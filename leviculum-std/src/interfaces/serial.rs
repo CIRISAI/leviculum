@@ -520,23 +520,42 @@ const RADIO_REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 /// ([`super::RNodeChannelFactory`]) is public.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RadioBringUp {
-    /// The board acked the config: it runs the profile that was requested.
+    /// The board is running the profile that was requested — either it
+    /// reported that profile back, or it acked the config and cannot be
+    /// asked (firmware with no radio query).
     ///
     /// The legacy ACK is a bare receipt — three bytes, no parameters — so
-    /// "what it adopted" is readable only as "what it was sent". That is
-    /// also why there is no fourth variant for an ACK the host cannot
-    /// reconcile: an ACK carries nothing to disagree with, and three bytes
-    /// that are not [`leviculum_core::rnode::RADIO_CONFIG_ACK`] are not an
-    /// ACK at all, so they leave the attempt on the no-ACK path.
+    /// "what it adopted" is readable only as "what it was sent", and it is
+    /// sent for a config that reached nothing but the flash page. That is
+    /// why the ACK no longer ends the bring-up on its own (#363); what
+    /// remains true of it is that three bytes which are not
+    /// [`leviculum_core::rnode::RADIO_CONFIG_ACK`] are not an ACK at all,
+    /// so they leave the attempt on the no-ACK path.
     Adopted,
-    /// No ACK, but the board answered
-    /// [`leviculum_core::envelope::TYPE_RADIO_QUERY`]: this is the profile
-    /// it is running right now, read off the board rather than guessed.
+    /// The board answered [`leviculum_core::envelope::TYPE_RADIO_QUERY`]
+    /// with a profile that is not the requested one: this is what it is
+    /// running right now, read off the board rather than guessed.
     Running(RadioConfigWire),
     /// The board answered neither frame within the wait. A board that
-    /// refused the query by name lands here too: a refusal says what the
-    /// board will not tell us, not what it is running.
+    /// refused the query as one it does not know lands here too: "I have
+    /// never heard of that frame" says what the board will not tell us, not
+    /// what it is running.
     Silent,
+    /// The board is there and talking, and its own answer is that no radio
+    /// is running this boot: the radio query came back refused as busy or
+    /// not-running rather than with a profile.
+    ///
+    /// On an LNode that is a `lora=off` boot — the media profile never
+    /// spawned the LoRa task — and it is reachable *with* a legacy ACK,
+    /// which is the whole of #363: the legacy frame's vocabulary is three
+    /// bytes or silence, so [`leviculum_core::envelope::ConfigDelivery::Stored`]
+    /// acks it exactly like `Applied` does, and that ack is a receipt for
+    /// the flash page, never for the air.
+    ///
+    /// Distinct from [`Silent`](RadioBringUp::Silent) because the board did
+    /// answer, and the answer is worse than no answer: there is no profile
+    /// to price because there is no modem to price.
+    Dead,
 }
 
 /// The config block as it goes on the wire, and as the board's own report
@@ -591,11 +610,25 @@ fn phy_differs(a: &RadioConfigWire, b: &RadioConfigWire) -> bool {
 /// running.
 ///
 /// `CONFIG_ATTEMPTS` pushes of the legacy config frame, each waiting
-/// `CONFIG_ACK_TIMEOUT` for the legacy ACK. An ACK ends it at
-/// [`RadioBringUp::Adopted`]. Silence does not: the host then asks the
-/// board what it is running (`ask_radio_report`), because the alternative
-/// to asking is guessing, and a guess about the PHY is a guess about every
-/// frame's airtime for as long as the interface is up.
+/// `CONFIG_ACK_TIMEOUT` for the legacy ACK. Then — ACK or no ACK — the host
+/// asks the board what it is running (`ask_radio_report`), because the
+/// alternative to asking is guessing, and a guess about the PHY is a guess
+/// about every frame's airtime for as long as the interface is up.
+///
+/// The ACK used to end it at [`RadioBringUp::Adopted`] on its own. It
+/// cannot: the legacy frame's whole vocabulary is three bytes or silence,
+/// so a board whose boot never spawned the LoRa task acks it with the same
+/// bytes as a board that keyed the profile — the page took the value
+/// (`envelope::legacy_radio_config_acked`, #363). What the ACK still does
+/// is narrow the answers: `Undeliverable` and `Unconfirmed`, the other two
+/// states that would refuse the query as busy, do not ack the legacy frame
+/// at all, so after an ACK a refused query means the taskless boot and
+/// nothing else.
+///
+/// A board that cannot answer the query keeps the old verdict. Older
+/// firmware either refuses it as a frame it does not know or says nothing
+/// at all, and neither is the board stating that its radio is off; the ACK
+/// is then the only word it has, and this host takes it.
 pub async fn radio_bring_up<S>(
     port: &mut S,
     requested: &RadioConfigWire,
@@ -610,7 +643,8 @@ where
     let mut frame_buf = Vec::new();
     frame(&payload, &mut frame_buf);
 
-    for attempt in 1..=CONFIG_ATTEMPTS {
+    let mut acked = false;
+    'attempts: for attempt in 1..=CONFIG_ATTEMPTS {
         tracing::info!(
             "Serial {}: sending radio config (attempt {}/{}): freq={} sf={} bw={} cr={} txp={}",
             name,
@@ -650,7 +684,8 @@ where
                                 && data[..] == RADIO_CONFIG_ACK[..]
                             {
                                 tracing::info!("Serial {}: radio config ACK received", name);
-                                return RadioBringUp::Adopted;
+                                acked = true;
+                                break 'attempts;
                             }
                         }
                     }
@@ -664,16 +699,58 @@ where
             }
         }
     }
-    tracing::warn!(
-        "Serial {}: radio config not acknowledged after {} attempts — asking the board \
-         what it is running",
-        name,
-        CONFIG_ATTEMPTS
-    );
-    match ask_radio_report(port, name).await {
-        Some(running) => RadioBringUp::Running(running),
-        None => RadioBringUp::Silent,
+    if acked {
+        tracing::debug!(
+            "Serial {}: radio config acknowledged — asking the board what it is running, \
+             because the legacy ACK is sent for a config that only reached the flash page",
+            name
+        );
+    } else {
+        tracing::warn!(
+            "Serial {}: radio config not acknowledged after {} attempts — asking the board \
+             what it is running",
+            name,
+            CONFIG_ATTEMPTS
+        );
     }
+    match ask_radio_report(port, name).await {
+        // The board named a profile. Identical to what was asked for and the
+        // config did arrive, ACK or no ACK; different, and the interface is
+        // priced at the board's, with the mismatch said out loud.
+        RadioReport::Running(running) if !phy_differs(requested, &running) => RadioBringUp::Adopted,
+        RadioReport::Running(running) => RadioBringUp::Running(running),
+        // The board says it has no running radio. With an ACK in hand this is
+        // the `lora=off` boot; without one it is the same board state reached
+        // without the flash-page receipt. Either way there is no modem here.
+        RadioReport::NotRunning => RadioBringUp::Dead,
+        // Nothing readable came back. An ACK is then the only statement the
+        // board has made, and older firmware that does not know the query at
+        // all must keep coming up on it.
+        RadioReport::Unavailable if acked => {
+            tracing::debug!(
+                "Serial {}: the board acked the radio config but its running profile could \
+                 not be read (no radio report); coming up on the requested profile",
+                name
+            );
+            RadioBringUp::Adopted
+        }
+        RadioReport::Unavailable => RadioBringUp::Silent,
+    }
+}
+
+/// What the board said when asked what its radio is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RadioReport {
+    /// A report: this is the profile the LoRa task configured.
+    Running(RadioConfigWire),
+    /// A refusal that is a statement about the radio — busy (the LoRa task
+    /// has not configured anything) or not-running. The board is answering;
+    /// what it answers is that there is nothing to name.
+    NotRunning,
+    /// Nothing usable: silence, EOF, a report that would not parse, or a
+    /// refusal that is a statement about the *frame* (unknown type,
+    /// unsupported) rather than about the radio.
+    Unavailable,
 }
 
 /// Ask the board what its radio is running
@@ -685,13 +762,17 @@ where
 /// (`leviculum-nrf/src/usb.rs`, `ControlAction::RadioQuery`), which is the
 /// whole reason it can settle a question an unanswered config leaves open.
 /// Before the radio is up it refuses as busy instead of inventing an answer;
-/// that refusal is logged here and returns `None`, because "I will not say"
-/// is not a profile anything can be priced at.
+/// that refusal is logged here and returns [`RadioReport::NotRunning`],
+/// because "I have nothing to name" is not a profile anything can be priced
+/// at — and, unlike a refusal of the frame itself, it is the board telling
+/// us its modem is off. A refusal that says the frame is unknown or
+/// unsupported is older firmware and says nothing about the radio, so it
+/// returns [`RadioReport::Unavailable`] with the silence cases.
 ///
 /// Frames that are neither answer are dropped, exactly as the ACK wait above
 /// drops them: this runs before the io task exists, so there is nothing yet
 /// to hand a data packet to.
-async fn ask_radio_report<S>(port: &mut S, name: &str) -> Option<RadioConfigWire>
+async fn ask_radio_report<S>(port: &mut S, name: &str) -> RadioReport
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -701,11 +782,11 @@ where
     frame(&envelope::encode_radio_query(), &mut frame_buf);
     if let Err(e) = port.write_all(&frame_buf).await {
         tracing::warn!("Serial {}: radio query write failed: {}", name, e);
-        return None;
+        return RadioReport::Unavailable;
     }
     if let Err(e) = port.flush().await {
         tracing::warn!("Serial {}: radio query flush failed: {}", name, e);
-        return None;
+        return RadioReport::Unavailable;
     }
 
     let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU as usize);
@@ -719,17 +800,17 @@ where
                 name,
                 RADIO_REPORT_TIMEOUT
             );
-            return None;
+            return RadioReport::Unavailable;
         }
         let n = match tokio::time::timeout(remaining, port.read(&mut buf)).await {
             Ok(Ok(0)) => {
                 tracing::debug!("Serial {}: EOF while waiting for the radio report", name);
-                return None;
+                return RadioReport::Unavailable;
             }
             Ok(Ok(n)) => n,
             Ok(Err(e)) => {
                 tracing::warn!("Serial {}: radio report read error: {}", name, e);
-                return None;
+                return RadioReport::Unavailable;
             }
             Err(_) => continue,
         };
@@ -740,13 +821,13 @@ where
             match envelope::decode_frame(&data) {
                 Ok(f) if f.frame_type == envelope::TYPE_RADIO_REPORT => {
                     match envelope::decode_radio_report_payload(f.payload) {
-                        Some(wire) => return Some(wire),
+                        Some(wire) => return RadioReport::Running(wire),
                         None => {
                             tracing::warn!(
                                 "Serial {}: radio report payload is not a radio config block",
                                 name
                             );
-                            return None;
+                            return RadioReport::Unavailable;
                         }
                     }
                 }
@@ -758,7 +839,19 @@ where
                                 name,
                                 reason
                             );
-                            return None;
+                            // Which half of the refusal this is decides the
+                            // bring-up: busy and not-running are the board
+                            // saying its radio is not up (`lora=off`, or a
+                            // LoRa task that has configured nothing yet);
+                            // unknown-type and unsupported are firmware that
+                            // does not have this frame and has said nothing
+                            // about its radio at all.
+                            return match reason {
+                                envelope::REFUSE_BUSY | envelope::REFUSE_NOT_RUNNING => {
+                                    RadioReport::NotRunning
+                                }
+                                _ => RadioReport::Unavailable,
+                            };
                         }
                     }
                 }
@@ -782,8 +875,10 @@ where
 /// * `Ok((phy, None))` — the board runs `phy` and nobody has to be told.
 /// * `Ok((phy, Some(warn)))` — the board runs `phy`, which is not what was
 ///   asked for; `warn` is the event naming both, for the caller to log.
-/// * `Err(refusal)` — nobody answered; the interface does not come up and
-///   the refusal says which frames went unanswered and for how long.
+/// * `Err(refusal)` — either nobody answered, and the refusal says which
+///   frames went unanswered and for how long, or the board answered that no
+///   radio is running this boot. In both cases the interface does not come
+///   up.
 pub fn radio_pricing_phy(
     outcome: &RadioBringUp,
     requested: &RadioConfigWire,
@@ -801,9 +896,25 @@ pub fn radio_pricing_phy(
                 phy_keys("running", running)
             )),
         )),
-        // Reported and identical: the config did arrive, only its ACK did
-        // not. Nothing to warn about and nothing to move.
+        // A report that matches is `Adopted` above, so `radio_bring_up` does
+        // not produce this arm — it is what the variant means, not what the
+        // bring-up currently reaches: a board running the requested profile
+        // is priced at its own report, and there is nothing to warn about.
         RadioBringUp::Running(running) => Ok((*running, None)),
+        RadioBringUp::Dead => Err(format!(
+            "RADIO_BRINGUP iface={name} outcome=dead-radio lora=off \
+             query_frame=0x{:02x} query_answer=radio-not-running \
+             query_wait_ms={} {} (the board answered the radio query by \
+             refusing to name a running profile: this boot never brought its \
+             radio up. A legacy config ACK does not contradict that — it is \
+             a receipt for the flash page, a reset away from meaning \
+             anything — so an interface here would report Up and hand every \
+             frame to a modem that does not exist. It does not come up, and \
+             the daemon keeps running without it)",
+            leviculum_core::envelope::TYPE_RADIO_QUERY,
+            RADIO_REPORT_TIMEOUT.as_millis(),
+            phy_keys("requested", requested),
+        )),
         RadioBringUp::Silent => Err(format!(
             "RADIO_BRINGUP iface={name} outcome=refused config_frame=legacy-radio-config \
              config_attempts={CONFIG_ATTEMPTS} config_wait_ms={} query_frame=0x{:02x} \

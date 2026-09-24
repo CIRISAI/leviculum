@@ -363,23 +363,35 @@ RNode block of `InterfaceConfig` (`InterfaceConfig::frequency`
 
 #### A board that does not take the config
 
-A `SerialInterface` with a LoRa block pushes the radio config at the board
-three times, waiting 2 s for the firmware's ACK each time. If none of the
-three is acknowledged the interface does not assume anything: it sends the
-radio query (`TYPE_RADIO_QUERY`, [Codeberg #349](https://codeberg.org/Lew_Palm/leviculum/issues/349))
-and waits a further 2 s for the board's report, which the firmware answers
-out of what its LoRa task actually configured.
+A `SerialInterface` with a LoRa block pushes the radio config at the board up
+to three times, waiting 2 s for the firmware's ACK each time. Then — ACK or no
+ACK — it sends the radio query (`TYPE_RADIO_QUERY`,
+[Codeberg #349](https://codeberg.org/Lew_Palm/leviculum/issues/349)) and waits
+a further 2 s for the board's report, which the firmware answers out of what
+its LoRa task actually configured. The ACK alone does not settle it: the
+legacy config frame's entire vocabulary is three bytes or silence, so a board
+that only wrote the config to its flash page acks it exactly like a board that
+keyed it ([Codeberg #363](https://codeberg.org/Lew_Palm/leviculum/issues/363)).
 
-* **Report received, same profile** — the config did arrive and only its ACK
-  did not. Nothing changes.
+* **Report received, same profile** — the board is running what was asked
+  for. The interface comes up on it. (Without an ACK this is the same
+  outcome: the config did arrive, only its receipt did not.)
 * **Report received, different profile** — the interface comes up priced at
   the profile the board reported, and logs
   `RADIO_BRINGUP iface=<name> outcome=running-differs` with the requested and
   the running parameters side by side.
+* **Query refused as busy or not-running** — the board is talking and says no
+  radio is running this boot, which on an LNode means it booted `lora=off`.
+  The interface refuses to come up and logs
+  `RADIO_BRINGUP iface=<name> outcome=dead-radio lora=off`. An ACK does not
+  change this; it is the case that ACK is unable to distinguish.
 * **Neither answered** — the interface refuses to come up. It logs
   `RADIO_BRINGUP iface=<name> outcome=refused` naming both frames and both
   waits, reports Down to `rnstatus`, and the daemon keeps running with its
   other interfaces. It does not retry on that port; fix the board and restart.
+
+Both refusals report Down to `rnstatus` and leave the rest of the daemon
+running.
 
 A modem the host cannot price is a modem the host does not drive. Airtime
 accounting and transmit spacing are computed from the PHY, so an interface
@@ -388,8 +400,11 @@ magnitude and hands the serial queue frames faster than the modem can key
 them; guessing the other way is a silent lie about airtime that nothing
 downstream can tell from a measurement.
 
-Firmware older than #349 does not answer the radio query, so an LNode running
-it that also misses the config ACK is refused rather than driven blind.
+Firmware older than #349 does not answer the radio query — it refuses it as a
+frame it does not know, or says nothing. That is not a board stating its radio
+is off, so such a board still comes up on its ACK, with a debug line saying the
+running profile could not be read; an LNode running it that also misses the
+config ACK is refused rather than driven blind.
 (`radio_bring_up`, `radio_pricing_phy` (`interfaces/serial.rs`))
 
 **Test-only:** `test_drop_direct_ingress` (bool, default off) emulates

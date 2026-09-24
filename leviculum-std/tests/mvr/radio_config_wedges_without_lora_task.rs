@@ -175,13 +175,27 @@ fn frame_cost_ms(phy: &RadioConfigWire) -> u64 {
     )
 }
 
-/// A board on the far end of the port that never acks a radio config, and
-/// answers the radio query only if `report` says so.
+/// How the scripted board answers [`envelope::TYPE_RADIO_QUERY`].
+#[derive(Clone, Copy)]
+enum QueryAnswer {
+    /// The profile the board's LoRa task has actually configured.
+    Report(RadioConfigWire),
+    /// A refusal by name. [`envelope::REFUSE_BUSY`] is what a boot that
+    /// never spawned the LoRa task sends (#363: there is no running profile
+    /// to name, and the flash page describes a board a reset would produce);
+    /// [`envelope::REFUSE_UNKNOWN_TYPE`] is what a firmware older than the
+    /// query sends.
+    Refuse(u8),
+    /// Nothing at all — the query goes unanswered.
+    Silence,
+}
+
+/// A board on the far end of the port: it acks the legacy radio config frame
+/// iff `acks_config`, and answers the radio query as `answer` says.
 ///
-/// Deliberately nothing else: a board that answers the config is the green
-/// path this pass does not change, and a board that answers more than it was
-/// asked would let a test pass on a frame the host never requested.
-fn scripted_board(mut port: DuplexStream, report: Option<RadioConfigWire>) {
+/// Deliberately nothing else: a board that answers more than it was asked
+/// would let a test pass on a frame the host never requested.
+fn scripted_board(mut port: DuplexStream, acks_config: bool, answer: QueryAnswer) {
     tokio::spawn(async move {
         let mut deframer = Deframer::with_max_frame(564);
         let mut buf = vec![0u8; 1024];
@@ -195,17 +209,28 @@ fn scripted_board(mut port: DuplexStream, report: Option<RadioConfigWire>) {
                 let DeframeResult::Frame(data) = r else {
                     continue;
                 };
-                let Ok(f) = envelope::decode_frame(&data) else {
+                let reply = match envelope::decode_frame(&data) {
                     // The legacy radio config frame, which carries its own
-                    // magic and not an envelope header. Unanswered, on
-                    // purpose: that is the whole premise.
-                    continue;
+                    // magic and not an envelope header. Its ack is the bare
+                    // three bytes, and a board with no LoRa task sends them
+                    // too: the receipt is for the flash page (#363).
+                    Err(_) if data.starts_with(&leviculum_core::rnode::RADIO_CONFIG_MAGIC) => {
+                        if !acks_config {
+                            continue;
+                        }
+                        leviculum_core::rnode::RADIO_CONFIG_ACK.to_vec()
+                    }
+                    Err(_) => continue,
+                    Ok(f) if f.frame_type == envelope::TYPE_RADIO_QUERY => match answer {
+                        QueryAnswer::Report(wire) => envelope::encode_radio_report(&wire),
+                        QueryAnswer::Refuse(reason) => {
+                            envelope::encode_refusal(envelope::TYPE_RADIO_QUERY, reason)
+                        }
+                        QueryAnswer::Silence => continue,
+                    },
+                    Ok(_) => continue,
                 };
-                if f.frame_type != envelope::TYPE_RADIO_QUERY {
-                    continue;
-                }
-                let Some(wire) = report else { continue };
-                frame(&envelope::encode_radio_report(&wire), &mut out);
+                frame(&reply, &mut out);
                 if port.write_all(&out).await.is_err() {
                     return;
                 }
@@ -224,7 +249,7 @@ fn scripted_board(mut port: DuplexStream, report: Option<RadioConfigWire>) {
 #[tokio::test(start_paused = true)]
 async fn an_unanswered_config_prices_the_profile_the_board_reports() {
     let (mut host, board) = tokio::io::duplex(8192);
-    scripted_board(board, Some(running_phy()));
+    scripted_board(board, false, QueryAnswer::Report(running_phy()));
 
     let requested = requested_phy();
     let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
@@ -274,7 +299,7 @@ async fn an_unanswered_config_prices_the_profile_the_board_reports() {
 #[tokio::test(start_paused = true)]
 async fn a_board_that_answers_neither_frame_does_not_come_up() {
     let (mut host, board) = tokio::io::duplex(8192);
-    scripted_board(board, None);
+    scripted_board(board, false, QueryAnswer::Silence);
 
     let requested = requested_phy();
     let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
@@ -337,6 +362,152 @@ async fn a_board_that_answers_neither_frame_does_not_come_up() {
         "serial_io_task is now started before the bring-up is settled, which \
          makes the refusal above unreachable"
     );
+}
+
+// ---------------------------------------------------------------------------
+// An ack from a dead radio is not an adopted interface (Codeberg #363)
+// ---------------------------------------------------------------------------
+//
+// The two cases above are what happens when the ack does NOT come. This is the
+// case where it does and means something else: the legacy frame's vocabulary is
+// three bytes or silence, so `ConfigDelivery::Stored` — a boot that never
+// spawned the LoRa task, config written to the flash page — acks it exactly
+// like `Applied` does (`envelope::legacy_radio_config_acked`). Pointed at a
+// `lora=off` LNode, a host that ends the bring-up on the ack runs a LoRa
+// interface over a radio that does not exist: it reports the interface up and
+// every frame it hands over is dropped in the board with no error to the host.
+//
+// The frame that separates the two is the one the no-ack path already sends.
+// A board with no LoRa task refuses the radio query as busy rather than
+// answering out of the flash page (`leviculum-nrf/src/usb.rs`,
+// `ControlAction::RadioQuery`) — and after an ack that refusal is not
+// ambiguous: `Undeliverable` and `Unconfirmed`, the other two busy answers, do
+// not ack the legacy frame at all, so the only acking board that has no running
+// profile is the taskless one.
+//
+// **Acceptance**: the first test below is red against the policy this replaces
+// (ack ends the bring-up at `Adopted`), green with the policy this pass lands.
+
+/// #363 from the host end: an ack plus a busy radio query is a board whose
+/// radio never came up, and the interface must not come up over it.
+#[tokio::test(start_paused = true)]
+async fn an_ack_from_a_board_with_no_radio_is_not_an_adopted_interface() {
+    let (mut host, board) = tokio::io::duplex(8192);
+    scripted_board(board, true, QueryAnswer::Refuse(envelope::REFUSE_BUSY));
+
+    let requested = requested_phy();
+    let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
+    assert_eq!(
+        outcome,
+        RadioBringUp::Dead,
+        "the legacy ack is a receipt for the flash page; a board that then \
+         refuses to name a running profile has no radio this boot"
+    );
+
+    let refusal = radio_pricing_phy(&outcome, &requested, "mvr")
+        .expect_err("a radio that is not running must not be priced at all");
+    // The operator has to be able to tell this from "the board never answered":
+    // the board is there, it is talking, and its own answer is that the modem
+    // is off.
+    for key in [
+        "iface=mvr",
+        "outcome=dead-radio",
+        "lora=off",
+        "query_answer=radio-not-running",
+    ] {
+        assert!(
+            refusal.contains(key),
+            "the dead-radio refusal does not carry {key}: {refusal}"
+        );
+    }
+}
+
+/// The green path, unchanged in effect: ack, and the board reports the very
+/// profile that was asked for.
+#[tokio::test(start_paused = true)]
+async fn an_ack_the_board_confirms_is_still_an_adopted_interface() {
+    let (mut host, board) = tokio::io::duplex(8192);
+    scripted_board(board, true, QueryAnswer::Report(requested_phy()));
+
+    let requested = requested_phy();
+    let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
+    assert_eq!(outcome, RadioBringUp::Adopted);
+
+    let (priced, mismatch) = radio_pricing_phy(&outcome, &requested, "mvr")
+        .expect("a board running the requested profile comes up");
+    assert_eq!(priced, requested);
+    assert!(mismatch.is_none(), "nothing to warn about: {mismatch:?}");
+}
+
+/// Ack, but the running profile is another one — the board took the frame and
+/// keyed something else (a clamped or rejected field). The verdict is the one
+/// the report path already gives: price at what the board says it runs, and
+/// say the mismatch out loud.
+#[tokio::test(start_paused = true)]
+async fn an_ack_over_another_profile_is_priced_at_the_reported_one() {
+    let (mut host, board) = tokio::io::duplex(8192);
+    scripted_board(board, true, QueryAnswer::Report(running_phy()));
+
+    let requested = requested_phy();
+    let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
+    assert_eq!(outcome, RadioBringUp::Running(running_phy()));
+
+    let (priced, mismatch) = radio_pricing_phy(&outcome, &requested, "mvr")
+        .expect("a board that reported a profile is not refused");
+    assert_eq!(
+        priced,
+        running_phy(),
+        "an ack is not a licence to price at the requested profile"
+    );
+    assert!(
+        mismatch.is_some(),
+        "a PHY the board is not running is said out loud"
+    );
+}
+
+/// Firmware older than the radio query keeps today's verdict. Both of its
+/// shapes: a refusal by name (our own dispatcher, on a build that predates
+/// `TYPE_RADIO_QUERY`) and plain silence (a stock RNode firmware, which
+/// answers nothing it does not know). An ack is all such a board can say, and
+/// this pass must not turn it into a failed bring-up.
+#[tokio::test(start_paused = true)]
+async fn a_firmware_that_cannot_answer_the_query_keeps_its_ack() {
+    for answer in [
+        QueryAnswer::Refuse(envelope::REFUSE_UNKNOWN_TYPE),
+        QueryAnswer::Refuse(envelope::REFUSE_UNSUPPORTED),
+        QueryAnswer::Silence,
+    ] {
+        let (mut host, board) = tokio::io::duplex(8192);
+        scripted_board(board, true, answer);
+
+        let requested = requested_phy();
+        let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
+        assert_eq!(
+            outcome,
+            RadioBringUp::Adopted,
+            "a board that cannot answer the query has not said its radio is \
+             off, and the ack is the only word it has"
+        );
+        let (priced, mismatch) =
+            radio_pricing_phy(&outcome, &requested, "mvr").expect("older firmware still comes up");
+        assert_eq!(priced, requested);
+        assert!(mismatch.is_none());
+    }
+}
+
+/// No ack either, and the board refuses the query as busy: same board state as
+/// the first test — the radio is not running — reached without the flash-page
+/// receipt. `Silent` is reserved for a board that said nothing at all.
+#[tokio::test(start_paused = true)]
+async fn a_busy_query_without_an_ack_is_also_a_dead_radio() {
+    let (mut host, board) = tokio::io::duplex(8192);
+    scripted_board(board, false, QueryAnswer::Refuse(envelope::REFUSE_BUSY));
+
+    let requested = requested_phy();
+    let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
+    assert_eq!(outcome, RadioBringUp::Dead);
+    radio_pricing_phy(&outcome, &requested, "mvr")
+        .expect_err("a radio the board says is not running is not priced");
 }
 
 // ---------------------------------------------------------------------------
