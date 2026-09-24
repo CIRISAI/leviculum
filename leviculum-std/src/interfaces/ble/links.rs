@@ -640,17 +640,17 @@ impl LinkTable {
             return Inbound::NotHandshaked;
         };
         // Every inbound frame is evidence the peer is there, keepalives
-        // included: a quiet phone sends nothing else for minutes on end
-        // (#382). This clock is the expiry sweep's — the duplicate rule
-        // reports it and no longer reads it.
+        // included (#382): the clock BOTH the expiry sweep and the
+        // duplicate rule's abandonment test read — which is why a
+        // keepalive-fed idle link outlives a rotated peer's dial (#360).
         link.last_heard_ms = now_ms;
         // Keepalives are still filtered before reassembly.
         if data.len() < FRAGMENT_HEADER_SIZE {
             return Inbound::Keepalive;
         }
-        // Real payload: the active-use evidence the duplicate rule
-        // consults (#360). Per frame and before reassembly, like the
-        // liveness clock and for the same reason.
+        // Real payload. Round 1 of #360 made this the duplicate rule's
+        // one input; round 2 reports it and consults none of it. Per
+        // frame and before reassembly, like the liveness clock.
         link.last_data_ms = Some(now_ms);
         let before = link.defrag.abandoned_count();
         let result = link.defrag.process(data, now_ms);
