@@ -5,8 +5,9 @@
 //! rig attached, and they pass on a host with nothing attached at all.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 
@@ -145,6 +146,27 @@ fn run(args: &[&str], env: Option<(&str, &Path)>) -> Output {
         cmd.env(key, value);
     }
     cmd.output().unwrap()
+}
+
+/// The same run, with lines typed into it. `Command::output` hands the
+/// child a closed stdin, which can only ever answer "no" to the first
+/// question; a prompt reached by answering "yes" needs a real pipe.
+fn run_typing(args: &[&str], typed: &str) -> Output {
+    let mut child = Command::new(EXE)
+        .args(args)
+        .env_remove(lnflash::manifest::BUNDLE_ENV)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(typed.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
 }
 
 fn stdout(out: &Output) -> String {
@@ -890,6 +912,35 @@ fn the_prompt_reaches_a_piped_stdin_and_a_piped_stdin_answers_no() {
     assert!(said.contains("Telemetry left as it is"), "{said}");
     // No address was asked for, because the first question was answered no.
     assert!(!said.contains("LXMF address"), "{said}");
+    assert!(out.status.success(), "{said}");
+}
+
+#[test]
+fn a_yes_with_no_address_reports_the_send_rather_than_the_board() {
+    // The other half of the prompt, through the real Console: "yes" and
+    // then end of input. Nothing goes out, and nothing in this run has
+    // read the board — the target is write-only on the control envelope —
+    // so the line reports the send and names the flag that does remove a
+    // stored target (Codeberg #395).
+    let bundle = unpacked_bundle();
+    let out = run_typing(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--set-telemetry",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        "y\n",
+    );
+    let said = stdout(&out);
+    assert!(said.contains("LXMF address"), "{said}");
+    assert!(said.contains("nothing is sent"), "{said}");
+    assert!(said.contains("--no-telemetry"), "{said}");
+    assert!(
+        !said.contains("telemetry stays off"),
+        "this run cannot know that: {said}"
+    );
     assert!(out.status.success(), "{said}");
 }
 

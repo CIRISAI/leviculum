@@ -104,10 +104,19 @@ pub fn resolve(ui: &mut dyn Ui, plan: &TelemetryPlan) -> io::Result<Option<Telem
 
     loop {
         let Some(typed) = ui.ask(ASK_ADDRESS)? else {
-            // Enter, end of input, or a run that does not ask at all:
-            // telemetry stays off. Saying so beats leaving the operator to
-            // infer it from a transcript that just stops.
-            ui.say("  no address given, so telemetry stays off");
+            // Enter, end of input, or a run that does not ask at all: no
+            // frame goes out. Saying so beats leaving the operator to infer
+            // it from a transcript that just stops — but the line may only
+            // report the send, not the board's state. Nothing here has read
+            // the board, and no envelope type can: the target is write-only
+            // on the wire (`TYPE_TELEMETRY_TARGET` with no query beside it),
+            // so a board that already carries one keeps it and "telemetry is
+            // off" would be false exactly where it matters. Naming
+            // `--no-telemetry` is what makes the alternative reachable.
+            ui.say(
+                "  no address given, so nothing is sent: the board keeps whatever telemetry \
+                 setting it already had, and `--no-telemetry` is what clears a stored target",
+            );
             return Ok(None);
         };
         match parse_address(&typed) {
@@ -417,17 +426,38 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_address_reports_the_send_and_not_a_state_it_cannot_read() {
+        // The line may only say what this run did. It sends nothing, and a
+        // board that already carries a target keeps it, so any sentence
+        // asserting that telemetry is now off is false on exactly the board
+        // where the claim matters. Removing a stored target has its own
+        // flag, and the line names it rather than leaving the operator to
+        // find it.
+        let mut ui = Fake::typing(&["y", ""]);
+        assert_eq!(resolve(&mut ui, &TelemetryPlan::default()).unwrap(), None);
+        let said = ui.transcript();
+        assert!(said.contains(ASK_ADDRESS), "the address was asked: {said}");
+        assert!(said.contains("nothing is sent"), "{said}");
+        assert!(said.contains("--no-telemetry"), "{said}");
+        assert!(
+            !said.contains("telemetry stays off"),
+            "the run cannot know that: {said}"
+        );
+    }
+
+    #[test]
     fn a_run_with_nobody_to_ask_never_blocks_on_the_prompt() {
         // --yes: Assumed::ask takes the stated default, which is "no".
         let mut ui = Assumed::new(true);
         assert_eq!(resolve(&mut ui, &TelemetryPlan::default()).unwrap(), None);
 
         // A piped stdin that runs out mid-dialogue is the same story: the
-        // address prompt reads EOF and the run ends off rather than looping.
+        // address prompt reads EOF and the run ends without sending rather
+        // than looping.
         let mut ui = Fake::typing(&["y"]);
         assert_eq!(resolve(&mut ui, &TelemetryPlan::default()).unwrap(), None);
         assert!(
-            ui.transcript().contains("telemetry stays off"),
+            ui.transcript().contains("nothing is sent"),
             "{}",
             ui.transcript()
         );
