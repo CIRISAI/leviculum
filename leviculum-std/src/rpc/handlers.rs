@@ -3078,24 +3078,11 @@ mod tests {
         );
     }
 
-    /// Codeberg #329: the keys current rnstatus indexes WITHOUT a presence
-    /// guard are mandatory in every interface row, on every row kind.
-    ///
-    /// The rule this pins, so the next upstream key addition is a decision and
-    /// not an outage: **a key rnstatus reads unguarded is mandatory; a key it
-    /// reads behind `"k" in ifstat` is optional.** Omitting a guarded key
-    /// degrades one line of output; omitting an unguarded one is a `KeyError`
-    /// traceback and a non-zero exit — which is exactly how #329 presented,
-    /// with two regression cells red on an image rebuild alone.
-    ///
-    /// The lists below are the audit of RNS 1.5.2 (`RNS/Utilities/rnstatus.py`,
-    /// the release the periculum-test image resolves from PyPI). Line numbers
-    /// are that file. `build_interface_stats_reports_listeners_and_their_children`
-    /// above covers the same two row kinds for value correctness; this one
-    /// covers key PRESENCE and the guard-implies-key relations, which is a
-    /// different failure mode.
-    #[test]
-    fn every_interface_row_carries_the_keys_rnstatus_reads_unguarded() {
+    /// One TCP listener plus the connection it spawned, served through the
+    /// real reply builder. Shared by the two key-set tests below — they must
+    /// read the same two row kinds for their verdicts to be about the same
+    /// shape.
+    fn listener_and_spawned_stats(tag: &str) -> Value {
         use crate::clock::SystemClock;
         use crate::interfaces::inventory::{InterfaceIdentity, InterfaceInventory, ListenerRow};
         use crate::interfaces::{InterfaceCounters, InterfaceStatsMap};
@@ -3104,54 +3091,7 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        // Read unconditionally for every interface rnstatus prints, on the
-        // default path with no flags at all.
-        const UNGUARDED_DEFAULT_PATH: &[&str] = &[
-            "name",       // :405, :479
-            "status",     // :432
-            "mode",       // :437-442
-            "clients",    // :446
-            "txdrp",      // :495  <- the #329 crash site
-            "txdrb",      // :496  (inside the txdrp branch)
-            "rxb",        // :605
-            "txb",        // :606
-            "txbuffered", // :700  <- the next crash after txdrp
-            "txstalled",  // :701  (inside the txbuffered branch)
-        ];
-
-        // Read unconditionally once a flag is given. Not reachable by a bare
-        // `rnstatus`, but every one of them is a crash for an operator who
-        // types the flag, so they are mandatory too.
-        const UNGUARDED_UNDER_FLAGS: &[&str] = &[
-            "bitrate", // --sort rate :379
-            "mtu",     // :499, reached because our bitrate is never None
-            "rxs", "txs", // --sort rxs/txs :387-390
-            "arxc", "atxc", // -A totals :687-688; --sort arxc/atxc
-            "prxc", "ptxc", // -P totals :679-680; --sort prxc/ptxc
-            "arxs", "atxs", // -A flow ratios :622-623
-            "prxs", "ptxs", // -P flow ratios :647-648
-            "arxb", "atxb", "prxb", "ptxb", // --sort atx/arx/ptx/prx :391-398
-        ];
-
-        // Guarded reads that pull a SECOND key in unguarded once the guard
-        // passes. Serving the guard key without its partner is the same crash
-        // one level down, so these are all-or-nothing pairs.
-        const IMPLIED_PAIRS: &[(&str, &str)] = &[
-            // :609 guards on incoming_*, :610/:618 then index outgoing_*.
-            ("incoming_announce_frequency", "outgoing_announce_frequency"),
-            // :631 guards on incoming_*, :632/:643 then index outgoing_*.
-            ("incoming_pr_frequency", "outgoing_pr_frequency"),
-            // :668 guards on both together, :669 indexes both.
-            ("protocol_violations", "ifac_violations"),
-            ("ifac_violations", "protocol_violations"),
-            // :592/:599 guard on *_active, :595/:602 index *_activated.
-            ("burst_active", "burst_activated"),
-            ("pr_burst_active", "pr_burst_activated"),
-            // :561 guards on ifac_signature, :563 indexes ifac_size.
-            ("ifac_signature", "ifac_size"),
-        ];
-
-        let tmp = std::env::temp_dir().join(format!("rpc-mandatory-keys-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("rpc-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
@@ -3202,9 +3142,209 @@ mod tests {
             );
         }
 
-        let value =
-            build_interface_stats(&mut core, std::time::Instant::now(), &stats, &inventory, 0);
-        let Value::Dict(top) = value else {
+        build_interface_stats(&mut core, std::time::Instant::now(), &stats, &inventory, 0)
+    }
+
+    /// The exact per-interface key set we serve, pinned so an addition is a
+    /// decision and not a surprise.
+    ///
+    /// The drift this catches cost the 3bbc0277 land gate: `tx_unaccounted`
+    /// (5c88147c) joined `row_fields` and the only pin that saw it was the
+    /// cross-daemon allow-list in `status_parity_tests.rs`, which is
+    /// `#[ignore]`d and runs in no lane a coder runs before pushing. The
+    /// key-set decision belongs where the keys are written, at unit-test
+    /// cost, and it is the same decision either way: an added key must be one
+    /// the reference reader tolerates (it looks fields up by name and never
+    /// enumerates an interface dict except to hex-encode `bytes`,
+    /// rnstatus.py:189-191/:345-357/:391-540), and it must be justified above
+    /// its own emitter.
+    ///
+    /// Adding a key here means adding it to the status-parity allow-list too
+    /// (`ours_only` in status_parity_tests.rs) — that gate compares against a
+    /// live rnsd and is the authority on what "lnsd-only" means; this one
+    /// only makes the change deliberate.
+    #[test]
+    fn the_served_interface_row_key_set_is_pinned() {
+        use std::collections::BTreeSet;
+
+        // Every key `row_fields` emits unconditionally, in that order.
+        const ROW_KEYS: &[&str] = &[
+            "name",
+            "short_name",
+            "hash",
+            "type",
+            "rxb",
+            "txb",
+            "rxs",
+            "txs",
+            // Additive, no reference equivalent (see row_fields).
+            "tx_queue_drops",
+            "tx_unaccounted",
+            // The post-1.3.5 upstream key set.
+            "mtu",
+            "txdrp",
+            "txdrb",
+            "txstalled",
+            "txbuffered",
+            "arxb",
+            "atxb",
+            "arxc",
+            "atxc",
+            "prxb",
+            "ptxb",
+            "prxc",
+            "ptxc",
+            "arxs",
+            "atxs",
+            "prxs",
+            "ptxs",
+            "burst_count",
+            "pr_burst_count",
+            "gravity",
+            "announces_to_internal",
+            "protocol_violations",
+            "ifac_violations",
+            "packet_filter_hits",
+            "autoconnect_source",
+            // The 1.3.5 set.
+            "status",
+            "mode",
+            "bitrate",
+            "clients",
+            "peers",
+            "incoming_announce_frequency",
+            "outgoing_announce_frequency",
+            "incoming_pr_frequency",
+            "outgoing_pr_frequency",
+            "announce_rate_target",
+            "announce_rate_penalty",
+            "announce_rate_grace",
+            "burst_active",
+            "burst_activated",
+            "pr_burst_active",
+            "pr_burst_activated",
+            "held_announces",
+            "announce_queue",
+            "ifac_signature",
+            "ifac_size",
+            "ifac_netname",
+        ];
+        // Conditional, and their condition is the row kind: Python emits the
+        // parent pair only for an interface that HAS a parent
+        // (Reticulum.py:1342-1344), so the listener carries neither.
+        const SPAWNED_ONLY: &[&str] = &["parent_interface_name", "parent_interface_hash"];
+
+        let Value::Dict(top) = listener_and_spawned_stats("row-key-set") else {
+            panic!("interface_stats must be a dict")
+        };
+        let Some(Value::List(list)) = top
+            .get(&HashableValue::String("interfaces".into()))
+            .cloned()
+        else {
+            panic!("interfaces must be a list")
+        };
+        assert_eq!(list.len(), 2, "listener + spawned connection");
+
+        for entry in &list {
+            let Value::Dict(row) = entry else {
+                panic!("interface entry must be a dict, got {entry:?}")
+            };
+            let name = match row.get(&HashableValue::String("name".into())) {
+                Some(Value::String(s)) => s.clone(),
+                _ => "<unnamed>".into(),
+            };
+            let served: BTreeSet<String> = row
+                .keys()
+                .map(|k| match k {
+                    HashableValue::String(s) => s.clone(),
+                    other => panic!("{name}: non-string key {other:?}"),
+                })
+                .collect();
+            let mut expected: BTreeSet<String> =
+                ROW_KEYS.iter().map(|k| (*k).to_string()).collect();
+            if name.starts_with("TCPInterface[Client on") {
+                expected.extend(SPAWNED_ONLY.iter().map(|k| (*k).to_string()));
+            }
+            let added: Vec<&String> = served.difference(&expected).collect();
+            let dropped: Vec<&String> = expected.difference(&served).collect();
+            assert!(
+                added.is_empty() && dropped.is_empty(),
+                "{name}: the served interface_stats key set moved (new: {added:?}, \
+                 no longer served: {dropped:?}). Serving a key the reference reader \
+                 chokes on is a crash in rnstatus, and serving one it ignores still \
+                 has to be declared lnsd-only in the status-parity allow-list — \
+                 update this pin and that one together, with the reason next to the \
+                 emitter"
+            );
+        }
+    }
+
+    /// Codeberg #329: the keys current rnstatus indexes WITHOUT a presence
+    /// guard are mandatory in every interface row, on every row kind.
+    ///
+    /// The rule this pins, so the next upstream key addition is a decision and
+    /// not an outage: **a key rnstatus reads unguarded is mandatory; a key it
+    /// reads behind `"k" in ifstat` is optional.** Omitting a guarded key
+    /// degrades one line of output; omitting an unguarded one is a `KeyError`
+    /// traceback and a non-zero exit — which is exactly how #329 presented,
+    /// with two regression cells red on an image rebuild alone.
+    ///
+    /// The lists below are the audit of RNS 1.5.2 (`RNS/Utilities/rnstatus.py`,
+    /// the release the periculum-test image resolves from PyPI). Line numbers
+    /// are that file. `build_interface_stats_reports_listeners_and_their_children`
+    /// above covers the same two row kinds for value correctness; this one
+    /// covers key PRESENCE and the guard-implies-key relations, which is a
+    /// different failure mode.
+    #[test]
+    fn every_interface_row_carries_the_keys_rnstatus_reads_unguarded() {
+        // Read unconditionally for every interface rnstatus prints, on the
+        // default path with no flags at all.
+        const UNGUARDED_DEFAULT_PATH: &[&str] = &[
+            "name",       // :405, :479
+            "status",     // :432
+            "mode",       // :437-442
+            "clients",    // :446
+            "txdrp",      // :495  <- the #329 crash site
+            "txdrb",      // :496  (inside the txdrp branch)
+            "rxb",        // :605
+            "txb",        // :606
+            "txbuffered", // :700  <- the next crash after txdrp
+            "txstalled",  // :701  (inside the txbuffered branch)
+        ];
+
+        // Read unconditionally once a flag is given. Not reachable by a bare
+        // `rnstatus`, but every one of them is a crash for an operator who
+        // types the flag, so they are mandatory too.
+        const UNGUARDED_UNDER_FLAGS: &[&str] = &[
+            "bitrate", // --sort rate :379
+            "mtu",     // :499, reached because our bitrate is never None
+            "rxs", "txs", // --sort rxs/txs :387-390
+            "arxc", "atxc", // -A totals :687-688; --sort arxc/atxc
+            "prxc", "ptxc", // -P totals :679-680; --sort prxc/ptxc
+            "arxs", "atxs", // -A flow ratios :622-623
+            "prxs", "ptxs", // -P flow ratios :647-648
+            "arxb", "atxb", "prxb", "ptxb", // --sort atx/arx/ptx/prx :391-398
+        ];
+
+        // Guarded reads that pull a SECOND key in unguarded once the guard
+        // passes. Serving the guard key without its partner is the same crash
+        // one level down, so these are all-or-nothing pairs.
+        const IMPLIED_PAIRS: &[(&str, &str)] = &[
+            // :609 guards on incoming_*, :610/:618 then index outgoing_*.
+            ("incoming_announce_frequency", "outgoing_announce_frequency"),
+            // :631 guards on incoming_*, :632/:643 then index outgoing_*.
+            ("incoming_pr_frequency", "outgoing_pr_frequency"),
+            // :668 guards on both together, :669 indexes both.
+            ("protocol_violations", "ifac_violations"),
+            ("ifac_violations", "protocol_violations"),
+            // :592/:599 guard on *_active, :595/:602 index *_activated.
+            ("burst_active", "burst_activated"),
+            ("pr_burst_active", "pr_burst_activated"),
+            // :561 guards on ifac_signature, :563 indexes ifac_size.
+            ("ifac_signature", "ifac_size"),
+        ];
+
+        let Value::Dict(top) = listener_and_spawned_stats("mandatory-keys") else {
             panic!("interface_stats must be a dict")
         };
         let Some(Value::List(list)) = top
