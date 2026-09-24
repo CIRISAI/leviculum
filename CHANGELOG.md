@@ -313,6 +313,33 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A receiver of a resource no longer times out on parts that are still on the
+  air. Its part timeout was derived from the link RTT alone, and on a slow
+  half-duplex carrier the RTT is measured over a handshake whose frames
+  alternate direction and never queue behind one another, while the parts of
+  a window do: on `lora_window_ab_pythonlike` (SF7/BW62.5, 50 KB, night run
+  2026-09-23, commit 1599dc72, RSSI -39 dBm and no RF loss) a link
+  established at rtt 1173 ms bought a 2596 ms timeout for parts the sender's
+  own interface priced at 1866 to 2586 ms EACH. The last part of every window
+  timed out; under the `pythonlike` window policy each timeout stepped the
+  window down and pulled `window_max` after it, and at `window_min = 2` the
+  transfer locked — 261 part frames for 51 distinct parts, 39 B/s, killed at
+  49 of 109 parts.
+
+  The rule is now that a part timeout is never shorter than the time the
+  sender needs to put the requested window on the air. That time is an
+  interface fact, so the interface states it: `Interface::frame_turnaround_ms`
+  reports what one frame costs the frame behind it — zero for every medium
+  with no post-TX wait and, on an RNode, the MTU-sized `tx_hold` at the PHY
+  it programmed (airtime + DIFS + the widest contention draw it can price at
+  bring-up). The driver mirrors it into transport beside the next-slot
+  answer, a link records the figure of the interface it runs on, and
+  `IncomingResource::part_timeout_ms` floors the timeout at
+  `window x turnaround + one RTT`. It is a floor under both window policies:
+  neither loses the term it had, because the floor only ever raises. A link
+  across a relay prices its own first hop, which is the only one anything on
+  the wire lets it see.
+
 - A carrier-detect no longer ends a receive window that is holding a frame. The
   CSMA path's `cad()` stood the receiver down unconditionally, so a board whose
   own announce reached the channel-access gate while a frame was arriving ended

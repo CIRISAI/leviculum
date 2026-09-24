@@ -6,6 +6,20 @@
 //! other in the same harness. [`WindowPolicy::Current`] reproduces the
 //! historical behavior exactly; [`WindowPolicy::PythonLike`] mirrors the
 //! Python-RNS reference algorithm as the baseline to beat.
+//!
+//! No policy here can defend itself against a part timeout that is shorter
+//! than the sender's pace. `lora_window_ab_pythonlike`, 50 KB run 3 of the
+//! night run on 2026-09-23 (commit 1599dc72), is the run that showed it: a
+//! link established at rtt 1173 ms over an SF7/BW62.5 carrier whose interface
+//! priced ONE part frame at up to 2586 ms, so the last part of every window
+//! timed out while it was still on the air. [`WindowState::timeout_pythonlike`]
+//! then did exactly what the reference does — step the window down and pull
+//! window_max after it — and at `window_min` the transfer locked: 261 part
+//! frames for 51 distinct parts, 39 B/s, no RF loss at -39 dBm. The fix is
+//! not in this file: `IncomingResource::part_timeout_ms` floors the timeout
+//! at what the interface says the window costs on the air (Codeberg
+//! #36/#374), and the policies below are then asked only the question they
+//! can actually answer.
 
 use crate::constants::{
     RESOURCE_WINDOW_INITIAL, RESOURCE_WINDOW_MAX_FAST, RESOURCE_WINDOW_MAX_SLOW,

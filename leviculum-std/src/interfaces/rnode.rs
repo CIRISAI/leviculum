@@ -3568,6 +3568,58 @@ mod tests {
         }
     }
 
+    /// The figure this interface reports as its per-frame turnaround
+    /// (`Interface::frame_turnaround_ms`): the hold a FULL-SIZE frame imposes
+    /// at the running PHY.
+    ///
+    /// It has to bound the hold of every frame LENGTH the interface may be
+    /// handed, because the receiver of a resource sizes a timeout with it and
+    /// a figure below the real cost is the whole of Codeberg #36/#374. At the
+    /// SF7/BW62.5 carrier `lora_window_ab_pythonlike` ran on (2026-09-23)
+    /// that means clearing the 1866 ms a 491 B part cost there.
+    ///
+    /// It does NOT bound every contention BAND: the figure is derived at
+    /// spawn, before the modem has sent a `CMD_STAT_CSMA`, so it prices the
+    /// band-1 window this interface's own policy draws from (cw 312 ms at
+    /// this PHY). The same part in the firmware's band 3 costs 2586 ms. The
+    /// handle reports a fixed number and a reported band widens the real
+    /// hold underneath it; carrying the live band out to the handle is
+    /// follow-on work, not a hole this test papers over.
+    #[test]
+    fn the_reported_turnaround_bounds_every_frames_hold() {
+        for (label, bw, sf, cr) in [
+            ("sf7/bw62.5 (the run 184 traced)", 62_500u32, 7u8, 5u8),
+            ("sf8/bw125 (the project default PHY)", 125_000, 8, 5),
+            ("sf12/bw125 (the slowest)", 125_000, 12, 5),
+        ] {
+            let reported = max_tx_hold(bw, sf, cr).held_ms;
+            for len in [1u32, 100, 491, rnode::HW_MTU as u32] {
+                let hold = tx_hold(len, bw, sf, cr, &FirmwareCsma::default()).held_ms;
+                assert!(
+                    hold <= reported,
+                    "{label}: a {len} B frame holds for {hold} ms, above the \
+                     {reported} ms reported"
+                );
+            }
+        }
+        let part_of_the_run = tx_hold(491, 62_500, 7, 5, &FirmwareCsma::default());
+        assert_eq!(
+            (
+                part_of_the_run.airtime_ms,
+                part_of_the_run.difs_ms,
+                part_of_the_run.cw_ms
+            ),
+            (1_506, 48, 312),
+            "the terms the night run of 2026-09-23 was priced with"
+        );
+        assert!(
+            max_tx_hold(62_500, 7, 5).held_ms >= part_of_the_run.held_ms,
+            "the reported turnaround must cover the 1866 ms one 491 B part \
+             cost on that run, got {}",
+            max_tx_hold(62_500, 7, 5).held_ms
+        );
+    }
+
     /// Where the modem has reported its own CSMA figures, they are what the
     /// hold is priced from — ours are the fallback, not the authority.
     #[test]

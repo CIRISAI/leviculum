@@ -49,6 +49,9 @@ pub(crate) struct MockInterface {
     pub(crate) online: bool,
     /// When true, try_send() returns BufferFull instead of accepting.
     pub(crate) reject_sends: bool,
+    /// What this mock carrier charges one frame for the next, ms. Zero (the
+    /// trait default) unless a test models a medium with a post-TX wait.
+    pub(crate) frame_turnaround_ms: u64,
 }
 
 impl MockInterface {
@@ -59,7 +62,15 @@ impl MockInterface {
             sent: Vec::new(),
             online: true,
             reject_sends: false,
+            frame_turnaround_ms: 0,
         }
+    }
+
+    /// Model a carrier on which one frame holds the next back, the way a
+    /// LoRa interface's `tx_hold` does.
+    pub(crate) fn with_frame_turnaround_ms(mut self, turnaround_ms: u64) -> Self {
+        self.frame_turnaround_ms = turnaround_ms;
+        self
     }
 }
 
@@ -82,6 +93,9 @@ impl Interface for MockInterface {
         }
         self.sent.push(data.to_vec());
         Ok(())
+    }
+    fn frame_turnaround_ms(&self) -> u64 {
+        self.frame_turnaround_ms
     }
 }
 

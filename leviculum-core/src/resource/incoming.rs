@@ -743,8 +743,24 @@ impl IncomingResource {
         let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
         let policy_timeout = base * timeout_factor + RETRY_GRACE_TIME_MS + per_retry_extra;
 
-        let _ = turnaround_ms;
-        policy_timeout
+        // The floor: never expect the window we asked for sooner than the
+        // sender can put it on the air. `turnaround_ms` is what one frame
+        // costs the frame behind it on this carrier, so `window` frames cost
+        // `window * turnaround`, and the REQ that asked for them needed a
+        // round trip of its own to arrive. Both policies take it; neither
+        // loses the term it had, because the floor only ever raises.
+        //
+        // Without it the last part of every window on a slow half-duplex
+        // link times out while it is still on the air: measured on
+        // `lora_window_ab_pythonlike`, 2026-09-23, where an RTT of 1173 ms
+        // bought a 2596 ms timeout for parts that cost up to 2586 ms EACH,
+        // the pythonlike policy dragged window_max down with the window on
+        // every one of those timeouts, and the transfer locked at
+        // window_min (Codeberg #36/#374).
+        let sender_pace = (self.window_state.window() as u64)
+            .saturating_mul(turnaround_ms)
+            .saturating_add(rtt_ms);
+        core::cmp::max(policy_timeout, sender_pace)
     }
 
     /// Poll for timeout.
@@ -1197,6 +1213,131 @@ mod tests {
             incoming.eifr, 9280,
             "post-HMU first-part rate must be measured from the HMU REQ"
         );
+    }
+
+    /// The part timeout at the state `lora_window_ab_pythonlike` was in on
+    /// the night run of 2026-09-23 (50 KB, run 3, on 1599dc72), the run that
+    /// found this: an SF7/BW62.5 link established at rtt 1173 ms, a window of
+    /// 4, three of its parts in, one outstanding. The receiver's timeout was
+    /// 1173 x 2 + 250 = 2596 ms, and the sender's interface prices ONE part
+    /// frame at 1866 to 2586 ms (airtime 1506 + DIFS 48 + the contention
+    /// draw). The last part of every window therefore timed out; under the
+    /// pythonlike policy each timeout dragged window_max down with the
+    /// window, the window sat at window_min = 2, and the transfer spent 261
+    /// part frames on 51 distinct parts before the run was killed.
+    ///
+    /// The timeout has to be at least as long as the sender needs to put the
+    /// window it was asked for on the air.
+    fn timeout_state_of_184(policy: WindowPolicy) -> IncomingResource {
+        const NUM_PARTS: usize = 8;
+        const SDU: usize = 464;
+        let random_hash = [0xBB; RESOURCE_RANDOM_HASH_SIZE];
+        let parts: Vec<Vec<u8>> = (0..NUM_PARTS)
+            .map(|i| vec![(i as u8).wrapping_mul(17).wrapping_add(3); SDU])
+            .collect();
+        let mut adv_hashmap = Vec::new();
+        for p in &parts {
+            adv_hashmap.extend_from_slice(&map_hash(p, &random_hash));
+        }
+        let mut adv = make_test_adv(NUM_PARTS as u32, adv_hashmap);
+        adv.transfer_size = (NUM_PARTS * SDU) as u64;
+
+        let mut now = 1_000u64;
+        let (mut incoming, _req) =
+            IncomingResource::from_advertisement(&adv, 431, SDU, now, usize::MAX, policy).unwrap();
+        assert_eq!(
+            incoming.window_state().window(),
+            4,
+            "the run's window: RESOURCE_WINDOW_INITIAL"
+        );
+
+        // Three of the four requested parts arrive, each one turnaround
+        // behind the last, which is the pace the sender's interface allows.
+        for part in parts.iter().take(3) {
+            now += TURNAROUND_MS_184;
+            assert!(
+                !matches!(
+                    incoming.receive_part(part, now, RTT_MS_184),
+                    ResourcePartResult::InvalidPart
+                ),
+                "part must match its hashmap entry"
+            );
+        }
+        assert_eq!(incoming.outstanding_parts, 1, "the window's last part");
+        assert!(incoming.data_received, "three parts in");
+        incoming
+    }
+
+    /// The rtt the link established at on the run 184 traced.
+    const RTT_MS_184: u64 = 1_173;
+    /// What one part frame cost the frame behind it on that link: the
+    /// interface's own hold, widest contention draw.
+    const TURNAROUND_MS_184: u64 = 2_586;
+
+    #[test]
+    fn part_timeout_is_never_shorter_than_the_senders_pace() {
+        for policy in [WindowPolicy::Current, WindowPolicy::PythonLike] {
+            let incoming = timeout_state_of_184(policy);
+
+            // The RTT-derived term is the term it is: on a carrier with no
+            // post-TX wait the timeout is unchanged, and it is exactly the
+            // 2596 ms the run measured.
+            assert_eq!(
+                incoming.part_timeout_ms(RTT_MS_184, 0),
+                2_596,
+                "{policy:?}: rtt 1173 x factor 2 + 250 grace, the run's figure"
+            );
+
+            // With the sender's pace known, the timeout covers the whole
+            // window the receiver asked for, plus one round trip for the REQ
+            // that asked for it.
+            let window = incoming.window_state().window() as u64;
+            assert_eq!(window, 4);
+            assert_eq!(
+                incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184),
+                window * TURNAROUND_MS_184 + RTT_MS_184,
+                "{policy:?}: the floor is window x turnaround + one rtt"
+            );
+            assert!(
+                incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184) >= 11_517,
+                "{policy:?}: 4 x 2586 + 1173"
+            );
+        }
+    }
+
+    /// The floor is a floor, not a replacement: where the policy already asks
+    /// for longer than the sender needs, the policy's figure stands.
+    #[test]
+    fn part_timeout_keeps_the_policy_term_when_it_is_the_longer_one() {
+        let incoming = timeout_state_of_184(WindowPolicy::PythonLike);
+        // A carrier a thousand times faster than the link 184 ran on: the
+        // whole window costs less than the RTT-derived term.
+        let quick = 1u64;
+        assert_eq!(
+            incoming.part_timeout_ms(RTT_MS_184, quick),
+            2_596,
+            "floor 4 x 1 + 1173 is below the policy term, which therefore wins"
+        );
+    }
+
+    /// `next_deadline` and `poll` must agree to the millisecond: they are one
+    /// formula, and the scheduler wakes on the deadline the poll then tests.
+    #[test]
+    fn next_deadline_and_poll_agree_on_the_floored_timeout() {
+        let mut incoming = timeout_state_of_184(WindowPolicy::PythonLike);
+        let timeout = incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184);
+        let deadline = incoming
+            .next_deadline(RTT_MS_184, TURNAROUND_MS_184)
+            .expect("transferring resource has a deadline");
+        assert_eq!(deadline, incoming.last_activity_ms + timeout);
+        assert!(matches!(
+            incoming.poll(deadline - 1, RTT_MS_184, TURNAROUND_MS_184),
+            ResourcePollResult::Nothing
+        ));
+        assert!(matches!(
+            incoming.poll(deadline, RTT_MS_184, TURNAROUND_MS_184),
+            ResourcePollResult::RetransmitAdv(_)
+        ));
     }
 
     #[test]

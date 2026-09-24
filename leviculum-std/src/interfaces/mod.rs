@@ -846,6 +846,26 @@ mod tests {
         (handle, out_rx)
     }
 
+    /// A handle reports what its interface said: nothing, for every medium
+    /// with no post-TX wait (TCP, UDP, I2P, local, serial, pipe, KISS, BLE,
+    /// the auto interface), and the stated hold for the one that has one.
+    ///
+    /// Zero is not a placeholder here, it is the answer: on those carriers a
+    /// frame does not hold the next frame back at all, so the receiver-side
+    /// resource timeout that reads this figure keeps exactly the RTT-derived
+    /// term it had before Codeberg #36/#374.
+    #[test]
+    fn frame_turnaround_is_zero_unless_the_interface_states_one() {
+        use leviculum_core::traits::Interface;
+        let (h, _rx) = make_handle(30);
+        assert_eq!(h.info.frame_turnaround_ms, None);
+        assert_eq!(h.frame_turnaround_ms(), 0);
+
+        let (mut h, _rx) = make_handle(31);
+        h.info.frame_turnaround_ms = Some(1_917);
+        assert_eq!(h.frame_turnaround_ms(), 1_917);
+    }
+
     #[test]
     fn interface_handle_defaults_to_no_credit() {
         let (h, _rx) = make_handle(7);

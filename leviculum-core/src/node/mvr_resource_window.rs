@@ -28,7 +28,7 @@ use std::vec::Vec;
 
 use rand_core::OsRng;
 
-use crate::constants::{RESOURCE_WINDOW_INITIAL, RESOURCE_WINDOW_MAX_SLOW};
+use crate::constants::{RESOURCE_WINDOW_INITIAL, RESOURCE_WINDOW_MAX_SLOW, RESOURCE_WINDOW_MIN};
 use crate::destination::{Destination, DestinationType, Direction, ProofStrategy};
 use crate::identity::Identity;
 use crate::link::LinkId;
@@ -56,11 +56,24 @@ const MAX_STEPS: usize = 500_000;
 // Sans-I/O helpers (same pattern as mvr_response_resource).
 // ----------------------------------------------------------------------------
 
-fn add_iface(node: &mut EndpointNode, name: &'static str) -> usize {
+/// Register an interface that states a per-frame turnaround, and mirror that
+/// statement into core exactly as the std driver's `push_interface_state`
+/// does every dispatch tick: ask the handle, push the answer. The chain under
+/// test is interface -> transport -> link -> resource timeout, so the harness
+/// must not short-circuit its first link.
+fn add_iface_with_turnaround(
+    node: &mut EndpointNode,
+    name: &'static str,
+    turnaround_ms: u64,
+) -> usize {
+    use crate::traits::Interface as _;
+    let iface = MockInterface::new(name, 0).with_frame_turnaround_ms(turnaround_ms);
+    let reported = iface.frame_turnaround_ms();
     let idx = node
         .transport
-        .register_interface(std::boxed::Box::new(MockInterface::new(name, 0)));
+        .register_interface(std::boxed::Box::new(iface));
     node.set_interface_name(idx, String::from(name));
+    node.set_interface_frame_turnaround_ms(idx, reported);
     idx
 }
 
@@ -161,6 +174,13 @@ struct PacedDelivery {
     link_id: LinkId,
     rate_bps: u64,
     turnaround_ms: u64,
+    /// The length-INDEPENDENT half of the sender's post-TX hold: the medium
+    /// access wait plus the longest contention draw the firmware may take
+    /// before the next frame (`interfaces/rnode.rs::tx_hold`, the DIFS and cw
+    /// terms). The length-dependent half is the airtime `rate_bps` already
+    /// charges. Zero for the older cells, which model a medium that transmits
+    /// as soon as it is asked.
+    frame_contention_ms: u64,
     drop_every: Option<usize>,
     to_receiver: VecDeque<Vec<u8>>,
     to_sender: VecDeque<Vec<u8>>,
@@ -183,6 +203,7 @@ impl PacedDelivery {
         policy: WindowPolicy,
         rate_bps: u64,
         turnaround_ms: u64,
+        frame_contention_ms: u64,
         drop_every: Option<usize>,
     ) -> (Self, crate::DestinationHash, [u8; 32]) {
         assert!(rate_bps > 0, "rate_bps must be positive");
@@ -191,8 +212,12 @@ impl PacedDelivery {
         }
         let (mut sender, dest_hash, signing_key) = make_sender();
         let mut receiver = make_receiver(policy);
-        let tx_iface = add_iface(&mut sender, "S_mesh");
-        let rx_iface = add_iface(&mut receiver, "R_mesh");
+        // Both ends run on the same carrier and both state what it charges a
+        // full-size frame; the receiver's link learns the figure from the
+        // interface the link proof arrives on.
+        let hold = modelled_turnaround_ms(rate_bps, frame_contention_ms);
+        let tx_iface = add_iface_with_turnaround(&mut sender, "S_mesh", hold);
+        let rx_iface = add_iface_with_turnaround(&mut receiver, "R_mesh", hold);
         (
             Self {
                 receiver,
@@ -202,6 +227,7 @@ impl PacedDelivery {
                 link_id: LinkId::new([0u8; 16]),
                 rate_bps,
                 turnaround_ms,
+                frame_contention_ms,
                 drop_every,
                 to_receiver: VecDeque::new(),
                 to_sender: VecDeque::new(),
@@ -301,14 +327,51 @@ impl PacedDelivery {
         }
     }
 
+    /// What the next frame costs the sim clock: the direction turnaround if
+    /// it flips the link, otherwise — for a frame of the sender's following
+    /// another of the sender's — the wait its interface imposes before the
+    /// modem can be finished with the previous one
+    /// (`interfaces/rnode.rs::tx_hold`, the DIFS and contention terms). Then
+    /// its own airtime, in both cases.
+    ///
+    /// A frame that follows a direction flip finds an idle queue and pays no
+    /// contention at all, which is why a link handshake measures an RTT far
+    /// below what one part of a burst then costs — the gap this whole cell is
+    /// about. A packet is a packet: nothing here looks at what it carries.
+    fn frame_cost_ms(&self, dir: Dir, len: usize) -> u64 {
+        let access = if self.last_dir != Some(dir) {
+            self.turnaround_ms
+        } else if dir == Dir::ToReceiver {
+            self.frame_contention_ms
+        } else {
+            0
+        };
+        access + len as u64 * 1000 / self.rate_bps
+    }
+
+    /// Direction and length of the frame `deliver_next` would take, in its
+    /// order. `None` when both queues are empty.
+    fn next_queued(&self) -> Option<(Dir, usize)> {
+        if let Some(pkt) = self.to_receiver.front() {
+            Some((Dir::ToReceiver, pkt.len()))
+        } else {
+            self.to_sender.front().map(|pkt| (Dir::ToSender, pkt.len()))
+        }
+    }
+
+    /// Earliest deadline either node is waiting on.
+    fn earliest_deadline(&self) -> Option<u64> {
+        [self.receiver.next_deadline(), self.sender.next_deadline()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
     /// Deliver one packet with airtime pacing, turnaround on direction flips,
     /// and deterministic loss of every k-th RESOURCE-context DATA part.
     fn deliver(&mut self, dir: Dir, pkt: Vec<u8>) {
-        if self.last_dir != Some(dir) {
-            self.advance(self.turnaround_ms);
-            self.last_dir = Some(dir);
-        }
-        self.advance(pkt.len() as u64 * 1000 / self.rate_bps);
+        self.advance(self.frame_cost_ms(dir, pkt.len()));
+        self.last_dir = Some(dir);
 
         let mut dropped = false;
         if dir == Dir::ToReceiver && packet_context(&pkt) == Some(PacketContext::Resource) {
@@ -362,17 +425,47 @@ impl PacedDelivery {
 
     /// Both queues are empty but the transfer is unfinished: jump the sim
     /// clock to the earliest node deadline and fire the timeout handlers.
-    /// Receiver timeouts that re-send a REQ are recorded together with the
-    /// window before/after, so tests can pin the on_timeout behavior.
     fn timeout_step(&mut self) {
-        let deadline = [self.receiver.next_deadline(), self.sender.next_deadline()]
-            .into_iter()
-            .flatten()
-            .min()
+        let deadline = self
+            .earliest_deadline()
             .expect("transfer incomplete but no node has a deadline: stalled");
         let now = self.now();
         self.advance(deadline.saturating_sub(now).max(1));
+        self.fire_timeouts();
+    }
 
+    /// A deadline that falls at or before the moment the next frame lands is
+    /// served first: the sim clock jumps to it and both nodes' timeout
+    /// handlers run there.
+    ///
+    /// A receiver's part timer runs while the sender is still putting the
+    /// window on the air. A harness that fires timeouts only on an idle
+    /// medium — or only at frame boundaries — cannot see a receiver give up
+    /// on parts that are still coming, which is precisely what
+    /// `lora_window_ab_pythonlike` hit on 2026-09-23. Returns true when it
+    /// did anything.
+    fn serve_due_deadline(&mut self) -> bool {
+        let now = self.now();
+        let horizon = match self.next_queued() {
+            Some((dir, len)) => now + self.frame_cost_ms(dir, len),
+            // Nothing in flight: `timeout_step` owns the idle case, which may
+            // have to jump the clock arbitrarily far forward.
+            None => return false,
+        };
+        match self.earliest_deadline() {
+            Some(deadline) if deadline <= horizon => {
+                self.advance(deadline.saturating_sub(now));
+                self.fire_timeouts();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Run both nodes' timeout handlers at the current sim time. Receiver
+    /// timeouts that re-send a REQ are recorded together with the window
+    /// before/after, so tests can pin the on_timeout behavior.
+    fn fire_timeouts(&mut self) {
         let window_before = self.receiver_window();
         let out = self.receiver.handle_timeout();
         let pkts = action_data(&out);
@@ -431,6 +524,12 @@ impl PacedDelivery {
                 self.now()
             );
             assert!(!self.failed, "resource transfer failed in the harness");
+            // A deadline that falls before the next frame lands is served
+            // first: the receiver's part timer does not pause while the
+            // sender is still transmitting.
+            if self.serve_due_deadline() {
+                continue;
+            }
             if !self.deliver_next() {
                 if self.completion_ms.is_some() {
                     break;
@@ -449,8 +548,34 @@ fn run_transfer(
     turnaround_ms: u64,
     drop_every: Option<usize>,
 ) -> TransferResult {
-    let (mut h, dest_hash, signing_key) =
-        PacedDelivery::new(policy, rate_bps, turnaround_ms, drop_every);
+    run_transfer_held(policy, size_bytes, rate_bps, turnaround_ms, 0, drop_every)
+}
+
+/// What a full-size frame costs the frame behind it on the modelled carrier:
+/// the airtime `rate_bps` prices plus the length-independent contention wait.
+/// This is the figure the interface reports as its per-frame turnaround, and
+/// it is derived here rather than written down twice.
+fn modelled_turnaround_ms(rate_bps: u64, frame_contention_ms: u64) -> u64 {
+    crate::constants::MTU as u64 * 1000 / rate_bps + frame_contention_ms
+}
+
+/// As [`run_transfer`], with a sender on a carrier that makes each frame wait
+/// `frame_contention_ms` past its own airtime before the next may follow.
+fn run_transfer_held(
+    policy: WindowPolicy,
+    size_bytes: usize,
+    rate_bps: u64,
+    turnaround_ms: u64,
+    frame_contention_ms: u64,
+    drop_every: Option<usize>,
+) -> TransferResult {
+    let (mut h, dest_hash, signing_key) = PacedDelivery::new(
+        policy,
+        rate_bps,
+        turnaround_ms,
+        frame_contention_ms,
+        drop_every,
+    );
     h.establish(dest_hash, &signing_key);
 
     h.receiver
@@ -727,6 +852,101 @@ fn pythonlike_shrinks_on_timeout() {
             .any(|&(before, after)| after < before),
         "PythonLike must shrink the window on at least one timeout (pairs: {:?})",
         r.timeout_window_pairs
+    );
+}
+
+// ----------------------------------------------------------------------------
+// A sender slower than one link RTT (Codeberg #36/#374). The minimal model of
+// `lora_window_ab_pythonlike`, night run 2026-09-23 on 1599dc72: SF7/BW62.5,
+// RSSI -39 dBm, no RF loss, a link established at rtt 1173 ms while the
+// sender's interface priced ONE part frame at up to 2586 ms. The handshake is
+// cheap because its frames alternate direction and never queue behind one
+// another; a window of parts is not, and the receiver's RTT-derived part
+// timeout was 2596 ms for the last part of every window. Every window's last
+// part timed out, `timeout_pythonlike` pulled window_max down with the window,
+// and at window_min = 2 the lock was permanent: 261 part frames for 51
+// distinct parts, 39 B/s, killed at 49 of 109 parts.
+// ----------------------------------------------------------------------------
+
+/// The modelled 184 carrier: 326 B/s prices a 491 B part at the 1506 ms of
+/// airtime the run measured, and 1080 ms is the DIFS (48) plus the widest
+/// contention draw (1032) the sender's interface adds before the next frame.
+const RATE_BPS_184: u64 = 326;
+const CONTENTION_MS_184: u64 = 1_080;
+
+/// A lossless link whose sender needs longer per part than the receiver's
+/// RTT-derived timeout allows must still transfer at the sender's pace: no
+/// part is sent twice, and the window does not collapse.
+///
+/// Red before the part-timeout floor under PythonLike: the window walked
+/// 4 -> 3 -> 2 and stayed there, 295 receiver timeouts spent 584 part frames
+/// on 45 distinct parts, and not one round after the first ever completed.
+#[test]
+fn a_sender_slower_than_one_rtt_keeps_its_window() {
+    for policy in [WindowPolicy::Current, WindowPolicy::PythonLike] {
+        let r = run_transfer_held(
+            policy,
+            20480,
+            RATE_BPS_184,
+            TURNAROUND_MS,
+            CONTENTION_MS_184,
+            None,
+        );
+        assert_eq!(
+            r.receiver_timeouts, 0,
+            "{policy:?}: nothing was lost, so no part may time out while it \
+             is still on the air (window pairs: {:?})",
+            r.timeout_window_pairs
+        );
+        assert_eq!(
+            r.retransmits, 0,
+            "{policy:?}: a lossless link must send each part exactly once, \
+             sent {} frames for {} parts",
+            r.parts_transmitted, r.unique_parts
+        );
+        assert!(
+            r.final_window > RESOURCE_WINDOW_MIN,
+            "{policy:?}: the window must not collapse to its floor, got {} \
+             (trajectory: {:?})",
+            r.final_window,
+            r.window_trajectory
+        );
+        assert!(
+            r.rounds > 1,
+            "{policy:?}: rounds must complete, got {} (trajectory: {:?})",
+            r.rounds,
+            r.window_trajectory
+        );
+    }
+}
+
+/// PythonLike does more than survive the slow sender: with the timeout no
+/// longer firing under it, its every-round growth runs, so the window ends
+/// ABOVE where it started rather than at the floor.
+#[test]
+fn pythonlike_grows_its_window_on_a_slow_sender() {
+    let r = run_transfer_held(
+        WindowPolicy::PythonLike,
+        20480,
+        RATE_BPS_184,
+        TURNAROUND_MS,
+        CONTENTION_MS_184,
+        None,
+    );
+    assert!(
+        r.final_window > RESOURCE_WINDOW_INITIAL,
+        "the window must grow past its initial {} on a clean link, got {} \
+         (trajectory: {:?})",
+        RESOURCE_WINDOW_INITIAL,
+        r.final_window,
+        r.window_trajectory
+    );
+    assert!(
+        r.window_trajectory
+            .iter()
+            .all(|&(_, w, _)| w > RESOURCE_WINDOW_MIN),
+        "no round may sit at the window floor: {:?}",
+        r.window_trajectory
     );
 }
 
