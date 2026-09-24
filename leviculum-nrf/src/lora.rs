@@ -1182,6 +1182,7 @@ async fn rx_window(
             let _ = radio
                 .disarm_rx_for_tx(
                     leviculum_core::sx126x::RxTeardownBy::Config,
+                    leviculum_rx_arming::DeferPolicy::OneFrame,
                     rx_buf,
                     &mut sink,
                 )
@@ -1624,7 +1625,19 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 continue;
             }
 
-            match radio.cad(config.sf).await {
+            // The carrier-detect's own teardown of a standing window may have a
+            // frame in it, and that frame goes up through the loop's sink like
+            // any other (Codeberg #426). `rx_start` is taken before the
+            // detection so the `op=rx_success duration_ms` a caught frame
+            // reports brackets the wait rather than nothing.
+            let mut cad_sink = CoreHandoff {
+                rx_start: embassy_time::Instant::now(),
+                reassembler: &mut reassembler,
+                incoming_tx: &incoming_tx,
+                rx_timeout_count,
+            };
+            let cad = radio.cad(config.sf, &mut rx_buf, &mut cad_sink).await;
+            match cad {
                 Ok(false) => {
                     // Channel clear, send the whole packet (both split
                     // frames back-to-back, no CAD between them).
@@ -1931,6 +1944,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 let _ = radio
                     .disarm_rx_for_tx(
                         leviculum_core::sx126x::RxTeardownBy::Select,
+                        leviculum_rx_arming::DeferPolicy::OneFrame,
                         &mut rx_buf,
                         &mut sink,
                     )

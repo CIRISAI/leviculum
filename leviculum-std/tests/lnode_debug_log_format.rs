@@ -10,9 +10,9 @@
 //! [SX_REG_IQ] iq_before=0xNN iq_after=0xNN txmod=0xNN       (once, first SetPacketParams)
 //! [SX_RX_ARM] site=<tag> timeout_ms=<u32> dark_ms=<u64|first>  (every SetRx)
 //! [SX_RX_ADOPT] latched=0xNNNN preamble=<0|1> header=<0|1> rxdone=<0|1> stood_ms=<u32>
-//! [SX_RX_TEARDOWN] site=<tag> preamble=<0|1> header=<0|1> rxdone=<0|1> armed_ms=<u32>
-//! [SX_RX_HARVEST] site=<tag> preamble=<0|1> header=<0|1> rxdone=<0|1> armed_ms=<u32>
-//! [SX_TX_DEFER] waited_ms=<u64> reason=<preamble|header> outcome=<frame|timeout|abandoned>
+//! [SX_RX_TEARDOWN] site=<tag> preamble=<0|1> header=<0|1> rxdone=<0|1> armed_ms=<u32> waited_ms=<u64>
+//! [SX_RX_HARVEST] site=<tag> preamble=<0|1> header=<0|1> rxdone=<0|1> armed_ms=<u32> waited_ms=<u64>
+//! [SX_TX_DEFER] waited_ms=<u64> reason=<preamble|header> outcome=<frame|timeout|abandoned|false_preamble>
 //! ```
 //!
 //! The adopt/teardown pair is read as a rate against each other: an
@@ -37,6 +37,17 @@
 //! the wait is earning its keep or merely delaying the transmitter — the ratio
 //! the guard has to justify itself with, and the reason the line carries the
 //! measured `waited_ms` rather than the bound it was allowed.
+//! `outcome=false_preamble` is the carrier-detect site's own release: a carrier
+//! that showed no header inside the preamble-plus-header time, let go at a
+//! tenth of the frame bound rather than at it (Codeberg #426).
+//!
+//! `waited_ms=` on the teardown and the harvest is the same quantity for the
+//! same reason, and it is `0` on every site that does not wait. It is read as
+//! an OPTIONAL trailing field below, unlike every other field on those lines:
+//! the parser has to keep reading the archived captures and the persistent-log
+//! replays of boards on firmware older than #426, which carry the line without
+//! it. What guards the emission instead is the format-string pin in
+//! `the_firmware_still_emits_both_halves_of_the_adoption_instrument`.
 //!
 //! The trailing ` t=<ms>` is board uptime at the moment the line was
 //! formatted, appended to EVERY runtime line since the drain-latency audit
@@ -705,6 +716,25 @@ fn the_adopt_and_teardown_lines_parse() {
         ),
         Some((false, false, false, 3))
     );
+    // The teardown a wait preceded (Codeberg #426), and the same line from a
+    // board on firmware that predates the field: both are samples of the same
+    // population and the parser reads both, which is why `waited_ms` is the one
+    // optional field on this line.
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_TEARDOWN",
+            "[SX_RX_TEARDOWN] site=cad preamble=1 header=0 rxdone=0 armed_ms=78 \
+             waited_ms=78 t=114658"
+        ),
+        Some((true, false, false, 78))
+    );
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_TEARDOWN",
+            "[SX_RX_TEARDOWN] site=cad preamble=1 header=0 rxdone=0 armed_ms=41 t=114580"
+        ),
+        Some((true, false, false, 41))
+    );
     // A missing field is a parse failure, not a default, and a flag that is
     // not a bit is not a `false`.
     assert_eq!(
@@ -763,7 +793,7 @@ fn the_firmware_still_emits_both_halves_of_the_adoption_instrument() {
     for shape in [
         r#""preamble={} header={} rxdone={}""#,
         r#""latched={:#06x} {} stood_ms={}""#,
-        r#""site={} {} armed_ms={}""#,
+        r#""site={} {} armed_ms={} waited_ms={}""#,
     ] {
         assert!(
             crate_src.contains(shape),
@@ -798,7 +828,7 @@ fn parse_tx_defer(line: &str) -> Option<(u64, String, String)> {
             }
             "outcome" => {
                 outcome = match value {
-                    "frame" | "timeout" | "abandoned" => Some(value.to_string()),
+                    "frame" | "timeout" | "abandoned" | "false_preamble" => Some(value.to_string()),
                     _ => return None,
                 }
             }
@@ -827,6 +857,15 @@ fn the_tx_defer_line_parses() {
              outcome=abandoned t=9 t=2"
         ),
         Some((60, "header".into(), "abandoned".into()))
+    );
+    // The carrier-detect site's release (Codeberg #426): a fraction of the
+    // frame bound, and its own outcome so the cheap waits are separable from
+    // the ones that spent the whole thing.
+    assert_eq!(
+        parse_tx_defer(
+            "[SX_TX_DEFER] waited_ms=78 reason=preamble outcome=false_preamble t=114580"
+        ),
+        Some((78, "preamble".into(), "false_preamble".into()))
     );
     // A missing field is a parse failure, not a default: a line with no
     // outcome would otherwise be counted as one.
@@ -888,6 +927,7 @@ fn the_firmware_still_emits_the_transmit_deferral_line() {
         "\"frame\"",
         "\"timeout\"",
         "\"abandoned\"",
+        "\"false_preamble\"",
     ] {
         assert!(
             crate_src.contains(tag),
@@ -963,7 +1003,13 @@ const DEFERRAL_HAND_CHECK: &str = "A source scan sees a site's name and that it 
     not armed at all, so the first stand-down of a turn is the only one and the \
     turn's top then consumes the config. If a new site passes the check too, \
     name it in the regions below and say here why its cadence is external; if it \
-    does not, it must not defer.";
+    does not, it must not defer with this bound. A site that cannot pass it may \
+    still defer with the other policy: the carrier-detect does, once per CSMA \
+    retry, and it pays for that by releasing a bare carrier at a tenth of the \
+    bound (Codeberg #426). It is not in this file's regions because it defers \
+    inside the driver's own `cad`, not in the loop; the site table that covers \
+    every teardown is the mvr \
+    `cad_tears_down_the_frame_it_then_detects`.";
 
 /// The transmit deferral is spent once per externally paced event, at the two
 /// places that have one.

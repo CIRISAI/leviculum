@@ -313,6 +313,19 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A carrier-detect no longer ends a receive window that is holding a frame. The
+  CSMA path's `cad()` stood the receiver down unconditionally, so a board whose
+  own announce reached the channel-access gate while a frame was arriving ended
+  that reception mid-air and then read the frame it had just destroyed as a busy
+  channel: a propagation sync round lost its third offer frame that way in the
+  night run of 2026-09-23 and did not recover inside the round's 180 s deadline.
+  The site now takes the same wait the idle select takes, hands a frame it
+  catches up through the loop's own sink, and releases a bare carrier that shows
+  no header within the preamble-plus-header time, which is a tenth of the frame
+  bound and is what makes the wait affordable at up to eight CSMA retries per
+  packet. `[SX_RX_TEARDOWN]` and `[SX_RX_HARVEST]` carry `waited_ms=` and the
+  deferral line has a fourth outcome, `false_preamble` (#426).
+
 - A board running the propagation role no longer goes deaf while it validates
   the mail it has just accepted. Every accepted upload and every synced message
   walks the 1000-round propagation stamp workblock, which costs 3655 to 3727 ms

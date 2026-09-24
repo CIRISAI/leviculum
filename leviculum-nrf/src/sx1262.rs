@@ -924,18 +924,26 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// holding a frame that is still arriving.
     ///
     /// [`disarm_rx`](Self::disarm_rx) with the deferral in front of it, and
-    /// the reason it is a separate method rather than a flag: only a caller
-    /// that cannot re-enter its own wait may defer. The bound is per call, so
-    /// a site reaching for this from a loop would turn "one frame's airtime,
-    /// once" into a wait that compounds, and the starvation argument would
-    /// stop holding. Two sites qualify, and each passes through at most once
-    /// per event: the idle select's outgoing arm (once per key-up) and the
-    /// config arm of `lora::rx_window` (once per host config push, which
-    /// arrives at host cadence, not the loop's). The config arm belongs to
-    /// every window the LoRa loop has, not only the idle one, and it is still
-    /// once per push: a window entered while a config is already waiting is
-    /// not armed at all, so after the first stand-down the rest of the turn
-    /// costs nothing and the turn's top consumes the config. The sequence itself is
+    /// the reason it is a separate method rather than a flag: the bound a
+    /// caller may spend depends on how often it is reached, and `policy` is
+    /// where the caller says which of the two it is.
+    ///
+    /// [`DeferPolicy::OneFrame`](leviculum_rx_arming::DeferPolicy::OneFrame) is
+    /// for a caller that passes through at most once per externally paced
+    /// event: the idle select's outgoing arm (once per key-up) and the config
+    /// arm of `lora::rx_window` (once per host config push, which arrives at
+    /// host cadence, not the loop's). The config arm belongs to every window
+    /// the LoRa loop has, not only the idle one, and it is still once per push:
+    /// a window entered while a config is already waiting is not armed at all,
+    /// so after the first stand-down the rest of the turn costs nothing and
+    /// the turn's top consumes the config.
+    ///
+    /// [`ReleaseFalsePreamble`](leviculum_rx_arming::DeferPolicy::ReleaseFalsePreamble)
+    /// is for the third site, [`cad`](Self::cad), which is reached once per
+    /// CSMA retry and therefore up to `CAD_MAX_RETRIES` times for one packet:
+    /// it keeps the full bound for a frame whose header has decoded and
+    /// releases a bare carrier after the preamble and the header should both
+    /// have passed. The sequence itself is
     /// [`leviculum_rx_arming::stand_down_for_tx`], where a fake radio asserts
     /// it.
     ///
@@ -946,13 +954,14 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     pub async fn disarm_rx_for_tx<S>(
         &mut self,
         by: leviculum_core::sx126x::RxTeardownBy,
+        policy: leviculum_rx_arming::DeferPolicy,
         buf: &mut [u8],
         sink: &mut S,
     ) -> Result<(), Error>
     where
         S: leviculum_rx_arming::FrameSink<Meta = RxStatus>,
     {
-        leviculum_rx_arming::stand_down_for_tx(self, by.tag(), buf, sink).await
+        leviculum_rx_arming::stand_down_for_tx(self, by.tag(), policy, buf, sink).await
     }
 
     /// Arm the receiver: the chip starts listening. `timeout_ms == 0` is
@@ -1220,7 +1229,19 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// Perform a Channel Activity Detection. Returns true if a LoRa preamble
     /// was detected (channel busy), false if clear. Blocks until CadDone IRQ.
     /// Exit mode 0x00 leaves the chip in STBY_RC regardless of result.
-    pub async fn cad(&mut self, sf: u8) -> Result<bool, Error> {
+    ///
+    /// `buf` and `sink` are for the reception the standing window may be
+    /// holding when the CSMA path arrives here. A detection cannot run while
+    /// the receiver is armed, so this has to leave RX; what it must not do is
+    /// end a frame that is still arriving, which is what the plain
+    /// [`disarm_rx`](Self::disarm_rx) at this site did until Codeberg #426. A
+    /// frame the wait catches goes up through the same sink and by the same
+    /// route `lora::rx_window`'s own receptions take, so it is
+    /// indistinguishable downstream from any other (Codeberg #426).
+    pub async fn cad<S>(&mut self, sf: u8, buf: &mut [u8], sink: &mut S) -> Result<bool, Error>
+    where
+        S: leviculum_rx_arming::FrameSink<Meta = RxStatus>,
+    {
         // The pair per spreading factor is `sx126x::cad_params` in core, where
         // a host test can hold it against the range the config validator
         // accepts. It used to be a match here ending in a catch-all that gave
@@ -1244,8 +1265,23 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // provisional window standing, and `SetCad` expects STBY_RC. This is
         // the first of the two commands a key-up issues, so on the CSMA path
         // it is where the teardown is measured.
-        self.disarm_rx(leviculum_core::sx126x::RxTeardownBy::Cad)
-            .await?;
+        //
+        // And it is the teardown the loop takes at an instant chosen by its own
+        // announce rather than by the air, so it is the one most likely to land
+        // on a frame: a plain standby here ended a 179-byte offer 41 ms into
+        // its preamble, and the detection that followed then read the frame it
+        // had just destroyed as a busy channel
+        // (`lora_pn_board_sync` step 21, 2026-09-23). The wait is the select
+        // site's, with the shorter bound for a carrier that never becomes a
+        // frame: this site is reached once per CSMA retry, not once per key-up.
+        let _ = self
+            .disarm_rx_for_tx(
+                leviculum_core::sx126x::RxTeardownBy::Cad,
+                leviculum_rx_arming::DeferPolicy::ReleaseFalsePreamble,
+                buf,
+                sink,
+            )
+            .await;
 
         self.write_command(
             opcode::SET_CAD_PARAMS,
@@ -1394,6 +1430,14 @@ impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxWindowProbe for Sx1262<SPI> {
             self.rx_ext_cr_denom,
             self.preamble_len,
         )
+    }
+
+    /// Forwards to `sx126x::false_preamble_ms` against the same cached
+    /// modulation `defer_ms` above uses, and the programmed
+    /// preamble with it: the bound is the time in which a real frame at this
+    /// modulation would have shown a header, so both terms are the link's own.
+    fn false_preamble_ms(&self) -> Option<u64> {
+        irq::false_preamble_ms(self.rx_ext_bw_hz, self.rx_ext_sf, self.preamble_len)
     }
 
     /// The DIO1 wait, bounded, with the chip left in RX for its whole
