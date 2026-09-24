@@ -16,6 +16,13 @@ members = [
     "lnpnd",
     "lndecode",
     "vectors-verify",
+    # Vendored nmea0183 with the float parse replaced (Codeberg #386). A
+    # member, unlike vendor/crossterm, because the patch is ours: its unit
+    # tests assert the fixed-point parse is bit-identical to `str::parse`,
+    # and `cargo test --workspace` is what runs them. Not a default member —
+    # no host binary links it, only the nRF firmware does, through the
+    # `[patch.crates-io]` in leviculum-nrf/Cargo.toml.
+    "vendor/nmea0183",
 ]
 
 # leviculum-ffi is a gnu-target cdylib (built via the `build-ffi` alias). It is

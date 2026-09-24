@@ -17,7 +17,7 @@ person what to do. This one is about the cases where the person forgot.
 | Defect | Caught by |
 |---|---|
 | `execute_benchmark` ended in an unconditional `Ok(())` (`periculum/src/assertions.rs`); 6 of 10 recorded runs carried zero packets and reported GREEN | **neither** — a scenario step, not a Rust test |
-| the sx1262 RX-extend guard tested IRQ flags its own latch mask had disabled (#144, fixed 26ce3a0) | **neither** — no test at all, and `exclude` (`Cargo.toml:39`) puts `leviculum-nrf` outside the workspace |
+| the sx1262 RX-extend guard tested IRQ flags its own latch mask had disabled (#144, fixed 26ce3a0) | **neither** — no test at all, and `exclude` (`Cargo.toml:59`) puts `leviculum-nrf` outside the workspace |
 | `status_parity` `#[ignore]`d with a reason naming a procedure no script implements; never executed by any gate (#189) | **B** |
 | 14 further ignored tests in `rnsd_interop` executed by nothing (#189) | **B** |
 | scenario steps across the corpus produced a delivery figure no step asserted; GREEN at 70-90 % (#188, Periculum #25) | **neither** — scenario steps |

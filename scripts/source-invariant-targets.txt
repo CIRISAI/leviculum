@@ -189,4 +189,5 @@ skip  lnpnd           first_start_identity       # spawns the daemon and inspect
 skip  lnpnd           lxmd_identity_takeover     # spawns the daemon against an lxmd identity
 skip  lnpnd           start_waits_for_daemon     # tokio runtime and a startup race with sleeps
 skip  lnpnd           status_default_budget      # tokio runtime with sleeps
+skip  nmea0183        parsing                    # sentence corpus in-process; subject is the parser
 skip  vectors-verify  corpus                     # reads the vector corpus, but the subject is the codecs under it

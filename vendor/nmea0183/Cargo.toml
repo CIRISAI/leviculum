@@ -1,0 +1,56 @@
+# Vendored, minimally-patched nmea0183 0.6.0 (BSD-3-Clause, Nikita
+# Staroverov, https://github.com/nsforth/nmea0183).
+#
+# The patch replaces every `str::parse::<f32>()` / `::<f64>()` in the crate
+# with the fixed-point parse in `src/fixed.rs`. Those two monomorphisations
+# were the last floating-point code in either firmware image and cost 14.8 KiB
+# of flash, of which `core::num::dec2flt::POWER_OF_FIVE_128` alone is 10 416 B
+# — a quarter of the 64 KiB propagation store region. An NMEA field never
+# carries more than ten significant digits, so an integer parse and one
+# division reproduce `parse` bit for bit (Codeberg #386).
+#
+# It is a workspace member rather than an excluded tree like vendor/crossterm
+# because the patch is ours and has to be gated: `cargo test --workspace`
+# runs its unit tests, which assert the bit equality against `str::parse`
+# itself.
+[package]
+name = "nmea0183"
+version = "0.6.0"
+authors = ["Nikita Staroverov <nsforth@gmail.com>"]
+edition = "2021"
+description = "NMEA 0183 parser targetting mostly embedded devices but not limited to."
+homepage = "https://github.com/nsforth/nmea0183"
+repository = "https://github.com/nsforth/nmea0183"
+license = "BSD-3-Clause"
+keywords = ["NMEA", "nmea", "parser", "gps", "embedded"]
+categories = ["embedded", "no-std", "parser-implementations"]
+readme = "README.md"
+publish = false
+
+[dependencies]
+
+[features]
+default = ["strict"]
+mtk = []
+strict = []
+
+# Upstream 0.6.0 predates these lints and trips 39 of them; the workspace
+# gate runs `clippy -D warnings`, so a member has to answer for them. They
+# are allowed here rather than fixed so the fork's diff against upstream
+# stays the nine call sites and `src/fixed.rs` — a rewrite of code we do
+# not own turns every future upstream release into a merge. `src/fixed.rs`
+# opts back into `clippy::all` at the top of the file: the allowances are
+# for the code we inherited, not the code we wrote.
+[lints.clippy]
+assign_op_pattern = "allow"
+bind_instead_of_map = "allow"
+legacy_numeric_constants = "allow"
+len_zero = "allow"
+manual_range_contains = "allow"
+match_like_matches_macro = "allow"
+needless_borrow = "allow"
+needless_return = "allow"
+new_without_default = "allow"
+redundant_field_names = "allow"
+unnecessary_unwrap = "allow"
+while_let_on_iterator = "allow"

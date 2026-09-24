@@ -234,6 +234,29 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- The firmware no longer carries a floating-point number parser. Every
+  decimal field of every NMEA sentence went through `str::parse::<f32>()` or
+  `::<f64>()` inside `nmea0183` 0.6.0, and those two monomorphisations linked
+  `core::num::dec2flt` — 17 044 B of flash, of which the
+  `POWER_OF_FIVE_128` table alone is 10 416 B. That algorithm is correctly
+  rounded for the full 17 significant digits an IEEE double holds; an NMEA
+  field carries at most ten. The crate is now vendored under
+  `vendor/nmea0183` with its nine `str::parse` call sites replaced by an
+  integer parse
+  and one division (`vendor/nmea0183/src/fixed.rs`), which is bit-identical
+  to `str::parse` whenever the mantissa and the power of ten are both exactly
+  representable — true of every field shape a receiver emits, and asserted
+  against `str::parse` itself over a corpus of real sentences and over every
+  mantissa 0..=999 at every scale 0..=6 on both widths. Measured with
+  `leviculum-nrf/tools/flash-attribution.sh`: the t114 image falls from
+  623 032 B to 604 584 B and rak4631 from 628 776 B to 610 296 B, 18 448 B
+  and 18 480 B, and `just nrf-store-gap` now reports 124 876 B (121 KiB)
+  free below the propagation store region on t114, 119 160 B (116 KiB) on
+  rak4631. `dec2flt` no longer appears in either image at all.
+  The cost is carrying the fork, and it is small: 47 changed lines in four
+  inherited files, two more that `cargo fmt` rewrapped, and one new module.
+  Codeberg #386.
+
 - Every build claim `lnflash` makes about a flashed board now names where it
   was read. A confirmation line said `the board reports git_sha=b9b4a9c3, not
   de6e74ed` and nothing more, and the first question that raises — was that

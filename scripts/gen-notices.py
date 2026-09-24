@@ -246,7 +246,37 @@ def clarified_text(graph, crate_name, crate_version):
     return "\n".join(chunks)
 
 
-def is_ours(crate):
+VENDOR = ROOT / "vendor"
+
+
+def vendored(graph):
+    """(name, version) of every crate resolved out of `vendor/`.
+
+    A `[patch.crates-io]` path replacement is indistinguishable from one
+    of our own crates by `source` alone — cargo reports null for both —
+    but a vendored crate is somebody else's code that we forked, and its
+    licence obligation is unchanged by the fork. Without this the notice
+    for such a crate silently disappears from the artifact that still
+    contains it, which is the precise failure this file exists to
+    prevent: nmea0183 0.6.0 (BSD-3-Clause) vanished from PART 2 the
+    moment it moved under `vendor/` (Codeberg #386), and crossterm
+    0.29.0 had been missing from PART 1 since it moved there.
+    """
+    meta = json.loads(
+        run(
+            ["cargo", "metadata", "--format-version", "1", "--frozen", *graph.feature_args],
+            cwd=graph.manifest.parent,
+        ).stdout
+    )
+    found = set()
+    for pkg in meta["packages"]:
+        manifest = Path(pkg["manifest_path"]).resolve()
+        if manifest.is_relative_to(VENDOR):
+            found.add((pkg["name"], pkg["version"]))
+    return found
+
+
+def is_ours(crate, vendored_crates):
     """True for a workspace-local crate.
 
     Path dependencies have a null `source`. Ours are AGPL and their text
@@ -254,13 +284,18 @@ def is_ours(crate):
     repeating it once per member would bury the third-party notices.
     Filtered per crate rather than per licence id on purpose — an AGPL
     crate arriving from crates.io must still be listed.
+
+    A path dependency under `vendor/` is the exception: see `vendored`.
     """
+    if (crate["name"], crate["version"]) in vendored_crates:
+        return False
     return crate.get("source") is None
 
 
 def render(graph, inventory):
     """One section of the notice file, deterministic given the inventory."""
     lines = [RULE, graph.title, RULE, "", graph.blurb, ""]
+    vendored_crates = vendored(graph)
 
     # (licence id, exact text) -> crates. cargo-about already splits by
     # text, which is what keeps 90 differently-copyrighted MIT crates
@@ -271,7 +306,7 @@ def render(graph, inventory):
             {
                 (u["crate"]["name"], u["crate"]["version"])
                 for u in entry["used_by"]
-                if not is_ours(u["crate"])
+                if not is_ours(u["crate"], vendored_crates)
             }
         )
         if not users:
@@ -284,7 +319,7 @@ def render(graph, inventory):
     classified = {
         (c["package"]["name"], c["package"]["version"]): c["license"]
         for c in inventory["crates"]
-        if not is_ours(c["package"])
+        if not is_ours(c["package"], vendored_crates)
     }
     covered = {u for users in groups.values() for u in users}
     for (name, version), expr in sorted(classified.items()):

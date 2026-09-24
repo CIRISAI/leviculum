@@ -364,3 +364,13 @@ path = "src/bin/solarnode.rs"
 [[bin]]
 name = "sd-ram-probe"
 path = "src/bin/sd-ram-probe.rs"
+
+# Vendored nmea0183 with the float parse replaced by a fixed-point one
+# (Codeberg #386). Upstream parses every decimal field through
+# `str::parse::<f32>()`/`::<f64>()`, which links `core::num::dec2flt` —
+# 14.8 KiB of flash, the last floating-point code in either image after
+# 9c2186ea removed the float formatters. A patch rather than three path
+# deps so `leviculum-nrf`, `gnss-time` and `gnss-presence` cannot end up
+# resolving different copies of the crate.
+[patch.crates-io]
+nmea0183 = { path = "../vendor/nmea0183" }

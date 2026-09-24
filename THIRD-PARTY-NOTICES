@@ -29,15 +29,15 @@ Linked into lnsd, lnstest, lncp, lnstatus, lnomad, lblogd and
 lnflash. Built for x86_64-unknown-linux-musl and
 aarch64-unknown-linux-musl.
 
-360 third-party crates, by licence:
+362 third-party crates, by licence:
 
   Apache-2.0                   249
   BSD-2-Clause                 1
-  BSD-3-Clause                 5
+  BSD-3-Clause                 6
   CC0-1.0                      1
   CDLA-Permissive-2.0          2
   ISC                          5
-  MIT                          95
+  MIT                          96
   MPL-2.0                      2
   Unicode-3.0                  1
   Zlib                         1
@@ -8581,6 +8581,43 @@ BSD-3-Clause — BSD 3-Clause "New" or "Revised" License
 ------------------------------------------------------------------------
 
 Applies to:
+  nmea0183 0.6.0
+
+BSD 3-Clause License
+
+Copyright (c) 2019, Nikita Staroverov
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+------------------------------------------------------------------------
+BSD-3-Clause — BSD 3-Clause "New" or "Revised" License
+------------------------------------------------------------------------
+
+Applies to:
   subtle 2.6.1
 
 Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved.
@@ -9771,6 +9808,7 @@ MIT — MIT License
 
 Applies to:
   crossterm 0.28.1
+  crossterm 0.29.0
 
 MIT License
 
