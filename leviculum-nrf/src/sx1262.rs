@@ -189,7 +189,7 @@ fn u24_be(val: u32) -> [u8; 3] {
 /// One decoding for both entries into the instrument — the read
 /// [`Sx1262::latched`] takes for [`leviculum_rx_arming::stand_down`] and the
 /// word [`Sx1262::finish_rx`] hands to
-/// [`leviculum_rx_arming::stand_down_with_latch`] — so the two cannot come to
+/// [`leviculum_rx_arming::stand_down_for_rx`] — so the two cannot come to
 /// disagree about which bit means which field.
 fn latch_of(flags: u16) -> leviculum_rx_arming::RxLatch {
     leviculum_rx_arming::RxLatch {
@@ -198,6 +198,25 @@ fn latch_of(flags: u16) -> leviculum_rx_arming::RxLatch {
         header: flags & irq::IRQ_HEADER_VALID != 0,
         rxdone: flags & irq::IRQ_RX_DONE != 0,
     }
+}
+
+/// What settling a window whose wait has ended produced.
+///
+/// Two outcomes and not three: the hardware timeout is an `Err(Error::Timeout)`
+/// out of [`Sx1262::settle_rx`], exactly as it always was, because a window
+/// that ran out its own bound is over and there is nothing left to decide.
+/// These two are the cases where something is: a frame to return, or a chip
+/// that may still be listening.
+enum RxSettle {
+    /// A frame came whole out of the chip's buffer. The length is what was
+    /// written into the caller's slice, not what the chip reported.
+    Frame(u8, RxStatus),
+    /// Neither terminating IRQ was set: the software wait expired on a window
+    /// the chip may still be holding. Carries the status word as read after
+    /// the RX extension and before `ClearIrqStatus` — the last honest reading
+    /// of that window, and the only evidence the caller's decision can rest
+    /// on.
+    WaitExpired(u16),
 }
 
 /// Convert an SX1262 bandwidth register code back to bandwidth in Hz
@@ -904,20 +923,27 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         leviculum_rx_arming::stand_down(self, by.tag()).await
     }
 
-    /// [`disarm_rx`](Self::disarm_rx) reporting a latch the caller read
-    /// itself, for the one path whose own read is taken after the clear.
+    /// Stand the receiver down for the receive path's own wait, waiting first
+    /// if the window is holding a frame that is still arriving, and giving
+    /// that frame back rather than to a sink.
     ///
-    /// See [`leviculum_rx_arming::stand_down_with_latch`] for why that read
-    /// cannot be believed and what the captures say about it. The only caller
-    /// is [`finish_rx`](Self::finish_rx)'s last branch, and the status word it
-    /// passes is the one it read after the RX extension — the last reading of
-    /// that window taken before `ClearIrqStatus`.
-    async fn disarm_rx_with_latch(
+    /// [`disarm_rx_for_tx`](Self::disarm_rx_for_tx)'s sibling, and it differs
+    /// in the two ways its site does. The latch is the caller's, because the
+    /// only caller is [`finish_rx`](Self::finish_rx)'s last branch and its own
+    /// read would be taken after `ClearIrqStatus` — see
+    /// [`leviculum_rx_arming::stand_down_for_rx`] for what the captures say
+    /// about that. And the frame is returned rather than delivered, because
+    /// this site is one step short of `await_rx`'s own return: there is a
+    /// caller waiting for exactly this frame, and handing it to
+    /// `lora::CoreHandoff` instead would deliver it twice or not at all.
+    async fn disarm_rx_for_rx(
         &mut self,
         by: leviculum_core::sx126x::RxTeardownBy,
+        policy: leviculum_rx_arming::DeferPolicy,
         flags: u16,
-    ) -> Result<(), Error> {
-        leviculum_rx_arming::stand_down_with_latch(self, by.tag(), latch_of(flags)).await
+        buf: &mut [u8],
+    ) -> Result<Option<(u8, RxStatus)>, Error> {
+        leviculum_rx_arming::stand_down_for_rx(self, by.tag(), policy, latch_of(flags), buf).await
     }
 
     /// Stand the receiver down for a transmit, waiting first if the window is
@@ -1111,17 +1137,87 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // is the one the next arming's `dark_ms` measures from.
         self.rx_arm
             .window_ended(embassy_time::Instant::now().as_millis());
-        self.finish_rx(flags, buf).await.map(Some)
+        match self.settle_rx(flags, buf).await? {
+            RxSettle::Frame(len, status) => Ok(Some((len, status))),
+            // Unreachable, and reported as "nothing latched" rather than
+            // asserted: this arm is entered only with a terminating IRQ
+            // already set, and `sx126x::rx_extend_ms` returns `None` for
+            // exactly that status, so `settle_rx` cannot come back here.
+            // `Ok(None)` is also the safe reading if it ever did — the window
+            // is still standing and the caller's wait is what follows.
+            RxSettle::WaitExpired(_) => Ok(None),
+        }
     }
 
-    /// Classify a terminated window and read out whatever it caught.
+    /// Classify a terminated window, read out whatever it caught, and defer to
+    /// a frame the window is still receiving rather than cutting it.
     ///
     /// The tail both entries into the window share — the wait in
     /// [`await_rx`](Self::await_rx) and the latched take above — so a
     /// reception is completed identically however it was noticed. `flags` is
     /// the status as read, not re-read: on the adopted path a second read
-    /// after the first would be a second chance to race the clear below.
-    async fn finish_rx(&mut self, mut flags: u16, buf: &mut [u8]) -> Result<(u8, RxStatus), Error> {
+    /// after the first would be a second chance to race the clear inside
+    /// [`settle_rx`](Self::settle_rx).
+    ///
+    /// Split from `settle_rx` so this one branch can exist at all. The
+    /// deferral takes the frame through `RxWindowProbe::take_latched_frame`,
+    /// which is [`take_latched_frame`](Self::take_latched_frame), which
+    /// settles the window — and an `async fn` whose future contains its own is
+    /// not a type rustc can lay out. `settle_rx` reaches no trait method, so
+    /// the cycle is cut where it costs nothing: the take re-enters the
+    /// settling, never the deferral.
+    async fn finish_rx(&mut self, flags: u16, buf: &mut [u8]) -> Result<(u8, RxStatus), Error> {
+        let latched = match self.settle_rx(flags, buf).await? {
+            RxSettle::Frame(len, status) => return Ok((len, status)),
+            RxSettle::WaitExpired(latched) => latched,
+        };
+        // Neither terminating IRQ: the software wait expired on a chip that
+        // may still be in RX, and this is the one teardown that can genuinely
+        // destroy a reception — a preamble whose frame outlasted even the
+        // extension is still on the air. Rig window 2026-09-24,
+        // `lora_pn_board_offer_past_the_link` round 3:
+        // `SX_RX_TEARDOWN site=rxwait preamble=1 waited_ms=0` cut the sender's
+        // LINKCLOSE in its preamble, which is what kept that round's seven
+        // messages.
+        //
+        // `latched` is handed over rather than re-read, because the read this
+        // site would take comes after `settle_rx`'s `ClearIrqStatus` and can
+        // therefore only report an empty channel — which is how every one of
+        // this site's lines in the captures came to say so, including the 72
+        // emitted directly behind an `[SX_RX_EXTEND]` that had just read
+        // `PreambleDetected` off the same window. That word is the last honest
+        // reading of it.
+        //
+        // `ReleaseFalsePreamble` for the reason the CAD site has it: this site
+        // is reached once per receive window whose software wait expires,
+        // which is the loop's own cadence rather than an externally paced
+        // event, so a carrier that never becomes a frame must cost the
+        // preamble-plus-header time and not a whole frame.
+        //
+        // The error is dropped, as it was before the deferral existed: the
+        // window is over either way and the caller is owed a verdict, not an
+        // SPI diagnosis.
+        match self
+            .disarm_rx_for_rx(
+                leviculum_core::sx126x::RxTeardownBy::RxWait,
+                leviculum_rx_arming::DeferPolicy::ReleaseFalsePreamble,
+                latched,
+                buf,
+            )
+            .await
+        {
+            Ok(Some((len, status))) => Ok((len, status)),
+            _ => Err(Error::Timeout),
+        }
+    }
+
+    /// Conclude a window whose wait has ended: honour a latched preamble with
+    /// the RX extension, clear the status, and read out a completed reception.
+    ///
+    /// Everything [`finish_rx`](Self::finish_rx) used to do except its last
+    /// branch, and it reaches no trait method — see that function for why the
+    /// split is load-bearing rather than tidiness.
+    async fn settle_rx(&mut self, mut flags: u16, buf: &mut [u8]) -> Result<RxSettle, Error> {
         let Some(&ArmedWindow { hw_timeout, .. }) = self.rx_state.window() else {
             return Err(Error::NotArmed);
         };
@@ -1199,29 +1295,17 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             let read_len = (len as usize).min(buf.len());
             self.read_buffer(ptr, &mut buf[..read_len]).await?;
             let status = self.get_packet_status().await?;
-            Ok((read_len as u8, status))
+            Ok(RxSettle::Frame(read_len as u8, status))
         } else if flags & irq::IRQ_TIMEOUT != 0 {
             Err(Error::Timeout)
         } else {
             // Neither terminating IRQ: the software wait expired on a chip
-            // that may still be in RX. `disarm_rx*` rather than a bare
-            // `set_standby_rc` so the state and the gap clock agree with the
-            // command — the window is over exactly once, here — and so this
-            // teardown lands in the same population as the others. It is one
-            // that can genuinely destroy a reception: a preamble whose frame
-            // outlasted even the extension is still on the air.
-            //
-            // `flags` is handed over rather than re-read, because the read
-            // `disarm_rx` would take here comes after the `ClearIrqStatus`
-            // above and can therefore only report an empty channel — which is
-            // how every one of this site's lines in the captures came to say
-            // so, including the 72 emitted directly behind an
-            // `[SX_RX_EXTEND]` that had just read `PreambleDetected` off the
-            // same window. This word is the last honest reading of it.
-            let _ = self
-                .disarm_rx_with_latch(leviculum_core::sx126x::RxTeardownBy::RxWait, flags)
-                .await;
-            Err(Error::Timeout)
+            // that may still be in RX. What is done about that is the
+            // caller's — see [`finish_rx`](Self::finish_rx) — and the status
+            // word goes with it, because the `ClearIrqStatus` above has
+            // already made every later read of this window a read of an empty
+            // channel.
+            Ok(RxSettle::WaitExpired(flags))
         }
     }
 

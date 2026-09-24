@@ -77,13 +77,32 @@
 //! the frame is taken and handed up by the same route every other reception
 //! takes — and the `[SX_RX_HARVEST]` line reports it.
 //!
+//! # The one site that is not a transmit
+//!
+//! [`stand_down_for_rx`] is the same wait at the receive path's own teardown:
+//! the software wait in `finish_rx` expiring on a window the chip may still be
+//! listening on. Same bound, same [`DeferPolicy`], same `waited_ms=`. It is a
+//! second entry point rather than a flag because two things there are the
+//! other way round — the latch is the caller's (a read taken at that site
+//! comes after `ClearIrqStatus` and can only report an empty channel), and the
+//! frame goes back to the caller rather than to a sink, because the caller is
+//! `await_rx` and the frame is what it is there to return.
+//!
+//! What it fixes: the RX extension one branch above already honours a latched
+//! preamble once, but the re-read that follows it can be reading a *different*
+//! frame's preamble, one that started during the extension. Rig window
+//! 2026-09-24, `lora_pn_board_offer_past_the_link` round 3:
+//! `SX_RX_TEARDOWN site=rxwait preamble=1 waited_ms=0` cut the sender's
+//! LINKCLOSE in its preamble.
+//!
 //! # What this crate deliberately does not do
 //!
-//! No spacing, no jitter, no periodic delay, and no continuous RX. The one
-//! wait above is conditional on a measured reception in progress and on
-//! nothing else; a guard that always waits would be a spacing delay wearing a
-//! costume, and `a_window_with_a_clear_latch_is_not_deferred_for` is the
-//! control that says this one is not.
+//! No spacing, no jitter, no periodic delay, and no continuous RX. Both waits
+//! above are conditional on a measured reception in progress and on nothing
+//! else; a guard that always waits would be a spacing delay wearing a costume,
+//! and `a_window_with_a_clear_latch_is_not_deferred_for` and
+//! `a_handed_latch_spends_one_standby_and_reads_nothing` are the controls that
+//! say these are not.
 //!
 //! The re-arm uses the window that just fired, and it is provisional: the
 //! loop's next decision either adopts it, replaces it, or leaves RX, and
@@ -974,14 +993,20 @@ where
     radio.disarm().await
 }
 
-/// [`stand_down`] for a caller that has already read the latch, with the
-/// status read left out.
+/// [`stand_down_for_tx`]'s sibling for the one site that is not a transmit:
+/// the receive path's own software wait, expiring on a window the chip may
+/// still be listening on.
 ///
-/// The one caller whose own read would be guaranteed to lie. The driver's
-/// `finish_rx` concludes a window the software wait ended by clearing the
-/// chip's IRQ status and *then* standing the window down, so the read
-/// [`stand_down`] takes a moment later can only come back empty — whatever the
-/// window was holding was cleared one command earlier.
+/// Same decision, same bound, same `policy`, same `waited_ms=` on the line.
+/// Two things differ, and each is why this is a second entry point rather
+/// than a flag on the first.
+///
+/// # The latch is the caller's, because the caller's is the only honest one
+///
+/// The driver's `finish_rx` concludes a window the software wait ended by
+/// clearing the chip's IRQ status and *then* standing the window down, so a
+/// read taken here can only come back empty — whatever the window was holding
+/// was cleared one command earlier.
 ///
 /// Measured, not argued. Across the 236 board captures of the 2026-09-14..17
 /// rig runs, all 102 `[SX_RX_TEARDOWN] site=rxwait` lines report
@@ -992,28 +1017,110 @@ where
 /// same window 416 ms later says the channel was empty. One capture cannot
 /// hold both readings; the second one is the clear talking.
 ///
-/// This matters beyond tidiness. This crate's claim is that every
-/// `[SX_RX_TEARDOWN]` carrying a latch is a frame it still loses, and the rate
-/// is the question. At `site=rxwait` that numerator is zero by construction,
-/// so the one teardown the loop takes at an instant chosen by noise rather
-/// than by its own schedule is also the one it cannot count.
+/// So `latch` is the status word the caller read after the RX extension and
+/// before the clear, and it is what the deferral decision is taken from and
+/// what the teardown line carries. No read is taken here, on either path.
 ///
-/// The latch belongs to the caller because only the caller still has it: the
-/// status word read after the RX extension is the last honest reading of that
-/// window. Everything else is [`stand_down`] — one report, one standby, and
-/// the same no-op when nothing is standing.
-pub async fn stand_down_with_latch<R>(
+/// The one read this does take is [`wait_out`]'s second-stage one, and it asks
+/// a different question: *has a header decoded since the clear?* A header that
+/// had already decoded before the clear is in `latch` already, which makes the
+/// reason `Header` and skips that stage entirely — so the post-clear read is
+/// reached only where a post-clear reading is the right one.
+///
+/// # The frame goes back to the caller, not to a sink
+///
+/// [`stand_down_for_tx`] is reached from a transmit, which has no use for a
+/// reception and hands it to a [`FrameSink`]. This is reached from the receive
+/// path itself, one frame short of returning: `finish_rx` has the caller's
+/// buffer and no sink, and its caller is what a frame is owed to. So a frame
+/// the wait catches is returned rather than delivered, and reaches the loop by
+/// the route every other reception takes — the one `await_rx` returns on.
+///
+/// # What this fixes
+///
+/// The extension one branch above grants a latched preamble one maximum-size
+/// frame's airtime, once, and the teardown happens after it expires. That is
+/// not the same as the frame's own end: the re-read that follows the extension
+/// can be reading a *different* frame's preamble, one that started during it.
+/// Rig window 2026-09-24, `lora_pn_board_offer_past_the_link` round 3:
+/// `SX_RX_TEARDOWN site=rxwait preamble=1 waited_ms=0` cut the sender's
+/// LINKCLOSE in its preamble, and the seven messages of that round stayed put.
+/// A latched preamble is a frame on the air; this is the deferral 188 gave the
+/// CAD site, at the site that still lacked it.
+pub async fn stand_down_for_rx<R>(
     radio: &mut R,
     site: &'static str,
+    policy: DeferPolicy,
     latch: RxLatch,
-) -> Result<(), R::Error>
+    buf: &mut [u8],
+) -> Result<Option<(u8, R::Meta)>, R::Error>
 where
     R: RxWindowProbe,
 {
     let Some(standing) = radio.standing_window() else {
-        return radio.disarm().await;
+        radio.disarm().await?;
+        return Ok(None);
     };
-    tear_down(radio, site, standing, latch, 0).await
+    // `zip` rather than two ifs, for the reason `stand_down_for_tx` gives: a
+    // bound with no reason, or a reason with no bound, is the two halves of
+    // the decision having read different bits.
+    let Some((bound_ms, reason)) = radio
+        .defer_ms(&latch)
+        .zip(TxDeferReason::from_latch(&latch))
+    else {
+        // The same two windows `stand_down_for_tx` separates here. One was
+        // listening to an empty channel and costs nothing to end; the other is
+        // holding a frame that already finished arriving, and ending *that*
+        // one destroys it.
+        //
+        // The concluded case cannot be reached from `finish_rx`, whose last
+        // branch is by construction the one where neither terminating IRQ is
+        // set. It is handled anyway because the latch is the caller's: an
+        // entry point that exists to stop a frame being destroyed must not
+        // destroy one it was handed.
+        if latch.rxdone {
+            let Some(frame) = harvest_frame(radio, site, standing, latch, buf).await? else {
+                return Ok(None);
+            };
+            stand_down(radio, site).await?;
+            return Ok(Some(frame));
+        }
+        tear_down(radio, site, standing, latch, 0).await?;
+        return Ok(None);
+    };
+
+    let (waited_ms, released) = wait_out(radio, site, policy, bound_ms, reason).await;
+    let taken = radio.take_latched_frame(buf).await;
+    let outcome = match &taken {
+        Ok(Some(_)) => TxDeferOutcome::Frame,
+        // `released` only when the wait ended early on its own evidence; a
+        // frame that arrived anyway in the meantime outranks it.
+        Ok(None) if released => TxDeferOutcome::FalsePreamble,
+        Ok(None) => TxDeferOutcome::Timeout,
+        // Swallowed for the reason `stand_down_for_tx` swallows it:
+        // propagating here would skip the standby below and leave a listening
+        // chip behind a caller that believes the window is over.
+        Err(_) => TxDeferOutcome::Abandoned,
+    };
+    let defer = TxDefer {
+        waited_ms,
+        reason,
+        outcome,
+    };
+    radio.report(RxEvent::Deferred(&defer));
+    let frame = taken.ok().flatten();
+
+    // Exactly one standby, whatever the wait bought. On `outcome=frame` the
+    // chip left RX at the reception and the window is gone, so this is the
+    // no-op it always is; on the others it is the teardown that was deferred,
+    // carrying the wait it was held for — and carrying the CALLER's latch,
+    // because a read taken here would report the empty channel the clear left
+    // behind, which is the whole reason this entry point takes a latch at all.
+    match radio.standing_window() {
+        Some(standing) => tear_down(radio, site, standing, latch, waited_ms).await?,
+        None => radio.disarm().await?,
+    }
+    Ok(frame)
 }
 
 /// Report one teardown and spend its standby, from a latch that has already
@@ -1076,8 +1183,41 @@ where
     R: RxWindowProbe,
     S: FrameSink<Meta = R::Meta>,
 {
+    let Some((len, meta)) = harvest_frame(radio, site, standing, latch, buf).await? else {
+        // Nothing came out; the teardown and its standby already happened
+        // inside, at this site and with this latch.
+        return Ok(());
+    };
+    let n = (len as usize).min(buf.len());
+    sink.deliver(&buf[..n], &meta).await;
+    stand_down(radio, site).await
+}
+
+/// Take the completed reception and report it, without deciding where it goes.
+///
+/// The half of [`harvest`] that is the same at every site: the two callers
+/// differ only in whether the frame is delivered to a [`FrameSink`] or handed
+/// back to whoever asked, and that difference must not be able to drag the
+/// reporting or the teardown with it.
+///
+/// `Ok(None)` is the reception that yielded nothing — a latched `RxDone` whose
+/// payload fails its CRC, or a readout that fails on the bus. It is reported
+/// as what it is, a teardown of a window that was holding a reception, so the
+/// saved and the lost population at this site stay countable against each
+/// other; the standby is spent inside that teardown, and the caller owes none.
+async fn harvest_frame<R>(
+    radio: &mut R,
+    site: &'static str,
+    standing: StandingWindow<R::Window>,
+    latch: RxLatch,
+    buf: &mut [u8],
+) -> Result<Option<(u8, R::Meta)>, R::Error>
+where
+    R: RxWindowProbe,
+{
     let Ok(Some((len, meta))) = radio.take_latched_frame(buf).await else {
-        return tear_down(radio, site, standing, latch, 0).await;
+        tear_down(radio, site, standing, latch, 0).await?;
+        return Ok(None);
     };
     let harvested = RxHarvest {
         site,
@@ -1089,9 +1229,7 @@ where
     // gives for the deferral line: a line emitted after the sink had yielded
     // would carry a `t=` from after the main task ran.
     radio.report(RxEvent::Harvested(&harvested));
-    let n = (len as usize).min(buf.len());
-    sink.deliver(&buf[..n], &meta).await;
-    stand_down(radio, site).await
+    Ok(Some((len, meta)))
 }
 
 /// How long a site may wait on evidence that is only a carrier.
@@ -2454,7 +2592,10 @@ mod tests {
     /// status after its RX extension, then issued `ClearIrqStatus`, and only
     /// then stood the window down. The fake is set up the same way — the chip
     /// reports an empty status, the caller still holds the word it read before
-    /// the clear — and the line carries the caller's reading.
+    /// the clear — and the line carries the caller's reading, not the chip's.
+    ///
+    /// The carrier never becomes a frame here, so the window still ends; what
+    /// is asserted is which latch reached the line.
     #[test]
     fn a_teardown_carries_the_latch_the_caller_read_before_the_clear() {
         let log = OpLog::default();
@@ -2464,15 +2605,13 @@ mod tests {
         // What the chip says now: the clear has run, so nothing is latched.
         port.latch = RxLatch::CLEAR;
 
-        block_on(stand_down_with_latch(
+        let mut buf = [0u8; 8];
+        block_on(stand_down_for_rx(
             &mut port,
             "rxwait",
-            RxLatch {
-                raw: 0x0004,
-                preamble: true,
-                header: false,
-                rxdone: false,
-            },
+            DeferPolicy::ReleaseFalsePreamble,
+            LIVE_PREAMBLE,
+            &mut buf,
         ))
         .expect("stood down");
 
@@ -2481,7 +2620,7 @@ mod tests {
                 Op::Teardown(s) => Some(s.clone()),
                 _ => None,
             }),
-            "site=rxwait preamble=1 header=0 rxdone=0 armed_ms=1587 waited_ms=0"
+            "site=rxwait preamble=1 header=0 rxdone=0 armed_ms=1665 waited_ms=78"
         );
         assert!(!port.state.standby_owed());
     }
@@ -2525,7 +2664,15 @@ mod tests {
         block_on(port.arm(CSMA)).expect("arm");
         let before = log.ops().len();
 
-        block_on(stand_down_with_latch(&mut port, "rxwait", RxLatch::CLEAR)).expect("stood down");
+        let mut buf = [0u8; 8];
+        block_on(stand_down_for_rx(
+            &mut port,
+            "rxwait",
+            DeferPolicy::ReleaseFalsePreamble,
+            RxLatch::CLEAR,
+            &mut buf,
+        ))
+        .expect("stood down");
 
         let ops = log.ops();
         let after = &ops[before..];
@@ -2553,15 +2700,13 @@ mod tests {
     fn standing_down_an_unarmed_radio_with_a_latch_is_not_a_sample() {
         let log = OpLog::default();
         let mut port = FakePort::new(&log, Vec::new());
-        block_on(stand_down_with_latch(
+        let mut buf = [0u8; 8];
+        block_on(stand_down_for_rx(
             &mut port,
             "rxwait",
-            RxLatch {
-                raw: 0x0014,
-                preamble: true,
-                header: true,
-                rxdone: false,
-            },
+            DeferPolicy::ReleaseFalsePreamble,
+            LIVE_HEADER,
+            &mut buf,
         ))
         .expect("stood down");
         let ops = log.ops();
@@ -3502,5 +3647,233 @@ mod tests {
             ),
             "site=select preamble=1 header=1 rxdone=1 armed_ms=10098 waited_ms=0"
         );
+    }
+
+    // The receive path's own wait: this batch.
+
+    /// The defect, as the rig wrote it. `finish_rx`'s software wait expired on
+    /// a window that had latched a preamble, the RX extension had already been
+    /// spent, and the teardown cut a frame that was still on the air —
+    /// `SX_RX_TEARDOWN site=rxwait preamble=1 waited_ms=0`, round 3 of
+    /// `lora_pn_board_offer_past_the_link` on 2026-09-24, and the frame was
+    /// the sender's LINKCLOSE.
+    ///
+    /// The claim: the same deferral 188 gave the CAD site, at this site, with
+    /// the frame going back to the caller instead of to a sink — and no
+    /// teardown line carrying a latch, because there is no longer a teardown.
+    #[test]
+    fn a_latched_preamble_at_rxwait_is_waited_out_and_the_frame_returned() {
+        let log = OpLog::default();
+        let payload = alloc::vec![0xDE, 0xAD, 0xBE];
+        // The chip as `finish_rx` leaves it: `ClearIrqStatus` has run, so a
+        // read here reports nothing. The caller still holds the word it read
+        // after the RX extension, and that is what it hands in.
+        let mut port = mid_reception(
+            &log,
+            RxLatch::CLEAR,
+            Some(300),
+            alloc::vec![Some(payload.clone())],
+        );
+        port.header_latches_after_ms = Some(60);
+        let before = log.ops().len();
+
+        let mut buf = [0u8; 8];
+        let taken = block_on(stand_down_for_rx(
+            &mut port,
+            "rxwait",
+            DeferPolicy::ReleaseFalsePreamble,
+            LIVE_PREAMBLE,
+            &mut buf,
+        ))
+        .expect("stood down");
+
+        let (len, meta) = taken.expect("the frame the teardown would have cut must come back");
+        assert_eq!((&buf[..len as usize], meta), (&payload[..], -42));
+
+        let ops = log.ops();
+        let after = &ops[before..];
+        // The CAD site's two stages and the CAD site's numbers: the short
+        // bound, the read that finds the header, and the remainder of the
+        // frame bound. 78 + 650 is 728, one bound and not two.
+        assert_eq!(
+            after
+                .iter()
+                .filter_map(|op| match op {
+                    Op::DeferWait(ms) => Some(*ms),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            alloc::vec![78, 650],
+            "after={after:?}"
+        );
+        assert_eq!(
+            one_defer_line(&log),
+            "waited_ms=300 reason=preamble outcome=frame",
+            "the line reports the frame's own airtime, not the bound"
+        );
+        assert_eq!(
+            log.count(|op| matches!(op, Op::Teardown(_))),
+            0,
+            "the teardown that cut the frame must not happen at all, after={after:?}"
+        );
+        // The window ended at the reception, so the standby this site spends
+        // is the no-op it is after any completed frame.
+        assert!(!port.state.standby_owed());
+    }
+
+    /// The other half, and the control that says this is a deferral and not a
+    /// delay: a carrier that produces no header inside the preamble-plus-header
+    /// time is read as noise, the window ends there rather than at the frame
+    /// bound, and the line says which of the two populations it was.
+    ///
+    /// The releasing policy for the same reason the CAD site has it: this site
+    /// is reached once per receive window whose software wait expires, which is
+    /// the loop's own cadence, not an externally paced event.
+    #[test]
+    fn a_false_preamble_at_rxwait_releases_at_the_short_bound() {
+        let log = OpLog::default();
+        let mut port = mid_reception(&log, RxLatch::CLEAR, None, Vec::new());
+        let started = port.now;
+        let before = log.ops().len();
+
+        let mut buf = [0u8; 8];
+        let taken = block_on(stand_down_for_rx(
+            &mut port,
+            "rxwait",
+            DeferPolicy::ReleaseFalsePreamble,
+            LIVE_PREAMBLE,
+            &mut buf,
+        ))
+        .expect("stood down");
+        assert!(taken.is_none(), "there was no frame to give back");
+
+        let ops = log.ops();
+        let after = &ops[before..];
+        assert_eq!(
+            after
+                .iter()
+                .filter_map(|op| match op {
+                    Op::DeferWait(ms) => Some(*ms),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            alloc::vec![78],
+            "one wait, at the short bound, and no second one, after={after:?}"
+        );
+        assert_eq!(
+            port.now - started,
+            78,
+            "the window was held for the false-preamble bound and no longer"
+        );
+        assert_eq!(
+            one_defer_line(&log),
+            "waited_ms=78 reason=preamble outcome=false_preamble",
+            "a released carrier is its own population, not a timeout"
+        );
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Teardown(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "site=rxwait preamble=1 header=0 rxdone=0 armed_ms=78 waited_ms=78",
+            "the teardown still carries the caller's latch, and now says what it waited"
+        );
+        assert!(!port.state.standby_owed());
+    }
+
+    /// A decoded header earns the full frame bound here too, and by the same
+    /// argument the CAD site makes: a header that passed its own CRC is a real
+    /// frame at this modulation, so the policy has nothing left to release.
+    ///
+    /// It also pins the read that is *not* taken: `reason=header` comes out of
+    /// the handed latch, and the single-stage wait means no status read is
+    /// taken before the frame bound is spent.
+    #[test]
+    fn a_handed_header_at_rxwait_waits_the_whole_frame() {
+        let log = OpLog::default();
+        let mut port = mid_reception(&log, RxLatch::CLEAR, None, Vec::new());
+        let before = log.ops().len();
+
+        let mut buf = [0u8; 8];
+        block_on(stand_down_for_rx(
+            &mut port,
+            "rxwait",
+            DeferPolicy::ReleaseFalsePreamble,
+            LIVE_HEADER,
+            &mut buf,
+        ))
+        .expect("stood down");
+
+        let ops = log.ops();
+        let after = &ops[before..];
+        assert_eq!(
+            after
+                .iter()
+                .filter_map(|op| match op {
+                    Op::DeferWait(ms) => Some(*ms),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            alloc::vec![728],
+            "one wait, at the frame bound, after={after:?}"
+        );
+        assert_eq!(
+            one_defer_line(&log),
+            "waited_ms=728 reason=header outcome=timeout"
+        );
+    }
+
+    /// A window whose reception had already completed is taken rather than
+    /// stood down here too — the same harvest the transmit sites do, with the
+    /// frame going back to the caller.
+    ///
+    /// Not reachable from `finish_rx` today, whose last branch is by
+    /// construction the one where neither terminating IRQ is set. It is
+    /// asserted anyway because the entry point is public and takes the latch
+    /// from its caller: a caller that hands in a concluded window must not have
+    /// its frame destroyed by the site that exists to stop exactly that.
+    #[test]
+    fn a_concluded_window_handed_to_rxwait_is_harvested_not_torn_down() {
+        let log = OpLog::default();
+        let payload = alloc::vec![0x01, 0x02];
+        let mut port = mid_reception(&log, CONCLUDED, None, alloc::vec![Some(payload.clone())]);
+        port.now += 40;
+        let before = log.ops().len();
+
+        let mut buf = [0u8; 8];
+        let taken = block_on(stand_down_for_rx(
+            &mut port,
+            "rxwait",
+            DeferPolicy::ReleaseFalsePreamble,
+            CONCLUDED,
+            &mut buf,
+        ))
+        .expect("harvested");
+
+        let (len, _) = taken.expect("the completed frame must come back");
+        assert_eq!(&buf[..len as usize], &payload[..]);
+        let ops = log.ops();
+        let after = &ops[before..];
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Harvest(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "site=rxwait preamble=1 header=1 rxdone=1 armed_ms=40 waited_ms=0"
+        );
+        assert_eq!(
+            log.count(|op| matches!(op, Op::Teardown(_))),
+            0,
+            "a harvest is not a teardown, after={after:?}"
+        );
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| matches!(op, Op::DeferWait(_)))
+                .count(),
+            0,
+            "a concluded reception has nothing left to wait for, after={after:?}"
+        );
+        assert!(!port.state.standby_owed());
     }
 }

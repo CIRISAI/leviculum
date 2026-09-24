@@ -140,7 +140,7 @@ written before the peer had a contention window to draw. The right
 comparison is against the peer's time to *key up*, not to finish its
 frame: the receiver stops its timeout on preamble detect and then runs
 to packet completion regardless of length
-(`SET_STOP_RX_TIMER_ON_PREAMBLE`, `leviculum-nrf/src/sx1262.rs:734`).
+(`SET_STOP_RX_TIMER_ON_PREAMBLE`, `leviculum-nrf/src/sx1262.rs:753`).
 
 | PHY | Post-TX window | Peer's widest wait | Covered |
 |---|---|---|---|

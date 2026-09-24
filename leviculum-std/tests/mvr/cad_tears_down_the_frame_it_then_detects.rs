@@ -46,11 +46,18 @@ fn nrf_source(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// The three forms a caller can leave a standing receive window by. Ordered
-/// longest first: `disarm_rx(` is a prefix of nothing here, but
-/// `disarm_rx_for_tx(` contains neither of the others, and a scan that matched
-/// on the shortest first would report every waiting site as a plain one.
-const TEARDOWN_CALLS: [&str; 3] = ["disarm_rx_for_tx(", "disarm_rx_with_latch(", "disarm_rx("];
+/// The three forms a caller can leave a standing receive window by: the plain
+/// one, the one that waits for a transmit and hands the frame to a sink, and
+/// the one that waits for the receive path and hands the frame back. The
+/// pairing below takes the LAST of these before the site name rather than the
+/// first match in this list, so a form that is a prefix of another cannot
+/// report a waiting site as a plain one.
+///
+/// Written with the receiver's dot, because a definition is not a teardown.
+/// `disarm_rx_for_rx` takes no type parameter, so its own `fn` line would
+/// otherwise match the pattern and be counted as a site that stands nothing
+/// down.
+const TEARDOWN_CALLS: [&str; 3] = [".disarm_rx_for_tx(", ".disarm_rx_for_rx(", ".disarm_rx("];
 
 /// Every `RxTeardownBy::` site in `src`, paired with the call it is an argument
 /// of, in source order.
@@ -98,7 +105,7 @@ fn teardown_sites(src: &str) -> Vec<(String, String)> {
 /// | `Config` (`configure_lora`) | plain | reached only after `rx_window`'s config arm has already stood the window down with the waiting form, so nothing is standing |
 /// | `Tx` (`transmit`) | plain | reached only after a CAD, which took the standby; on the CSMA path this finds nothing standing |
 /// | `Arm` (`arm_rx`) | plain | the arming's own head, and the latched window is kept instead by `ensure_armed`'s adoption before it ever gets here |
-/// | `RxWait` (`finish_rx`) | with-latch | the wait at this site is the RX extension one branch above it, sized by the same `rx_extend_ms` the deferral uses; a frame that outlasts it is past its own bound |
+/// | `RxWait` (`finish_rx`) | for-rx | the RX extension one branch above it is not the frame's own end — the re-read that follows it can be reading a preamble that latched DURING the extension, which is what cut a LINKCLOSE in `lora_pn_board_offer_past_the_link` round 3 on 2026-09-24; it defers on the caller's pre-clear latch and returns the frame instead of delivering it |
 /// | `Cad` | for-tx | Codeberg #426, this batch |
 /// | `Config` (`rx_window`) | for-tx | one host config push |
 /// | `Select` (idle select) | for-tx | one key-up |
@@ -123,11 +130,11 @@ fn every_teardown_site_that_can_hold_a_frame_waits_for_it() {
     assert_eq!(
         driver,
         [
-            ("Config".to_string(), "disarm_rx(".to_string()),
-            ("Tx".to_string(), "disarm_rx(".to_string()),
-            ("Arm".to_string(), "disarm_rx(".to_string()),
-            ("RxWait".to_string(), "disarm_rx_with_latch(".to_string()),
-            ("Cad".to_string(), "disarm_rx_for_tx(".to_string()),
+            ("Config".to_string(), ".disarm_rx(".to_string()),
+            ("Tx".to_string(), ".disarm_rx(".to_string()),
+            ("Arm".to_string(), ".disarm_rx(".to_string()),
+            ("RxWait".to_string(), ".disarm_rx_for_rx(".to_string()),
+            ("Cad".to_string(), ".disarm_rx_for_tx(".to_string()),
         ],
         "the teardown sites in leviculum-nrf/src/sx1262.rs changed. {SITE_TABLE}"
     );
@@ -135,8 +142,8 @@ fn every_teardown_site_that_can_hold_a_frame_waits_for_it() {
     assert_eq!(
         loop_sites,
         [
-            ("Config".to_string(), "disarm_rx_for_tx(".to_string()),
-            ("Select".to_string(), "disarm_rx_for_tx(".to_string()),
+            ("Config".to_string(), ".disarm_rx_for_tx(".to_string()),
+            ("Select".to_string(), ".disarm_rx_for_tx(".to_string()),
         ],
         "the teardown sites in leviculum-nrf/src/lora.rs changed. {SITE_TABLE}"
     );
@@ -183,23 +190,35 @@ fn every_teardown_site_that_can_hold_a_frame_waits_for_it() {
     );
 }
 
-/// The CAD site is the only one that releases a bare carrier early, and the
-/// other two keep the full frame bound.
+/// Which sites release a bare carrier early, and which keep the full frame
+/// bound.
 ///
-/// The policy is the whole difference between the three deferring sites, and it
-/// follows from how often each is reached: the select and config arms are spent
-/// once per externally paced event and can afford one maximum-size frame, the
-/// CAD is reached once per CSMA retry and cannot.
+/// The policy is the whole difference between the four deferring sites, and it
+/// follows from how often each is reached, not from taste: the select and
+/// config arms are spent once per externally paced event and can afford one
+/// maximum-size frame; the CAD is reached once per CSMA retry and cannot; and
+/// the rxwait site is reached once per receive window whose software wait
+/// expires, which is the loop's own cadence and not an external one, so it
+/// releases too.
 #[test]
-fn only_the_cad_site_releases_a_false_preamble() {
+fn the_release_policy_follows_how_often_a_site_is_reached() {
     for (rel, expected) in [
-        ("src/sx1262.rs", ["ReleaseFalsePreamble"].as_slice()),
+        (
+            "src/sx1262.rs",
+            ["ReleaseFalsePreamble", "ReleaseFalsePreamble"].as_slice(),
+        ),
         ("src/lora.rs", ["OneFrame", "OneFrame"].as_slice()),
     ] {
         let src = nrf_source(rel);
-        let policies: Vec<&str> = src
-            .match_indices("disarm_rx_for_tx(")
-            .map(|(at, _)| {
+        let mut sites: Vec<usize> = src
+            .match_indices(".disarm_rx_for_tx(")
+            .chain(src.match_indices(".disarm_rx_for_rx("))
+            .map(|(at, _)| at)
+            .collect();
+        sites.sort_unstable();
+        let policies: Vec<&str> = sites
+            .into_iter()
+            .map(|at| {
                 let call = &src[at..(at + 600).min(src.len())];
                 if call.contains("DeferPolicy::ReleaseFalsePreamble") {
                     "ReleaseFalsePreamble"

@@ -1711,7 +1711,7 @@ mod tests {
 
     /// The ten bandwidths `RadioConfig::from_wire_config`
     /// (`leviculum-nrf/src/lora.rs`) has an SX1262 register code for, and the
-    /// only ones `bw_code_to_hz` (`leviculum-nrf/src/sx1262.rs:206`) ever
+    /// only ones `bw_code_to_hz` (`leviculum-nrf/src/sx1262.rs:225`) ever
     /// returns. Written out here rather than imported so this test states the
     /// firmware's acceptance set independently of whatever the host computes.
     const FIRMWARE_ACCEPTS_HZ: [u32; 10] = [
