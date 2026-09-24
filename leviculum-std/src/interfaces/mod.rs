@@ -156,6 +156,14 @@ pub(crate) struct InterfaceCounters {
     /// Payload bytes of those dropped frames, in the same currency as
     /// `tx_bytes` (Python `tx_dropped_bytes`, the `txdrb` stats key).
     pub tx_dropped_bytes: AtomicU64,
+    /// Frames an RNode modem was handed and did not account for on its own
+    /// airtime ledger: written over the serial line, never keyed, and never
+    /// answered for (the RNode firmware is silent on six of its ten paths
+    /// from an accepted frame to no transmission). Counted beside the drop
+    /// counters rather than inside them because the interface re-hands such a
+    /// frame once; only a frame unaccounted for twice is also counted as a
+    /// drop. Always 0 on a medium whose driver keeps no airtime ledger.
+    pub tx_unaccounted: AtomicU64,
     speed: std::sync::Mutex<SpeedState>,
     radio: std::sync::Mutex<Option<RadioStats>>,
     /// Live carrier state, flipped by the owning interface task at its
@@ -177,6 +185,7 @@ impl InterfaceCounters {
             test_direct_ingress_drops: AtomicU64::new(0),
             tx_queue_drops: AtomicU64::new(0),
             tx_dropped_bytes: AtomicU64::new(0),
+            tx_unaccounted: AtomicU64::new(0),
             speed: std::sync::Mutex::new(SpeedState {
                 prev_rx: 0,
                 prev_tx: 0,

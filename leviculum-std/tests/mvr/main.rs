@@ -183,6 +183,7 @@ pub mod alloc_probe {
 #[global_allocator]
 static COUNTING: alloc_probe::Counting = alloc_probe::Counting;
 
+mod a_frame_the_modem_consumed_without_transmitting;
 mod announce_emission_unix_time;
 mod burst_continuation_contends_inside_its_own_answer;
 mod cad_tears_down_the_frame_it_then_detects;

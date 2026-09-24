@@ -888,7 +888,7 @@ fn is_quiet(stats: &Value) -> bool {
 
 /// One tick of the 1 Hz traffic counter, on BOTH stacks: ours samples the byte
 /// counters once a second and caches `(delta * 8) / elapsed`
-/// (`spawn_traffic_counter`, leviculum-std/src/interfaces/mod.rs:251-266),
+/// (`spawn_traffic_counter`, leviculum-std/src/interfaces/mod.rs:278-296),
 /// Python's `Transport.count_traffic_loop` does the same.
 const SPEED_SAMPLE_PERIOD: Duration = Duration::from_secs(1);
 

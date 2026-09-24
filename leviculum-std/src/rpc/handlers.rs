@@ -308,7 +308,7 @@ fn opt_int(v: Option<i64>) -> Value {
 ///     `r_battery_state != 0x00`).
 ///   - `last_rssi` (int dBm) / `last_snr` (float dB) -> only once the device
 ///     has reported a received packet via `apply_radio_stat`
-///     (interfaces/rnode.rs:1064-1072). These two are ours: Python does not
+///     (interfaces/rnode.rs:1441-1449). These two are ours: Python does not
 ///     place them in the dict (its RSSI feeds per-packet reporting), so they
 ///     are emitted as additive keys and omitted while `None` — rnstatus
 ///     renders by key lookup (rnstatus.py:475-533) and ignores them.
@@ -381,6 +381,10 @@ struct StatRow {
     /// Payload bytes of those shed frames: the `txdrb` key (upstream
     /// `interface.tx_dropped_bytes`, same vintage).
     tx_dropped_bytes: u64,
+    /// Frames an RNode modem was handed and never accounted for on its own
+    /// airtime ledger (`InterfaceCounters::tx_unaccounted`). Reads 0 on every
+    /// medium that keeps no such ledger, which is every medium but this one.
+    tx_unaccounted: u64,
     /// The `mtu` key (upstream `interface.HW_MTU`). `None` when the driver
     /// registered none — the reference base class also initialises
     /// `HW_MTU` (Interface.py:103) to `None`, and rnstatus renders it
@@ -441,6 +445,15 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         (
             pickle_str_key("tx_queue_drops"),
             pickle_int(row.tx_queue_drops as i64),
+        ),
+        // Additive in the same sense, and for the same reason it exists: a
+        // frame the modem consumed without transmitting is packet loss that
+        // no reference key has a name for. The interface re-hands such a
+        // frame once, so this counts the CONDITION and `txdrp` counts only
+        // the frames it did not recover.
+        (
+            pickle_str_key("tx_unaccounted"),
+            pickle_int(row.tx_unaccounted as i64),
         ),
         // The post-1.3.5 upstream key set. These keys exist nowhere in our
         // pinned 1.3.5 reference; the authoritative shape was measured on
@@ -734,7 +747,7 @@ pub(crate) fn build_interface_stats(
             .unwrap_or_else(|| interface_type(entry.kind, &entry.name));
 
         // Read byte counters and compute speeds from the shared counters
-        let (rxb, txb, rxs, txs, tx_queue_drops, tx_dropped_bytes) = counters_map
+        let (rxb, txb, rxs, txs, tx_queue_drops, tx_dropped_bytes, tx_unaccounted) = counters_map
             .get(&entry.id)
             .map(|c| {
                 let (rxs, txs) = c.speeds();
@@ -745,9 +758,10 @@ pub(crate) fn build_interface_stats(
                     txs,
                     c.tx_queue_drops.load(Ordering::Relaxed),
                     c.tx_dropped_bytes.load(Ordering::Relaxed),
+                    c.tx_unaccounted.load(Ordering::Relaxed),
                 )
             })
-            .unwrap_or((0, 0, 0.0, 0.0, 0, 0));
+            .unwrap_or((0, 0, 0.0, 0.0, 0, 0, 0));
 
         // Totals stay what they were: the traffic-bearing, non-local
         // interfaces. Local IPC clients and (below) listeners are excluded, so
@@ -809,6 +823,7 @@ pub(crate) fn build_interface_stats(
             txs,
             tx_queue_drops,
             tx_dropped_bytes,
+            tx_unaccounted,
             mtu: entry.hw_mtu.map(|m| m as i64),
             // Real `Interface::is_online()` (Codeberg #56): the shared
             // counters carry the live state the interface task flips at
@@ -864,9 +879,10 @@ pub(crate) fn build_interface_stats(
             rxs: agg.rxs,
             txs: agg.txs,
             // A listener carries no packets, so it holds no send queue
-            // that could shed one.
+            // that could shed one, and no modem that could swallow one.
             tx_queue_drops: 0,
             tx_dropped_bytes: 0,
+            tx_unaccounted: 0,
             mtu: Some(listener.hw_mtu),
             status: true,
             mode: listener.mode.as_u8(),

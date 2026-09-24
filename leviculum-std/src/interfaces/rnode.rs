@@ -154,6 +154,10 @@ struct QueuedFrame {
     data: Vec<u8>,
     payload_len: u64,
     high_priority: bool,
+    /// Whether this is the one re-hand [`judge_airtime`] buys a frame the
+    /// modem consumed without transmitting. Carried on the queue entry so the
+    /// frame's second handover knows not to ask for a third.
+    rehand: bool,
 }
 
 /// The ceiling of the randomised pre-TX wait this interface can impose, for
@@ -683,6 +687,379 @@ fn max_tx_hold(bandwidth_hz: u32, sf: u8, cr: u8) -> TxHold {
         cr,
         &FirmwareCsma::default(),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Airtime accounting: did the modem key the frame it was handed?
+// ---------------------------------------------------------------------------
+
+/// The window `airtime_short` is a ratio over. `update_airtime` takes two
+/// 7500 ms bins — `AIRTIME_BINLEN_MS` is `STATUS_INTERVAL_MS * DCD_SAMPLES`
+/// = 3 * 2500 (`RNode_Firmware/Config.h:176-183`) — as
+/// `(airtime_bins[cb]+airtime_bins[pb])/(2*AIRTIME_BINLEN_MS)`
+/// (`RNode_Firmware/RNode_Firmware.ino:698`).
+const AIRTIME_WINDOW_MS: u64 = 15_000;
+
+/// Full scale of the CHTM `airtime_*`/`channel_load_*` u16 fields: the
+/// firmware multiplies the 0..1 ratio by 100*100 before it writes them
+/// (`kiss_indicate_channel_stats`, `RNode_Firmware/Utilities.h:959-964`), so
+/// one raw unit is 0.01 % — 1.5 ms inside [`AIRTIME_WINDOW_MS`], against the
+/// several hundred milliseconds one frame costs at every PHY we run.
+const CHTM_FULL_SCALE: u64 = 10_000;
+
+/// The window the modem's own DCD busy fraction covers: a `DCD_SAMPLES` =
+/// 2500 ring sampled every `STATUS_INTERVAL_MS` = 3 ms
+/// (`RNode_Firmware/Config.h:176-178`), folded into `local_channel_util`
+/// once a second (`RNode_Firmware/RNode_Firmware.ino:1451-1458`).
+const DCD_WINDOW_MS: u64 = 7_500;
+
+/// One CHTM period. `check_modem_status` folds the DCD ring into
+/// `local_channel_util` and then calls `update_airtime`, whose last statement
+/// emits the frame, every `UTIL_UPDATE_INTERVAL_MS` = 1000 ms
+/// (`RNode_Firmware/Config.h:179`, `RNode_Firmware/RNode_Firmware.ino:1453`).
+/// The 2500-sample ring wraps at a non-multiple of the interval, so the
+/// spacing is never longer than this and occasionally shorter.
+const CHTM_PERIOD: Duration = Duration::from_millis(1_000);
+
+/// Milliseconds since the Unix epoch, for the two timestamps
+/// `LORA_TX_UNACCOUNTED` carries. Wall clock rather than a process-local
+/// monotonic base on purpose: the measurement that produced this observable
+/// laid a sender's handovers against a listener's decodes and a second node's
+/// receives, all in different processes on different hosts.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// What the frame's own airtime is worth in raw `airtime_short` units.
+///
+/// Rounded up, so any frame whose airtime is computable expects at least one
+/// unit and an unmoved ledger is always a statement about a frame that should
+/// have moved it. Zero means the PHY has no computable airtime (bandwidth 0 —
+/// `airtime_ms_with_preamble` returns 0 there), and the accounting declines to
+/// judge.
+fn expected_airtime_raw(airtime_ms: u64) -> u16 {
+    ((airtime_ms * CHTM_FULL_SCALE).div_ceil(AIRTIME_WINDOW_MS)).min(u16::MAX as u64) as u16
+}
+
+/// Configured airtime locks, in the raw units the CHTM fields use.
+///
+/// The firmware stores them as `st_airtime_limit = at/(100.0*100.0)` and
+/// discards a limit at or above 1.0 (`RNode_Firmware/RNode_Firmware.ino:943-952`),
+/// which is the same scaling `airtime_short` is reported in — so a limit and
+/// a reading are directly comparable. 0 means no lock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AirtimeLock {
+    st: u16,
+    lt: u16,
+}
+
+impl AirtimeLock {
+    fn from_config(st: Option<u16>, lt: Option<u16>) -> Self {
+        let sane = |v: Option<u16>| match v {
+            Some(v) if (v as u64) < CHTM_FULL_SCALE => v,
+            _ => 0,
+        };
+        Self {
+            st: sane(st),
+            lt: sane(lt),
+        }
+    }
+}
+
+/// The numbers one "did this frame key?" decision is made from: the ledger as
+/// it stood at the handover, the ledger in the CHTM under judgement, and what
+/// the frame should have cost.
+#[derive(Debug, Clone, Copy)]
+struct AirtimeAccount {
+    /// `airtime_short` (raw) as of the handover.
+    baseline_short: u16,
+    /// `airtime_short` (raw) in the CHTM being judged.
+    observed_short: u16,
+    /// `airtime_long` (raw) as of the handover.
+    baseline_long: u16,
+    /// `airtime_long` (raw) in the same CHTM.
+    observed_long: u16,
+    /// `channel_load_short` (raw) in the same CHTM — `total_channel_util`,
+    /// which is `local_channel_util + airtime` clamped at 1.0.
+    observed_load_short: u16,
+    /// What the frame's own airtime is worth, per [`expected_airtime_raw`].
+    expected_short: u16,
+    /// The hold this frame owed ([`TxHold::held_ms`]): the span the medium
+    /// would have had to be busy for, for the firmware's CSMA to still be
+    /// legitimately holding the frame.
+    hold_ms: u64,
+    /// The locks this interface configured, if any.
+    lock: AirtimeLock,
+}
+
+/// What the modem's ledger says about one handed frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AirtimeVerdict {
+    /// The ledger rose: the frame reached `add_airtime`, which is reachable
+    /// only after `endPacket()` returned
+    /// (`RNode_Firmware/RNode_Firmware.ino:744-751`).
+    Keyed,
+    /// The ledger did not move, the medium was free and no lock was armed:
+    /// the modem consumed the frame without transmitting it.
+    Unaccounted,
+    /// The reading cannot decide. The reason is a stable token, logged rather
+    /// than counted — every one of them is a case where a silent consume and
+    /// an ordinary wait look alike from the host.
+    Undecided(&'static str),
+}
+
+/// Judge one handed frame against the modem's own airtime ledger.
+///
+/// The firmware answers nothing on six of its ten paths from an accepted
+/// `CMD_DATA` frame to no transmission (the path table of 2026-09-24 at
+/// firmware tag 1.85; the two that can produce "written, never aired, not
+/// queued afterwards" are the length guards that pop start and length BEFORE
+/// testing them, `RNode_Firmware/RNode_Firmware.ino:586-589` in `flush_queue`
+/// and `RNode_Firmware/RNode_Firmware.ino:626-628` in `pop_queue`). What it
+/// does emit is one per-transmission receipt, and the host already logs it
+/// without reading it: `kiss_indicate_channel_stats`
+/// (`RNode_Firmware/RNode_Firmware.ino:712`) is the last statement of
+/// `update_airtime`, which is the last statement of both queue drains,
+/// reached only after `transmit()` ran
+/// `endPacket()` and `add_airtime` folded the cost in. A rise in
+/// `airtime_short` is therefore proof the frame keyed, and no rise is the
+/// shape of a silent consume.
+///
+/// The decision is deliberately asymmetric: every ambiguity resolves AWAY
+/// from the accusation, because a false `LORA_TX_UNACCOUNTED` would poison
+/// the instrument it exists to be.
+///
+/// * **Any** rise is [`AirtimeVerdict::Keyed`], not just a rise of the
+///   expected size. `airtime_bins` is written by `add_airtime` alone and the
+///   host holds one frame in the modem at a time ([`tx_hold`]), so a rise in
+///   this window can only be this frame — while a rise SMALLER than expected
+///   is what a keyed frame looks like when a bin ages out in the same CHTM.
+///   [`AirtimeAccount::expected_short`] is therefore reported, never
+///   thresholded, and the couple of percent between our airtime derivation
+///   and the firmware's own cost formula
+///   (`RNode_Firmware/RNode_Firmware.ino:654-665`) cannot change a verdict.
+/// * A NEGATIVE step is undecided, not accusing: `airtime_bins[nb] = 0`
+///   drops a 7500 ms bin out of the two-bin window every 7500 ms
+///   (`RNode_Firmware/RNode_Firmware.ino:698`), and a keyed frame plus an
+///   aged-out one reads as a fall. Measured: `airtime_short` went 17.92 ->
+///   16.40 across a keyed 3.28 % frame, 2026-09-24 on t-beam-1.
+/// * An unmoved `airtime_short` with a RISEN `airtime_long` is undecided.
+///   `longterm_airtime` sums all bins over an hour
+///   (`RNode_Firmware/RNode_Firmware.ino:700-702`), so it does not fall when
+///   the short window rotates: it is the independent receipt that separates
+///   an exact cancellation from a silent consume. One raw unit of it is
+///   360 ms, so it can only corroborate frames that cost at least that much.
+/// * A medium that could have been busy for the whole hold is undecided. The
+///   firmware's CSMA does not start its DIFS wait until the medium is free,
+///   and restarts it whenever the medium goes busy again
+///   (`RNode_Firmware/RNode_Firmware.ino:1630-1635`), so a busy medium is a
+///   frame still legitimately queued. The host reads the busy fraction out of
+///   the same CHTM — `channel_load_short` is `local_channel_util + airtime`
+///   clamped at 1.0 (`RNode_Firmware/RNode_Firmware.ino:1459-1460`), so
+///   subtracting `airtime_short` recovers the DCD fraction — and converts it
+///   to milliseconds over [`DCD_WINDOW_MS`]. Busy for less than the hold
+///   means the medium was demonstrably free part of it.
+/// * An armed airtime lock is undecided. It defers rather than discards
+///   (`RNode_Firmware/RNode_Firmware.ino:1624`, `tx_queue_handler` runs only
+///   `if (!airtime_lock ...)`) and it signals nothing over KISS, so the host
+///   can only infer it from its own configured limit against the reported
+///   airtime.
+fn judge_airtime(a: &AirtimeAccount) -> AirtimeVerdict {
+    if a.expected_short == 0 {
+        return AirtimeVerdict::Undecided("airtime_not_computable");
+    }
+    let step = a.observed_short as i32 - a.baseline_short as i32;
+    if step > 0 {
+        return AirtimeVerdict::Keyed;
+    }
+    if step < 0 {
+        return AirtimeVerdict::Undecided("bin_rotation");
+    }
+    if a.observed_long > a.baseline_long {
+        return AirtimeVerdict::Undecided("longterm_rose");
+    }
+    if a.lock.st != 0 && a.observed_short >= a.lock.st {
+        return AirtimeVerdict::Undecided("st_airtime_lock");
+    }
+    if a.lock.lt != 0 && a.observed_long >= a.lock.lt {
+        return AirtimeVerdict::Undecided("lt_airtime_lock");
+    }
+    // `total_channel_util` is clamped at 1.0, so at full scale the DCD
+    // fraction underneath is unrecoverable and the medium was in any case as
+    // busy as the modem can report.
+    if (a.observed_load_short as u64) >= CHTM_FULL_SCALE {
+        return AirtimeVerdict::Undecided("medium_busy");
+    }
+    let dcd_raw = a.observed_load_short.saturating_sub(a.observed_short) as u64;
+    let busy_ms = dcd_raw * DCD_WINDOW_MS / CHTM_FULL_SCALE;
+    if busy_ms >= a.hold_ms {
+        return AirtimeVerdict::Undecided("medium_busy");
+    }
+    AirtimeVerdict::Unaccounted
+}
+
+/// A frame the modem has been handed and has not yet accounted for.
+///
+/// One at a time, because [`tx_hold`] keeps one frame at a time in the modem.
+/// It carries its own copy of the serial frame: that copy is the whole of the
+/// workaround, and it is why the re-hand costs nothing but the airtime of one
+/// duplicate.
+struct PendingHandover {
+    /// The KISS frame as it was written, ready to be written again.
+    data: Vec<u8>,
+    payload_len: u64,
+    high_priority: bool,
+    /// Whether this frame IS a re-hand. A frame is re-handed once: a second
+    /// silent consume of the same frame is a modem that is not going to send
+    /// it, and repeating into that only buys latency for everything behind it.
+    is_rehand: bool,
+    /// When the frame was handed over, on the wall clock the event reports.
+    /// The windows below are monotonic; this one is comparable across hosts.
+    handed_unix_ms: u64,
+    /// Earliest instant at which a missing rise means anything — the frame
+    /// cannot have keyed before its hold elapsed.
+    due: tokio::time::Instant,
+    /// Last instant at which this CHTM is still about this frame:
+    /// [`CHTM_PERIOD`] past `due`. Past it the two-bin window may have
+    /// rotated and the reading is no longer the frame's.
+    deadline: tokio::time::Instant,
+    account: AirtimeAccount,
+}
+
+/// How many handed-but-unaccounted frames the interface tracks at once.
+///
+/// [`tx_hold`] keeps one frame in the modem at a time, so in the shape this
+/// observable was built for the queue holds one entry — two while a frame
+/// whose receipt CHTM has not arrived yet is followed by the next handover.
+/// The cap exists so a modem that never sends CHTM at all (an AVR RNode
+/// compiles `kiss_indicate_channel_stats` to nothing) cannot accumulate frame
+/// copies forever.
+const PENDING_HANDOVERS_MAX: usize = 8;
+
+/// Settle the frames the modem has not yet accounted for against a
+/// `CMD_STAT_CHTM` that has just arrived, oldest first.
+///
+/// Returns the one frame to re-hand, if this CHTM produced that verdict.
+///
+/// Oldest-first and one accusation per CHTM. Each pending frame carries the
+/// ledger as it stood at its own handover, so a rise credits the OLDEST
+/// unresolved frame and then the next — which is the honest granularity: the
+/// ledger is an aggregate over the whole modem, and nothing in it says which
+/// frame a millisecond belonged to. In a pipeline that therefore under-reports
+/// (a rise belonging to a later frame absolves an earlier one), and in the
+/// shape this was measured in — one frame in the modem at a time — the two
+/// coincide.
+///
+/// A verdict of [`AirtimeVerdict::Undecided`] LEAVES the frame pending: the
+/// reasons are properties of one reading, and the next CHTM inside the
+/// frame's deadline may decide it. Past the deadline the frame is dropped
+/// unjudged, because the two-bin window may have rotated by then and the
+/// reading is no longer about this frame.
+fn settle_handovers(
+    name: &str,
+    counters: &InterfaceCounters,
+    pendings: &mut VecDeque<PendingHandover>,
+    cs: &rnode::ChannelStats,
+    now: tokio::time::Instant,
+    chtm_unix_ms: u64,
+) -> Option<QueuedFrame> {
+    while let Some(mut front) = pendings.pop_front() {
+        if now > front.deadline {
+            tracing::debug!(
+                target: "leviculum_std::interfaces::rnode::tx_trace",
+                "LORA_TX_ACCOUNT iface={name} len={} verdict=undecided reason=chtm_late",
+                front.payload_len
+            );
+            continue;
+        }
+        front.account.observed_short = cs.airtime_short;
+        front.account.observed_long = cs.airtime_long;
+        front.account.observed_load_short = cs.channel_load_short;
+        match judge_airtime(&front.account) {
+            AirtimeVerdict::Keyed => {
+                tracing::debug!(
+                    target: "leviculum_std::interfaces::rnode::tx_trace",
+                    "LORA_TX_ACCOUNT iface={name} len={} verdict=keyed",
+                    front.payload_len
+                );
+                continue;
+            }
+            AirtimeVerdict::Undecided(reason) => {
+                tracing::debug!(
+                    target: "leviculum_std::interfaces::rnode::tx_trace",
+                    "LORA_TX_ACCOUNT iface={name} len={} verdict=undecided reason={reason}",
+                    front.payload_len
+                );
+                pendings.push_front(front);
+                return None;
+            }
+            // The ledger has not moved, but the frame's own hold has not
+            // elapsed either: the modem may not have keyed it YET. Nothing to
+            // say until a CHTM arrives past the hold.
+            AirtimeVerdict::Unaccounted if now < front.due => {
+                pendings.push_front(front);
+                return None;
+            }
+            AirtimeVerdict::Unaccounted => {
+                counters
+                    .tx_unaccounted
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Warn, not debug: a frame the modem consumed without
+                // transmitting is packet loss with no other witness on this
+                // host. Same target as `LORA_TX` and `LORA_CHTM` so a capture
+                // that reads the handovers reads this beside them, and the
+                // two timestamps are the pair that pins it: the handover the
+                // accusation is about, and the reading that failed to
+                // account for it.
+                tracing::warn!(
+                    target: "leviculum_std::interfaces::rnode::tx_trace",
+                    "LORA_TX_UNACCOUNTED iface={name} len={} handover_t={} chtm_t={} \
+                     expected_delta={:.2}",
+                    front.payload_len,
+                    front.handed_unix_ms,
+                    chtm_unix_ms,
+                    front.account.expected_short as f64 / 100.0
+                );
+                if front.is_rehand {
+                    // Second strike for the same frame. One re-hand is a
+                    // dropped frame recovered; a modem that swallows the
+                    // re-hand too is not going to send this frame, and the
+                    // frame is now lost for good — counted the way the
+                    // `error_txfailed` path counts the frames it abandons.
+                    counters
+                        .tx_queue_drops
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    counters
+                        .tx_dropped_bytes
+                        .fetch_add(front.payload_len, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        event = "RNODE_TX_QUEUE_DROP",
+                        iface = %Scalar(name),
+                        len = front.payload_len,
+                        depth = pendings.len(),
+                        reason = "unaccounted_twice",
+                    );
+                    return None;
+                }
+                tracing::warn!(
+                    target: "leviculum_std::interfaces::rnode::tx_trace",
+                    "LORA_TX_REHAND iface={name} len={} handover_t={}",
+                    front.payload_len,
+                    front.handed_unix_ms
+                );
+                return Some(QueuedFrame {
+                    data: front.data,
+                    payload_len: front.payload_len,
+                    high_priority: front.high_priority,
+                    rehand: true,
+                });
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1376,6 +1753,7 @@ async fn rnode_io_task<S>(
     drop_direct_ingress: bool,
     jitter_arm: JitterArm,
     frame_class: FrameClass,
+    alock: AirtimeLock,
 ) -> mpsc::Receiver<OutgoingPacket>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1414,6 +1792,14 @@ where
     let mut ready_poll = ready_poll_start;
     let mut ready_query_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
 
+    // The modem's airtime ledger as of the last CHTM, and the frames it has
+    // been handed and has not accounted for. `None` until the first CHTM: with
+    // no baseline there is nothing to take a step against, which is also what
+    // keeps a modem that never sends CHTM (an AVR RNode, or any modem before
+    // its first stat frame) out of the accounting entirely.
+    let mut ledger: Option<(u16, u16)> = None;
+    let mut pendings: VecDeque<PendingHandover> = VecDeque::new();
+
     // Duty-lock visibility: when the CMD_READY gate (Gate 2 below)
     // holds queued frames, say so. The firmware's duty lock produces exactly
     // this shape — the queue stays full, every poll answers 0x00, the gate
@@ -1435,6 +1821,12 @@ where
     let mut heartbeat_pending = false;
 
     loop {
+        // The one frame a CHTM this iteration asked to re-hand. Set in the
+        // read branch, acted on below the select together with the send
+        // gates — a frame pushed back onto the queue has to arm the
+        // acquisition wait, and that state lives out here.
+        let mut rehand: Option<QueuedFrame> = None;
+
         tokio::select! {
             // Branch 1: Read from serial port
             result = port.read(&mut buf) => {
@@ -1646,9 +2038,32 @@ where
                                     // load, noise floor, temperature, battery) to
                                     // rnstatus/lnstatus. Field names/units mirror
                                     // Python RNodeInterface's `r_*` attributes.
+                                    // CHTM first, and on its own: besides the
+                                    // radio rows it is the modem's only
+                                    // per-transmission receipt, and the
+                                    // frames handed over since the last one
+                                    // are settled against it
+                                    // (`settle_handovers`).
+                                    rnode::CMD_STAT_CHTM => {
+                                        apply_radio_stat(&name, &counters, command, &payload);
+                                        if let Some(cs) =
+                                            rnode::decode_channel_stats(&payload)
+                                        {
+                                            let now = tokio::time::Instant::now();
+                                            rehand = settle_handovers(
+                                                &name,
+                                                &counters,
+                                                &mut pendings,
+                                                &cs,
+                                                now,
+                                                unix_ms(),
+                                            );
+                                            ledger =
+                                                Some((cs.airtime_short, cs.airtime_long));
+                                        }
+                                    }
                                     cmd @ (rnode::CMD_STAT_RSSI
                                     | rnode::CMD_STAT_SNR
-                                    | rnode::CMD_STAT_CHTM
                                     | rnode::CMD_STAT_BAT
                                     | rnode::CMD_STAT_TEMP) => {
                                         apply_radio_stat(&name, &counters, cmd, &payload);
@@ -1703,6 +2118,7 @@ where
                             data: frame,
                             payload_len: pkt.data.len() as u64,
                             high_priority,
+                            rehand: false,
                         };
                         if high_priority {
                             // Insert before the first non-high-priority packet
@@ -1860,6 +2276,34 @@ where
             }
         }
 
+        // A frame the modem consumed without transmitting goes back to the
+        // FRONT of the queue: it is older than everything behind it. It owes
+        // the same channel access as any other acquisition — this re-hands a
+        // frame, it does not let one skip the wait — so the arming below is
+        // the enqueue branch's, for a queue that was idle when the verdict
+        // came in.
+        if let Some(frame) = rehand.take() {
+            let payload_len = frame.payload_len as usize;
+            send_queue.push_front(frame);
+            if send_timer.is_none() && !timer_ready {
+                let owed = arm_owed_jitter_ms(
+                    jitter_arm,
+                    &mut access,
+                    payload_len,
+                    bandwidth_hz,
+                    sf,
+                    cr,
+                    frame_class,
+                );
+                if owed == 0 {
+                    timer_ready = true;
+                } else {
+                    jitter_armed_ms = owed;
+                    send_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(owed))));
+                }
+            }
+        }
+
         // Track the flow-control gate's hold state after every
         // iteration, before the send attempt below (a reopening gate must
         // emit its RNODE_TX_RELEASED with the frames still held, not after
@@ -1973,16 +2417,70 @@ where
                 // modem that holds two frames sends the second one deaf).
                 // What the frame CONTAINS does not enter into it; only how
                 // long it occupies the air.
-                {
-                    let hold = tx_hold(queued.payload_len as u32, bandwidth_hz, sf, cr, &fw_csma);
-                    tracing::debug!(
-                        target: "leviculum_std::interfaces::rnode::tx_trace",
-                        "LORA_TX_HOLD iface={name} held_ms={} airtime_ms={} difs_ms={} cw_ms={}",
-                        hold.held_ms, hold.airtime_ms, hold.difs_ms, hold.cw_ms
+                let hold = tx_hold(queued.payload_len as u32, bandwidth_hz, sf, cr, &fw_csma);
+                tracing::debug!(
+                    target: "leviculum_std::interfaces::rnode::tx_trace",
+                    "LORA_TX_HOLD iface={name} held_ms={} airtime_ms={} difs_ms={} cw_ms={}",
+                    hold.held_ms, hold.airtime_ms, hold.difs_ms, hold.cw_ms
+                );
+                send_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                    hold.held_ms,
+                ))));
+
+                // What the modem owes for the frame it now holds. The ledger
+                // it reports in its next `CMD_STAT_CHTM` is the only receipt
+                // it gives, so the expectation is recorded here and settled
+                // there (`settle_handovers`). No baseline yet means no
+                // accounting for this frame: a step needs something to step
+                // from.
+                if let Some((baseline_short, baseline_long)) = ledger {
+                    // The firmware prepends its own header byte before it
+                    // charges the packet (`transmit`,
+                    // `RNode_Firmware/RNode_Firmware.ino:720-724`), and
+                    // `add_airtime` is called with that count, so the cost it
+                    // books is for one byte more than the payload.
+                    let charged_ms = rnode::airtime_ms_with_preamble(
+                        queued.payload_len as u32 + 1,
+                        bandwidth_hz,
+                        sf,
+                        cr,
+                        rnode::derive_preamble_symbols(sf, cr, bandwidth_hz),
                     );
-                    send_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                        hold.held_ms,
-                    ))));
+                    let due = tokio::time::Instant::now() + Duration::from_millis(hold.held_ms);
+                    if pendings.len() >= PENDING_HANDOVERS_MAX {
+                        // A modem that answers with no CHTM at all cannot be
+                        // accounted against; it must not cost memory either.
+                        if let Some(dropped) = pendings.pop_front() {
+                            tracing::debug!(
+                                target: "leviculum_std::interfaces::rnode::tx_trace",
+                                "LORA_TX_ACCOUNT iface={name} len={} verdict=undecided                                  reason=no_chtm",
+                                dropped.payload_len
+                            );
+                        }
+                    }
+                    pendings.push_back(PendingHandover {
+                        data: queued.data,
+                        payload_len: queued.payload_len,
+                        high_priority: queued.high_priority,
+                        is_rehand: queued.rehand,
+                        handed_unix_ms: unix_ms(),
+                        due,
+                        deadline: due + CHTM_PERIOD,
+                        account: AirtimeAccount {
+                            baseline_short,
+                            baseline_long,
+                            // Filled in from the CHTM under judgement; a
+                            // reading identical to the baseline is what the
+                            // accusation is made of, so that is the honest
+                            // initial value.
+                            observed_short: baseline_short,
+                            observed_long: baseline_long,
+                            observed_load_short: 0,
+                            expected_short: expected_airtime_raw(charged_ms),
+                            hold_ms: hold.held_ms,
+                            lock: alock,
+                        },
+                    });
                 }
             } else {
                 // Nothing left to send: the burst is over and the channel
@@ -2132,6 +2630,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
                     ctx.test_drop_direct_ingress,
                     /* jitter_arm = */ ctx.jitter_arm,
                     /* frame_class = */ ctx.frame_class,
+                    /* alock = */ AirtimeLock::from_config(radio.st_alock, radio.lt_alock),
                 )
                 .await;
 
@@ -4014,6 +4513,340 @@ mod tests {
         );
     }
 
+    /// The frame's cost in the units the modem reports its ledger in, and the
+    /// floor that keeps an accusation from being vacuous.
+    ///
+    /// One raw unit is 1.5 ms of airtime (10000 units across the firmware's
+    /// 15 s two-bin window), so an announce-sized frame at the bench PHY is a
+    /// three-digit hole and nothing about the reading is marginal. Rounded UP
+    /// so that every frame whose airtime is computable expects at least one
+    /// unit: an expectation of zero would make "the ledger did not move" a
+    /// statement about nothing, and [`judge_airtime`] declines to judge it.
+    #[test]
+    fn a_frames_cost_in_ledger_units_is_never_a_vacuous_zero() {
+        // The bench PHY, for the frame length the rig measurement carried,
+        // plus the header byte the firmware charges.
+        let airtime_ms = rnode::airtime_ms_with_preamble(
+            148,
+            62_500,
+            7,
+            5,
+            rnode::derive_preamble_symbols(7, 5, 62_500),
+        );
+        let raw = expected_airtime_raw(airtime_ms);
+        assert_eq!(
+            raw as u64,
+            (airtime_ms * CHTM_FULL_SCALE).div_ceil(AIRTIME_WINDOW_MS),
+            "the expectation is the frame's airtime in CHTM units and nothing \
+             else"
+        );
+        assert!(
+            raw > 100,
+            "a 148-byte frame at SF7/62.5 kHz costs {airtime_ms} ms, which is \
+             hundreds of raw units, not a marginal signal: got {raw}"
+        );
+        assert_eq!(
+            expected_airtime_raw(1),
+            1,
+            "a frame too short to fill one unit still expects one"
+        );
+        assert_eq!(
+            expected_airtime_raw(0),
+            0,
+            "an uncomputable airtime expects nothing, and is not judged"
+        );
+    }
+
+    /// The account the judge is given for a frame that cost 3.36 % of the
+    /// modem's short window on an idle medium: the shape both rig
+    /// measurements produced, before any single field is varied.
+    fn idle_account() -> AirtimeAccount {
+        AirtimeAccount {
+            baseline_short: 1_000,
+            observed_short: 1_000,
+            baseline_long: 50,
+            observed_long: 50,
+            observed_load_short: 1_000,
+            expected_short: 336,
+            hold_ms: 900,
+            lock: AirtimeLock::default(),
+        }
+    }
+
+    /// An unmoved ledger is an accusation ONLY when nothing else can explain
+    /// it. Every ambiguity has to resolve away from the accusation, because a
+    /// false `LORA_TX_UNACCOUNTED` would poison the instrument it exists to
+    /// be — this is the table of what must NOT produce one.
+    #[test]
+    fn every_ambiguity_resolves_away_from_the_accusation() {
+        assert_eq!(
+            judge_airtime(&idle_account()),
+            AirtimeVerdict::Unaccounted,
+            "the measured shape: the ledger did not move, the medium was idle, \
+             no lock was armed"
+        );
+
+        // Any rise, not a rise of the expected size. `airtime_bins` is written
+        // by `add_airtime` alone, and one frame at a time is in the modem, so
+        // a rise in this window can only be this frame — while a rise SMALLER
+        // than expected is what a keyed frame looks like when a bin ages out
+        // in the same reading.
+        let mut one_unit = idle_account();
+        one_unit.observed_short += 1;
+        assert_eq!(
+            judge_airtime(&one_unit),
+            AirtimeVerdict::Keyed,
+            "one raw unit of rise is proof the frame reached `add_airtime`"
+        );
+
+        // Measured on t-beam-1, 2026-09-24: airtime_short went 17.92 -> 16.40
+        // across a frame that DID key, because a 7500 ms bin aged out of the
+        // two-bin window in the same reading.
+        let mut fell = idle_account();
+        fell.observed_short -= 480;
+        assert_eq!(
+            judge_airtime(&fell),
+            AirtimeVerdict::Undecided("bin_rotation"),
+            "a falling ledger is a rotation, never an accusation"
+        );
+
+        // The independent receipt: `longterm_airtime` sums all bins over an
+        // hour, so it does not fall when the short window rotates. An exact
+        // cancellation in the short window is the one residual false-positive
+        // shape, and this is what separates it.
+        let mut long_rose = idle_account();
+        long_rose.observed_long += 1;
+        assert_eq!(
+            judge_airtime(&long_rose),
+            AirtimeVerdict::Undecided("longterm_rose"),
+            "the hour-long ledger rising says the frame keyed even when the \
+             15 s one has not moved"
+        );
+
+        // A medium that could have been busy for the whole hold: the firmware
+        // does not start its DIFS wait until the medium is free, so the frame
+        // may simply still be queued. `channel_load_short` is the DCD busy
+        // fraction plus the modem's own airtime, over 7500 ms.
+        let mut busy = idle_account();
+        busy.observed_load_short = 1_000 + (900 * CHTM_FULL_SCALE / DCD_WINDOW_MS) as u16;
+        assert_eq!(
+            judge_airtime(&busy),
+            AirtimeVerdict::Undecided("medium_busy"),
+            "busy for at least the hold is a frame still legitimately waiting"
+        );
+        let mut nearly_busy = idle_account();
+        nearly_busy.observed_load_short = 1_000 + (880 * CHTM_FULL_SCALE / DCD_WINDOW_MS) as u16;
+        assert_eq!(
+            judge_airtime(&nearly_busy),
+            AirtimeVerdict::Unaccounted,
+            "busy for LESS than the hold means the medium was demonstrably \
+             free part of it, and the frame should have gone"
+        );
+        let mut clamped = idle_account();
+        clamped.observed_load_short = CHTM_FULL_SCALE as u16;
+        assert_eq!(
+            judge_airtime(&clamped),
+            AirtimeVerdict::Undecided("medium_busy"),
+            "`total_channel_util` is clamped at 1.0, so at full scale the DCD \
+             fraction underneath is unrecoverable"
+        );
+
+        // An armed airtime lock defers rather than discards and signals
+        // nothing over KISS; the host can only infer it from the limit it
+        // configured itself.
+        let mut st_locked = idle_account();
+        st_locked.lock = AirtimeLock::from_config(Some(1_000), None);
+        assert_eq!(
+            judge_airtime(&st_locked),
+            AirtimeVerdict::Undecided("st_airtime_lock"),
+            "at or above the short-term limit the firmware holds the queue"
+        );
+        let mut lt_locked = idle_account();
+        lt_locked.lock = AirtimeLock::from_config(None, Some(50));
+        assert_eq!(
+            judge_airtime(&lt_locked),
+            AirtimeVerdict::Undecided("lt_airtime_lock"),
+            "same for the long-term limit"
+        );
+        let mut under_lock = idle_account();
+        under_lock.lock = AirtimeLock::from_config(Some(1_001), Some(51));
+        assert_eq!(
+            judge_airtime(&under_lock),
+            AirtimeVerdict::Unaccounted,
+            "a limit the reported airtime has not reached explains nothing"
+        );
+
+        // A limit at or above full scale is discarded by the firmware itself,
+        // so it must not silence the host either.
+        assert_eq!(
+            AirtimeLock::from_config(Some(CHTM_FULL_SCALE as u16), Some(0)),
+            AirtimeLock { st: 0, lt: 0 },
+            "the firmware zeroes a limit of 1.0 or more; so do we"
+        );
+
+        let mut uncomputable = idle_account();
+        uncomputable.expected_short = 0;
+        assert_eq!(
+            judge_airtime(&uncomputable),
+            AirtimeVerdict::Undecided("airtime_not_computable"),
+            "with no expectation there is nothing to be missing"
+        );
+    }
+
+    /// One pending frame, built as the handover site builds it.
+    fn pending(payload_len: u64, is_rehand: bool, due_in: Duration) -> PendingHandover {
+        let due = tokio::time::Instant::now() + due_in;
+        PendingHandover {
+            data: rnode::build_data_frame(&vec![0xAA; payload_len as usize]),
+            payload_len,
+            high_priority: false,
+            is_rehand,
+            handed_unix_ms: unix_ms(),
+            due,
+            deadline: due + CHTM_PERIOD,
+            account: AirtimeAccount {
+                expected_short: 336,
+                hold_ms: 900,
+                ..idle_account()
+            },
+        }
+    }
+
+    /// A CHTM that reports the idle account's own ledger back, unmoved.
+    fn frozen_chtm() -> rnode::ChannelStats {
+        rnode::ChannelStats {
+            airtime_short: 1_000,
+            airtime_long: 50,
+            channel_load_short: 1_000,
+            channel_load_long: 50,
+            current_rssi: None,
+            noise_floor: None,
+            interference: None,
+        }
+    }
+
+    /// The settlement rules the io task depends on: nothing is said before the
+    /// frame's own hold has elapsed, the first verdict past it buys one
+    /// re-hand, and the re-hand's own verdict buys a counted drop instead of a
+    /// second retry.
+    #[tokio::test]
+    async fn a_silent_consume_buys_one_re_hand_and_then_a_counted_drop() {
+        let counters = InterfaceCounters::new();
+        let mut pendings: VecDeque<PendingHandover> = VecDeque::new();
+
+        // Before the hold elapses, an unmoved ledger says nothing: the modem
+        // may simply not have keyed the frame YET.
+        pendings.push_back(pending(168, false, Duration::from_secs(30)));
+        let early = settle_handovers(
+            "t",
+            &counters,
+            &mut pendings,
+            &frozen_chtm(),
+            tokio::time::Instant::now(),
+            unix_ms(),
+        );
+        assert!(
+            early.is_none(),
+            "no verdict before the frame's hold elapses"
+        );
+        assert_eq!(
+            pendings.len(),
+            1,
+            "and the frame stays pending, to be judged by a later reading"
+        );
+        assert_eq!(
+            counters
+                .tx_unaccounted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        // Past the hold, the same reading is the accusation — and it returns
+        // the frame to re-hand, marked so its own handover cannot ask for a
+        // third.
+        pendings.clear();
+        pendings.push_back(pending(168, false, Duration::from_millis(0)));
+        let first = settle_handovers(
+            "t",
+            &counters,
+            &mut pendings,
+            &frozen_chtm(),
+            tokio::time::Instant::now() + Duration::from_millis(1),
+            unix_ms(),
+        );
+        let frame = first.expect("the frame must come back to be re-handed");
+        assert!(frame.rehand, "the retry must be marked as one");
+        assert_eq!(frame.payload_len, 168);
+        assert_eq!(
+            counters
+                .tx_unaccounted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            counters
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a frame that is being retried is not yet a lost frame"
+        );
+
+        // The retry's own verdict: counted, named, and not retried again.
+        pendings.clear();
+        pendings.push_back(pending(168, true, Duration::from_millis(0)));
+        let second = settle_handovers(
+            "t",
+            &counters,
+            &mut pendings,
+            &frozen_chtm(),
+            tokio::time::Instant::now() + Duration::from_millis(1),
+            unix_ms(),
+        );
+        assert!(second.is_none(), "one re-hand, not two");
+        assert_eq!(
+            counters
+                .tx_unaccounted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            counters
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the frame is lost now, and counted the way the error_txfailed \
+             path counts the frames it abandons"
+        );
+        assert_eq!(
+            counters
+                .tx_dropped_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            168
+        );
+
+        // A reading that arrives past the deadline is about a window that may
+        // have rotated: the frame is dropped unjudged rather than accused.
+        pendings.clear();
+        pendings.push_back(pending(168, false, Duration::from_millis(0)));
+        let late = settle_handovers(
+            "t",
+            &counters,
+            &mut pendings,
+            &frozen_chtm(),
+            tokio::time::Instant::now() + CHTM_PERIOD + Duration::from_millis(50),
+            unix_ms(),
+        );
+        assert!(late.is_none(), "a late reading accuses nobody");
+        assert!(pendings.is_empty(), "and does not keep the frame either");
+        assert_eq!(
+            counters
+                .tx_unaccounted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "the counter must not move on a reading that decided nothing"
+        );
+    }
+
     /// A PHY whose airtime cannot be computed must still leave the serial
     /// floor standing: a hold of zero would hand the modem a whole burst at
     /// 115200 baud, which is the defect this hold exists to prevent.
@@ -4086,6 +4919,7 @@ mod tests {
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
                 /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
             )
             .await;
         });
@@ -4256,6 +5090,7 @@ mod tests {
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
                 /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
             )
             .await;
         });
@@ -4432,6 +5267,7 @@ mod tests {
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
                 /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
             )
             .await;
         });
@@ -4454,6 +5290,7 @@ mod tests {
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
                 /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
             )
             .await;
         });
@@ -5279,6 +6116,7 @@ mod tests {
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
                 /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
             )
             .await;
         });
@@ -5381,6 +6219,7 @@ mod tests {
                     drop_direct,
                     /* jitter_arm = */ JitterArm::AsIs,
                     /* frame_class = */ FrameClass::default(),
+                    /* alock = */ AirtimeLock::default(),
                 )
                 .await;
             });
@@ -5463,6 +6302,7 @@ mod tests {
                     drop_direct,
                     /* jitter_arm = */ JitterArm::AsIs,
                     /* frame_class = */ FrameClass::default(),
+                    /* alock = */ AirtimeLock::default(),
                 )
                 .await;
             });
@@ -5519,6 +6359,7 @@ mod tests {
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
                 /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
             )
             .await;
         });
@@ -5603,6 +6444,7 @@ mod tests {
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
                 /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
             )
             .await;
         });
@@ -6779,6 +7621,7 @@ mod tests {
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
                 /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
             )
             .await;
         });
@@ -7012,6 +7855,7 @@ mod tests {
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
                 /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
             )
             .await;
         });
@@ -7677,6 +8521,7 @@ mod tests {
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
                 /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
             )
             .await;
         });

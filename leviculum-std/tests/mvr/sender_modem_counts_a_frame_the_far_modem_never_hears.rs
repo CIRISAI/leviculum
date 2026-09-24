@@ -24,7 +24,7 @@
 //! of that frame is complete and in order --
 //! `PKT_RX(Local) -> PATH_LOOKUP -> PKT_FORWARD -> PKT_TX -> send queue 1
 //! packet -> acquisition jitter 360ms -> TX 131 bytes to serial` -- and
-//! `port.write_all` + `port.flush` (`interfaces/rnode.rs:1901,1914`) both
+//! `port.write_all` + `port.flush` (`interfaces/rnode.rs:2346,2359`) both
 //! returned, so the whole frame reached the firmware.
 //!
 //! WHAT THE TWO MODEMS SAY. The RNode firmware reports `airtime_short` and

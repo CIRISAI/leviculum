@@ -10,7 +10,7 @@ This page is the study Codeberg #347 asked for: five questions, each
 with a number, the reason for it, and the artifact that settled it. It
 is written after the fact. The window landed while the study was still
 open, in `a_directed_packet_is_jittered_on_acquisition_and_free_in_a_burst`
-(`leviculum-std/src/interfaces/rnode.rs:4055`)
+(`leviculum-std/src/interfaces/rnode.rs:4889`)
 and the firmware policy behind it, so four of the five questions are
 answered by code rather than by argument. The fifth is not, and is
 stated as open at the end.
