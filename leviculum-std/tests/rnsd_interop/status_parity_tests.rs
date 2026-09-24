@@ -110,8 +110,9 @@
 //!     LocalClientInterface while the sampling rnstatus is connected. The
 //!     whole-inventory comparison lives in
 //!     `status_inventory_parity_across_daemons`;
-//!   * per-interface key set: ours adds announce_queue/peers/tx_queue_drops
-//!     plus the post-1.3.5 upstream key set (txdrp and its siblings, added
+//!   * per-interface key set: ours adds announce_queue/peers/tx_queue_drops/
+//!     tx_unaccounted plus the post-1.3.5 upstream key set (txdrp and its
+//!     siblings, added
 //!     for current-rnstatus drop-in compatibility — see the note above
 //!     `row_fields` in rpc/handlers.rs) that the 1.3.5 vendor rnsd here
 //!     predates; nothing is Python-only;
@@ -2513,6 +2514,18 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // stays out of this set only because it is emitted per medium and the
     // TCP interface this test samples has none.
     //
+    // `tx_unaccounted` is additive on exactly the same terms: it counts the
+    // frames an RNode modem was handed and never accounted for on its own
+    // airtime ledger, a packet-loss condition no reference key names. It is
+    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:454) and
+    // so appears on this TCP interface too, reading 0 — the honest value for
+    // a medium that keeps no such ledger. Reference tolerance re-measured on
+    // the pinned vendor tree for this key: rnstatus reads interface fields
+    // only by name (rnstatus.py:391-540) and the two --json paths iterate an
+    // interface dict solely to hex-encode `bytes` values
+    // (rnstatus.py:189-191, :345-357), so an unknown int key is carried
+    // through untouched.
+    //
     // Operational lesson: any batch that adds an interface_stats key MUST run
     // the status-parity step (`bash scripts/run-status-parity.sh`, the recipe
     // in `just standard`). This suite is `#[ignore]`d, so the normal test
@@ -2552,16 +2565,17 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
         "ifac_violations",
         "packet_filter_hits",
     ];
-    let ours_only_full: BTreeSet<String> = ["announce_queue", "peers", "tx_queue_drops"]
+    // The keys we serve on every row that Python has no equivalent for, plus
+    // `peers` (Python emits it per interface type). One list, so the two
+    // shapes below cannot drift apart: they differ only in `announce_queue`.
+    let additive_ours = ["peers", "tx_queue_drops", "tx_unaccounted"];
+    let ours_only_queued: BTreeSet<String> = additive_ours
         .iter()
         .chain(upstream_additions.iter())
         .map(|s| s.to_string())
         .collect();
-    let ours_only_queued: BTreeSet<String> = ["peers", "tx_queue_drops"]
-        .iter()
-        .chain(upstream_additions.iter())
-        .map(|s| s.to_string())
-        .collect();
+    let mut ours_only_full = ours_only_queued.clone();
+    ours_only_full.insert("announce_queue".to_string());
     assert!(
         ours_only == ours_only_full || ours_only == ours_only_queued,
         "unexpected lnsd-only interface_stats keys: {ours_only:?}"
