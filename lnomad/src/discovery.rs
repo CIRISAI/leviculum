@@ -11,7 +11,9 @@
 //! The announce `app_data` a NomadNet node sends is the node's display name as
 //! plain UTF-8 (`Node.announce()`: `self.app_data = self.name.encode("utf-8")`;
 //! `self.destination.announce(app_data=self.app_data)`), so the name is decoded
-//! straight from the bytes, gracefully when it is absent or not valid UTF-8.
+//! straight from the bytes, gracefully when it is absent or not valid UTF-8, and
+//! stripped of terminal control characters: it is remote-controlled text that
+//! becomes display text at that point (Codeberg #356).
 //!
 //! [`NomadNodeRegistry`] consumes `AnnounceReceived` events, keeps only the node
 //! announces, and upserts a [`DiscoveredNode`] keyed by destination hash so a
@@ -57,18 +59,55 @@ pub fn is_nomad_node_announce(announce: &ReceivedAnnounce) -> bool {
     name_hash_is_nomad_node(announce.name_hash())
 }
 
+/// Strip terminal control characters from an announce-supplied display name.
+///
+/// The name comes out of a remote node's announce, and from here on it is
+/// display text: the browser's top bar, the places panel, the label of a
+/// bookmark saved on that node's page. This is the rule the micron parser
+/// applies to page bytes (Codeberg #281), with one difference — a display name
+/// is a single line, so `\n` does not survive either.
+///
+/// Everything printable survives. Dropped are all C0 controls including `ESC`
+/// (the CSI/OSC/DCS introducer), `CR`, `BEL`, `DEL`, and the C1 range
+/// `U+0080..=U+009F`, whose members are single-character forms of the same
+/// introducers. `\t` and `\n` each become one space: whitespace the name may
+/// legitimately carry, but a name must not claim more terminal columns than it
+/// draws (the top bar sizes the title slot by the name's character widths, and
+/// a control character is counted there while the frame draws nothing for it),
+/// and words on either side of them stay separated.
+///
+/// The printable tail of a sequence stays as inert text rather than being
+/// swallowed: without its introducer it cannot act, and a reader who sees the
+/// residue is told plainly that the announce tried something.
+fn strip_control_chars(name: &str) -> String {
+    name.chars()
+        .filter_map(|c| match c {
+            '\t' | '\n' => Some(' '),
+            c if c.is_control() || ('\u{80}'..='\u{9f}').contains(&c) => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// Decode a node display name from an announce `app_data`.
 ///
-/// NomadNet sends the name as plain UTF-8 (`Node.announce`). Returns `None` when
-/// the payload is empty (name absent) or not valid UTF-8, so a malformed or
-/// nameless announce still registers the node without a name.
+/// NomadNet sends the name as plain UTF-8 (`Node.announce`). Terminal control
+/// characters are stripped here, where remote bytes first become display text;
+/// see the private `strip_control_chars` for the rule.
+///
+/// Returns `None` when the payload is empty (name absent), is not valid UTF-8,
+/// or carries no visible text once the controls are gone — so a malformed,
+/// nameless or all-control announce still registers the node, labelled by its
+/// dest hash instead of by a blank that would still claim the columns.
 pub fn decode_node_name(app_data: &[u8]) -> Option<String> {
     if app_data.is_empty() {
         return None;
     }
-    core::str::from_utf8(app_data)
-        .ok()
-        .map(|name| name.to_string())
+    let name = strip_control_chars(core::str::from_utf8(app_data).ok()?);
+    if name.trim().is_empty() {
+        return None;
+    }
+    Some(name)
 }
 
 /// Current wall-clock time in whole seconds since the Unix epoch, or `0` if the
@@ -331,6 +370,34 @@ mod tests {
         assert_eq!(decode_node_name(b""), None);
         // 0xff is not valid UTF-8.
         assert_eq!(decode_node_name(&[0xff, 0xfe]), None);
+    }
+
+    #[test]
+    fn decode_name_strips_terminal_control_characters() {
+        // Codeberg #356: app_data is remote-controlled text, and the decoded name
+        // is display text from here on — the browser's top bar, the places panel,
+        // the label of a bookmark saved on that page. Same rule the micron parser
+        // applies to page bytes (#281), minus the newline exemption.
+        let hostile = b"Node\x1b[2J\x1b]0;pwned\x07\xc2\x9b31m\x7f\tTail\n2";
+        assert_eq!(
+            decode_node_name(hostile).as_deref(),
+            Some("Node[2J]0;pwned31m Tail 2"),
+        );
+        // A name that is nothing but controls leaves no display text: the node is
+        // nameless and its label falls back to the dest hex.
+        assert_eq!(decode_node_name(b"\x1b\x07\x7f"), None);
+        assert_eq!(decode_node_name("\u{9b}".as_bytes()), None);
+        // Whitespace-only is nameless for the same reason: it would draw a blank
+        // label that still claims every column it covers.
+        assert_eq!(decode_node_name(b"\t \t"), None);
+    }
+
+    #[test]
+    fn decode_name_keeps_unicode_names_intact() {
+        // The negative control: dropping controls must not touch ordinary text.
+        for name in ["Bäume am Kanal", "北の森", "Solar 🌲 Nord", "Ångström"] {
+            assert_eq!(decode_node_name(name.as_bytes()).as_deref(), Some(name));
+        }
     }
 
     #[test]

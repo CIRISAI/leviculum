@@ -7094,6 +7094,95 @@ mod tests {
     }
 
     #[test]
+    fn a_hostile_announce_name_cannot_control_the_frame() {
+        // Codeberg #356: the node display name arrives in a remote node's announce
+        // and reaches this frame through browser::page_title and the places panel,
+        // never through the micron parser — so the filter #281 put at the parser
+        // boundary does not cover it. The strip sits where the announce bytes
+        // become a name (discovery::decode_node_name); this test pins the property
+        // at the sink the reader actually sees.
+        let hostile = b"Node\x1b[2J\x1b]0;pwned\x07\xc2\x9b31m\x7f\tTail";
+        let mut reg = NomadNodeRegistry::new();
+        assert!(reg.observe_parts(
+            &crate::discovery::nomad_node_name_hash(),
+            [0xcd; 16],
+            hostile,
+            Some(1),
+            10,
+        ));
+        let name = reg.get_by_hash(&[0xcd; 16]).and_then(|n| n.name.clone());
+        let title = crate::browser::page_title(name.as_deref(), &[0xab; 16], "/page/171.mu");
+
+        let mut m =
+            Model::from_document(&parse(SAMPLE), content_width(80), title.clone(), (80, 24));
+        m.history.visit(tgt(0xab));
+        m.current_dest = Some([0xab; 16]);
+        m.node_registry = reg;
+        m.show_places = true;
+        let buffer = render(&m, 80, 24);
+
+        // No cell of the frame — top bar or places row — holds anything that could
+        // act on a terminal.
+        for y in 0..24 {
+            for x in 0..80 {
+                let sym = buffer[(x, y)].symbol();
+                assert!(
+                    !sym.chars()
+                        .any(|c| c.is_control() || ('\u{80}'..='\u{9f}').contains(&c)),
+                    "a control character reached cell ({x},{y}): {sym:?}"
+                );
+            }
+        }
+
+        // Our column accounting agrees with what is drawn: the separator follows
+        // the title immediately, so the announce can neither shift the address the
+        // reader judges the page by nor push its path off the bar.
+        let top = row_text(&buffer, 0, 80);
+        assert!(
+            top.starts_with(&format!("{title}{TOPBAR_SEP}")),
+            "title and separator are not flush: {top:?}"
+        );
+        assert!(top.contains(":/page/171.mu"), "address missing: {top:?}");
+        // The printable residue stays visible, so the reader is shown the attempt.
+        assert!(top.contains("Node"), "the name's text is missing: {top:?}");
+    }
+
+    #[test]
+    fn an_all_control_announce_name_leaves_the_address_readable() {
+        // The extreme of the same mechanism: a name of nothing but control
+        // characters drew no glyph yet claimed one column per character, blanking
+        // the title and squeezing the address until its path was gone. Such an
+        // announce carries no name at all, so the frame falls back to the short
+        // dest hex and the address stays whole.
+        let hostile = vec![0x7f_u8; 60];
+        let mut reg = NomadNodeRegistry::new();
+        assert!(reg.observe_parts(
+            &crate::discovery::nomad_node_name_hash(),
+            [0xab; 16],
+            &hostile,
+            Some(1),
+            10,
+        ));
+        let name = reg.get_by_hash(&[0xab; 16]).and_then(|n| n.name.clone());
+        assert_eq!(name, None, "a name of pure controls is no name");
+
+        let title = crate::browser::page_title(name.as_deref(), &[0xab; 16], "/page/171.mu");
+        let mut m = Model::from_document(&parse(SAMPLE), content_width(80), title, (80, 24));
+        m.history.visit(tgt(0xab));
+        m.current_dest = Some([0xab; 16]);
+        let buffer = render(&m, 80, 24);
+        let top = row_text(&buffer, 0, 80);
+        assert!(
+            top.starts_with("abababab…"),
+            "want the short dest hex as the title: {top:?}"
+        );
+        assert!(
+            top.contains(":/page/171.mu"),
+            "address path missing: {top:?}"
+        );
+    }
+
+    #[test]
     fn status_bar_renders_hints() {
         let m = loaded_model((80, 24));
         let buffer = render(&m, 80, 24);
