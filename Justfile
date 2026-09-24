@@ -760,6 +760,18 @@ check-supervised-spawns:
 check-core-lock-census:
     @python3 scripts/check-core-lock-census.py
 
+# Codeberg #347: the environment knobs the shipped code reads, each with a
+# verdict. A variable that changes what a daemon does is a knob nobody
+# configured -- not in the config file, not in any status output -- and #347's
+# three-arm jitter selector is one that has to be DELETED when the A/B
+# answers. The census makes both halves loud: a knob added without a verdict
+# fails, and a verdict left behind after its knob is gone fails too. Same
+# shape as the two censuses above: a text scan, sub-second, no build, fails
+# naming a file:line.
+[doc('Give every environment knob a verdict in the knob census')]
+check-env-knobs:
+    @python3 scripts/check-env-knobs.py
+
 # Codeberg #191c's census, moved forward to the push gate. `just standard`
 # already counts the #[ignore]d tests, but from the BUILT test binaries --
 # `--ignored --list` on every one of them -- so it cannot run here: Tier 0
@@ -943,7 +955,7 @@ check-source-invariant-census:
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard source-invariant-tests
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

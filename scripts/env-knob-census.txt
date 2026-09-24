@@ -1,0 +1,28 @@
+# Pinned census of the environment knobs the shipped code reads (#347).
+#
+# An environment variable that changes what a daemon does is a knob nobody
+# configured: it is not in the config file, no status tool reports it, and two
+# runs taken under different values look identical afterwards unless the code
+# said so out loud. #347 added exactly such a knob and it is meant to be
+# DELETED when the experiment it serves answers, so the list has to be able to
+# say "temporary, and this is what removes it" -- and has to go red when a
+# knob is added without saying anything at all, and again when a knob is gone
+# but its line is not.
+#
+# scripts/check-env-knobs.py rebuilds the set from the sources and fails
+# `just fast` on any difference in either direction. Format: one
+#
+#     <KNOB> <temporary|permanent> <reason>
+#
+# per line. A `temporary` line must name its issue (#NNN) and what removes it;
+# a `permanent` line says why the knob outlives any one experiment. Counted:
+# every `LEVICULUM_*` literal in a non-test, non-build Rust source that is not
+# inside an `env!`. See the script's docstring for the rest of the rule.
+
+LEVICULUM_JITTER_ARM temporary #347 the three-arm A/B selector for the RNode host interface's acquisition jitter (leviculum-std/src/interfaces/rnode.rs::JitterArm). Removed with the two arms that lose the co-release series: the winner becomes the unconditional policy, the enum, the variable and arm_owed_jitter_ms go, and this line goes with them.
+
+LEVICULUM_EVENT_LOG permanent operator diagnostic: the path the structured event log is written to (leviculum-std/src/event_log.rs, docs/src/structured-event-logs.md). Selects a sink, never a behaviour on the air.
+LEVICULUM_EVENT_LOG_SYNC permanent operator diagnostic: opt back in to the pre-#418 blocking write on the emitting thread, for a crash where the buffered writer would lose the last lines. Sink discipline, not protocol.
+LEVICULUM_EVENT_NODE permanent operator diagnostic: the node name stamped into each event-log line, so a multi-node run merges into one timeline.
+LEVICULUM_RESOURCE_WINDOW_POLICY permanent #85 selects the resource receive-window algorithm. Deliberately an environment variable and not a config key, because the config format is shared with Python rnsd and must not grow leviculum-only keys (leviculum-std/src/resource_policy.rs). No removal condition has been stated for it, so it is not claimed here to be temporary.
+LEVICULUM_APPEND_BENCH_DIR permanent names the disk an #[ignore]d append-cost measurement runs on (leviculum-std/src/file_propagation_store.rs, in its #[cfg(test)] module). Reaches no daemon; it is in this census only because a cfg(test) module inside a src/ file is not something the scanner can exclude.
