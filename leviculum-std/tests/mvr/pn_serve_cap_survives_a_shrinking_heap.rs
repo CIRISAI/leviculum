@@ -82,10 +82,12 @@ const ARRIVING_SYNC_BATCH_BYTES: usize = 8 * 1000;
 const ARRIVING_UPLOAD_BYTES: usize = 4 * 1000;
 
 /// One more endpoint link, at this tree's own `budget_per_link()`
-/// (2 688 B on the 2026-09-23 capture's boot line; 2 680 B since #384
-/// B2 shrank `OutgoingResource` by the joined-ciphertext copy it kept
-/// beside its parts).
-const ARRIVING_LINK_BYTES: usize = 2_680;
+/// (2 688 B, the figure the 2026-09-23 capture's boot line printed too).
+/// #384 B2 took it to 2 680 B by shrinking `OutgoingResource` by the
+/// joined-ciphertext copy it kept beside its parts; the
+/// `frame_turnaround_ms` a link now records off its first hop
+/// (#36/#374) put the 8 B back.
+const ARRIVING_LINK_BYTES: usize = 2_688;
 
 /// The margin the firmware takes off before it spends a live reading
 /// (`SERVE_MARGIN_BYTES`, `leviculum-nrf/src/heap_census.rs`): the sum

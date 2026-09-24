@@ -91,16 +91,17 @@ const BOOT_CAP: usize = 222;
 /// `leviculum-nrf/src/heap_census.rs`): one inbound sync batch at
 /// `BOARD_SYNC_LIMIT_KB` (8 000 B), one queued upload at
 /// `BOARD_TRANSFER_LIMIT_KB` (4 000 B), and one more endpoint link at
-/// `budget_per_link()` — 2 680 B in this tree (the 2026-09-23 boot line
-/// printed 2 688; #384 B2 shrank `Link` by the joined-ciphertext copy
-/// `OutgoingResource` kept beside its parts). All three can coexist, so
-/// they are summed.
+/// `budget_per_link()` — 2 688 B in this tree. It was 2 680 B between
+/// #384 B2, which shrank `Link` by the joined-ciphertext copy
+/// `OutgoingResource` kept beside its parts, and the `frame_turnaround_ms`
+/// a link now records off its first hop (#36/#374), which put the 8 B
+/// back. All three can coexist, so they are summed.
 ///
 /// Mirrored here as a literal for the same reason
 /// [`BOARD_RESOURCE_SDU`] is: `leviculum-nrf` is a thumbv7em crate this
 /// host cannot link. The firmware computes it from those three
 /// constants; what this test pins is the rule, at the board's numbers.
-const BOARD_SERVE_MARGIN_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000 + 4 * 1000 + 2_680;
+const BOARD_SERVE_MARGIN_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000 + 4 * 1000 + 2_688;
 
 /// The link SDU the serve transient is sized against on a board
 /// (`SERVE_RESOURCE_SDU`, `leviculum-nrf/src/pn.rs`): Reticulum's

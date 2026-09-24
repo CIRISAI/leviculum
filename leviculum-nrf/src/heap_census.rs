@@ -164,7 +164,7 @@ pub const fn budget_reserve() -> usize {
 /// fill its queues). What remains of [`crate::HEAP_SIZE`] is divided by
 /// [`budget_per_link`], the carrier-independent cost of one more link.
 /// With today's numbers (T114: node box 31 008 B, role 21 120 B,
-/// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 664 B) the
+/// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 688 B) the
 /// division yields 4 — the heap affords exactly the BLE-session count,
 /// and no extra LoRa-backed links until a fixed term shrinks. The
 /// binaries assert `>=` [`crate::ble::MAX_LINKS`]: a node box grown past
@@ -264,8 +264,8 @@ pub const fn budget_serve_cap(node_box: usize) -> usize {
 /// ```text
 ///   BOARD_SYNC_LIMIT_KB · 1000       8 000 B   one inbound sync batch
 /// + BOARD_TRANSFER_LIMIT_KB · 1000   4 000 B   one queued upload
-/// + budget_per_link()                2 680 B   one more endpoint link
-/// =                                 14 680 B
+/// + budget_per_link()                2 688 B   one more endpoint link
+/// =                                 14 688 B
 /// ```
 ///
 /// All three can coexist: the batch arrives from a peer over one link,
@@ -292,7 +292,7 @@ pub const SERVE_MARGIN_BYTES: usize = crate::pn::BOARD_SYNC_LIMIT_KB as usize * 
 // moving an announced limit legitimately moves this: move the mvrs'
 // literal and their expected served counts with it, and say what the
 // board serves now.
-const _: () = assert!(SERVE_MARGIN_BYTES == 14_680);
+const _: () = assert!(SERVE_MARGIN_BYTES == 14_688);
 
 /// The cap one fetch may serve to, from the heap the board HAS rather
 /// than the heap its boot plan feared (#388, order 138).
