@@ -1157,8 +1157,20 @@ fn packet_and_resource_upload_failures_close_the_link_before_retry() {
     assert_upload_failure_closes_link(PropagationUploadFailure::Resource(ResourceError::Timeout));
 }
 
-#[test]
-fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
+/// A client and an in-memory mailbox node, both real `NodeCore`s, holding one
+/// message the client already has and one it does not. The `/get` answer for
+/// the second is deliberately larger than a Link packet, so the node replies
+/// with a Resource: that transfer is what the abandoned-round mvr below needs
+/// in flight, and what the end-to-end drain needs to complete.
+struct MailboxPair {
+    client: ClientHarness,
+    server: MailboxServer,
+    client_identity_hash: [u8; 16],
+    content: Vec<u8>,
+    message_id: [u8; 32],
+}
+
+fn mailbox_pair() -> MailboxPair {
     let client_identity = identity(1);
     let client_identity_hash = *client_identity.hash();
     let client_delivery =
@@ -1232,7 +1244,7 @@ fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
     let mut mailbox = BTreeSet::new();
     mailbox.insert(already_have);
     mailbox.insert(fresh);
-    let mut server = MailboxServer {
+    let server = MailboxServer {
         node: server_node,
         propagation_destination: server_destination_hash,
         mailbox,
@@ -1257,6 +1269,26 @@ fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
     client
         .router
         .insert_bounded_id(already_have, NOW_UNIX - 1.0, true);
+    MailboxPair {
+        client,
+        server,
+        client_identity_hash,
+        content,
+        message_id: message.message_id,
+    }
+}
+
+#[test]
+fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
+    let MailboxPair {
+        mut client,
+        mut server,
+        client_identity_hash,
+        content,
+        message_id,
+    } = mailbox_pair();
+    let already_have = server.already_have;
+    let fresh = server.fresh;
 
     // Discovery is real NodeCore announce processing, not direct state
     // injection into PropagationTransport.
@@ -1315,7 +1347,7 @@ fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
         })
         .collect();
     assert_eq!(delivered.len(), 1);
-    assert_eq!(delivered[0].message_id, message.message_id);
+    assert_eq!(delivered[0].message_id, message_id);
     assert_eq!(delivered[0].content, content);
     assert_eq!(delivered[0].verification, Verification::Valid);
     assert_eq!(delivered[0].method, DeliveryMethod::Propagated);
@@ -1350,10 +1382,123 @@ fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
     assert!(client.router.processed_ids.contains_key(&fresh));
     assert!(client.router.delivered_ids.contains_key(&already_have));
     assert!(client.router.has_message(&fresh));
-    assert!(client
+    assert!(client.router.delivered_ids.contains_key(&message_id));
+}
+
+/// mvr for Codeberg #393: the round that asked for a transfer owns it.
+///
+/// `request_messages_from_propagation_node` replaces the client state, so a
+/// round still running is abandoned there. Its `/get` answer rides on the Link
+/// as an inbound Resource, and the Link is not torn down — so nothing told the
+/// transfer that the reason it exists is gone, and its own watchdog went on
+/// issuing part requests: `RESOURCE_MAX_RETRIES` 16 at a progressive
+/// `PER_RETRY_DELAY_MS` 500 is ~60 s of backoff before any per-part time of
+/// flight, which is the 93 s measured in #390. Those requests contend with the
+/// round that replaced them, on the same link.
+///
+/// One carrier only: this drives two `NodeCore`s packet by packet over a test
+/// clock, so no medium is under test and no radio is involved.
+#[test]
+fn a_replaced_sync_round_takes_its_inbound_transfer_with_it() {
+    let MailboxPair {
+        mut client,
+        mut server,
+        ..
+    } = mailbox_pair();
+
+    let announce = server
+        .node
+        .announce_destination(
+            &server.propagation_destination,
+            Some(&propagation_announce()),
+        )
+        .expect("announce propagation node");
+    pump(
+        &mut client,
+        &mut server,
+        Vec::new(),
+        take_packets(announce.actions),
+    );
+    let selected = client
         .router
-        .delivered_ids
-        .contains_key(&message.message_id));
+        .set_outbound_propagation_node(&mut client.node, Some(server.propagation_destination))
+        .expect("select propagation node");
+    let mut to_server = client.absorb_router(selected);
+    let requested = client
+        .router
+        .request_messages_from_propagation_node(&mut client.node, None)
+        .expect("request mailbox");
+    to_server.extend(client.absorb_router(requested));
+
+    // Stop the exchange the moment the response Resource is live on the
+    // client's link: that is the state an abandoned round leaves behind.
+    let link_id = pump_until_incoming_resource(&mut client, &mut server, to_server);
+    assert_eq!(
+        client.router.propagation_client_state(),
+        Some(PropagationClientState::Receiving)
+    );
+
+    // The application starts another round against the same node — a retry
+    // after its own deadline ran out, which is how #390 hit this.
+    let restarted = client
+        .router
+        .request_messages_from_propagation_node(&mut client.node, None)
+        .expect("second mailbox request");
+    let _ = client.absorb_router(restarted);
+
+    // The part requests come from that Resource object and nowhere else, so
+    // "the receiver stops" is exactly "the link no longer carries it".
+    assert!(
+        client
+            .node
+            .link(&link_id)
+            .is_none_or(|link| !link.has_incoming_resource()),
+        "the abandoned round left its inbound Resource requesting on the link"
+    );
+}
+
+/// Run the exchange packet by packet until the client's propagation Link
+/// carries the inbound response Resource, and return that link. Stopping
+/// mid-transfer is the point: the round has to be abandoned while the
+/// transfer it started is still live.
+fn pump_until_incoming_resource(
+    client: &mut ClientHarness,
+    server: &mut MailboxServer,
+    to_server: Vec<Vec<u8>>,
+) -> LinkId {
+    let destination = server.propagation_destination;
+    let mut to_server: VecDeque<Vec<u8>> = to_server.into();
+    let mut to_client: VecDeque<Vec<u8>> = VecDeque::new();
+    for _ in 0..4096 {
+        let live = client
+            .router
+            .propagation
+            .as_ref()
+            .and_then(|runtime| runtime.transport.active_link(&destination))
+            .filter(|link_id| {
+                client
+                    .node
+                    .link(link_id)
+                    .is_some_and(|link| link.has_incoming_resource())
+            });
+        // Both conditions: the Resource has to be on the link AND actually
+        // flowing, which is what moves the round to `Receiving`. Stopping on
+        // the advertisement alone would abandon a round that had not yet
+        // started the transfer under test.
+        if let Some(link_id) = live {
+            if client.router.propagation_client_state() == Some(PropagationClientState::Receiving) {
+                return link_id;
+            }
+        }
+        if let Some(packet) = to_client.pop_front() {
+            to_server.extend(client.receive(vec![packet]));
+        } else if let Some(packet) = to_server.pop_front() {
+            to_client.extend(server.receive(vec![packet]));
+        } else {
+            panic!("the exchange quiesced before the response Resource reached the client");
+        }
+    }
+    panic!("the response Resource never reached the client");
 }
 
 // ---------------------------------------------------------------------------

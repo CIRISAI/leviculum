@@ -1377,14 +1377,49 @@ impl LxmfRouter {
         let now_ms = node.now_ms();
         node.storage_mut()
             .used_known_dest(destination.as_bytes(), now_ms);
+        let mut output = RouterOutput::default();
+
+        // A round with a request outstanding owns more than the client state
+        // replaced below: the pending request in the transport, and — once the
+        // node answers with a Resource — the inbound transfer riding on the
+        // Link. Dropping the state drops the only record that either was
+        // wanted, and the Link survives, so nothing tells the transfer that the
+        // reason it exists is gone. It goes on issuing part requests for its
+        // whole retry horizon (`RESOURCE_MAX_RETRIES` 16 at a progressive
+        // `PER_RETRY_DELAY_MS` 500 is ~60 s of backoff before any per-part time
+        // of flight; 93 s measured on LoRa, Codeberg #390), contending with the
+        // round that replaced it, and the abandoned request later reports its
+        // own timeout into that round's state. Give it up the way every other
+        // abandon in this runtime does — tear the Link down, which fails both
+        // directions through `remove_link` and tells the node to stop sending
+        // (Codeberg #393). Python has the same gap (`LXMRouter.py:506-520`
+        // reuses the active link without cancelling); the deviation costs one
+        // link establishment and buys a quiet carrier for the new round.
+        if matches!(
+            propagation.client.state,
+            PropagationClientState::RequestSent
+                | PropagationClientState::Receiving
+                | PropagationClientState::ResponseReceived
+        ) {
+            propagation.cancel_outbound_link(node, &mut output);
+        }
+
         propagation.client = MailboxSync {
             // Python uses zero as PR_ALL_MESSAGES.
             max_messages: max_messages.filter(|maximum| *maximum != 0),
             ..MailboxSync::default()
         };
-        let mut output = RouterOutput::default();
 
-        if let Some(link_id) = propagation.transport.active_link(&destination) {
+        // The teardown above is only observed by `PropagationTransport` when
+        // the caller feeds the `LinkClosed` event back, which is after this
+        // returns — so `active_link` can still name the link just closed. The
+        // node is the authority on whether it is still usable, the same guard
+        // `PropagationTransport::ensure_link` applies before reusing one.
+        let active_link = propagation
+            .transport
+            .active_link(&destination)
+            .filter(|link_id| node.link(link_id).is_some_and(|link| link.is_active()));
+        if let Some(link_id) = active_link {
             propagation.begin_list_request(node, link_id, &mut output)?;
         } else if node.has_path(&destination) {
             propagation.set_state(PropagationClientState::LinkEstablishing, &mut output);
