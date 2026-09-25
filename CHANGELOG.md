@@ -41,6 +41,30 @@ Catch-up to upstream master (+465), including upstream's 0.9.0 release
   assembler (leviculum#62), the plane counters (leviculum#60) and the breakers
   (leviculum#66) to `dispatch_output`, like every other call site.
 
+### Fixed on the fork's CI lanes (upstream's CI is Linux-only)
+
+- Security: h2 0.4.19 (RUSTSEC-2026-0258) and rustls 0.23.45
+  (RUSTSEC-2026-0285). Taking upstream's lockfile had put the vulnerable h2
+  back. Both are reached only through lblogd and async-web-client.
+- Windows build: upstream's `announce-stall-probe` (Codeberg #418) uses raw
+  FIFO descriptors. It is now Unix-only, with a stub `main` elsewhere, and its
+  test is Unix-only.
+- macOS: APFS refuses non-UTF-8 file names (EILSEQ), which broke the two
+  foreign-filename store tests. They now accept that refusal and are Unix-only.
+- Windows: the UDP device-form test binds a broadcast address, as
+  `UDPInterface.py` does, and Windows refuses that bind. It is ignored on
+  Windows with that reason.
+
+### Consumer notes (CIRISEdge)
+
+- `CooperativeStamper::generate` now takes a fourth argument,
+  `&StampCancel`. Pass `&StampCancel::new()` where no cancellation is needed.
+- `ControlPlaneOverflow` is minted by the `EventReceiver`. It arrives ahead of
+  the backlog, at most once per second.
+- A peer's rejection surfaces as `ResourceError::RejectedByRemote`, not
+  `Cancelled`. A failed middle segment emits `ResourceFailed`, and
+  request-carrying resources no longer emit `ResourceCompleted`.
+
 ## [0.26.0+ciris.1] — CIRIS fork
 
 ### Added — a peer that will not drain is shed, not absorbed (leviculum#66)
