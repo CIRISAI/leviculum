@@ -164,16 +164,17 @@ impl SegmentAssembler {
             let over_aggregate =
                 self.buffered_total.saturating_add(projected) > self.aggregate_cap();
             if over_transfer || over_aggregate {
+                // Over the assembly ceiling: this transfer is delivered per
+                // segment instead. A consumer concatenates ResourceCompleted.data
+                // in segment_index order, or raises
+                // ReticulumNodeBuilder::max_assembled_resource_size.
                 tracing::error!(
                     event = "RESOURCE_ASSEMBLY_DECLINED",
                     segments = total_segments,
                     projected_bytes = projected,
                     per_transfer_cap = self.per_transfer_cap,
                     aggregate_buffered = self.buffered_total,
-                    "a {total_segments}-segment transfer (up to {projected} bytes) exceeds the \
-                     assembly ceiling; delivering it per segment instead. Concatenate \
-                     ResourceCompleted.data in segment_index order, or raise \
-                     ReticulumNodeBuilder::max_assembled_resource_size",
+                    delivery = "per_segment",
                 );
                 self.partials.insert(
                     link_id,
@@ -238,7 +239,7 @@ impl SegmentAssembler {
                         event = "RESOURCE_ASSEMBLY_OUT_OF_ORDER",
                         expected = next_expected,
                         got = segment_index,
-                        "segment arrived out of order; delivering this transfer per segment"
+                        delivery = "per_segment",
                     );
                     self.buffered_total = self.buffered_total.saturating_sub(buffered.len());
                     return Some(NodeEvent::ResourceCompleted {
