@@ -2633,6 +2633,20 @@ mod tests {
             full_frame_ms: 360,
         }),
     };
+    /// The same link under arm 4, which is arm 3's rule over 2..8 frames
+    /// instead of 2..15 (Lew 2026-09-25, `interfaces::rnode::JitterArm`). The
+    /// only field that moves is the count, and that is the point: the term this
+    /// tool charges per sender is the count times the frame's airtime, so a
+    /// shorter span shrinks the window it sizes.
+    const ROTATION_ARM_4: LinkProfile = LinkProfile {
+        bitrate_bps: 2734,
+        tx_jitter_max_ms: Some(360),
+        acquisition: Some(AcquisitionCeiling {
+            max_ms: 360,
+            frame_slots: Some(8),
+            full_frame_ms: 360,
+        }),
+    };
     /// The same link under the arm the daemon runs by default, where the
     /// acquisition is the slot-priced 360 ms whatever the frame.
     const ROTATION_ARM_1: LinkProfile = LinkProfile {
@@ -2674,6 +2688,36 @@ mod tests {
             (per_sender_3, per_sender_1),
             (15 * air_ms, 360),
             "arm 3 owes 15 frames of {air_ms}ms where arm 1 owes 15 slots"
+        );
+
+        // Arm 4 is the same term over a shorter span, and the window it sizes
+        // follows it down by exactly the seven frames per sender the span gives
+        // up — the figure the A/B between the two spans is about. Charged here
+        // because this is where the term reaches a timeout: an arm whose
+        // ceiling shrank in the interface but not in the budget would size its
+        // windows on a wait no daemon owes, which is trace 223's false red with
+        // the sign reversed.
+        let arm_4 = drain_budget(FRAMES, MEASURED_FRAME_BYTES, Some(ROTATION_ARM_4), fallback);
+        let per_sender_4 = ROTATION_ARM_4
+            .acquisition_ceiling_ms(air_ms)
+            .expect("the arm-4 profile carries an acquisition");
+        assert_eq!(
+            per_sender_4,
+            8 * air_ms,
+            "arm 4 owes 8 frames of {air_ms}ms"
+        );
+        assert_eq!(
+            arm_3.total.as_millis() as u64 - arm_4.total.as_millis() as u64,
+            INTERLEAVED_SENDERS * 7 * air_ms,
+            "the two whole-frame arms' windows differ by the seven frames per \
+             sender arm 4 gives up and nothing else:\n  arm 3: {}\n  arm 4: {}",
+            arm_3.detail,
+            arm_4.detail
+        );
+        assert!(
+            per_sender_4 > per_sender_1,
+            "arm 4 is still priced in whole frames ({per_sender_4}ms), not in \
+             arm 1's slots ({per_sender_1}ms)"
         );
 
         assert_eq!(
