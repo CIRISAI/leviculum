@@ -3269,25 +3269,59 @@ convert = "hex-to-uf2"
             .find(|d| d.name == "3-2.3.1")
             .unwrap();
 
+        // The line already in flight when the tool arrives: what a board
+        // that was talking before the flash left in the port's queue, and
+        // the pre-flash sha #378 reported as the new one. It is in the
+        // queue as a fact, not as a hope — the wait below returns only
+        // once the port counts all of it.
+        let stale = b"[FW_BUILD] git_sha=aaaaaaaa dirty=true\r\n";
+        pty.write_raw(stale);
+        assert!(
+            pty.wait_until_queue(Duration::from_secs(5), |queued| queued >= stale.len()),
+            "the stale line never reached the port's input queue"
+        );
+
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                std::thread::sleep(Duration::from_millis(250));
+                // The board speaks once the port has been flushed, which is
+                // the queue going empty again: the reset banner arrives
+                // after `fresh_banner` has thrown the old line away. Waiting
+                // for the flush itself, rather than sleeping past where it
+                // is expected to have happened, is what keeps the order of
+                // the two writes independent of the machine's load.
+                assert!(
+                    pty.wait_until_queue(verify::FRESH_BANNER_BUDGET, |queued| queued == 0),
+                    "the read never flushed the port's input queue"
+                );
                 pty.write_raw(b"[FW_BUILD] git_sha=bb7c4f64 dirty=false\r\n");
             });
             let reading =
                 running_build(&sysfs, &t114, &Options::default()).expect("the board spoke");
+            // The banner emitted after the flush, never the one that was
+            // already in flight: that is what makes the claim the board's
+            // current build rather than its previous one.
             assert_eq!(reading.build.git_sha, "bb7c4f64");
+            assert_eq!(reading.build.dirty, Some(false));
             // The board's own by-id link, and the node the bus names for
             // if00 behind it: the pair that settles "was this our port?"
             // from the tool's output alone.
             assert_eq!(reading.source.port, link);
             assert_eq!(reading.source.node, dev.path().join("ttyACM1"));
-            // And the delay says the line was not one already in flight.
-            assert!(
-                reading.source.after >= Duration::from_millis(200),
-                "{:?}",
-                reading.source.after
+            // Information, not an assertion. How long after the flush the
+            // line arrived is a property of the machine the test runs on:
+            // the lower bound that used to stand here measured 139 ms on a
+            // loaded Codeberg runner and failed (Woodpecker 463,
+            // 2026-09-24), while the claim it stood for — the line came
+            // after the flush — is the sha asserted above.
+            eprintln!(
+                "BANNER_AFTER_FLUSH us={} budget_us={}",
+                reading.source.after.as_micros(),
+                verify::FRESH_BANNER_BUDGET.as_micros(),
             );
+            // The one bound the code owes: the read is given
+            // FRESH_BANNER_BUDGET and stops there, so a delay past it means
+            // the reader overran its own deadline rather than that the host
+            // was busy.
             assert!(
                 reading.source.after < verify::FRESH_BANNER_BUDGET,
                 "{:?}",

@@ -396,10 +396,10 @@ pub fn utc_offset_secs(unix_secs: i64) -> i64 {
 pub(crate) mod testpty {
     use std::fs::File;
     use std::io::{Read, Write};
-    use std::os::fd::FromRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::PathBuf;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 
@@ -407,8 +407,9 @@ pub(crate) mod testpty {
         master: File,
         pub slave_path: PathBuf,
         /// Keeps the slave side open so the master never reads EIO between
-        /// the test's own opens of the slave path.
-        _holder: File,
+        /// the test's own opens of the slave path. Also the fd
+        /// [`Pty::queued_for_host`] asks about the port's input queue.
+        holder: File,
     }
 
     impl Pty {
@@ -447,7 +448,42 @@ pub(crate) mod testpty {
             Pty {
                 master,
                 slave_path,
-                _holder: holder,
+                holder,
+            }
+        }
+
+        /// How many bytes are queued for the host on this port: written by
+        /// the device side and not read by anybody yet.
+        ///
+        /// The queue belongs to the port, not to a descriptor, so this
+        /// count is the one the code under test sees through its own fd —
+        /// and it is what a `tcflush(TCIFLUSH)` there empties. That makes
+        /// the flush an event a test can wait for rather than guess at.
+        pub fn queued_for_host(&self) -> usize {
+            let mut queued: libc::c_int = 0;
+            // SAFETY: FIONREAD on a tty writes one c_int through the
+            // pointer, which is a live local.
+            let rc = unsafe { libc::ioctl(self.holder.as_raw_fd(), libc::FIONREAD, &mut queued) };
+            assert_eq!(rc, 0, "FIONREAD on the pty slave");
+            queued.max(0) as usize
+        }
+
+        /// Block until the port's input queue satisfies `settled`, and say
+        /// whether it did before `within` ran out.
+        ///
+        /// A precondition to wait for, never a duration to assert on: the
+        /// budget only bounds a test that would otherwise hang when the
+        /// code under test never reaches the state waited for.
+        pub fn wait_until_queue(&self, within: Duration, settled: impl Fn(usize) -> bool) -> bool {
+            let deadline = Instant::now() + within;
+            loop {
+                if settled(self.queued_for_host()) {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
     }
