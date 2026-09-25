@@ -353,7 +353,9 @@ impl EventSink {
                 self.check_control_watermark();
             }
             Err(TrySendError::Full(ev)) => {
-                self.counters.control_dropped.fetch_add(1, Ordering::Relaxed);
+                self.counters
+                    .control_dropped
+                    .fetch_add(1, Ordering::Relaxed);
                 let pending = self.control_dropped.fetch_add(1, Ordering::Relaxed) + 1;
                 // The receiver swaps the count to zero when it mints the
                 // overflow marker, so a count of one opens a new episode.
@@ -412,12 +414,12 @@ impl EventSink {
         let high = cap * 8 / 10;
         if !self.control_watermarked && queued >= high {
             self.control_watermarked = true;
+            // The consumer is falling behind; drops begin at `queue_capacity`.
             tracing::warn!(
                 event = "CONTROL_PLANE_WATERMARK",
                 queued,
                 queue_capacity = cap,
-                "control plane at {}% — the consumer is falling behind; drops begin at {cap}",
-                queued * 100 / cap,
+                queue_pct = queued * 100 / cap,
             );
         } else if self.control_watermarked && queued * 2 <= cap {
             self.control_watermarked = false;
