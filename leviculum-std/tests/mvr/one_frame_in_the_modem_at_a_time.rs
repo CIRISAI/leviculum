@@ -48,6 +48,13 @@
 //! serial floor at a frame airtime of ~600 ms, and this test fails on the
 //! first assertion.
 //!
+//! Since 2026-09-25 the interface draws a fresh per-frame spread on top of
+//! that floor, so the gap is a BAND and this file pins its lower edge. The
+//! floor is the guarantee — one frame in the modem at a time — and the spread
+//! only ever sits above it; what the spread itself is for, and that it is
+//! actually drawn, is pinned in the interface's own unit tests
+//! (`two_ends_with_identical_budgets_do_not_hold_identically`).
+//!
 //! ## Topology
 //!
 //! ```text
@@ -72,7 +79,9 @@ use leviculum_core::identity::Identity;
 use leviculum_core::rnode;
 use leviculum_core::{Destination, DestinationType, Direction};
 use leviculum_std::driver::ReticulumNodeBuilder;
-use leviculum_std::interfaces::{RNodeChannelFactory, RNodeChannelHalves, RNodeChannelOpenFuture};
+use leviculum_std::interfaces::{
+    RNodeChannelFactory, RNodeChannelHalves, RNodeChannelOpenFuture, TX_HOLD_SPREAD_SLOTS,
+};
 use rand_core::OsRng;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -328,8 +337,15 @@ async fn wait_until(deadline: Duration, what: &str, mut ready: impl FnMut() -> b
 /// taken in the write that precedes the timer being armed, and the timer's
 /// deadline is rounded up to the next millisecond tick. The floor exists so
 /// that rounding cannot fail the test, and it is far below the smallest policy
-/// error it has to catch — a second hold (the whole `owed_ms` again) or a fresh
-/// acquisition draw on top of the hold (48 to 360 ms at this PHY).
+/// error it has to catch — a second hold, the whole `owed_ms` again.
+///
+/// It no longer catches a stray SMALL acquisition draw on top of the hold
+/// (48 ms at this PHY, a draw of zero slots plus DIFS): the upper bound now
+/// also admits the per-frame spread, which is 0 to 96 ms of the same shape at
+/// this PHY, and one sample of a random term cannot be told from another. That
+/// is a real loss of reach and it is stated rather than papered over — the
+/// bound that matters here is the floor, and a burst that served a whole extra
+/// acquisition (up to 360 ms) still trips it.
 const CLOCK_MARGIN_MS: u64 = 100;
 
 /// Records the longest a wake-up was late by while the burst was in flight.
@@ -475,11 +491,17 @@ async fn the_modem_holds_one_frame_at_a_time() {
     // the window's width.
     let cw_ms = (JITTER_CW_SLOTS as u64 - 1) * phy.csma_slot_ms;
     let owed_ms = airtime_ms + phy.csma_difs_ms + cw_ms;
+    // The fresh per-frame spread the interface draws on top of the owed hold,
+    // at its widest (`rnode::tx_hold`): the hold is a band now, not a point,
+    // and only the FLOOR is the guarantee this file pins. Counted in the slot
+    // the modem reported, like every other term here — no typed millisecond
+    // enters this test.
+    let spread_max_ms = TX_HOLD_SPREAD_SLOTS * phy.csma_slot_ms;
 
     let gap_ms = handovers[1].at.duration_since(handovers[0].at).as_millis() as u64;
     println!(
         "TX_HOLD_MVR len={} airtime_ms={airtime_ms} difs_ms={} cw_ms={cw_ms} \
-         owed_ms={owed_ms} gap_ms={gap_ms}",
+         owed_ms={owed_ms} spread_max_ms={spread_max_ms} gap_ms={gap_ms}",
         handovers[0].len, phy.csma_difs_ms
     );
 
@@ -511,11 +533,12 @@ async fn the_modem_holds_one_frame_at_a_time() {
     let over_ms = gap_ms.saturating_sub(owed_ms);
     println!("TX_HOLD_MVR_CLOCK slack_ms={slack_ms} over_ms={over_ms}");
     assert!(
-        over_ms <= slack_ms + CLOCK_MARGIN_MS,
-        "the hold must be the frame's own cost and no more: {gap_ms} ms \
-         against {owed_ms} ms owed, which is {over_ms} ms too long while this \
-         host delayed a timer by at most {slack_ms} ms during the same \
-         window. A slow host is not an explanation for this one."
+        over_ms <= spread_max_ms + slack_ms + CLOCK_MARGIN_MS,
+        "the hold must be the frame's own cost plus at most one spread and no \
+         more: {gap_ms} ms against {owed_ms} ms owed and {spread_max_ms} ms of \
+         spread, which is {over_ms} ms over the floor while this host delayed \
+         a timer by at most {slack_ms} ms during the same window. A slow host \
+         is not an explanation for this one."
     );
 
     node.stop().await.ok();

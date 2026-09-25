@@ -215,7 +215,7 @@ address one peripheral-role link. lnsd, on BlueZ, cannot.
 per-interface field lives in `Transport`, and there are 24 of them
 (`interface_announce_caps`, `leviculum-core/src/transport.rs:2223`
 through `own_tunnel_ids`,
-`leviculum-core/src/transport.rs:2487` — the `BTreeMap<usize, _>` and
+`leviculum-core/src/transport.rs:2498` — the `BTreeMap<usize, _>` and
 `BTreeSet<usize>` fields in that block).
 
 **Method, and why not `size_of`.** Summing `size_of` over those 24

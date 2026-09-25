@@ -792,14 +792,76 @@ struct FirmwareCsma {
 }
 
 /// The wait one handed-over frame imposes before the next may follow it, and
-/// the three terms it is made of — each term is an event field, so a census
+/// the four terms it is made of — each term is an event field, so a census
 /// can check the arithmetic rather than trust it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TxHold {
     held_ms: u64,
+    /// The floor the hold may never drop below: `airtime + DIFS + cw`, at
+    /// least [`rnode::MIN_SPACING_MS`]. What d6a158be guarantees — one frame
+    /// in the modem at a time — is a statement about THIS number, and
+    /// [`TxHold::spread_ms`] only ever sits on top of it.
+    owed_ms: u64,
     airtime_ms: u64,
     difs_ms: u64,
     cw_ms: u64,
+    /// The fresh per-frame draw over `0 ..= TX_HOLD_SPREAD_SLOTS` slots
+    /// ([`tx_hold_spread_max_ms`]), which is what keeps two ends with
+    /// identical budgets from holding identically (see [`tx_hold`]).
+    spread_ms: u64,
+}
+
+/// How wide the per-frame random spread is, in contention slots of the
+/// modulation in force.
+///
+/// The quantity it has to clear is the modem's carrier-sense RISE TIME: on
+/// SX127x, `dcd` is `SIG_DETECT|SIG_SYNCED` read live out of `REG_MODEM_STAT`
+/// (`sx127x.cpp:197-204` @1.85), so it cannot rise before the peer's preamble
+/// has been detected. Trace 228 measured that blind window at ~40 ms at the
+/// SF7/BW62.5 carrier (the 37 ms preamble plus detect latency). Two ends whose
+/// key-ups fall inside it are both deaf, and trace 245 (2026-09-25) found all
+/// twelve of a run's lost frames there, at staggers of 0 to 19 ms.
+///
+/// Four slots is the spread that covers twice that window at this PHY — a slot
+/// is 12 symbol times (`jitter_slot_ms`), 24 ms at SF7/BW62.5, so the draw
+/// spans 0..=96 ms against the 80 ms owed. It is expressed in SLOTS rather
+/// than milliseconds for the same reason every other term of the hold is: the
+/// rise time is a preamble, the preamble is symbols, and a typed millisecond
+/// would be true of one carrier only. At SF12/BW125 a slot is 100 ms and the
+/// spread is 400 ms, which is what that carrier's much longer preamble needs.
+pub const TX_HOLD_SPREAD_SLOTS: u64 = 4;
+
+/// The contention slot the hold prices its terms in: the modem's own, where it
+/// has reported one, and otherwise the reference derivation.
+fn hold_slot_ms(bandwidth_hz: u32, sf: u8, cr: u8, csma: &FirmwareCsma) -> u64 {
+    csma.slot_ms
+        .unwrap_or_else(|| jitter_slot_ms(bandwidth_hz, sf, cr))
+}
+
+/// The widest per-frame spread at this PHY: [`TX_HOLD_SPREAD_SLOTS`] slots.
+///
+/// The ceiling, not a draw — what the interface REPORTS as the top of its
+/// hold, and what a draw is taken uniformly over.
+fn tx_hold_spread_max_ms(bandwidth_hz: u32, sf: u8, cr: u8, csma: &FirmwareCsma) -> u64 {
+    TX_HOLD_SPREAD_SLOTS * hold_slot_ms(bandwidth_hz, sf, cr, csma)
+}
+
+/// One uniform draw over `0 ..= max_ms`, for the frame about to be handed
+/// over.
+///
+/// Per frame, from the interface's own randomness, and deliberately NOT from
+/// the [`ChannelAccess`] stream: that stream is an oracle a dozen tests
+/// reproduce from a seed, and a second consumer of it would make every one of
+/// those sequences a function of how many frames a burst happened to contain.
+///
+/// The modulo skews the top residues by at most one part in `u32::MAX /
+/// max_ms` — about one in forty million at the widest spread this interface
+/// draws — which is nothing next to the millisecond the value is rounded to.
+fn draw_tx_hold_spread_ms(rng: &mut impl RngCore, max_ms: u64) -> u64 {
+    if max_ms == 0 {
+        return 0;
+    }
+    (rng.next_u32() as u64) % (max_ms + 1)
 }
 
 /// How long the host must hold the next frame after handing one to the modem,
@@ -816,16 +878,40 @@ struct TxHold {
 /// it instead, from what it already knows:
 ///
 /// ```text
-/// hold = airtime(frame at the running PHY) + DIFS + longest contention draw
+/// owed = airtime(frame at the running PHY) + DIFS + longest contention draw
+/// hold = owed + rand(0 ..= TX_HOLD_SPREAD_SLOTS slots)
 /// ```
 ///
-/// The last two terms are the firmware's own, taken from its stat frames where
-/// it has sent them ([`FirmwareCsma`]) and otherwise derived the way
-/// [`ChannelAccess`] derives the wait it draws. The result is the instant the
-/// modem can at the earliest be finished with the frame it holds: airtime for
-/// the frame itself, and DIFS plus the widest window for the contest the
-/// firmware runs before the NEXT one. A frame handed over then finds an empty
-/// queue and gets its own CSMA contest.
+/// The first three terms are the guarantee: DIFS and the contention window are
+/// the firmware's own, taken from its stat frames where it has sent them
+/// ([`FirmwareCsma`]) and otherwise derived the way [`ChannelAccess`] derives
+/// the wait it draws. Their sum is the instant the modem can at the earliest
+/// be finished with the frame it holds: airtime for the frame itself, and DIFS
+/// plus the widest window for the contest the firmware runs before the NEXT
+/// one. A frame handed over then finds an empty queue and gets its own CSMA
+/// contest. The widest window and not a draw of it, because the host cannot
+/// see the modem's draw; the hold therefore never drops below `owed`.
+///
+/// **Why the fourth term.** A budget made only of those three is a CONSTANT,
+/// and it is the same constant on every node running the same PHY: trace 245
+/// (2026-09-25) watched `held_ms=863` on both daemons of an A/B pair at once.
+/// A constant hold is a metronome. Once two ends' bursts start inside the
+/// modem's ~40 ms carrier-sense rise time of each other — where neither radio
+/// can see the other (`TX_HOLD_SPREAD_SLOTS`) — every following frame pair
+/// keys at the same stagger and collides again: that run's attempt 6 lost
+/// three consecutive pairs exactly 880 ms apart, at staggers 0, 1 and 2 ms,
+/// and a 50 KB transfer in the same window retried one part window 155 times
+/// until it timed out. No deterministic term of any size breaks that, and no
+/// contention draw covers it either, because the frames it happens on are
+/// burst continuations and deferral releases, where no acquisition draw is
+/// served at all. What breaks it is a FRESH draw per frame, wide enough that
+/// two ends cannot stay inside each other's blind window: after one frame the
+/// two budgets differ, and they differ again by a different amount on the
+/// next.
+///
+/// The spread is the medium's quirk and nothing else's: a half-duplex modem
+/// with a blind window the length of a preamble. It costs, on average, half of
+/// [`TX_HOLD_SPREAD_SLOTS`] slots per frame.
 ///
 /// This is not [`rnode::compute_spacing_ms`], which computes the same shape
 /// from constants that assume a 24 ms slot and adds a fixed 100 ms margin.
@@ -834,7 +920,14 @@ struct TxHold {
 ///
 /// Nothing here asks what the frame contains: a packet is a packet, and the
 /// only input from the frame is its length on the air.
-fn tx_hold(frame_len: u32, bandwidth_hz: u32, sf: u8, cr: u8, csma: &FirmwareCsma) -> TxHold {
+fn tx_hold(
+    frame_len: u32,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+    csma: &FirmwareCsma,
+    spread_ms: u64,
+) -> TxHold {
     let airtime_ms = rnode::airtime_ms_with_preamble(
         frame_len,
         bandwidth_hz,
@@ -842,9 +935,7 @@ fn tx_hold(frame_len: u32, bandwidth_hz: u32, sf: u8, cr: u8, csma: &FirmwareCsm
         cr,
         rnode::derive_preamble_symbols(sf, cr, bandwidth_hz),
     );
-    let slot_ms = csma
-        .slot_ms
-        .unwrap_or_else(|| jitter_slot_ms(bandwidth_hz, sf, cr));
+    let slot_ms = hold_slot_ms(bandwidth_hz, sf, cr, csma);
     let difs_ms = csma.difs_ms.unwrap_or(JITTER_DIFS_SLOTS * slot_ms);
     // `random(cw_min, cw_max)` is upper-exclusive, so the longest draw is
     // `cw_max - 1` slots. Unreported, the band-1 window this interface's own
@@ -856,15 +947,23 @@ fn tx_hold(frame_len: u32, bandwidth_hz: u32, sf: u8, cr: u8, csma: &FirmwareCsm
         .map(|m| (m as u64).saturating_sub(1))
         .unwrap_or(JITTER_CW_SLOTS as u64 - 1);
     let cw_ms = cw_slots * slot_ms;
+    // The serial floor still binds underneath: a PHY whose airtime is not
+    // computable (bandwidth 0 — `airtime_ms_with_preamble` returns 0) must not
+    // turn into a hold of zero, which would hand the modem a whole burst at
+    // serial speed.
+    let owed_ms = (airtime_ms + difs_ms + cw_ms).max(rnode::MIN_SPACING_MS);
     TxHold {
-        // The serial floor still binds underneath: a PHY whose airtime is not
-        // computable (bandwidth 0 — `airtime_ms_with_preamble` returns 0)
-        // must not turn into a hold of zero, which would hand the modem a
-        // whole burst at serial speed.
-        held_ms: (airtime_ms + difs_ms + cw_ms).max(rnode::MIN_SPACING_MS),
+        // The spread goes ON TOP of the owed floor, never into it: the
+        // guarantee one frame in the modem at a time rests on is that the next
+        // frame waits out the whole of what the modem may still owe this one,
+        // and a draw that could eat into that would trade one failure mode for
+        // the other.
+        held_ms: owed_ms + spread_ms,
+        owed_ms,
         airtime_ms,
         difs_ms,
         cw_ms,
+        spread_ms,
     }
 }
 
@@ -877,12 +976,17 @@ fn tx_hold(frame_len: u32, bandwidth_hz: u32, sf: u8, cr: u8, csma: &FirmwareCsm
 /// turnaround a caller uses to size a timeout must bound every frame the
 /// interface may be handed, not the one it happens to hold.
 fn max_tx_hold(bandwidth_hz: u32, sf: u8, cr: u8) -> TxHold {
+    let csma = FirmwareCsma::default();
     tx_hold(
         rnode::HW_MTU as u32,
         bandwidth_hz,
         sf,
         cr,
-        &FirmwareCsma::default(),
+        &csma,
+        // The ceiling of the spread, not a draw of it: this figure is what the
+        // interface REPORTS, and a reported maximum that a draw could exceed
+        // is the whole of Codeberg #36/#374 again.
+        tx_hold_spread_max_ms(bandwidth_hz, sf, cr, &csma),
     )
 }
 
@@ -2614,11 +2718,22 @@ where
                 // modem that holds two frames sends the second one deaf).
                 // What the frame CONTAINS does not enter into it; only how
                 // long it occupies the air.
-                let hold = tx_hold(queued.payload_len as u32, bandwidth_hz, sf, cr, &fw_csma);
+                let hold = tx_hold(
+                    queued.payload_len as u32,
+                    bandwidth_hz,
+                    sf,
+                    cr,
+                    &fw_csma,
+                    draw_tx_hold_spread_ms(
+                        &mut rand_core::OsRng,
+                        tx_hold_spread_max_ms(bandwidth_hz, sf, cr, &fw_csma),
+                    ),
+                );
                 tracing::debug!(
                     target: "leviculum_std::interfaces::rnode::tx_trace",
-                    "LORA_TX_HOLD iface={name} held_ms={} airtime_ms={} difs_ms={} cw_ms={}",
-                    hold.held_ms, hold.airtime_ms, hold.difs_ms, hold.cw_ms
+                    "LORA_TX_HOLD iface={name} held_ms={} airtime_ms={} difs_ms={} cw_ms={} \
+                     spread_ms={}",
+                    hold.held_ms, hold.airtime_ms, hold.difs_ms, hold.cw_ms, hold.spread_ms
                 );
                 send_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
                     hold.held_ms,
@@ -2754,14 +2869,15 @@ async fn rnode_reconnect_task<S, C, Fut>(
     // post-TX hold, stated where the bitrate is stated.
     let max_hold = max_tx_hold(radio.bandwidth, radio.sf, radio.cr);
     tracing::debug!(
-        "{}: bitrate={} bps, tx_hold(mtu)={}ms (airtime {}ms + DIFS {}ms + cw {}ms), \
-         jitter_max={}ms (DIFS + contention window), jitter_arm={}",
+        "{}: bitrate={} bps, tx_hold(mtu)<={}ms (airtime {}ms + DIFS {}ms + cw {}ms \
+         + spread 0..{}ms), jitter_max={}ms (DIFS + contention window), jitter_arm={}",
         ctx.name,
         bitrate_bps,
         max_hold.held_ms,
         max_hold.airtime_ms,
         max_hold.difs_ms,
         max_hold.cw_ms,
+        max_hold.spread_ms,
         ctx.jitter_max_ms,
         ctx.jitter_arm.digit(),
     );
@@ -3030,10 +3146,17 @@ where
     // the reconnect task below, and the handle must report the PHY the task is
     // about to program, not a second guess at it.
     let announce_cap_bps = announce_cap_bitrate(ctx.radio.sf, ctx.radio.cr, ctx.radio.bandwidth);
-    // Copied out before `ctx` moves into the task: the handle reports the
-    // same pre-TX jitter ceiling the TX loop actually draws against, rather
-    // than recomputing it and risking the two drifting apart.
-    let tx_jitter_max_ms = ctx.jitter_max_ms;
+    // What one frame of a burst costs the frame behind it, worst case: the
+    // hold's terms other than the frame's own airtime. Derived from `ctx`'s
+    // acquisition ceiling rather than recomputed, so the reported figure and
+    // the wait the TX loop imposes cannot drift apart.
+    let tx_jitter_max_ms = ctx.jitter_max_ms
+        + tx_hold_spread_max_ms(
+            ctx.radio.bandwidth,
+            ctx.radio.sf,
+            ctx.radio.cr,
+            &FirmwareCsma::default(),
+        );
     // Copied out beside it, and for the same reason: what the frame that
     // TAKES the channel pays under the arm this build runs. A separate number
     // because arm 3 prices its slots in whole frames, so the two are only
@@ -3791,17 +3914,33 @@ async fn rnode_multi_io_task<S>(
                 // transmitted, which is the radio the air-time was spent on.
                 // This task parses no stat frames, so the CSMA terms are the
                 // reference derivation rather than the modem's own report.
+                let vport_csma = FirmwareCsma::default();
                 let hold = tx_hold(
                     data.len() as u32,
                     v.radio.bandwidth,
                     v.radio.sf,
                     v.radio.cr,
-                    &FirmwareCsma::default(),
+                    &vport_csma,
+                    draw_tx_hold_spread_ms(
+                        &mut rand_core::OsRng,
+                        tx_hold_spread_max_ms(
+                            v.radio.bandwidth,
+                            v.radio.sf,
+                            v.radio.cr,
+                            &vport_csma,
+                        ),
+                    ),
                 );
                 tracing::debug!(
                     target: "leviculum_std::interfaces::rnode::tx_trace",
-                    "LORA_TX_HOLD iface={} held_ms={} airtime_ms={} difs_ms={} cw_ms={}",
-                    v.name, hold.held_ms, hold.airtime_ms, hold.difs_ms, hold.cw_ms
+                    "LORA_TX_HOLD iface={} held_ms={} airtime_ms={} difs_ms={} cw_ms={} \
+                     spread_ms={}",
+                    v.name,
+                    hold.held_ms,
+                    hold.airtime_ms,
+                    hold.difs_ms,
+                    hold.cw_ms,
+                    hold.spread_ms
                 );
                 send_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
                     hold.held_ms,
@@ -3924,7 +4063,15 @@ pub(crate) fn spawn_rnode_multi_interface(
                 // carrier, so each takes its own share; capping only the
                 // section-index one would leave the rest uncapped.
                 announce_cap_bitrate: announce_cap_bitrate(sub.sf, sub.cr, sub.bandwidth),
-                tx_jitter_max_ms: Some(compute_jitter_max_ms(sub.sf, sub.cr, sub.bandwidth)),
+                tx_jitter_max_ms: Some(
+                    compute_jitter_max_ms(sub.sf, sub.cr, sub.bandwidth)
+                        + tx_hold_spread_max_ms(
+                            sub.bandwidth,
+                            sub.sf,
+                            sub.cr,
+                            &FirmwareCsma::default(),
+                        ),
+                ),
                 // A vport's transmit path runs no #347 arm of its own, so the
                 // acquisition it can owe is the unmodified slot-priced one.
                 acquisition: Some(compute_acquisition_ceiling(
@@ -4595,17 +4742,30 @@ mod tests {
             ("bench_single_pair_fast SF7/250", 250_000, 7, 5),
             ("bench_single_pair_slow SF10/125", 125_000, 10, 8),
         ] {
-            let hold = tx_hold(len, bw, sf, cr, &none);
+            // Drawn at zero: this test is about the three OWED terms and
+            // their arithmetic, and the fourth is asserted on in
+            // `the_reported_maximum_is_the_owed_hold_plus_the_whole_spread`.
+            let hold = tx_hold(len, bw, sf, cr, &none, 0);
             let slot = jitter_slot_ms(bw, sf, cr);
             println!(
-                "TX_HOLD phy={label} len={len} held_ms={} airtime_ms={} difs_ms={} \
-                 cw_ms={} slot_ms={slot}",
-                hold.held_ms, hold.airtime_ms, hold.difs_ms, hold.cw_ms
+                "TX_HOLD phy={label} len={len} held_ms={} owed_ms={} airtime_ms={} \
+                 difs_ms={} cw_ms={} spread_ms={} spread_max_ms={} slot_ms={slot}",
+                hold.held_ms,
+                hold.owed_ms,
+                hold.airtime_ms,
+                hold.difs_ms,
+                hold.cw_ms,
+                hold.spread_ms,
+                tx_hold_spread_max_ms(bw, sf, cr, &none)
             );
             assert_eq!(
-                hold.held_ms,
+                hold.owed_ms,
                 hold.airtime_ms + hold.difs_ms + hold.cw_ms,
-                "{label}: the hold is the sum of its three terms"
+                "{label}: the owed hold is the sum of its three terms"
+            );
+            assert_eq!(
+                hold.held_ms, hold.owed_ms,
+                "{label}: a zero draw holds exactly what is owed"
             );
             assert_eq!(
                 hold.difs_ms,
@@ -4651,8 +4811,12 @@ mod tests {
             ("sf12/bw125 (the slowest)", 125_000, 12, 5),
         ] {
             let reported = max_tx_hold(bw, sf, cr).held_ms;
+            let csma = FirmwareCsma::default();
+            // The widest draw, not a typical one: a reported ceiling a draw
+            // can step over is no ceiling at all.
+            let widest = tx_hold_spread_max_ms(bw, sf, cr, &csma);
             for len in [1u32, 100, 491, rnode::HW_MTU as u32] {
-                let hold = tx_hold(len, bw, sf, cr, &FirmwareCsma::default()).held_ms;
+                let hold = tx_hold(len, bw, sf, cr, &csma, widest).held_ms;
                 assert!(
                     hold <= reported,
                     "{label}: a {len} B frame holds for {hold} ms, above the \
@@ -4660,7 +4824,7 @@ mod tests {
                 );
             }
         }
-        let part_of_the_run = tx_hold(491, 62_500, 7, 5, &FirmwareCsma::default());
+        let part_of_the_run = tx_hold(491, 62_500, 7, 5, &FirmwareCsma::default(), 0);
         assert_eq!(
             (
                 part_of_the_run.airtime_ms,
@@ -4678,13 +4842,184 @@ mod tests {
         );
     }
 
+    /// The PHYs the spread is asserted at, and the slot each one's spread is
+    /// counted in. `lora_ratchet_rotation`'s carrier first, because that is
+    /// the cell trace 245 measured the lock on.
+    const SPREAD_PHYS: [(&str, u32, u8, u8); 4] = [
+        ("lora_ratchet_rotation SF7/62.5", 62_500, 7, 5),
+        ("the project default SF8/125", 125_000, 8, 5),
+        ("bench_single_pair_fast SF7/250", 250_000, 7, 5),
+        ("the slowest SF12/125", 125_000, 12, 5),
+    ];
+
+    /// Two ends of one pair, same PHY, same firmware figures, same frame
+    /// length — the exact condition trace 245 measured — must not hold
+    /// identically frame after frame.
+    ///
+    /// This is the pin on the metronome. Before the spread the hold was
+    /// `airtime + DIFS + (cw_max - 1) * slot` and every term of it is a
+    /// function of the PHY alone, so the two ends of the A/B pair held for
+    /// 863 ms each, simultaneously, for the whole of a burst: once their
+    /// key-ups fell inside the modem's ~40 ms carrier-sense rise time of each
+    /// other, every following pair collided again (attempt 6: three
+    /// collisions 880 ms apart, staggers 0 -> 1 -> 2 ms). Twenty frames is
+    /// the length of the bursts that cell runs.
+    ///
+    /// The assertion is deliberately weak — "not all equal", not a
+    /// distribution — because that is the whole of what the fix claims: two
+    /// identical budgets must stop producing one identical schedule. Two
+    /// streams from the interface's own randomness stand in for the two ends;
+    /// they collide on all twenty frames with probability below 2^-100 at
+    /// every PHY here.
+    #[test]
+    fn two_ends_with_identical_budgets_do_not_hold_identically() {
+        const FRAMES: usize = 20;
+        let csma = FirmwareCsma::default();
+        for (label, bw, sf, cr) in SPREAD_PHYS {
+            let spread_max = tx_hold_spread_max_ms(bw, sf, cr, &csma);
+            assert!(
+                spread_max > 0,
+                "{label}: a PHY whose spread is zero is the metronome again"
+            );
+            let mut end_a = Vec::with_capacity(FRAMES);
+            let mut end_b = Vec::with_capacity(FRAMES);
+            for _ in 0..FRAMES {
+                for end in [&mut end_a, &mut end_b] {
+                    end.push(
+                        tx_hold(
+                            147,
+                            bw,
+                            sf,
+                            cr,
+                            &csma,
+                            draw_tx_hold_spread_ms(&mut rand_core::OsRng, spread_max),
+                        )
+                        .held_ms,
+                    );
+                }
+            }
+            println!(
+                "TX_HOLD_SPREAD phy={label} spread_max_ms={spread_max} a={end_a:?} b={end_b:?}"
+            );
+            assert_ne!(
+                end_a, end_b,
+                "{label}: two ends with identical budgets held identically for \
+                 all {FRAMES} frames, which is the phase lock trace 245 measured"
+            );
+            assert!(
+                end_a.iter().any(|h| *h != end_a[0]),
+                "{label}: one end held {} ms for all {FRAMES} frames — the \
+                 draw is not fresh per frame",
+                end_a[0]
+            );
+        }
+    }
+
+    /// The guarantee d6a158be made, under every draw: the hold never drops
+    /// below what the modem may still owe the frame it holds.
+    ///
+    /// The spread sits ON TOP of that floor. A draw that could eat into it
+    /// would put a second frame in the modem's queue, which is flushed with
+    /// no carrier sense between frames (`tx_queue_handler` -> `flush_queue()`,
+    /// `RNode_Firmware.ino:1623-1645`) — trading the phase lock for the bug
+    /// the hold was written for.
+    #[test]
+    fn no_hold_is_ever_below_what_the_modem_is_owed() {
+        let csma = FirmwareCsma::default();
+        for (label, bw, sf, cr) in SPREAD_PHYS {
+            let spread_max = tx_hold_spread_max_ms(bw, sf, cr, &csma);
+            for len in [1u32, 100, 147, 491, rnode::HW_MTU as u32] {
+                let owed = tx_hold(len, bw, sf, cr, &csma, 0).held_ms;
+                for _ in 0..50 {
+                    let hold = tx_hold(
+                        len,
+                        bw,
+                        sf,
+                        cr,
+                        &csma,
+                        draw_tx_hold_spread_ms(&mut rand_core::OsRng, spread_max),
+                    );
+                    assert_eq!(
+                        hold.owed_ms, owed,
+                        "{label}: the draw moved the owed floor itself"
+                    );
+                    assert!(
+                        hold.held_ms >= owed,
+                        "{label}: a {len} B frame held for {} ms, under the \
+                         {owed} ms the modem is still owed",
+                        hold.held_ms
+                    );
+                    assert!(
+                        hold.held_ms <= owed + spread_max,
+                        "{label}: a {len} B frame held for {} ms, over the \
+                         {} ms ceiling the interface reports",
+                        hold.held_ms,
+                        owed + spread_max
+                    );
+                }
+            }
+        }
+    }
+
+    /// What the interface REPORTS as its per-frame turnaround is the owed hold
+    /// plus the WHOLE spread — the top of the band, not the middle of it.
+    ///
+    /// Two consumers read it and both size a window with it: the selftest's
+    /// drain budget (through `LinkProfile::tx_jitter_max_ms`) and the
+    /// receiver's resource part timeout (through
+    /// `Interface::frame_turnaround_ms`, Codeberg #36/#374). A reported figure
+    /// that a draw can step over is exactly the hole those two were written to
+    /// close, so the ceiling moves by the full spread and by nothing else.
+    #[test]
+    fn the_reported_maximum_is_the_owed_hold_plus_the_whole_spread() {
+        let csma = FirmwareCsma::default();
+        for (label, bw, sf, cr) in SPREAD_PHYS {
+            let reported = max_tx_hold(bw, sf, cr);
+            let owed = tx_hold(rnode::HW_MTU as u32, bw, sf, cr, &csma, 0).held_ms;
+            let spread_max = tx_hold_spread_max_ms(bw, sf, cr, &csma);
+            let slot = jitter_slot_ms(bw, sf, cr);
+            println!(
+                "TX_HOLD_MAX phy={label} slot_ms={slot} owed_ms={owed} \
+                 spread_max_ms={spread_max} reported_ms={}",
+                reported.held_ms
+            );
+            assert_eq!(
+                spread_max,
+                TX_HOLD_SPREAD_SLOTS * slot,
+                "{label}: the spread is counted in slots of THIS modulation, \
+                 never in typed milliseconds"
+            );
+            assert!(
+                spread_max >= 80,
+                "{label}: the spread must cover twice the modem's ~40 ms \
+                 carrier-sense rise time (trace 228/245), got {spread_max} ms"
+            );
+            assert_eq!(
+                reported.held_ms,
+                owed + spread_max,
+                "{label}: the reported maximum must be the owed hold plus the \
+                 whole spread"
+            );
+            assert_eq!(
+                reported.spread_ms, spread_max,
+                "{label}: the reported figure carries the ceiling of the \
+                 spread, not a draw of it"
+            );
+            assert_eq!(
+                reported.owed_ms, owed,
+                "{label}: the owed floor under the reported figure is the \
+                 MTU-sized frame's"
+            );
+        }
+    }
+
     /// Where the modem has reported its own CSMA figures, they are what the
     /// hold is priced from — ours are the fallback, not the authority.
     #[test]
     fn a_reported_contention_window_overrides_the_derived_one() {
         let len = 100;
         let (bw, sf, cr) = (62_500u32, 7u8, 5u8);
-        let derived = tx_hold(len, bw, sf, cr, &FirmwareCsma::default());
+        let derived = tx_hold(len, bw, sf, cr, &FirmwareCsma::default(), 0);
 
         // What a band-3 firmware reports: `cw_min = 30, cw_max = 44`
         // (`RNode_Firmware.ino:1616-1617`), and a slot of its own.
@@ -4693,7 +5028,7 @@ mod tests {
             difs_ms: Some(60),
             cw_max: Some(45),
         };
-        let hold = tx_hold(len, bw, sf, cr, &reported);
+        let hold = tx_hold(len, bw, sf, cr, &reported, 0);
         assert_eq!(hold.difs_ms, 60, "the reported DIFS is used as reported");
         assert_eq!(
             hold.cw_ms,
@@ -5049,7 +5384,7 @@ mod tests {
     /// 115200 baud, which is the defect this hold exists to prevent.
     #[test]
     fn an_uncomputable_phy_still_holds_the_serial_floor() {
-        let hold = tx_hold(100, 0, 7, 5, &FirmwareCsma::default());
+        let hold = tx_hold(100, 0, 7, 5, &FirmwareCsma::default(), 0);
         assert_eq!(hold.airtime_ms, 0, "airtime is not computable at bw 0");
         assert!(
             hold.held_ms >= rnode::MIN_SPACING_MS,
@@ -5170,18 +5505,24 @@ mod tests {
         // runs, never typed.
         // "one" and "two" are the frames whose airtime the second and third
         // handover wait out; both are 3 bytes, so one figure covers both.
-        let hold = tx_hold(3, 125_000, 7, 5, &FirmwareCsma::default()).held_ms;
-        assert_eq!(
-            at[1] - at[0],
-            hold,
-            "the second frame of the burst owes no draw, but must not reach \
-             the modem before the first has left the air"
-        );
-        assert_eq!(
-            at[2] - at[1],
-            hold,
-            "the third frame of the burst waits out the second the same way"
-        );
+        let csma = FirmwareCsma::default();
+        let owed = tx_hold(3, 125_000, 7, 5, &csma, 0).held_ms;
+        // A band and no longer a point: the io task draws the spread fresh per
+        // frame, so what a test can pin is the floor it may never go under and
+        // the ceiling it reports. The band is closed on both sides — a hold
+        // that overshot the ceiling would be a second wait, not a draw.
+        let spread = tx_hold_spread_max_ms(125_000, 7, 5, &csma);
+        for (i, gap) in [at[1] - at[0], at[2] - at[1]].into_iter().enumerate() {
+            assert!(
+                (owed..=owed + spread).contains(&gap),
+                "frame {} of the burst owes no acquisition draw, but must not \
+                 reach the modem before the one before it has left the air \
+                 ({owed}ms) and must not be held past the reported ceiling \
+                 ({}ms): got {gap}ms",
+                i + 2,
+                owed + spread
+            );
+        }
 
         // The queue has drained: the hold after the last frame finds
         // nothing to send and hands the channel back. What comes after is a
@@ -5346,20 +5687,17 @@ mod tests {
              already running ({wait}ms), not key the radio on arrival because \
              of what it carries"
         );
-        let hold = tx_hold(
-            b"linkrequest".len() as u32,
-            125_000,
-            7,
-            5,
-            &FirmwareCsma::default(),
-        )
-        .held_ms;
-        assert_eq!(
-            at[1] - at[0],
-            hold,
+        let csma = FirmwareCsma::default();
+        let owed = tx_hold(b"linkrequest".len() as u32, 125_000, 7, 5, &csma, 0).held_ms;
+        let spread = tx_hold_spread_max_ms(125_000, 7, 5, &csma);
+        let gap = at[1] - at[0];
+        assert!(
+            (owed..=owed + spread).contains(&gap),
             "the jumped frame follows inside the same acquisition, owing no \
              draw of its own — but not before the frame that jumped it has \
-             left the air"
+             left the air ({owed}ms), and not past the reported ceiling \
+             ({}ms): got {gap}ms",
+            owed + spread
         );
 
         drop(outgoing_tx);

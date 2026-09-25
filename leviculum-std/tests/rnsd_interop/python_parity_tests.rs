@@ -152,7 +152,7 @@ async fn test_python_announce_received_by_rust_matches_spec() {
 ///    producing a divergent loop.
 ///
 ///    The announce dedup exemption (`is_single_announce` at
-///    `transport.rs:1291`) matches Python's `Transport.py:1230-1232`;
+///    `transport.rs:1294`) matches Python's `Transport.py:1230-1232`;
 ///    loop suppression is via the path-table "not-better-hops" branch
 ///    and LOCAL_REBROADCASTS_MAX guard.
 #[tokio::test]

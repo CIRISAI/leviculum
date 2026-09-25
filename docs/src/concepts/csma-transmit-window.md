@@ -10,7 +10,7 @@ This page is the study Codeberg #347 asked for: five questions, each
 with a number, the reason for it, and the artifact that settled it. It
 is written after the fact. The window landed while the study was still
 open, in `a_directed_packet_is_jittered_on_acquisition_and_free_in_a_burst`
-(`leviculum-std/src/interfaces/rnode.rs:5086`)
+(`leviculum-std/src/interfaces/rnode.rs:5421`)
 and the firmware policy behind it, so four of the five questions are
 answered by code rather than by argument. The fifth is not, and is
 stated as open at the end.
@@ -131,6 +131,43 @@ announces were ever jittered. That is type-awareness in collision
 avoidance and it is the thing the interface-isolation rule forbids; see
 [Interface isolation](interface-isolation.md). Both halves of it are
 pinned now, the answering half and the queue jumper's.
+
+**Since 2026-09-25, a burst frame does owe a draw — a different one.**
+The sentence above is about the ACQUISITION wait, and it still holds: a
+frame that continues a burst serves no acquisition. What it does owe is
+the post-handover hold, and that hold now carries a fresh random term of
+its own (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:923`):
+
+```text
+owed = airtime(frame) + DIFS + (cw_max - 1) x slot
+hold = owed + rand(0 ..= TX_HOLD_SPREAD_SLOTS x slot)
+```
+
+The `owed` part is the guarantee that keeps the modem's queue at one
+frame, and the spread only ever sits on top of it. The reason for the
+spread is that `owed` is a constant, identical on every node running the
+same PHY: trace 245 (2026-09-25) watched `held_ms=863` on both daemons of
+an A/B pair at once, and once two ends' key-ups fell inside the modem's
+~40 ms carrier-sense rise time of each other, every following frame pair
+collided again — three collisions exactly 880 ms apart at staggers 0, 1
+and 2 ms, and a 50 KB transfer that retried one part window 155 times
+until it timed out. No acquisition draw reaches those frames, because
+they are burst continuations and deferral releases. A constant hold is a
+metronome; the spread is what stops two metronomes agreeing.
+
+Four slots, because the quantity it has to clear is the modem's
+carrier-sense rise time: on SX127x `dcd` is a live read of
+`SIG_DETECT|SIG_SYNCED` (`reference/RNode_Firmware/sx127x.cpp:197-204`
+@1.85), so it cannot rise before the peer's preamble has been detected,
+and trace 228 measured that blind window at ~40 ms at SF7/BW62.5. Four
+slots span 0 to 96 ms there against the 80 ms owed. It is counted in
+contention slots and not in milliseconds for the same reason every other
+term here is: a slot is 12 symbol times, and a typed millisecond would be
+true of one carrier only.
+
+The interface reports the top of the band — `owed + spread` — as its
+per-frame turnaround, so the receiver's resource part timeout and the
+selftest's drain window size on a hold no draw can step over.
 
 ## 4. What does it do to the ack window, the burst yield, and link setup?
 
@@ -278,6 +315,6 @@ we can change is our own.
    wrong at every SF above 8. Their only consumer is `compute_spacing_ms`
    (`leviculum-core/src/rnode.rs:1047`), which has no caller: the host
    interface prices the same shape from the modem's reported slot
-   instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:837`).
+   instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:923`).
    Nothing is broken by them today and something would be by the next
    caller.

@@ -28,7 +28,7 @@ pub use pipe::PipeClientHandle;
 pub(crate) mod rnode;
 pub use rnode::{
     RNodeChannelConfig, RNodeChannelFactory, RNodeChannelHalves, RNodeChannelHandle,
-    RNodeChannelOpenFuture,
+    RNodeChannelOpenFuture, TX_HOLD_SPREAD_SLOTS,
 };
 pub(crate) mod serial;
 pub use serial::{
@@ -582,9 +582,12 @@ pub(crate) struct InterfaceInfo {
     /// nothing. An explicit `bitrate` key in the config still overrides it
     /// (Codeberg #404).
     pub announce_cap_bitrate: Option<u32>,
-    /// Ceiling of the randomised pre-TX jitter this interface applies before
-    /// putting a frame on the air, in milliseconds. `None` for interfaces that
-    /// transmit as soon as they are asked (TCP, UDP, Local, Serial).
+    /// Ceiling, in milliseconds, of everything one frame of a burst costs the
+    /// frame behind it apart from that frame's own airtime: on a LoRa carrier
+    /// the DIFS, the widest contention window, and the widest of the fresh
+    /// per-frame spread the interface draws on top (`rnode::tx_hold`). `None`
+    /// for interfaces that transmit as soon as they are asked (TCP, UDP,
+    /// Local, Serial).
     ///
     /// Reported so a caller can size a delivery window from the interface's
     /// own contention bound; nothing schedules on it. Travels to transport as

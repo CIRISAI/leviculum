@@ -931,16 +931,19 @@ pub struct LinkProfile {
     /// medium-access delay the carrier imposes are on top; a caller pricing a
     /// frame has to allow for them.
     pub bitrate_bps: u32,
-    /// Ceiling, in milliseconds, of the randomised delay the interface adds
-    /// before it transmits, or `None` for interfaces that transmit as soon as
-    /// they are asked.
+    /// Ceiling, in milliseconds, of the delay the interface adds between one
+    /// frame and the next apart from the frame's own airtime, or `None` for
+    /// interfaces that transmit as soon as they are asked.
     ///
     /// On a shared half-duplex medium this is the interface's own bound on
     /// how long one of two peers that enqueue together can be held back
     /// before its first frame goes out.
     ///
     /// The PER-FRAME term, and only that: it is what one frame of a burst
-    /// costs the frame behind it. What the FIRST frame of a burst pays to
+    /// costs the frame behind it — on a LoRa carrier the DIFS, the widest
+    /// contention window, and the widest of the fresh per-frame spread the
+    /// interface draws on top of them so two ends with identical budgets
+    /// cannot hold identically. What the FIRST frame of a burst pays to
     /// take the channel is [`Self::acquisition`], which is a different
     /// quantity on an interface that prices its contention slots in whole
     /// frames.
@@ -4666,7 +4669,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3224. A destination with no cached
+    /// link-request path uses at transport.rs:3227. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -5451,7 +5454,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1225 ran in the
+        // Gate on the already-incremented hops (transport.rs:1228 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -9735,7 +9738,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1965`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1968`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -20892,7 +20895,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1225) before
+        // The inbound path increments hops once (transport.rs:1228) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
