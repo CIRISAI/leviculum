@@ -98,6 +98,13 @@ pub struct ActiveRadioConfig {
     /// Part of what the radio is set to, and the one part of it that can
     /// make the board look like broken hardware.
     pub silent: bool,
+    /// The mute's lease in seconds (Codeberg #410): how long this silence
+    /// may last before the board takes its own voice back. Zero when the
+    /// board is not mute.
+    pub lease_s: u16,
+    /// Seconds still to run on that lease at the moment the line is
+    /// written. Zero when the board is not mute.
+    pub lease_left_s: u16,
 }
 
 impl ActiveRadioConfig {
@@ -135,13 +142,20 @@ impl ActiveRadioConfig {
 /// one that does not, it is set by a host frame and not by anything the
 /// operator did at the bench, and a reader who has to infer it from the
 /// absence of `[LORA] TX` lines is reading a silence where a fact belongs.
+///
+/// `lease_s` and `lease_left_s` came with the deadline on that mute, and
+/// they are unconditional like the rest: the question a reader of a silent
+/// board has is not "is it silent" — the next key answers that — but "for
+/// how much longer", and a board that answers it only while it happens to
+/// be muted cannot be swept for across a corpus. On a board that is not
+/// mute both read `0`, which is the true answer: no silence, no deadline.
 pub fn active_radio_config<S: LineSink>(sink: &mut S, c: &ActiveRadioConfig) {
     sink.line(
         Route::Critical,
         "[LORA] ",
         format_args!(
             "active config: freq={} sf={} bw={} cr={} txp={} txp_requested={} \
-             txp_honoured={} csma={} silent={}",
+             txp_honoured={} csma={} silent={} lease_s={} lease_left_s={}",
             c.freq_hz,
             c.sf,
             c.bw_hz,
@@ -150,7 +164,9 @@ pub fn active_radio_config<S: LineSink>(sink: &mut S, c: &ActiveRadioConfig) {
             c.txp_requested_dbm,
             if c.txp_honoured() { "yes" } else { "no" },
             c.csma,
-            c.silent
+            c.silent,
+            c.lease_s,
+            c.lease_left_s
         ),
     );
 }
@@ -206,6 +222,46 @@ pub fn lora_tx_unmuted<S: LineSink>(sink: &mut S, run: &MuteRun) {
         format_args!(
             "LORA_TX_UNMUTED packets={} bytes={}",
             run.packets, run.bytes
+        ),
+    );
+}
+
+/// One host mute that ran out of time instead of being lifted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MuteExpiry {
+    /// The lease that just ran out, in seconds — the host's value, or the
+    /// firmware default a host that sent none was given.
+    pub lease_s: u16,
+    /// Outgoing frames the silence swallowed over its whole life, exact.
+    pub dropped: u32,
+}
+
+/// `[LORA] LORA_MUTE_EXPIRED …` — the board took its own voice back
+/// because the host's silence reached its deadline.
+///
+/// Codeberg #410. `radio_silent` used to be a mute with no end: cleared by
+/// a reset, or by a later config saying otherwise, and by nothing else. A
+/// harness that promised to hand the bench back kept that promise only for
+/// as long as its own process lived, and on 2026-09-15 three LNodes stood
+/// mute for seven hours after a corpus that ended on an RNode-only cell.
+///
+/// This is the line that says the deadline did the handing back instead,
+/// and it is the one an operator greps for when a board starts talking
+/// again with nobody having touched it. Emitted exactly once per lease —
+/// `leviculum_mute_lease::MuteLease::expired_at` is edge-triggered for that
+/// reason — and the frames it names are the run's exact total, not the
+/// decade-truncated count [`lora_tx_muted`] carries.
+///
+/// Gated, like the two lines it closes out: it describes running traffic.
+/// The proof that the board can transmit again is not this line but the
+/// ordinary acquisition and TX lines that follow it.
+pub fn lora_mute_expired<S: LineSink>(sink: &mut S, expiry: &MuteExpiry) {
+    sink.line(
+        Route::Gated,
+        "[LORA] ",
+        format_args!(
+            "LORA_MUTE_EXPIRED lease_s={} dropped={}",
+            expiry.lease_s, expiry.dropped
         ),
     );
 }
@@ -416,6 +472,8 @@ mod tests {
             txp_requested_dbm: 22,
             csma: true,
             silent: false,
+            lease_s: 0,
+            lease_left_s: 0,
         }
     }
 
@@ -429,7 +487,7 @@ mod tests {
                 Route::Critical,
                 String::from(
                     "[LORA] active config: freq=869463000 sf=8 bw=125000 cr=5 txp=22 \
-                     txp_requested=22 txp_honoured=yes csma=true silent=false t=191\r\n"
+                     txp_requested=22 txp_honoured=yes csma=true silent=false lease_s=0 lease_left_s=0 t=191\r\n"
                 )
             )]
         );
@@ -454,7 +512,7 @@ mod tests {
                 Route::Critical,
                 String::from(
                     "[LORA] active config: freq=869463000 sf=8 bw=125000 cr=5 txp=14 \
-                     txp_requested=2 txp_honoured=no csma=true silent=false t=191\r\n"
+                     txp_requested=2 txp_honoured=no csma=true silent=false lease_s=0 lease_left_s=0 t=191\r\n"
                 )
             )]
         );
@@ -775,6 +833,8 @@ mod tests {
             &mut sink,
             &ActiveRadioConfig {
                 silent: true,
+                lease_s: 900,
+                lease_left_s: 412,
                 ..eu_medium()
             },
         );
@@ -784,9 +844,28 @@ mod tests {
                 Route::Critical,
                 String::from(
                     "[LORA] active config: freq=869463000 sf=8 bw=125000 cr=5 txp=22 \
-                     txp_requested=22 txp_honoured=yes csma=true silent=true t=191\r\n"
+                     txp_requested=22 txp_honoured=yes csma=true silent=true lease_s=900 \
+                     lease_left_s=412 t=191\r\n"
                 )
             )]
+        );
+    }
+
+    /// The deadline is on the line whether or not the board is mute, so
+    /// "how much longer" is a key that can be swept for rather than one
+    /// that appears only where somebody already knew to look. A board that
+    /// is transmitting says `lease_s=0 lease_left_s=0`, which is the true
+    /// answer and not a placeholder.
+    #[test]
+    fn an_unmuted_radio_still_carries_the_lease_keys() {
+        let mut sink = Recorder::default();
+        active_radio_config(&mut sink, &eu_medium());
+        assert!(
+            sink.lines[0]
+                .1
+                .contains("silent=false lease_s=0 lease_left_s=0"),
+            "{}",
+            sink.lines[0].1
         );
     }
 
@@ -831,6 +910,52 @@ mod tests {
             [(
                 Route::Gated,
                 String::from("[LORA] LORA_TX_UNMUTED packets=37 bytes=2479 t=191\r\n")
+            )]
+        );
+    }
+
+    /// Codeberg #410: the board took its own voice back. This is the line
+    /// an operator greps for when a board starts transmitting again with
+    /// nobody having touched it, and it carries the lease that ran out so
+    /// the reader can tell a host-set deadline from the firmware default.
+    #[test]
+    fn a_lease_that_runs_out_says_so_and_names_what_the_silence_cost() {
+        let mut sink = Recorder::default();
+        lora_mute_expired(
+            &mut sink,
+            &MuteExpiry {
+                lease_s: 900,
+                dropped: 37,
+            },
+        );
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Gated,
+                String::from("[LORA] LORA_MUTE_EXPIRED lease_s=900 dropped=37 t=191\r\n")
+            )]
+        );
+    }
+
+    /// A lease that expires with nothing to show for it still says so: the
+    /// board was mute, the deadline passed, and an idle board's silence
+    /// costing zero packets is a fact worth having in the capture rather
+    /// than a reason to say nothing.
+    #[test]
+    fn an_expiry_that_swallowed_nothing_is_still_reported() {
+        let mut sink = Recorder::default();
+        lora_mute_expired(
+            &mut sink,
+            &MuteExpiry {
+                lease_s: 6_300,
+                dropped: 0,
+            },
+        );
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Gated,
+                String::from("[LORA] LORA_MUTE_EXPIRED lease_s=6300 dropped=0 t=191\r\n")
             )]
         );
     }

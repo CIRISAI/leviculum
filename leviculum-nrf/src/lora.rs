@@ -333,7 +333,17 @@ pub struct RadioConfig {
     /// When true, drop every outgoing LoRa packet at the driver boundary.    /// the radio keeps listening but never transmits. Used by the
     /// integration-test runner to neutralize T114s it does not bind, so the
     /// test channel is not polluted by their Reticulum announces.
+    ///
+    /// Bounded by [`silence_lease_s`](Self::silence_lease_s): the flag says
+    /// the board is mute, the lease says for how long, and the transmit
+    /// path asks the lease (Codeberg #410).
     pub radio_silent: bool,
+    /// How long [`radio_silent`](Self::radio_silent) may last, in seconds,
+    /// from the moment this config is applied. `0` is the firmware's own
+    /// default (`leviculum_mute_lease::DEFAULT_LEASE_S`) and never
+    /// "forever" — which is what a host that predates the field, and every
+    /// host sending the legacy magic frame, gets.
+    pub silence_lease_s: u16,
     /// Short-term airtime limit, RNode `CMD_ST_ALOCK` u16 encoding
     /// (`percent * 100`). `0` = unlimited. Enforced by the airtime lock.
     pub st_alock: u16,
@@ -381,6 +391,7 @@ impl RadioConfig {
             cr_denom: 5,
             csma_enabled: true,
             radio_silent: false,
+            silence_lease_s: 0,
             st_alock: 0,
             lt_alock: 0,
             // Compiled default: no host ever set an explicit long-term lock, so
@@ -450,6 +461,7 @@ impl RadioConfig {
             cr_denom: wire.cr,
             csma_enabled: wire.csma_enabled,
             radio_silent: wire.radio_silent,
+            silence_lease_s: wire.silence_lease_s,
             st_alock: wire.st_alock,
             lt_alock: wire.lt_alock,
             lt_alock_present: wire.lt_alock_present,
@@ -473,6 +485,7 @@ impl RadioConfig {
             preamble_len: self.preamble_len,
             csma_enabled: self.csma_enabled,
             radio_silent: self.radio_silent,
+            silence_lease_s: self.silence_lease_s,
             st_alock: self.st_alock,
             lt_alock: self.lt_alock,
             lt_alock_present: self.lt_alock_present,
@@ -767,6 +780,8 @@ impl leviculum_log_line::facts::LineSink for FirmwareLog {
 fn active_facts(
     config: &RadioConfig,
     programmed: &leviculum_core::sx126x::TxPowerProgram,
+    lease: &leviculum_mute_lease::MuteLease,
+    now_ms: u64,
 ) -> leviculum_log_line::facts::ActiveRadioConfig {
     leviculum_log_line::facts::ActiveRadioConfig {
         freq_hz: config.frequency_hz,
@@ -777,6 +792,29 @@ fn active_facts(
         txp_requested_dbm: programmed.requested_dbm,
         csma: config.csma_enabled,
         silent: config.radio_silent,
+        // Read off the lease and not off `config.silence_lease_s`: the wire
+        // field is what the host asked for, the lease is what the board is
+        // running, and the number an operator needs is the second one. They
+        // differ whenever the host sent `0` and got the firmware default.
+        lease_s: lease.lease_s(),
+        lease_left_s: lease.remaining_s(now_ms),
+    }
+}
+
+/// Put a freshly applied config's mute into force, or lift it.
+///
+/// One function for the boot config and the runtime one, because the rule is
+/// the same in both and it is the rule the whole of Codeberg #410 turns on: a
+/// config that says the board is silent starts a deadline, and a config that
+/// says it is not clears one outright. There is no third outcome — in
+/// particular, a config that leaves `radio_silent` set does not *extend* an
+/// existing lease, it restarts it, which is what makes "the harness re-sends
+/// the config" the supported way to hold a board quiet for longer.
+fn apply_mute(lease: &mut leviculum_mute_lease::MuteLease, config: &RadioConfig, now_ms: u64) {
+    if config.radio_silent {
+        lease.grant(now_ms, config.silence_lease_s);
+    } else {
+        lease.clear();
     }
 }
 
@@ -1376,6 +1414,7 @@ async fn apply_runtime_config(
     slot_ms: &mut u64,
     access: &mut leviculum_channel_access::ChannelAccess,
     airtime: &mut leviculum_core::rnode::AirtimeTracker,
+    lease: &mut leviculum_mute_lease::MuteLease,
 ) {
     match radio
         .configure_lora(
@@ -1389,9 +1428,13 @@ async fn apply_runtime_config(
         .await
     {
         Ok(programmed) => {
+            // The mute first, so the line below states the lease this config
+            // just put in force rather than the one it replaced.
+            let now_ms = embassy_time::Instant::now().as_millis();
+            apply_mute(lease, &new_cfg, now_ms);
             leviculum_log_line::facts::active_radio_config(
                 &mut FirmwareLog,
-                &active_facts(&new_cfg, &programmed),
+                &active_facts(&new_cfg, &programmed, lease, now_ms),
             );
             *config = new_cfg;
             publish_running_config(config);
@@ -1406,8 +1449,14 @@ async fn apply_runtime_config(
 
 /// What the task does with a packet the outgoing queue has just handed it:
 /// either it becomes the packet being transmitted, or the host's mute
-/// (`RadioConfig::radio_silent`) swallows it here. Returns whether it
-/// became `pending_tx`.
+/// swallows it here. Returns whether it became `pending_tx`.
+///
+/// The mute is the LEASE and not `RadioConfig::radio_silent`, which is only
+/// the host's request for one. The two differ exactly where it matters: a
+/// lease that has run out leaves the flag set — nothing on the board clears
+/// a field of the applied config — and the frame must go out anyway. Asking
+/// the lease here, rather than trusting the loop's own expiry check to have
+/// run first, is what makes that true on the turn the deadline falls in.
 ///
 /// One function for all three dequeue sites (the pre-TX pick-up, the burst
 /// continuation, and the idle select's outgoing arm), because the mute is
@@ -1425,12 +1474,13 @@ async fn apply_runtime_config(
 /// the 2 KiB post-crash tail, and a muted board drops a frame per announce.
 fn admit_for_transmit(
     data: Vec<u8>,
-    config: &RadioConfig,
+    lease: &leviculum_mute_lease::MuteLease,
+    now_ms: u64,
     muted: &mut leviculum_media_state::DropRun,
     pending_tx: &mut Option<Vec<u8>>,
     access: &mut leviculum_channel_access::ChannelAccess,
 ) -> bool {
-    if config.radio_silent {
+    if lease.is_muted(now_ms) {
         if let Some(run) = muted.dropped(data.len()) {
             leviculum_log_line::facts::lora_tx_muted(
                 &mut FirmwareLog,
@@ -1482,6 +1532,15 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
         }
     }
 
+    // The deadline on a host's transmit mute (#410). A board comes up with
+    // no lease because it comes up with no mute: `radio_silent` is the one
+    // field of a radio config that is deliberately not persisted, so a reset
+    // is already an unmute and there is nothing here for a stored lease to
+    // bound. `apply_mute` below is therefore a clear on every ordinary boot;
+    // it is written as the general call anyway so the boot path and the
+    // runtime path cannot come to disagree about what a config means.
+    let mut mute_lease = leviculum_mute_lease::MuteLease::new();
+
     match radio
         .configure_lora(
             config.frequency_hz,
@@ -1494,9 +1553,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
         .await
     {
         Ok(programmed) => {
+            let now_ms = embassy_time::Instant::now().as_millis();
+            apply_mute(&mut mute_lease, &config, now_ms);
             leviculum_log_line::facts::active_radio_config(
                 &mut FirmwareLog,
-                &active_facts(&config, &programmed),
+                &active_facts(&config, &programmed, &mute_lease, now_ms),
             );
             publish_running_config(&config);
         }
@@ -1580,18 +1641,58 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 &mut slot_ms,
                 &mut access,
                 &mut airtime,
+                &mut mute_lease,
             )
             .await;
         }
 
-        // Pick up a new packet to send if no TX is in flight. When
-        // `radio_silent` is set, drop everything the stack hands us instead
-        // of starting a TX, the radio stays listening but never transmits.
-        // Used to keep unused test T114s from polluting the LoRa channel
-        // with their own Reticulum announces.
+        // Has the host's mute reached its deadline (#410)? Asked here, on
+        // every turn, rather than only when something wants to transmit: a
+        // board whose lease ran out has to SAY so, and it has to say it at
+        // the deadline rather than whenever the stack next happens to hand
+        // it a frame — that could be the next announce interval away, and a
+        // silence that ends invisibly is the half of this defect that cost
+        // seven hours of diagnosis. The turn itself can be parked in a
+        // receive window for up to a minute, so the line can lag the
+        // deadline by that much; it carries the deadline, not the moment it
+        // was noticed.
+        let now_ms = embassy_time::Instant::now().as_millis();
+        if mute_lease.expired_at(now_ms).is_some() {
+            // The run's exact total, and it closes the run: the expiry IS
+            // the end of the mute, so there is no `LORA_TX_UNMUTED` left to
+            // emit on the first frame that gets through.
+            let dropped = muted.resumed().map_or(0, |run| run.packets);
+            leviculum_log_line::facts::lora_mute_expired(
+                &mut FirmwareLog,
+                &leviculum_log_line::facts::MuteExpiry {
+                    lease_s: mute_lease.lease_s(),
+                    dropped,
+                },
+            );
+            // The board is no longer silent, so nothing it reports may still
+            // say that it is. `radio_silent` is on the #349 radio report and
+            // on the `active config` line, and a report that keeps claiming
+            // a mute the board is not honouring is worse than none: it sends
+            // the next reader looking for a host that never sent anything.
+            config.radio_silent = false;
+            publish_running_config(&config);
+        }
+
+        // Pick up a new packet to send if no TX is in flight. While the
+        // mute's lease is in force, drop everything the stack hands us
+        // instead of starting a TX; the radio stays listening but never
+        // transmits. Used to keep unused test T114s from polluting the LoRa
+        // channel with their own Reticulum announces.
         if pending_tx.is_none() {
             if let Some(data) = take_outgoing(&outgoing_rx) {
-                admit_for_transmit(data, &config, &mut muted, &mut pending_tx, &mut access);
+                admit_for_transmit(
+                    data,
+                    &mute_lease,
+                    now_ms,
+                    &mut muted,
+                    &mut pending_tx,
+                    &mut access,
+                );
             }
         }
 
@@ -1840,9 +1941,17 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 // A frame the mute swallows leaves the burst with nothing in
                 // flight, which is what `true` says here: the accounting
                 // follows the radio, not the queue.
-                Some(next) => {
-                    !admit_for_transmit(next, &config, &mut muted, &mut pending_tx, &mut access)
-                }
+                Some(next) => !admit_for_transmit(
+                    next,
+                    &mute_lease,
+                    // Read fresh: the burst continuation runs after a whole
+                    // transmission and its post-TX window, so the turn's
+                    // opening timestamp can be seconds old by here.
+                    embassy_time::Instant::now().as_millis(),
+                    &mut muted,
+                    &mut pending_tx,
+                    &mut access,
+                ),
                 None => true,
             };
             if !leviculum_core::rnode::burst_should_yield(
@@ -2015,7 +2124,17 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                         &mut sink,
                     )
                     .await;
-                admit_for_transmit(data, &config, &mut muted, &mut pending_tx, &mut access);
+                admit_for_transmit(
+                    data,
+                    &mute_lease,
+                    // Fresh for the burst continuation's reason: this arm is
+                    // reached out of a receive window that may have stood
+                    // for a minute.
+                    embassy_time::Instant::now().as_millis(),
+                    &mut muted,
+                    &mut pending_tx,
+                    &mut access,
+                );
             }
         }
     }

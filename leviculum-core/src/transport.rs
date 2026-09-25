@@ -17276,6 +17276,7 @@ mod tests {
                     st_alock: 0,
                     lt_alock: 0,
                     lt_alock_present: false,
+                    silence_lease_s: 0,
                 }
             }
 

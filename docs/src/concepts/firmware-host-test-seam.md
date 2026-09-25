@@ -46,20 +46,22 @@ drive (`stand_down_for_rx`, `leviculum-nrf/src/sx1262.rs:946`).
 
 ## Where the seam runs today
 
-The `leviculum-nrf` workspace has 25 members besides the firmware crate,
+The `leviculum-nrf` workspace has 26 members besides the firmware crate,
 every one of them pure and host-testable: `screen`, `sd-policy`,
 `gnss-time`, `gnss-presence`, `gnss-init`, `telemetry-policy`, `ble-tx`,
 `announce-policy`, `queue-budget`, `log-line`, `tx-spacing`, `rx-arming`,
 `persist-ack`, `boot-trace`, `boot-count`, `channel-access`,
 `media-state`, `record-log`, `pn-store`, `store-spike`, `qspi-bitbang`,
-`battery-scale`, `settle-budget`, `sync-batch`, `upload-proof`
-(`members`, `leviculum-nrf/Cargo.toml:14`). Together they carry **790
-host assertions across 58 test targets** — measured 2026-09-25 by the
-host-triple lines of `lint-nrf` (`Justfile:75`). The last four came with
-the post-TX receive window (Codeberg #423), which is the rule's own case:
-an arithmetic budget that had been stranded in `src/lora.rs` was moved
-into `leviculum-channel-access` by the fix that needed it, rather than
-asserted on a board.
+`battery-scale`, `settle-budget`, `sync-batch`, `upload-proof`,
+`mute-lease`
+(`members`, `leviculum-nrf/Cargo.toml:14`). Together they carry **806
+host assertions across 61 test targets** — measured 2026-09-25 by the
+host-triple lines of `lint-nrf` (`Justfile:75`). `mute-lease` is the
+newest and the rule's own case twice over: the deadline on a host's
+transmit mute (Codeberg #410) is a decision that would have been
+unassertable inside `src/lora.rs`, and the `LORA_MUTE_EXPIRED` line that
+announces it went into `log-line` beside the two mute lines it closes
+out, rather than being spelled at its one call site.
 
 `leviculum-core` is the other half of the seam and counts the same way: a
 decision that is not board-specific belongs there, where `lnsd` runs the

@@ -577,9 +577,13 @@ fn requested_wire(config: &SerialRadioConfig) -> RadioConfigWire {
         // unless `airtime_limit_long` says otherwise.
         st_alock: 0,
         lt_alock: config.lt_alock,
-        // Send-side only; `build_radio_config_frame` always emits the full
-        // 21-byte frame, so the receiver parses the lt_alock field as present.
+        // Send-side only; `build_radio_config_frame` always emits the
+        // lt_alock field, so the receiver parses it as present.
         lt_alock_present: true,
+        // `lnsd` never mutes a board — `radio_silent` above is false — so
+        // there is no silence for a lease to bound, and the frame stays the
+        // 21 bytes every LNode firmware has ever parsed (Codeberg #410).
+        silence_lease_s: 0,
     }
 }
 
@@ -1809,6 +1813,7 @@ mod tests {
                 st_alock: 0,
                 lt_alock: 0,
                 lt_alock_present: true,
+                silence_lease_s: 0,
             },
         );
         // Strip the 2-byte magic the parser expects to be gone.
@@ -2061,6 +2066,7 @@ mod tests {
                 st_alock: 0,
                 lt_alock: radio.lt_alock,
                 lt_alock_present: true,
+                silence_lease_s: 0,
             },
         );
         let parsed =

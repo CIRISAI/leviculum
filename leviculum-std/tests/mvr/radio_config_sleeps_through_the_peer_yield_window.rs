@@ -76,6 +76,7 @@ fn pushed_config() -> RadioConfigWire {
         st_alock: 0,
         lt_alock: 0,
         lt_alock_present: true,
+        silence_lease_s: 0,
     }
 }
 

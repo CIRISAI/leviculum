@@ -1029,6 +1029,7 @@ dependencies = [
  "leviculum-log-line",
  "leviculum-lxmf",
  "leviculum-media-state",
+ "leviculum-mute-lease",
  "leviculum-persist-ack",
  "leviculum-pn-store",
  "leviculum-qspi-bitbang",

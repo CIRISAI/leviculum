@@ -31,7 +31,12 @@ use crate::rnode::{build_radio_config_frame, parse_radio_config, RadioConfigWire
 const MAGIC: [u8; 4] = [0x52, 0x54, 0x52, 0x43]; // "RTRC"
 const FORMAT_VERSION: u8 = 0x01;
 const HEADER_SIZE: usize = 6; // magic(4) + version(1) + payload_len(1)
-/// Largest radio-config wire payload [`parse_radio_config`] accepts.
+/// Largest radio-config wire payload this record stores: the legacy frame's
+/// parameter block. Deliberately NOT
+/// [`crate::rnode::RADIO_CONFIG_PAYLOAD_MAX_LEN`], which is two bytes longer
+/// since the silence lease (Codeberg #410) — the lease is never persisted
+/// (see [`encode_radio_config`]), so widening the record would grow every
+/// board's flash page to hold two bytes that are always zero.
 const MAX_PAYLOAD: usize = 19;
 /// Smallest radio-config wire payload [`parse_radio_config`] accepts.
 const MIN_PAYLOAD: usize = 13;
@@ -68,7 +73,12 @@ fn checksum(data: &[u8]) -> [u8; 2] {
 /// `false`): it is a runtime mute used by the test runner to neutralise
 /// boards a scenario does not bind, not a radio setting a user chose. A
 /// board that persisted it would come back from a reset permanently mute
-/// with no visible cause. Every other field round-trips verbatim.
+/// with no visible cause. `silence_lease_s` goes with it, and not only
+/// because a lease without a mute means nothing: the lease is counted from
+/// the moment the board applies the config, and a reset is exactly the
+/// event that ends a silence, so a stored lease could only ever be a
+/// deadline measured from the wrong instant. Every other field round-trips
+/// verbatim.
 ///
 /// `lt_alock_present` round-trips through the stored payload *length*, the
 /// same way it does on the wire: a config that carried no explicit
@@ -78,6 +88,7 @@ fn checksum(data: &[u8]) -> [u8; 2] {
 pub fn encode_radio_config(cfg: &RadioConfigWire) -> [u8; ENCODED_SIZE_ALIGNED] {
     let storable = RadioConfigWire {
         radio_silent: false,
+        silence_lease_s: 0,
         ..*cfg
     };
     // Reuse the host wire encoder so the stored payload can never drift
@@ -147,6 +158,7 @@ mod tests {
             st_alock: 1500,
             lt_alock: 200,
             lt_alock_present: true,
+            silence_lease_s: 0,
         }
     }
 
@@ -253,6 +265,27 @@ mod tests {
         assert_eq!(decoded.frequency_hz, cfg.frequency_hz);
     }
 
+    /// The lease goes the way `radio_silent` does, and for a reason of its
+    /// own: it is counted from the moment the board applies the config, and
+    /// a reset is the event that ends a silence, so a lease read back out of
+    /// flash would be a deadline measured from an instant that no longer
+    /// exists.
+    #[test]
+    fn a_silence_lease_is_not_persisted() {
+        let cfg = RadioConfigWire {
+            radio_silent: true,
+            silence_lease_s: 900,
+            ..sample()
+        };
+        let decoded = decode_radio_config(&encode_radio_config(&cfg)).unwrap();
+        assert!(!decoded.radio_silent);
+        assert_eq!(decoded.silence_lease_s, 0);
+        // And it costs the record no bytes: the stored payload is the same
+        // 19 the page held before the lease existed.
+        assert_eq!(encode_radio_config(&cfg)[5], MAX_PAYLOAD as u8);
+        assert_eq!(ENCODED_SIZE, 27);
+    }
+
     #[test]
     fn silent_flag_alone_does_not_change_the_stored_bytes() {
         // The save path compares encoded bytes; a mute toggle must not
@@ -260,6 +293,7 @@ mod tests {
         let cfg = sample();
         let muted = RadioConfigWire {
             radio_silent: true,
+            silence_lease_s: 900,
             ..cfg
         };
         assert_eq!(encode_radio_config(&cfg), encode_radio_config(&muted));

@@ -1065,8 +1065,25 @@ pub fn compute_spacing_ms(
 /// Magic prefix for radio config frames (distinguishes from Reticulum packets).
 pub const RADIO_CONFIG_MAGIC: [u8; 2] = [0xA4, 0xA4];
 
-/// Total config frame payload length (2 magic + 19 parameter bytes).
+/// Total legacy config frame length (2 magic + 19 parameter bytes).
+///
+/// **Fixed, and it stays fixed.** The legacy magic dialect is dispatched by
+/// (magic, length) alone — `envelope::classify_control_frame`'s first arm,
+/// the emulated modem in periculum's `periculum-emulator`, and every board
+/// already in the field all match this exact number — so a frame of any
+/// other length behind the magic is not a config with one more field, it is
+/// a frame that falls through to the envelope decoder and, failing that,
+/// onto the air as if it were a packet.
+///
+/// The parameter block therefore grows only inside the envelope, where
+/// `TYPE_RADIO_CONFIG` carries its own length: see
+/// [`radio_config_payload`], which is the growing encoder, against
+/// [`build_radio_config_frame`], which is the frozen one.
 pub const RADIO_CONFIG_FRAME_LEN: usize = 21;
+
+/// Largest parameter block [`parse_radio_config`] accepts: the 19 bytes the
+/// legacy frame carries plus the two of the silence lease (Codeberg #410).
+pub const RADIO_CONFIG_PAYLOAD_MAX_LEN: usize = 21;
 
 /// ACK payload sent by T114 after applying radio config.
 pub const RADIO_CONFIG_ACK: [u8; 3] = [0xA4, 0xA4, 0x01];
@@ -1120,17 +1137,36 @@ pub struct RadioConfigWire {
     /// lock was provided", so it can fall back to the ETSI lawful default
     /// derived from its own TX frequency (see [`firmware_default_lt_alock`]).
     pub lt_alock_present: bool,
+    /// How long [`radio_silent`](Self::radio_silent) is allowed to last,
+    /// in seconds, counted from the moment the board applies this config.
+    /// `0` means "the firmware's default lease"
+    /// (`leviculum_mute_lease::DEFAULT_LEASE_S`) and never "forever": a
+    /// control frame that silences field hardware until somebody
+    /// power-cycles it fails mute instead of failing safe (Codeberg #410).
+    ///
+    /// A host that wants a longer silence re-sends the config; the lease
+    /// runs from the last config that said silent, so a harness that keeps
+    /// muting an unbound board once per scenario keeps it muted.
+    ///
+    /// Ignored when `radio_silent` is false — a config that says the board
+    /// may transmit clears the lease outright rather than scheduling one.
+    pub silence_lease_s: u16,
 }
 
-/// Parse a radio config from wire bytes (13 to 19 bytes, after magic stripped).
+/// Parse a radio config from wire bytes (13 to 21 bytes, after magic stripped).
+///
+/// The upper two lengths are the enveloped dialect's: the legacy magic frame
+/// is fixed at [`RADIO_CONFIG_FRAME_LEN`] and carries 19.
 ///
 /// Wire layout: freq_hz(4 BE) + bw_hz(4 BE) + sf(1) + cr(1) + tx_power(1) + preamble(2 BE)
 /// + csma_enabled(1, optional, defaults to false if absent for backward compat)
 /// + radio_silent(1, optional, defaults to false if absent for backward compat)
 /// + st_alock(2 BE, optional, defaults to 0 if absent for backward compat)
 /// + lt_alock(2 BE, optional, defaults to 0 if absent for backward compat)
+/// + silence_lease_s(2 BE, optional, defaults to 0 if absent for backward
+///   compat; enveloped dialect only, see [`radio_config_payload`])
 pub fn parse_radio_config(data: &[u8]) -> Option<RadioConfigWire> {
-    if !(13..=19).contains(&data.len()) {
+    if !(13..=RADIO_CONFIG_PAYLOAD_MAX_LEN).contains(&data.len()) {
         return None;
     }
     let frequency_hz = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
@@ -1149,6 +1185,13 @@ pub fn parse_radio_config(data: &[u8]) -> Option<RadioConfigWire> {
     let lt_alock_present = data.len() >= 19;
     let lt_alock = if lt_alock_present {
         u16::from_be_bytes([data[17], data[18]])
+    } else {
+        0
+    };
+    // Absent and zero mean the same thing here — "the firmware's default
+    // lease" — so unlike `lt_alock` this field needs no presence flag.
+    let silence_lease_s = if data.len() >= 21 {
+        u16::from_be_bytes([data[19], data[20]])
     } else {
         0
     };
@@ -1172,10 +1215,20 @@ pub fn parse_radio_config(data: &[u8]) -> Option<RadioConfigWire> {
         st_alock,
         lt_alock,
         lt_alock_present,
+        silence_lease_s,
     })
 }
 
-/// Build a radio config frame payload (21 bytes including magic prefix).
+/// Build a legacy magic-prefixed radio config frame: always exactly
+/// [`RADIO_CONFIG_FRAME_LEN`] bytes.
+///
+/// [`RadioConfigWire::silence_lease_s`] is **not** on this dialect and never
+/// will be — see [`RADIO_CONFIG_FRAME_LEN`] for why the length is the
+/// dispatch and therefore frozen. A host that wants to set a lease sends the
+/// enveloped frame (`envelope::encode_radio_config`), and a board that gets
+/// the legacy one reads lease `0`, which is its own default lease and not
+/// "forever". That is what lets every host that already exists keep sending
+/// the bytes it always sent.
 pub fn build_radio_config_frame(cfg: &RadioConfigWire) -> Vec<u8> {
     let mut out = Vec::with_capacity(RADIO_CONFIG_FRAME_LEN);
     out.extend_from_slice(&RADIO_CONFIG_MAGIC);
@@ -1189,6 +1242,24 @@ pub fn build_radio_config_frame(cfg: &RadioConfigWire) -> Vec<u8> {
     out.push(cfg.radio_silent as u8);
     out.extend_from_slice(&cfg.st_alock.to_be_bytes());
     out.extend_from_slice(&cfg.lt_alock.to_be_bytes());
+    out
+}
+
+/// Build the bare parameter block, for the enveloped dialect
+/// (`envelope::TYPE_RADIO_CONFIG` and `TYPE_RADIO_REPORT`), which carries its
+/// own length and is therefore the dialect this frame is allowed to grow in.
+///
+/// 19 bytes, or 21 with the silence lease appended. The lease is emitted
+/// only when it is non-zero, because absent and `0` mean the same thing to
+/// [`parse_radio_config`] and because a board from before the lease existed
+/// refuses a 21-byte payload as malformed: a host that sets no lease must go
+/// on putting the bytes on the wire that every fielded board already parses.
+pub fn radio_config_payload(cfg: &RadioConfigWire) -> Vec<u8> {
+    let mut out = build_radio_config_frame(cfg);
+    out.drain(..RADIO_CONFIG_MAGIC.len());
+    if cfg.silence_lease_s != 0 {
+        out.extend_from_slice(&cfg.silence_lease_s.to_be_bytes());
+    }
     out
 }
 
@@ -3295,6 +3366,8 @@ mod tests {
             // These profiles are built into full 21-byte frames, so the parsed
             // round-trip sees the lt_alock field present.
             lt_alock_present: true,
+            // No lease, so these profiles build the pre-#410 frame verbatim.
+            silence_lease_s: 0,
         }
     }
 
@@ -3311,6 +3384,7 @@ mod tests {
             st_alock: 0,
             lt_alock: 0,
             lt_alock_present: true,
+            silence_lease_s: 0,
         }
     }
 
@@ -3327,6 +3401,7 @@ mod tests {
             st_alock: 0,
             lt_alock: 0,
             lt_alock_present: true,
+            silence_lease_s: 0,
         }
     }
 
@@ -3398,7 +3473,79 @@ mod tests {
         assert_eq!(&frame[17..19], &[0x00, 0x00]);
         // lt_alock = 0 (2 BE)
         assert_eq!(&frame[19..21], &[0x00, 0x00]);
+        // No silence lease, so the frame ends here and is byte-for-byte what
+        // every host sent before the lease existed.
         assert_eq!(frame.len(), RADIO_CONFIG_FRAME_LEN);
+    }
+
+    /// The 21-byte payload (Codeberg #410): the lease lands in bytes 19..21
+    /// big-endian and nothing before it moves.
+    #[test]
+    fn radio_config_payload_byte_layout_with_silence_lease() {
+        let cfg = RadioConfigWire {
+            radio_silent: true,
+            silence_lease_s: 900,
+            ..medium_profile()
+        };
+        let payload = radio_config_payload(&cfg);
+        assert_eq!(payload.len(), RADIO_CONFIG_PAYLOAD_MAX_LEN);
+        // Appended, not interleaved: the whole pre-lease block is its prefix.
+        let no_lease = radio_config_payload(&RadioConfigWire {
+            silence_lease_s: 0,
+            ..cfg
+        });
+        assert_eq!(no_lease.len(), 19);
+        assert_eq!(&payload[..19], &no_lease[..]);
+        // 900 = 0x0384, big-endian.
+        assert_eq!(&payload[19..21], &[0x03, 0x84]);
+        let parsed = parse_radio_config(&payload).unwrap();
+        assert_eq!(parsed, cfg);
+        assert_eq!(parsed.silence_lease_s, 900);
+    }
+
+    /// **The legacy dialect does not grow.** Its length is the board's whole
+    /// dispatch for it (`envelope::classify_control_frame`'s first arm, the
+    /// emulated modem in periculum), so a lease set on a config that is sent
+    /// as the magic frame is dropped from the bytes rather than lengthening
+    /// them — and the board reads lease 0, which is its own default.
+    #[test]
+    fn the_legacy_frame_never_carries_a_silence_lease() {
+        let leased = RadioConfigWire {
+            radio_silent: true,
+            silence_lease_s: 900,
+            ..medium_profile()
+        };
+        let frame = build_radio_config_frame(&leased);
+        assert_eq!(frame.len(), RADIO_CONFIG_FRAME_LEN);
+        assert_eq!(
+            frame,
+            build_radio_config_frame(&RadioConfigWire {
+                silence_lease_s: 0,
+                ..leased
+            }),
+            "a lease must not change one byte of the legacy dialect"
+        );
+        let parsed = parse_radio_config(&frame[2..]).unwrap();
+        assert!(parsed.radio_silent);
+        assert_eq!(parsed.silence_lease_s, 0);
+    }
+
+    /// The whole point of the default: a config from a host that predates
+    /// the lease (today's periculum, today's `lnsd`) parses to `0`, which
+    /// the firmware reads as "my default lease" and never as "forever".
+    #[test]
+    fn radio_config_parse_19_byte_payload_has_no_lease() {
+        let cfg = RadioConfigWire {
+            radio_silent: true,
+            silence_lease_s: 900,
+            ..medium_profile()
+        };
+        let payload = radio_config_payload(&cfg);
+        let pre_lease = &payload[..19];
+        let parsed = parse_radio_config(pre_lease).unwrap();
+        assert!(parsed.radio_silent);
+        assert!(parsed.lt_alock_present);
+        assert_eq!(parsed.silence_lease_s, 0);
     }
 
     #[test]
@@ -3408,7 +3555,7 @@ mod tests {
 
     #[test]
     fn radio_config_parse_too_long() {
-        assert!(parse_radio_config(&[0; 20]).is_none());
+        assert!(parse_radio_config(&[0; 22]).is_none());
     }
 
     #[test]

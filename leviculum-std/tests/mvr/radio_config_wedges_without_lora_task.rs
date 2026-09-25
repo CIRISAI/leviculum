@@ -52,6 +52,7 @@ fn corpus_config(sf: u8) -> RadioConfigWire {
         st_alock: 0,
         lt_alock: 0,
         lt_alock_present: true,
+        silence_lease_s: 0,
     }
 }
 
@@ -146,6 +147,7 @@ fn requested_phy() -> RadioConfigWire {
         st_alock: 0,
         lt_alock: 0,
         lt_alock_present: true,
+        silence_lease_s: 0,
     }
 }
 

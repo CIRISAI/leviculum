@@ -53,6 +53,11 @@ leviculum-announce-policy = { path = "announce-policy" }
 # the slice the board runs and the frame-airtime budget the crate's tests pin
 # it against cannot drift apart.
 leviculum-settle-budget = { path = "settle-budget" }
+# How long a host's transmit mute may last before the board takes its own
+# voice back (#410), and the default lease an old host's frame gets. The LoRa
+# task reads both from here, so the deadline the board runs is the deadline
+# the crate's host tests derive from the corpus it has to cover.
+leviculum-mute-lease = { path = "mute-lease" }
 # The inbound peer-sync batch: its counters, and what the sender's LINKCLOSE
 # means for messages already resident here. The engine drains through this
 # type, so the rule the board runs is the rule the crate's host tests assert.

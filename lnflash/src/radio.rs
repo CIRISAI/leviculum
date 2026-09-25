@@ -432,6 +432,9 @@ impl RadioSettings {
             st_alock: 0,
             lt_alock: self.lt_alock(),
             lt_alock_present: true,
+            // No mute, so no lease to bound it with, and the frame stays the
+            // length every fielded LNode already parses (Codeberg #410).
+            silence_lease_s: 0,
         }
     }
 

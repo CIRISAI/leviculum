@@ -938,6 +938,74 @@ fn the_firmware_still_emits_the_transmit_deferral_line() {
     }
 }
 
+/// **Codeberg #410, the positive control for the lease.** The transmit
+/// admission has to ask the deadline, not the host's request for one.
+///
+/// `RadioConfig::radio_silent` is what the host asked for and it is never
+/// cleared on the board — nothing rewrites a field of the applied config
+/// when a lease runs out except the loop's own expiry arm. So a
+/// `admit_for_transmit` that consults the flag is a board that is mute
+/// forever again, and the whole of this change is undone by putting one
+/// identifier back. That revert compiles, links, flashes and passes every
+/// other test in the tree, because `leviculum-nrf` cross-compiles and has no
+/// host tests: this is the only thing between it and the rig.
+///
+/// Asserted on the function's own body rather than on the file, so a
+/// `radio_silent` mentioned in a comment somewhere else in `lora.rs` — there
+/// are several — cannot make it pass or fail for the wrong reason.
+#[test]
+fn the_transmit_admission_asks_the_lease_and_not_the_hosts_request() {
+    let lora = nrf_source("lora.rs");
+    let start = sole_index(&lora, "fn admit_for_transmit(");
+    let body = &lora[start..];
+    let end = body
+        .find("\n}\n")
+        .expect("unterminated admit_for_transmit in leviculum-nrf/src/lora.rs");
+    let body = &body[..end];
+
+    assert!(
+        body.contains("lease.is_muted("),
+        "admit_for_transmit no longer asks the mute lease; a host mute is          unbounded again and the board can only be freed by a reset or a          second config (leviculum#410). Body:\n{body}"
+    );
+    assert!(
+        !body.contains("radio_silent"),
+        "admit_for_transmit reads `radio_silent` again. That field is the          host's REQUEST for a silence and outlives the lease that bounds it,          so reading it here restores the seven-hour mute of 2026-09-15.          Body:\n{body}"
+    );
+    assert!(
+        !body.contains("config: &RadioConfig"),
+        "admit_for_transmit takes the config again; it is handed the lease          precisely so the flag is not in reach. Body:\n{body}"
+    );
+}
+
+/// The other half of the same defect: the expiry has to be ANNOUNCED. A
+/// board that quietly starts transmitting again is as hard to read as one
+/// that quietly stopped — the 2026-09-15 diagnosis was made from which lines
+/// were absent, and this is the line whose presence answers it.
+#[test]
+fn the_firmware_still_announces_a_lease_that_ran_out() {
+    let lora = nrf_source("lora.rs");
+    assert!(
+        lora.contains("mute_lease.expired_at("),
+        "leviculum-nrf/src/lora.rs no longer asks whether the mute's lease          ran out, so nothing emits LORA_MUTE_EXPIRED"
+    );
+    assert!(
+        lora.contains("facts::lora_mute_expired("),
+        "the expiry is no longer written through leviculum_log_line::facts,          so the line's format has left the one place it is asserted"
+    );
+
+    let facts: String = {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("leviculum-nrf/log-line/src/facts.rs");
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    };
+    assert!(
+        facts.contains("\"LORA_MUTE_EXPIRED lease_s={} dropped={}\""),
+        "the LORA_MUTE_EXPIRED format string changed; the rig check for          leviculum#410 greps it verbatim"
+    );
+}
+
 /// The index of `needle` in `src`, insisting there is exactly one.
 ///
 /// The region slicing below is only meaningful if the markers it cuts on are

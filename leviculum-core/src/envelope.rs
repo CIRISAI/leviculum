@@ -49,8 +49,8 @@ use alloc::vec::Vec;
 use crate::constants::{IDENTITY_KEY_SIZE, TRUNCATED_HASHBYTES};
 use crate::node_name::{NodeName, NODE_NAME_MAX_LEN};
 use crate::rnode::{
-    parse_radio_config, RadioConfigWire, RADIO_CONFIG_FRAME_LEN, RADIO_CONFIG_MAGIC,
-    RADIO_RESET_FRAME,
+    parse_radio_config, radio_config_payload, RadioConfigWire, RADIO_CONFIG_FRAME_LEN,
+    RADIO_CONFIG_MAGIC, RADIO_RESET_FRAME,
 };
 
 /// Magic prefix of every envelope frame. Distinct from the legacy
@@ -645,11 +645,16 @@ pub fn encode_capability_query() -> Vec<u8> {
     encode_frame(TYPE_CAPABILITIES, &[])
 }
 
-/// Encode a complete radio-config frame; the payload is the same
-/// parameter block the legacy magic frame carries after its magic.
+/// Encode a complete radio-config frame; the payload is the parameter block
+/// the legacy magic frame carries after its magic, plus whatever the block
+/// has grown since — today, the silence lease (Codeberg #410).
+///
+/// This is the dialect that grows, and [`RADIO_CONFIG_FRAME_LEN`] says why:
+/// the envelope carries an explicit length, so a longer parameter block is
+/// still unambiguously a config here, while behind the legacy magic it would
+/// be a frame the board does not recognise at all.
 pub fn encode_radio_config(cfg: &RadioConfigWire) -> Vec<u8> {
-    let legacy = crate::rnode::build_radio_config_frame(cfg);
-    encode_frame(TYPE_RADIO_CONFIG, &legacy[RADIO_CONFIG_MAGIC.len()..])
+    encode_frame(TYPE_RADIO_CONFIG, &radio_config_payload(cfg))
 }
 
 /// Encode a complete radio-config query (Codeberg #349).
@@ -661,8 +666,7 @@ pub fn encode_radio_query() -> Vec<u8> {
 /// codec [`encode_radio_config`] uses, so the host can change one field and
 /// send it straight back.
 pub fn encode_radio_report(cfg: &RadioConfigWire) -> Vec<u8> {
-    let legacy = crate::rnode::build_radio_config_frame(cfg);
-    encode_frame(TYPE_RADIO_REPORT, &legacy[RADIO_CONFIG_MAGIC.len()..])
+    encode_frame(TYPE_RADIO_REPORT, &radio_config_payload(cfg))
 }
 
 /// Decode a radio-report payload back into the settings it describes.
@@ -1657,6 +1661,9 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
     if data == RADIO_RESET_FRAME {
         return ControlAction::LegacyReset;
     }
+    // Exactly [`RADIO_CONFIG_FRAME_LEN`], never a range: this length IS the
+    // dispatch for the legacy dialect, so the dialect cannot grow a field
+    // (Codeberg #410's silence lease rides the envelope arm below instead).
     if data.len() == RADIO_CONFIG_FRAME_LEN && data[..2] == RADIO_CONFIG_MAGIC {
         return match parse_radio_config(&data[2..]) {
             Some(cfg) => ControlAction::LegacyRadioConfig(cfg),
@@ -1873,6 +1880,7 @@ mod tests {
             st_alock: 0,
             lt_alock: 1000,
             lt_alock_present: true,
+            silence_lease_s: 0,
         }
     }
 
@@ -2651,6 +2659,69 @@ mod tests {
             classify_control_frame(&enveloped, ACCEPTED),
             ControlAction::Reset
         );
+    }
+
+    /// The silence lease (Codeberg #410) rides the envelope, and only the
+    /// envelope: a host that sets one reaches the board through
+    /// [`TYPE_RADIO_CONFIG`], whose length is explicit, and the same config
+    /// sent as the legacy magic frame silently loses it and gets the
+    /// board's default lease instead. Both halves are asserted together
+    /// because it is the PAIR that is the compatibility story.
+    #[test]
+    fn a_silence_lease_rides_the_envelope_and_not_the_legacy_magic() {
+        let leased = RadioConfigWire {
+            radio_silent: true,
+            silence_lease_s: 900,
+            ..sample_config()
+        };
+        let enveloped = encode_radio_config(&leased);
+        assert_eq!(
+            classify_control_frame(&enveloped, ACCEPTED),
+            ControlAction::RadioConfig(leased)
+        );
+
+        let legacy = crate::rnode::build_radio_config_frame(&leased);
+        assert_eq!(legacy.len(), RADIO_CONFIG_FRAME_LEN);
+        let ControlAction::LegacyRadioConfig(seen) = classify_control_frame(&legacy, ACCEPTED)
+        else {
+            panic!("the legacy frame must still be classified as a config");
+        };
+        assert!(seen.radio_silent);
+        assert_eq!(seen.silence_lease_s, 0);
+    }
+
+    /// A config with no lease is byte-identical in both dialects to what it
+    /// was before the field existed — the enveloped payload is 19 bytes, so
+    /// firmware that predates the lease still parses it.
+    #[test]
+    fn a_config_without_a_lease_did_not_change_length_in_either_dialect() {
+        let cfg = sample_config();
+        assert_eq!(cfg.silence_lease_s, 0);
+        assert_eq!(
+            crate::rnode::build_radio_config_frame(&cfg).len(),
+            RADIO_CONFIG_FRAME_LEN
+        );
+        let enveloped = encode_radio_config(&cfg);
+        assert_eq!(
+            enveloped.len(),
+            ENVELOPE_HEADER_LEN + RADIO_CONFIG_FRAME_LEN - RADIO_CONFIG_MAGIC.len()
+        );
+    }
+
+    /// The board's own report carries the lease back, so a host can read the
+    /// deadline it set (or the one the board defaulted to) rather than infer
+    /// it (#349's read direction).
+    #[test]
+    fn a_radio_report_round_trips_the_silence_lease() {
+        let cfg = RadioConfigWire {
+            radio_silent: true,
+            silence_lease_s: 60,
+            ..sample_config()
+        };
+        let report = encode_radio_report(&cfg);
+        let frame = decode_frame(&report).unwrap();
+        assert_eq!(frame.frame_type, TYPE_RADIO_REPORT);
+        assert_eq!(decode_radio_report_payload(frame.payload), Some(cfg));
     }
 
     #[test]

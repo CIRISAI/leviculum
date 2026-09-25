@@ -1042,6 +1042,7 @@ pub(crate) mod testing {
             st_alock: 1_500,
             lt_alock: 250,
             lt_alock_present: true,
+            silence_lease_s: 0,
         }
     }
 

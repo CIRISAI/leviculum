@@ -104,7 +104,7 @@ The two predict a median gap of 216 ms and 204 ms; the bench measured
 we are already transmitting owes nothing, because the frame before it
 served the wait. The wait comes back when the channel is handed back,
 which the transmit path does after its post-TX listening window
-(`leviculum-nrf/src/lora.rs:1920`).
+(`leviculum-nrf/src/lora.rs:2029`).
 
 Asking for the wait does not discharge it. The wait is spent listening
 and the listen returns early on a reception, so a wait cut short by an
@@ -243,7 +243,7 @@ returns on the first frame — and it is spent at a yield, where the peer's
 turn is the point. A window that ends before the peer's turn can start is
 not a cheaper window, it is a missed reply and a retransmission timeout.
 
-`burst_should_yield` (`leviculum-core/src/rnode.rs:1573`) is unaffected:
+`burst_should_yield` (`leviculum-core/src/rnode.rs:1644`) is unaffected:
 it bounds a burst by frame count and accumulated airtime, and the window
 is spent before the burst starts rather than inside it.
 
@@ -254,7 +254,7 @@ that went deaf would trade a collision for a missed frame, which is the
 same loss at the layer that counts. The transmit path arms the receiver
 for the drawn duration and reports back what it actually listened
 through, and a reception that cuts the wait short leaves the debt
-standing (`leviculum-nrf/src/lora.rs:1668`).
+standing (`leviculum-nrf/src/lora.rs:1769`).
 
 ## 6. Does the window's floor matter?
 

@@ -252,7 +252,7 @@ Show what a message will cost before it is sent, next to the send action:
 
 The pieces exist. `leviculum_core::rnode::airtime_ms`
 (`leviculum-core/src/rnode.rs:968`) and `packet_airtime_ms`
-(`leviculum-core/src/rnode.rs:1415`) are public, interfaces report a
+(`leviculum-core/src/rnode.rs:1486`) are public, interfaces report a
 `bitrate` (`leviculum-std/src/interfaces/mod.rs:558-560`) computed from
 spreading factor, coding rate and bandwidth
 (`compute_bitrate`, `leviculum-std/src/interfaces/rnode.rs:2866`), and
