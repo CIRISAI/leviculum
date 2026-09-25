@@ -758,6 +758,7 @@ fn active_facts(
         txp_dbm: programmed.programmed_dbm,
         txp_requested_dbm: programmed.requested_dbm,
         csma: config.csma_enabled,
+        silent: config.radio_silent,
     }
 }
 
@@ -1385,6 +1386,58 @@ async fn apply_runtime_config(
     }
 }
 
+/// What the task does with a packet the outgoing queue has just handed it:
+/// either it becomes the packet being transmitted, or the host's mute
+/// (`RadioConfig::radio_silent`) swallows it here. Returns whether it
+/// became `pending_tx`.
+///
+/// One function for all three dequeue sites (the pre-TX pick-up, the burst
+/// continuation, and the idle select's outgoing arm), because the mute is
+/// the one outcome of this decision that produces no other trace. A frame
+/// that is kept never reaches the acquisition jitter, the CAD, the CSMA
+/// verdict or the airtime lock, each of which logs; the three sites used to
+/// spell `drop(data)` and say nothing, so a muted board produced a capture
+/// in which frames entered the queue, were dequeued, and vanished.
+///
+/// Codeberg #410: that is how the rig came to stand mute for seven hours
+/// after the 2026-09-15 corpus, with `[MEDIA] lora=on`, a live receive loop
+/// and a climbing transport counter — the diagnosis had to be made from
+/// which lines were *absent*. The drop run is counted the way
+/// `media::log_tx_drop`'s is and for the same reason: every line also writes
+/// the 2 KiB post-crash tail, and a muted board drops a frame per announce.
+fn admit_for_transmit(
+    data: Vec<u8>,
+    config: &RadioConfig,
+    muted: &mut leviculum_media_state::DropRun,
+    pending_tx: &mut Option<Vec<u8>>,
+    access: &mut leviculum_channel_access::ChannelAccess,
+) -> bool {
+    if config.radio_silent {
+        if let Some(run) = muted.dropped(data.len()) {
+            leviculum_log_line::facts::lora_tx_muted(
+                &mut FirmwareLog,
+                &leviculum_log_line::facts::MuteRun {
+                    packets: run.packets,
+                    bytes: run.bytes,
+                },
+            );
+        }
+        return false;
+    }
+    if let Some(run) = muted.resumed() {
+        leviculum_log_line::facts::lora_tx_unmuted(
+            &mut FirmwareLog,
+            &leviculum_log_line::facts::MuteRun {
+                packets: run.packets,
+                bytes: run.bytes,
+            },
+        );
+    }
+    *pending_tx = Some(data);
+    access.begin_packet();
+    true
+}
+
 // LoRa async task
 //
 // `channel_seed` feeds the channel-access randomness (acquisition jitter,
@@ -1457,6 +1510,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     access.set_phy(config.bw_hz, config.sf, config.cr_denom);
 
     let mut pending_tx: Option<Vec<u8>> = None;
+    // Frames the host's mute has swallowed since it was set (#410), so the
+    // suppression is logged as a run and not as one line per frame. See
+    // `admit_for_transmit`.
+    let mut muted = leviculum_media_state::DropRun::new();
     let mut slot_ms: u64 = compute_slot_ms(&config);
     // Count of consecutive post-TX ack windows that expired with no reception.
     // Drives the peer-turn yield (see PEER_YIELD_AFTER_EMPTY). Reset to 0 on any
@@ -1516,12 +1573,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
         // with their own Reticulum announces.
         if pending_tx.is_none() {
             if let Some(data) = take_outgoing(&outgoing_rx) {
-                if config.radio_silent {
-                    drop(data);
-                } else {
-                    pending_tx = Some(data);
-                    access.begin_packet();
-                }
+                admit_for_transmit(data, &config, &mut muted, &mut pending_tx, &mut access);
             }
         }
 
@@ -1767,15 +1819,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // stashed into pending_tx and transmitted next iteration through
             // the normal CSMA/CAD TX path.
             let queue_empty = match take_outgoing(&outgoing_rx) {
+                // A frame the mute swallows leaves the burst with nothing in
+                // flight, which is what `true` says here: the accounting
+                // follows the radio, not the queue.
                 Some(next) => {
-                    if config.radio_silent {
-                        drop(next);
-                        true
-                    } else {
-                        pending_tx = Some(next);
-                        access.begin_packet();
-                        false
-                    }
+                    !admit_for_transmit(next, &config, &mut muted, &mut pending_tx, &mut access)
                 }
                 None => true,
             };
@@ -1949,12 +1997,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                         &mut sink,
                     )
                     .await;
-                if config.radio_silent {
-                    drop(data);
-                } else {
-                    pending_tx = Some(data);
-                    access.begin_packet();
-                }
+                admit_for_transmit(data, &config, &mut muted, &mut pending_tx, &mut access);
             }
         }
     }

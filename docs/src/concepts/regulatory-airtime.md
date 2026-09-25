@@ -28,7 +28,7 @@ Our LNode firmware enforces the same way: `AirtimeTracker`
 (`leviculum-core/src/rnode.rs:1592`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
-`leviculum-nrf/src/lora.rs:1530-1564`), continuing to listen so RX is
+`leviculum-nrf/src/lora.rs:1582-1616`), continuing to listen so RX is
 not starved.
 
 The host-side airtime credit bucket
@@ -57,7 +57,7 @@ firmware reads as unlimited.
 firmware states the settings it applied and the limits it loaded into
 the tracker on the boot-critical log path — the one that bypasses the
 debug port's runtime drain gate (`airtime_limits`,
-`leviculum-nrf/log-line/src/facts.rs:231`) — and states them again on
+`leviculum-nrf/log-line/src/facts.rs:298`) — and states them again on
 every runtime reconfiguration. Until 2026-08 both were ordinary
 runtime lines: a board that came up before a reader attached dropped
 them with everything else, so the two facts a compliance question is

@@ -577,7 +577,7 @@ fn direction_4_carrier_sense_re_anchors_the_pair_and_doubles_the_odds() {
     );
 
     // Whether the interruption resumes the remainder (what the nRF
-    // firmware does, `leviculum-nrf/src/lora.rs:1598-1626`) or redraws, the
+    // firmware does, `leviculum-nrf/src/lora.rs:1650-1678`) or redraws, the
     // separation stays a whole number of slots from a common anchor, so
     // the tie floor applies to both and neither can beat 1/14.
     assert!(pct(re_anchored.1, re_anchored.0) >= pct(cw, cw * cw));

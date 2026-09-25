@@ -93,6 +93,11 @@ pub struct ActiveRadioConfig {
     /// request was outside what the part can deliver.
     pub txp_requested_dbm: i8,
     pub csma: bool,
+    /// The host's transmit mute (`radio_silent`): the receiver keeps
+    /// running, every outgoing frame is dropped at the driver boundary.
+    /// Part of what the radio is set to, and the one part of it that can
+    /// make the board look like broken hardware.
+    pub silent: bool,
 }
 
 impl ActiveRadioConfig {
@@ -124,13 +129,19 @@ impl ActiveRadioConfig {
 /// interesting case cannot be grepped for across a corpus, because the reader
 /// would have to know in advance which runs to look at, which is precisely
 /// what they are trying to find out.
+///
+/// `silent` is on the line for the same reason and by the same argument
+/// (Codeberg #410): it is the difference between a board that transmits and
+/// one that does not, it is set by a host frame and not by anything the
+/// operator did at the bench, and a reader who has to infer it from the
+/// absence of `[LORA] TX` lines is reading a silence where a fact belongs.
 pub fn active_radio_config<S: LineSink>(sink: &mut S, c: &ActiveRadioConfig) {
     sink.line(
         Route::Critical,
         "[LORA] ",
         format_args!(
             "active config: freq={} sf={} bw={} cr={} txp={} txp_requested={} \
-             txp_honoured={} csma={}",
+             txp_honoured={} csma={} silent={}",
             c.freq_hz,
             c.sf,
             c.bw_hz,
@@ -138,7 +149,63 @@ pub fn active_radio_config<S: LineSink>(sink: &mut S, c: &ActiveRadioConfig) {
             c.txp_dbm,
             c.txp_requested_dbm,
             if c.txp_honoured() { "yes" } else { "no" },
-            c.csma
+            c.csma,
+            c.silent
+        ),
+    );
+}
+
+/// One run of outgoing frames the host's transmit mute swallowed.
+///
+/// Counted rather than logged per packet for [`crate`]'s usual reason and
+/// `leviculum_media_state::DropRun`'s: every line also goes into the 2 KiB
+/// post-crash tail, and a muted board drops one frame per announce, so a
+/// line per packet would empty the tail of the boot and fault diagnostics
+/// it exists for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MuteRun {
+    pub packets: u32,
+    pub bytes: u32,
+}
+
+/// `[LORA] LORA_TX_MUTED …` — the host's mute threw this run of frames
+/// away instead of transmitting them.
+///
+/// Codeberg #410: `radio_silent` is the one state of the transmit path
+/// that left no trace at all. The frame never reaches the acquisition
+/// jitter, the CAD, the CSMA decision or the airtime lock, each of which
+/// has its own line, so a muted board produced a capture in which packets
+/// entered the outgoing queue, were dequeued, and vanished. Seven hours of
+/// three mute LNodes were diagnosed from the *absence* of lines; this is
+/// the line whose presence answers it instead.
+///
+/// Emitted on the first frame of a run and at each decade after it, so the
+/// count is never more than a factor of ten below the truth while the
+/// number of lines stays logarithmic; the exact total is on
+/// [`lora_tx_unmuted`].
+///
+/// Gated, like `MEDIA_TX_DROP` which it is the sibling of: it describes
+/// running traffic, not the board's bring-up.
+pub fn lora_tx_muted<S: LineSink>(sink: &mut S, run: &MuteRun) {
+    sink.line(
+        Route::Gated,
+        "[LORA] ",
+        format_args!(
+            "LORA_TX_MUTED packets={} bytes={} reason=host-silent",
+            run.packets, run.bytes
+        ),
+    );
+}
+
+/// `[LORA] LORA_TX_UNMUTED …` — the mute is over and a frame was handed to
+/// the radio again. The only line carrying the run's untruncated totals.
+pub fn lora_tx_unmuted<S: LineSink>(sink: &mut S, run: &MuteRun) {
+    sink.line(
+        Route::Gated,
+        "[LORA] ",
+        format_args!(
+            "LORA_TX_UNMUTED packets={} bytes={}",
+            run.packets, run.bytes
         ),
     );
 }
@@ -348,6 +415,7 @@ mod tests {
             txp_dbm: 22,
             txp_requested_dbm: 22,
             csma: true,
+            silent: false,
         }
     }
 
@@ -361,7 +429,7 @@ mod tests {
                 Route::Critical,
                 String::from(
                     "[LORA] active config: freq=869463000 sf=8 bw=125000 cr=5 txp=22 \
-                     txp_requested=22 txp_honoured=yes csma=true t=191\r\n"
+                     txp_requested=22 txp_honoured=yes csma=true silent=false t=191\r\n"
                 )
             )]
         );
@@ -386,7 +454,7 @@ mod tests {
                 Route::Critical,
                 String::from(
                     "[LORA] active config: freq=869463000 sf=8 bw=125000 cr=5 txp=14 \
-                     txp_requested=2 txp_honoured=no csma=true t=191\r\n"
+                     txp_requested=2 txp_honoured=no csma=true silent=false t=191\r\n"
                 )
             )]
         );
@@ -691,5 +759,79 @@ mod tests {
         assert_eq!(sink.kept.len(), 2, "kept: {:?}", sink.kept);
         assert!(sink.kept[0].starts_with("[LORA] active config: "));
         assert!(sink.kept[1].starts_with("[LORA_AIRTIME_LOCK] limits "));
+    }
+    /// Codeberg #410: `radio_silent` stops every transmission at the driver
+    /// boundary while the receiver keeps running, and the one line an
+    /// operator reads to answer "what is this board set to" did not mention
+    /// it. On 2026-09-15 a corpus left all three rig LNodes muted for seven
+    /// hours; the preserved capture
+    /// (`schneckenschreck:/home/lew/rig-run/ble-drop/feld-t114.log`,
+    /// 02:44Z-09:40Z) contains 20 dequeues from the outgoing LoRa queue, no
+    /// transmission at all, and not one line mentioning a mute.
+    #[test]
+    fn a_muted_radio_says_so_on_the_configuration_line() {
+        let mut sink = Recorder::default();
+        active_radio_config(
+            &mut sink,
+            &ActiveRadioConfig {
+                silent: true,
+                ..eu_medium()
+            },
+        );
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Critical,
+                String::from(
+                    "[LORA] active config: freq=869463000 sf=8 bw=125000 cr=5 txp=22 \
+                     txp_requested=22 txp_honoured=yes csma=true silent=true t=191\r\n"
+                )
+            )]
+        );
+    }
+
+    /// The first packet a mute swallows says so, so a capture attached to a
+    /// board that has just been muted states it on that packet rather than
+    /// on the tenth.
+    #[test]
+    fn the_first_packet_a_mute_swallows_is_reported() {
+        let mut sink = Recorder::default();
+        lora_tx_muted(
+            &mut sink,
+            &MuteRun {
+                packets: 1,
+                bytes: 67,
+            },
+        );
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Gated,
+                String::from(
+                    "[LORA] LORA_TX_MUTED packets=1 bytes=67 reason=host-silent t=191\r\n"
+                )
+            )]
+        );
+    }
+
+    /// And the end of the run carries its untruncated totals, the one place
+    /// the exact count of what the mute cost is stated.
+    #[test]
+    fn the_end_of_a_mute_run_states_what_it_swallowed() {
+        let mut sink = Recorder::default();
+        lora_tx_unmuted(
+            &mut sink,
+            &MuteRun {
+                packets: 37,
+                bytes: 2479,
+            },
+        );
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Gated,
+                String::from("[LORA] LORA_TX_UNMUTED packets=37 bytes=2479 t=191\r\n")
+            )]
+        );
     }
 }
