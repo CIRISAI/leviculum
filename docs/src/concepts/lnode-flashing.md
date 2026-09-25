@@ -62,7 +62,7 @@ reset arrives while the flag is still live.
 
 The touch only exists if the running firmware implements it. Ours does.
 Stock Meshtastic does not, which is why a first flash away from
-Meshtastic needs the manual double-tap (`Justfile:1420`); for that case
+Meshtastic needs the manual double-tap (`Justfile:1482`); for that case
 Meshtastic offers its own admin command, wrapped as `just dfu-rak4631`.
 For Meshcore, microReticulum and RNode firmware on nRF we have not
 measured it.
@@ -539,7 +539,7 @@ Start with how wide the field actually is. The Meshtastic tree carries
 
 **Two transports cover 155 of the 160 flashable variants**, and we
 already own both: the UF2 path in `leviculum-nrf/tools/uf2-runner.sh`
-and the ESP path behind `Justfile:577`, which drives `esptool`. The
+and the ESP path behind `Justfile:633`, which drives `esptool`. The
 work is not building 162 things. It is separating two mechanisms
 cleanly and turning everything else into data.
 

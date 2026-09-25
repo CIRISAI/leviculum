@@ -53,7 +53,7 @@
 //!
 //! The range emulation is the scenario's own: `deaf_to_direct` renders
 //! `test_drop_direct_ingress`, which drops a received frame iff its wire
-//! hops byte is 0 (`leviculum-std/src/interfaces/mod.rs:453-476`). The
+//! hops byte is 0 (`leviculum-std/src/interfaces/mod.rs:458-481`). The
 //! predicate here is that byte test, literally.
 //!
 //! Sans-I/O: no LoRa, no Docker, no rig, deterministic seeded RNGs.
