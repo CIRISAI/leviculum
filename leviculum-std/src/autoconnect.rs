@@ -30,6 +30,7 @@
 //! in the interface layer and the runtime-management logic here, and makes the
 //! spawn/register/teardown lifecycle unit-testable against a mock spawner.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use leviculum_core::crypto::full_hash;
@@ -44,6 +45,18 @@ pub(crate) const AUTOCONNECT_TYPES: [&str; 2] = ["BackboneInterface", "TCPServer
 /// How long an auto-connected interface may report offline before it is torn
 /// down (Python `InterfaceDiscovery.DETACH_THRESHOLD`, in seconds).
 pub(crate) const DETACH_THRESHOLD_SECS: f64 = 12.0;
+
+/// Ceiling for the [cooldown](AutoConnectManager::cooldown) of an endpoint that
+/// has never once connected, in seconds.
+///
+/// The cost of one retry is a full dial cycle: a TCP client task, an interface
+/// registration, [`DETACH_THRESHOLD_SECS`] of a held slot, the core-side
+/// teardown, and the connect-failure warnings. Capping at five minutes turns a
+/// permanently unusable record from ~6 300 of those a day into ~276, while
+/// keeping the delay before an endpoint that starts working is picked up
+/// bounded by a figure an operator can wait out. Python has no equivalent
+/// ceiling (see the deviation note on [`AutoConnectManager::cooldown`]).
+const COOLDOWN_MAX_SECS: f64 = 300.0;
 
 /// The spawn + teardown surface [`AutoConnectManager`] drives. Split out so the
 /// lifecycle is unit-testable against a mock, while production wires it to the
@@ -80,6 +93,27 @@ struct Active {
     /// Wall-clock (Unix seconds) the interface was first seen offline, or
     /// `None` while it is online. Drives the detach-threshold teardown.
     down_since: Option<f64>,
+    /// Whether this attachment ever reported online. An endpoint torn down
+    /// without having done so once is a candidate for the cooldown; one that
+    /// connected and later dropped is not.
+    ever_online: bool,
+}
+
+/// The backoff carried by an endpoint that has been auto-connected and torn
+/// down without ever coming online.
+struct Cooldown {
+    /// Wall-clock (Unix seconds) before which the endpoint takes no slot.
+    until: f64,
+    /// Consecutive dial cycles that never reached online, driving the doubling.
+    consecutive: u32,
+}
+
+/// How long an endpoint that has never connected waits before it may take a
+/// slot again: [`DETACH_THRESHOLD_SECS`] doubling per consecutive failed dial
+/// cycle, capped at [`COOLDOWN_MAX_SECS`]. 12 s, 24 s, 48 s, ... 300 s.
+fn cooldown_secs(consecutive: u32) -> f64 {
+    let doublings = consecutive.saturating_sub(1).min(16);
+    (DETACH_THRESHOLD_SECS * f64::from(1u32 << doublings)).min(COOLDOWN_MAX_SECS)
 }
 
 /// Runtime auto-connect lifecycle for discovered interfaces.
@@ -94,6 +128,20 @@ pub(crate) struct AutoConnectManager {
     /// Endpoints (`discovery_hash`) already warned about as unimplemented, so
     /// the repeated poll does not spam the log.
     warned_unimplemented: BTreeSet<[u8; 32]>,
+    /// Per-endpoint backoff for endpoints that have never once connected
+    /// (Codeberg #414). Keyed by `endpoint_hash`, pruned every poll to the
+    /// endpoints still backed by a live record, so it is bounded by the
+    /// discovered set.
+    ///
+    /// DELIBERATE DEVIATION from Python, which has no such state: there, a
+    /// discovered endpoint that can never be reached is re-dialled on the
+    /// monitor tick forever. Permitted by the project deviation rule — a
+    /// client's own dial cadence is invisible on the wire and to every peer,
+    /// and the measured 22 dial cycles per five minutes per unusable record
+    /// (#414) is wasted work and log volume on exactly the constrained
+    /// backbone nodes Priority 1 is about. It is a backoff, never a blacklist:
+    /// the endpoint keeps being retried, just at a rate that decays.
+    cooldown: BTreeMap<[u8; 32], Cooldown>,
 }
 
 impl AutoConnectManager {
@@ -103,6 +151,7 @@ impl AutoConnectManager {
             max_interfaces,
             active: Vec::new(),
             warned_unimplemented: BTreeSet::new(),
+            cooldown: BTreeMap::new(),
         }
     }
 
@@ -180,11 +229,22 @@ impl AutoConnectManager {
         let mut torn_this_tick: BTreeSet<[u8; 32]> = BTreeSet::new();
         let mut i = 0;
         while i < self.active.len() {
-            let record_gone = !live_endpoints.contains(&self.active[i].endpoint_hash);
+            let endpoint_hash = self.active[i].endpoint_hash;
+            let record_gone = !live_endpoints.contains(&endpoint_hash);
+            // Distinguished from `record_gone` because only a connection that
+            // died (or never came up) says anything about the endpoint; a
+            // record that expired says only that its owner stopped announcing.
+            let mut offline_detach = false;
             let detach = if record_gone {
                 true
             } else if spawner.is_online(self.active[i].id) {
                 self.active[i].down_since = None;
+                if !self.active[i].ever_online {
+                    self.active[i].ever_online = true;
+                    // It connects: it owes nothing to the cooldown table, so a
+                    // later outage gets Python's prompt re-attach.
+                    self.cooldown.remove(&endpoint_hash);
+                }
                 false
             } else {
                 match self.active[i].down_since {
@@ -192,19 +252,34 @@ impl AutoConnectManager {
                         self.active[i].down_since = Some(now);
                         false
                     }
-                    Some(t) => now - t >= DETACH_THRESHOLD_SECS,
+                    Some(t) => {
+                        offline_detach = now - t >= DETACH_THRESHOLD_SECS;
+                        offline_detach
+                    }
                 }
             };
 
             if detach {
                 let id = self.active[i].id;
-                torn_this_tick.insert(self.active[i].endpoint_hash);
+                if offline_detach && !self.active[i].ever_online {
+                    let entry = self.cooldown.entry(endpoint_hash).or_insert(Cooldown {
+                        until: now,
+                        consecutive: 0,
+                    });
+                    entry.consecutive = entry.consecutive.saturating_add(1);
+                    entry.until = now + cooldown_secs(entry.consecutive);
+                }
+                torn_this_tick.insert(endpoint_hash);
                 spawner.teardown(id);
                 self.active.remove(i);
             } else {
                 i += 1;
             }
         }
+
+        // Bounded by the live discovered set: an endpoint nobody advertises any
+        // more carries no backoff, and is dialled fresh if it is re-discovered.
+        self.cooldown.retain(|k, _| live_endpoints.contains(k));
 
         // Spawn pass. `live` is caller-sorted best-first (Python
         // list_discovered_interfaces order), so the cap keeps the best peers.
@@ -224,6 +299,16 @@ impl AutoConnectManager {
             if torn_this_tick.contains(&endpoint_hash) {
                 continue; // just detached this tick; do not immediately reconnect
             }
+            if self
+                .cooldown
+                .get(&endpoint_hash)
+                .is_some_and(|c| now < c.until)
+            {
+                // Never once connected: waiting out its backoff. `continue`,
+                // not `break` — the slot it is not taking goes to the next
+                // candidate rather than staying empty.
+                continue;
+            }
             if self.active.iter().any(|a| a.endpoint_hash == endpoint_hash) {
                 continue; // already auto-connected to this endpoint
             }
@@ -240,6 +325,7 @@ impl AutoConnectManager {
                     id,
                     endpoint_hash,
                     down_since: None,
+                    ever_online: false,
                 });
             }
         }
@@ -277,6 +363,11 @@ mod tests {
         offline: BTreeSet<usize>,
         /// If set, the next spawn returns `None` (resolution failure).
         fail_next_spawn: bool,
+        /// Hosts whose spawned interfaces never report online, the way an
+        /// unroutable endpoint (`::`, an IPv6 target with no route) behaves.
+        never_online: BTreeSet<String>,
+        /// Ids spawned towards a [`never_online`](Self::never_online) host.
+        dead_ids: BTreeSet<usize>,
     }
 
     impl AutoConnectSpawner for MockSpawner {
@@ -293,6 +384,9 @@ mod tests {
             }
             let id = InterfaceId(self.next_id);
             self.next_id += 1;
+            if self.never_online.contains(host) {
+                self.dead_ids.insert(id.0);
+            }
             self.spawned
                 .push((name.to_string(), host.to_string(), port, id));
             self.spawned_ifac
@@ -303,7 +397,7 @@ mod tests {
             self.torn_down.push(id);
         }
         fn is_online(&self, id: InterfaceId) -> bool {
-            !self.offline.contains(&id.0)
+            !self.offline.contains(&id.0) && !self.dead_ids.contains(&id.0)
         }
     }
 
@@ -518,6 +612,193 @@ mod tests {
             sp.spawned_ifac[0],
             (Some("closednet".to_string()), Some("closedkey".to_string())),
             "record IFAC material must reach the spawner"
+        );
+    }
+
+    /// Drive the manager for `secs` simulated seconds at the production poll
+    /// cadence (`driver::AUTOCONNECT_POLL_INTERVAL`, 1 s), starting at t=1000.
+    /// Returns the slot occupancy sampled after every poll.
+    fn simulate(
+        mgr: &mut AutoConnectManager,
+        live: &[DiscoveredInterfaceRecord],
+        sp: &mut MockSpawner,
+        secs: u64,
+    ) -> Vec<usize> {
+        (0..secs)
+            .map(|t| {
+                mgr.poll(live, 1000.0 + t as f64, sp);
+                mgr.active_count()
+            })
+            .collect()
+    }
+
+    fn spawns_to(sp: &MockSpawner, host: &str) -> usize {
+        sp.spawned.iter().filter(|s| s.1 == host).count()
+    }
+
+    /// #414, question 1, the case where usable candidates are scarcer than
+    /// slots: three unroutable endpoints sort ahead of a single reachable peer
+    /// under the issue's cap of three, so two slots keep cycling on dead
+    /// endpoints for the whole run.
+    ///
+    /// The peer must still get its slot and keep it. It does, and already did
+    /// before the cooldown: every dead endpoint detaches at the same tick, and
+    /// the `torn_this_tick` guard makes the spawn pass skip them for that one
+    /// poll, which is the peer's opening. This test pins that opening down, so
+    /// a later change to the teardown pass cannot close it silently.
+    #[test]
+    fn unreachable_endpoints_do_not_starve_a_reachable_peer() {
+        let mut mgr = AutoConnectManager::new(3);
+        let mut sp = MockSpawner::default();
+        for h in ["::", "2001:db8::1", "2001:db8::2"] {
+            sp.never_online.insert(h.to_string());
+        }
+        // Caller-sorted best-first: the unroutable records rank above the peer.
+        let live = vec![
+            backbone_rec("dead-a", "::", 4242, 1),
+            backbone_rec("dead-b", "2001:db8::1", 4242, 2),
+            backbone_rec("dead-c", "2001:db8::2", 4242, 3),
+            backbone_rec("good", "10.0.0.9", 4965, 4),
+        ];
+
+        let occupancy = simulate(&mut mgr, &live, &mut sp, 300);
+
+        assert!(
+            spawns_to(&sp, "10.0.0.9") >= 1,
+            "reachable peer never got a slot in 5 min; occupancy={:?}, spawns={:?}",
+            occupancy,
+            sp.spawned.iter().map(|s| s.1.clone()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            spawns_to(&sp, "10.0.0.9"),
+            1,
+            "a peer that stays online is dialled exactly once"
+        );
+    }
+
+    /// #414, question 1: do failing endpoints occupy auto-connect slots, so a
+    /// host configured for three ends up with fewer usable ones?
+    ///
+    /// Measured answer: no, not durably. Three unroutable endpoints sort ahead
+    /// of three reachable peers under the issue's cap of three. The unroutable
+    /// ones hold every slot until the detach threshold; from then on the
+    /// reachable peers hold all three and cannot be displaced, because an
+    /// endpoint that is online is never torn down and the cap is full. The
+    /// whole deficit is the one-off startup cycle, and the cooldown keeps it
+    /// one-off rather than recurring.
+    #[test]
+    fn unreachable_endpoints_cost_one_startup_cycle_of_slot_time() {
+        let mut mgr = AutoConnectManager::new(3);
+        let mut sp = MockSpawner::default();
+        for h in ["::", "2001:db8::1", "2001:db8::2"] {
+            sp.never_online.insert(h.to_string());
+        }
+        let live = vec![
+            backbone_rec("dead-a", "::", 4242, 1),
+            backbone_rec("dead-b", "2001:db8::1", 4242, 2),
+            backbone_rec("dead-c", "2001:db8::2", 4242, 3),
+            backbone_rec("good-a", "10.0.0.9", 4965, 4),
+            backbone_rec("good-b", "10.0.0.10", 4965, 5),
+            backbone_rec("good-c", "10.0.0.11", 4965, 6),
+        ];
+        let reachable: Vec<[u8; 32]> = ["10.0.0.9", "10.0.0.10", "10.0.0.11"]
+            .iter()
+            .map(|h| AutoConnectManager::endpoint_hash(h, Some(4965)))
+            .collect();
+
+        let mut usable_per_sec = Vec::with_capacity(300);
+        for t in 0..300u64 {
+            mgr.poll(&live, 1000.0 + t as f64, &mut sp);
+            usable_per_sec.push(
+                mgr.active
+                    .iter()
+                    .filter(|a| reachable.contains(&a.endpoint_hash))
+                    .count(),
+            );
+        }
+
+        let empty_lead = usable_per_sec.iter().take_while(|n| **n == 0).count();
+        assert!(
+            empty_lead as f64 <= DETACH_THRESHOLD_SECS + 2.0,
+            "reachable peers waited {empty_lead} s for a slot; one detach cycle is the budget"
+        );
+        assert!(
+            usable_per_sec[empty_lead..].iter().all(|n| *n == 3),
+            "all three slots must stay usable once handed over: {usable_per_sec:?}"
+        );
+    }
+
+    /// #414, question 2: the retry cadence for an endpoint that has never once
+    /// connected.
+    ///
+    /// Every teardown/respawn cycle destroys the TCP client and builds a fresh
+    /// one, which resets that interface's own connect backoff to attempt 1 —
+    /// so the interface layer's log throttling (`should_log_failure`: attempts
+    /// 1..=3, then doublings) never gets past its base rate. Bounding the
+    /// respawn rate is what bounds the log volume.
+    #[test]
+    fn a_never_connected_endpoint_is_retried_at_a_bounded_rate() {
+        let mut mgr = AutoConnectManager::new(3);
+        let mut sp = MockSpawner::default();
+        sp.never_online.insert("::".to_string());
+        let live = vec![backbone_rec("dead", "::", 4242, 1)];
+
+        simulate(&mut mgr, &live, &mut sp, 300);
+
+        let spawns = sp.spawned.len();
+        assert!(
+            spawns <= 6,
+            "{spawns} dial cycles in 5 min for one unusable endpoint; each costs \
+             three connect-failure warnings before the detach threshold cuts it"
+        );
+    }
+
+    /// The cooldown is a backoff, not a blacklist: an endpoint that starts
+    /// working is auto-connected again without operator action.
+    #[test]
+    fn a_cooled_down_endpoint_reconnects_once_it_comes_up() {
+        let mut mgr = AutoConnectManager::new(1);
+        let mut sp = MockSpawner::default();
+        sp.never_online.insert("10.0.0.5".to_string());
+        let live = vec![backbone_rec("peer", "10.0.0.5", 4965, 1)];
+
+        simulate(&mut mgr, &live, &mut sp, 120);
+        let cold_spawns = sp.spawned.len();
+        assert!(cold_spawns >= 1, "the endpoint is tried at least once");
+
+        // The peer comes up. Its next dial must stick.
+        sp.never_online.remove("10.0.0.5");
+        simulate(&mut mgr, &live, &mut sp, 600);
+
+        assert!(
+            sp.spawned.len() > cold_spawns,
+            "a recovered endpoint must be dialled again, not blacklisted"
+        );
+        assert_eq!(mgr.active_count(), 1, "and must end up auto-connected");
+    }
+
+    /// A peer that connected once and later dropped is not a never-connected
+    /// endpoint: it keeps Python's prompt re-attach after the detach threshold.
+    #[test]
+    fn a_peer_that_connected_once_is_reattached_promptly() {
+        let mut mgr = AutoConnectManager::new(1);
+        let mut sp = MockSpawner::default();
+        let rec = backbone_rec("peer", "10.0.0.5", 4965, 1);
+        let live = std::slice::from_ref(&rec);
+
+        mgr.poll(live, 1000.0, &mut sp); // dialled
+        let id = sp.spawned[0].3;
+        mgr.poll(live, 1001.0, &mut sp); // observed online
+        sp.offline.insert(id.0); // carrier dies
+        for t in 0..20u64 {
+            mgr.poll(live, 1002.0 + t as f64, &mut sp);
+        }
+
+        assert_eq!(sp.torn_down, vec![id], "sustained offline still detaches");
+        assert_eq!(
+            sp.spawned.len(),
+            2,
+            "a peer that has been online is re-dialled on the next poll"
         );
     }
 

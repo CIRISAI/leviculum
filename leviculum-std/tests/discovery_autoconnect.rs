@@ -780,3 +780,109 @@ async fn published_ifac_record_connects_under_that_ifac() {
     let _ = node_a.stop().await;
     let _ = node_b.stop().await;
 }
+
+// ===========================================================================
+// Codeberg #414: an endpoint that never connects must not be re-dialled at the
+// detach-threshold rate.
+// ===========================================================================
+
+/// End to end for the never-connected cooldown, on the production event loop
+/// rather than the manager's mock spawner. Two things only the real loop can
+/// show:
+///
+///   * a peer that DOES connect is observed online by the live spawner's
+///     `is_online`, so it is never mistaken for a never-connected endpoint and
+///     survives well past the detach threshold untouched;
+///   * an endpoint nothing listens on is torn down once and then left alone
+///     for its cooldown, instead of being re-dialled every ~14 s the way it
+///     was before (measured: 22 dial cycles per five minutes, each rebuilding
+///     the TCP client and restarting its connect backoff from attempt 1).
+///
+/// Observing for 30 s covers the first detach (~13 s) and the whole first
+/// cooldown (12 s more); without the cooldown the dead endpoint is back within
+/// a second of every teardown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_never_connected_endpoint_is_not_redialled_at_the_detach_rate() {
+    let good_port = next_port();
+    let dead_port = next_port(); // nothing ever listens here
+    let good_addr: SocketAddr = format!("127.0.0.1:{good_port}").parse().unwrap();
+
+    let b_storage = tempfile::tempdir().expect("tempdir b");
+    let mut node_b = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_server(good_addr)
+        .storage_path(b_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build b");
+    node_b.start().await.expect("start b");
+
+    // Both records are on disk before A starts, so the first auto-connect poll
+    // sees them together and the cap (2) covers both: which one ranks higher
+    // cannot influence the result.
+    let a_storage = tempfile::tempdir().expect("tempdir a");
+    seed_discovered_record(a_storage.path(), good_port, None, None, 0xA1);
+    seed_discovered_record(a_storage.path(), dead_port, None, None, 0xD1);
+    let mut node_a = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .autoconnect_discovered_interfaces(2)
+        .storage_path(a_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build a");
+    node_a.start().await.expect("start a");
+
+    let good_name = "autoconnect/Seeded-161";
+    let dead_name = "autoconnect/Seeded-209";
+
+    let good_up = wait_until(Duration::from_secs(15), || {
+        node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.name == good_name && i.online)
+    })
+    .await;
+    assert!(
+        good_up,
+        "reachable discovered endpoint did not auto-connect; interfaces = {:?}",
+        node_a
+            .interface_stats()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // Sample both endpoints for 30 s at 250 ms.
+    let sample = Duration::from_millis(250);
+    let samples = 120u32;
+    let mut good_offline_samples = 0u32;
+    let mut dead_absent_samples = 0u32;
+    for _ in 0..samples {
+        tokio::time::sleep(sample).await;
+        let stats = node_a.interface_stats();
+        if !stats.iter().any(|i| i.name == good_name && i.online) {
+            good_offline_samples += 1;
+        }
+        if !stats.iter().any(|i| i.name == dead_name) {
+            dead_absent_samples += 1;
+        }
+    }
+
+    assert_eq!(
+        good_offline_samples, 0,
+        "a connected peer must stay attached past the detach threshold, \
+         not be cooled down as if it had never connected"
+    );
+    // One cooldown is 12 s = 48 samples; allow half of that for scheduling and
+    // for where in the cycle the observation window opened. Before the fix the
+    // endpoint was absent for the single poll between teardown and re-dial,
+    // roughly 2 of these 120 samples.
+    assert!(
+        dead_absent_samples >= 24,
+        "dead endpoint was absent for only {dead_absent_samples}/120 samples; \
+         it is being re-dialled at the detach-threshold rate"
+    );
+
+    let _ = node_a.stop().await;
+    let _ = node_b.stop().await;
+}
