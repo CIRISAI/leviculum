@@ -605,7 +605,19 @@ pub(crate) fn spawn_local_client(config: LocalClientConfig) -> Result<InterfaceH
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Local,
-            ingress_control: None,
+            // Never ingress-limited, exactly like the server side above:
+            // the reference's `LocalClientInterface.should_ingress_limit`
+            // returns False unconditionally (LocalInterface.py:137-138),
+            // and the client's uplink to its shared instance is that same
+            // class. Left at `None` this fell back to the kind default,
+            // and a client born into a busy instance armed its burst
+            // limiter on the daemon's announce fan-out — then HELD the one
+            // path-response announce it had asked for, until past any
+            // query budget. That is the client half of Codeberg #427's
+            // `lnpnd --status` timeouts (7 of 8 field runs at 5, 20 and
+            // 60 s alike); pinned end-to-end in
+            // `lnpnd/tests/status_under_transport_load.rs`.
+            ingress_control: Some(false),
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

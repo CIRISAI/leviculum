@@ -1900,6 +1900,25 @@ impl ReticulumNode {
                         );
                         core.register_interface_bitrate(handle.info.id.0, bps);
                     }
+                    // An ingress-control value the interface itself declared
+                    // (today only the shared-instance client uplink, which is
+                    // never limited — LocalInterface.py:137-138). The runtime
+                    // accept path honours this field (see the #8/#189 comment
+                    // in the new-connection handler); until #427 this
+                    // construction-time path silently ignored it and the
+                    // uplink fell back to the transport default (ON). `None`
+                    // keeps that default; a config interface's own
+                    // `register_interface_config` runs after this loop and
+                    // still wins.
+                    if let Some(ingress_on) = handle.info.ingress_control {
+                        core.set_interface_ingress_control(handle.info.id.0, ingress_on);
+                        if !ingress_on {
+                            tracing::info!(
+                                "Interface {} ingress control: off (declared by medium)",
+                                handle.info.name
+                            );
+                        }
+                    }
                     stats.insert(handle.info.id.0, Arc::clone(&handle.counters));
                     ready.insert(handle.info.id.0, Arc::clone(&handle.ready));
                 }

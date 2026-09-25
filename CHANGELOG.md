@@ -404,6 +404,42 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- `lnpnd --status` answers on a loaded shared instance (Codeberg #427). On
+  a transport node under sustained announce traffic the query timed out 7
+  of 8 times, at 5, 20 and 60 s alike, while the daemon worked fine the
+  whole time. Reproducing the load in a rig (path table driven to its
+  ceiling, a few thousand announces per minute) turned up two divergences
+  from the reference on one causal chain. First, a local client's path
+  request for a destination absent from the daemon's path table was
+  forwarded to network interfaces only, never to the other local clients —
+  and the daemon hosting the requested control destination is exactly such
+  a client, so once churn had evicted its control entry the request
+  black-holed (the reference forwards on every other interface,
+  Transport.py:3006-3013). Second, the client's own uplink to the shared
+  instance ran the announce ingress burst limiter, which the reference
+  disables on this interface unconditionally (LocalInterface.py:137-138):
+  a client born into a busy instance armed the limiter on the daemon's
+  announce fan-out and then held the very path-response announce it had
+  asked for, for as long as the traffic kept the burst armed — past any
+  budget. With both fixed the rig's query answers in ~0.5 s at the shipped
+  5 s budget under the same load; `lnpnd/tests/status_under_transport_load.rs`
+  pins the whole recovery end to end, and a transport unit test pins the
+  local-client forward on its own.
+
+- `lnpnd`'s remote-management verbs can say what happened to them
+  (Codeberg #427). The path and link stages shared one timeout line, the
+  field could not tell which stage died, and `-v`/`RUST_LOG` installed no
+  subscriber in client mode, so a timed-out query produced one line of
+  output and no way to ask for more. Each stage timeout now adds a stderr
+  line naming the stage, the destination hash actually being resolved (not
+  the propagation hash the status header prints), the measured wait
+  against the budget, and the instance name with the socket it resolves
+  to; stdout keeps the reference's exact `timed out, exiting now` line for
+  scripts. Client mode installs the same stderr subscriber the daemon path
+  has, at the config's loglevel shifted by `-v`/`-q` (the reference's
+  `_remote_init`, lxmd.py:877-878), `RUST_LOG` winning when set, and the
+  dial itself is logged with the resolved socket before it happens.
+
 - `lnsd` builds for a 32-bit router again (Codeberg #415). `leviculum-std`
   held its interface byte counters, its event-log sink counters and the
   driver's dropped-control counter in `std::sync::atomic::AtomicU64`, which

@@ -10039,22 +10039,35 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
 
-        // 4. Local client with unknown destination → forward to network interfaces
-        // (Python Transport.py:3006-3013). This works even without transport enabled.
+        // 4. Local client with unknown destination → forward to every OTHER
+        // interface, the other local clients included (Python
+        // Transport.py:3006-3013 forwards on all interfaces except the
+        // requester's, and spawned local clients are ordinary members of
+        // `Transport.interfaces`, LocalInterface.py:461). This works even
+        // without transport enabled.
+        //
+        // The local clients are not an optimisation but the point (Codeberg
+        // #427): one of them may HOST the destination — `lnpnd --status`
+        // asks the shared instance for the daemon's control destination,
+        // which lives one socket over. With the path entry present, case 2a
+        // answers from the cache; with it expired or evicted, this forward
+        // is the only route the request has to the destination's own host,
+        // and excluding local clients here black-holed the query at every
+        // budget (7 of 8 field runs at 5, 20 and 60 s, miauhaus 2026-09-25).
         if from_local {
             let mut buf = [0u8; crate::constants::MTU];
             let len = packet.pack(&mut buf)?;
             crate::tracing::debug!(
-                "Path request for <{}> from local client, forwarding to network interfaces",
+                "Path request for <{}> from local client, forwarding to all other interfaces",
                 HexShort(&requested_hash),
             );
-            let network_ifaces: Vec<usize> = self
+            let other_ifaces: Vec<usize> = self
                 .interface_names
                 .keys()
                 .copied()
-                .filter(|&id| id != interface_index && !self.is_local_client(id))
+                .filter(|&id| id != interface_index)
                 .collect();
-            for iface_idx in network_ifaces {
+            for iface_idx in other_ifaces {
                 // Outgoing path-request frequency for the forwarded request
                 // (Codeberg #67 Stage 2a).
                 self.record_outgoing_path_request(iface_idx);
@@ -26041,6 +26054,72 @@ mod tests {
             );
 
             // Should NOT have a SendPacket back to the local client
+            let self_sends: Vec<_> = actions
+                .iter()
+                .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == LOCAL_CLIENT_IFACE))
+                .collect();
+            assert!(
+                self_sends.is_empty(),
+                "Path request should not be forwarded back to source local client"
+            );
+        }
+
+        /// A local client's path request for a destination the daemon holds
+        /// no path entry for must reach the OTHER local clients — one of them
+        /// may host the destination and answer for it (Codeberg #427). The
+        /// reference forwards such a request on every interface except the
+        /// requester's, local clients included (`elif is_from_local_client`,
+        /// Transport.py:3006-3013; spawned clients are in
+        /// `Transport.interfaces`, LocalInterface.py:461). Excluding them
+        /// black-holes `lnpnd --status` against its own daemon the moment
+        /// the control destination's entry has fallen out of the instance's
+        /// path table: the request goes to the network, the daemon one
+        /// socket over never hears it, and the client times out at every
+        /// budget — 7 of 8 field runs at 5, 20 and 60 s alike (miauhaus,
+        /// 2026-09-25).
+        #[test]
+        fn test_path_request_from_local_client_forwarded_to_other_local_clients() {
+            const SECOND_LOCAL_CLIENT_IFACE: usize = 11;
+            let mut transport = make_transport_with_local_client();
+            transport.set_interface_name(SECOND_LOCAL_CLIENT_IFACE, "Local[rns/default]/1".into());
+            transport.set_local_client(SECOND_LOCAL_CLIENT_IFACE, true);
+
+            let target_dest = [0xAAu8; TRUNCATED_HASHBYTES];
+            let tag = [0xBBu8; TRUNCATED_HASHBYTES];
+            let mut data = Vec::new();
+            data.extend_from_slice(&target_dest);
+            data.extend_from_slice(&tag);
+
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Plain,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: transport.path_request_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(data),
+            };
+
+            let result = transport.handle_path_request(packet, LOCAL_CLIENT_IFACE);
+            assert!(result.is_ok());
+
+            let actions = transport.drain_actions();
+            let sibling_sends: Vec<_> = actions
+                .iter()
+                .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == SECOND_LOCAL_CLIENT_IFACE))
+                .collect();
+            assert!(
+                !sibling_sends.is_empty(),
+                "A local client's path request for an unknown destination must \
+                 be forwarded to the other local clients, who may host it"
+            );
+
             let self_sends: Vec<_> = actions
                 .iter()
                 .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == LOCAL_CLIENT_IFACE))
