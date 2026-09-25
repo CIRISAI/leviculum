@@ -7,3 +7,11 @@ license = "AGPL-3.0-or-later"
 description = "Pure LoRa channel-access policy for the firmware's transmit path: acquisition jitter and the CAD retry gate, host-testable"
 
 [dependencies]
+
+[dev-dependencies]
+# Tests only, and only for the airtime side of the post-TX window: the
+# window's rows are DERIVED from the same formula the firmware charges its
+# transmissions with (`airtime_ms_with_preamble`, `derive_preamble_symbols`)
+# and from `PACING_MARGIN_MS` itself, never numbers copied in here where
+# they would drift away from the radio. The policy stays dependency-free.
+leviculum-core = { path = "../../leviculum-core", default-features = false }

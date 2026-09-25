@@ -938,6 +938,9 @@ version = "0.1.0"
 [[package]]
 name = "leviculum-channel-access"
 version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+]
 
 [[package]]
 name = "leviculum-core"

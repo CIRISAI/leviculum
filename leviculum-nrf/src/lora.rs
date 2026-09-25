@@ -672,9 +672,16 @@ fn xorshift32(state: &mut u32) -> u32 {
     *state
 }
 
-/// Compute CSMA slot time in ms from the current radio profile.
-/// `max(24, airtime(500) / 10)`, scales with spreading factor so SF10/SF12
+/// The CAD retry gate's BACKOFF slot in ms, from the current radio profile:
+/// `max(24, airtime(500) / 10)`, scaling with spreading factor so SF10/SF12
 /// don't keep retrying inside the same airtime window.
+///
+/// This is not the slot a contention window is drawn in. That one is 12
+/// symbol times clamped to `[24, 100]` ms
+/// (`leviculum_channel_access::jitter_slot_ms`), and the two diverge at wide
+/// bandwidths, where this one sits on its floor while the other tracks the
+/// symbol. Sizing anything against a peer's wait with this slot is the
+/// defect of Codeberg #423.
 fn compute_slot_ms(cfg: &RadioConfig) -> u64 {
     let airtime = leviculum_core::rnode::airtime_ms(500, cfg.bw_hz, cfg.sf, cfg.cr_denom);
     core::cmp::max(CSMA_SLOT_MS_MIN, airtime / 10)
@@ -690,10 +697,18 @@ fn compute_slot_ms(cfg: &RadioConfig) -> u64 {
 /// (CSMA_POST_TX_YIELD_SLOTS). We mirror that discipline with an explicit
 /// bounded window.
 ///
-/// Sized to one full single-frame reply airtime at the current profile plus a
-/// turnaround margin (peer host processing + its CSMA backoff). `rx_window`
-/// returns the instant a packet arrives, so this is only an upper bound that
-/// costs wall-clock when the channel is genuinely idle, not on every TX.
+/// Sized to one full single-frame reply airtime at the current profile plus
+/// the peer's whole turnaround — its host processing plus the widest wait it
+/// can draw before it keys up. `rx_window` returns the instant a packet
+/// arrives, so this is only an upper bound that costs wall-clock when the
+/// channel is genuinely idle, not on every TX.
+///
+/// Only the airtime is computed here; the turnaround term and the ceiling are
+/// `leviculum_channel_access::post_tx_rx_window_ms`, which is where the
+/// window a peer draws is defined and where a host test can reach the
+/// arithmetic. Until Codeberg #423 this function budgeted the peer's DIFS in
+/// the CAD gate's backoff slot, and at SF7/500 kHz that left the window 90 ms
+/// short of the peer's key-up.
 fn post_tx_rx_window_ms(cfg: &RadioConfig) -> u32 {
     // One full LoRa frame on the wire (header + max single payload).
     let reply_bytes = (leviculum_core::rnode::MAX_SINGLE_PAYLOAD + 1) as u32;
@@ -704,10 +719,13 @@ fn post_tx_rx_window_ms(cfg: &RadioConfig) -> u32 {
         cfg.cr_denom,
         cfg.preamble_len,
     );
-    // Peer turnaround: host processing jitter + its DIFS-equivalent (2 slots).
-    let turnaround = leviculum_core::rnode::PACING_MARGIN_MS + 2 * compute_slot_ms(cfg);
-    // Clamp to >=1ms (the SX1262 needs a non-zero timeout) and a sane ceiling.
-    (reply_airtime + turnaround).clamp(1, 10_000) as u32
+    leviculum_channel_access::post_tx_rx_window_ms(
+        reply_airtime,
+        leviculum_core::rnode::PACING_MARGIN_MS,
+        cfg.bw_hz,
+        cfg.sf,
+        cfg.cr_denom,
+    )
 }
 
 /// Routes [`leviculum_log_line::facts`] onto the firmware's two log sinks.

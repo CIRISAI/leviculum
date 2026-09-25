@@ -113,6 +113,69 @@ pub fn jitter_slot_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
     slot_ms.clamp(slot_min, JITTER_SLOT_MAX_MS)
 }
 
+/// The widest wait a node can owe before it keys up on a fresh channel
+/// acquisition: DIFS plus the top of the contention window, at its
+/// modulation ([`JITTER_DIFS_SLOTS`], [`JITTER_CW_SLOTS`],
+/// [`jitter_slot_ms`]).
+///
+/// This is the quantity anyone sizing a *listening* window against a peer
+/// has to budget, because it is the latest the peer can key up — not the
+/// latest it can finish a frame. The draw is uniform over the window, so
+/// this is a ceiling reached once per `JITTER_CW_SLOTS` acquisitions and
+/// not a typical wait; the mean is DIFS plus half the window.
+pub fn widest_acquisition_wait_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
+    (JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1) * jitter_slot_ms(bw_hz, sf, cr_denom)
+}
+
+/// Ceiling on the post-TX receive window, in ms. A bound on how long one
+/// yield may keep the transmit path off its queue when the channel is
+/// genuinely silent; it binds only at SF12/125 kHz, where one reply
+/// airtime alone is 9.3 s.
+pub const POST_TX_WINDOW_MAX_MS: u64 = 10_000;
+
+/// How long the transmit path listens after a transmission before it
+/// drains the next outgoing frame: one reply airtime plus the peer's whole
+/// turnaround.
+///
+/// `reply_airtime_ms` is a full single-frame reply on the wire at the live
+/// modulation, and `host_margin_ms` the peer's host-side processing before
+/// it starts contending (`PACING_MARGIN_MS`); the caller supplies both
+/// because the airtime formula and that constant live in `leviculum-core`.
+/// The modulation is taken rather than a slot, because the slot the peer
+/// draws in is this crate's [`jitter_slot_ms`] and no other — passing one
+/// in is how the term below came to be wrong.
+///
+/// **The turnaround is the peer's widest time to KEY UP, not to finish its
+/// frame** ([`widest_acquisition_wait_ms`]): the receiver stops its
+/// timeout on preamble detect and then runs to packet completion whatever
+/// the length (`SET_STOP_RX_TIMER_ON_PREAMBLE`,
+/// `leviculum-nrf/src/sx1262.rs`), so a reply that starts inside the
+/// window is heard in full even when it ends outside it.
+///
+/// Until Codeberg #423 the turnaround budgeted the peer's DIFS and nothing
+/// else — two slots of the *backoff* slot the CAD gate uses, written
+/// before the peer had a contention window to draw at all. It was covered
+/// at every slow PHY only by the reply-airtime term's slack, and at
+/// SF7/500 kHz there was not enough of that slack: 270 ms of window
+/// against a peer that can wait 360 ms, so a peer drawing the top of its
+/// window keyed up after the board had already left the window. The
+/// coverage is now structural — the term the window must cover is a
+/// summand of the window — instead of an accident of how much airtime the
+/// modulation happens to charge.
+pub fn post_tx_rx_window_ms(
+    reply_airtime_ms: u64,
+    host_margin_ms: u64,
+    bw_hz: u32,
+    sf: u8,
+    cr_denom: u8,
+) -> u32 {
+    let turnaround = host_margin_ms + widest_acquisition_wait_ms(bw_hz, sf, cr_denom);
+    // Clamp to >= 1 ms: the SX1262 reads a zero timeout as "no timeout".
+    reply_airtime_ms
+        .saturating_add(turnaround)
+        .clamp(1, POST_TX_WINDOW_MAX_MS) as u32
+}
+
 /// What the transmit path must do next, after asking the gate about a CAD
 /// outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,9 +407,7 @@ mod tests {
         // against 1500 ms at SF12/125 kHz, a factor of 16 that no
         // millisecond constant tracks. A change to the slot derivation,
         // the DIFS width or the number of draws moves at least one row.
-        let widest = |bw, sf, cr| {
-            (JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1) * jitter_slot_ms(bw, sf, cr)
-        };
+        let widest = widest_acquisition_wait_ms;
         let narrowest = |bw, sf, cr| JITTER_DIFS_SLOTS * jitter_slot_ms(bw, sf, cr);
 
         // SF7 and SF8 at 125 kHz sit on the 24 ms slot floor together, so
@@ -385,6 +446,139 @@ mod tests {
         assert_eq!(jitter_slot_ms(125_000, 0, 5), JITTER_SLOT_MAX_MS);
         assert_eq!(jitter_slot_ms(125_000, 7, 0), JITTER_SLOT_MAX_MS);
         assert_eq!(jitter_slot_ms(125_000, 40, 5), JITTER_SLOT_MAX_MS);
+    }
+
+    // --- The post-TX receive window (Codeberg #423) ---------------------
+
+    /// The reply the post-TX window is sized against: a full single-frame
+    /// LoRa packet on the wire, header plus the largest unsplit payload,
+    /// at the programmed preamble the reference derives for the PHY.
+    ///
+    /// Computed from `leviculum-core` rather than transcribed, so the rows
+    /// below are the numbers the firmware's own call produces and cannot
+    /// drift from the airtime formula the radio is charged with. A config
+    /// may override the preamble (`preamble_symbols`,
+    /// `leviculum-std/src/interfaces/serial.rs`), which moves the rows but
+    /// not the coverage: the peer's turnaround is a summand of the window,
+    /// so any airtime at all still covers it.
+    fn reply_airtime_ms(bw: u32, sf: u8, cr: u8) -> u64 {
+        let bytes = (leviculum_core::rnode::MAX_SINGLE_PAYLOAD + 1) as u32;
+        let preamble = leviculum_core::rnode::derive_preamble_symbols(sf, cr, bw);
+        leviculum_core::rnode::airtime_ms_with_preamble(bytes, bw, sf, cr, preamble)
+    }
+
+    /// The window `leviculum-nrf/src/lora.rs` opened before #423: one reply
+    /// airtime plus `PACING_MARGIN_MS` plus two slots of the *backoff*
+    /// slot, `max(24, airtime(500)/10)`, which is the CAD gate's slot and
+    /// not the one a peer draws its contention window in.
+    fn window_before_423(bw: u32, sf: u8, cr: u8) -> u64 {
+        let backoff_slot = core::cmp::max(
+            JITTER_SLOT_MIN_MS,
+            leviculum_core::rnode::airtime_ms(500, bw, sf, cr) / 10,
+        );
+        (reply_airtime_ms(bw, sf, cr) + leviculum_core::rnode::PACING_MARGIN_MS + 2 * backoff_slot)
+            .clamp(1, POST_TX_WINDOW_MAX_MS)
+    }
+
+    #[test]
+    fn budgeting_only_the_peers_difs_closed_the_window_before_it_could_key_up() {
+        // The defect of Codeberg #423, as the arithmetic states it. At
+        // SF7/500 kHz the pre-#423 window was 270 ms and a peer's widest
+        // wait before it keys up is 360 ms, so a peer that drew the top of
+        // its contention window keyed after the board had stopped
+        // listening. Nothing about the peer is hypothetical here: it draws
+        // the window THIS crate hands its own transmit path.
+        assert_eq!(window_before_423(500_000, 7, 5), 270);
+        assert_eq!(widest_acquisition_wait_ms(500_000, 7, 5), 360);
+        assert!(window_before_423(500_000, 7, 5) < widest_acquisition_wait_ms(500_000, 7, 5));
+
+        // And it is the fast PHYs only, which is why the defect survived a
+        // corpus that runs at SF7..SF12/125 kHz: there the airtime term is
+        // large enough to cover the missing contention window by accident.
+        // SF7/250 kHz is the last row that still covers, and by 36 ms.
+        assert!(window_before_423(125_000, 7, 5) > widest_acquisition_wait_ms(125_000, 7, 5));
+        assert_eq!(
+            window_before_423(250_000, 7, 5) - widest_acquisition_wait_ms(250_000, 7, 5),
+            36
+        );
+
+        // What the term should have been, at the one PHY that broke: the
+        // peer's whole wait, not its DIFS.
+        assert!(
+            post_tx_rx_window_ms(
+                reply_airtime_ms(500_000, 7, 5),
+                leviculum_core::rnode::PACING_MARGIN_MS,
+                500_000,
+                7,
+                5,
+            ) as u64
+                >= widest_acquisition_wait_ms(500_000, 7, 5)
+        );
+    }
+
+    #[test]
+    fn the_post_tx_window_is_one_reply_plus_the_peers_whole_turnaround() {
+        // The table `docs/src/concepts/csma-transmit-window.md` quotes for
+        // question 4, pinned where it is computed. Each row is one reply
+        // airtime plus 100 ms of peer host processing plus the peer's
+        // widest wait, so a change to any of the three moves a row.
+        let window = |bw, sf, cr| {
+            post_tx_rx_window_ms(
+                reply_airtime_ms(bw, sf, cr),
+                leviculum_core::rnode::PACING_MARGIN_MS,
+                bw,
+                sf,
+                cr,
+            )
+        };
+        assert_eq!(window(125_000, 7, 5), 876);
+        assert_eq!(window(125_000, 8, 5), 1188);
+        assert_eq!(window(125_000, 9, 5), 2127);
+        assert_eq!(window(125_000, 10, 5), 3948);
+        // At SF12 one reply airtime alone is 9348 ms, so the ceiling binds.
+        assert_eq!(window(125_000, 12, 5), POST_TX_WINDOW_MAX_MS as u32);
+        assert_eq!(window(250_000, 7, 5), 680);
+        assert_eq!(window(500_000, 7, 5), 582);
+        assert_eq!(window(500_000, 5, 5), 231);
+    }
+
+    #[test]
+    fn the_post_tx_window_covers_the_peers_keyup_at_every_modulation() {
+        // The property the row-by-row table is one sample of, and the
+        // reason the term is a summand rather than a margin that happens
+        // to be large enough: the window cannot be shorter than the peer's
+        // host turnaround plus the widest wait it can draw, at any
+        // modulation a config can ask for.
+        let margin = leviculum_core::rnode::PACING_MARGIN_MS;
+        for &bw in &[7_800u32, 62_500, 125_000, 250_000, 500_000] {
+            for sf in 5..=12u8 {
+                for cr in 5..=8u8 {
+                    let owed = margin + widest_acquisition_wait_ms(bw, sf, cr);
+                    let window =
+                        post_tx_rx_window_ms(reply_airtime_ms(bw, sf, cr), margin, bw, sf, cr)
+                            as u64;
+                    assert!(
+                        window >= owed,
+                        "bw={bw} sf={sf} cr={cr}: window {window} < owed {owed}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_windows_ceiling_cannot_cut_into_the_peers_turnaround() {
+        // The one way the coverage above could stop holding is the clamp,
+        // so the ceiling is pinned against the widest turnaround any
+        // modulation can produce: DIFS plus the window at the 100 ms slot
+        // ceiling, plus the host margin. 1600 ms against 10000 ms.
+        let widest_possible = leviculum_core::rnode::PACING_MARGIN_MS
+            + (JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1) * JITTER_SLOT_MAX_MS;
+        assert_eq!(widest_possible, 1600);
+        assert!(POST_TX_WINDOW_MAX_MS >= widest_possible);
+        // And a degenerate modulation still yields a window the SX1262
+        // accepts: a zero timeout means "listen forever" to the chip.
+        assert!(post_tx_rx_window_ms(0, 0, 0, 0, 0) >= 1);
     }
 
     // --- The acquisition jitter ----------------------------------------

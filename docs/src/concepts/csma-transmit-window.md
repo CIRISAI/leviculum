@@ -27,8 +27,8 @@ because the answer is made of the same five artifacts.
 | Slot | 12 symbol times, clamped to `[24, 100]` ms, floor 6 ms above 30 kbps | `jitter_slot_ms` (`leviculum-nrf/channel-access/src/lib.rs:97`) |
 | DIFS | 2 slots (SIFS is 0) | `JITTER_DIFS_SLOTS` (`leviculum-nrf/channel-access/src/lib.rs:75`) |
 | Contention window | uniform over 0..=13 slots | `JITTER_CW_SLOTS` (`leviculum-nrf/channel-access/src/lib.rs:79`) |
-| Owed when | once per channel acquisition, never per packet | `channel_released` (`leviculum-nrf/channel-access/src/lib.rs:195`) |
-| Discharged by | listening it through, not by being asked for it | `jitter_spent` (`leviculum-nrf/channel-access/src/lib.rs:238`) |
+| Owed when | once per channel acquisition, never per packet | `channel_released` (`leviculum-nrf/channel-access/src/lib.rs:258`) |
+| Discharged by | listening it through, not by being asked for it | `jitter_spent` (`leviculum-nrf/channel-access/src/lib.rs:301`) |
 
 ## 1. What is the window sized from?
 
@@ -47,7 +47,7 @@ that yields, at the PHYs the corpus actually runs:
 
 The table is pinned, not quoted:
 `the_widest_acquisition_wait_is_a_function_of_the_modulation`
-(`leviculum-nrf/channel-access/src/lib.rs:336`).
+(`leviculum-nrf/channel-access/src/lib.rs:399`).
 
 A millisecond constant would have been wrong in both directions. At
 SF12 the clamp is what binds and 12 symbol times would be 393 ms, so
@@ -104,14 +104,14 @@ The two predict a median gap of 216 ms and 204 ms; the bench measured
 we are already transmitting owes nothing, because the frame before it
 served the wait. The wait comes back when the channel is handed back,
 which the transmit path does after its post-TX listening window
-(`leviculum-nrf/src/lora.rs:1902`).
+(`leviculum-nrf/src/lora.rs:1920`).
 
 Asking for the wait does not discharge it. The wait is spent listening
 and the listen returns early on a reception, so a wait cut short by an
 incoming frame has de-tiled nothing: the frame that ended it released
 every other waiting node at the same instant. Only listening it through
 counts (`acquisition_jitter_ms`,
-`leviculum-nrf/channel-access/src/lib.rs:222`).
+`leviculum-nrf/channel-access/src/lib.rs:285`).
 
 **What it costs.** At the project default PHY the mean cost is 204 ms
 per acquisition and the worst case 360 ms. A link setup is three
@@ -172,41 +172,76 @@ selftest's drain window size on a hold no draw can step over.
 ## 4. What does it do to the ack window, the burst yield, and link setup?
 
 The pre-review audit named the post-TX receive window as the one thing a
-transmit window could break, and the arithmetic says it mostly does not.
+transmit window could break, and it was right: at one PHY it did. That is
+Codeberg #423, and it is fixed here rather than described.
 
-The window the transmit path opens after every transmission is one full
-single-frame reply airtime plus a turnaround margin
-(`post_tx_rx_window_ms`, `leviculum-nrf/src/lora.rs:697`). Its
-turnaround term budgets the peer's DIFS and nothing else, so it was
-written before the peer had a contention window to draw. The right
+The window the transmit path opens after a transmission is one full
+single-frame reply airtime plus the peer's turnaround
+(`post_tx_rx_window_ms`, `leviculum-nrf/src/lora.rs:712`, deciding in
+`leviculum-channel-access` where the peer's window is defined). The right
 comparison is against the peer's time to *key up*, not to finish its
 frame: the receiver stops its timeout on preamble detect and then runs
 to packet completion regardless of length
-(`SET_STOP_RX_TIMER_ON_PREAMBLE`, `leviculum-nrf/src/sx1262.rs:753`).
+(`SET_STOP_RX_TIMER_ON_PREAMBLE`, `leviculum-nrf/src/sx1262.rs:753`), so
+a reply that starts inside the window is heard whole even when it ends
+outside it.
 
-| PHY | Post-TX window | Peer's widest wait | Covered |
-|---|---|---|---|
-| SF7/125 kHz | 666 ms | 360 ms | yes |
-| SF8/125 kHz | 1094 ms | 360 ms | yes |
-| SF9/125 kHz | 1866 ms | 735 ms | yes |
-| SF10/125 kHz | 3338 ms | 1470 ms | yes |
-| SF12/125 kHz | 10000 ms (clamped) | 1500 ms | yes |
-| SF7/250 kHz | 396 ms | 360 ms | yes, by 36 ms |
-| SF7/500 kHz | 270 ms | 360 ms | **no** |
-| SF5/500 kHz | 189 ms | 90 ms | yes |
+Until #423 the turnaround term budgeted the peer's DIFS and nothing else
+— and in the wrong slot at that, two slots of the CAD gate's *backoff*
+slot, `max(24, airtime(500)/10)`, rather than of the 12-symbol slot a
+contention window is actually drawn in. It was written before the peer
+had a window to draw, and it stayed that way through #149 and #347.
 
-The window is airtime-derived and the wait is slot-derived, so they
-diverge exactly where the slot's 24 ms floor stops tracking a shrinking
-airtime: at wide bandwidths and low spreading factors. SF7/500 kHz is
-the one PHY in the table where the listening window closes before the
-peer can be expected to have keyed.
+| PHY | Post-TX window | before #423 | Peer's widest wait | Covered |
+|---|---|---|---|---|
+| SF7/125 kHz | 876 ms | 666 ms | 360 ms | yes |
+| SF8/125 kHz | 1188 ms | 1094 ms | 360 ms | yes |
+| SF9/125 kHz | 2127 ms | 1866 ms | 735 ms | yes |
+| SF10/125 kHz | 3948 ms | 3338 ms | 1470 ms | yes |
+| SF12/125 kHz | 10000 ms (clamped) | 10000 ms | 1500 ms | yes |
+| SF7/250 kHz | 680 ms | 396 ms | 360 ms | yes |
+| SF7/500 kHz | 582 ms | 270 ms | 360 ms | yes, **was no** |
+| SF5/500 kHz | 231 ms | 189 ms | 90 ms | yes |
 
-Even there the peer is not necessarily missed, because our own next
-acquisition owes its jitter immediately afterwards and that wait is also
-spent listening, so the composite listen is 270 + 48..360 ms. Missing
-the reply needs the peer to draw high and us to draw low in the same
-exchange. That is a probability, not a guarantee, and a probability is
-not what an ack window should rest on.
+The old window was airtime-derived and the wait is slot-derived, so they
+diverged exactly where the slot's 24 ms floor stops tracking a shrinking
+airtime: at wide bandwidths and low spreading factors. At SF7/500 kHz the
+listening window closed 90 ms before the peer could be expected to have
+keyed, and the only reason the other rows held is that the airtime term
+was large enough to absorb a missing contention window by accident —
+SF7/250 kHz held by 36 ms.
+
+Missing the reply there needed the peer to draw high and us to draw low
+in the same exchange, since our own next acquisition owes its jitter
+immediately afterwards and that wait is also spent listening: the
+composite listen was 270 + 48..360 ms. That is a probability, not a
+guarantee, and a probability is not what an ack window should rest on.
+
+What the term is now is the peer's whole wait —
+`widest_acquisition_wait_ms`, the same DIFS-plus-window this crate hands
+our own transmit path — so the coverage is structural rather than
+arithmetical luck: the quantity the window has to cover is a *summand* of
+the window, and no PHY, preamble override or clamp can take it back out.
+The window is computed in `post_tx_rx_window_ms`
+(`leviculum-nrf/channel-access/src/lib.rs:165`) and its rows are pinned
+where they are computed, from `leviculum-core`'s own airtime rather than
+transcribed: `the_post_tx_window_is_one_reply_plus_the_peers_whole_turnaround`
+(`leviculum-nrf/channel-access/src/lib.rs:520`) for the table, and
+`the_post_tx_window_covers_the_peers_keyup_at_every_modulation`
+(`leviculum-nrf/channel-access/src/lib.rs:546`) for the property it is one
+sample of, over five bandwidths x SF5..SF12 x CR4/5..4/8. The pre-#423
+arithmetic is kept as an assertion of its own,
+`budgeting_only_the_peers_difs_closed_the_window_before_it_could_key_up`
+(`leviculum-nrf/channel-access/src/lib.rs:484`), so a revert of the term
+goes red at SF7/500 kHz rather than silently.
+
+The cost is the second column against the third: every PHY but SF12/125
+kHz, where the ceiling already bound, listens longer now — by 210 ms at
+the bench PHY and 610 ms at SF10/125 kHz. It is spent
+only when the channel stays silent through the whole window — `rx_window`
+returns on the first frame — and it is spent at a yield, where the peer's
+turn is the point. A window that ends before the peer's turn can start is
+not a cheaper window, it is a missed reply and a retransmission timeout.
 
 `burst_should_yield` (`leviculum-core/src/rnode.rs:1573`) is unaffected:
 it bounds a burst by frame count and accumulated airtime, and the window
@@ -219,7 +254,7 @@ that went deaf would trade a collision for a missed frame, which is the
 same loss at the layer that counts. The transmit path arms the receiver
 for the drawn duration and reports back what it actually listened
 through, and a reception that cuts the wait short leaves the debt
-standing (`leviculum-nrf/src/lora.rs:1650`).
+standing (`leviculum-nrf/src/lora.rs:1668`).
 
 ## 6. Does the window's floor matter?
 
@@ -263,10 +298,10 @@ milliseconds: every acquisition also owes DIFS unconditionally, two slots
 is the `narrowest` column of question 1's table — 48 ms at the bench PHY,
 12 ms at SF5/500 kHz, 200 ms at SF12
 (`the_widest_acquisition_wait_is_a_function_of_the_modulation`,
-`leviculum-nrf/channel-access/src/lib.rs:336`), and pinned again through
+`leviculum-nrf/channel-access/src/lib.rs:399`), and pinned again through
 the draw itself for a thousand seeds in
 `boot_owes_jitter_and_the_draw_is_difs_plus_a_bounded_window`
-(`leviculum-nrf/channel-access/src/lib.rs:393`). The reference is no
+(`leviculum-nrf/channel-access/src/lib.rs:587`). The reference is no
 different: `tx_queue_handler`
 (`reference/RNode_Firmware/RNode_Firmware.ino:1623`) waits `difs_ms`
 (`reference/RNode_Firmware/Config.h:119`), also two slots, and waits it
@@ -302,11 +337,18 @@ we can change is our own.
 
 ## What is still open
 
-1. The post-TX receive window's turnaround term still budgets the peer's
-   DIFS without its contention window, and at SF7/500 kHz that is 90 ms
-   short. Sizing it is a radio-behaviour change and wants a rig
-   measurement with the other medium switched off, so it belongs in its
-   own issue rather than here.
+1. The post-TX receive window's turnaround term now budgets the peer's
+   whole wait (Codeberg #423, above), and what is left open is the term
+   beside it: whether the reply *airtime* belongs in the window at all.
+   Nothing about coverage needs it — the peer's key-up is what the window
+   has to reach — so dropping it would take SF12/125 kHz from the 10 s
+   clamp to 1600 ms and SF10 from 3948 to 1570. That is a large change to
+   the listening duty cycle at slow PHYs, it interacts with the peer-turn
+   yield the window is doubled into (#23 Bug B) and with the receiver's
+   resource part timeout, and it is a radio-behaviour change that wants a
+   rig measurement with the other medium switched off. #423's own
+   acceptance is the same rig scenario: SF7/500 kHz, LoRa under test,
+   Bluetooth off on the boards.
 2. `JITTER_CW_SLOTS` mirrors the reference's post-excursion band-1
    window, 14 draws, where a freshly booted reference uses 15. See
    question 2.

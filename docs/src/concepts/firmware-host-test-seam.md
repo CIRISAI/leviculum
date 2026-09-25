@@ -53,9 +53,13 @@ every one of them pure and host-testable: `screen`, `sd-policy`,
 `persist-ack`, `boot-trace`, `boot-count`, `channel-access`,
 `media-state`, `record-log`, `pn-store`, `store-spike`, `qspi-bitbang`,
 `battery-scale`, `settle-budget`, `sync-batch`, `upload-proof`
-(`members`, `leviculum-nrf/Cargo.toml:14`). Together they carry **786
+(`members`, `leviculum-nrf/Cargo.toml:14`). Together they carry **790
 host assertions across 58 test targets** — measured 2026-09-25 by the
-host-triple lines of `lint-nrf` (`Justfile:75`).
+host-triple lines of `lint-nrf` (`Justfile:75`). The last four came with
+the post-TX receive window (Codeberg #423), which is the rule's own case:
+an arithmetic budget that had been stranded in `src/lora.rs` was moved
+into `leviculum-channel-access` by the fix that needed it, rather than
+asserted on a board.
 
 `leviculum-core` is the other half of the seam and counts the same way: a
 decision that is not board-specific belongs there, where `lnsd` runs the
