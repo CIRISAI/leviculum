@@ -345,6 +345,37 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "CONTROL_PLANE_OVERFLOW",
         required_keys: &["dropped_count"],
     },
+    // CIRIS fork saturation signals. The control plane crossed 80 % before any
+    // drop (leviculum#60); the completion mirror passed its alarm threshold or
+    // its expected envelope, which never evicts (leviculum#56).
+    EventSchema {
+        name: "CONTROL_PLANE_WATERMARK",
+        required_keys: &["queued", "queue_capacity", "queue_pct"],
+    },
+    EventSchema {
+        name: "COMPLETION_MIRROR_WATERMARK",
+        required_keys: &["live_links", "envelope", "envelope_pct"],
+    },
+    EventSchema {
+        name: "COMPLETION_MIRROR_OVER_ENVELOPE",
+        required_keys: &["live_links", "envelope", "next_report_at"],
+    },
+    // CIRIS fork multi-segment resource assembly (leviculum#62): a transfer
+    // that cannot be assembled is delivered per segment, and says so.
+    EventSchema {
+        name: "RESOURCE_ASSEMBLY_DECLINED",
+        required_keys: &[
+            "segments",
+            "projected_bytes",
+            "per_transfer_cap",
+            "aggregate_buffered",
+            "delivery",
+        ],
+    },
+    EventSchema {
+        name: "RESOURCE_ASSEMBLY_OUT_OF_ORDER",
+        required_keys: &["expected", "got", "delivery"],
+    },
     // OBS-1: announce rebroadcast made observable. ANN_TX fires when the node
     // actually (re)transmits a stored announce on an interface (pairs with
     // ANN_RX); ANN_TX_SUPPRESSED fires when an airtime cap held the rebroadcast
