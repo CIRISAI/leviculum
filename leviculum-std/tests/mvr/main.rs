@@ -50,9 +50,33 @@ pub mod harness;
 /// two siblings, against a 33 238 B model. Unarmed the cost is one
 /// thread-local read per allocation, which every other mvr pays and none of
 /// them can see.
+///
+/// Per-thread arming was necessary and not sufficient. libtest gives each
+/// test its own thread, so no other test's *own* allocations land in this
+/// window — but `tracing` dispatch runs on the thread that emits the event,
+/// and `EventLogLayer::on_event` (`leviculum-std/src/event_log.rs:1634`)
+/// pushes one `String` into the buffer of EVERY capture handle any test has
+/// registered, "regardless of which test emitted it" (that module's own doc).
+/// So the code under test emitting `PKT_TX`
+/// (`leviculum-core/src/transport.rs:3450`) inside the window made THIS
+/// thread pay another test's `Vec<String>` growth step: on 2026-09-25,
+/// `link_failure_recovery_silent_resume.rs:530` held the only handle in this
+/// binary, its buffer crossed 256 -> 512 entries during the calibration
+/// serve, and `512 * size_of::<String>()` = 12 288 B landed in a window whose
+/// whole budget is 4 096 B. Deterministic, and invisible under
+/// `--test-threads=1`, where that test's handle is dropped before this one
+/// starts. Hence [`Probe::armed`] holds this thread's dispatch at
+/// `NoSubscriber` for the life of the window: the journey the dispatch feeds
+/// is host-only anyway — the firmware takes `leviculum-core` with
+/// `default-features = false` (`leviculum-nrf/Cargo.toml:17`), so
+/// `crate::tracing::enabled!` is the `false` shim at
+/// `leviculum-core/src/lib.rs:83` and the whole `PKT_TX` block is dead code
+/// on a board. Muting it measures the board's path, not this host's
+/// observability.
 pub mod alloc_probe {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// The board heap the measurement is for
     /// (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:269`). A single block
@@ -73,6 +97,67 @@ pub mod alloc_probe {
         static PEAK: Cell<isize> = const { Cell::new(0) };
         /// Largest single counted block since arming.
         static MAXBLOCK: Cell<isize> = const { Cell::new(0) };
+        /// Where [`trap_block_size`] leaves the backtrace of the first
+        /// matching block this thread allocated inside a window.
+        ///
+        /// A leaked `&'static str` rather than a `String`, to keep this
+        /// module's no-destructor rule: a thread-local that needed a
+        /// destructor would register it from inside the allocator. One
+        /// leak per trapped thread, and only when the trap is armed.
+        static TRAPPED: Cell<Option<&'static str>> = const { Cell::new(None) };
+        /// Re-entry guard: capturing a backtrace allocates.
+        static IN_TRAP: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The block size [`trap_block_size`] is watching for; 0 = off.
+    ///
+    /// Process-global rather than thread-local so a test can arm it for a
+    /// window that has not started yet. Read once per *counted* allocation
+    /// inside an armed window, so an unarmed thread pays nothing for it.
+    static TRAP_BLOCK: AtomicUsize = AtomicUsize::new(0);
+
+    /// Name the code that allocates a block of exactly `bytes`.
+    ///
+    /// The debugging entry point for "this window caught a block it should
+    /// not have": take the size from [`largest_block`], arm this, re-run,
+    /// and read [`trap_report`]. A size filter is used rather than a
+    /// threshold because a threshold backtraces every large block and the
+    /// capture itself allocates — enough to move the numbers of every
+    /// other probe test in the binary (measured 2026-09-25). Pass 0 to
+    /// disarm.
+    pub fn trap_block_size(bytes: usize) {
+        TRAP_BLOCK.store(bytes, Ordering::Relaxed);
+    }
+
+    /// The backtrace of the first trapped block on this thread, if one
+    /// was caught since the trap was armed.
+    pub fn trap_report() -> Option<&'static str> {
+        TRAPPED.try_with(Cell::get).ok().flatten()
+    }
+
+    /// Capture one backtrace for a block the trap is watching for.
+    ///
+    /// Counting is suspended across the capture so the diagnostic cannot
+    /// move the number it exists to explain.
+    fn trap(size: usize) {
+        if size != TRAP_BLOCK.load(Ordering::Relaxed) {
+            return;
+        }
+        if IN_TRAP.try_with(Cell::get).unwrap_or(true) {
+            return;
+        }
+        let _ = IN_TRAP.try_with(|guard| guard.set(true));
+        let _ = ARMED.try_with(|armed| armed.set(false));
+        if TRAPPED.try_with(Cell::get).ok().flatten().is_none() {
+            let captured: &'static str = Box::leak(
+                std::backtrace::Backtrace::force_capture()
+                    .to_string()
+                    .into_boxed_str(),
+            );
+            let _ = TRAPPED.try_with(|slot| slot.set(Some(captured)));
+        }
+        let _ = ARMED.try_with(|armed| armed.set(true));
+        let _ = IN_TRAP.try_with(|guard| guard.set(false));
     }
 
     /// Whether a block of this layout is one the board could hold.
@@ -104,6 +189,10 @@ pub mod alloc_probe {
                 block.set(size);
             }
         });
+        // Last, not first: the block is booked before it is backtraced, so
+        // arming the trap during a parallel run cannot make some other
+        // thread's window miss a block it should have counted.
+        trap(layout.size());
     }
 
     fn release(layout: Layout) {
@@ -148,16 +237,26 @@ pub mod alloc_probe {
     /// dropped, so a panicking test cannot leave the counter running into
     /// the next test this thread picks up.
     pub struct Probe {
-        _private: (),
+        /// This thread's `tracing` dispatch, held at `NoSubscriber` for the
+        /// life of the window. See the module doc: the dispatch runs on the
+        /// emitting thread and hands the line to every *other* test's
+        /// capture buffer, so leaving it live measures the schedule.
+        _no_tracing: tracing::dispatcher::DefaultGuard,
     }
 
     impl Probe {
         pub fn armed() -> Self {
+            // Installed before arming on purpose: `set_default` touches a
+            // thread-local of its own, and those bytes are the probe's, not
+            // the code under test's.
+            let no_tracing = tracing::dispatcher::set_default(&tracing::Dispatch::none());
             LIVE.with(|live| live.set(0));
             PEAK.with(|peak| peak.set(0));
             MAXBLOCK.with(|block| block.set(0));
             ARMED.with(|armed| armed.set(true));
-            Self { _private: () }
+            Self {
+                _no_tracing: no_tracing,
+            }
         }
 
         /// The high-water mark of live bytes since arming, in bytes the
@@ -175,6 +274,9 @@ pub mod alloc_probe {
 
     impl Drop for Probe {
         fn drop(&mut self) {
+            // The body runs before the fields, so counting stops before
+            // the dispatch guard is restored and never bills the window
+            // for tracing's own teardown.
             ARMED.with(|armed| armed.set(false));
         }
     }
@@ -182,6 +284,92 @@ pub mod alloc_probe {
 
 #[global_allocator]
 static COUNTING: alloc_probe::Counting = alloc_probe::Counting;
+
+/// The probe's own positive control: what a measurement window counts and
+/// what it must not.
+///
+/// The window in `pn_serve_peak_outgrows_the_board_heap` is 4 096 B wide and
+/// caught a 12 288 B block that belonged to another test (see the
+/// [`alloc_probe`] module doc). These pin both halves of the fix — that a
+/// block of exactly that size is invisible when it is allocated outside the
+/// window and fully visible when it is allocated inside — so a later change
+/// to the probe cannot quietly restore either failure.
+mod alloc_probe_self_test {
+    use crate::alloc_probe;
+
+    /// The size the real contamination had: another test's `Vec<String>`
+    /// capacity step, `512 * size_of::<String>()`.
+    const CONTAMINANT_BYTES: usize = 512 * std::mem::size_of::<String>();
+
+    #[test]
+    fn a_block_allocated_before_the_window_is_not_in_the_window() {
+        assert_eq!(CONTAMINANT_BYTES, 12_288, "the block the probe caught");
+        let outside: Vec<u8> = Vec::with_capacity(CONTAMINANT_BYTES);
+        let (peak, largest) = {
+            let probe = alloc_probe::Probe::armed();
+            (probe.peak(), alloc_probe::largest_block())
+        };
+        assert_eq!(
+            largest, 0,
+            "a block from before arming is not this window's"
+        );
+        assert!(peak < 4096, "peak {peak} B");
+        drop(outside);
+    }
+
+    #[test]
+    fn a_block_allocated_inside_the_window_is_counted_and_nameable() {
+        alloc_probe::trap_block_size(CONTAMINANT_BYTES);
+        let (peak, largest, named) = {
+            let probe = alloc_probe::Probe::armed();
+            let inside: Vec<u8> = Vec::with_capacity(CONTAMINANT_BYTES);
+            let seen = (probe.peak(), alloc_probe::largest_block());
+            drop(inside);
+            (seen.0, seen.1, alloc_probe::trap_report())
+        };
+        alloc_probe::trap_block_size(0);
+        assert_eq!(
+            largest, CONTAMINANT_BYTES,
+            "the window must see its own block"
+        );
+        assert!(peak >= CONTAMINANT_BYTES, "peak {peak} B");
+        let named = named.expect("an armed trap must name the block it matched");
+        assert!(
+            named.contains("a_block_allocated_inside_the_window_is_counted_and_nameable"),
+            "the backtrace must reach the allocating code: {named}"
+        );
+    }
+
+    /// The contamination itself, reproduced: a `tracing` event emitted by
+    /// the code under test used to hand this thread the growth of a
+    /// `Vec<String>` owned by whatever other test had a capture handle
+    /// registered. A window holds its own dispatch at `NoSubscriber`, so
+    /// the event does not reach any layer and costs the window nothing.
+    #[test]
+    fn a_tracing_event_inside_the_window_reaches_no_layer() {
+        let _handle = leviculum_std::test_support::event_log::init_event_log();
+        let (peak, largest) = {
+            let probe = alloc_probe::Probe::armed();
+            for _ in 0..64 {
+                tracing::debug!(target: "pkt", event = "PROBE_SELF_TEST", t = 0);
+            }
+            (probe.peak(), alloc_probe::largest_block())
+        };
+        assert_eq!(
+            (peak, largest),
+            (0, 0),
+            "a muted window must allocate nothing for 64 events"
+        );
+        // The subscriber is genuinely there: the same events outside the
+        // window do reach the layer, so the assertion above is not vacuous.
+        let before = _handle.dump().len();
+        tracing::debug!(target: "pkt", event = "PROBE_SELF_TEST", t = 0);
+        assert!(
+            _handle.dump().len() > before,
+            "control: outside a window the event must reach the capture buffer"
+        );
+    }
+}
 
 mod a_frame_the_modem_consumed_without_transmitting;
 mod announce_emission_unix_time;

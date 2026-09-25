@@ -312,7 +312,9 @@ fn one_fetch_serve_holds_many_copies_of_its_own_response() {
         assert!(
             largest < 1024 && peak < 4096,
             "the host allowance is no longer just the compressor: \
-             peak {peak} B, largest block {largest} B"
+             peak {peak} B, largest block {largest} B -- name the block by \
+             arming alloc_probe::trap_block_size({largest}) before this \
+             window and printing alloc_probe::trap_report()"
         );
         peak
     };
