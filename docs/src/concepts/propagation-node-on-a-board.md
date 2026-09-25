@@ -251,7 +251,7 @@ sections the linker charged to `FLASH`, and it reads the region's bounds
 from the symbols the firmware itself mounts. An image that grew into the
 region would be a link error before it could be a lost store: four
 `ASSERT`s in `memory.x` hold the edges (`ASSERT`,
-`leviculum-nrf/memory.x:253`) — the image stops below the boot-record
+`leviculum-nrf/memory.x:291`) — the image stops below the boot-record
 page (#380), that page stops below the store, the store stops at
 `USER_FLASH_END`, and the store is a whole number of 4 KiB pages.
 
