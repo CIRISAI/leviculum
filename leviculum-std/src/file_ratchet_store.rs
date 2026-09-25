@@ -225,6 +225,8 @@ impl RatchetStore for FileRatchetStore {
 
 #[cfg(test)]
 mod tests {
+    // Only the Unix-gated test reads these off Unix.
+    #[cfg_attr(not(unix), allow(unused_imports))]
     use super::*;
 
     /// Codeberg #336: both ratchet directories are enumerated on every
