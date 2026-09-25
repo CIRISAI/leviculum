@@ -279,7 +279,7 @@ Three measured budgets, all from the T114 on the rig, all post-#372:
 
 | Budget | Measured | Headroom |
 |---|---|---|
-| Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:253`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
+| Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:269`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
 | Stack, flip-link region below `.data` | `min_free=72 280` of a 104 464 B region, `peak_used=32 184` (`rig-run/proof-dup-t114.log`, 2026-09-10) | ~70 KiB never touched |
 | SoftDevice RAM ceiling | 928 B of margin (`leviculum-nrf/memory.x:166`) | **not the relevant budget, see below** |
 

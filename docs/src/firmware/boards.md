@@ -403,7 +403,7 @@ path = "src/bin/solarnode.rs"
 The board-support-package (BSP) features select the runtime for a given
 board. Exactly one BSP feature must be enabled per build; a
 `compile_error!` in `lib.rs` enforces the mutual exclusion.
-(`leviculum-nrf/src/lib.rs:18-27`)
+(`leviculum-nrf/src/lib.rs:34-43`)
 
 | Feature | Effect | Cite |
 |---------|--------|------|

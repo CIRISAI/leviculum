@@ -12,6 +12,7 @@
 - [Bluetooth interfaces](concepts/bluetooth-interfaces.md)
 - [Media profiles](concepts/media-profiles.md)
 - [How far one firmware build reaches](concepts/board-support-scope.md)
+- [The firmware's host-test seam](concepts/firmware-host-test-seam.md)
 - [Flashing an LNode](concepts/lnode-flashing.md)
 - [OTA stage 1: entering BLE DFU on a command from the mesh](concepts/ota-stage-1-ble-dfu.md)
 - [OTA stage 2: the image itself over the mesh](concepts/ota-stage-2-mesh-image.md)

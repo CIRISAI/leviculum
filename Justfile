@@ -76,29 +76,29 @@ lint-nrf:
     cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-t114 -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-solarnode -- -D warnings
-    # leviculum-screen, leviculum-sd-policy, leviculum-gnss-time,
-    # leviculum-gnss-presence, leviculum-gnss-init, leviculum-telemetry-policy,
-    # leviculum-ble-tx, leviculum-announce-policy, leviculum-queue-budget,
-    # leviculum-log-line,
-    # leviculum-tx-spacing, leviculum-rx-arming, leviculum-persist-ack,
-    # leviculum-boot-trace, leviculum-boot-count, leviculum-channel-access,
-    # leviculum-media-state,
-    # leviculum-record-log, leviculum-pn-store, leviculum-store-spike,
-    # leviculum-qspi-bitbang, leviculum-battery-scale,
-    # leviculum-settle-budget and leviculum-sync-batch are the
-    # pure, host-testable crates inside the leviculum-nrf workspace: clippy +
-    # tests run on the host triple (the workspace's .cargo/config defaults to
-    # thumbv7em).
+    # Every other member of the leviculum-nrf workspace is a pure,
+    # host-testable crate: clippy + tests run on the host triple, because the
+    # workspace's own `.cargo/config.toml` defaults `build.target` to
+    # thumbv7em. The set is `--workspace --exclude leviculum-nrf` rather than a
+    # written-out `-p` list, so a seam crate is gated by being a member and
+    # cannot be added without its tests running. The list it replaced had to be
+    # kept in three places (the `members` array, these two lines) and the prose
+    # copy above them had already lost `leviculum-upload-proof`; a crate missing
+    # from the `-p` lines is silently never tested, which a positive control
+    # confirmed — a deliberately red test in a fresh member failed this form and
+    # passed the list one. The firmware crate is the one member that has to be
+    # excluded: it does not compile for a host triple at any feature set.
+    # Policy and inventory: docs/src/concepts/firmware-host-test-seam.md.
     #
-    # `--all-targets` here, unlike the two embedded feature-set lines above:
+    # `--all-targets` here, unlike the three embedded feature-set lines above:
     # these crates' whole value is their host test suites, and without the flag
     # clippy lints their libs only while the `cargo test` line below merely
     # COMPILES the test code. A lint that fires solely in a test was therefore
     # invisible to every run of this recipe — the same gap the workspace line in
     # `fast` closed in e27a15e. The embedded lines stay narrow: `--all-targets`
     # there would pull in test/bench harnesses that do not link for thumbv7em.
-    cd leviculum-nrf && cargo clippy -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-announce-policy -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming -p leviculum-persist-ack -p leviculum-boot-trace -p leviculum-boot-count -p leviculum-channel-access -p leviculum-media-state -p leviculum-record-log -p leviculum-pn-store -p leviculum-store-spike -p leviculum-qspi-bitbang -p leviculum-battery-scale -p leviculum-settle-budget -p leviculum-sync-batch -p leviculum-upload-proof --target $(rustc -vV | sed -n 's/host: //p') --all-targets -- -D warnings
-    cd leviculum-nrf && cargo test -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-announce-policy -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming -p leviculum-persist-ack -p leviculum-boot-trace -p leviculum-boot-count -p leviculum-channel-access -p leviculum-media-state -p leviculum-record-log -p leviculum-pn-store -p leviculum-store-spike -p leviculum-qspi-bitbang -p leviculum-battery-scale -p leviculum-settle-budget -p leviculum-sync-batch -p leviculum-upload-proof --target $(rustc -vV | sed -n 's/host: //p')
+    cd leviculum-nrf && cargo clippy --workspace --exclude leviculum-nrf --target $(rustc -vV | sed -n 's/host: //p') --all-targets -- -D warnings
+    cd leviculum-nrf && cargo test --workspace --exclude leviculum-nrf --target $(rustc -vV | sed -n 's/host: //p')
 
 # Build the ESP32-class firmware (Heltec WiFi LoRa 32 V4) and package the
 # flash image.

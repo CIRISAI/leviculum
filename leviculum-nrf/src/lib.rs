@@ -2,6 +2,22 @@
 //!
 //! Provides heap allocator setup, board-specific pin mappings,
 //! USB CDC-ACM debug logging, and Reticulum transport interface.
+//!
+//! # Nothing here is tested
+//!
+//! This crate cannot run a host test — both BSP features route through
+//! `softdevice`, one of them is mandatory (the `compile_error!` pair
+//! below), and `nrf-softdevice-s140` does not compile for a host triple.
+//! Every `#[test]` in this workspace lives in one of the pure member
+//! crates beside it, and every assertion written here instead would need
+//! a board and an hour of the one rig.
+//!
+//! So a decision — a cadence, a threshold, an ordering, a predicate, an
+//! arithmetic budget, a byte-exact line other tools grep — belongs in a
+//! member crate, and this crate calls it. What stays is what takes a pin,
+//! a register, a SoftDevice syscall or an `embassy_time::Instant`. The
+//! policy, the seam's current extent and the decisions still stranded in
+//! `src/` are in `docs/src/concepts/firmware-host-test-seam.md`.
 
 #![no_std]
 

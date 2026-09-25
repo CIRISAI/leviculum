@@ -55,7 +55,7 @@ pub mod alloc_probe {
     use std::cell::Cell;
 
     /// The board heap the measurement is for
-    /// (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:253`). A single block
+    /// (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:269`). A single block
     /// bigger than this is host-only by construction; see the module
     /// doc.
     pub const BLOCK_CEILING_BYTES: usize = 32 * 1024;

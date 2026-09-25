@@ -38,7 +38,7 @@ write") — still 440 KB short of two banks.
 So there is no A/B bank internally, and the alternative — erase the
 running image and write the new one from a transfer held in RAM — is not
 an alternative at all. It fails on two counts: the board has 96 KiB of
-heap (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:253`) against a 605 KiB
+heap (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:269`) against a 605 KiB
 image, and a power cut during the write leaves a board with no image and
 no copy of one. **Staging on flash the copier does not erase is not an
 optimisation; it is the property that makes the operation survivable.**
