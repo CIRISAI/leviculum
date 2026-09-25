@@ -194,12 +194,50 @@ MEMORY
      * 0x20001FFF) for MBR + master-init scratch; cannot probe below
      * that via deliberate undersize.
      *
-     * Note: 0x20010000 (64 KiB reservation) regresses with a
-     * peripheral-register MEMACC fault (info != 0); root cause now
-     * believed to be a layout-driven re-trigger of the same
-     * SoftDevice-PREGION violation that caused Bug #32 (direct RNG
-     * register access from RawHwRng, fixed in commit f093099). Worth
-     * re-running 64 KiB with the f093099 build to confirm.
+     * The old warning here — "0x20010000 (64 KiB reservation)
+     * regresses with a peripheral-register MEMACC fault, stay below
+     * that boundary" — no longer describes anything this line can do,
+     * and is dropped rather than carried forward (#46). Two facts, both
+     * measured, retire it.
+     *
+     * First, ORIGIN(RAM) stopped deciding the SoftDevice's reservation
+     * when flip-link arrived (574844cf, 2026-07-01). nrf-softdevice
+     * passes `&__sdata` as `app_ram_base` to `sd_ble_enable`
+     * (softdevice.rs `get_app_ram_base`), and under flip-link .data sits
+     * ABOVE the stack, anchored to the TOP of the region — so __sdata is
+     * a function of ORIGIN(RAM) + LENGTH(RAM), not of ORIGIN(RAM).
+     * Building src/bin/t114.rs at this ORIGIN and at 0x20010000
+     * (LENGTH 0x30000, same top of RAM) gives byte-identical
+     * `__sdata = _stack_start = 0x2001EB50` and an unmoved .retained;
+     * the only difference is `_stack_end`, i.e. the stack region shrinks
+     * from 0x17D90 (97 680 B) to 0xEB50 (60 240 B). Neither of the
+     * mechanisms the old note was reaching for — a larger SD
+     * reservation, or a shifted static — is reachable by editing this
+     * line any more.
+     *
+     * Second, the boundary is already crossed and nothing faults. The
+     * base this build declares is 0x2001EB50, 125 776 B above
+     * 0x20000000, well past 0x20010000, on every image since flip-link.
+     * The SD's real requirement is the separately probed 0x20005DA0,
+     * and the ceiling that matters is ORIGIN(RETAINED) — held at boot by
+     * `assert_sd_fits_below_retained` (src/ble/mod.rs), not by a
+     * magic address up here.
+     *
+     * What the 2026-05-02 observation was: it was taken at 90534abe
+     * (02:24), 48 minutes BEFORE f0930991 (03:12) fixed RawHwRng's
+     * direct RNG register access — itself a confirmed
+     * peripheral-register MEMACC against an S140-owned peripheral, the
+     * exact fault class reported. That build had no flip-link, so
+     * __sdata WAS ORIGIN(RAM) and the edit really did hand the SD
+     * 64 KiB; what it also did was link a known PREGION violation.
+     * Re-running it today would need a pre-flip-link tree to mean
+     * anything, and would re-measure a bug that is fixed. That
+     * __sdata WAS ORIGIN(RAM) back then is measured, not inferred:
+     * deleting `linker = "flip-link"` from .cargo/config.toml and
+     * relinking puts __sdata at 0x20006DC0, i.e. at this ORIGIN — that
+     * relink is the positive control for the layout assertion in
+     * scripts/check-nrf-stack-frames.sh, which exists so the premise
+     * of this whole note cannot quietly stop holding.
      *
      * Leaves 256K - 24.3K SD - 3.1K retained = 228.6K (0x39240) for
      * application: 0x20006DC0 = 0x20006140 + 0xC80 (RETAINED), and
