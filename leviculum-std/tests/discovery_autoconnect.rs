@@ -886,3 +886,137 @@ async fn a_never_connected_endpoint_is_not_redialled_at_the_detach_rate() {
     let _ = node_a.stop().await;
     let _ = node_b.stop().await;
 }
+
+/// Codeberg #416, end to end: a `bootstrap_only` interface is a way into the
+/// network, not a permanent link. Python detaches every bootstrap-only
+/// interface once the online auto-connected count reaches
+/// `autoconnect_discovered_interfaces`, and re-creates it when that count
+/// falls back to zero (`Discovery.py:553-563`). lnsd parsed the key and kept
+/// the connection for the life of the daemon, which on a public backbone node
+/// left a seed client carrying tens of megabytes it was never meant to carry.
+///
+/// The test drives both halves against real loopback TCP: node A reaches B
+/// over a bootstrap-only client, auto-connects to B's separately advertised
+/// second port, and must then drop the bootstrap client; removing the
+/// discovery record kills the auto-connect again, and the bootstrap client
+/// must come back rather than leaving A with no way into the network.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bootstrap_only_interface_is_detached_once_autoconnect_is_satisfied() {
+    let bootstrap_port = next_port();
+    let backbone_port = next_port();
+    let bootstrap_addr: SocketAddr = format!("127.0.0.1:{bootstrap_port}").parse().unwrap();
+    let backbone_addr: SocketAddr = format!("127.0.0.1:{backbone_port}").parse().unwrap();
+
+    // Node B: two listeners. The first is the seed entry point A dials with its
+    // bootstrap-only client; the second is the endpoint A discovers.
+    let b_storage = tempfile::tempdir().expect("tempdir b");
+    let mut node_b = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_server(bootstrap_addr)
+        .add_tcp_server(backbone_addr)
+        .storage_path(b_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build b");
+    node_b.start().await.expect("start b");
+
+    let a_storage = tempfile::tempdir().expect("tempdir a");
+    seed_discovered_record(a_storage.path(), backbone_port, None, None, 0xB1);
+    let mut node_a = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_client(bootstrap_addr)
+        .bootstrap_only()
+        .autoconnect_discovered_interfaces(1)
+        .storage_path(a_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build a");
+    node_a.start().await.expect("start a");
+
+    // The bootstrap client is A's only configured interface, so it takes
+    // config index 0 and with it the `tcp_client_0` name.
+    let bootstrap_name = "tcp_client_0";
+    let autoconnect_name = "autoconnect/Seeded-177";
+
+    let seed_up = wait_until(Duration::from_secs(15), || {
+        node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.name == bootstrap_name && i.online)
+    })
+    .await;
+    assert!(seed_up, "bootstrap-only seed client never connected");
+
+    let auto_up = wait_until(Duration::from_secs(15), || {
+        node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.name == autoconnect_name && i.online)
+    })
+    .await;
+    assert!(
+        auto_up,
+        "discovered endpoint did not auto-connect; interfaces = {:?}",
+        node_a
+            .interface_stats()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let seed_gone = wait_until(Duration::from_secs(15), || {
+        !node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.name == bootstrap_name)
+    })
+    .await;
+    assert!(
+        seed_gone,
+        "bootstrap_only interface was still attached with the autoconnect target \
+         reached; interfaces = {:?}",
+        node_a
+            .interface_stats()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // Second half: the auto-connected interface goes away (its record expires,
+    // emulated by deleting it), leaving A with nothing. The seed must return.
+    let dir = a_storage.path().join("discovery").join("interfaces");
+    for entry in std::fs::read_dir(&dir).expect("read discovery dir") {
+        let entry = entry.expect("dir entry");
+        std::fs::remove_file(entry.path()).expect("remove record");
+    }
+
+    let auto_gone = wait_until(Duration::from_secs(15), || {
+        !node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.name == autoconnect_name)
+    })
+    .await;
+    assert!(auto_gone, "auto-connected interface outlived its record");
+
+    let seed_back = wait_until(Duration::from_secs(20), || {
+        node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.name == bootstrap_name && i.online)
+    })
+    .await;
+    assert!(
+        seed_back,
+        "no auto-connected interface is left and the bootstrap interface was not \
+         re-established: the node has no way back into the network; interfaces = {:?}",
+        node_a
+            .interface_stats()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let _ = node_a.stop().await;
+    let _ = node_b.stop().await;
+}

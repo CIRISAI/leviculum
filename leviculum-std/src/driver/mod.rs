@@ -820,6 +820,98 @@ fn peer_up_announce(
     }
 }
 
+/// Apply one interface section's configuration to the core, keyed by its
+/// interface index.
+///
+/// Called for every enabled section at start-up, and again when a section is
+/// re-attached at runtime (Codeberg #416: a `bootstrap_only` interface that
+/// was detached and is brought back). `handle_interface_down` deregisters all
+/// of this — mode, kind, IFAC, announce-rate, tunnel hash, announce cap — so a
+/// re-attach that skipped it would bring the interface back stripped of
+/// everything the operator configured.
+///
+/// `TCPServerInterface` sections are skipped: the listener never registers as
+/// an interface, only its accepted connections do, and they inherit their
+/// configuration through `InterfaceInfo` under dynamic ids.
+fn register_interface_config(core: &mut StdNodeCore, idx: usize, iface_config: &InterfaceConfig) {
+    if iface_config.interface_type == "TCPServerInterface" {
+        return; // IFAC passed to spawn_tcp_server in initialize_interfaces
+    }
+    // Tunnel-capable interfaces (Codeberg #64 initiator side): a
+    // static TCP client registers a stable, peer-opaque interface
+    // hash so it can initiate the synthesize handshake on connect and
+    // reconnect. The hash is derived from the interface's stable name
+    // (mirrors Python `interface.get_hash() = full_hash(str(self))`);
+    // it only needs to stay constant across the interface's
+    // reconnects so the derived tunnel id is stable. The medium
+    // decision ("a non-KISS TCP client wants a tunnel") lives here in
+    // the driver; transport treats the hash as opaque bytes.
+    if iface_config.interface_type == "TCPClientInterface" {
+        let iface_name = format!("tcp_client_{}", idx);
+        let interface_hash = leviculum_core::crypto::full_hash(iface_name.as_bytes());
+        core.register_tunnel_interface(idx, interface_hash);
+    }
+    if let Some(ifac) = build_ifac_config(iface_config) {
+        core.set_ifac_config(idx, ifac);
+        tracing::info!(
+            "IFAC enabled on interface {} (size={})",
+            idx,
+            iface_config
+                .ifac_size
+                .unwrap_or(leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK)
+        );
+    }
+    // Announce-rate config (Codeberg #92): drives both status
+    // reporting and per-destination rebroadcast rate limiting
+    // (enforced per receiving interface in transport).
+    if let Some(ar) = build_announce_rate_config(iface_config) {
+        core.set_announce_rate_config(idx, ar);
+    }
+    apply_bitrate_and_announce_cap(core, idx, iface_config);
+    // Transport medium, resolved from the configured interface type so
+    // status can group by transport rather than by the peer-label name.
+    core.set_interface_kind(idx, kind_from_interface_type(&iface_config.interface_type));
+    // Interface propagation mode (Codeberg #91). Resolve the config
+    // string to an InterfaceMode and hand it to transport, which
+    // owns the per-interface mode map and applies the propagation
+    // rules. An unrecognised value logs and keeps the Full default,
+    // matching Python (which leaves the mode unchanged on an
+    // unknown string).
+    if let Some(mode_str) = iface_config.mode.as_deref() {
+        match leviculum_core::traits::InterfaceMode::from_config_str(mode_str) {
+            Some(mode) => {
+                core.set_interface_mode(idx, mode);
+                if mode != leviculum_core::traits::InterfaceMode::Full {
+                    tracing::info!("Interface {} mode: {}", idx, mode);
+                }
+            }
+            None => {
+                tracing::warn!("Interface {}: unknown mode '{}', using Full", idx, mode_str);
+            }
+        }
+    }
+    // Ingress control (Codeberg #8). The interface's medium decides
+    // the default (point-to-point off, shared/broadcast on); an
+    // explicit config value overrides it. The driver (media-aware)
+    // resolves the flag and hands it to transport, which owns the
+    // per-interface map and stays interface-type agnostic.
+    let ingress_on = iface_config.resolve_ingress_control();
+    core.set_interface_ingress_control(idx, ingress_on);
+    if !ingress_on {
+        tracing::info!("Interface {} ingress control: off", idx);
+    }
+    // Egress control (Codeberg #172). Off unless the operator sets
+    // `egress_control`, matching the reference default
+    // (`Interface.EGRESS_CONTROL = False`). No medium-class default
+    // here: the reference has none either, and switching it on by
+    // guess would silently drop path requests.
+    let egress_on = iface_config.egress_control.unwrap_or(false);
+    core.set_interface_egress_control(idx, egress_on);
+    if egress_on {
+        tracing::info!("Interface {} egress control: on", idx);
+    }
+}
+
 /// Hand an interface's configured bitrate and announce cap to the core.
 ///
 /// Split out of the interface-registration loop because the ordering is a
@@ -857,6 +949,89 @@ fn apply_bitrate_and_announce_cap(core: &mut StdNodeCore, idx: usize, config: &I
                  configured bitrate to take a share of",
                 idx
             );
+        }
+    }
+}
+
+/// Re-establish every detached `bootstrap_only` section (Codeberg #416,
+/// Python `Discovery.py:559-563` re-synthesising from `bootstrap_configs`).
+///
+/// Each section is rebuilt through the same constructor start-up uses, under
+/// its original config index, so it comes back with the same interface id and
+/// the same name. The core-side configuration `handle_interface_down` removed
+/// is re-applied where the handle is registered (see the `new_interface_rx`
+/// arm), which is after the inherited `InterfaceInfo` values land — the
+/// announce-cap entry is reset by `register_interface_bitrate`, so the config
+/// has to have the last word.
+#[allow(clippy::too_many_arguments)]
+fn reattach_bootstrap_interfaces(
+    bootstrap: &mut BootstrapWiring,
+    next_id: &Arc<AtomicUsize>,
+    new_iface_tx: &mpsc::Sender<InterfaceHandle>,
+    reconnect_tx: &mpsc::Sender<InterfaceId>,
+    corrupt_every: Option<u64>,
+    outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    inventory: &crate::interfaces::inventory::SharedInventory,
+    transport_enabled: bool,
+) {
+    let BootstrapWiring {
+        ifaces,
+        tunnel_notify_tx,
+        peer_event_tx,
+        storage_path,
+        identity_hash,
+        auto_peer_count,
+    } = bootstrap;
+    let ctx = interface_build::InterfaceBuildCtx {
+        next_id,
+        new_iface_tx,
+        reconnect_tx,
+        tunnel_notify_tx,
+        peer_event_tx,
+        corrupt_every,
+        storage_path: storage_path.clone(),
+        outbound_socket_hook,
+        inventory: Arc::clone(inventory),
+        transport_enabled,
+        identity_hash: *identity_hash,
+    };
+    for b in ifaces.iter_mut() {
+        if !b.ids.is_empty() {
+            continue;
+        }
+        match interface_build::build_interface(b.idx, &b.config, &ctx, auto_peer_count) {
+            Ok(interface_build::Built::Handles(mut handles)) => {
+                apply_runtime_ifac(&b.config, &mut handles);
+                for handle in handles {
+                    let id = handle.info.id;
+                    if new_iface_tx.try_send(handle).is_err() {
+                        tracing::warn!(
+                            "could not re-attach bootstrap-only interface '{}': the event \
+                             loop is not accepting interfaces",
+                            b.config.name,
+                        );
+                        break;
+                    }
+                    b.ids.push(id);
+                }
+                if !b.ids.is_empty() {
+                    tracing::info!(
+                        "discovery: no auto-discovered interface is connected, \
+                         re-establishing bootstrap-only interface '{}'",
+                        b.config.name,
+                    );
+                }
+            }
+            // Filtered out when the wiring was built: a type that registers no
+            // interface of its own was never detachable in the first place.
+            Ok(interface_build::Built::SelfManaged) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "could not re-attach bootstrap-only interface '{}': {}",
+                    b.config.name,
+                    e,
+                );
+            }
         }
     }
 }
@@ -909,6 +1084,42 @@ struct AutoConnectWiring {
     next_id: Arc<AtomicUsize>,
     corrupt_every: Option<u64>,
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    /// `bootstrap_only` sections, if any (Codeberg #416). `None` when the
+    /// config has none, which is the usual case.
+    bootstrap: Option<BootstrapWiring>,
+}
+
+/// Runtime lifecycle of the `bootstrap_only` interfaces (Codeberg #416).
+///
+/// A bootstrap-only interface exists to join the network, not to carry it:
+/// Python detaches every one of them once the online auto-discovered count
+/// reaches `autoconnect_discovered_interfaces`, and re-creates them from the
+/// saved configs when that count falls back to zero
+/// (`Reticulum.py:824-825`, `Discovery.py:553-563`).
+///
+/// Re-attaching goes through the same constructor start-up uses, under the
+/// section's ORIGINAL interface index. That index is not cosmetic: the core
+/// keys mode, kind, IFAC, announce-rate and the tunnel hash by it, the TCP
+/// client derives its name from it, and `handle_interface_down` deregisters
+/// all of that on detach. Reusing the index — and re-running
+/// [`register_interface_config`] — is what makes the returning interface the
+/// same interface rather than a stripped-down namesake.
+struct BootstrapWiring {
+    ifaces: Vec<BootstrapIface>,
+    tunnel_notify_tx: mpsc::Sender<InterfaceId>,
+    peer_event_tx: mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>,
+    storage_path: Option<PathBuf>,
+    identity_hash: [u8; 16],
+    auto_peer_count: AutoPeerCount,
+}
+
+/// One `bootstrap_only` section under management.
+struct BootstrapIface {
+    /// Config index, which is also the interface id its leaf handle takes.
+    idx: usize,
+    config: InterfaceConfig,
+    /// Live interface ids; empty while the section is detached.
+    ids: Vec<InterfaceId>,
 }
 
 /// One periodic self-advertise job (Codeberg #107): a discoverable interface's
@@ -1701,89 +1912,7 @@ impl ReticulumNode {
                 if !iface_config.enabled {
                     continue;
                 }
-                if iface_config.interface_type == "TCPServerInterface" {
-                    continue; // IFAC passed to spawn_tcp_server in initialize_interfaces
-                }
-                // Tunnel-capable interfaces (Codeberg #64 initiator side): a
-                // static TCP client registers a stable, peer-opaque interface
-                // hash so it can initiate the synthesize handshake on connect and
-                // reconnect. The hash is derived from the interface's stable name
-                // (mirrors Python `interface.get_hash() = full_hash(str(self))`);
-                // it only needs to stay constant across the interface's
-                // reconnects so the derived tunnel id is stable. The medium
-                // decision ("a non-KISS TCP client wants a tunnel") lives here in
-                // the driver; transport treats the hash as opaque bytes.
-                if iface_config.interface_type == "TCPClientInterface" {
-                    let iface_name = format!("tcp_client_{}", idx);
-                    let interface_hash = leviculum_core::crypto::full_hash(iface_name.as_bytes());
-                    core.register_tunnel_interface(idx, interface_hash);
-                }
-                if let Some(ifac) = build_ifac_config(iface_config) {
-                    core.set_ifac_config(idx, ifac);
-                    tracing::info!(
-                        "IFAC enabled on interface {} (size={})",
-                        idx,
-                        iface_config
-                            .ifac_size
-                            .unwrap_or(leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK)
-                    );
-                }
-                // Announce-rate config (Codeberg #92): drives both status
-                // reporting and per-destination rebroadcast rate limiting
-                // (enforced per receiving interface in transport).
-                if let Some(ar) = build_announce_rate_config(iface_config) {
-                    core.set_announce_rate_config(idx, ar);
-                }
-                apply_bitrate_and_announce_cap(&mut core, idx, iface_config);
-                // Transport medium, resolved from the configured interface type so
-                // status can group by transport rather than by the peer-label name.
-                core.set_interface_kind(
-                    idx,
-                    kind_from_interface_type(&iface_config.interface_type),
-                );
-                // Interface propagation mode (Codeberg #91). Resolve the config
-                // string to an InterfaceMode and hand it to transport, which
-                // owns the per-interface mode map and applies the propagation
-                // rules. An unrecognised value logs and keeps the Full default,
-                // matching Python (which leaves the mode unchanged on an
-                // unknown string).
-                if let Some(mode_str) = iface_config.mode.as_deref() {
-                    match leviculum_core::traits::InterfaceMode::from_config_str(mode_str) {
-                        Some(mode) => {
-                            core.set_interface_mode(idx, mode);
-                            if mode != leviculum_core::traits::InterfaceMode::Full {
-                                tracing::info!("Interface {} mode: {}", idx, mode);
-                            }
-                        }
-                        None => {
-                            tracing::warn!(
-                                "Interface {}: unknown mode '{}', using Full",
-                                idx,
-                                mode_str
-                            );
-                        }
-                    }
-                }
-                // Ingress control (Codeberg #8). The interface's medium decides
-                // the default (point-to-point off, shared/broadcast on); an
-                // explicit config value overrides it. The driver (media-aware)
-                // resolves the flag and hands it to transport, which owns the
-                // per-interface map and stays interface-type agnostic.
-                let ingress_on = iface_config.resolve_ingress_control();
-                core.set_interface_ingress_control(idx, ingress_on);
-                if !ingress_on {
-                    tracing::info!("Interface {} ingress control: off", idx);
-                }
-                // Egress control (Codeberg #172). Off unless the operator sets
-                // `egress_control`, matching the reference default
-                // (`Interface.EGRESS_CONTROL = False`). No medium-class default
-                // here: the reference has none either, and switching it on by
-                // guess would silently drop path requests.
-                let egress_on = iface_config.egress_control.unwrap_or(false);
-                core.set_interface_egress_control(idx, egress_on);
-                if egress_on {
-                    tracing::info!("Interface {} egress control: on", idx);
-                }
+                register_interface_config(&mut core, idx, iface_config);
             }
 
             let transport_enabled = core.transport_config().enable_transport;
@@ -1895,6 +2024,44 @@ impl ReticulumNode {
         let autoconnect_corrupt_every = self.corrupt_every;
         let autoconnect_socket_hook = self.outbound_socket_hook.clone();
 
+        // Bootstrap-only sections (Codeberg #416). Only a section that
+        // registered a leaf interface under its own config index can be
+        // detached and brought back under that index; a listener-shaped type
+        // (TCP server, AutoInterface, I2P) registers its children under
+        // dynamic ids and has no seed-connection semantics to begin with.
+        let bootstrap_ifaces: Vec<BootstrapIface> = self
+            .interfaces
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.enabled && c.bootstrap_only)
+            .filter_map(|(idx, c)| {
+                let id = InterfaceId(idx);
+                if registry.handles().iter().any(|h| h.info.id == id) {
+                    Some(BootstrapIface {
+                        idx,
+                        config: c.clone(),
+                        ids: vec![id],
+                    })
+                } else {
+                    tracing::warn!(
+                        "interface '{}': bootstrap_only is not acted on for a {} -- the type \
+                         registers no interface of its own to detach",
+                        c.name,
+                        c.interface_type,
+                    );
+                    None
+                }
+            })
+            .collect();
+        let bootstrap = (!bootstrap_ifaces.is_empty()).then(|| BootstrapWiring {
+            ifaces: bootstrap_ifaces,
+            tunnel_notify_tx: tunnel_notify_tx.clone(),
+            peer_event_tx: peer_event_tx.clone(),
+            storage_path: self.storage_path.clone(),
+            identity_hash: self.identity_hash(),
+            auto_peer_count: self.auto_peer_count.clone(),
+        });
+
         // A previous stop() closed the completion registry when its event loop
         // exited; this loop is about to observe events again, so registrations
         // must park rather than resolve NodeStopped.
@@ -1931,6 +2098,7 @@ impl ReticulumNode {
                     next_id: autoconnect_next_id,
                     corrupt_every: autoconnect_corrupt_every,
                     outbound_socket_hook: autoconnect_socket_hook,
+                    bootstrap,
                 },
                 discovery_announce,
                 core_processor,
@@ -4060,7 +4228,7 @@ async fn run_event_loop(
     remote_mgmt: Option<RemoteMgmtResponder>,
     discovery_storage: Option<PathBuf>,
     discovery_network_identity: Option<Arc<leviculum_core::Identity>>,
-    autoconnect_wiring: AutoConnectWiring,
+    mut autoconnect_wiring: AutoConnectWiring,
     discovery_announce: Option<DiscoveryAnnounceWiring>,
     core_processor: Option<Box<dyn CoreProcessor>>,
     completions: Arc<CompletionRegistry>,
@@ -4665,6 +4833,21 @@ async fn run_event_loop(
                     if let Some(ifac) = &inherited_ifac {
                         core.set_ifac_config(iface_idx, ifac.clone());
                     }
+                    // A re-attached `bootstrap_only` section (Codeberg #416)
+                    // returns under its original config index, so everything
+                    // `handle_interface_down` deregistered has to go back —
+                    // announce-rate config, the tunnel hash, bitrate and
+                    // announce cap, egress control. Applied here, last, because
+                    // `register_interface_bitrate` above resets the announce-cap
+                    // entry and the operator's config must win.
+                    if let Some(cfg) = autoconnect_wiring.bootstrap.as_ref().and_then(|b| {
+                        b.ifaces
+                            .iter()
+                            .find(|i| i.ids.contains(&handle.info.id))
+                            .map(|i| &i.config)
+                    }) {
+                        register_interface_config(&mut core, iface_idx, cfg);
+                    }
                 }
                 // Mirror inherited IFAC in driver-local ifac_configs for dispatch_actions.
                 if let Some(ifac) = inherited_ifac {
@@ -4870,14 +5053,51 @@ async fn run_event_loop(
                         transport_enabled,
                     };
                     manager.poll(&live, now_unix, &mut spawner);
-                    let teardown_ids = spawner.teardown_ids;
+                    let mut teardown_ids: Vec<(InterfaceId, &'static str)> = spawner
+                        .teardown_ids
+                        .into_iter()
+                        .map(|id| (id, "auto-connected"))
+                        .collect();
+
+                    // Bootstrap-only lifecycle (Codeberg #416). A seed
+                    // connection is detached once enough auto-discovered
+                    // interfaces are online, and re-established when none are
+                    // left — otherwise a node that loses its auto-connects has
+                    // no way back into the network.
+                    if let Some(bootstrap) = autoconnect_wiring.bootstrap.as_mut() {
+                        let attached =
+                            bootstrap.ifaces.iter().filter(|b| !b.ids.is_empty()).count();
+                        match manager.bootstrap_action(attached) {
+                            crate::autoconnect::BootstrapAction::Keep => {}
+                            crate::autoconnect::BootstrapAction::Detach => {
+                                for b in bootstrap.ifaces.iter_mut() {
+                                    teardown_ids.extend(
+                                        b.ids.drain(..).map(|id| (id, "bootstrap-only")),
+                                    );
+                                }
+                            }
+                            crate::autoconnect::BootstrapAction::ReAttach => {
+                                reattach_bootstrap_interfaces(
+                                    bootstrap,
+                                    &autoconnect_wiring.next_id,
+                                    &autoconnect_wiring.new_iface_tx,
+                                    &autoconnect_wiring.reconnect_tx,
+                                    autoconnect_wiring.corrupt_every,
+                                    autoconnect_wiring.outbound_socket_hook.clone(),
+                                    &inventory,
+                                    transport_enabled,
+                                );
+                            }
+                        }
+                    }
 
                     // Complete each requested teardown through the same cleanup
                     // path a hard `Disconnected` uses, so path/link state and
                     // the per-interface maps are consistently torn down.
-                    for iface_id in teardown_ids {
+                    for (iface_id, reason) in teardown_ids {
                         tracing::info!(
-                            "discovery: tearing down auto-connected interface {} ({})",
+                            "discovery: tearing down {} interface {} ({})",
+                            reason,
                             iface_id,
                             registry.name_of(iface_id),
                         );
@@ -9165,6 +9385,7 @@ mod tests {
                 next_id: Arc::new(AtomicUsize::new(1)),
                 corrupt_every: None,
                 outbound_socket_hook: None,
+                bootstrap: None,
             },
             None,
             None,

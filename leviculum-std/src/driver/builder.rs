@@ -589,6 +589,20 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Mark the most recently added interface `bootstrap_only` (Codeberg #416).
+    ///
+    /// Equivalent to `bootstrap_only = yes` in the interface's config section:
+    /// the interface exists to join the network, and is detached again once the
+    /// auto-connected interface count reaches
+    /// [`autoconnect_discovered_interfaces`](Self::autoconnect_discovered_interfaces).
+    /// No-op if no interface has been added yet.
+    pub fn bootstrap_only(mut self) -> Self {
+        if let Some(last) = self.interfaces.last_mut() {
+            last.bootstrap_only = true;
+        }
+        self
+    }
+
     /// Add an AutoInterface with default configuration
     ///
     /// Zero-configuration LAN discovery via IPv6 multicast.

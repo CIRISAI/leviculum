@@ -142,6 +142,25 @@ pub(crate) struct AutoConnectManager {
     /// backbone nodes Priority 1 is about. It is a backoff, never a blacklist:
     /// the endpoint keeps being retried, just at a rate that decays.
     cooldown: BTreeMap<[u8; 32], Cooldown>,
+    /// Auto-connected interfaces reporting online as of the last
+    /// [`poll`](Self::poll) — Python's `online_interfaces`
+    /// (`Discovery.py:524-531`), counted after that poll's teardown pass so an
+    /// interface on its way out is not counted as connectivity we have.
+    online: usize,
+}
+
+/// What the `bootstrap_only` interfaces should do this tick
+/// (Python `Discovery.py:553-563`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BootstrapAction {
+    /// Leave them as they are.
+    Keep,
+    /// Enough auto-discovered interfaces are online: the seed connections have
+    /// done their job and are detached.
+    Detach,
+    /// No auto-discovered interface is left and no bootstrap interface is
+    /// attached: re-establish them, or the node has no way back in.
+    ReAttach,
 }
 
 impl AutoConnectManager {
@@ -152,6 +171,31 @@ impl AutoConnectManager {
             active: Vec::new(),
             warned_unimplemented: BTreeSet::new(),
             cooldown: BTreeMap::new(),
+            online: 0,
+        }
+    }
+
+    /// The lifecycle step the `bootstrap_only` interfaces owe this tick, given
+    /// how many of them are currently attached (Codeberg #416).
+    ///
+    /// Python compares its count of online auto-discovered interfaces against
+    /// `max_autoconnected_interfaces` — the same single integer that enables
+    /// auto-connect at all — and tears every bootstrap-only interface down once
+    /// the target is reached; when the count falls back to zero and no
+    /// bootstrap interface is left, it re-creates them from the saved configs.
+    /// With auto-connect disabled there is nothing that could replace a seed
+    /// connection, so the key stays inert, exactly as in Python (the monitor
+    /// job only runs for auto-connected interfaces).
+    pub(crate) fn bootstrap_action(&self, attached: usize) -> BootstrapAction {
+        if !self.enabled() {
+            return BootstrapAction::Keep;
+        }
+        if attached > 0 && self.online >= self.max_interfaces {
+            BootstrapAction::Detach
+        } else if attached == 0 && self.online == 0 {
+            BootstrapAction::ReAttach
+        } else {
+            BootstrapAction::Keep
         }
     }
 
@@ -280,6 +324,16 @@ impl AutoConnectManager {
         // Bounded by the live discovered set: an endpoint nobody advertises any
         // more carries no backoff, and is dialled fresh if it is re-discovered.
         self.cooldown.retain(|k, _| live_endpoints.contains(k));
+
+        // Connectivity we actually have, read after the teardown pass and
+        // before the spawn pass: an interface just detached is gone, and one
+        // dialled below has not connected yet. Both would otherwise make the
+        // bootstrap decision on a link that carries nothing (Codeberg #416).
+        self.online = self
+            .active
+            .iter()
+            .filter(|a| spawner.is_online(a.id))
+            .count();
 
         // Spawn pass. `live` is caller-sorted best-first (Python
         // list_discovered_interfaces order), so the cap keeps the best peers.
@@ -819,5 +873,99 @@ mod tests {
         mgr.poll(std::slice::from_ref(&rec), 1001.0, &mut sp);
         assert_eq!(sp.spawned.len(), 2, "rediscovery re-auto-connects");
         assert_eq!(mgr.active_count(), 1);
+    }
+    /// Codeberg #416. The seed connection is only redundant once the
+    /// auto-connect target is actually *online*: a spawned interface that has
+    /// not connected, or one that is on its way out, is not connectivity.
+    #[test]
+    fn a_bootstrap_interface_is_kept_until_the_autoconnect_target_is_online() {
+        let mut mgr = AutoConnectManager::new(1);
+        let mut sp = MockSpawner::default();
+        let rec = backbone_rec("Hub", "10.0.0.5", 4965, 1);
+
+        // Nothing discovered yet: one seed is attached and stays.
+        mgr.poll(&[], 1000.0, &mut sp);
+        assert_eq!(mgr.bootstrap_action(1), BootstrapAction::Keep);
+
+        // Dialled but not yet online -> still not a replacement.
+        sp.offline.insert(0);
+        mgr.poll(std::slice::from_ref(&rec), 1001.0, &mut sp);
+        assert_eq!(
+            mgr.bootstrap_action(1),
+            BootstrapAction::Keep,
+            "an auto-connected interface that never came online is not connectivity"
+        );
+
+        // Online, and the target is one: the seed has done its job.
+        sp.offline.clear();
+        mgr.poll(std::slice::from_ref(&rec), 1002.0, &mut sp);
+        assert_eq!(mgr.bootstrap_action(1), BootstrapAction::Detach);
+    }
+
+    /// Codeberg #416, the other half: detaching the seed is only safe because
+    /// it comes back. Losing the last auto-connected interface must ask for a
+    /// re-attach, or the node is left with no way into the network at all.
+    #[test]
+    fn losing_every_autoconnect_asks_for_the_bootstrap_interface_back() {
+        let mut mgr = AutoConnectManager::new(1);
+        let mut sp = MockSpawner::default();
+        let rec = backbone_rec("Hub", "10.0.0.5", 4965, 1);
+
+        // The count is read before the spawn pass, as Python reads it at the
+        // top of its monitor job: an endpoint dialled on this tick has not
+        // connected yet, so it takes the following poll to count.
+        mgr.poll(std::slice::from_ref(&rec), 1000.0, &mut sp);
+        assert_eq!(mgr.bootstrap_action(1), BootstrapAction::Keep);
+        mgr.poll(std::slice::from_ref(&rec), 1001.0, &mut sp);
+        assert_eq!(mgr.bootstrap_action(1), BootstrapAction::Detach);
+
+        // Seed detached; the record then disappears and the auto-connect with it.
+        mgr.poll(&[], 1002.0, &mut sp);
+        assert_eq!(mgr.active_count(), 0);
+        assert_eq!(mgr.bootstrap_action(0), BootstrapAction::ReAttach);
+
+        // Once it is back, nothing more is owed until the target is online again.
+        assert_eq!(mgr.bootstrap_action(1), BootstrapAction::Keep);
+    }
+
+    /// With auto-connect off nothing could ever replace a seed connection, so
+    /// the key stays inert rather than tearing down the node's only link.
+    /// Python reaches the same place by another route: its monitor job only
+    /// exists for auto-connected interfaces.
+    #[test]
+    fn bootstrap_only_is_inert_without_autoconnect() {
+        let mut mgr = AutoConnectManager::new(0);
+        let mut sp = MockSpawner::default();
+        mgr.poll(&[backbone_rec("Hub", "10.0.0.5", 4965, 1)], 1000.0, &mut sp);
+        assert_eq!(mgr.bootstrap_action(1), BootstrapAction::Keep);
+        assert_eq!(
+            mgr.bootstrap_action(0),
+            BootstrapAction::Keep,
+            "a disabled manager must not ask for interfaces it will never replace"
+        );
+    }
+
+    /// A cap above one is reached only when every slot is online, so a partly
+    /// filled auto-connect set keeps the seed.
+    #[test]
+    fn a_partly_filled_autoconnect_set_keeps_the_seed() {
+        let mut mgr = AutoConnectManager::new(3);
+        let mut sp = MockSpawner::default();
+        let a = backbone_rec("A", "10.0.0.5", 4965, 1);
+        let b = backbone_rec("B", "10.0.0.6", 4965, 2);
+
+        mgr.poll(&[a.clone(), b.clone()], 1000.0, &mut sp);
+        assert_eq!(mgr.active_count(), 2);
+        assert_eq!(
+            mgr.bootstrap_action(1),
+            BootstrapAction::Keep,
+            "two of three online is not the target"
+        );
+
+        let c = backbone_rec("C", "10.0.0.7", 4965, 3);
+        mgr.poll(&[a.clone(), b.clone(), c.clone()], 1001.0, &mut sp);
+        mgr.poll(&[a, b, c], 1002.0, &mut sp);
+        assert_eq!(mgr.active_count(), 3);
+        assert_eq!(mgr.bootstrap_action(1), BootstrapAction::Detach);
     }
 }

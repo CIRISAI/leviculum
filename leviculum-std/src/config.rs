@@ -401,11 +401,11 @@ pub struct InterfaceConfig {
     #[serde(default)]
     pub discoverable: bool,
     /// Seed-only interface (Python `bootstrap_only`, Reticulum.py:824-825).
-    /// Parsed and reported, not yet acted on: Python's discovery job tears a
-    /// bootstrap-only interface down once the auto-connected count reaches
-    /// the target and re-creates it when that count falls to zero
-    /// (Discovery.py:553-570); lnsd keeps the connection for the life of the
-    /// daemon. `warn_unimplemented_keys` says so at start-up.
+    /// The interface exists to join the network, not to carry it: the
+    /// auto-connect poll detaches it once the online auto-connected count
+    /// reaches `autoconnect_discovered_interfaces`, and re-establishes it when
+    /// that count falls back to zero (Discovery.py:553-563, Codeberg #416).
+    /// Inert without auto-connect, since nothing could replace the seed then.
     #[serde(default)]
     pub bootstrap_only: bool,
     /// Human-readable name published in the discovery announce (Python

@@ -133,9 +133,10 @@ fn both_seeds_are_tcp_clients_carrying_bootstrap_only() {
         assert!(iface.enabled);
         assert_eq!(iface.target_host.as_deref(), Some("127.0.0.1"));
         assert_eq!(iface.target_port, Some(port));
-        // Parsed, so the daemon can say out loud that it does not act on it.
         // A silently dropped `bootstrap_only` is a seed connection that is
-        // never torn down and that nothing in the log admits to.
+        // never torn down (Codeberg #416): on this node both stayed up
+        // permanently while three of three auto-connects were online, one of
+        // them carrying 47 MB up and 64 MB down in under two hours.
         assert!(iface.bootstrap_only, "{name}: bootstrap_only = yes");
     }
 }

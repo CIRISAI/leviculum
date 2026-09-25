@@ -281,8 +281,6 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         }
     }
 
-    warn_unimplemented_keys(&interfaces);
-
     // RNS 1.3.x semantic: shared_instance_type = tcp disables AF_UNIX and
     // therefore overrides any configured shared_instance_socket path (tcp
     // wins on conflict). Applied here, post-parse, so it holds for any key
@@ -376,28 +374,6 @@ pub(crate) fn promote_discoverable_modes(interfaces: &mut HashMap<String, Interf
             name,
             label
         );
-    }
-}
-
-/// Warn about keys that parse but that this daemon does not act on.
-///
-/// The taxonomy that matters for a config we inherit from a Python node is
-/// "we ignore this and say so" versus "we ignore this quietly"; only the
-/// second can make a production node do something nobody asked for. These
-/// warnings are the difference. They are deliberately at WARN, not DEBUG:
-/// an rnsd-shaped config runs at `loglevel = 4` (info), where a DEBUG line
-/// is not emitted at all.
-fn warn_unimplemented_keys(interfaces: &HashMap<String, InterfaceConfig>) {
-    for (name, iface) in interfaces.iter() {
-        if iface.bootstrap_only {
-            tracing::warn!(
-                "interface '{}': bootstrap_only is accepted but not acted on -- lnsd keeps \
-                 this connection for the life of the daemon instead of tearing it down once \
-                 enough auto-discovered interfaces are up. Remove the interface to drop the \
-                 seed connection.",
-                name
-            );
-        }
     }
 }
 
@@ -701,13 +677,10 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         // passphrase is on the air, so it stays an explicit per-interface
         // opt-in exactly as in the reference (Codeberg #162).
         "publish_ifac" => iface.publish_ifac = parse_bool(value),
-        // Python marks an interface a seed that the discovery job tears down
-        // once enough auto-discovered interfaces are up, and re-synthesises
-        // when none are left (Reticulum.py:824-825/1025, Discovery.py:553-570).
-        // Parsed so the value is on the record and can be reported; the
-        // teardown itself does not exist here yet, which is why
-        // `warn_unimplemented_keys` says so out loud at start-up rather than
-        // leaving a production seed connection looking managed.
+        // Marks an interface a seed: the discovery job tears it down once
+        // enough auto-discovered interfaces are up, and re-establishes it when
+        // none are left (Reticulum.py:824-825/1025, Discovery.py:553-563).
+        // Acted on by the driver's auto-connect poll (Codeberg #416).
         "bootstrap_only" => iface.bootstrap_only = parse_bool(value),
         "discovery_name" => iface.discovery_name = Some(value.to_string()),
         "reachable_on" => iface.reachable_on = Some(value.to_string()),
