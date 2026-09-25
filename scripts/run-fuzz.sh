@@ -28,45 +28,84 @@
 #   1  at least one target crashed -- the input is under $LEVICULUM_FUZZ_STATE/findings
 #   2  could not run: missing toolchain, missing crate, unregistered target
 #
+# Two modes, because fuzzing and regression-checking are different jobs:
+#
+#   FUZZ (default) explores. It costs a wall budget per target and its verdict
+#   is about inputs nobody has written down yet.
+#   REGRESS (--regress) explores nothing. It replays the corpus and the
+#   checked-in seeds through each target exactly once (-runs=0) and asserts
+#   they are all still handled. That is the check that the three defects the
+#   issue names stay fixed -- #263's nesting chain, #267's wrapping bin32
+#   length and #271's oversized frame all have a named seed under
+#   <crate>/fuzz/seeds/<target>/ -- and it is fast enough for the push path.
+#
 # Usage:
 #   bash scripts/run-fuzz.sh                    # every target, 60 s each
 #   bash scripts/run-fuzz.sh --seconds 900      # the nightly budget
+#   bash scripts/run-fuzz.sh --nightly          # FUZZ_SECS (120) per target
+#   bash scripts/run-fuzz.sh --regress          # replay the corpus, no fuzzing
 #   bash scripts/run-fuzz.sh hdlc_deframe       # one target by name
 #   bash scripts/run-fuzz.sh --list             # what would run, no build
 #
+# Toolchain: cargo-fuzz drives libFuzzer through `-Z` sanitizer flags, so the
+# targets need NIGHTLY -- the repo's pinned 1.97.1 stable (rust-toolchain.toml)
+# cannot build them, which is why every invocation below is `cargo +nightly`.
+# The channel is a knob (LEVICULUM_FUZZ_TOOLCHAIN) so a date-pinned nightly can
+# replace the rolling one without editing this file; scripts/install-ci.sh
+# names the version these targets were last verified against. The resolved
+# version is printed as FUZZ_TOOLCHAIN on every run, so a drift is visible in
+# the log rather than inferred from a build failure.
+#
 # Environment:
 #   LEVICULUM_FUZZ_SECONDS   per-target wall budget            (default 60)
+#   FUZZ_SECS                per-target wall budget in --nightly (default 120)
 #   LEVICULUM_FUZZ_STATE     persistent corpus/findings root
 #                            (default ~/.local/state/leviculum-fuzz)
+#   LEVICULUM_FUZZ_CORPUS    corpus root, <root>/<crate>/<target>/
+#                            (default $LEVICULUM_FUZZ_STATE/corpus)
+#   LEVICULUM_FUZZ_ARTIFACTS crash-input root, <root>/<crate>/<target>/
+#                            (default $LEVICULUM_FUZZ_STATE/findings)
 #   LEVICULUM_FUZZ_CRATES    space-separated fuzz crate dirs, repo-relative or
 #                            absolute (default the two in this repo)
 #   LEVICULUM_FUZZ_MAX_LEN   libFuzzer -max_len                (default 8192)
 #   LEVICULUM_FUZZ_RSS_MB    libFuzzer -rss_limit_mb           (default 2048)
+#   LEVICULUM_FUZZ_TIMEOUT   libFuzzer -timeout, seconds per input (default 25)
+#   LEVICULUM_FUZZ_TOOLCHAIN rustup channel to build with    (default nightly)
 #   LEVICULUM_FUZZ_CARGO     cargo binary to drive             (default cargo)
 
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-SECONDS_PER_TARGET="${LEVICULUM_FUZZ_SECONDS:-60}"
 STATE="${LEVICULUM_FUZZ_STATE:-$HOME/.local/state/leviculum-fuzz}"
 CRATES="${LEVICULUM_FUZZ_CRATES:-leviculum-core/fuzz leviculum-std/fuzz}"
 MAX_LEN="${LEVICULUM_FUZZ_MAX_LEN:-8192}"
 RSS_MB="${LEVICULUM_FUZZ_RSS_MB:-2048}"
+# Per-INPUT limit, not per-run: without it libFuzzer waits 1200 s for one
+# hanging input, which eats a 120 s budget twenty times over and reports the
+# hang as nothing at all. A parser that takes 25 s on 8 KiB is a finding.
+TIMEOUT="${LEVICULUM_FUZZ_TIMEOUT:-25}"
+TOOLCHAIN="${LEVICULUM_FUZZ_TOOLCHAIN:-nightly}"
 CARGO="${LEVICULUM_FUZZ_CARGO:-cargo}"
 # ASan wants glibc; the workspace default target is musl (.cargo/config.toml),
 # so this is passed explicitly rather than left to cargo-fuzz's default.
 HOST_TARGET="x86_64-unknown-linux-gnu"
 
 LIST_ONLY=0
+MODE=fuzz
+SKIP_IF_UNAVAILABLE=0
+SECONDS_SET=""
 WANTED=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --seconds) SECONDS_PER_TARGET="${2:?--seconds needs a value}"; shift 2 ;;
-        --seconds=*) SECONDS_PER_TARGET="${1#*=}"; shift ;;
+        --seconds) SECONDS_SET="${2:?--seconds needs a value}"; shift 2 ;;
+        --seconds=*) SECONDS_SET="${1#*=}"; shift ;;
+        --regress) MODE=regress; shift ;;
+        --skip-if-unavailable) SKIP_IF_UNAVAILABLE=1; shift ;;
+        --nightly) MODE=nightly; shift ;;
         --list) LIST_ONLY=1; shift ;;
-        -h|--help) sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,74p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 2 ;;
         *) WANTED+=("$1"); shift ;;
     esac
@@ -74,21 +113,56 @@ done
 
 die() { echo "[run-fuzz] ERROR: $*" >&2; exit 2; }
 
+# For the push path only: a host without the nightly toolchain must not fail
+# `just fast`, and must not go quiet either. One named line, exit 0, and the
+# caller that asked for it is the only one that gets it -- a scheduled run
+# still takes exit 2 for the same condition, because there the toolchain being
+# gone IS the finding.
+skip_or_die() {
+    if [ "$SKIP_IF_UNAVAILABLE" = 1 ]; then
+        echo "FUZZ_SKIPPED mode=$MODE reason=\"$1\""
+        exit 0
+    fi
+    die "$2"
+}
+
+# The budget default follows the mode: an interactive `just fuzz` is 60 s, the
+# scheduled run is FUZZ_SECS (120 s). An explicit --seconds beats both.
+case "$MODE" in
+    nightly) SECONDS_PER_TARGET="${LEVICULUM_FUZZ_SECONDS:-${FUZZ_SECS:-120}}" ;;
+    *)       SECONDS_PER_TARGET="${LEVICULUM_FUZZ_SECONDS:-60}" ;;
+esac
+[ -n "$SECONDS_SET" ] && SECONDS_PER_TARGET="$SECONDS_SET"
+
 case "$SECONDS_PER_TARGET" in
     ''|*[!0-9]*) die "--seconds wants a whole number of seconds, got '$SECONDS_PER_TARGET'" ;;
 esac
 
+# Corpus and crash inputs: one root each, defaulting under $LEVICULUM_FUZZ_STATE
+# and overridable per run. They default to the SAME place in every mode on
+# purpose -- a scheduled run and a hand-driven one that keep separate corpora
+# accumulate two half-explored input sets that never meet.
+CORPUS_ROOT="${LEVICULUM_FUZZ_CORPUS:-$STATE/corpus}"
+ARTIFACT_ROOT="${LEVICULUM_FUZZ_ARTIFACTS:-$STATE/findings}"
+
 # Preconditions, each with the command that fixes it. A missing toolchain is
 # exit 2, never a green run over zero targets.
-command -v "$CARGO" >/dev/null 2>&1 || die "no '$CARGO' on PATH"
-if ! "$CARGO" +nightly --version >/dev/null 2>&1; then
-    die "the nightly toolchain is missing (libFuzzer needs -Z flags):
-       rustup toolchain install nightly"
+command -v "$CARGO" >/dev/null 2>&1 || skip_or_die "no '$CARGO' on PATH" "no '$CARGO' on PATH"
+if ! TOOLCHAIN_VERSION="$("$CARGO" "+$TOOLCHAIN" --version 2>/dev/null)"; then
+    skip_or_die "the '$TOOLCHAIN' toolchain is missing: rustup toolchain install $TOOLCHAIN" \
+        "the '$TOOLCHAIN' toolchain is missing (libFuzzer needs -Z flags, which
+       the pinned stable in rust-toolchain.toml does not have):
+       rustup toolchain install $TOOLCHAIN"
 fi
-if ! "$CARGO" +nightly fuzz --version >/dev/null 2>&1; then
-    die "cargo-fuzz is missing:
+if ! FUZZ_VERSION="$("$CARGO" "+$TOOLCHAIN" fuzz --version 2>/dev/null)"; then
+    skip_or_die "cargo-fuzz is missing: cargo install cargo-fuzz" \
+        "cargo-fuzz is missing:
        cargo install cargo-fuzz"
 fi
+# Said, not assumed: which compiler produced these binaries is the first thing
+# anyone asks about a sanitizer finding, and a rolling nightly changes under a
+# corpus that outlives it.
+echo "FUZZ_TOOLCHAIN channel=$TOOLCHAIN version=\"$TOOLCHAIN_VERSION\" cargo_fuzz=\"$FUZZ_VERSION\" mode=$MODE"
 
 RUN_TS="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="$STATE/logs/$RUN_TS"
@@ -99,6 +173,12 @@ crate_slug() {
     local dir="$1"
     basename "$(dirname "$(cd "$dir" && pwd)")"
 }
+
+# The per-target status lines carry the mode in their KEY, not in a field: a
+# regress line and a fuzz line report different things (inputs replayed vs
+# inputs explored) and a report that greps one must not catch the other.
+LINE=FUZZ_TARGET
+[ "$MODE" = regress ] && LINE=FUZZ_REGRESS
 
 total=0 green=0 crashed=0 errored=0
 declare -a CRASH_LINES=()
@@ -111,7 +191,7 @@ for crate_rel in $CRATES; do
     [ -f "$FUZZ_DIR/Cargo.toml" ] || die "no fuzz crate at $FUZZ_DIR"
     slug="$(crate_slug "$FUZZ_DIR")"
 
-    if ! listed="$("$CARGO" +nightly fuzz list --fuzz-dir "$FUZZ_DIR" 2>&1)"; then
+    if ! listed="$("$CARGO" "+$TOOLCHAIN" fuzz list --fuzz-dir "$FUZZ_DIR" 2>&1)"; then
         echo "$listed" >&2
         die "cargo fuzz list failed in $FUZZ_DIR"
     fi
@@ -136,13 +216,13 @@ for crate_rel in $CRATES; do
         fi
 
         total=$((total + 1))
-        corpus="$STATE/corpus/$slug/$target"
-        findings="$STATE/findings/$slug/$target"
+        corpus="$CORPUS_ROOT/$slug/$target"
+        findings="$ARTIFACT_ROOT/$slug/$target"
         seeds="$FUZZ_DIR/seeds/$target"
         log="$LOG_DIR/$slug-$target.log"
 
         if [ "$LIST_ONLY" = 1 ]; then
-            echo "FUZZ_TARGET name=$target crate=$slug seeds=$([ -d "$seeds" ] && echo yes || echo no) corpus=$corpus"
+            echo "$LINE name=$target crate=$slug seeds=$([ -d "$seeds" ] && echo yes || echo no) corpus=$corpus"
             continue
         fi
 
@@ -151,16 +231,53 @@ for crate_rel in $CRATES; do
 
         # The persistent corpus is the FIRST dir (libFuzzer writes new inputs
         # there); the checked-in seeds follow as read-only input.
-        cmd=("$CARGO" +nightly fuzz run --fuzz-dir "$FUZZ_DIR" --target "$HOST_TARGET"
+        cmd=("$CARGO" "+$TOOLCHAIN" fuzz run --fuzz-dir "$FUZZ_DIR" --target "$HOST_TARGET"
              "$target" "$corpus")
         [ -d "$seeds" ] && cmd+=("$seeds")
-        cmd+=(--
-             "-max_total_time=$SECONDS_PER_TARGET"
-             "-max_len=$MAX_LEN"
-             "-rss_limit_mb=$RSS_MB"
-             "-artifact_prefix=$findings/")
 
-        echo "[run-fuzz] $slug/$target: ${SECONDS_PER_TARGET}s, corpus $corpus"
+        if [ "$MODE" = regress ]; then
+            # Replay only. -runs=0 executes every loaded input once and exits;
+            # nothing is generated, nothing is written to the corpus.
+            inputs=0 biggest=0
+            for d in "$corpus" "$seeds"; do
+                [ -d "$d" ] || continue
+                while read -r sz; do
+                    [ -n "$sz" ] || continue
+                    inputs=$((inputs + 1))
+                    [ "$sz" -gt "$biggest" ] && biggest="$sz"
+                done < <(find "$d" -type f -printf '%s\n' 2>/dev/null)
+            done
+            # A target with nothing to replay is a check that checks nothing.
+            # It is the #290 failure in miniature, so it is an ERROR, not a
+            # green run over an empty corpus.
+            if [ "$inputs" = 0 ]; then
+                errored=$((errored + 1))
+                echo "$LINE name=$target crate=$slug status=ERROR inputs=0 -- neither $corpus nor $seeds holds an input to replay" >&2
+                continue
+            fi
+            # -max_len is a TRUNCATION, not a filter: libFuzzer loads a larger
+            # corpus file and silently cuts it to the limit (measured against
+            # the 100004-byte #263 reproducer at lim: 8192, 2026-09-25), which
+            # replays something other than the input that used to crash. The
+            # limit therefore follows the corpus in this mode.
+            replay_len="$MAX_LEN"
+            [ "$biggest" -gt "$replay_len" ] && replay_len="$biggest"
+            cmd+=(--
+                 "-runs=0"
+                 "-max_len=$replay_len"
+                 "-rss_limit_mb=$RSS_MB"
+                 "-timeout=$TIMEOUT"
+                 "-artifact_prefix=$findings/")
+            echo "[run-fuzz] $slug/$target: replaying $inputs input(s), max $biggest B"
+        else
+            cmd+=(--
+                 "-max_total_time=$SECONDS_PER_TARGET"
+                 "-max_len=$MAX_LEN"
+                 "-rss_limit_mb=$RSS_MB"
+                 "-timeout=$TIMEOUT"
+                 "-artifact_prefix=$findings/")
+            echo "[run-fuzz] $slug/$target: ${SECONDS_PER_TARGET}s, corpus $corpus"
+        fi
         t0="$(date +%s)"
         "${cmd[@]}" > "$log" 2>&1
         rc=$?
@@ -177,7 +294,11 @@ for crate_rel in $CRATES; do
 
         if [ "$rc" = 0 ]; then
             green=$((green + 1))
-            echo "FUZZ_TARGET name=$target crate=$slug status=GREEN secs=$elapsed corpus=$after new=$((after - before)) log=$log"
+            if [ "$MODE" = regress ]; then
+                echo "$LINE name=$target crate=$slug status=GREEN secs=$elapsed inputs=$inputs bytes_max=$biggest log=$log"
+            else
+                echo "$LINE name=$target crate=$slug status=GREEN secs=$elapsed corpus=$after new=$((after - before)) log=$log"
+            fi
             continue
         fi
 
@@ -185,7 +306,7 @@ for crate_rel in $CRATES; do
         artifacts="$(find "$findings" -type f -newermt "@$t0" 2>/dev/null | sort)"
         if [ -n "$artifacts" ]; then
             crashed=$((crashed + 1))
-            echo "FUZZ_TARGET name=$target crate=$slug status=CRASH rc=$rc secs=$elapsed corpus=$after log=$log"
+            echo "$LINE name=$target crate=$slug status=CRASH rc=$rc secs=$elapsed corpus=$after log=$log"
             while read -r a; do
                 [ -n "$a" ] || continue
                 sum="$(sha256sum "$a" | cut -d' ' -f1)"
@@ -197,7 +318,7 @@ for crate_rel in $CRATES; do
                     echo "sha256: $sum"
                     echo "bytes:  $(wc -c < "$a")"
                     echo "reproduce:"
-                    echo "  $CARGO +nightly fuzz run --fuzz-dir $FUZZ_DIR --target $HOST_TARGET $target $a"
+                    echo "  $CARGO +$TOOLCHAIN fuzz run --fuzz-dir $FUZZ_DIR --target $HOST_TARGET $target $a"
                     echo "input (first 256 bytes):"
                     head -c 256 "$a" | od -A x -t x1z
                     echo "libFuzzer output (tail):"
@@ -207,7 +328,7 @@ for crate_rel in $CRATES; do
             done <<< "$artifacts"
         else
             errored=$((errored + 1))
-            echo "FUZZ_TARGET name=$target crate=$slug status=ERROR rc=$rc secs=$elapsed log=$log"
+            echo "$LINE name=$target crate=$slug status=ERROR rc=$rc secs=$elapsed log=$log"
             {
                 echo
                 echo "================ ERROR: $slug/$target did not run (rc=$rc) ================"
@@ -230,7 +351,12 @@ if [ "$total" = 0 ]; then
 fi
 
 echo
-echo "FUZZ_SUMMARY targets=$total green=$green crash=$crashed error=$errored secs_per_target=$SECONDS_PER_TARGET state=$STATE logs=$LOG_DIR"
+# The budget is a fuzz-mode fact. Printing it in regress mode would state a
+# number no target in that run was given, which is the kind of key a report
+# generator later averages.
+budget="$SECONDS_PER_TARGET"
+[ "$MODE" = regress ] && budget="n/a"
+echo "FUZZ_SUMMARY mode=$MODE targets=$total green=$green crash=$crashed error=$errored secs_per_target=$budget corpus=$CORPUS_ROOT artifacts=$ARTIFACT_ROOT logs=$LOG_DIR"
 
 if [ ${#CRASH_LINES[@]} -gt 0 ]; then
     echo "FUZZ CRASHES FOUND -- inputs kept:" >&2

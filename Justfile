@@ -347,6 +347,45 @@ fuzz *args:
 fuzz-selftest:
     bash scripts/test-run-fuzz.sh
 
+# The scheduled run (Codeberg #290). Same runner, a budget that is worth a
+# night rather than a coffee: FUZZ_SECS per target, 120 s by default, over the
+# same persistent corpus `just fuzz` feeds, so a night starts where the last
+# one stopped instead of re-exploring the shallow paths from the seeds.
+#
+#   just fuzz-nightly              120 s per target
+#   FUZZ_SECS=900 just fuzz-nightly
+#
+# Exit 1 = a crash or a per-input timeout, with the input kept and named;
+# exit 2 = a run that could not happen. Where the corpus and the crash inputs
+# go is LEVICULUM_FUZZ_CORPUS / LEVICULUM_FUZZ_ARTIFACTS; both default under
+# ~/.local/state/leviculum-fuzz, which is deliberately NOT the cargo target
+# directory: the nightly host throws that away wholesale when the build cache
+# passes its hard size cap, and a corpus on a cache eviction schedule is a
+# corpus that silently restarts.
+[doc('The scheduled fuzz run: FUZZ_SECS (120) per target over the kept corpus')]
+fuzz-nightly:
+    bash scripts/run-fuzz.sh --nightly
+
+# The regression half (Codeberg #290): replay the kept corpus and the
+# checked-in seeds through every target once, generating nothing. It is not
+# fuzzing and it does not look for new inputs -- it asserts that the inputs
+# that DID find something are still handled.
+#
+# Three of them are named seeds for the three defects the issue cites:
+# resource_advertisement_unpack/recursion_reproducer (#263, the only one of the
+# three that aborted this build -- an ASan stack overflow), .../bin32_len_wrap
+# and .../ext32_len_wrap (#267, a wire u32 length that wrapped the bounds check
+# on a 32-bit usize), hdlc_deframe/oversized_frame (#271, a frame one byte past
+# DEFAULT_MAX_FRAME followed by a good one, so the discard and the resync are
+# both replayed).
+#
+# On the push path because a regression check nobody runs is what #290 is
+# about. Skips with a named reason where nightly or cargo-fuzz is absent, so
+# it does not make the toolchain a push-path dependency.
+[doc('Replay the fuzz corpus and the defect seeds through every target')]
+fuzz-regress:
+    bash scripts/run-fuzz.sh --regress --skip-if-unavailable
+
 [doc('Rustdoc gate: broken intra-doc links fail instead of warning')]
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -1015,7 +1054,7 @@ check-source-invariant-census:
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

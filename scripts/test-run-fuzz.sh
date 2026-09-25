@@ -20,6 +20,13 @@
 #      list is fuzzed by nobody -- #290 one level down. Asserts exit 2.
 #   5. A MISSING TOOLCHAIN. The one that must never look green: no cargo-fuzz
 #      means exit 2, not a clean run over zero targets.
+#   6. REGRESS REPLAYS, AND CATCHES. --regress is on the push path, so its
+#      positive control is here rather than in somebody's memory: the same
+#      corpus is replayed green, then the target is made to panic on an input
+#      that corpus holds, and the replay must go red and name it. A regression
+#      check that cannot fail is the #290 failure wearing a gate's clothes.
+#   7. REGRESS WITH NOTHING TO REPLAY IS AN ERROR. An empty corpus and no
+#      seeds means the check checked nothing; exit 2, never green.
 #
 # Needs the nightly toolchain and cargo-fuzz (cases 1-4 build a real fuzz
 # target); skips with a named reason if they are absent. ~1 min.
@@ -133,7 +140,7 @@ KEPT="$(find "$STATE/findings" -type f | wc -l)"
 expect_ge "$KEPT" 1 "the crashing input is preserved under the state dir"
 LEAKED="$(find "$FIX" -path '*artifacts*' -type f | wc -l)"
 expect_eq "$LEAKED" 0 "nothing is left in the crate's artifacts dir, which a fresh clone deletes"
-grep -q "FUZZ_SUMMARY targets=1 green=0 crash=1" <<< "$OUT"
+grep -q "FUZZ_SUMMARY mode=fuzz targets=1 green=0 crash=1" <<< "$OUT"
 assert $? "the summary counts the crash"
 [ "$FAILED" = 0 ] || echo "$OUT" >&2
 
@@ -185,6 +192,49 @@ grep -q "cargo install cargo-fuzz" <<< "$OUT"
 assert $? "the error says how to fix it"
 grep -q "FUZZ_SUMMARY" <<< "$OUT"
 refute $? "no summary line for a run that never happened"
+
+echo "=== case 6: --regress replays the corpus, and goes red when it should ==="
+# Cases 1-3 left a corpus for fixture_clean under the state dir; replaying it
+# must be green, must not fuzz (no new inputs), and must not take a budget.
+BEFORE="$(find "$CORPUS" -type f | wc -l)"
+OUT="$(run_fixture bash "$RUNNER" --regress fixture_clean 2>&1)"
+RC=$?
+expect_eq "$RC" 0 "exit 0 replaying a corpus the target handles"
+grep -q "FUZZ_REGRESS name=fixture_clean .*status=GREEN .*inputs=$BEFORE " <<< "$OUT"
+assert $? "the line reports how many inputs were replayed ($BEFORE)"
+AFTER="$(find "$CORPUS" -type f | wc -l)"
+expect_eq "$AFTER" "$BEFORE" "replaying generates nothing: the corpus is unchanged"
+grep -q "secs_per_target=n/a" <<< "$OUT"
+assert $? "the summary does not report a time budget no target was given"
+
+# The positive control: same corpus, same runner, a target that now panics on
+# an input the corpus holds. Restored immediately afterwards.
+cp "$FIX/fuzz_targets/fixture_clean.rs" "$WORK/fixture_clean.rs.orig"
+cat > "$FIX/fuzz_targets/fixture_clean.rs" <<'EOF'
+#![no_main]
+use libfuzzer_sys::fuzz_target;
+fuzz_target!(|data: &[u8]| {
+    if data.len() > 3 && data[0] == b'l' {
+        panic!("reintroduced defect");
+    }
+});
+EOF
+OUT="$(run_fixture bash "$RUNNER" --regress fixture_clean 2>&1)"
+RC=$?
+cp "$WORK/fixture_clean.rs.orig" "$FIX/fuzz_targets/fixture_clean.rs"
+expect_eq "$RC" 1 "exit 1 when a corpus input now crashes the target"
+grep -q "FUZZ_REGRESS name=fixture_clean .*status=CRASH" <<< "$OUT"
+assert $? "the regress failure names the target"
+grep -q "sha256=" <<< "$OUT"
+assert $? "the offending input is preserved with its hash"
+
+echo "=== case 7: a regress run with nothing to replay is an error ==="
+EMPTY="$WORK/empty-state"
+OUT="$(LEVICULUM_FUZZ_STATE="$EMPTY" LEVICULUM_FUZZ_CRATES="$FIX" bash "$RUNNER" --regress fixture_clean 2>&1)"
+RC=$?
+expect_eq "$RC" 2 "exit 2 when neither corpus nor seeds hold an input"
+grep -q "status=ERROR inputs=0" <<< "$OUT"
+assert $? "the error says the corpus was empty"
 
 echo
 if [ "$FAILED" = 0 ]; then

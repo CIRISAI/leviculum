@@ -41,6 +41,8 @@ directly on the whole input.
 ```sh
 just fuzz                # every target in both fuzz crates, 60 s each
 just fuzz sam_parse      # this one
+just fuzz-nightly        # the scheduled run, FUZZ_SECS (120 s) per target
+just fuzz-regress        # replay the corpus and the seeds, no fuzzing
 ```
 
 `scripts/run-fuzz.sh` is what that recipe calls; see
@@ -70,5 +72,10 @@ cargo +nightly fuzz run sam_parse --target x86_64-unknown-linux-gnu <file>
 ## CI / nightly
 
 Same as the core crate's: no tier runs the fuzzing itself, the push path runs
-`just fuzz-selftest` over the runner, and a scheduled run is
-`bash scripts/run-fuzz.sh --seconds <budget>`.
+`just fuzz-selftest` over the runner plus `just fuzz-regress` over the corpus,
+and the scheduled run is `just fuzz-nightly`.
+
+This crate is what makes `fuzz-regress` cost anything at all from cold: its
+ASan build is 89 s of the 92 s a cold replay of all eight targets takes
+(measured 2026-09-25), against 2.0 s for the whole set once built. The
+leviculum-core targets replay in well under a second each.

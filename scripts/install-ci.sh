@@ -65,14 +65,37 @@ for cmd in lintian; do
 done
 
 # Optional test dependency: cargo-fuzz plus the nightly toolchain run the
-# wire-parser fuzz targets (`just fuzz`, scripts/run-fuzz.sh, Codeberg #290).
-# No tier runs the fuzzing itself; `just fuzz-selftest` is on the push path but
-# skips with a named reason when these are absent, so warn rather than fail.
+# wire-parser fuzz targets (`just fuzz`, `just fuzz-nightly`, `just
+# fuzz-regress`, scripts/run-fuzz.sh, Codeberg #290).
+#
+# WHICH TOOLCHAIN, and why it is not the pinned one: cargo-fuzz drives
+# libFuzzer through `-Z` sanitizer flags, which the repo's pinned stable
+# (rust-toolchain.toml, 1.97.1) does not accept. So these targets -- and only
+# these -- build on NIGHTLY. That is a deliberate exception to the pin, not a
+# drift: no shipped binary comes out of this toolchain, only fuzz targets that
+# never leave the host.
+#
+# The channel is a knob rather than a hardcode. `LEVICULUM_FUZZ_TOOLCHAIN` is
+# what run-fuzz.sh passes to cargo, so a rolling `nightly` can be replaced by a
+# date-pinned one on a host that wants reproducibility:
+#
+#   rustup toolchain install nightly-2026-06-17
+#   LEVICULUM_FUZZ_TOOLCHAIN=nightly-2026-06-17 just fuzz-nightly
+#
+# Last verified: cargo 1.98.0-nightly (598ab48ec 2026-06-17) with cargo-fuzz
+# 0.13.2, all eight targets green (2026-09-25). Every run prints the resolved
+# version as a FUZZ_TOOLCHAIN line, so a nightly that moved under the corpus is
+# visible in the log instead of inferred from a build failure.
+#
+# No tier runs the fuzzing itself; `just fuzz-selftest` and `just fuzz-regress`
+# are on the push path but both skip with a named reason when these are absent,
+# so warn rather than fail.
 for cmd in cargo-fuzz; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "[install-ci] Note: optional test dependency '$cmd' not found"
         echo "[install-ci] Hint: cargo install cargo-fuzz && rustup toolchain install nightly"
-        echo "[install-ci]       (needed for 'just fuzz'; 'just fuzz-selftest' skips without it)"
+        echo "[install-ci]       (needed for 'just fuzz'; 'just fuzz-selftest' and"
+        echo "[install-ci]        'just fuzz-regress' skip without it)"
     fi
 done
 
