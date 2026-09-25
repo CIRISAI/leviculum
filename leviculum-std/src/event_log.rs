@@ -360,6 +360,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "COMPLETION_MIRROR_OVER_ENVELOPE",
         required_keys: &["live_links", "envelope", "next_report_at"],
     },
+    // CIRIS fork known-destinations backpressure (leviculum#49): a flush held
+    // the file to the identity cap. `identity_evictions` is cumulative, so a
+    // fleet running at its cap is legible rather than silently forgetting.
+    EventSchema {
+        name: "KNOWN_DESTINATIONS_PRUNED",
+        required_keys: &["pruned", "kept", "cap", "identity_evictions"],
+    },
     // CIRIS fork multi-segment resource assembly (leviculum#62): a transfer
     // that cannot be assembled is delivered per segment, and says so.
     EventSchema {

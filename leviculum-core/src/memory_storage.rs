@@ -379,6 +379,12 @@ pub struct MemoryStorage {
     // `Retained` marker would silently unpin a destination the application
     // asked to keep.
     known_dest_use: BoundedMap<[u8; TRUNCATED_HASHBYTES], KnownDestUse>,
+
+    /// Identities the `known_identities` cap has pushed out since start
+    /// (leviculum#49). A fleet that runs at its cap should be legible, not
+    /// silently forgetting: this only ever grows, and a persistent store
+    /// reports it beside the entries it prunes from disk.
+    identity_evictions: u64,
 }
 
 /// Cache-lifecycle state for a known destination, mirroring the fifth field of
@@ -432,12 +438,32 @@ impl MemoryStorage {
             discovery_path_requests: BoundedMap::new(caps.path_cap),
             dest_ratchet_keys: BoundedMap::new(caps.local_dest_cap),
             known_dest_use: BoundedMap::new(caps.destination_cap),
+            identity_evictions: 0,
         }
     }
 
     /// The ceilings this storage was built with.
     pub fn caps(&self) -> TableCaps {
         self.caps
+    }
+
+    /// How many identities the `known_identities` cap has evicted since this
+    /// storage was built (leviculum#49).
+    pub fn identity_evictions(&self) -> u64 {
+        self.identity_evictions
+    }
+
+    /// Restore a retain pin read back from persistent storage.
+    ///
+    /// `retain_known_dest` pins only a destination with a cached announce,
+    /// which is Python's `_retain_destination_data` at runtime. A pin loaded
+    /// from disk has no announce behind it yet, and Python still honours it:
+    /// `known_destinations[dest][4] == -1` is retained on load, whatever the
+    /// announce cache holds. This is that load path (leviculum#49), and it is
+    /// what keeps a pinned destination out of the identity cap's reach after
+    /// a restart.
+    pub fn seed_retained_known_dest(&mut self, dest: [u8; TRUNCATED_HASHBYTES]) {
+        self.set_known_dest_use(dest, KnownDestUse::Retained);
     }
 
     /// Write a known-destination use marker, evicting an unpinned marker
@@ -1126,7 +1152,20 @@ impl Storage for MemoryStorage {
         // the numerically smallest destination hash, which is deterministic
         // but unrelated to age: a destination whose hash starts low could
         // never stay known on a full node.
-        self.known_identities.insert(dest_hash, identity);
+        //
+        // leviculum#49: and never a retained one while an unretained one is
+        // left. The retain pin is the application's word that a destination
+        // is load-bearing (Python `_retain_destination_data`), so capacity
+        // pressure falls on the unpinned population, oldest first.
+        let use_state = &self.known_dest_use;
+        let evicted = self
+            .known_identities
+            .insert_preferring(dest_hash, identity, |dest, _| {
+                !matches!(use_state.get(dest), Some(KnownDestUse::Retained))
+            });
+        if evicted.is_some() {
+            self.identity_evictions = self.identity_evictions.saturating_add(1);
+        }
     }
 
     // Cleanup
@@ -2747,6 +2786,40 @@ mod cap_tests {
             local_dest_cap: TINY,
             receipt_cap: TINY,
         }
+    }
+
+    /// leviculum#49: at the identity cap, capacity pressure falls on the
+    /// unretained population. A destination pinned oldest of all survives,
+    /// and every eviction is counted.
+    #[test]
+    fn identity_cap_evicts_unretained_before_retained_and_counts_it() {
+        let mut caps = tiny_caps();
+        caps.identity_cap = 2;
+        let mut s = MemoryStorage::with_caps(caps);
+        let id = || Identity::generate(&mut rand_core::OsRng);
+
+        // Pinned with no cached announce, as a pin read back from disk is.
+        s.seed_retained_known_dest(hash16(1));
+        s.set_identity(hash16(1), id());
+        s.set_identity(hash16(2), id());
+        assert_eq!(s.identity_evictions(), 0, "nothing evicted below the cap");
+
+        s.set_identity(hash16(3), id());
+        assert!(
+            s.get_identity(&hash16(1)).is_some(),
+            "the retained, oldest entry stays"
+        );
+        assert!(
+            s.get_identity(&hash16(2)).is_none(),
+            "the oldest unretained entry goes"
+        );
+        assert!(s.get_identity(&hash16(3)).is_some());
+        assert_eq!(s.identity_evictions(), 1);
+
+        s.set_identity(hash16(4), id());
+        assert!(s.get_identity(&hash16(1)).is_some());
+        assert!(s.get_identity(&hash16(3)).is_none());
+        assert_eq!(s.identity_evictions(), 2);
     }
 
     fn hash16(n: u32) -> [u8; TRUNCATED_HASHBYTES] {
