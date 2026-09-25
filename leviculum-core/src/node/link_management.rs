@@ -3297,13 +3297,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         self.transport.register_destination(*new_link_id.as_bytes());
 
                         // Rebind retry bookkeeping and caller-visible ids.
-                        let mut attempt = 0;
-                        if let Some(mut retry) = self.link_retry_state.remove(&link_id) {
-                            retry.remaining -= 1;
-                            retry.attempt = retry.attempt.saturating_add(1);
-                            attempt = retry.attempt;
-                            self.link_retry_state.insert(new_link_id, retry);
-                        }
+                        // `attempt` is produced by the arm that owns the
+                        // state rather than pre-seeded and overwritten: the
+                        // `0` of a `let mut attempt = 0` is unreachable here
+                        // (we are inside `retries_left > 0`, which read the
+                        // very entry this removes), so it was a value no run
+                        // could observe and, in the no-`tracing` firmware
+                        // config where the RETX log below compiles away, an
+                        // `unused_assignments` warning on every build.
+                        let attempt = match self.link_retry_state.remove(&link_id) {
+                            Some(mut retry) => {
+                                retry.remaining -= 1;
+                                retry.attempt = retry.attempt.saturating_add(1);
+                                let attempt = retry.attempt;
+                                self.link_retry_state.insert(new_link_id, retry);
+                                attempt
+                            }
+                            None => 0,
+                        };
                         for target in self.link_id_aliases.values_mut() {
                             if *target == link_id {
                                 *target = new_link_id;

@@ -3,7 +3,18 @@ runner = "tools/uf2-runner.sh"
 
 [target.thumbv7em-none-eabihf]
 linker = "flip-link"
-rustflags = ["-C", "link-arg=-Tlink.x"]
+# `-D warnings` lives here and not in `just lint-nrf`'s `-- -D warnings`
+# because that form binds to the top-level crate only: every path dependency
+# -- leviculum-core above all -- compiled warning-free-by-nobody. An
+# `unused_assignments` in leviculum-core/src/node/link_management.rs sat in
+# every firmware build output until 2026-09-25 for exactly that reason.
+# Scoped to the firmware triple, so the workspace's other members keep being
+# gated by their own host-target clippy line, and constant rather than a
+# recipe-local RUSTFLAGS, so `just lint-nrf` and a plain `cargo build` share
+# one fingerprint instead of rebuilding each other's artifacts. Registry and
+# git dependencies are unaffected: cargo compiles them with `--cap-lints
+# allow`, which caps a forced `-D` back to `allow`.
+rustflags = ["-C", "link-arg=-Tlink.x", "-D", "warnings"]
 
 [build]
 target = "thumbv7em-none-eabihf"
