@@ -5379,6 +5379,58 @@ mod tests {
         );
     }
 
+    /// One charge absolves two pendings when handovers pipeline — the
+    /// documented under-report of oldest-first crediting, pinned at the
+    /// numbers a rig run produced (Refs #24).
+    ///
+    /// Measured 2026-09-25 16:18:21.111Z on t-beam-1 (window d attempt 1 of
+    /// the `lora_ratchet_rotation_listened` series): frame A was handed and
+    /// its hold expired before its own CSMA let it key, so frame B was
+    /// handed while A was still unkeyed — B's baseline predates A's charge.
+    /// The receipt CHTM for A's keying then settled BOTH: A on its own rise,
+    /// B on the same rise against the stale baseline. Two
+    /// `LORA_TX_ACCOUNT verdict=keyed` lines in one instant, and nothing of
+    /// B's in the ledger either judged. B in fact keyed 100 ms later into a
+    /// mutual overlap nobody decoded; had the modem consumed it instead, no
+    /// `LORA_TX_UNACCOUNTED` could ever have fired for it. This test pins
+    /// the blind spot as it stands; closing it means a pending may only be
+    /// credited by charge the earlier pendings have not already consumed.
+    #[tokio::test]
+    async fn one_charge_absolves_two_pendings_when_handovers_pipeline() {
+        let counters = InterfaceCounters::new();
+        let mut pendings: VecDeque<PendingHandover> = VecDeque::new();
+        // Both baselines read 1_000: B was handed before A's charge landed.
+        pendings.push_back(pending(147, false, Duration::from_millis(0)));
+        pendings.push_back(pending(147, false, Duration::from_millis(0)));
+        // A's receipt CHTM: one frame's worth of rise (+328 raw = 3.28 %,
+        // the 147 B charge every reading of the rig run stepped by).
+        let receipt = rnode::ChannelStats {
+            airtime_short: 1_328,
+            ..frozen_chtm()
+        };
+        let rehand = settle_handovers(
+            "t",
+            &counters,
+            &mut pendings,
+            &receipt,
+            tokio::time::Instant::now() + Duration::from_millis(1),
+            unix_ms(),
+        );
+        assert!(rehand.is_none(), "nothing is re-handed: both read as keyed");
+        assert!(
+            pendings.is_empty(),
+            "one frame's rise closed both accounts, so B is no longer \
+             watched by anything"
+        );
+        assert_eq!(
+            counters
+                .tx_unaccounted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "and the silent-consume instrument saw nothing to accuse"
+        );
+    }
+
     /// A PHY whose airtime cannot be computed must still leave the serial
     /// floor standing: a hold of zero would hand the modem a whole burst at
     /// 115200 baud, which is the defect this hold exists to prevent.
