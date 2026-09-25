@@ -365,7 +365,7 @@ WARN level, on the same target as `LORA_TX` and `LORA_CHTM`, and
 counted as `tx_unaccounted` in the interface stats. Every ambiguity
 resolves away from the accusation, because a false one would poison the
 instrument (`judge_airtime`,
-`leviculum-std/src/interfaces/rnode.rs:962`): any rise at all counts as
+`leviculum-std/src/interfaces/rnode.rs:1067`): any rise at all counts as
 keyed, a falling ledger is read as a bin ageing out of the two-bin
 window rather than as a swallowed frame, a rise in `airtime_long`
 absolves even when the short window has not moved, a DCD busy fraction

@@ -10,7 +10,7 @@ This page is the study Codeberg #347 asked for: five questions, each
 with a number, the reason for it, and the artifact that settled it. It
 is written after the fact. The window landed while the study was still
 open, in `a_directed_packet_is_jittered_on_acquisition_and_free_in_a_burst`
-(`leviculum-std/src/interfaces/rnode.rs:4981`)
+(`leviculum-std/src/interfaces/rnode.rs:5086`)
 and the firmware policy behind it, so four of the five questions are
 answered by code rather than by argument. The fifth is not, and is
 stated as open at the end.
@@ -246,10 +246,12 @@ colliding set is every equal pair and its size is one over the number of
 draws: 1/15 in the reference as booted and 1/14 after an excursion
 (question 2), and 1/14 for us. That figure is the one the arms are
 measured against —
-`FrameClass` (`leviculum-std/src/interfaces/rnode.rs:376`) takes a
-same-class pair to 1/56 and states in the same place that the count alone
-leaves it at 1/14, i.e. that a change which does not increase the number
-of distinguishable outcomes buys nothing. A floor does not increase it.
+`FrameClass` (`leviculum-std/src/interfaces/rnode.rs:433`) takes a
+same-class pair to 1/56 over arm 3's fourteen counts — and to 29/784,
+about 1/27, over arm 4's seven, which is what a shorter span costs — and
+states in the same place that the count alone leaves it at 1/14, i.e. that
+a change which does not increase the number of distinguishable outcomes
+buys nothing. A floor does not increase it.
 Width, quantisation against the frame, and per-identity pinning do, and
 which of those wins is the open A/B, not this.
 
@@ -276,6 +278,6 @@ we can change is our own.
    wrong at every SF above 8. Their only consumer is `compute_spacing_ms`
    (`leviculum-core/src/rnode.rs:1047`), which has no caller: the host
    interface prices the same shape from the modem's reported slot
-   instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:732`).
+   instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:837`).
    Nothing is broken by them today and something would be by the next
    caller.

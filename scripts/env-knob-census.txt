@@ -19,7 +19,7 @@
 # every `LEVICULUM_*` literal in a non-test, non-build Rust source that is not
 # inside an `env!`. See the script's docstring for the rest of the rule.
 
-LEVICULUM_JITTER_ARM temporary #347 the three-arm A/B selector for the RNode host interface's acquisition jitter (leviculum-std/src/interfaces/rnode.rs::JitterArm). Removed with the two arms that lose the co-release series: the winner becomes the unconditional policy, the enum, the variable and arm_owed_jitter_ms go, and this line goes with them.
+LEVICULUM_JITTER_ARM temporary #347 the four-arm A/B selector for the RNode host interface's acquisition jitter (leviculum-std/src/interfaces/rnode.rs::JitterArm). Arm 4 joined on 2026-09-25 as arm 3's rule over a shorter count span, a separate arm rather than a knob on arm 3 so that a run document names one policy. Removed with the arms that lose the co-release series: the winner becomes the unconditional policy, the enum, the variable and arm_owed_jitter_ms go, and this line goes with them.
 
 LEVICULUM_EVENT_LOG permanent operator diagnostic: the path the structured event log is written to (leviculum-std/src/event_log.rs, docs/src/structured-event-logs.md). Selects a sink, never a behaviour on the air.
 LEVICULUM_EVENT_LOG_SYNC permanent operator diagnostic: opt back in to the pre-#418 blocking write on the emitting thread, for a crash where the buffered writer would lose the last lines. Sink discipline, not protocol.
