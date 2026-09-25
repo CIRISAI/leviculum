@@ -39,6 +39,10 @@
 //! The distribution both arms produce is printed (run with `--nocapture`);
 //! the assertions are on the separation between them.
 
+// A FIFO is the whole mechanism of this test; there is none off Unix
+// (CIRIS fork: the Windows lane).
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
