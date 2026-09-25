@@ -54,6 +54,15 @@
 # of the property the crate exists for.
 1    lndecode/tests/cli.rs
 
+# `lnflash`'s own CLI test, for the one case `Command::output` cannot reach: a
+# prompt answered "yes" needs a real pipe on stdin, so `run_typing` spawns,
+# writes the answers and `wait_with_output()`s them in the same function. The
+# child is a CLI that resolves a target and prints; it runs in milliseconds and
+# holds no port, socket, lock or device. Bare for the same reason as `lndecode`
+# above: `lnflash` ships as a standalone bundle and does not carry
+# `leviculum-std` as a dev-dependency to supervise a sub-second prompt.
+1    lnflash/tests/cli.rs
+
 # Two `event-log-helper` children that emit three events each and exit; both are
 # `wait()`ed a few lines below the spawn. Sub-second, and the test's assertions
 # read the files they wrote, so a helper that failed to run is a red test rather
