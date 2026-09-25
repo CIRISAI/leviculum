@@ -404,6 +404,30 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- `lnsd` builds for a 32-bit router again (Codeberg #415). `leviculum-std`
+  held its interface byte counters, its event-log sink counters and the
+  driver's dropped-control counter in `std::sync::atomic::AtomicU64`, which
+  exists only where `target_has_atomic = "64"`. A user cross-compiling for a
+  MIPS router (`mips-unknown-linux-musl`, soft float) got three unresolved
+  imports out of this crate and had to patch it before the daemon would
+  build; `powerpc-unknown-linux-gnu` and the ARMv5 triples are in the same
+  position.
+
+  The counters now go through `Counter64`, which is an `AtomicU64` on every
+  target that has one and a mutex-guarded `u64` on the targets that do not.
+  The width does not move: narrowing to `AtomicUsize` is the fix that
+  suggests itself, and on a 32-bit target it wraps `rx_bytes`/`tx_bytes` at
+  4 GiB, so `rnstatus` totals restart on a router that has been up a week.
+  The cost is one uncontended lock per counted frame, and only on a target
+  that has no 64-bit atomic to begin with.
+
+  `just fast` now carries `no-atomic64-gate`, a `cargo check` of
+  `leviculum-std` for `arm-linux-androideabi` — 32-bit, no 64-bit atomic,
+  and no C dependency to cross-compile. The 32-bit gate added in #303 could
+  not have caught this: i686 is 32-bit and *has* a 64-bit atomic, so pointer
+  width and atomic width need separate targets. What the new gate does not
+  cover is `interfaces/ble/`, which is linux-only and not compiled there.
+
 - A board with an Android phone in the room now dials its neighbour boards
   again (Codeberg #412). A board has one outgoing BLE link, and the scan
   window elected the lowest-addressed eligible candidate. A phone's

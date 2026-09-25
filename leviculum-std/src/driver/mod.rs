@@ -70,10 +70,11 @@ pub use stream::LinkHandle;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 
+use crate::counter64::Counter64;
 use crate::sync_ext::MutexRecover;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -213,7 +214,7 @@ struct EventSink {
     /// was handed out. Shared with the [`EventReceiver`], which is where the
     /// marker is minted — the only place that needs no room in a full
     /// channel to do it (Codeberg #419).
-    control_dropped: Arc<AtomicU64>,
+    control_dropped: Arc<Counter64>,
     /// Reliable channel deliveries that found the data plane full, in arrival
     /// order. Retried ahead of every later data event so a channel's sequence
     /// order is preserved (#280).
@@ -383,7 +384,7 @@ pub struct EventReceiver {
     /// Control events the sink dropped and this receiver has not reported
     /// yet. Shared with [`EventSink`], which is the only writer besides the
     /// swap below.
-    control_dropped: Arc<AtomicU64>,
+    control_dropped: Arc<Counter64>,
     /// When the last overflow marker was handed out, for
     /// `overflow_marker_interval`.
     last_overflow_marker: Option<Instant>,
@@ -1124,7 +1125,7 @@ pub struct ReticulumNode {
     /// Counter of dropped control events, shared between the runner's
     /// `EventSink` (which counts) and the `EventReceiver` (which reports).
     /// Kept here so `start()` can hand the runner a clone (Codeberg #419).
-    control_dropped: Arc<AtomicU64>,
+    control_dropped: Arc<Counter64>,
     /// Merged event receiver for consuming events. `None` either because the
     /// node was built with `without_events()`, or because
     /// `take_event_receiver()` already handed it out.
@@ -1304,7 +1305,7 @@ impl ReticulumNode {
         // Codeberg #71: the single bounded channel is split into a priority
         // control plane and a droppable data plane, merged back for the
         // application by `EventReceiver`.
-        let control_dropped = Arc::new(AtomicU64::new(0));
+        let control_dropped = Arc::new(Counter64::new(0));
         let (control_tx, data_tx, event_rx) = if events_enabled {
             let (control_tx, control_rx) = mpsc::channel(control_channel_capacity);
             let (data_tx, data_rx) = mpsc::channel(data_channel_capacity);
@@ -6932,7 +6933,7 @@ mod tests {
     fn sink_and_receiver(control_cap: usize, data_cap: usize) -> (EventSink, EventReceiver) {
         let (control_tx, control_rx) = mpsc::channel(control_cap);
         let (data_tx, data_rx) = mpsc::channel(data_cap);
-        let control_dropped = Arc::new(AtomicU64::new(0));
+        let control_dropped = Arc::new(Counter64::new(0));
         (
             EventSink {
                 control_tx,

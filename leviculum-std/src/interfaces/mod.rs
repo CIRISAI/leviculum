@@ -41,9 +41,10 @@ pub(crate) mod tcp;
 pub use tcp::{disable_fault_injection, enable_fault_injection, TcpClientHandle};
 pub(crate) mod udp;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::counter64::Counter64;
 use crate::sync_ext::MutexRecover;
 use std::time::{Duration, Instant};
 
@@ -135,7 +136,11 @@ pub(crate) struct RadioStats {
 /// Created by each interface spawn function, cloned into the I/O task.
 /// The RPC handler reads these via `InterfaceStatsMap`.
 ///
-/// `rx_bytes`/`tx_bytes` are written by I/O tasks (lock-free atomics).
+/// `rx_bytes`/`tx_bytes` are written by I/O tasks through [`Counter64`],
+/// which is a lock-free `AtomicU64` on every target that has one and a
+/// mutex-guarded `u64` on the 32-bit targets that do not (Codeberg #415).
+/// Either way they are 64 bits wide: byte totals that wrap at 4 GiB on a
+/// long-running router are a reporting bug, not a portability saving.
 /// `speed` is updated every second by a background task (see
 /// `spawn_traffic_counter`) and read by the RPC handler.
 ///
@@ -144,18 +149,18 @@ pub(crate) struct RadioStats {
 /// it to `Some(RadioStats::default())` at spawn so the stats keys are always
 /// present (mirroring Python's `hasattr(interface, "r_airtime_short")` gate).
 pub(crate) struct InterfaceCounters {
-    pub rx_bytes: AtomicU64,
-    pub tx_bytes: AtomicU64,
+    pub rx_bytes: Counter64,
+    pub tx_bytes: Counter64,
     /// Frames dropped by the TEST-ONLY `test_drop_direct_ingress` filter
     /// (see [`test_drop_direct_ingress_frame`]). Always 0 in production.
-    pub test_direct_ingress_drops: AtomicU64,
+    pub test_direct_ingress_drops: Counter64,
     /// Outgoing frames dropped from the RNode host-side send queue because
     /// it exceeded its cap while TX was held (a dropped frame must be
     /// counted, never silent).
-    pub tx_queue_drops: AtomicU64,
+    pub tx_queue_drops: Counter64,
     /// Payload bytes of those dropped frames, in the same currency as
     /// `tx_bytes` (Python `tx_dropped_bytes`, the `txdrb` stats key).
-    pub tx_dropped_bytes: AtomicU64,
+    pub tx_dropped_bytes: Counter64,
     /// Frames an RNode modem was handed and did not account for on its own
     /// airtime ledger: written over the serial line, never keyed, and never
     /// answered for (the RNode firmware is silent on six of its ten paths
@@ -163,7 +168,7 @@ pub(crate) struct InterfaceCounters {
     /// counters rather than inside them because the interface re-hands such a
     /// frame once; only a frame unaccounted for twice is also counted as a
     /// drop. Always 0 on a medium whose driver keeps no airtime ledger.
-    pub tx_unaccounted: AtomicU64,
+    pub tx_unaccounted: Counter64,
     speed: std::sync::Mutex<SpeedState>,
     radio: std::sync::Mutex<Option<RadioStats>>,
     /// Live carrier state, flipped by the owning interface task at its
@@ -180,12 +185,12 @@ pub(crate) struct InterfaceCounters {
 impl InterfaceCounters {
     pub(crate) fn new() -> Self {
         Self {
-            rx_bytes: AtomicU64::new(0),
-            tx_bytes: AtomicU64::new(0),
-            test_direct_ingress_drops: AtomicU64::new(0),
-            tx_queue_drops: AtomicU64::new(0),
-            tx_dropped_bytes: AtomicU64::new(0),
-            tx_unaccounted: AtomicU64::new(0),
+            rx_bytes: Counter64::new(0),
+            tx_bytes: Counter64::new(0),
+            test_direct_ingress_drops: Counter64::new(0),
+            tx_queue_drops: Counter64::new(0),
+            tx_dropped_bytes: Counter64::new(0),
+            tx_unaccounted: Counter64::new(0),
             speed: std::sync::Mutex::new(SpeedState {
                 prev_rx: 0,
                 prev_tx: 0,

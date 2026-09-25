@@ -124,10 +124,11 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::counter64::Counter64;
 use crate::sync_ext::MutexRecover;
 use std::time::{Duration, Instant};
 
@@ -1169,11 +1170,11 @@ const SLOW_REPORT_MIN_GAP_MS: u128 = 1_000;
 /// Shared counters between the emitting threads and the writer thread.
 struct SinkCounters {
     /// Lines accepted into the queue.
-    enqueued: AtomicU64,
+    enqueued: Counter64,
     /// Lines the writer has handed to `write(2)`.
-    flushed: AtomicU64,
+    flushed: Counter64,
     /// Lines refused because the queue was full.
-    dropped: AtomicU64,
+    dropped: Counter64,
 }
 
 /// How the sink gets a line into the file.
@@ -1227,9 +1228,9 @@ impl FileSink {
         }
         let (tx, rx) = sync_channel::<(u128, String)>(SINK_QUEUE_CAPACITY);
         let counters = Arc::new(SinkCounters {
-            enqueued: AtomicU64::new(0),
-            flushed: AtomicU64::new(0),
-            dropped: AtomicU64::new(0),
+            enqueued: Counter64::new(0),
+            flushed: Counter64::new(0),
+            dropped: Counter64::new(0),
         });
         let writer_counters = Arc::clone(&counters);
         // A named thread so `top -H` / a stack dump can attribute the
@@ -1554,7 +1555,7 @@ impl EventLogLayer {
 ///
 /// Relaxed: nothing orders against it, and a reader wants the count, not a
 /// position in anyone's history.
-static VISITS: AtomicU64 = AtomicU64::new(0);
+static VISITS: Counter64 = Counter64::new(0);
 
 /// Records this layer has visited since process start.
 ///

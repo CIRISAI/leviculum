@@ -455,6 +455,62 @@ i686-usize-gate:
     CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-self-contained=yes" \
     {{manifest}} i686-usize-release -- cargo test -p leviculum-core --target i686-unknown-linux-musl --all-features --release --lib
 
+# Codeberg #415: check leviculum-std on a target with NO 64-bit atomic.
+#
+# `std::sync::atomic::AtomicU64` is compiled only where
+# `target_has_atomic = "64"`. A user cross-compiling `lnsd` for a MIPS router
+# (mips-unknown-linux-musl, soft float) got three unresolved imports out of
+# this crate and had to patch it before it would build; the counters now go
+# through `leviculum-std/src/counter64.rs`, which keeps the width and varies
+# the mechanism.
+#
+# The i686 gate above cannot see that class of defect: i686 is 32-bit but it
+# HAS a 64-bit atomic (cmpxchg8b), so `rustc --print cfg` lists
+# target_has_atomic="64" there and every AtomicU64 resolves. Pointer width and
+# atomic width are separate properties and need separate targets.
+#
+# The target is arm-linux-androideabi, and that choice is about the C compiler
+# rather than about Android. The reporter's own triple is tier 3 — rustup
+# carries no std for mips-unknown-linux-musl, so a gate cannot `rustup target
+# add` it and self-heal the way this one does. Of the targets rustup does
+# carry without a 64-bit atomic, all the others (armv5te-unknown-linux-gnueabi
+# and -musleabi, powerpc-unknown-linux-gnu) have target_os = "linux", which
+# turns on the `[target.'cfg(target_os = "linux")'.dependencies]` block in
+# leviculum-std/Cargo.toml: bluer -> dbus -> libdbus-sys, whose build script
+# compiles vendored C and wants a cross gcc this gate would then demand of
+# every host and of the forge. Android's target_os is "android", the block
+# does not apply, and the gate needs nothing rustup cannot install.
+#
+# Same reason it checks the library and not the binary the reporter built:
+# `-p leviculum-cli --bin lnsd` pulls libsqlite3-sys, which compiles C for
+# every target there is. A cross-build of the whole daemon is the reporter's
+# business and needs their toolchain; what this gate owns is that our Rust
+# stops being the reason it fails.
+#
+# What that costs, said plainly: `interfaces/ble/` is linux-only and therefore
+# not compiled here, so an AtomicU64 added inside the BLE interface would pass
+# this gate. The rest of the crate is covered.
+#
+# `cargo check`, not `-D warnings`: dropping the linux-only modules leaves
+# `OutgoingPacket.peer` read by nobody, a pre-existing dead_code warning about
+# cfg coverage and not about portability. Turning it into an error here would
+# make the gate fail for a reason it is not about.
+#
+# The counters' arithmetic is not checked by this recipe — a cross-check
+# compiles and never runs. The mutex arm is compiled on every target so its
+# unit tests (`counter64::tests`, including the 2^32 crossing) run in the
+# workspace lib suite below.
+#
+# Measured on hamster 2026-09-25: 6.3 s from an empty
+# `target/arm-linux-androideabi` with the sccache wrapper switched off — 101
+# crates, check-only, no codegen — and ~3 s to re-check the crate alone once
+# its dependencies are there. The `rust-std` download is once per host per
+# toolchain, like the embedded triples above.
+[doc('Check leviculum-std on a target with no 64-bit atomic')]
+no-atomic64-gate:
+    rustup target add arm-linux-androideabi
+    cargo check -p leviculum-std --target arm-linux-androideabi
+
 # Guarantee C step 1 (docs/src/concepts/checks-and-citations.md): the four
 # vendored references must sit at the commit their gitlink names. One wrong
 # fact — `reference/LXMF` twelve commits behind for five weeks — silently
@@ -937,7 +993,9 @@ check-source-invariant-census:
 # gates + a compile check of every workspace target (#220) + a RUN of the
 # `tests/` targets whose subject is a file in this tree (the other half of
 # #220) + workspace lib
-# tests + the core suite on a 32-bit `usize` (#303) + the citation guard +
+# tests + the core suite on a 32-bit `usize` (#303) + a check of leviculum-std
+# on a target with no 64-bit atomic (#415 — a separate property from pointer
+# width: i686 is 32-bit and has one) + the citation guard +
 # the third-party notice guard (#288) + the process-supervision pair (census
 # over the sources, proof against the kernel) + the #[ignore]d census counted
 # from the sources (#191c, the binary count of it is in `standard`)
@@ -957,7 +1015,7 @@ check-source-invariant-census:
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard source-invariant-tests
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -982,6 +1040,10 @@ fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline che
 #                           dependencies already fetched.
 #   m0-build-gate,
 #   lxmf-embedded-gate    — thumbv6m / thumbv7em cross-compiles.
+#   no-atomic64-gate      — an arm-linux-androideabi cross-check (#415). It
+#                           installs its own target, so it would run here, but
+#                           it would pay for that download on every container
+#                           and the push path already carries it.
 # Those keep running on the push path, which has the targets and the submodules.
 # What is left is what a submodule-less host-target container can actually
 # prove, and it is the majority of the suite: fmt, clippy, a compile check of

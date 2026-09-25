@@ -16,6 +16,7 @@ pub mod api;
 pub(crate) mod autoconnect;
 pub(crate) mod clock;
 pub mod config;
+pub(crate) mod counter64;
 pub(crate) mod discovery;
 pub mod driver;
 pub mod error;
