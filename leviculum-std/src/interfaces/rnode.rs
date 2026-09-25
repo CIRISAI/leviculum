@@ -1134,10 +1134,12 @@ enum AirtimeVerdict {
 /// the instrument it exists to be.
 ///
 /// * **Any** rise is [`AirtimeVerdict::Keyed`], not just a rise of the
-///   expected size. `airtime_bins` is written by `add_airtime` alone and the
-///   host holds one frame in the modem at a time ([`tx_hold`]), so a rise in
-///   this window can only be this frame — while a rise SMALLER than expected
-///   is what a keyed frame looks like when a bin ages out in the same CHTM.
+///   expected size. `airtime_bins` is written by `add_airtime` alone, and
+///   [`settle_handovers`] presents each frame only the part of a reading's
+///   rise that no earlier handover has already been credited with, so a rise
+///   this account can still see can only be this frame — while a rise SMALLER
+///   than expected is what a keyed frame looks like when a bin ages out in
+///   the same CHTM.
 ///   [`AirtimeAccount::expected_short`] is therefore reported, never
 ///   thresholded, and the couple of percent between our airtime derivation
 ///   and the firmware's own cost formula
@@ -1247,12 +1249,26 @@ const PENDING_HANDOVERS_MAX: usize = 8;
 ///
 /// Oldest-first and one accusation per CHTM. Each pending frame carries the
 /// ledger as it stood at its own handover, so a rise credits the OLDEST
-/// unresolved frame and then the next — which is the honest granularity: the
-/// ledger is an aggregate over the whole modem, and nothing in it says which
-/// frame a millisecond belonged to. In a pipeline that therefore under-reports
-/// (a rise belonging to a later frame absolves an earlier one), and in the
-/// shape this was measured in — one frame in the modem at a time — the two
-/// coincide.
+/// unresolved frame first — which is the honest granularity: the ledger is an
+/// aggregate over the whole modem, and nothing in it says which frame a
+/// millisecond belonged to.
+///
+/// **A reading's rise is spent once.** When handovers pipeline — the hold of
+/// the first frame expires on schedule while the modem's CSMA still defers
+/// keying it, so the second is handed over before the first flies — both
+/// pendings carry the same pre-charge baseline, and crediting each of them
+/// with the whole rise absolves the second with air it has not flown.
+/// Measured 2026-09-25 16:18:21.111Z on t-beam-1 (window d attempt 1 of the
+/// `lora_ratchet_rotation_listened` series, Refs #24): two
+/// `LORA_TX_ACCOUNT verdict=keyed` lines 19 µs apart for one frame's charge,
+/// and the absolved frame keyed 100 ms later into a mutual key-up and died —
+/// had the modem consumed it instead, no `LORA_TX_UNACCOUNTED` could ever
+/// have fired for it. So the walk carries a running credit: a frame it
+/// credits spends its own modelled airtime out of the reading's rise (never
+/// more than that rise holds), and the next frame is judged against what is
+/// left. A frame the remainder cannot cover stays pending, to be judged by
+/// the next receipt — or accused by the ordinary unaccounted path, once a
+/// later reading offers it no rise of its own.
 ///
 /// A verdict of [`AirtimeVerdict::Undecided`] LEAVES the frame pending: the
 /// reasons are properties of one reading, and the next CHTM inside the
@@ -1267,6 +1283,10 @@ fn settle_handovers(
     now: tokio::time::Instant,
     chtm_unix_ms: u64,
 ) -> Option<QueuedFrame> {
+    // How much of this reading's rise earlier pendings have already been
+    // credited with, in raw ledger units. A millisecond of air belongs to one
+    // frame; the same charge may not absolve the next one too.
+    let mut credited: u16 = 0;
     while let Some(mut front) = pendings.pop_front() {
         if now > front.deadline {
             tracing::debug!(
@@ -1279,13 +1299,42 @@ fn settle_handovers(
         front.account.observed_short = cs.airtime_short;
         front.account.observed_long = cs.airtime_long;
         front.account.observed_load_short = cs.channel_load_short;
-        match judge_airtime(&front.account) {
+        // The account this frame is judged on is its own, with its baseline
+        // advanced past the charge already spent on the frames ahead of it:
+        // only the remainder of the rise is this frame's to be absolved by.
+        // The observed fields stay as the modem reported them, because the
+        // lock and busy-medium tests are about the modem's state, not about
+        // this frame's share of it.
+        let judged = AirtimeAccount {
+            baseline_short: front.account.baseline_short.saturating_add(credited),
+            ..front.account
+        };
+        if credited > 0 && judged.observed_short <= judged.baseline_short {
+            // The whole rise is spoken for. This reading says nothing about
+            // this frame — neither that it keyed nor that it did not — so the
+            // frame stays pending for the next receipt.
+            tracing::debug!(
+                target: "leviculum_std::interfaces::rnode::tx_trace",
+                "LORA_TX_ACCOUNT iface={name} len={} verdict=undecided reason=rise_spent",
+                front.payload_len
+            );
+            pendings.push_front(front);
+            return None;
+        }
+        match judge_airtime(&judged) {
             AirtimeVerdict::Keyed => {
                 tracing::debug!(
                     target: "leviculum_std::interfaces::rnode::tx_trace",
                     "LORA_TX_ACCOUNT iface={name} len={} verdict=keyed",
                     front.payload_len
                 );
+                // What this frame takes out of the reading: its own modelled
+                // airtime, and never more than the rise it was credited from
+                // actually holds — a bin that ages out in the same CHTM makes
+                // a keyed frame read smaller than it cost, and charging the
+                // difference to the frames behind it would invent a debt.
+                let rise = judged.observed_short.saturating_sub(judged.baseline_short);
+                credited = credited.saturating_add(judged.expected_short.min(rise));
                 continue;
             }
             AirtimeVerdict::Undecided(reason) => {
@@ -5379,9 +5428,8 @@ mod tests {
         );
     }
 
-    /// One charge absolves two pendings when handovers pipeline — the
-    /// documented under-report of oldest-first crediting, pinned at the
-    /// numbers a rig run produced (Refs #24).
+    /// One charge absolves one pending, even when handovers pipeline
+    /// (Refs #24).
     ///
     /// Measured 2026-09-25 16:18:21.111Z on t-beam-1 (window d attempt 1 of
     /// the `lora_ratchet_rotation_listened` series): frame A was handed and
@@ -5392,11 +5440,16 @@ mod tests {
     /// `LORA_TX_ACCOUNT verdict=keyed` lines in one instant, and nothing of
     /// B's in the ledger either judged. B in fact keyed 100 ms later into a
     /// mutual overlap nobody decoded; had the modem consumed it instead, no
-    /// `LORA_TX_UNACCOUNTED` could ever have fired for it. This test pins
-    /// the blind spot as it stands; closing it means a pending may only be
-    /// credited by charge the earlier pendings have not already consumed.
+    /// `LORA_TX_UNACCOUNTED` could ever have fired for it, because the
+    /// instrument had already closed B's account.
+    ///
+    /// So A takes its own modelled airtime out of the rise and B is left
+    /// with nothing to be absolved by: B stays pending, and the reading
+    /// makes no claim about it in either direction — it is not accused
+    /// either, since a rise that is spoken for is not the same fact as a
+    /// ledger that did not move.
     #[tokio::test]
-    async fn one_charge_absolves_two_pendings_when_handovers_pipeline() {
+    async fn a_pipelined_pending_is_not_absolved_by_the_charge_ahead_of_it() {
         let counters = InterfaceCounters::new();
         let mut pendings: VecDeque<PendingHandover> = VecDeque::new();
         // Both baselines read 1_000: B was handed before A's charge landed.
@@ -5416,18 +5469,109 @@ mod tests {
             tokio::time::Instant::now() + Duration::from_millis(1),
             unix_ms(),
         );
-        assert!(rehand.is_none(), "nothing is re-handed: both read as keyed");
-        assert!(
-            pendings.is_empty(),
-            "one frame's rise closed both accounts, so B is no longer \
-             watched by anything"
+        assert!(rehand.is_none(), "one frame's charge re-hands nothing");
+        assert_eq!(
+            pendings.len(),
+            1,
+            "A is settled by the rise it earned; B is still watched, because \
+             nothing in this reading is about B"
+        );
+        assert_eq!(
+            pendings[0].account.baseline_short, 1_000,
+            "and B keeps its own baseline: the next receipt judges it against \
+             the ledger as it stood at B's handover, not against a borrowed one"
         );
         assert_eq!(
             counters
                 .tx_unaccounted
                 .load(std::sync::atomic::Ordering::Relaxed),
             0,
-            "and the silent-consume instrument saw nothing to accuse"
+            "a rise that is spoken for is not an accusation either"
+        );
+    }
+
+    /// Two pipelined pendings, two charges: both keyed, nobody accused.
+    ///
+    /// The sibling of
+    /// [`a_pipelined_pending_is_not_absolved_by_the_charge_ahead_of_it`], and
+    /// the reason the credit walk subtracts the modelled airtime rather than
+    /// the whole rise: the frame left pending must still be settled by its
+    /// own charge when that charge arrives. Both shapes the rig produces are
+    /// asserted — the second frame's charge arriving in a CHTM of its own
+    /// (the measured case, where the second frame keys 100 ms after the
+    /// first), and both charges landing in one reading (the modem keying
+    /// twice between two CHTMs).
+    #[tokio::test]
+    async fn two_pipelined_pendings_are_both_keyed_by_two_charges() {
+        let counters = InterfaceCounters::new();
+        let mut pendings: VecDeque<PendingHandover> = VecDeque::new();
+        pendings.push_back(pending(147, false, Duration::from_millis(0)));
+        pendings.push_back(pending(147, false, Duration::from_millis(0)));
+        let now = tokio::time::Instant::now() + Duration::from_millis(1);
+
+        // A's receipt: one charge, so only A is settled.
+        let first = settle_handovers(
+            "t",
+            &counters,
+            &mut pendings,
+            &rnode::ChannelStats {
+                airtime_short: 1_328,
+                ..frozen_chtm()
+            },
+            now,
+            unix_ms(),
+        );
+        assert!(first.is_none());
+        assert_eq!(pendings.len(), 1, "B waits for a charge of its own");
+
+        // B's own receipt, one frame further up the ledger.
+        let second = settle_handovers(
+            "t",
+            &counters,
+            &mut pendings,
+            &rnode::ChannelStats {
+                airtime_short: 1_656,
+                ..frozen_chtm()
+            },
+            now,
+            unix_ms(),
+        );
+        assert!(second.is_none(), "B keyed: nothing to re-hand");
+        assert!(pendings.is_empty(), "and nothing is left watching it");
+        assert_eq!(
+            counters
+                .tx_unaccounted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "no LORA_TX_UNACCOUNTED for either frame: both flew"
+        );
+
+        // Same two frames, one reading carrying both charges: the remainder
+        // covers the second, so the walk must not hold it back.
+        pendings.push_back(pending(147, false, Duration::from_millis(0)));
+        pendings.push_back(pending(147, false, Duration::from_millis(0)));
+        let together = settle_handovers(
+            "t",
+            &counters,
+            &mut pendings,
+            &rnode::ChannelStats {
+                airtime_short: 1_656,
+                ..frozen_chtm()
+            },
+            now,
+            unix_ms(),
+        );
+        assert!(together.is_none(), "two charges, two keyed frames");
+        assert!(
+            pendings.is_empty(),
+            "a rise that covers both pendings settles both"
+        );
+        assert_eq!(
+            counters
+                .tx_unaccounted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "and still nobody is accused"
         );
     }
 
