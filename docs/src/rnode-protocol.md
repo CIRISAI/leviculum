@@ -382,7 +382,7 @@ it; the second verdict counts the frame as lost instead
 (`RNODE_TX_QUEUE_DROP ... reason=unaccounted_twice`). What a re-hand
 costs the far end is one duplicate, and the dedup cache drops it on
 arrival (`has_packet_hash`,
-`leviculum-core/src/transport.rs:3166`, which emits `DEDUP_DROP`). The
+`leviculum-core/src/transport.rs:3260`, which emits `DEDUP_DROP`). The
 classes that cache exempts -- announces, and link requests and proofs
 addressed to us -- are exactly the classes whose retries the stack
 already expects, so a second copy there is processed as a retry rather

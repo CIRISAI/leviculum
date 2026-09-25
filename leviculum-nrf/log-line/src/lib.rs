@@ -300,6 +300,64 @@ impl core::fmt::Display for RelayDecidedBody {
     }
 }
 
+/// The body of the firmware's `ANN_TX` line, rendered from the core's
+/// `NodeEvent::AnnounceTransmitted` (Codeberg #405).
+///
+/// One line per announce transmission, saying which occasion put it on the
+/// air:
+///
+/// ```text
+/// ANN_TX occasion=<o> dst=<8 hex> hops=<n> iface=<n|all>
+/// ```
+///
+/// A board's capture could not tell them apart. Since #402 registered an
+/// airtime cap on the LoRa interface, the holdoff allows two or three transit
+/// announces in a window where a capture may show fifteen announce-sized
+/// transmissions, and the board's own `[ANNOUNCE] sent reason=` line accounts
+/// only for the ones it originated itself. `occasion=transit` is a relayed
+/// announce the cap passed, `local` one this board originated (`hops=0`,
+/// which bypasses the cap by design), `uncapped` a relayed announce on an
+/// interface carrying no cap at all, and `path-response` an answer somebody
+/// asked for. Reading the cap off a capture needs that distinction: fifteen
+/// `transit` lines inside one holdoff would mean the cap is not working,
+/// fifteen `local` ones mean the announce policy is.
+///
+/// `occasion` is the core's own scalar (`AnnounceTxOccasion::as_str`), passed
+/// through as `&'static str` so this crate keeps no dependencies. `dst` is
+/// the first 4 bytes, like [`RelayDecidedBody`]'s, a prefix of the 32-hex
+/// `dst=` the host's own `ANN_TX` carries. `iface=all` is the broadcast that
+/// leaves on every interface at once, whose expansion the core does not see —
+/// a fixed key set, so `all` is a value and never a missing field.
+///
+/// **The line is transmissions only.** An announce the cap held back or
+/// dropped emits none: that is `ANN_TX_SUPPRESSED` in the core's tracing, and
+/// the boards have no tracing. Silence here is not proof a board stayed quiet.
+pub struct AnnounceTransmittedBody {
+    /// The occasion scalar, the core's own (`AnnounceTxOccasion::as_str`).
+    pub occasion: &'static str,
+    /// The destination the announce was for.
+    pub dest: [u8; 16],
+    /// The announce's hop count as transmitted.
+    pub hops: u8,
+    /// The interface it went out on, or `None` for the broadcast that
+    /// reaches every interface at once.
+    pub iface_out: Option<usize>,
+}
+
+impl core::fmt::Display for AnnounceTransmittedBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "occasion={} dst=", self.occasion)?;
+        for byte in &self.dest[..4] {
+            write!(f, "{byte:02x}")?;
+        }
+        write!(f, " hops={}", self.hops)?;
+        match self.iface_out {
+            Some(idx) => write!(f, " iface={idx}"),
+            None => f.write_str(" iface=all"),
+        }
+    }
+}
+
 /// The uptime stamp of a captured line: its LAST `t=` field.
 ///
 /// `None` for a line that carries none — every line the current
@@ -507,6 +565,92 @@ iface_out=none t=7\r\n"
             "{} bytes: {rendered:?}",
             rendered.len()
         );
+        assert_eq!(parse_stamp(&rendered), Some(u64::MAX));
+    }
+
+    /// The #405 line, byte for byte: the three occasions a board's capture
+    /// had to tell apart, plus the uncapped one the code also has. Rendering
+    /// them side by side is the point — the acceptance run for #402 saw
+    /// fifteen announce-sized transmissions and could attribute none.
+    #[test]
+    fn every_announce_occasion_renders_as_its_own_line() {
+        let mut dest = [0u8; 16];
+        dest[..4].copy_from_slice(&[0x9f, 0x3a, 0x02, 0xc1]);
+        let transit = AnnounceTransmittedBody {
+            occasion: "transit",
+            dest,
+            hops: 1,
+            iface_out: Some(1),
+        };
+        assert_eq!(
+            line("ANN_TX ", format_args!("{transit}"), 146002),
+            "ANN_TX occasion=transit dst=9f3a02c1 hops=1 iface=1 t=146002\r\n"
+        );
+        // A locally originated announce: hops=0 is what bypassed the cap, so
+        // the two facts a reader needs sit on the same line.
+        let local = AnnounceTransmittedBody {
+            occasion: "local",
+            dest,
+            hops: 0,
+            iface_out: None,
+        };
+        assert_eq!(
+            line("ANN_TX ", format_args!("{local}"), 146002),
+            "ANN_TX occasion=local dst=9f3a02c1 hops=0 iface=all t=146002\r\n"
+        );
+        let response = AnnounceTransmittedBody {
+            occasion: "path-response",
+            dest,
+            hops: 2,
+            iface_out: Some(0),
+        };
+        assert_eq!(
+            line("ANN_TX ", format_args!("{response}"), 146002),
+            "ANN_TX occasion=path-response dst=9f3a02c1 hops=2 iface=0 t=146002\r\n"
+        );
+        let uncapped = AnnounceTransmittedBody {
+            occasion: "uncapped",
+            dest,
+            hops: 3,
+            iface_out: Some(2),
+        };
+        assert_eq!(
+            line("ANN_TX ", format_args!("{uncapped}"), 146002),
+            "ANN_TX occasion=uncapped dst=9f3a02c1 hops=3 iface=2 t=146002\r\n"
+        );
+    }
+
+    /// `iface=all` is a value, not an omitted key: a consumer splitting on
+    /// `=` must never have to tell "every interface" from a truncated line.
+    /// Same failure `iface_out=none` pins for `PKT_RELAY`.
+    #[test]
+    fn the_broadcast_announce_keeps_the_interface_key() {
+        let body = AnnounceTransmittedBody {
+            occasion: "local",
+            dest: [0x11; 16],
+            hops: 0,
+            iface_out: None,
+        };
+        let rendered = line("ANN_TX ", format_args!("{body}"), 7);
+        assert!(rendered.contains(" iface=all "), "{rendered:?}");
+        assert_eq!(rendered.matches('=').count(), 5);
+    }
+
+    /// The per-occurrence cost on the debug CDC, as a number: the widest
+    /// occasion, hop count, interface index and stamp the core can hand over.
+    #[test]
+    fn the_widest_announce_tx_line_fits_the_firmware_log_buffer() {
+        let body = AnnounceTransmittedBody {
+            occasion: "path-response",
+            dest: [0xff; 16],
+            hops: u8::MAX,
+            iface_out: Some(99),
+        };
+        let rendered = line("ANN_TX ", format_args!("{body}"), u64::MAX);
+        assert_eq!(rendered.len(), 85);
+        // And it must stay inside one log buffer, or `format_line` starts
+        // trading the body against the `t=` the capture is ordered by.
+        assert!(rendered.len() < 128, "{rendered:?}");
         assert_eq!(parse_stamp(&rendered), Some(u64::MAX));
     }
 

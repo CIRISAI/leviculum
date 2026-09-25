@@ -1859,6 +1859,68 @@ impl RelayOutcome {
     }
 }
 
+/// Why an announce this node put on an interface went out (Codeberg #405).
+///
+/// Since the boards register an airtime cap (#402) a capture sees announce-
+/// sized transmissions it cannot attribute: the cap's holdoff allows two or
+/// three transit announces in a window where fifteen went out, and every one
+/// of them left the same trace. The occasions differ in what would silence
+/// them — a cap, a mode gate, or nothing at all — so a reader who cannot tell
+/// them apart cannot tell a working cap from an absent one.
+///
+/// Deliberately not a policy input: nothing reads this back. It is the
+/// `reason=` of one line, in the vocabulary the decision sites already use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnnounceTxOccasion {
+    /// A relayed announce (`hops > 0`) that the interface's airtime cap let
+    /// through: either immediately, because the holdoff had expired, or from
+    /// the cap's queue once it did. This is the one occasion the cap paces.
+    Transit,
+    /// An announce this node originated (`hops == 0`), which bypasses the cap
+    /// by design (Python `Transport.py:1091`). Its cadence is the announce
+    /// policy's, not the cap's, so a cap can never explain its rate.
+    Local,
+    /// A relayed announce on an interface that carries NO cap — a BLE or
+    /// serial interface beside a capped LoRa one, or a board whose PHY was
+    /// not known yet when it registered. Says outright that nothing paced
+    /// this transmission.
+    Uncapped,
+    /// An answer to a path request, sent on the requesting interface alone.
+    /// Requested rather than propagated: it is not paced by the cap and does
+    /// not mean this node is relaying announces at all.
+    PathResponse,
+}
+
+impl AnnounceTxOccasion {
+    /// The scalar a structured log line carries. Stable: capture consumers
+    /// count these. Kebab-cased like [`RelayOutcome::as_str`].
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            AnnounceTxOccasion::Transit => "transit",
+            AnnounceTxOccasion::Local => "local",
+            AnnounceTxOccasion::Uncapped => "uncapped",
+            AnnounceTxOccasion::PathResponse => "path-response",
+        }
+    }
+}
+
+/// The occasion of one broadcast announce transmission, from the two facts
+/// that decide it: whether this node originated the announce, and whether the
+/// interface it goes out on carries an airtime cap.
+///
+/// A path response never comes through here — it reaches one named interface
+/// and states its occasion at that site.
+const fn announce_tx_occasion(hops: u8, capped: bool) -> AnnounceTxOccasion {
+    if hops == 0 {
+        AnnounceTxOccasion::Local
+    } else if capped {
+        AnnounceTxOccasion::Transit
+    } else {
+        AnnounceTxOccasion::Uncapped
+    }
+}
+
 /// Events emitted by Transport for the application to handle
 #[derive(Debug)]
 pub enum TransportEvent {
@@ -2015,6 +2077,38 @@ pub enum TransportEvent {
         /// The interface it was handed to, for
         /// [`RelayOutcome::Forwarded`]; `None` for every outcome that
         /// reached no interface.
+        interface_out: Option<usize>,
+    },
+
+    /// One announce transmission, and which of the occasions in
+    /// [`AnnounceTxOccasion`] it was (Codeberg #405).
+    ///
+    /// Emitted where the transmission actually happens — after the packet is
+    /// handed to an interface, never where it was decided — so the event
+    /// never claims a TX that a hop ceiling or a pack error stopped.
+    ///
+    /// Off the boards the same statement is the `ANN_TX` tracing line beside
+    /// it, carrying the same `occasion`. On a board none of the core's
+    /// tracing exists (`leviculum-core/src/lib.rs:83-100`), and the
+    /// firmware's own `[ANNOUNCE] sent` line covers only the announces the
+    /// board originates: a transit announce, a locally originated one that
+    /// bypassed the cap, and a path response were one and the same sight on a
+    /// capture. The boards render this as `ANN_TX`.
+    ///
+    /// **Transmissions only.** An announce the cap held back or dropped stays
+    /// on `ANN_TX_SUPPRESSED`, which is a tracing line and off-board only —
+    /// this event answers "why did this board talk", not "what did it not
+    /// say".
+    AnnounceTransmitted {
+        /// The destination the announce was for.
+        destination_hash: [u8; TRUNCATED_HASHBYTES],
+        /// Which occasion put it on the air.
+        occasion: AnnounceTxOccasion,
+        /// The announce's hop count as transmitted.
+        hops: u8,
+        /// The interface it went out on; `None` when it went to every
+        /// interface at once through a single `Broadcast` action, whose
+        /// expansion the core does not see.
         interface_out: Option<usize>,
     },
 }
@@ -4572,7 +4666,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3130. A destination with no cached
+    /// link-request path uses at transport.rs:3224. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -7531,7 +7625,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// which loops all interfaces without filtering by receiving_interface.
     /// Self-heard echoes are dropped on arrival by the packet_hashlist dedup
     /// in process_incoming, seeded here before the broadcast is emitted.
-    fn forward_on_all(&mut self, packet: &mut Packet) {
+    ///
+    /// Returns whether a `Broadcast` action was pushed: `false` when the hop
+    /// ceiling shed the announce or it failed to pack. The caller's `ANN_TX`
+    /// line and its [`TransportEvent::AnnounceTransmitted`] hang off this, so
+    /// neither can name a transmission that did not leave (#405).
+    fn forward_on_all(&mut self, packet: &mut Packet) -> bool {
         if packet.hops > self.hop_ceiling() {
             crate::tracing::debug!(
                 hops = packet.hops,
@@ -7539,7 +7638,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 "Dropped broadcast packet, max hops exceeded"
             );
             self.stats.record_drop(DropReason::ForwardMaxHops);
-            return;
+            return false;
         }
         let size = packet.packed_size();
         let mut buf = alloc::vec![0u8; size];
@@ -7576,7 +7675,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 Some(ph8(&seed_hash)),
             );
             self.stats.packets_forwarded += 1;
+            return true;
         }
+        false
     }
 
     fn send_packet_on_interface(
@@ -9634,7 +9735,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1903`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1965`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -10382,10 +10483,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             // on a specific interface (targeted path response).
                             crate::tracing::debug!(
                                 event = "ANN_TX",
+                                occasion = AnnounceTxOccasion::PathResponse.as_str(),
                                 dst = %HexShort(&dest_hash),
                                 hops = parsed.hops,
                                 iface = %self.iface_name(target_iface),
                             );
+                            self.events.push(TransportEvent::AnnounceTransmitted {
+                                destination_hash: dest_hash,
+                                occasion: AnnounceTxOccasion::PathResponse,
+                                hops: parsed.hops,
+                                interface_out: Some(target_iface),
+                            });
                         }
                     }
                 } else {
@@ -10394,18 +10502,33 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // Self-originated retries (hops == 0) and interfaces
                     // without a cap bypass the rate limiter.
                     if parsed.hops == 0 || self.interface_announce_caps.is_empty() {
-                        self.forward_on_all(&mut parsed);
                         // OBS-1: uncapped broadcast goes to every interface via a
                         // single Broadcast action, so one ANN_TX with iface=all
                         // covers it. The capped branch emits per-interface inside
                         // broadcast_announce_with_caps (where send vs queue is
                         // decided), so it is intentionally not emitted here.
-                        crate::tracing::debug!(
-                            event = "ANN_TX",
-                            dst = %HexShort(&dest_hash),
-                            hops = parsed.hops,
-                            iface = "all",
-                        );
+                        //
+                        // Gated on the return value (#405): `forward_on_all`
+                        // sheds an announce past the hop ceiling, and the line
+                        // used to be written either way — claiming a TX that
+                        // never happened in the one case where the reader is
+                        // counting transmissions.
+                        let occasion = announce_tx_occasion(parsed.hops, /* capped */ false);
+                        if self.forward_on_all(&mut parsed) {
+                            crate::tracing::debug!(
+                                event = "ANN_TX",
+                                occasion = occasion.as_str(),
+                                dst = %HexShort(&dest_hash),
+                                hops = parsed.hops,
+                                iface = "all",
+                            );
+                            self.events.push(TransportEvent::AnnounceTransmitted {
+                                destination_hash: dest_hash,
+                                occasion,
+                                hops: parsed.hops,
+                                interface_out: None,
+                            });
+                        }
                     } else {
                         self.broadcast_announce_with_caps(&mut parsed);
                     }
@@ -10516,8 +10639,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // that interface this call; `ann_suppressed` = held back by the airtime
         // cap (queued) or dropped (queue full) so a suppressed rebroadcast is
         // visible without ever claiming a TX that did not happen.
+        // (interface, occasion): the occasion differs per interface here, not
+        // just per announce (#405). A transit announce that the LoRa cap let
+        // through is `transit`; the same announce on the board's uncapped BLE
+        // and serial interfaces is `uncapped`, because nothing paced it there.
         let capped_ifaces: Vec<usize> = self.interface_announce_caps.keys().copied().collect();
-        let mut ann_tx_ifaces: Vec<usize> = Vec::new();
+        let mut ann_tx_ifaces: Vec<(usize, AnnounceTxOccasion)> = Vec::new();
         let mut ann_suppressed: Vec<(usize, &'static str)> = Vec::new();
 
         // Emission timebase of this announce, used to decide whether it may
@@ -10550,7 +10677,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let cap_bps = cap.bitrate_bps as u64 * cap.announce_cap_percent as u64 / 100;
                 let wait_ms = (tx_bits * 1000).checked_div(cap_bps).unwrap_or(0);
                 cap.allowed_at_ms = now + wait_ms;
-                ann_tx_ifaces.push(*iface_idx);
+                ann_tx_ifaces.push((*iface_idx, announce_tx_occasion(packet.hops, true)));
             } else if cap.queue.len() >= self.config.max_queued_announces {
                 // Queue full: the announce is dropped on this interface.
                 ann_suppressed.push((*iface_idx, "queue_full"));
@@ -10602,7 +10729,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 data: raw.clone(),
                 peer: None,
             });
-            ann_tx_ifaces.push(iface_idx);
+            ann_tx_ifaces.push((iface_idx, announce_tx_occasion(packet.hops, false)));
         }
         self.stats.packets_forwarded += 1;
 
@@ -10614,7 +10741,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let dst = packet.destination_hash;
         let hops = packet.hops;
         let ph = self.pkt_ph_lazy(&raw);
-        for iface_idx in ann_tx_ifaces {
+        for (iface_idx, occasion) in ann_tx_ifaces {
             if let Some(ph) = &ph {
                 crate::tracing::debug!(
                     target: PKT_EVENT_TARGET,
@@ -10627,10 +10754,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
             crate::tracing::debug!(
                 event = "ANN_TX",
+                occasion = occasion.as_str(),
                 dst = %HexShort(&dst),
                 hops = hops,
                 iface = %self.iface_name(iface_idx),
             );
+            self.events.push(TransportEvent::AnnounceTransmitted {
+                destination_hash: dst,
+                occasion,
+                hops,
+                interface_out: Some(iface_idx),
+            });
         }
         for (iface_idx, reason) in ann_suppressed {
             crate::tracing::debug!(
@@ -10687,12 +10821,24 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             self.push_packet(iface_idx, raw, None, None);
             self.record_outgoing_announce(iface_idx);
             // OBS-1: a previously cap-suppressed announce is now actually sent.
+            // It is `transit` like one the cap passed immediately — the cap
+            // paced it, which is the distinction the occasion draws; that it
+            // waited in the queue to do so is on the `ANN_TX_SUPPRESSED
+            // reason=airtime_cap` line that preceded it (#405).
+            let occasion = announce_tx_occasion(hops, true);
             crate::tracing::debug!(
                 event = "ANN_TX",
+                occasion = occasion.as_str(),
                 dst = %HexShort(&dst),
                 hops = hops,
                 iface = %self.iface_name(iface_idx),
             );
+            self.events.push(TransportEvent::AnnounceTransmitted {
+                destination_hash: dst,
+                occasion,
+                hops,
+                interface_out: Some(iface_idx),
+            });
         }
     }
 
@@ -12332,6 +12478,223 @@ mod tests {
             assert!(
                 broadcast.contains(&InterfaceId(ap)),
                 "AP iface must be excluded from the announce broadcast; got {broadcast:?}"
+            );
+        }
+
+        /// #405: the three announce transmissions a board's capture could not
+        /// tell apart, plus the fourth the code also has, each naming its own
+        /// occasion. This is the minimal reproducer: before the occasion
+        /// existed all four emitted the identical `ANN_TX dst= hops= iface=`,
+        /// so fifteen announce-sized transmissions in one cap holdoff could
+        /// not be attributed to the cap, to the local announce policy, or to
+        /// somebody's path request.
+        ///
+        /// Driven through `check_announce_rebroadcasts`, the one scheduler all
+        /// four paths leave from, with entries seeded directly so the three
+        /// occasions occur in a single deterministic pass.
+        #[test]
+        fn every_announce_transmission_names_its_occasion() {
+            let mut transport = make_transport_enabled();
+            let lora = transport.register_interface(Box::new(MockInterface::new("lora", 1)));
+            let ble = transport.register_interface(Box::new(MockInterface::new("ble", 2)));
+            // Named as the driver names them at registration: the uncapped
+            // send loop keys off `interface_names`, so an unnamed interface
+            // would be skipped and the test would prove nothing about it.
+            transport.set_interface_name(lora, "lora".into());
+            transport.set_interface_name(ble, "ble".into());
+            // Only LoRa carries a cap, as on a board after #402: the same
+            // transit announce is paced there and unpaced on BLE, and the
+            // occasions have to say so per interface.
+            transport.register_interface_bitrate(lora, 1200);
+
+            let now = transport.clock.now_ms();
+            let mut seed = |raw: Vec<u8>,
+                            dst: [u8; TRUNCATED_HASHBYTES],
+                            hops: u8,
+                            target: Option<usize>,
+                            block: bool| {
+                transport.storage.set_announce(
+                    dst,
+                    AnnounceEntry {
+                        timestamp_ms: now,
+                        hops,
+                        retries: 0,
+                        retransmit_at_ms: Some(now),
+                        raw_packet: raw,
+                        receiving_interface_index: lora,
+                        target_interface: target,
+                        local_rebroadcasts: 0,
+                        block_rebroadcasts: block,
+                    },
+                );
+            };
+
+            // A relayed announce: capped on LoRa, unpaced on BLE.
+            let (transit_raw, transit_dst) = make_announce_raw(1, PacketContext::None);
+            seed(transit_raw, transit_dst, 1, None, false);
+            // One this node originated: hops == 0 bypasses the cap by design.
+            let (local_raw, local_dst) = make_announce_raw(0, PacketContext::None);
+            seed(local_raw, local_dst, 0, None, false);
+            // An answer somebody asked for, on the requesting interface alone.
+            let (resp_raw, resp_dst) = make_announce_raw(2, PacketContext::None);
+            seed(resp_raw, resp_dst, 2, Some(ble), true);
+
+            // The tracing surface is captured too: off the boards the SAME
+            // statement is the `ANN_TX` line, and a line without `occasion=`
+            // is the sight this issue is about. The capture exists only with
+            // `tracing` on; the EVENT half below is the one the boards get
+            // and it is asserted in both feature builds.
+            #[cfg(feature = "tracing")]
+            let ((), logs) = crate::test_log_capture::with_captured_logs(|| {
+                transport.check_announce_rebroadcasts(now);
+            });
+            #[cfg(not(feature = "tracing"))]
+            let logs = {
+                transport.check_announce_rebroadcasts(now);
+                ""
+            };
+
+            let seen: Vec<(
+                [u8; TRUNCATED_HASHBYTES],
+                AnnounceTxOccasion,
+                u8,
+                Option<usize>,
+            )> = transport
+                .drain_events()
+                .filter_map(|e| match e {
+                    TransportEvent::AnnounceTransmitted {
+                        destination_hash,
+                        occasion,
+                        hops,
+                        interface_out,
+                    } => Some((destination_hash, occasion, hops, interface_out)),
+                    _ => None,
+                })
+                .collect();
+
+            // The transit announce: `transit` on the capped interface,
+            // `uncapped` on the one nothing paces. One announce, two
+            // occasions — the distinction a single per-announce line loses.
+            assert!(
+                seen.contains(&(transit_dst, AnnounceTxOccasion::Transit, 1, Some(lora))),
+                "the capped interface must report transit; got {seen:?}"
+            );
+            assert!(
+                seen.contains(&(transit_dst, AnnounceTxOccasion::Uncapped, 1, Some(ble))),
+                "the uncapped interface must say so rather than claim the cap \
+                 passed it; got {seen:?}"
+            );
+            // The locally originated one leaves on a single Broadcast action,
+            // so it names no interface and must not pretend to.
+            assert!(
+                seen.contains(&(local_dst, AnnounceTxOccasion::Local, 0, None)),
+                "a self-originated announce must report local; got {seen:?}"
+            );
+            assert!(
+                seen.contains(&(resp_dst, AnnounceTxOccasion::PathResponse, 2, Some(ble))),
+                "a targeted path response must report path-response on the \
+                 requesting interface; got {seen:?}"
+            );
+            // And nothing else: four transmissions, four events. A fifth
+            // would be the double-send this scheduler's two arms must never
+            // both take.
+            assert_eq!(seen.len(), 4, "one event per transmission; got {seen:?}");
+            // Every occasion scalar is distinct, or a capture could not
+            // separate them by grep.
+            let mut scalars: Vec<&str> = seen.iter().map(|(_, o, _, _)| o.as_str()).collect();
+            scalars.sort_unstable();
+            scalars.dedup();
+            assert_eq!(scalars, ["local", "path-response", "transit", "uncapped"]);
+
+            // Every ANN_TX line carries an occasion, and all four scalars
+            // appear: a capture consumer greps these, and a line that keeps
+            // the old three-key shape is indistinguishable from its
+            // neighbours again.
+            let ann_tx: Vec<&str> = logs
+                .lines()
+                .filter(|l| l.contains("event=\"ANN_TX\"") || l.contains("event=ANN_TX"))
+                .collect();
+            if cfg!(feature = "tracing") {
+                assert_eq!(
+                    ann_tx.len(),
+                    4,
+                    "one ANN_TX per transmission; got {ann_tx:?}"
+                );
+                for l in &ann_tx {
+                    assert!(l.contains("occasion="), "ANN_TX without an occasion: {l}");
+                }
+                for want in ["transit", "local", "uncapped", "path-response"] {
+                    assert!(
+                        ann_tx
+                            .iter()
+                            .any(|l| l.contains(&alloc::format!("occasion=\"{want}\""))
+                                || l.contains(&alloc::format!("occasion={want}"))),
+                        "no ANN_TX line reported occasion={want}; got {ann_tx:?}"
+                    );
+                }
+            }
+        }
+
+        /// The line must not name a transmission that never left. An announce
+        /// past the hop ceiling is shed inside `forward_on_all`, which used to
+        /// report nothing back: the `ANN_TX` beside the call claimed the TX
+        /// anyway, in the one case where the reader is counting transmissions
+        /// (#405).
+        #[test]
+        fn an_announce_shed_at_the_hop_ceiling_reports_no_transmission() {
+            let mut transport = make_transport_enabled();
+            let lora = transport.register_interface(Box::new(MockInterface::new("lora", 1)));
+            // No cap registered: this is the bypass arm, where the claim was
+            // written unconditionally.
+            let now = transport.clock.now_ms();
+            let over = transport.hop_ceiling() + 1;
+            let (raw, dst) = make_announce_raw(over, PacketContext::None);
+            transport.storage.set_announce(
+                dst,
+                AnnounceEntry {
+                    timestamp_ms: now,
+                    hops: over,
+                    retries: 0,
+                    retransmit_at_ms: Some(now),
+                    raw_packet: raw,
+                    receiving_interface_index: lora,
+                    target_interface: None,
+                    local_rebroadcasts: 0,
+                    block_rebroadcasts: false,
+                },
+            );
+
+            #[cfg(feature = "tracing")]
+            let ((), logs) = crate::test_log_capture::with_captured_logs(|| {
+                transport.check_announce_rebroadcasts(now);
+            });
+            #[cfg(not(feature = "tracing"))]
+            let logs = {
+                transport.check_announce_rebroadcasts(now);
+                ""
+            };
+
+            // The pre-existing half of the defect: the line was written
+            // beside the CALL, not after the send, so it named a
+            // transmission the hop ceiling had just shed. Vacuous without
+            // `tracing`, where there are no lines at all; the event
+            // assertion below carries the claim in that build.
+            assert!(
+                !logs.contains("ANN_TX"),
+                "no announce left, so no ANN_TX line may claim one: {logs}"
+            );
+
+            let transmissions = transport
+                .drain_events()
+                .filter(|e| matches!(e, TransportEvent::AnnounceTransmitted { .. }))
+                .count();
+            assert_eq!(
+                transmissions, 0,
+                "an announce the hop ceiling shed is not a transmission"
+            );
+            assert_eq!(
+                transport.stats.drops_forward_max_hops, 1,
+                "and it is still counted as the drop it is"
             );
         }
 
@@ -14826,7 +15189,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:5975), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6069), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

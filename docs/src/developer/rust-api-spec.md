@@ -128,7 +128,7 @@ plane and a droppable data plane (Codeberg #71), draining control first.
 | `fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError>` — `driver/mod.rs:475` | Non-blocking receive |
 
 `NodeEvent` is the event enum, defined in core at
-`leviculum-core/src/node/event.rs:42` and re-exported as
+`leviculum-core/src/node/event.rs:44` and re-exported as
 `leviculum_std::NodeEvent`. It is `#[non_exhaustive]`, so always include a
 catch-all arm. The variants most applications match (field names verbatim from
 source):

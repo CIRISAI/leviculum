@@ -84,6 +84,36 @@ pub fn log_events(events: &[NodeEvent], now_ms: u64) {
         // can only say how many, never which. Only the ADDRESSED relay path
         // reaches this — an overheard copy bound elsewhere stays on the
         // counter, so the line cannot drown a shared-medium capture.
+        // Why this board just talked (#405). Since the board registers an
+        // airtime cap (#402) a capture shows announce-sized transmissions
+        // that the cap's holdoff cannot account for, and nothing said which
+        // of them the cap was even meant to pace: `[ANNOUNCE] sent` covers
+        // only the announces this board originates, and the core's own
+        // `ANN_TX` line is compiled out here. `occasion=` is that answer —
+        // `transit` passed the cap, `local` bypassed it because it started
+        // here, `uncapped` was never paced at all, `path-response` was asked
+        // for. Transmissions only: an announce the cap held back emits no
+        // line here.
+        if let NodeEvent::AnnounceTransmitted {
+            destination_hash,
+            occasion,
+            hops,
+            interface_out,
+        } = event
+        {
+            crate::log::log_fmt(
+                "ANN_TX ",
+                format_args!(
+                    "{}",
+                    leviculum_log_line::AnnounceTransmittedBody {
+                        occasion: occasion.as_str(),
+                        dest: *destination_hash.as_bytes(),
+                        hops: *hops,
+                        iface_out: *interface_out,
+                    }
+                ),
+            );
+        }
         if let NodeEvent::RelayDecided {
             destination_hash,
             packet_hash_prefix,

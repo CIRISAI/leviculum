@@ -50,6 +50,14 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     // rendered on the boards, where the journey events that say the same
     // thing are compiled out, and read from a capture, not from an app.
     "RelayDecided",
+    // Which occasion put one announce this node transmitted on the air
+    // (#405): pure instrumentation, for the same reason as the two above. It
+    // is about a transmission the transport already made, mostly of somebody
+    // else's announce, and asks nothing of the application. A C app's own
+    // announces are the ones it called `lev_announce` for; it learns nothing
+    // from being told a second time that they left, and nothing it could act
+    // on from a relayed one. The line exists to be read from a capture.
+    "AnnounceTransmitted",
 ];
 
 /// Variants whose `destination_hash` is deliberately not projected into

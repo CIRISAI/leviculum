@@ -3894,6 +3894,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
 
+            TransportEvent::AnnounceTransmitted {
+                destination_hash,
+                occasion,
+                hops,
+                interface_out,
+            } => {
+                self.events.push(NodeEvent::AnnounceTransmitted {
+                    destination_hash: DestinationHash::new(destination_hash),
+                    occasion,
+                    hops,
+                    interface_out,
+                });
+            }
+
             TransportEvent::PacketReceived {
                 destination_hash,
                 packet,

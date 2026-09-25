@@ -11,7 +11,9 @@ use crate::announce::ReceivedAnnounce;
 use crate::constants::TRUNCATED_HASHBYTES;
 use crate::destination::DestinationHash;
 use crate::link::{LinkCloseReason, LinkId};
-use crate::transport::{AnnounceTableClosed, DiscoveryWindow, RelayOutcome, PKT_PH_BYTES};
+use crate::transport::{
+    AnnounceTableClosed, AnnounceTxOccasion, DiscoveryWindow, RelayOutcome, PKT_PH_BYTES,
+};
 
 /// Why the driver destroyed frames bound to an interface (#25).
 ///
@@ -261,6 +263,31 @@ pub enum NodeEvent {
         /// The interface it was handed to, for
         /// [`RelayOutcome::Forwarded`]; `None` for every outcome that reached
         /// no interface.
+        interface_out: Option<usize>,
+    },
+
+    /// One announce this node transmitted, and which occasion put it on the
+    /// air (Codeberg #405).
+    ///
+    /// See
+    /// [`TransportEvent::AnnounceTransmitted`](crate::transport::TransportEvent::AnnounceTransmitted)
+    /// for why the three occasions had to become distinguishable and for what
+    /// is deliberately out of scope (suppression).
+    ///
+    /// Like [`LinkRefused`](NodeEvent::LinkRefused) and
+    /// [`RelayDecided`](NodeEvent::RelayDecided) it exists so the boards can
+    /// see it: they build leviculum-core without `tracing`, so the `ANN_TX`
+    /// line that says the same thing off-board is compiled out there. They
+    /// render it as one `ANN_TX` line on the debug CDC.
+    AnnounceTransmitted {
+        /// The destination the announce was for.
+        destination_hash: DestinationHash,
+        /// Which occasion put it on the air.
+        occasion: AnnounceTxOccasion,
+        /// The announce's hop count as transmitted.
+        hops: u8,
+        /// The interface it went out on; `None` when it went to every
+        /// interface at once through a single `Broadcast` action.
         interface_out: Option<usize>,
     },
 
@@ -569,6 +596,9 @@ impl NodeEvent {
             // A relay decision is about somebody else's packet in transit;
             // this node terminates no link it names.
             | NodeEvent::RelayDecided { .. }
+            // An announce is a broadcast: it names no link even when it
+            // leaves on exactly one interface.
+            | NodeEvent::AnnounceTransmitted { .. }
             | NodeEvent::ControlPlaneOverflow { .. }
             | NodeEvent::CoreProcessorPanicked { .. }
             | NodeEvent::InterfaceDown(_)
@@ -626,7 +656,11 @@ impl NodeEvent {
             // would let pure instrumentation crowd out path discovery on the
             // busiest node in the mesh. A lost one costs a reader one line of
             // a repeating condition; the counters still total correctly.
-            | NodeEvent::RelayDecided { .. } => EventClass::Data,
+            | NodeEvent::RelayDecided { .. }
+            // Instrumentation again, and on the busiest node in the mesh one
+            // of these accompanies every announce it passes on. Nothing reads
+            // it back; a lost one costs a reader one line.
+            | NodeEvent::AnnounceTransmitted { .. } => EventClass::Data,
 
             // Link lifecycle and identity — at most one per link, must not be
             // lost or links wedge. A refusal is the lifecycle event of a link
@@ -687,6 +721,7 @@ impl NodeEvent {
             NodeEvent::PathLost { .. } => "PathLost",
             NodeEvent::AnnounceLearnedNotRelayed { .. } => "AnnounceLearnedNotRelayed",
             NodeEvent::RelayDecided { .. } => "RelayDecided",
+            NodeEvent::AnnounceTransmitted { .. } => "AnnounceTransmitted",
             NodeEvent::PacketReceived { .. } => "PacketReceived",
             NodeEvent::PacketDeliveryConfirmed { .. } => "PacketDeliveryConfirmed",
             NodeEvent::DeliveryFailed { .. } => "DeliveryFailed",

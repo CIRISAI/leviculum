@@ -258,7 +258,24 @@ fn obs_events_are_well_formed_under_event_log_layer() {
     for l in &ann_tx {
         assert_well_formed(l);
         assert!(l.contains("dst=") && l.contains("hops=") && l.contains("iface="));
+        // Codeberg #405: which of the announce-transmission occasions this
+        // was. Without it the line cannot say whether the airtime cap paced
+        // this announce, whether it bypassed the cap because it originated
+        // here, or whether somebody asked for it.
+        assert!(
+            l.contains("occasion="),
+            "ANN_TX must name its occasion; line: {l}"
+        );
     }
+    // The relayed announce this test feeds in arrives at hops=1 on an
+    // interface with no registered bitrate, so nothing paces it: `uncapped`
+    // is the honest occasion, and reading `transit` here would mean the line
+    // claims a cap that was never registered.
+    assert!(
+        ann_tx.iter().any(|l| l.contains("occasion=uncapped")),
+        "expected occasion=uncapped for a relay on an uncapped interface; \
+         got {ann_tx:#?}"
+    );
 
     // PKT_DROP_SUMMARY fired with the per-reason counts.
     let summary = lines_for(&dump, "PKT_DROP_SUMMARY");
