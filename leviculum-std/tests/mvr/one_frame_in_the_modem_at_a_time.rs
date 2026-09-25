@@ -33,8 +33,12 @@
 //! The fake modem below is the firmware's serial side. It answers the detect
 //! probe and the radio configuration, reports its PHY and CSMA parameters
 //! the way `updateBitrate()` → `setPreamble()` → `kiss_indicate_phy_stats()`
-//! does at every radio configuration (`Utilities.h:1226-1228,1243-1258`),
-//! and timestamps every `CMD_DATA` it is handed.
+//! does at every radio configuration (`Utilities.h:1226-1228,1243-1258`).
+//!
+//! The handover instants themselves are stamped one layer earlier, in the
+//! write the interface hands the bytes down with ([`StampingWrite`]) — not in
+//! the modem's read loop, which is a task wake-up and can be late by more
+//! than this test's whole margin.
 //!
 //! The assertion is that the second frame of a burst does not reach the
 //! modem until the first has left the air: the first frame's airtime at the
@@ -55,8 +59,11 @@
 //!
 //! Sans-hardware, deterministic, a few seconds.
 
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use leviculum_channel_access::JITTER_CW_SLOTS;
@@ -87,7 +94,8 @@ struct ReportedPhy {
     csma_difs_ms: u64,
 }
 
-/// One frame the modem was handed, and when.
+/// One frame the modem was handed, and when — the instant the interface let
+/// go of it, stamped by [`StampingWrite`].
 #[derive(Debug, Clone)]
 struct Handover {
     at: Instant,
@@ -110,6 +118,91 @@ impl RNodeChannelFactory for DuplexFactory {
     }
 }
 
+/// The write half the interface is handed, with a KISS deframer reading over
+/// the shoulder of every write: each `CMD_DATA` frame is stamped at the
+/// `poll_write` that completed it.
+///
+/// Until 2026-09-25 the stamp was taken in the fake modem's read loop. Both
+/// ends of the duplex run on one runtime, so that stamp is a task WAKE-UP —
+/// the instant the reader was next scheduled, not the instant the frame
+/// crossed the boundary — and this test allows no slack at all: the hold is a
+/// sleep of exactly the milliseconds the assertion recomputes, so whatever the
+/// loaded host adds to the FIRST wake-up alone comes straight off the measured
+/// gap. The land gate on 23641c94 reported 752 ms against 924 owed, and
+/// `stress-ng --cpu 20 --vm 2` beside the test at `nice -n 19` reproduced it
+/// at 760 ms and 820 ms in two of five runs — on a tree whose `tx_hold` is
+/// byte-identical to the one that was green nine commits earlier, so there was
+/// nothing in the interface to find. The same load pushed other runs to
+/// 1046 ms and 1052 ms: the wake-up moved the gap in both directions, which is
+/// what a delayed observer looks like and not what a changed policy looks
+/// like.
+///
+/// The write is the right place for it on the merits, not only for the
+/// stability. What this test measures is the one thing the host decides — when
+/// it lets go of a frame — and the host has no influence on when the firmware
+/// on the far side of a serial line gets around to reading it. The stamp is
+/// taken inside the interface's own task, in the call that hands the bytes
+/// down, before the hold timer for that frame exists; the two stamps the gap
+/// is made of are therefore separated by exactly the timer the interface set
+/// between them, and nothing the scheduler does to any other task can move
+/// them.
+struct StampingWrite<W> {
+    inner: W,
+    deframer: KissDeframer,
+    record: Arc<Mutex<ModemRecord>>,
+}
+
+impl<W> StampingWrite<W> {
+    fn new(inner: W, record: Arc<Mutex<ModemRecord>>) -> Self {
+        Self {
+            inner,
+            deframer: KissDeframer::with_max_payload(rnode::HW_MTU),
+            record,
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for StampingWrite<W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let me = self.get_mut();
+        let written = match Pin::new(&mut me.inner).poll_write(cx, buf) {
+            Poll::Ready(Ok(n)) => n,
+            other => return other,
+        };
+        // Only the bytes that were actually accepted: a short write leaves the
+        // rest for the next call, and a frame that completes there is stamped
+        // there.
+        let at = Instant::now();
+        for f in me.deframer.process(&buf[..written]) {
+            if let KissDeframeResult::Frame { command, payload } = f {
+                if command == rnode::CMD_DATA {
+                    me.record
+                        .lock()
+                        .expect("record lock")
+                        .handovers
+                        .push(Handover {
+                            at,
+                            len: payload.len() as u32,
+                        });
+                }
+            }
+        }
+        Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 /// The firmware's own slot derivation, transcribed rather than imported: 12
 /// symbol times, clamped to at most 100 ms and at least 24 ms — 6 ms when the
 /// modulation runs faster than 30 kbps (`Config.h:102-107`,
@@ -125,8 +218,8 @@ fn modem_slot_ms(bw_hz: u32, sf: u8, cr: u8) -> u64 {
 }
 
 /// A minimal RNode firmware: answers the detect probe and the radio
-/// configuration, reports its PHY and CSMA parameters once the radio is on,
-/// and timestamps every `CMD_DATA` it is handed.
+/// configuration, and reports its PHY and CSMA parameters once the radio is
+/// on. It does not stamp the data frames — see [`StampingWrite`].
 ///
 /// It does NOT send `CMD_STAT_CSMA`: the firmware emits that only when its
 /// contention band changes (`RNode_Firmware.ino:1614-1618`), so a modem that
@@ -193,16 +286,11 @@ async fn fake_modem(mut peer: tokio::io::DuplexStream, record: Arc<Mutex<ModemRe
                     | rnode::CMD_TXPOWER
                     | rnode::CMD_SF
                     | rnode::CMD_CR => push(&mut reply, command, &payload),
-                    rnode::CMD_DATA => {
-                        record
-                            .lock()
-                            .expect("record lock")
-                            .handovers
-                            .push(Handover {
-                                at: Instant::now(),
-                                len: payload.len() as u32,
-                            })
-                    }
+                    // `CMD_DATA` is deliberately not timestamped here: the
+                    // stamp that matters is taken in `StampingWrite`, on the
+                    // other side of the duplex. Falls through to the modem's
+                    // silence, which is what the firmware answers a data
+                    // frame with.
                     _ => {}
                 }
             }
@@ -232,12 +320,13 @@ fn announceable(app_name: &str) -> Destination {
 async fn the_modem_holds_one_frame_at_a_time() {
     let (port, peer) = tokio::io::duplex(64 * 1024);
     let (read_half, write_half) = tokio::io::split(port);
+    let record = Arc::new(Mutex::new(ModemRecord::default()));
     let halves: Mutex<Option<RNodeChannelHalves>> = Mutex::new(Some((
         Box::new(read_half) as Box<dyn AsyncRead + Send + Unpin>,
-        Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+        Box::new(StampingWrite::new(write_half, Arc::clone(&record)))
+            as Box<dyn AsyncWrite + Send + Unpin>,
     )));
 
-    let record = Arc::new(Mutex::new(ModemRecord::default()));
     let modem = tokio::spawn(fake_modem(peer, Arc::clone(&record)));
 
     let storage = tempfile::tempdir().expect("storage");
@@ -296,8 +385,9 @@ async fn the_modem_holds_one_frame_at_a_time() {
     );
     assert!(
         handovers.len() >= 2,
-        "both announces must reach the modem — this is a spacing test, and \
-         a frame that never arrives is a different bug: got {} handovers",
+        "both announces must be handed down — this is a spacing test, and \
+         a frame that is never sent at all is a different bug: got {} \
+         handovers",
         handovers.len()
     );
 
