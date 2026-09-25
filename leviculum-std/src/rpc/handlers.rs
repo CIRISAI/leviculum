@@ -413,6 +413,9 @@ struct StatRow {
     /// frame on the air, in milliseconds; `None` for a medium that transmits
     /// as soon as it is asked (Codeberg #190).
     tx_jitter_max_ms: Option<u64>,
+    /// How much of the ceiling above is the interface's fresh per-frame
+    /// spread; `None` where the interface draws none.
+    tx_hold_spread_max_ms: Option<u64>,
     /// What TAKING the carrier costs at worst, as the interface prices it;
     /// `None` for a medium that transmits as soon as it is asked.
     acquisition: Option<leviculum_core::transport::AcquisitionCeiling>,
@@ -639,6 +642,21 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         ));
     }
 
+    // How much of that ceiling is the interface's fresh per-frame spread,
+    // additive on the same terms and in the same seconds. A reader sizing a
+    // burst charges the rest of the ceiling once per CSMA band the burst
+    // climbs into and this term once per frame, so a reader that cannot
+    // subtract it prices the spread once per band instead — twice over on a
+    // link that leaves band 1, which is how the drain window this key was
+    // added for over-sized itself (trace 251). Absent, the whole ceiling is
+    // contention, which is what a daemon older than this key means by it.
+    if let Some(ms) = row.tx_hold_spread_max_ms {
+        fields.push((
+            pickle_str_key("tx_hold_spread_max"),
+            pickle_float(ms as f64 / 1000.0),
+        ));
+    }
+
     // Beside it, and additive on the same terms: what the frame that TAKES
     // the channel pays, which is a different quantity from the per-frame
     // ceiling above wherever the interface prices its contention slots in
@@ -858,6 +876,7 @@ pub(crate) fn build_interface_stats(
                 .map(|(_, l)| l.identity.name.clone()),
             radio,
             tx_jitter_max_ms: entry.link_profile.and_then(|p| p.tx_jitter_max_ms),
+            tx_hold_spread_max_ms: entry.link_profile.and_then(|p| p.tx_hold_spread_max_ms),
             acquisition: entry.link_profile.and_then(|p| p.acquisition),
         });
     }
@@ -905,6 +924,7 @@ pub(crate) fn build_interface_stats(
             // A listener carries no packets, so it has no medium access of its
             // own to bound; the spawned connection is the row that would.
             tx_jitter_max_ms: None,
+            tx_hold_spread_max_ms: None,
             acquisition: None,
         });
     }
@@ -2142,6 +2162,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: Some(2926),
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             },
         );
@@ -2790,6 +2811,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: Some(2926),
+                tx_hold_spread_max_ms: Some(400),
                 acquisition: None,
             },
         );
@@ -2799,6 +2821,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 115_200,
                 tx_jitter_max_ms: None,
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             },
         );
@@ -2847,12 +2870,23 @@ mod tests {
             Some(Value::F64(2.926)),
             "the jitter ceiling is reported in seconds"
         );
+        assert_eq!(
+            field(&radio, "tx_hold_spread_max"),
+            Some(Value::F64(0.4)),
+            "how much of that ceiling is the per-frame spread rides beside \
+             it, in the same seconds: a reader charges the rest once per \
+             CSMA band and this once per frame"
+        );
 
         let serial = row_named("SerialInterface[/dev/ttyUSB1]");
         assert_eq!(field(&serial, "bitrate"), Some(Value::I64(115_200)));
         assert!(
             field(&serial, "tx_jitter_max").is_none(),
             "a medium that transmits when asked carries no ceiling key"
+        );
+        assert!(
+            field(&serial, "tx_hold_spread_max").is_none(),
+            "and no spread key either"
         );
 
         let tcp = row_named("tcp_client_0");
@@ -2891,6 +2925,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: Some(2926),
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             },
         );

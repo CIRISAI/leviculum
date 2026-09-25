@@ -479,6 +479,7 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
             bitrate: None,
             announce_cap_bitrate: None,
             tx_jitter_max_ms: None,
+            tx_hold_spread_max_ms: None,
             acquisition: None,
             frame_turnaround_ms: None,
             ifac: None,

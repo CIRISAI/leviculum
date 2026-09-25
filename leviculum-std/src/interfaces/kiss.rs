@@ -429,6 +429,7 @@ pub(crate) fn spawn_kiss_interface(config: KissInterfaceConfig) -> InterfaceHand
             bitrate: None,
             announce_cap_bitrate: None,
             tx_jitter_max_ms: None,
+            tx_hold_spread_max_ms: None,
             acquisition: None,
             frame_turnaround_ms: None,
             ifac: None,

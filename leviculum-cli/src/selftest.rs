@@ -739,6 +739,9 @@ fn radio_bitrate_bps(iface: &serde_json::Value) -> Option<(u32, String)> {
 struct RadioRow {
     bitrate_bps: u32,
     tx_jitter_max_ms: Option<u64>,
+    /// How much of that ceiling the daemon says is its fresh per-frame
+    /// spread; `None` from a daemon that reports no such term.
+    tx_hold_spread_max_ms: Option<u64>,
     acquisition: Option<AcquisitionCeiling>,
     /// The interface's own name, for the line the caller logs.
     name: String,
@@ -767,6 +770,15 @@ fn link_profile_from_interface_stats(
         // daemon that does not report a pre-TX contention bound.
         let jitter_ms = iface
             .get("tx_jitter_max")
+            .and_then(|v| v.as_f64())
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .map(|s| (s * 1000.0) as u64);
+        // How much of that ceiling is the interface's per-frame spread, in
+        // the same seconds. Absent on `rnsd` and on any `lnsd` older than the
+        // key, and then the whole ceiling counts as contention — which is
+        // what such a daemon means by it, because it drew no spread at all.
+        let spread_ms = iface
+            .get("tx_hold_spread_max")
             .and_then(|v| v.as_f64())
             .filter(|s| s.is_finite() && *s >= 0.0)
             .map(|s| (s * 1000.0) as u64);
@@ -800,6 +812,7 @@ fn link_profile_from_interface_stats(
             best = Some(RadioRow {
                 bitrate_bps: bitrate,
                 tx_jitter_max_ms: jitter_ms,
+                tx_hold_spread_max_ms: spread_ms,
                 acquisition,
                 name,
                 shape,
@@ -810,6 +823,7 @@ fn link_profile_from_interface_stats(
     let Some(RadioRow {
         bitrate_bps,
         tx_jitter_max_ms,
+        tx_hold_spread_max_ms,
         acquisition,
         name,
         shape,
@@ -826,11 +840,15 @@ fn link_profile_from_interface_stats(
         Some(AcquisitionCeiling { max_ms, .. }) => format!(", acquisition {max_ms} ms"),
         None => String::new(),
     };
+    let spread_note = match tx_hold_spread_max_ms {
+        Some(ms) => format!(" of which {ms} ms is the per-frame spread"),
+        None => ", all of it contention".to_string(),
+    };
     let origin = match tx_jitter_max_ms {
         Some(ms) => {
             format!(
                 "the daemon's `{name}` ({bitrate_bps} bps {shape}, jitter ceiling {ms} \
-                 ms{acquisition_note})"
+                 ms{spread_note}{acquisition_note})"
             )
         }
         None => format!(
@@ -842,6 +860,7 @@ fn link_profile_from_interface_stats(
         leviculum_core::transport::LinkProfile {
             bitrate_bps,
             tx_jitter_max_ms,
+            tx_hold_spread_max_ms,
             acquisition,
         },
         origin,
@@ -1015,8 +1034,9 @@ struct FramePacing {
     /// What the frame occupies on the air, preamble and header included.
     air_ms: u64,
     /// What the sending interface holds the NEXT frame back after handing
-    /// this one to the modem: the frame's own airtime plus the contention the
-    /// firmware runs before the frame behind it.
+    /// this one to the modem: the frame's own airtime, plus one contention
+    /// window per band the burst climbs into, plus the one per-frame spread
+    /// drawn on top of them ([`contention_terms`]).
     hold_ms: u64,
 }
 
@@ -1030,7 +1050,8 @@ struct FramePacing {
 const INTERLEAVED_SENDERS: u64 = 2;
 
 /// The contention window a burst meets, as a multiple of the band-1 ceiling
-/// the interface reports as `tx_jitter_max`.
+/// — the contention half of what the interface reports as `tx_jitter_max`,
+/// never the whole of it ([`contention_terms`]).
 ///
 /// That ceiling is DIFS plus the widest of the 14 equally likely band-1 draws
 /// — 15 slots in all. The modem does not stay in band 1 under a burst:
@@ -1051,11 +1072,39 @@ const INTERLEAVED_SENDERS: u64 = 2;
 /// as late rather than thrown away ([`drain_single_packets`]).
 const BURST_CONTENTION_BANDS: u64 = 2;
 
+/// The two halves of the interface's reported per-frame ceiling, in the order
+/// a burst pays them: what one contest costs, and the spread drawn on top of
+/// it.
+///
+/// The interface reports the sum (`rnode.rs`, pinned by
+/// `the_reported_maximum_is_the_owed_hold_plus_the_whole_spread`), and the sum
+/// is right for what it is reported for — the widest hold ONE frame can
+/// impose. It is the wrong quantity to multiply. The contest is re-run for
+/// every CSMA band a burst climbs into, so [`BURST_CONTENTION_BANDS`] bands
+/// cost that many contests; the spread is a fresh per-frame draw the
+/// interface takes whatever band it is in, so a burst pays it once per frame
+/// and never twice. Trace 251 (2026-09-25) caught the fold: a link reporting
+/// 456 ms = 360 contention + 96 spread was priced at 912 ms per frame, 96 ms
+/// of which the sender never waits. A window that is too wide hides slow
+/// delivery behind a green bar, and this tool's bar is 100 %.
+///
+/// A daemon that reports no spread reports a ceiling that is all contention,
+/// which is exactly what it means: it draws none.
+fn contention_terms(profile: leviculum_core::transport::LinkProfile) -> (u64, u64) {
+    let ceiling_ms = profile.tx_jitter_max_ms.unwrap_or(0);
+    // Clamped, because the two figures come off the wire independently and a
+    // spread wider than the ceiling it is part of would underflow the
+    // contention term into a huge one.
+    let spread_ms = profile.tx_hold_spread_max_ms.unwrap_or(0).min(ceiling_ms);
+    (ceiling_ms - spread_ms, spread_ms)
+}
+
 /// Price one frame at the link `profile` describes.
 fn frame_pacing(wire_bytes: usize, profile: leviculum_core::transport::LinkProfile) -> FramePacing {
     let payload_ms = (wire_bytes as u64) * 8 * 1000 / profile.bitrate_bps as u64;
     let air_ms = payload_ms * FRAME_OVERHEAD_PERMILLE / 1000;
-    let contention_ms = profile.tx_jitter_max_ms.unwrap_or(0) * BURST_CONTENTION_BANDS;
+    let (per_band_ms, spread_ms) = contention_terms(profile);
+    let contention_ms = per_band_ms * BURST_CONTENTION_BANDS + spread_ms;
     FramePacing {
         air_ms,
         hold_ms: air_ms + contention_ms,
@@ -1088,8 +1137,12 @@ fn acquisition_shape(profile: leviculum_core::transport::LinkProfile, frame_air_
 /// link `profile` describes.
 ///
 /// ```text
+/// hold   = air + bands x contention + spread
 /// window = frames x max(air, hold / senders) + (hold + air) + senders x acquisition
 /// ```
+///
+/// The hold's two contention terms are not one number times two: the contest
+/// is re-run per CSMA band, the spread is drawn per frame ([`contention_terms`]).
 ///
 /// The first term is the medium's pace. A frame cannot cross faster than its
 /// own airtime, and it cannot follow the one before it faster than the
@@ -1136,6 +1189,7 @@ fn drain_budget(
     };
 
     let pacing = frame_pacing(wire_bytes, profile);
+    let (per_band_ms, spread_ms) = contention_terms(profile);
     let payload_ms = (wire_bytes as u64) * 8 * 1000 / profile.bitrate_bps as u64;
     let medium_ms = pacing.air_ms.max(pacing.hold_ms / INTERLEAVED_SENDERS);
     let tail_ms = pacing.hold_ms + pacing.air_ms;
@@ -1153,8 +1207,9 @@ fn drain_budget(
         detail: format!(
             "{frames} frames x {wire_bytes}B at {} bps: air {:.2}s/frame \
              (payload {:.2}s +{}% preamble/header), hold {:.2}s/frame \
-             (air + {}x the {:.2}s pre-TX jitter ceiling, the band a burst \
-             runs in), acquisition {:.2}s/sender ({}); window = frames x \
+             (air + {}x the {:.2}s contention window, one per band a burst \
+             climbs into, + the {:.2}s per-frame spread, drawn once per \
+             frame), acquisition {:.2}s/sender ({}); window = frames x \
              max(air, hold/{}) + tail deferral (hold + air) + {} x \
              acquisition = {frames} x {:.2}s + {:.2}s + {:.2}s = {:.1}s",
             profile.bitrate_bps,
@@ -1163,7 +1218,8 @@ fn drain_budget(
             FRAME_OVERHEAD_PERMILLE / 10 - 100,
             pacing.hold_ms as f64 / 1000.0,
             BURST_CONTENTION_BANDS,
-            profile.tx_jitter_max_ms.unwrap_or(0) as f64 / 1000.0,
+            per_band_ms as f64 / 1000.0,
+            spread_ms as f64 / 1000.0,
             acquisition_each_ms as f64 / 1000.0,
             acquisition_shape(profile, pacing.air_ms),
             INTERLEAVED_SENDERS,
@@ -2601,6 +2657,7 @@ mod tests {
     const MEASURED_LINK: LinkProfile = LinkProfile {
         bitrate_bps: 2734,
         tx_jitter_max_ms: Some(2926),
+        tx_hold_spread_max_ms: None,
         acquisition: None,
     };
     const MEASURED_FRAME_BYTES: usize = 147;
@@ -2613,11 +2670,34 @@ mod tests {
     const HELD_LINK: LinkProfile = LinkProfile {
         bitrate_bps: 2380,
         tx_jitter_max_ms: Some(360),
+        tx_hold_spread_max_ms: None,
         acquisition: None,
     };
     /// What that run's `LORA_TX_HOLD` reported per frame once the burst had
     /// pushed the modem out of band 1.
     const HELD_LINK_BAND_2_HOLD_MS: u64 = 1_223;
+
+    /// The link of window d attempt 1 (trace 251, 2026-09-25,
+    /// `lora_ratchet_rotation_listened_exec_alpha_2_2026-09-25T16-19-07Z.log`)
+    /// as the daemon reported it: 2380 bps at SF7/BW62.5/CR4:5, a jitter
+    /// ceiling of 456 ms, and an acquisition of 15 slots floored at one
+    /// frame's airtime.
+    ///
+    /// The 456 is the sum the interface reports, and it is the reason this
+    /// test exists: 360 ms of contention (DIFS plus the widest band-1 draw,
+    /// 15 slots of 24 ms) plus 96 ms of per-frame spread (`TX_HOLD_SPREAD_SLOTS`
+    /// = 4 slots of the same 24 ms). The run's own line shows it arriving —
+    /// "jitter ceiling 456 ms".
+    const D_ATTEMPT_1: LinkProfile = LinkProfile {
+        bitrate_bps: 2380,
+        tx_jitter_max_ms: Some(456),
+        tx_hold_spread_max_ms: Some(96),
+        acquisition: Some(AcquisitionCeiling {
+            max_ms: 360,
+            frame_slots: Some(15),
+            full_frame_ms: 360,
+        }),
+    };
 
     /// The link `lora_ratchet_rotation_listened` ran on for trace 223
     /// (2026-09-24), as the daemon reports it under the arm that lost
@@ -2627,6 +2707,7 @@ mod tests {
     const ROTATION_ARM_3: LinkProfile = LinkProfile {
         bitrate_bps: 2734,
         tx_jitter_max_ms: Some(360),
+        tx_hold_spread_max_ms: None,
         acquisition: Some(AcquisitionCeiling {
             max_ms: 360,
             frame_slots: Some(15),
@@ -2641,6 +2722,7 @@ mod tests {
     const ROTATION_ARM_4: LinkProfile = LinkProfile {
         bitrate_bps: 2734,
         tx_jitter_max_ms: Some(360),
+        tx_hold_spread_max_ms: None,
         acquisition: Some(AcquisitionCeiling {
             max_ms: 360,
             frame_slots: Some(8),
@@ -2652,6 +2734,7 @@ mod tests {
     const ROTATION_ARM_1: LinkProfile = LinkProfile {
         bitrate_bps: 2734,
         tx_jitter_max_ms: Some(360),
+        tx_hold_spread_max_ms: None,
         acquisition: Some(AcquisitionCeiling {
             max_ms: 360,
             frame_slots: None,
@@ -2894,7 +2977,11 @@ mod tests {
         for term in [
             "air ",
             "hold ",
-            "jitter ceiling",
+            // Both halves of the per-frame ceiling, because they are charged
+            // on different schedules and a reader checking a window off a log
+            // needs to see which is which (trace 251).
+            "contention window",
+            "per-frame spread",
             "tail deferral",
             "2380 bps",
         ] {
@@ -2956,6 +3043,7 @@ mod tests {
             Some(LinkProfile {
                 bitrate_bps: 5468,
                 tx_jitter_max_ms: Some(1463),
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             }),
             std::time::Duration::from_secs(5),
@@ -2966,6 +3054,7 @@ mod tests {
             Some(LinkProfile {
                 bitrate_bps: 366,
                 tx_jitter_max_ms: Some(21_857),
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             }),
             std::time::Duration::from_secs(5),
@@ -2995,6 +3084,7 @@ mod tests {
                 Some(LinkProfile {
                     bitrate_bps: 0,
                     tx_jitter_max_ms: None,
+                    tx_hold_spread_max_ms: None,
                     acquisition: None
                 }),
                 fallback
@@ -3017,6 +3107,7 @@ mod tests {
             Some(LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: None,
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             }),
             std::time::Duration::from_secs(5),
@@ -3077,6 +3168,78 @@ mod tests {
         );
     }
 
+    /// The spread is drawn once per frame, so the window prices it once per
+    /// frame — not once per contention band.
+    ///
+    /// The interface reports one number for what a frame costs the frame
+    /// behind it, and that number is two terms with different schedules: the
+    /// contest (DIFS + the widest window), re-run for every CSMA band a burst
+    /// climbs into, and the fresh spread the interface draws for every frame
+    /// it hands over. Multiplying the sum by [`BURST_CONTENTION_BANDS`]
+    /// charges the spread for a band the sender never waits in.
+    ///
+    /// Hand-computed for window d attempt 1 (trace 251), 5 frames of 147 B:
+    ///
+    /// ```text
+    /// payload     = 147 x 8 x 1000 / 2380              =   494 ms
+    /// air         = 494 x 1.2                          =   592 ms
+    /// contention  = 2 bands x 360                      =   720 ms
+    /// hold        = 592 + 720 + 96 (spread, once)      =  1408 ms
+    /// medium      = max(592, 1408 / 2)                 =   704 ms
+    /// tail        = 1408 + 592                         =  2000 ms
+    /// acquisition = 2 x max(360, 15 x 592)             = 17760 ms
+    /// window      = 5 x 704 + 2000 + 17760             = 23280 ms
+    /// ```
+    #[test]
+    fn the_per_frame_spread_is_priced_once_per_frame() {
+        let fallback = std::time::Duration::from_secs(10);
+        let budget = drain_budget(5, 147, Some(D_ATTEMPT_1), fallback);
+        assert_eq!(
+            budget.total,
+            std::time::Duration::from_millis(23_280),
+            "the spread belongs in the hold once: {}",
+            budget.detail
+        );
+
+        // The same link as a daemon that draws no spread reports it: the
+        // whole ceiling is contention, and every band pays all of it. This is
+        // the arithmetic this tool did for every link before the spread
+        // existed, and still does against `rnsd` and against any `lnsd` older
+        // than the `tx_hold_spread_max` key.
+        //
+        // ```text
+        // contention = 2 bands x 456                       =   912 ms
+        // hold       = 592 + 912                           =  1504 ms   <- the
+        //   1.50 s/frame the d-attempt-1 run itself printed, spread and all
+        // window     = 5 x max(592, 752) + 2096 + 17760    = 23616 ms
+        // ```
+        let unsplit = LinkProfile {
+            tx_hold_spread_max_ms: None,
+            ..D_ATTEMPT_1
+        };
+        let old = drain_budget(5, 147, Some(unsplit), fallback);
+        assert_eq!(
+            old.total,
+            std::time::Duration::from_millis(23_616),
+            "a ceiling reported without a spread is all contention: {}",
+            old.detail
+        );
+        assert!(
+            old.total > budget.total,
+            "the double-priced window was the wider one, which is the \
+             direction that hides slow delivery behind a green bar"
+        );
+
+        // The derivation the run document carries has to show both terms, or
+        // the next person to read a window off a log cannot check it.
+        assert!(
+            budget.detail.contains("2x the 0.36s contention window")
+                && budget.detail.contains("+ the 0.10s per-frame spread"),
+            "the detail must state the split it priced: {}",
+            budget.detail
+        );
+    }
+
     // Reading the daemon's answer (Codeberg #190)
     //
     // The payload is the shared-instance dict `rnsd` serves too, so the read
@@ -3124,7 +3287,38 @@ mod tests {
             link_profile_from_interface_stats(&stats).expect("a radio row is present");
         assert_eq!(profile.bitrate_bps, 2734);
         assert_eq!(profile.tx_jitter_max_ms, Some(2926));
+        assert_eq!(
+            profile.tx_hold_spread_max_ms, None,
+            "a row without the spread key reports a ceiling that is all \
+             contention"
+        );
         assert!(origin.contains("RNodeInterface[radio]"), "{origin}");
+    }
+
+    /// The same row from a daemon that draws a per-frame spread: the ceiling
+    /// and the part of it that is the spread arrive as two keys, because a
+    /// burst pays them on different schedules and a reader that cannot split
+    /// them prices one of the two wrong (trace 251).
+    #[test]
+    fn a_radio_row_with_the_spread_key_splits_the_ceiling() {
+        let stats = stats_with(vec![iface_row(
+            "RNodeInterface[radio]",
+            serde_json::json!({
+                "type": "RNodeInterface",
+                "bitrate": 2380u64,
+                "airtime_short": 0.0,
+                "tx_jitter_max": 0.456,
+                "tx_hold_spread_max": 0.096,
+            }),
+        )]);
+        let (profile, origin) =
+            link_profile_from_interface_stats(&stats).expect("a radio row is present");
+        assert_eq!(profile.tx_jitter_max_ms, Some(456));
+        assert_eq!(profile.tx_hold_spread_max_ms, Some(96));
+        assert!(
+            origin.contains("jitter ceiling 456 ms of which 96 ms is the per-frame spread"),
+            "the line the run document keeps has to name both terms: {origin}"
+        );
     }
 
     /// The tolerance Codeberg #183 was about, on this payload: a daemon that
@@ -3360,6 +3554,7 @@ mod tests {
         let local = LinkProfile {
             bitrate_bps: 366,
             tx_jitter_max_ms: Some(21_857),
+            tx_hold_spread_max_ms: None,
             acquisition: None,
         };
         assert_eq!(
@@ -3377,6 +3572,7 @@ mod tests {
                 Some(LinkProfile {
                     bitrate_bps: 0,
                     tx_jitter_max_ms: None,
+                    tx_hold_spread_max_ms: None,
                     acquisition: None
                 }),
                 &from_daemon
@@ -3671,6 +3867,7 @@ mod tests {
             profile: Some(LinkProfile {
                 bitrate_bps: 0,
                 tx_jitter_max_ms: None,
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             }),
             origin: "a row with no usable bitrate".to_string(),
@@ -3687,6 +3884,7 @@ mod tests {
             profile: Some(LinkProfile {
                 bitrate_bps: 10_000_000,
                 tx_jitter_max_ms: None,
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             }),
             origin: "a 10 Mbit/s row".to_string(),

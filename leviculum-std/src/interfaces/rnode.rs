@@ -3199,13 +3199,19 @@ where
     // hold's terms other than the frame's own airtime. Derived from `ctx`'s
     // acquisition ceiling rather than recomputed, so the reported figure and
     // the wait the TX loop imposes cannot drift apart.
-    let tx_jitter_max_ms = ctx.jitter_max_ms
-        + tx_hold_spread_max_ms(
-            ctx.radio.bandwidth,
-            ctx.radio.sf,
-            ctx.radio.cr,
-            &FirmwareCsma::default(),
-        );
+    //
+    // The spread is reported a second time on its own, because the two terms
+    // of that sum are paid on different schedules: the contention part again
+    // for every CSMA band a burst climbs into, the spread exactly once per
+    // frame whatever the band. A reader that cannot split them prices one of
+    // the two wrong (`LinkProfile::tx_hold_spread_max_ms`).
+    let tx_hold_spread_max_ms = tx_hold_spread_max_ms(
+        ctx.radio.bandwidth,
+        ctx.radio.sf,
+        ctx.radio.cr,
+        &FirmwareCsma::default(),
+    );
+    let tx_jitter_max_ms = ctx.jitter_max_ms + tx_hold_spread_max_ms;
     // Copied out beside it, and for the same reason: what the frame that
     // TAKES the channel pays under the arm this build runs. A separate number
     // because arm 3 prices its slots in whole frames, so the two are only
@@ -3258,6 +3264,7 @@ where
             bitrate: Some(bitrate),
             announce_cap_bitrate: announce_cap_bps,
             tx_jitter_max_ms: Some(tx_jitter_max_ms),
+            tx_hold_spread_max_ms: Some(tx_hold_spread_max_ms),
             acquisition: Some(acquisition),
             frame_turnaround_ms: Some(frame_turnaround_ms),
             ifac: None,
@@ -4121,6 +4128,15 @@ pub(crate) fn spawn_rnode_multi_interface(
                             &FirmwareCsma::default(),
                         ),
                 ),
+                // The per-frame half of that sum, reported on its own so a
+                // reader can charge it once per frame and the contention half
+                // once per band (`LinkProfile::tx_hold_spread_max_ms`).
+                tx_hold_spread_max_ms: Some(tx_hold_spread_max_ms(
+                    sub.bandwidth,
+                    sub.sf,
+                    sub.cr,
+                    &FirmwareCsma::default(),
+                )),
                 // A vport's transmit path runs no #347 arm of its own, so the
                 // acquisition it can owe is the unmodified slot-priced one.
                 acquisition: Some(compute_acquisition_ceiling(

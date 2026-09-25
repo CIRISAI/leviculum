@@ -948,6 +948,22 @@ pub struct LinkProfile {
     /// quantity on an interface that prices its contention slots in whole
     /// frames.
     pub tx_jitter_max_ms: Option<u64>,
+    /// How much of [`Self::tx_jitter_max_ms`] is the fresh per-frame spread,
+    /// or `None` from an interface (or a daemon) that reports no such term.
+    ///
+    /// The two parts of that ceiling are drawn on different schedules, and a
+    /// caller that prices a burst has to tell them apart. The contention part
+    /// — DIFS plus the widest window — is drawn once per contest, so it grows
+    /// with the band the modem has climbed into: a burst that leaves band 1
+    /// pays it again, and again. The spread is a fresh draw the interface
+    /// takes for EVERY frame it hands over, band or no band, so it is paid
+    /// exactly once per frame however hard the burst drives the medium.
+    ///
+    /// Subtract it to get the contention part: `tx_jitter_max_ms - this`.
+    /// Absent, the whole ceiling is the contention part, which is what every
+    /// interface but the RNode one reports and what a peer daemon that
+    /// predates this field reports too.
+    pub tx_hold_spread_max_ms: Option<u64>,
     /// What taking the channel costs at worst on this carrier, or `None` for
     /// a medium that transmits as soon as it is asked.
     ///
@@ -4669,7 +4685,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3227. A destination with no cached
+    /// link-request path uses at transport.rs:3243. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -5454,7 +5470,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1228 ran in the
+        // Gate on the already-incremented hops (transport.rs:1244 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -9738,7 +9754,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1968`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1984`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -15192,7 +15208,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6069), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6085), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -20896,7 +20912,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1228) before
+        // The inbound path increments hops once (transport.rs:1244) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -30614,6 +30630,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 5468,
                 tx_jitter_max_ms: Some(1463),
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             },
         );
@@ -30622,6 +30639,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: Some(2926),
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             },
         );
@@ -30658,6 +30676,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: Some(2926),
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
             },
         );

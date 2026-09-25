@@ -593,6 +593,18 @@ pub(crate) struct InterfaceInfo {
     /// own contention bound; nothing schedules on it. Travels to transport as
     /// part of [`leviculum_core::transport::LinkProfile`].
     pub tx_jitter_max_ms: Option<u64>,
+    /// How much of [`Self::tx_jitter_max_ms`] is the fresh per-frame spread
+    /// (`rnode::tx_hold_spread_max_ms`), or `None` for an interface that
+    /// draws none.
+    ///
+    /// Reported beside the ceiling rather than folded into it because the two
+    /// terms are paid on different schedules: the contention part is drawn
+    /// once per contest and grows with the CSMA band a burst climbs into,
+    /// while the spread is drawn afresh for every frame and is therefore paid
+    /// exactly once per frame. A caller pricing a burst that spans bands has
+    /// to be able to split them (see
+    /// [`leviculum_core::transport::LinkProfile::tx_hold_spread_max_ms`]).
+    pub tx_hold_spread_max_ms: Option<u64>,
     /// What taking this carrier costs the frame that takes it, worst case,
     /// or `None` for every medium that transmits as soon as it is asked.
     ///
@@ -881,6 +893,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                tx_hold_spread_max_ms: None,
                 acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
