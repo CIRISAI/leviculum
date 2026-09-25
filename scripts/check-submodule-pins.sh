@@ -103,8 +103,7 @@ canary || exit 1
 
 # --- the real check --------------------------------------------------
 
-status_out=$(git submodule status 2>&1)
-if [ $? -ne 0 ]; then
+if ! status_out=$(git submodule status 2>&1); then
     echo "check-submodule-pins: \`git submodule status\` failed:" >&2
     echo "$status_out" >&2
     exit 1

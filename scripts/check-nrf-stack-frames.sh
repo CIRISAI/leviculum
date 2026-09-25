@@ -73,6 +73,9 @@ fi
 
 # stdin: disassembly. stdout: frame sizes in bytes, descending.
 parse_frames() {
+    # shellcheck disable=SC2016 # python source, quoted literally on purpose:
+    # the backticks in its comment and error text are prose, not command
+    # substitution, and `$` would have to reach python unexpanded too.
     python3 -c '
 import re, sys
 # `sub sp, #N` (narrow) and `sub.w sp, sp, #N` / `subw sp, sp, #N` (wide) are

@@ -253,6 +253,11 @@ rnode-chip-offsets:
 # leaving it out would gate the module while its only non-test caller went
 # unchecked.
 #
+# A gate script that nothing lints is the same hole one layer up. Every
+# `scripts/check-*.sh` a Justfile gate invokes is in the list, checked
+# 2026-09-25 against the recipes; check-nrf-stack-frames.sh was the one the #46
+# pass tripped over, and it brought four more in with it.
+#
 # Must run from the repo root: the `source=` directives in these scripts name
 # repo-relative paths, which is what lets shellcheck resolve a `.` through
 # $SCRIPT_DIR. -x is what the ticket asks for and covers a future `source`
@@ -269,6 +274,11 @@ nrf-shellcheck:
         scripts/check-nrf-store-gap.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
+        scripts/check-nrf-stack-frames.sh \
+        scripts/check-submodule-pins.sh \
+        scripts/check-processor-compile-fail.sh \
+        scripts/check-commit-trailers.sh \
+        scripts/check-integ-bin-list.sh \
         scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh \
         scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh \
         scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh \

@@ -399,10 +399,10 @@ fi
 BASELINE=$(awk '$1 == "baseline" { print $2 }' "$BASELINE_FILE")
 LEGACY=$(awk '$1 == "legacy" { print $2 }' "$BASELINE_FILE")
 FOREIGN=$(awk '$1 == "foreign" { print $2 }' "$BASELINE_FILE")
-[ -n "$BASELINE" ] && [ -n "$LEGACY" ] && [ -n "$FOREIGN" ] || {
+if [ -z "$BASELINE" ] || [ -z "$LEGACY" ] || [ -z "$FOREIGN" ]; then
     echo "ERROR: $BASELINE_FILE must set 'baseline', 'legacy' and 'foreign'" >&2
     exit 2
-}
+fi
 
 # A shallow CI clone has to be deepened before any of these mean anything.
 # Depth 1 contains the baseline when the baseline *is* HEAD, so testing for
