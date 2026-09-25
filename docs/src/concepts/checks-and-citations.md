@@ -433,6 +433,10 @@ remaining 21 were spans whose other end a human had to locate, and eight
 of those left the bare class entirely by acquiring the identifier they
 should have had.
 
+That fixer reaches the bare class only. What repairs the
+identifier-anchored classes without re-anchoring them onto their
+identifiers is section 7.
+
 The fixer has one trap worth naming, because it sprang once: this guard
 is itself in the corpus it guards, so a fixture string naming a git hook
 and a line number in its own tests is a citation as far as the scan is
@@ -496,6 +500,102 @@ around those tables (`Defined at …`, the enum-variant rows whose name is
 in another cell, the newtype accessors written as a signature followed
 by a parenthesised citation). Those remain bare, and section 5's anchor
 is what covers them.
+
+### 7. The repair follows the diff, not the nearest name
+
+Section 5's fixer repairs the bare class because a bare citation
+carries its own anchor: the text of the line it names says where that
+line went. The identifier-anchored classes have no such anchor in the
+report. What the guard prints for them is the nearest occurrence of the
+cited identifier — and that is exactly the number a repair must not
+take.
+
+The reason is the trap the order-257 coder recorded, which is worth
+quoting rather than paraphrasing: a 16-line doc comment inserted at
+line 950 of `transport.rs` reddened 121 citations below it — 38 bare
+ones the `LEVICULUM_CITATION_FIX` mode rewrote, and 83 identifier-
+anchored ones it cannot fix, which the coder repointed by hand from the
+`git diff -U0` line map, because *the guard reports "identifier now at
+3569" for a citation that deliberately points three lines ABOVE its
+identifier (3566 after the move), so following the report would have
+re-anchored 83 citations onto their identifiers and destroyed the
+offsets their authors chose.* A manual step with a known failure mode,
+performed about 120 times in one pass, is a tool that has not been
+written yet. Three passes in one day paid that tax; one of them for a
+single citation.
+
+So the map is the diff and the proof is the text.
+
+1. `LEVICULUM_CITATION_FIX_BASE=<rev>` names the state the citations
+   were right about. The default is `HEAD` when the tree has
+   uncommitted changes to tracked files — the insertion is still in the
+   working tree — and `HEAD~1` when it has none, the insertion being
+   the commit just made. Untracked files do not count as dirty: a stray
+   log beside the tree says nothing about where a cited line was. Which
+   base was used is printed on every run, because a map read against
+   the wrong base is this mode's one failure mode.
+2. `git diff -U0 <base> -- <cited file>` is a line map. Every hunk that
+   ends above the cited line displaces it by that hunk's own length
+   change, and nothing else does. `-U0` is what makes this true: with
+   context lines a hunk's bounds say nothing about which lines actually
+   changed. A pure insertion is written `-N,0` and lands *after* old
+   line N, so it displaces every line past N and contains none —
+   reading its start as a contained line would report the line
+   immediately above an insertion as replaced by it, which is the
+   commonest shape there is.
+3. A cited line *inside* a hunk was not displaced, it was replaced. Its
+   text is not somewhere else, it is gone. That one is reported with
+   the line the hunk now starts at and never rewritten: what replaced
+   text meant is a question only a reader can answer.
+4. The rewrite happens only when the mapped line now holds the text the
+   cited line held in `<base>`. That is what makes the author's offset
+   provably preserved — the citation follows its own line, whatever
+   that line pointed at and however far the identifier has moved.
+   Otherwise the citation stays red and *both* candidates are printed,
+   the mapped line and the nearest-identifier line, for a reader to
+   choose between.
+
+Step 4 is the whole safety of the mode, and it is worth being exact
+about what it can and cannot catch. A correctly parsed diff against the
+right base cannot fail it: the map is exact by construction. It fails
+when the premise does — a base at which the cited file did not exist, a
+line past the end of that copy, a path inside a reference submodule
+whose lines this tree's diff does not move, or a base against which
+nothing under the citation moved at all. In each of those the citation
+is left red rather than renumbered from a map that has stopped
+describing the tree. All four are the same sentence: a number this
+cannot prove is a number it does not write.
+
+The fixers share their finder and their byte surgery for the reason
+section 5 gives, and they run in one invocation rather than in
+parallel: both rewrite the same citing files, and a bare repair changes
+the length of the citation it rewrites, so the identifier pass rescans
+before it places anything. While a fix run is rewriting the corpus the
+three resolving guards skip — loudly, naming the variable that silenced
+them, because an environment variable that quietly turns a guard green
+is the shape this page exists to remove. A fix run applies no verdict;
+the verdict is the next run without it.
+
+The measurement that landed it is the 257 corpus itself, replayed. A
+copy of the tree at the commit before 257 with 257's code and 257's
+stale citations — the exact state that coder faced — repairs to 38 bare
+and 83 identifier-anchored citations, which is that pass's split to the
+citation, and the resulting tree is byte-identical to the one the coder
+produced by hand across all 119 changed lines. On the tree this landed
+in, the live case was a citation into `memory.x` whose line the
+preceding commit had pushed 38 lines down: the line map places it at
+291, where the `ASSERT` it names now is, while the nearest match in the
+guard's report was line 289 — a comment that merely mentions `ASSERT`s.
+Two lines, silently, from following the report instead of the diff.
+
+Its fixture repository is in the guard's own tests: a citation three
+lines above its identifier with an insertion above both must move by
+the insertion and not onto the identifier, a citation whose line was
+replaced must stay red with both candidates named, and a citation into
+a file the base has no copy of must not be touched. Each has an
+injected-drift control, because two of the three verdicts are "leave it
+alone", and a fixer that has stopped repairing anything leaves
+everything alone.
 
 ### What C cannot reach
 
@@ -975,6 +1075,9 @@ writing: C covers `docs/src/**`, the Rust sources of `leviculum-core`,
 `leviculum-lxmf`, `leviculum-lxmf-node` and `leviculum-std`, and (since
 2026-09-23) the gate scripts under `scripts/` and the `Justfile`, and its
 submodule check runs first in `just fast`; its bump path is unbuilt.
+Both halves of it repair since 2026-09-25: the bare class against the
+tree's own history, the identifier-anchored classes against the line map
+of a named base (section 7).
 
 Two shapes it refused to see until 2026-09-23, both found by reading
 rather than by a red gate. A **backwards line spec** (`a-b` with `a > b`)

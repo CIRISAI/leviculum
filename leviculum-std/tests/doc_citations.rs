@@ -630,6 +630,30 @@ struct Failure {
     message: String,
 }
 
+/// A citation [`check`] refused, kept so that a fixer works from the same
+/// verdict the reader was shown rather than from a second implementation of
+/// the drift rule.
+struct Drifted<'a> {
+    citation: &'a Citation,
+    /// One entry per file the cited path resolved to, in the order `check`
+    /// tried them. A bare `constants.rs` names several, and which one the
+    /// prose meant is not decidable here.
+    candidates: Vec<DriftCandidate>,
+}
+
+/// What the report says about one candidate file of a refused citation.
+struct DriftCandidate {
+    /// Repo-relative path.
+    path: String,
+    /// The occurrence of the cited identifier nearest the cited span -- the
+    /// number the guard's report prints, and the one a repair must not
+    /// simply take: a citation that deliberately points three lines above
+    /// its identifier loses that offset the moment it is re-anchored onto
+    /// it. `None` when the identifier occurs nowhere, or when the citation
+    /// carries none and failed on the file's length.
+    nearest_ident: Option<usize>,
+}
+
 /// A resolved identifier citation and how many lines its identifier sits
 /// from the cited span. Zero is exact; anything else is `WINDOW` budget
 /// already spent at landing time, and a citation that lands at the edge
@@ -698,7 +722,14 @@ fn absent_submodules(root: &Path) -> BTreeSet<&'static str> {
 /// The single checking core, shared by the book guard, the source guard and
 /// the canary. `root` is both the resolution root and the prefix stripped
 /// from reported paths.
-fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
+///
+/// The third return is the drifted citations with what the report said about
+/// each candidate file, for [`repair_by_diff`]. Finder and fixer are the same
+/// code here for the reason the concept page gives: a fixer that decided
+/// drift for itself would be a second implementation of this function, and
+/// the first symptom of the two disagreeing is a repair pointed at the wrong
+/// line.
+fn check<'a>(root: &Path, citations: &'a [Citation]) -> (Counts, Vec<Failure>, Vec<Drifted<'a>>) {
     let mut files = Vec::new();
     walk(root, SKIP_DIRS, &mut files);
     let rel_files: Vec<String> = files
@@ -734,6 +765,7 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
 
     let mut counts = Counts::default();
     let mut failures = Vec::new();
+    let mut drifted = Vec::new();
 
     for c in citations {
         if EXTERNAL_PREFIXES.iter().any(|p| c.path.starts_with(p)) {
@@ -813,6 +845,7 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
         // the prose, not the path, disambiguates.
         let max_line = c.spans.iter().map(|s| s.1).max().unwrap();
         let mut candidate_notes = Vec::new();
+        let mut candidate_drift = Vec::new();
         let mut passed = false;
         for cand in &candidates {
             let text = fs::read_to_string(root.join(cand)).unwrap_or_default();
@@ -822,6 +855,10 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
                     "    {cand} has only {} lines (cited: {max_line})",
                     lines.len()
                 ));
+                candidate_drift.push(DriftCandidate {
+                    path: (*cand).to_string(),
+                    nearest_ident: None,
+                });
                 continue;
             }
             let Some(ident) = &c.ident else {
@@ -883,6 +920,10 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
             } else {
                 format!("`{needle}`")
             };
+            candidate_drift.push(DriftCandidate {
+                path: (*cand).to_string(),
+                nearest_ident: nearest.copied(),
+            });
             candidate_notes.push(match nearest {
                 Some(&n) => format!(
                     "    {what} not within {WINDOW} lines of the cited span in {cand}\n    cited line {cited_first}: {}\n    nearest {what}: line {n}: {}",
@@ -897,10 +938,14 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
                 kind: FailureKind::Drift,
                 message: format!("{where_}\n{}", candidate_notes.join("\n")),
             });
+            drifted.push(Drifted {
+                citation: c,
+                candidates: candidate_drift,
+            });
         }
     }
 
-    (counts, failures)
+    (counts, failures, drifted)
 }
 
 // --- figure attribution (Codeberg #200) ----------------------------------
@@ -1295,7 +1340,7 @@ fn run_canary() {
         citations.len()
     );
 
-    let (counts, failures) = check(root, &citations);
+    let (counts, failures, _) = check(root, &citations);
     // Nine of the twelve name what they point at: four in the paren
     // spelling, two in the comma spelling, three in the table spelling. The
     // three that do not are the second citation of the not-an-identifier
@@ -1492,7 +1537,7 @@ fn githook_citations_match_without_loosening_the_pattern() {
         2,
         "the fixture's two hook citations were not both parsed"
     );
-    let (_, failures) = check(root, &citations);
+    let (_, failures, _) = check(root, &citations);
     let messages: Vec<&str> = failures.iter().map(|f| f.message.as_str()).collect();
     assert_eq!(
         failures.len(),
@@ -1549,7 +1594,7 @@ fn an_inverted_line_spec_is_refused_where_it_is_written() {
         "the fixture's two range citations were not both parsed"
     );
 
-    let (_, failures) = check(root, &citations);
+    let (_, failures, _) = check(root, &citations);
     let messages: Vec<&str> = failures.iter().map(|f| f.message.as_str()).collect();
     assert_eq!(
         failures.len(),
@@ -1634,7 +1679,7 @@ fn a_justfile_citation_lands_on_the_recipe_and_not_on_a_mention_of_it() {
         Some("standard"),
         "`just standard` did not name the citation beside it"
     );
-    let (_, failures) = check(root, &citations);
+    let (_, failures, _) = check(root, &citations);
     assert_eq!(
         failures.len(),
         1,
@@ -1652,7 +1697,7 @@ fn a_justfile_citation_lands_on_the_recipe_and_not_on_a_mention_of_it() {
     // citation that does land on the definition must stay quiet.
     fs::write(&doc, cite(recipe)).unwrap();
     let citations = scan(root, &[doc], Corpus::Book);
-    let (_, failures) = check(root, &citations);
+    let (_, failures, _) = check(root, &citations);
     let messages: Vec<&str> = failures.iter().map(|f| f.message.as_str()).collect();
     assert!(
         failures.is_empty(),
@@ -1778,9 +1823,21 @@ fn doc_comment_figures_are_on_the_page_they_cite() {
 fn doc_citations_resolve() {
     run_canary();
 
+    // A fix run rewrites the citing files while the tests run, so this one
+    // has nothing stable to judge. Loudly, not silently: an env var that
+    // quietly turns a guard green is the shape this file exists to remove.
+    if fix_mode_on() {
+        println!(
+            "doc citations: SKIPPED -- citation fix mode is rewriting this corpus. \
+             Re-run without LEVICULUM_CITATION_FIX / LEVICULUM_CITATION_FIX_BASE \
+             for a verdict."
+        );
+        return;
+    }
+
     let root = repo_root();
     let citations = book_citations(&root);
-    let (counts, failures) = check(&root, &citations);
+    let (counts, failures, _) = check(&root, &citations);
 
     println!(
         "doc citations: {} total, {} identifier-checked, {} bare \
@@ -1814,9 +1871,21 @@ fn doc_citations_resolve() {
 fn source_citations_resolve() {
     run_canary();
 
+    // A fix run rewrites the citing files while the tests run, so this one
+    // has nothing stable to judge. Loudly, not silently: an env var that
+    // quietly turns a guard green is the shape this file exists to remove.
+    if fix_mode_on() {
+        println!(
+            "source citations: SKIPPED -- citation fix mode is rewriting this corpus. \
+             Re-run without LEVICULUM_CITATION_FIX / LEVICULUM_CITATION_FIX_BASE \
+             for a verdict."
+        );
+        return;
+    }
+
     let root = repo_root();
     let citations = source_citations(&root, SOURCE_CRATES);
-    let (counts, failures) = check(&root, &citations);
+    let (counts, failures, _) = check(&root, &citations);
 
     // Published on every run, like the book's, so nobody reads a green guard
     // as full coverage. The bare majority is real: for those citations this
@@ -1851,9 +1920,21 @@ fn source_citations_resolve() {
 
 #[test]
 fn script_citations_resolve() {
+    // A fix run rewrites the citing files while the tests run, so this one
+    // has nothing stable to judge. Loudly, not silently: an env var that
+    // quietly turns a guard green is the shape this file exists to remove.
+    if fix_mode_on() {
+        println!(
+            "script citations: SKIPPED -- citation fix mode is rewriting this corpus. \
+             Re-run without LEVICULUM_CITATION_FIX / LEVICULUM_CITATION_FIX_BASE \
+             for a verdict."
+        );
+        return;
+    }
+
     let root = repo_root();
     let citations = script_citations(&root);
-    let (counts, failures) = check(&root, &citations);
+    let (counts, failures, _) = check(&root, &citations);
 
     println!(
         "script citations (scripts/*.sh, Justfile): {} total, {} identifier-checked, \
@@ -2531,7 +2612,13 @@ fn repaired(c: &Citation, spans: &[AnchoredSpan]) -> Option<String> {
     if fixed.iter().any(|&(a, b)| a > b) {
         return None;
     }
-    let spec = fixed
+    Some(citation_text(c, &fixed))
+}
+
+/// The citation rewritten with `spans`, in the spelling it was written in:
+/// backticked in the book, bare in a source comment.
+fn citation_text(c: &Citation, spans: &[(usize, usize)]) -> String {
+    let spec = spans
         .iter()
         .map(|&(a, b)| {
             if a == b {
@@ -2543,7 +2630,33 @@ fn repaired(c: &Citation, spans: &[AnchoredSpan]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(",");
     let quote = if c.raw.starts_with('`') { "`" } else { "" };
-    Some(format!("{quote}{}:{spec}{quote}", c.path))
+    format!("{quote}{}:{spec}{quote}", c.path)
+}
+
+/// Replace citations in place. `edits` holds `(offset, length, replacement)`
+/// per citing file, with offsets as scanned. Returns how many it rewrote.
+///
+/// Shared by both fixers, so that whichever one placed a citation, the byte
+/// surgery under it is the same and is written once.
+fn rewrite_citations(root: &Path, edits: BTreeMap<PathBuf, Vec<(usize, usize, String)>>) -> usize {
+    let mut n = 0;
+    for (doc, mut edits) in edits {
+        let path = root.join(&doc);
+        let Ok(mut text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        // Back to front, so an earlier edit does not move a later offset.
+        edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+        for (offset, len, new) in edits {
+            if text.get(offset..offset + len).is_none() {
+                continue;
+            }
+            text.replace_range(offset..offset + len, &new);
+            n += 1;
+        }
+        let _ = fs::write(&path, text);
+    }
+    n
 }
 
 /// Rewrite every repairable citation in place. Returns how many it rewrote.
@@ -2562,24 +2675,7 @@ fn apply_repairs(root: &Path, drifted: &[(&Citation, Vec<AnchoredSpan>)]) -> usi
                 .push((c.offset, c.raw.len(), new));
         }
     }
-    let mut n = 0;
-    for (doc, mut edits) in per_file {
-        let path = root.join(&doc);
-        let Ok(mut text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        // Back to front, so an earlier edit does not move a later offset.
-        edits.sort_by_key(|e| std::cmp::Reverse(e.0));
-        for (offset, len, new) in edits {
-            if text.get(offset..offset + len).is_none() {
-                continue;
-            }
-            text.replace_range(offset..offset + len, &new);
-            n += 1;
-        }
-        let _ = fs::write(&path, text);
-    }
-    n
+    rewrite_citations(root, per_file)
 }
 
 fn anchor_report(
@@ -2628,6 +2724,404 @@ fn anchor_report(
             }
         })
         .collect()
+}
+
+// --- repair by the diff, not by the nearest name --------------------------
+//
+// `LEVICULUM_CITATION_FIX` above repairs the bare class, where the citation's
+// own anchor text says where the line went. The identifier-anchored classes
+// have no such anchor in the report: what `check` prints is the nearest
+// occurrence of the cited identifier, and that is precisely the number a
+// repair must NOT take.
+//
+// Order 257 paid for that in full, and the coder who paid it wrote the trap
+// down: a 16-line doc comment inserted at line 950 of transport.rs reddened
+// 121 citations below it -- 38 bare ones the fixer above rewrote, and 83
+// identifier-anchored ones repointed by hand off a `git diff -U0` line map,
+// because "the guard reports `identifier now at 3569` for a citation that
+// deliberately points three lines ABOVE its identifier (3566 after the move),
+// so following the report would have re-anchored 83 citations onto their
+// identifiers and destroyed the offsets their authors chose". A manual step
+// with a known failure mode, performed about 120 times in one pass, is a
+// tool that has not been written yet.
+//
+// So the map is the diff and the proof is the text:
+//
+//   1. `LEVICULUM_CITATION_FIX_BASE=<rev>` names the state the citations were
+//      right about. Default: `HEAD` when the tree has uncommitted changes to
+//      tracked files (the insertion is still in the working tree), `HEAD~1`
+//      when it has none (the insertion is the commit just made). Which one
+//      was used is printed, because a repair read against the wrong base is
+//      the one failure mode of this whole mode.
+//   2. `git diff -U0 <base> -- <cited file>` is a line map: every hunk that
+//      ends above the cited line displaces it by that hunk's own length
+//      change, and nothing else does.
+//   3. A cited line INSIDE a hunk was not displaced, it was replaced. Its
+//      text is not somewhere else, it is gone, so that one is reported with
+//      the line the hunk now starts at and never rewritten -- what replaced
+//      text meant is a question only a reader can answer.
+//   4. The rewrite happens only when the mapped line now holds the text the
+//      cited line held in `<base>`. That is what makes the author's offset
+//      provably preserved: the citation follows its own line, whatever that
+//      line was pointing at, and however far the nearest identifier has
+//      moved. Otherwise it stays red and BOTH candidates are printed -- the
+//      mapped line and the nearest-identifier line -- for a reader to choose
+//      between.
+//
+// Step 4 is the whole safety of the mode. A correctly parsed diff against the
+// right base cannot fail it: the map is exact by construction. It fails when
+// the premise does -- a base the cited file did not exist at, a line past the
+// end of it, a path inside a reference submodule this tree's diff does not
+// move -- and in every one of those the citation is left red rather than
+// renumbered from a map that has stopped describing the tree.
+
+/// One `@@ -a,b +c,d @@` header of a `-U0` diff.
+#[derive(Clone, Copy)]
+struct Hunk {
+    old_start: usize,
+    old_len: usize,
+    new_start: usize,
+    new_len: usize,
+}
+
+/// `@@ -a[,b] +c[,d] @@`. An absent length is 1, as the diff format says.
+fn hunk_regex() -> Regex {
+    Regex::new(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@").unwrap()
+}
+
+fn hunk_field(c: &regex::Captures, i: usize, default: usize) -> usize {
+    c.get(i)
+        .map_or(default, |m| m.as_str().parse().unwrap_or(default))
+}
+
+/// The hunks between `base` and the working-tree copy of `path`.
+///
+/// `-U0` is what makes them a line map: with context lines a hunk's bounds
+/// say nothing about which lines actually changed, and every citation near a
+/// change would map to the start of one. `None` is git declining to answer at
+/// all; an empty list is the file not having changed since `base`.
+fn diff_hunks(repo: &Path, re: &Regex, base: &str, path: &str) -> Option<Vec<Hunk>> {
+    let out = git(repo, &["diff", "-U0", base, "--", path])?;
+    Some(
+        out.lines()
+            .filter_map(|l| re.captures(l))
+            .map(|c| Hunk {
+                old_start: hunk_field(&c, 1, 0),
+                old_len: hunk_field(&c, 2, 1),
+                new_start: hunk_field(&c, 3, 0),
+                new_len: hunk_field(&c, 4, 1),
+            })
+            .collect(),
+    )
+}
+
+/// Where a line of the base sits in the working tree.
+enum Mapped {
+    /// Still there, displaced by what the diff changed above it.
+    At(usize),
+    /// Inside a hunk that replaced it, which now starts at this line.
+    Replaced(usize),
+}
+
+fn map_line(hunks: &[Hunk], line: usize) -> Mapped {
+    let mut delta = 0isize;
+    for h in hunks {
+        // A pure insertion is written `-N,0`: it lands AFTER old line N, so
+        // it displaces every line past N and contains none. Reading its
+        // `old_start` as a contained line would report the line immediately
+        // above an insertion as replaced by it -- which is the commonest
+        // shape there is, a doc comment grown by one paragraph.
+        let old_end = if h.old_len == 0 {
+            h.old_start
+        } else {
+            h.old_start + h.old_len - 1
+        };
+        if h.old_len > 0 && (h.old_start..=old_end).contains(&line) {
+            return Mapped::Replaced(h.new_start.max(1));
+        }
+        if old_end < line {
+            delta += h.new_len as isize - h.old_len as isize;
+        }
+    }
+    Mapped::At((line as isize + delta).max(1) as usize)
+}
+
+/// What the line map can prove about one cited line.
+enum Placed {
+    /// The mapped line holds the text the cited line held in the base, so
+    /// moving the citation there preserves the offset its author wrote.
+    Proved(usize),
+    /// Not proved, and why -- naming the mapped line where there is one,
+    /// because that is half of what the reader has to weigh.
+    Unproved(String),
+}
+
+fn place_by_diff(base_lines: &[String], now: &[String], hunks: &[Hunk], line: usize) -> Placed {
+    let Some(was) = line.checked_sub(1).and_then(|i| base_lines.get(i)) else {
+        return Placed::Unproved(format!(
+            "line {line} is not in the base copy of the file ({} lines), so there is \
+             no text to follow",
+            base_lines.len()
+        ));
+    };
+    let was = was.trim();
+    match map_line(hunks, line) {
+        Mapped::Replaced(at) => Placed::Unproved(format!(
+            "line {line} is inside a hunk the diff replaced: its text is not elsewhere, \
+             it is gone. That hunk now starts at line {at}"
+        )),
+        Mapped::At(to) => match now.get(to - 1).map(|l| l.trim()) {
+            Some(text) if text == was => Placed::Proved(to),
+            Some(_) => Placed::Unproved(format!(
+                "the line map puts line {line} at line {to}, which does not hold the \
+                 text line {line} held in the base"
+            )),
+            None => Placed::Unproved(format!(
+                "the line map puts line {line} at line {to}, past the end of the file \
+                 ({} lines)",
+                now.len()
+            )),
+        },
+    }
+}
+
+/// The revision the line map is read against, and why it is that one.
+struct FixBase {
+    rev: String,
+    why: &'static str,
+}
+
+/// Whether either fixer is on.
+///
+/// `LEVICULUM_CITATION_FIX_BASE` alone turns this mode on as well: somebody
+/// naming the base is asking for the repair that reads it.
+fn fix_mode_on() -> bool {
+    std::env::var_os("LEVICULUM_CITATION_FIX").is_some()
+        || std::env::var_os("LEVICULUM_CITATION_FIX_BASE").is_some()
+}
+
+/// The base to read the line map against when nothing names one.
+///
+/// Tracked changes decide it and untracked files are ignored: a stray log
+/// file beside the tree says nothing about where a cited line was, and this
+/// tree carries plenty of them.
+fn default_base(dirty: bool) -> FixBase {
+    if dirty {
+        FixBase {
+            rev: "HEAD".into(),
+            why: "the tree has uncommitted changes to tracked files, so the insertion \
+                  that moved the cited lines is in the working tree",
+        }
+    } else {
+        FixBase {
+            rev: "HEAD~1".into(),
+            why: "the tree is clean, so the insertion that moved the cited lines is \
+                  HEAD itself",
+        }
+    }
+}
+
+fn has_tracked_changes(root: &Path) -> bool {
+    git(root, &["status", "--porcelain", "--untracked-files=no"])
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+fn fix_base(root: &Path) -> FixBase {
+    match std::env::var_os("LEVICULUM_CITATION_FIX_BASE")
+        .map(|v| v.to_string_lossy().trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        Some(rev) => FixBase {
+            rev,
+            why: "named by LEVICULUM_CITATION_FIX_BASE",
+        },
+        None => default_base(has_tracked_changes(root)),
+    }
+}
+
+/// Repair every red citation whose cited line the diff can place, and report
+/// every one it cannot with both candidates. Returns how many it rewrote and
+/// the report, one entry per red citation.
+fn repair_by_diff(root: &Path, base: &str, drifted: &[Drifted]) -> (usize, Vec<String>) {
+    let hunk_re = hunk_regex();
+    // Every base blob in one `cat-file` batch, for the reason `read_blobs`
+    // gives: it is the process spawns that a gate feels, not the reads.
+    let mut want: BTreeSet<(String, String)> = BTreeSet::new();
+    for d in drifted {
+        for cand in &d.candidates {
+            if submodule_of(&cand.path).is_none() {
+                want.insert((base.to_string(), cand.path.clone()));
+            }
+        }
+    }
+    let blobs = read_blobs(root, &want);
+    let mut hunks_of: BTreeMap<String, Vec<Hunk>> = BTreeMap::new();
+    let mut edits: BTreeMap<PathBuf, Vec<(usize, usize, String)>> = BTreeMap::new();
+    let mut notes = Vec::new();
+
+    for d in drifted {
+        let c = d.citation;
+        let mut report = vec![format!("{}:{}: {}", c.doc.display(), c.doc_line, c.raw)];
+        let mut repair = None;
+        for cand in &d.candidates {
+            let name = c.ident.as_deref().unwrap_or("the cited name");
+            let nearest = match cand.nearest_ident {
+                Some(n) => format!(
+                    "the nearest `{name}` is at line {n} -- what the report suggests, \
+                     and what would replace the author's offset with zero"
+                ),
+                None => format!("`{name}` occurs nowhere in this file"),
+            };
+            let placed = place_citation(root, base, &blobs, &mut hunks_of, &hunk_re, c, cand);
+            match placed {
+                Ok(spans) => {
+                    let new = citation_text(c, &spans);
+                    report.push(format!(
+                        "    {}: the line map moves it to {new}; {nearest}",
+                        cand.path
+                    ));
+                    repair = Some(new);
+                    break;
+                }
+                Err(why) => {
+                    report.push(format!("    {}: {why}", cand.path));
+                    report.push(format!("    {}: {nearest}", cand.path));
+                }
+            }
+        }
+        match repair {
+            Some(new) => {
+                report.push("    repaired by the line map".to_string());
+                edits
+                    .entry(c.doc.clone())
+                    .or_default()
+                    .push((c.offset, c.raw.len(), new));
+            }
+            None => report.push(
+                "    left red: the two candidates above disagree or neither is proved. \
+                 Re-read the citation rather than renumbering it"
+                    .to_string(),
+            ),
+        }
+        notes.push(report.join("\n"));
+    }
+
+    (rewrite_citations(root, edits), notes)
+}
+
+/// Every endpoint of one citation, placed in one candidate file, or the first
+/// reason it could not be.
+///
+/// All or nothing per citation: half a repaired span is worse than the drift
+/// it replaces, which is the rule [`repaired`] already follows for the bare
+/// class.
+fn place_citation(
+    root: &Path,
+    base: &str,
+    blobs: &BTreeMap<(String, String), Vec<String>>,
+    hunks_of: &mut BTreeMap<String, Vec<Hunk>>,
+    hunk_re: &Regex,
+    c: &Citation,
+    cand: &DriftCandidate,
+) -> Result<Vec<(usize, usize)>, String> {
+    if let Some((sub, _)) = submodule_of(&cand.path) {
+        return Err(format!(
+            "inside reference/{sub}, whose lines this tree's own diff does not move"
+        ));
+    }
+    let Some(base_lines) = blobs.get(&(base.to_string(), cand.path.clone())) else {
+        return Err(format!(
+            "no copy of this file at {base}, so the line map has nothing to read"
+        ));
+    };
+    let Ok(text) = fs::read_to_string(root.join(&cand.path)) else {
+        return Err("unreadable in the working tree".to_string());
+    };
+    let now: Vec<String> = text.lines().map(str::to_string).collect();
+    let hunks = hunks_of
+        .entry(cand.path.clone())
+        .or_insert_with(|| diff_hunks(root, hunk_re, base, &cand.path).unwrap_or_default());
+
+    let mut fixed = c.spans.clone();
+    for (i, &(start, end)) in c.spans.iter().enumerate() {
+        for (edge, line) in [(0usize, start), (1, end)] {
+            if edge == 1 && end == start {
+                continue;
+            }
+            match place_by_diff(base_lines, &now, hunks, line) {
+                Placed::Proved(to) => {
+                    if edge == 0 {
+                        fixed[i].0 = to;
+                        // A single-line span carries only its start edge, so
+                        // moving that edge has to move both ends.
+                        if end == start {
+                            fixed[i].1 = to;
+                        }
+                    } else {
+                        fixed[i].1 = to;
+                    }
+                }
+                Placed::Unproved(why) => return Err(why),
+            }
+        }
+    }
+    if fixed == c.spans {
+        return Err(format!(
+            "the diff against {base} moves none of this citation's lines, so the base \
+             is not the state it was right about (or this is not the file that moved)"
+        ));
+    }
+    if fixed.iter().any(|&(a, b)| a > b) {
+        return Err("following the line map would invert the range".to_string());
+    }
+    Ok(fixed)
+}
+
+/// In fix mode only, the tree to repair may be pointed elsewhere.
+///
+/// The positive control runs this mode over a copy of the tree at an older
+/// commit, which is the only way to show it reproduces repairs that were made
+/// by hand. Deliberately honoured by no checking path: a guard whose root can
+/// be redirected can be silenced, and this one is redirectable only when it
+/// asserts nothing.
+fn fix_root() -> PathBuf {
+    std::env::var_os("LEVICULUM_CITATION_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(repo_root)
+}
+
+/// The identifier-anchored repair pass over a whole tree: rescan, re-check,
+/// repair what the line map proves, print what it does not.
+///
+/// The rescan is load-bearing. The bare fixer runs first and changes the
+/// length of every citation it rewrites, so the byte offsets scanned before
+/// it are stale by the time this runs.
+fn repair_identifier_citations(root: &Path) -> usize {
+    let base = fix_base(root);
+    println!(
+        "LEVICULUM_CITATION_FIX_BASE: reading the line map against {} ({})",
+        base.rev, base.why
+    );
+    let mut fixed = 0;
+    for (label, citations) in [
+        ("doc", book_citations(root)),
+        ("source", source_citations(root, SOURCE_CRATES)),
+        ("script", script_citations(root)),
+    ] {
+        let (_, _, drifted) = check(root, &citations);
+        let (n, notes) = repair_by_diff(root, &base.rev, &drifted);
+        println!(
+            "{label}: {} red citation(s), {n} repaired by the line map, {} left for a \
+             reader",
+            drifted.len(),
+            drifted.len() - n
+        );
+        for note in &notes {
+            println!("{note}");
+        }
+        fixed += n;
+    }
+    fixed
 }
 
 /// The standing canary for the anchor rule: a miniature repo with two bare
@@ -2777,7 +3271,19 @@ fn run_bare_anchor_canary() {
 fn bare_citations_still_point_at_the_text_they_cited() {
     run_bare_anchor_canary();
 
-    let root = repo_root();
+    // In fix mode the tree being repaired can be another one; see
+    // [`fix_root`]. Printed rather than assumed, because a repair written
+    // into the wrong tree is silent.
+    let root = if fix_mode_on() {
+        let root = fix_root();
+        println!(
+            "citation fix mode: repairing the tree at {}",
+            root.display()
+        );
+        root
+    } else {
+        repo_root()
+    };
     if git(&root, &["rev-parse", "--git-dir"]).is_none() {
         // Loudly, not silently: a guard that quietly checks nothing is the
         // shape this whole check exists to remove.
@@ -2808,9 +3314,229 @@ fn bare_citations_still_point_at_the_text_they_cited() {
         }
         failures.extend(anchor_report(label, &counts, &drifted));
     }
-    if std::env::var_os("LEVICULUM_CITATION_FIX").is_some() {
-        println!("LEVICULUM_CITATION_FIX: rewrote {fixed} citation(s)");
+    if fix_mode_on() {
+        println!("LEVICULUM_CITATION_FIX: rewrote {fixed} bare citation(s)");
+        // The identifier-anchored classes, after the bare ones and in the
+        // same invocation rather than in a test of their own: both fixers
+        // rewrite the same citing files, and two of them running in parallel
+        // would have one write over the other's.
+        let by_map = repair_identifier_citations(&root);
+        println!("LEVICULUM_CITATION_FIX_BASE: rewrote {by_map} identifier citation(s)");
+        println!(
+            "citation fix mode applied no verdict: re-run the guard without \
+             LEVICULUM_CITATION_FIX / LEVICULUM_CITATION_FIX_BASE for one."
+        );
         return;
     }
     report("bare-citation anchor", &failures);
+}
+
+/// A red citation is repaired to where the line map moved its line, never to
+/// the nearest occurrence of its name.
+///
+/// The fixture is the 257 shape in miniature: a citation that deliberately
+/// points three lines ABOVE the item it names, and an insertion above it that
+/// moves both. Following the guard's report would put the citation on its
+/// identifier and the author's three-line offset would be gone, silently,
+/// because the result is green. All three verdicts of the mode are asserted
+/// on one tree, since two of them are "leave it alone", and a fixer that has
+/// stopped repairing anything at all leaves everything alone.
+#[test]
+fn a_repair_follows_the_line_map_and_not_the_nearest_name() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let git_in = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@localhost",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "FIXTURE: git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    let src = root.join("leviculum-core/src");
+    fs::create_dir_all(&src).unwrap();
+    let docs = root.join("docs/src/concepts");
+    fs::create_dir_all(&docs).unwrap();
+
+    // Two subjects, each cited three lines above itself.
+    let mut body: Vec<String> = (1..=30).map(|n| format!("// filler {n}")).collect();
+    body[9] = "// the frame the budget prices".into();
+    body[12] = "pub fn priced_frame() {}".into();
+    body[19] = "// the band the sender never waits in".into();
+    body[22] = "pub fn replaced_band() {}".into();
+    let code = src.join("line_map.rs");
+    fs::write(&code, body.join("\n") + "\n").unwrap();
+
+    // Built rather than spelled out, like the anchor canary's: a literal
+    // citation in this file would be scanned as part of the corpus it guards.
+    let cited = |line: usize| format!("`line_map.rs:{line}`");
+    let late_cited = |line: usize| format!("`late_map.rs:{line}`");
+    let doc = docs.join("line_map.md");
+    let write_doc = |first: String, second: String, third: String| {
+        fs::write(
+            &doc,
+            format!(
+                "The budget (`priced_frame`, {first}) prices one frame.\n\
+                 The band (`replaced_band`, {second}) is re-entered.\n\
+                 The arrival (`late_arrival`, {third}) landed after the base.\n"
+            ),
+        )
+        .unwrap();
+    };
+    write_doc(cited(10), cited(20), late_cited(5));
+
+    git_in(&["init", "-q"]);
+    git_in(&["add", "-A"]);
+    git_in(&["commit", "-qm", "fixture"]);
+    assert!(
+        !has_tracked_changes(root),
+        "FIXTURE: the tree is dirty right after its own commit"
+    );
+
+    // The insertion, uncommitted: sixteen lines land above both cited lines,
+    // and the second cited line is ALSO rewritten where it stands -- one
+    // commit routinely does both.
+    body.splice(5..5, (1..=16).map(|n| format!("// inserted {n}")));
+    let replaced = body
+        .iter()
+        .position(|l| l == "// the band the sender never waits in")
+        .expect("FIXTURE: the line to replace is in the fixture");
+    body[replaced] = "// the band the sender re-enters".into();
+    fs::write(&code, body.join("\n") + "\n").unwrap();
+
+    // A file that did not exist at the base at all, cited far from its
+    // subject: nothing in the base to prove a move with.
+    let mut late: Vec<String> = (1..=40).map(|n| format!("// late {n}")).collect();
+    late[4] = "// the arrival nobody had committed".into();
+    late[29] = "pub fn late_arrival() {}".into();
+    fs::write(src.join("late_map.rs"), late.join("\n") + "\n").unwrap();
+
+    assert!(
+        has_tracked_changes(root),
+        "FIXTURE: the insertion did not make the tree dirty, so the default base \
+         cannot be chosen by it"
+    );
+    assert_eq!(
+        default_base(true).rev,
+        "HEAD",
+        "FIXTURE: a tree whose insertion is uncommitted must be mapped against HEAD"
+    );
+    assert_eq!(
+        default_base(false).rev,
+        "HEAD~1",
+        "FIXTURE: a clean tree's insertion is HEAD itself, so the map reads HEAD~1"
+    );
+
+    let citations = scan(root, std::slice::from_ref(&doc), Corpus::Book);
+    assert_eq!(
+        citations.len(),
+        3,
+        "FIXTURE: the three citations were not all parsed"
+    );
+    assert!(
+        citations.iter().all(|c| c.ident.is_some()),
+        "FIXTURE: the identifiers did not attach, so this is not the identifier-\
+         anchored class at all"
+    );
+    let (_, _, drifted) = check(root, &citations);
+    assert_eq!(
+        drifted.len(),
+        3,
+        "FIXTURE: expected all three citations red before the repair, got {}",
+        drifted.len()
+    );
+
+    let (fixed, notes) = repair_by_diff(root, "HEAD", &drifted);
+    assert_eq!(
+        fixed,
+        1,
+        "FIXTURE: expected exactly the displaced citation to be repaired, got {fixed}. \
+         Repairing more means the mode renumbers citations it cannot prove; repairing \
+         fewer means it has stopped repairing.\n{}",
+        notes.join("\n")
+    );
+    let text = fs::read_to_string(&doc).unwrap();
+
+    // 1. The displaced citation follows its own line (+16), not its name.
+    assert!(
+        text.contains(&cited(26)),
+        "FIXTURE: the repair did not follow the line map to 26:\n{text}"
+    );
+    assert!(
+        !text.contains(&cited(29)),
+        "FIXTURE: the repair took the nearest name (line 29) and destroyed the \
+         author's three-line offset -- the exact defect this mode exists for:\n{text}"
+    );
+
+    // 2. The citation inside a replaced hunk stays red, with both candidates
+    //    named: the hunk's new start and the nearest identifier.
+    assert!(
+        text.contains(&cited(20)),
+        "FIXTURE: a citation whose line was replaced, not moved, was rewritten \
+         anyway:\n{text}"
+    );
+    let note = notes
+        .iter()
+        .find(|n| n.contains(&cited(20)))
+        .expect("FIXTURE: the replaced citation was not reported");
+    assert!(
+        note.contains("36") && note.contains("39"),
+        "FIXTURE: the replaced citation was reported without both candidates (the \
+         hunk now at 36, the nearest name at 39):\n{note}"
+    );
+    assert!(
+        note.contains("inside a hunk the diff replaced"),
+        "FIXTURE: a replaced line was reported as one that merely holds other text. \
+         A reader following this needs to know the text is gone, not moved:\n{note}"
+    );
+
+    // 3. A citation with no text in the base to prove a move with is not
+    //    touched, however plainly its file has changed.
+    assert!(
+        text.contains(&late_cited(5)),
+        "FIXTURE: a citation into a file absent at the base was renumbered from a \
+         map that describes nothing:\n{text}"
+    );
+    let late_note = notes
+        .iter()
+        .find(|n| n.contains(&late_cited(5)))
+        .expect("FIXTURE: the citation into the new file was not reported");
+    assert!(
+        late_note.contains("no copy of this file at HEAD"),
+        "FIXTURE: a citation the base has no text for was left red for some other \
+         reason than the one that is true:\n{late_note}"
+    );
+
+    // The proof step on its own. Hand-built hunks, because a correctly parsed
+    // diff against the right base cannot produce a mapped line holding the
+    // wrong text -- which is the point of comparing: when the premise breaks,
+    // the text is what says so instead of the arithmetic being believed.
+    let base_lines = vec!["one".to_string(), "two".into(), "three".into()];
+    let now = vec!["one".to_string(), "rewritten".into(), "three".into()];
+    assert!(
+        matches!(
+            place_by_diff(&base_lines, &now, &[], 2),
+            Placed::Unproved(_)
+        ),
+        "FIXTURE: a mapped line holding other text was accepted as a repair"
+    );
+    assert!(
+        matches!(place_by_diff(&base_lines, &now, &[], 3), Placed::Proved(3)),
+        "FIXTURE: an unchanged line was not placed, so the proof rejects everything \
+         and the mode repairs nothing"
+    );
 }
