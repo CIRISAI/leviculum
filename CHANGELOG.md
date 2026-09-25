@@ -404,6 +404,31 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A board with an Android phone in the room now dials its neighbour boards
+  again (Codeberg #412). A board has one outgoing BLE link, and the scan
+  window elected the lowest-addressed eligible candidate. A phone's
+  resolvable private address has `01` in its top two bits while a board's
+  static random address has `11`, so a phone is numerically below every board
+  in the room, always: it was never eligible under the strict sort and always
+  first in the fallback class, and every few minutes it drew a new address
+  and won again. The corpus night of 2026-09-14/15 measured `feld-t114`
+  spending all seven outgoing links it made over two days on one phone and
+  none on a board.
+
+  The window now orders the fallback class by the address only where the
+  address is a key. A candidate whose address class says its owner redraws it
+  ranks behind every candidate whose does not, and those are ordered by which
+  advertiser the window heard first. In the host simulation with one phone in
+  the room, the share of the room's dials aimed at it falls from 42 % to 6 %
+  at ten boards and from 28 % to 0 % at twenty, the board-to-board links come
+  back to within 1 % of an empty room, and the boards left with no link to
+  any board fall from 28 and 48 per 1000 arrival orders to 2 and 0. A room of
+  boards alone is unchanged to the number, because it holds no address that
+  rotates.
+
+  It is a preference inside what the rule already permits, never an exclusion:
+  a board whose only eligible candidate is a phone dials the phone.
+
 - A board now proves a client's upload when it arrives, not when it has been
   judged, so a phone on BLE can finally post mail to the propagation node on
   a board (Codeberg #397). An upload rides a plain link packet and the

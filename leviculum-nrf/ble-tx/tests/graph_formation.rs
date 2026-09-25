@@ -31,6 +31,10 @@
 //! how many incoming slots it still has, and the window prefers the
 //! emptiest one, equal counts falling back to the address as before.
 //!
+//! #412 added a fourth — **what breaks a tie the address should not
+//! decide?** — and with it [`TargetChoice::FallbackFirstHeard`] and
+//! [`TargetChoice::RotatingLast`]; see the churn section below.
+//!
 //! Measured on this seed stream (disconnected/linkless orders per 1000,
 //! and saturated boards — boards that ended with all three incoming
 //! slots spent — summed over the same 1000 orders):
@@ -169,7 +173,69 @@
 //! that the fallback class must be ordered by something other than the
 //! raw address.
 //!
-//! ## The quiet spec, which part 3 dropped, is the one that resists
+//! ## What the fallback class is ordered by instead
+//!
+//! Two candidate orders, both in [`leviculum_ble_tx::FallbackOrder`],
+//! both measured on this instrument with everything else held equal
+//! (same seeds, same phones, same spec: only the tie-break moves):
+//!
+//! | churn | policy             | n=10 disc / boardless / bb / %churn | n=20 disc / boardless / bb / %churn |
+//! |------:|--------------------|-------------------------------------|-------------------------------------|
+//! |     0 | eager/mostfree     |   0 /  0 / 10000 /  0 %             |   0 /  0 / 20000 /  0 %             |
+//! |     0 | eager/firstheard   |   2 /  0 / 10000 /  0 %             |  74 /  0 / 20000 /  0 %             |
+//! |     0 | eager/rotatinglast |   0 /  0 / 10000 /  0 %             |   0 /  0 / 20000 /  0 %             |
+//! |     1 | eager/mostfree     |  44 / 28 /  8984 / 42 %             | 180 / 48 / 18854 / 28 %             |
+//! |     1 | eager/firstheard   |   6 /  0 /  9866 / 13 %             |  58 /  2 / 19998 /  3 %             |
+//! |     1 | eager/rotatinglast |  22 /  2 /  9912 /  6 %             |  78 /  0 / 20000 /  0 %             |
+//! |     2 | eager/mostfree     |  86 / 26 /  8914 / 43 %             | 194 / 46 / 18808 / 28 %             |
+//! |     2 | eager/firstheard   |  36 /  8 /  9664 / 24 %             |  42 /  0 / 19996 /  5 %             |
+//! |     2 | eager/rotatinglast |  24 / 16 /  9796 / 12 %             |  94 /  0 / 19996 /  0 %             |
+//!
+//! **First-heard** drops the address term for every candidate and
+//! breaks the tie by which advertiser the window heard first. It works
+//! against the phone, and it hands back most of the saturated-cycle
+//! lock in the empty room — 74 split graphs per 1000 at twenty boards
+//! against zero, which is the #375 guarantee itself. That is not a
+//! surprise in hindsight: the agreement between searchers that the
+//! address order produced is what closed the lock, and an arbitrary
+//! tie-break has no agreement in it. The row stays as the record of
+//! the trade.
+//!
+//! **Rotating-last**, what ships, keeps the address term where the
+//! address is a key and drops it where it is not: a candidate whose
+//! address class says its owner redraws it (`01` or `00` on top, Core
+//! Spec Vol 6 Part B §1.3.2.2) ranks behind every candidate whose does
+//! not, first-heard among themselves. Every board in a room of boards
+//! has a static random address, so the empty room is not merely as
+//! good but BIT-IDENTICAL, which the table above asserts as an
+//! equality rather than a bound.
+//!
+//! With one phone in the room it takes the mechanism out: the share of
+//! the room's dials aimed at the phone falls from 42 % to 6 % at ten
+//! boards and from 28 % to 0 % at twenty, the board-to-board links
+//! come back to within 1 % of the empty room (and exactly to it at
+//! twenty), the boards left with no board link at all fall from 28 and
+//! 48 to 2 and 0, and the split graphs at least halve. It is a
+//! preference and not an exclusion, which the two-phone row shows by
+//! still spending 12 % of its dials there — a board with nobody else
+//! to dial dials the phone, as it must.
+//!
+//! What it does NOT do, and first-heard partly does: spread the
+//! fallback dials among the BOARDS. That is why first-heard still wins
+//! some churned cells (6 against 22 at ten boards with one phone)
+//! while paying for it in the empty room. Whether the fallback class
+//! should be spread among boards as well is #375's question, not this
+//! one.
+//!
+//! The residual is the address class itself: a PUBLIC address carries
+//! no constraint on its top bits, so a BlueZ host whose OUI begins
+//! below `0x80` reads as rotating and is ordered behind the boards
+//! inside the fallback class. It costs such a peer position, never a
+//! dial. The address TYPE arrives with every advertising report and
+//! would settle it exactly; plumbing it through both stacks is the
+//! honest fix and it is not this one.
+//!
+//! ## The quiet spec, which part 3 dropped, also resists
 //!
 //! `quiet/lowest` suspends the fallback clock while the board holds any
 //! link, and a board holding a phone's incoming link therefore never
@@ -179,6 +245,11 @@
 //! quiet spec's known cost — 28 and 78 all-linked splits in an empty
 //! room — is the price of that, and it is smaller than what churn costs
 //! eager.
+//!
+//! It is not what ships, because it pays that cost in every room and
+//! the fallback order above pays none: a board holding a phone's
+//! incoming link never reaching fallback at all is a blunt version of
+//! not electing the phone.
 //!
 //! ## One row improves, and it is a confound, not good news
 //!
@@ -207,8 +278,8 @@
 //! this one.
 
 use leviculum_ble_tx::{
-    judge_duplicate, should_initiate, CandidateTable, ConnectDecision, DupVerdict, Origin,
-    ScanMode, LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU, SCAN_FALLBACK_AFTER_MS,
+    judge_duplicate, should_initiate, CandidateTable, ConnectDecision, DupVerdict, FallbackOrder,
+    Origin, ScanMode, LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU, SCAN_FALLBACK_AFTER_MS,
     WINDOW_CANDIDATES,
 };
 
@@ -380,11 +451,53 @@ enum TargetChoice {
     /// [`CandidateTable`] policy as item 2 shipped it, with no peer
     /// advertising a slot count.
     LowestEligible,
-    /// The shipped policy since #375 item 3: the same window and the
-    /// same table, with every board advertising how many incoming slots
-    /// it still has, so the fullest peers sort behind the emptiest ones
-    /// and only equal counts fall back to the address.
+    /// What #375 item 3 shipped and #412 measured the cost of: the
+    /// same window and the same table, with every board advertising how
+    /// many incoming slots it still has, so the fullest peers sort
+    /// behind the emptiest ones and only equal counts fall back to the
+    /// address.
     MostFreeSlots,
+    /// [`Self::MostFreeSlots`] with the fallback class's last term
+    /// changed from the address to which advertiser the window heard
+    /// first ([`FallbackOrder::FirstHeard`]). Everything else is
+    /// identical, including the table, so the difference between this
+    /// row and `MostFreeSlots` is that one term and nothing else.
+    /// Measured, not shipped: see the module docs for what it costs
+    /// the empty room.
+    FallbackFirstHeard,
+    /// The shipped policy since #412: the same again with
+    /// [`FallbackOrder::RotatingLast`], which keeps the address term
+    /// for candidates whose address stays put and puts the ones that
+    /// redraw it behind them.
+    RotatingLast,
+}
+
+impl TargetChoice {
+    /// Whether the boards in this configuration advertise their free
+    /// incoming slots (#375 item 3).
+    fn advertises_slots(self) -> bool {
+        matches!(
+            self,
+            Self::MostFreeSlots | Self::FallbackFirstHeard | Self::RotatingLast
+        )
+    }
+
+    /// The tie-break the shared table uses for the fallback class.
+    fn fallback_order(self) -> FallbackOrder {
+        match self {
+            Self::FallbackFirstHeard => FallbackOrder::FirstHeard,
+            Self::RotatingLast => FallbackOrder::RotatingLast,
+            _ => FallbackOrder::Address,
+        }
+    }
+
+    /// Whether the row reads the order the advertising PDUs arrived
+    /// in. Only the two orders that break a tie by it draw the shuffle
+    /// — a row that never reads it must not consume the draw either,
+    /// or the two would not be the same replay.
+    fn reads_arrival_order(self) -> bool {
+        matches!(self, Self::FallbackFirstHeard | Self::RotatingLast)
+    }
 }
 
 /// xorshift64* — deterministic, seedable, no dependency.
@@ -606,6 +719,10 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
     // The churning peers come from a stream of their own, so that
     // adding them cannot move a single draw of the one above.
     let mut churn_rng = (seed ^ 0xC0FF_EE15_0BAD_F00D) | 1;
+    // And the advertising arrival order from a third, for the same
+    // reason one step further (#412): only `FallbackFirstHeard` reads
+    // it, and it must leave both streams above untouched.
+    let mut offer_rng = (seed ^ 0x0FFE_5ED0_1DE5_7ABC) | 1;
     let mut churners: Vec<Churner> = (0..churn.peers)
         .map(|_| {
             let addr = (next_rand(&mut churn_rng) & 0x3FFF_FFFF_FFFF) | 0x4000_0000_0000;
@@ -708,7 +825,7 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
                         if !boards[p].arrived || boards[p].incoming.len() >= PERIPH_SLOTS {
                             return None;
                         }
-                        let free = (choice == TargetChoice::MostFreeSlots).then(|| {
+                        let free = choice.advertises_slots().then(|| {
                             u8::try_from(PERIPH_SLOTS - boards[p].incoming.len())
                                 .expect("slots fit a byte")
                         });
@@ -745,10 +862,29 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
                 // `LowestEligible` replays item 2 by having nobody
                 // advertise a count; `MostFreeSlots` is the shipped
                 // policy, every board stating its free slots.
-                TargetChoice::LowestEligible | TargetChoice::MostFreeSlots => {
+                TargetChoice::LowestEligible
+                | TargetChoice::MostFreeSlots
+                | TargetChoice::FallbackFirstHeard
+                | TargetChoice::RotatingLast => {
                     let mut window: CandidateTable<usize, WINDOW_CANDIDATES> =
-                        CandidateTable::new();
-                    for &(p, decision, free) in &candidates {
+                        CandidateTable::with_fallback_order(choice.fallback_order());
+                    // The order the advertising PDUs arrive in. It is
+                    // the candidate order for every row that does not
+                    // read it, and a seeded shuffle for the one that
+                    // does. The shuffle has a stream of ITS OWN, a
+                    // third one: drawing from the main stream would
+                    // move the arrival and scan orders, and drawing
+                    // from the churn stream would give this row a
+                    // different phone from every other row. Both would
+                    // make the comparison between rows something other
+                    // than a comparison of policies.
+                    let mut offers = candidates.clone();
+                    if choice.reads_arrival_order() {
+                        for i in (1..offers.len()).rev() {
+                            offers.swap(i, (next_rand(&mut offer_rng) as usize) % (i + 1));
+                        }
+                    }
+                    for &(p, decision, free) in &offers {
                         let addr = if p < n {
                             boards[p].addr
                         } else {
@@ -1056,7 +1192,7 @@ fn measure(n: usize, spec: FallbackSpec, choice: TargetChoice, churn: Churn) -> 
 }
 
 /// Every policy the file compares, as one label table.
-const CONFIGS: [(FallbackSpec, TargetChoice, &str); 6] = [
+const CONFIGS: [(FallbackSpec, TargetChoice, &str); 8] = [
     (FallbackSpec::Off, TargetChoice::FirstSeen, "strict"),
     (FallbackSpec::Eager, TargetChoice::FirstSeen, "eager/first"),
     (
@@ -1074,6 +1210,16 @@ const CONFIGS: [(FallbackSpec, TargetChoice, &str); 6] = [
         FallbackSpec::Eager,
         TargetChoice::MostFreeSlots,
         "eager/mostfree",
+    ),
+    (
+        FallbackSpec::Eager,
+        TargetChoice::FallbackFirstHeard,
+        "eager/firstheard",
+    ),
+    (
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        "eager/rotatinglast",
     ),
 ];
 
@@ -1171,6 +1317,44 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
         (at10.disconnected, at20.disconnected),
         (28, 78),
         "quiet/lowest moved: the quiet spec's documented cost is stale, re-measure"
+    );
+    // #412's shipped order changes the fallback class's last term for
+    // addresses that are redrawn, and a room of boards has none: every
+    // column of the empty room must therefore be the SAME NUMBER as
+    // the order it replaced, not merely as good. This is the claim
+    // that makes the change safe to ship, and it is an equality.
+    for (shipped, replaced) in [
+        (&rates["eager/rotatinglast"].0, &rates["eager/mostfree"].0),
+        (&rates["eager/rotatinglast"].1, &rates["eager/mostfree"].1),
+    ] {
+        assert_eq!(
+            (
+                shipped.disconnected,
+                shipped.linkless,
+                shipped.saturated,
+                shipped.boardless,
+                shipped.board_links,
+                shipped.dials
+            ),
+            (
+                replaced.disconnected,
+                replaced.linkless,
+                replaced.saturated,
+                replaced.boardless,
+                replaced.board_links,
+                replaced.dials
+            ),
+            "the rotating-last order moved a number in a room that has no rotating address"
+        );
+    }
+    // And the order it did NOT ship, for the record: dropping the
+    // address term for every candidate gives back most of the
+    // saturated-cycle lock the window closed.
+    let (at10, at20) = &rates["eager/firstheard"];
+    assert_eq!(
+        (at10.disconnected, at20.disconnected),
+        (2, 74),
+        "eager/firstheard moved: the empty-room cost of the first-heard order is stale"
     );
     for label in [
         "eager/first",
@@ -1339,6 +1523,50 @@ fn a_churning_peer_takes_the_fallback_dial_and_the_board_graph_pays_for_it() {
             churned.board_links,
             churned_first.board_links
         );
+
+        // What the shipped order does about it. The three numbers the
+        // issue asks for, each against the order it replaced and in
+        // the direction that matters, plus the one that says the
+        // change is not an exclusion.
+        let shipped = pick(1, "eager/rotatinglast");
+        assert!(
+            shipped.share_spent_on_churn() * 4.0 < churned.share_spent_on_churn(),
+            "n={n}: the rotating-last order must cut the room's churn dials to well under a \
+             quarter of what the address order spent (rotating-last {:.0} %, address {:.0} %)",
+            shipped.share_spent_on_churn(),
+            churned.share_spent_on_churn()
+        );
+        assert!(
+            shipped.board_links * 100 >= clean.board_links * 99,
+            "n={n}: the board-to-board links a churning peer cost must come back (shipped {}, \
+             address order {}, empty room {})",
+            shipped.board_links,
+            churned.board_links,
+            clean.board_links
+        );
+        assert!(
+            shipped.disconnected * 2 <= churned.disconnected,
+            "n={n}: the shipped order must at least halve the split board graphs a churning \
+             peer causes (shipped {}, address order {})",
+            shipped.disconnected,
+            churned.disconnected
+        );
+        assert!(
+            shipped.boardless <= churned.boardless,
+            "n={n}: more boards ended with no board link under the shipped order ({} against {})",
+            shipped.boardless,
+            churned.boardless
+        );
+        // It is a preference, not an exclusion: with two churning
+        // peers in the room some board still has nobody else to dial,
+        // and dials them. A zero here would mean the order had become
+        // a rule about who may be connected to at all.
+        let two = pick(2, "eager/rotatinglast");
+        assert!(
+            two.churn_links > 0,
+            "n={n}: the shipped order stopped dialling churning peers entirely — that is an \
+             exclusion, and the fallback class must stay permitted"
+        );
     }
 }
 
@@ -1482,7 +1710,11 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
 /// table is where a room with a phone in it is answered for.
 #[test]
 fn the_shipped_config_connects_every_order_and_strands_nobody() {
-    for choice in [TargetChoice::LowestEligible, TargetChoice::MostFreeSlots] {
+    for choice in [
+        TargetChoice::LowestEligible,
+        TargetChoice::MostFreeSlots,
+        TargetChoice::RotatingLast,
+    ] {
         for n in [10usize, 20] {
             let mut split = 0usize;
             for seed in 0..ORDERS {

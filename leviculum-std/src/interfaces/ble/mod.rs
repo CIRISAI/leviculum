@@ -617,7 +617,9 @@ impl BleTask {
                 // Eligible: into the collection window instead of an
                 // immediate dial — the firmware's window, the same
                 // CandidateTable, the same choice: emptiest advertised
-                // peer first, then lowest address (#375 item 3).
+                // peer first (#375 item 3), then the lowest address,
+                // except that a peer which redraws its address does not
+                // get to win that tie with it (#412).
                 scheduler.offer(addr.0, decision.decision, decision.free_slots, now);
                 self.dial_window_choice(
                     scheduler,
@@ -712,8 +714,9 @@ impl BleTask {
     }
 
     /// Close the scheduler's collection window if its bound has passed
-    /// and defer its choice into the dial queue — the lowest eligible
-    /// address, strict verdicts first, elected by the same
+    /// and defer its choice into the dial queue — strict verdicts
+    /// first, then the emptiest peer, then the lowest address among
+    /// those that keep one (#412), elected by the same
     /// [`CandidateTable`] the firmware and the #375 simulation use. Logs
     /// `BLE_SCAN_WINDOW` once per window that ends in a dial, like the
     /// firmware, and `BLE_DIAL_QUEUE` for the deferred dial (#49 part 3:

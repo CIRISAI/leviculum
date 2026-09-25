@@ -1863,10 +1863,9 @@ mod tests {
     }
 
     /// The collection window: opens at the first eligible sighting,
-    /// closes only after its bound, and elects the lowest eligible
-    /// address with strict verdicts ahead of fallback verdicts — via
-    /// the shared [`CandidateTable`], so this is the firmware's choice
-    /// verbatim.
+    /// closes only after its bound, and elects the best candidate with
+    /// strict verdicts ahead of fallback verdicts — via the shared
+    /// [`CandidateTable`], so this is the firmware's choice verbatim.
     #[test]
     fn the_window_collects_and_dials_the_lowest_eligible_candidate() {
         let mut s = ScanScheduler::new(0);

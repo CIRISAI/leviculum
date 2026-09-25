@@ -1484,6 +1484,9 @@ fn addr_already_linked(addr_value: u64) -> bool {
 /// Columba at 6674ae87 advertises the service UUID alone — no
 /// manufacturer record, so no hint, so that phone is dialled exactly
 /// as it was (see [`leviculum_ble_tx::PeerRegistry::hint_linked`]).
+/// What no longer lets it take the slot every time is the window's
+/// fallback order, which stopped ranking by an address its owner
+/// redraws (`leviculum_ble_tx::window`, #412).
 ///
 /// A HINT, and used in one direction only: to skip a dial. `None` — an
 /// advertiser that carried no hint — is never a match, so a pre-#412
@@ -1768,9 +1771,10 @@ fn dead_end(addr: u64) -> bool {
 
 /// Scan until one advertisement wins an initiate decision, keep
 /// collecting further eligible advertisers for one bounded window
-/// ([`SCAN_WINDOW_COLLECT_MS`]), then return the best candidate — the
-/// lowest eligible address, strict verdicts before fallback verdicts —
-/// plus the rule that permitted it (the caller resets the fallback
+/// ([`SCAN_WINDOW_COLLECT_MS`]), then return the best candidate —
+/// strict verdicts before fallback verdicts, the emptiest advertiser
+/// first, ties broken by the lowest address except among peers that
+/// redraw theirs (#412) — plus the rule that permitted it (the caller resets the fallback
 /// clock on a strict verdict, #375) and the window's `seen` count for
 /// the `BLE_SCAN_WINDOW` log line.
 ///
