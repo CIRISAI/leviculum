@@ -15,6 +15,11 @@ and the firmware policy behind it, so four of the five questions are
 answered by code rather than by argument. The fifth is not, and is
 stated as open at the end.
 
+Question 6 was asked separately, as Codeberg #40 against the reference
+firmware, and it is the same question about the other end of the window:
+not what the wait is made of but where it starts. It is answered here
+because the answer is made of the same five artifacts.
+
 ## What we build it out of
 
 | Term | Value | Where |
@@ -178,6 +183,83 @@ same loss at the layer that counts. The transmit path arms the receiver
 for the drawn duration and reports back what it actually listened
 through, and a reception that cuts the wait short leaves the debt
 standing (`leviculum-nrf/src/lora.rs:1598`).
+
+## 6. Does the window's floor matter?
+
+**No, and that is worth stating because it is the remedy an observer
+reaches for first.** Codeberg #40 recorded the reference's light-traffic
+window as `cw_min = 0` (`CSMA_CW_MIN`,
+`reference/RNode_Firmware/Config.h:109`) and proposed raising the floor to
+two or three slots "so a competing node's preamble falls into the other's
+CAD window". Our draw mirrors that window, so the proposal reads as a
+proposal about us too. Three things about it do not hold, and none of them
+needs a new measurement.
+
+**A term both ends owe cancels out of what separates them.** Two nodes
+released by the same event are separated by the *difference* of their
+waits, not by either wait, so a constant added to every wait moves the
+whole distribution of waits and leaves the distribution of separations
+exactly where it was. That is not an argument but a pin, and it was
+already made for a different proposal of the same shape: a deferral of one
+frame airtime on every answer, refused in
+`direction_3_a_deferral_that_is_a_constant_cancels_and_buys_nothing`
+(`leviculum-std/tests/mvr/two_responders_overlap_inside_one_airtime.rs:503`),
+which asserts the deferred census equal to the baseline one count for
+count and says in place that a constant common to both cancels the way
+DIFS already does. A floor is that constant, spelled in slots instead of
+airtimes.
+
+What a floor does buy is latency: at SF10/125 kHz two more slots cost
+every acquisition another 196 ms out of the budget priced in question 3.
+Its one second-order effect points the same way rather than the other: a
+longer wait is longer exposed to a *third* node's frame arriving inside
+it, and a wait cut short that way re-anchors both ends on that frame at
+the same instant — the same mechanism that makes deliberate carrier sense
+a losing direction here, priced in
+`direction_4_carrier_sense_re_anchors_the_pair_and_doubles_the_odds`
+(`leviculum-std/tests/mvr/two_responders_overlap_inside_one_airtime.rs:551`).
+
+**Our pre-TX wait has never been able to be zero anyway.** The draw's own
+floor is zero, but a floor of zero draws is not a floor of zero
+milliseconds: every acquisition also owes DIFS unconditionally, two slots
+(`JITTER_DIFS_SLOTS`, `leviculum-nrf/channel-access/src/lib.rs:75`), which
+is the `narrowest` column of question 1's table — 48 ms at the bench PHY,
+12 ms at SF5/500 kHz, 200 ms at SF12
+(`the_widest_acquisition_wait_is_a_function_of_the_modulation`,
+`leviculum-nrf/channel-access/src/lib.rs:336`), and pinned again through
+the draw itself for a thousand seeds in
+`boot_owes_jitter_and_the_draw_is_difs_plus_a_bounded_window`
+(`leviculum-nrf/channel-access/src/lib.rs:393`). The reference is no
+different: `tx_queue_handler`
+(`reference/RNode_Firmware/RNode_Firmware.ino:1623`) waits `difs_ms`
+(`reference/RNode_Firmware/Config.h:119`), also two slots, and waits it
+while sensing: a medium that goes busy clears `difs_wait_start`, so the
+DIFS restarts from the top, while the contention countdown only freezes
+(`cw_wait_passed` survives and is reset at the flush, not at the
+interruption). `cw_min = 0` means the *contention* term can be zero, not
+that a node transmits the instant it is handed a frame.
+
+**And the colliding set is not "both drew zero".** #40 priced the risk at
+`1/15²`, which is the chance of that one pair. Two ends that draw the same
+value, whichever value it is, end their waits in the same slot, so the
+colliding set is every equal pair and its size is one over the number of
+draws: 1/15 in the reference as booted and 1/14 after an excursion
+(question 2), and 1/14 for us. That figure is the one the arms are
+measured against —
+`FrameClass` (`leviculum-std/src/interfaces/rnode.rs:376`) takes a
+same-class pair to 1/56 and states in the same place that the count alone
+leaves it at 1/14, i.e. that a change which does not increase the number
+of distinguishable outcomes buys nothing. A floor does not increase it.
+Width, quantisation against the frame, and per-identity pinning do, and
+which of those wins is the open A/B, not this.
+
+None of it is reachable from the host in any case, which is what #40
+concluded and still holds: the reference's whole command set carries one
+CSMA opcode and it is a read-only stat, `CMD_STAT_CSMA`
+(`reference/RNode_Firmware/Framing.h:48`); the nearest thing to a setter,
+`CMD_DIS_IA` (`reference/RNode_Firmware/Framing.h:67`), switches
+interference avoidance off and never touches the window. The only window
+we can change is our own.
 
 ## What is still open
 
