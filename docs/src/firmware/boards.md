@@ -332,14 +332,36 @@ no USB-to-UART bridge on this board.
 
 ### Not covered today
 
-Each of these is a separate pinout family, reachable by adding one board
-file rather than by changing shared code:
+Each of these is a separate pinout family around the SX1262 this
+firmware already drives, reachable by adding one board file rather than
+by changing shared code:
 
 | Family | Products |
 |---|---|
 | ThinkNode M6 | Elecrow ThinkNode M6, muzi BASE |
 | ProMicro + E22 | nRF52 ProMicro DIY, DLS Minimesh Lite |
 | Individual wirings | Heltec Mesh Pocket, B&Q Nano G2 Ultra, LILYGO T-Echo Lite, Canary One, MS24SF1, MeshLink, TWC Mesh v4 |
+
+**A different radio family is not on that list, and the T1000-E is the
+board that makes the distinction worth drawing.** The Seeed SenseCAP Card
+Tracker T1000-E carries the nRF52840 every nRF family above runs on, so
+its MCU, its bootloader and its USB path are all familiar; its LoRa
+transceiver is a Semtech LR1110, a different part with a different
+command set. No board file reaches that. The SX126x driver every build on
+this page shares does not carry over at all, which makes this device
+dearer to support than either of the other two boards waiting for
+attention: the Solar Node P1-Pro above is the same radio die on a resolved
+pin map, and the Heltec V4 brings a new MCU family and a new toolchain but
+reuses the radio driver unchanged. What the port would actually cost, and which of
+the radio-adjacent crates survive it untouched, is in
+[How far one firmware build reaches](../concepts/board-support-scope.md)
+under "The axis the policy does not have"; Codeberg #406 is the record.
+
+The one thing it has that no board above has is a 3-axis accelerometer,
+which is the movement signal the announce cadence currently has to infer
+from a position delta (`MovementDetector`,
+`leviculum-nrf/announce-policy/src/cadence.rs:226`). If that work ever
+needs a hardware answer instead, this is the device that can give one.
 
 The XIAO family, now family C above, is the one case where the
 bootloader cannot answer which board it is: the MCU module is a XIAO and

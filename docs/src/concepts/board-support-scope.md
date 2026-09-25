@@ -139,6 +139,65 @@ the same question — is the identifier bound to the same unit as the
 wiring — has to be asked again on its own terms. The class boundary is
 about where code lives. It is not a second policy.
 
+## The axis the policy does not have: the transceiver family
+
+Everything above varies two things, the class and the pinout family, and
+holds a third fixed without ever saying so: every board in this book
+carries an SX1262. The unit of support is a set of seven pins because
+seven pins is all that differs once the part itself is settled. A board
+with a different transceiver does not sit anywhere on that scale, and the
+Seeed SenseCAP Card Tracker T1000-E (Codeberg #406) is the first one we
+own: the nRF52840 we already build for, a bootloader and a USB path we
+already flash through, and a Semtech LR1110 where every board above has
+an SX1262.
+
+The class table above puts every opcode sequence in one row. That row is
+where the cost lands, and it is not spread evenly across the code that
+looks radio-shaped. Measured on this tree, 2026-09-25:
+
+| What | Lines | Reaches a second radio family |
+|---|---|---|
+| `leviculum-core/src/sx126x.rs` | 2461 | No: command set, register map, timing arithmetic |
+| `leviculum-nrf/src/sx1262.rs` | 1601 | The SPI and pin glue partly, the opcodes not at all |
+| `leviculum-nrf/rx-arming/src/lib.rs` | 3879 | Mostly yes, see below |
+| `leviculum-nrf/channel-access/src/lib.rs` | 745 | Mostly yes, see below |
+
+**The two pure crates are the cheaper half, and that is worth stating
+because their prose names the chip on nearly every page and reads like the
+expensive half.** Both were lifted out of the driver so a host test could
+drive them, and being liftable is the same property as being portable:
+
+- `rx-arming` reaches a radio only through two traits, `RxPort`
+  (`leviculum-nrf/rx-arming/src/lib.rs:155`) and `RxWindowProbe`
+  (`leviculum-nrf/rx-arming/src/lib.rs:694`). The driver implements both,
+  `RxPort` (`leviculum-nrf/src/sx1262.rs:1430`) and `RxWindowProbe`
+  (`leviculum-nrf/src/sx1262.rs:1460`), and a test fake implements
+  `RxPort` (`leviculum-nrf/rx-arming/src/lib.rs:1826`) beside it. A second
+  family writes a third implementation; it does not fork the crate.
+- `channel-access` touches no radio at all. The caller reports what its
+  own channel-activity detection said — `cad_clear`
+  (`leviculum-nrf/channel-access/src/lib.rs:256`), `cad_busy`
+  (`leviculum-nrf/channel-access/src/lib.rs:266`), `cad_error`
+  (`leviculum-nrf/channel-access/src/lib.rs:283`) — and the jitter slot is
+  derived from bandwidth, spreading factor and coding rate
+  (`jitter_slot_ms`, `leviculum-nrf/channel-access/src/lib.rs:97`), which
+  are properties of the modulation rather than of the part. Only the
+  module's own text names the SX1262
+  (`leviculum-nrf/channel-access/src/lib.rs:17`).
+
+**Where the seam would have to open, if it opens.** `RxLatch`
+(`leviculum-nrf/rx-arming/src/lib.rs:355`) is three named LoRa interrupt
+bits — preamble, header, `RxDone` — read back without being cleared, and
+the two bounds computed from them are forwarded to
+`leviculum_core::sx126x::tx_defer_ms` and
+`leviculum_core::sx126x::false_preamble_ms`. A part that latches those
+three the same way slots in behind the existing traits. A part that does
+not forces the traits themselves open, and choosing between widening them
+and carrying a second implementation is a design decision, not a port.
+**That decision is not taken here, and nothing in this tree has measured
+an LR11xx part against these traits.** Until one has, the honest estimate
+is the driver in full and the two crates untouched.
+
 ## The limit that bites
 
 Universality reaches exactly as far as the identification does. A build
