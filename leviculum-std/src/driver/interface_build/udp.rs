@@ -258,6 +258,13 @@ mod tests {
     /// with no broadcast-capable IPv4 interface (an isolated netns with only
     /// loopback) cannot exercise this form at all; the test says so rather
     /// than failing on an environment it does not test.
+    // Windows refuses to bind a broadcast address (WSAEADDRNOTAVAIL, 10049).
+    // The device form binds one, as UDPInterface.py does, so it shares that
+    // limit there (CIRIS fork: the Windows lane).
+    #[cfg_attr(
+        windows,
+        ignore = "Windows cannot bind a broadcast address; the device form mirrors UDPInterface.py"
+    )]
     #[tokio::test]
     async fn a_device_fills_both_addresses_and_needs_no_forward_port() {
         let Some(device) = if_addrs::get_if_addrs()
