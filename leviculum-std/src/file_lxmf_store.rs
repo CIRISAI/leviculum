@@ -132,6 +132,9 @@ mod tests {
     /// A foreign name used to panic enumeration inside the hex decode and
     /// take the node down; it is skipped, and the entries this store did
     /// write are still listed.
+    // Non-UTF-8 file names are a Unix notion; the test builds one with
+    // std::os::unix (CIRIS fork: the Windows lane).
+    #[cfg(unix)]
     #[test]
     fn a_foreign_filename_is_skipped_rather_than_fatal() {
         use std::os::unix::ffi::OsStrExt;
@@ -146,7 +149,14 @@ mod tests {
         std::fs::write(dir.path().join("\u{1F600}"), b"not ours").expect("stray file");
         // A name that is not UTF-8 at all, which no String can hold.
         let raw = std::ffi::OsStr::from_bytes(b"\xff\xfe").to_owned();
-        std::fs::write(dir.path().join(raw), b"not ours either").expect("stray file");
+        match std::fs::write(dir.path().join(raw), b"not ours either") {
+            Ok(()) => {}
+            // APFS refuses a name that is not UTF-8 (EILSEQ). Where the file
+            // system cannot hold such a name, the case this sets up cannot
+            // arise (CIRIS fork: the macOS lane).
+            Err(e) if e.raw_os_error() == Some(libc::EILSEQ) => {}
+            Err(e) => panic!("stray file: {e}"),
+        }
 
         assert_eq!(
             storage.keys(b"lxmf/peers/").expect("keys"),
