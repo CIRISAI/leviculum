@@ -450,16 +450,14 @@ impl CompletionRegistry {
                 let live = inner.established.len();
                 if live >= inner.mirror_alarm_at {
                     if live >= ESTABLISHED_MIRROR_CAP {
+                        // Past the expected envelope. Nothing is dropped, but links
+                        // are being established faster than they close: check the
+                        // link lifecycle (leviculum#57). Reported on a doubling ladder.
                         tracing::error!(
                             event = "COMPLETION_MIRROR_OVER_ENVELOPE",
                             live_links = live,
                             envelope = ESTABLISHED_MIRROR_CAP,
-                            "completion mirror holds {live} live links, past the expected \
-                             envelope of {} — nothing is dropped, but links are being \
-                             established faster than they close; check the link lifecycle \
-                             (leviculum#57). Next report at {}.",
-                            ESTABLISHED_MIRROR_CAP,
-                            live.saturating_mul(2),
+                            next_report_at = live.saturating_mul(2),
                         );
                         inner.mirror_alarm_at = live.saturating_mul(2);
                     } else {
@@ -467,10 +465,7 @@ impl CompletionRegistry {
                             event = "COMPLETION_MIRROR_WATERMARK",
                             live_links = live,
                             envelope = ESTABLISHED_MIRROR_CAP,
-                            "completion mirror at {live} live links, {}% of the expected \
-                             envelope of {}",
-                            live * 100 / ESTABLISHED_MIRROR_CAP,
-                            ESTABLISHED_MIRROR_CAP,
+                            envelope_pct = live * 100 / ESTABLISHED_MIRROR_CAP,
                         );
                         inner.mirror_alarm_at = ESTABLISHED_MIRROR_CAP;
                     }
