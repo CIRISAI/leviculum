@@ -301,6 +301,57 @@ async fn fake_modem(mut peer: tokio::io::DuplexStream, record: Arc<Mutex<ModemRe
     }
 }
 
+/// Polls `ready` until it holds, and returns as soon as it does.
+///
+/// Every wait in this file is for an event the fixture can observe, so none of
+/// them is a fixed sleep: a sleep long enough for a loaded host is dead time on
+/// an idle one, and a sleep short enough to keep the test quick fails on the
+/// loaded one with a message about the wrong thing (a PHY that was never
+/// reported, a frame that was never handed down) instead of about the spacing.
+/// Returning on the deadline rather than panicking keeps the diagnosis in the
+/// assertion that follows, which prints what was actually collected.
+async fn wait_until(deadline: Duration, what: &str, mut ready: impl FnMut() -> bool) {
+    let started = Instant::now();
+    while !ready() {
+        if started.elapsed() >= deadline {
+            eprintln!("waited {deadline:?} in vain: {what}");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// How much longer than the hold the gap may be once this host's own clock
+/// slack is accounted for ([`clock_witness`]).
+///
+/// An unloaded host spends 0 to 1 ms of it: the stamp of the first frame is
+/// taken in the write that precedes the timer being armed, and the timer's
+/// deadline is rounded up to the next millisecond tick. The floor exists so
+/// that rounding cannot fail the test, and it is far below the smallest policy
+/// error it has to catch — a second hold (the whole `owed_ms` again) or a fresh
+/// acquisition draw on top of the hold (48 to 360 ms at this PHY).
+const CLOCK_MARGIN_MS: u64 = 100;
+
+/// Records the longest a wake-up was late by while the burst was in flight.
+///
+/// The quantity the upper bound needs is not "was the host busy" but "by how
+/// much could a timer in THIS runtime have fired late at the moment the second
+/// frame's hold expired". So the witness asks for exactly that: a short sleep,
+/// over and over, on the same single-threaded runtime as the interface, with
+/// the overshoot of each wake-up kept if it is the largest so far. A starved
+/// runtime makes the witness late by as long as it makes the hold's timer late;
+/// an idle one makes neither.
+async fn clock_witness(slack: Arc<Mutex<u64>>) {
+    const TICK_MS: u64 = 50;
+    loop {
+        let started = Instant::now();
+        tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
+        let late = (started.elapsed().as_millis() as u64).saturating_sub(TICK_MS);
+        let mut worst = slack.lock().expect("slack lock");
+        *worst = (*worst).max(late);
+    }
+}
+
 /// A destination this node can announce, to get a frame onto the medium
 /// without a peer, a path or a link.
 fn announceable(app_name: &str) -> Destination {
@@ -354,8 +405,24 @@ async fn the_modem_holds_one_frame_at_a_time() {
     let hash_b = *dest_b.hash();
     node.register_destination(dest_a);
     node.register_destination(dest_b);
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Waited out, not slept over: the modem's stat frame is the LAST thing the
+    // detect-and-configure handshake produces, so its arrival is the condition
+    // the burst needs, and a fixed sleep is only a guess at how long a loaded
+    // host takes to get there. The guess was 2 s and a host under `stress-ng
+    // --cpu 30` missed it on 2026-09-25, failing on an unreported PHY instead
+    // of on the spacing this file is about.
+    wait_until(
+        Duration::from_secs(30),
+        "the modem never reported its PHY",
+        || record.lock().expect("record lock").phy.csma_slot_ms > 0,
+    )
+    .await;
     record.lock().expect("record lock").handovers.clear();
+
+    // From here to the measurement, watch what this host's clock does to a
+    // task that asks to be woken on time (see [`clock_witness`]).
+    let slack = Arc::new(Mutex::new(0u64));
+    let witness = tokio::spawn(clock_witness(Arc::clone(&slack)));
 
     // The burst: two frames handed down in the same instant, the shape the
     // selftest produces and the shape a relay produces when an announce
@@ -367,11 +434,18 @@ async fn the_modem_holds_one_frame_at_a_time() {
         .await
         .expect("announce b");
 
-    // Long enough for the acquisition draw (48..360 ms at this PHY) plus one
-    // hold (~1 s for an announce-sized frame at SF7/62.5 kHz), with room to
-    // spare. A test that read too early would see one frame and could not
-    // tell a held frame from a lost one, so it waits well past both.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Both frames, however long the acquisition draw (48..360 ms at this PHY)
+    // and the hold (~1 s for an announce-sized frame at SF7/62.5 kHz) take on
+    // the host this runs on. A test that read after a fixed wait would, on a
+    // slow enough host, see one frame and could not tell a held frame from a
+    // lost one; the deadline below is a failure, not a measurement, and the
+    // count is asserted on afterwards either way.
+    wait_until(
+        Duration::from_secs(30),
+        "the second frame was never handed down",
+        || record.lock().expect("record lock").handovers.len() >= 2,
+    )
+    .await;
 
     let (handovers, phy) = {
         let rec = record.lock().expect("record lock");
@@ -419,10 +493,29 @@ async fn the_modem_holds_one_frame_at_a_time() {
          carrier sense between them, and the second one leaves deaf.",
         phy.csma_difs_ms
     );
+    // The other side of the pin: the hold is the frame's own cost and no more.
+    // The clock may only run LONG here — a tokio timer never fires early and
+    // the stamps are taken before the timer is armed — so this bound has to
+    // carry whatever lateness the host imposed, and it carries the measured
+    // figure rather than a guessed one. A fixed 1000 ms tolerance stood here
+    // until 2026-09-25 and a host under `stress-ng --cpu 30` overran it with
+    // 2008 ms against 924 owed, on an interface that had done nothing wrong.
+    // The witness's own wake-up for the starved interval may still be queued
+    // behind this task: a starvation that ends makes every expired timer
+    // runnable at once, and the order they are polled in is the runtime's
+    // business. Two of its ticks are enough for it to have recorded what it
+    // saw, and the frames are already stamped, so this waits for nothing else.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let slack_ms = *slack.lock().expect("slack lock");
+    witness.abort();
+    let over_ms = gap_ms.saturating_sub(owed_ms);
+    println!("TX_HOLD_MVR_CLOCK slack_ms={slack_ms} over_ms={over_ms}");
     assert!(
-        gap_ms < owed_ms + 1_000,
+        over_ms <= slack_ms + CLOCK_MARGIN_MS,
         "the hold must be the frame's own cost and no more: {gap_ms} ms \
-         against {owed_ms} ms owed"
+         against {owed_ms} ms owed, which is {over_ms} ms too long while this \
+         host delayed a timer by at most {slack_ms} ms during the same \
+         window. A slow host is not an explanation for this one."
     );
 
     node.stop().await.ok();
