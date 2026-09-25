@@ -5,14 +5,815 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Each release section opens with a `Toolchain:` line naming the pinned Rust
-version that built it, copied from `rust-toolchain.toml`. Raising that pin is
-a deliberate act at release time — published binaries and a measured embedded
-stack-frame margin are what it protects — and `just toolchain-status` says how
-far it has fallen behind current stable, as a report rather than a gate
-(Codeberg #304). Sections from 0.9.0 on carry the line; before the pin landed
-on 2026-08-18 the channel was `stable`, meaning whatever the building host had
-last installed, and there is no one version to name.
+<!-- CIRIS fork releases carry a `+ciris.N` build-metadata marker so their tags
+never collide with upstream's own version line. Downstream (CIRISEdge) pins the
+git tag, not the version string. -->
+
+## [0.27.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master (+465), including upstream's 0.9.0 release
+(2026-09-18) and 44 entries in its current Unreleased section.
+
+### Absorbed upstream (dropped from the carry)
+
+- `unregister_destination` on `ReticulumNode` (leviculum#54).
+- NTFS-safe `lnflash` sysfs fixtures (no `:` in committed paths).
+- The Linux-only gating of the BLE dependencies (leviculum#64).
+- The Unix-only parent-directory fsync in the file identity store (leviculum#65).
+- The self-spawned pipe-bridge child in the pipe interface tests.
+
+### Carried features ported onto upstream's changes
+
+- Scoped transit (leviculum#51): the per-interface `transit` flag now applies
+  inside upstream's `register_interface_config` helper, and upstream's new BLE
+  interface declares `transit: true` like every other interface.
+- Control-plane drop ladder and watermark (leviculum#60): upstream moved the
+  drop counter into an `Arc<Counter64>` shared with the `EventReceiver`
+  (Codeberg #419), which mints the overflow marker and resets the count. The
+  doubling warn ladder now resets when a new drop episode starts at a count of
+  one. `plane_stats()` keeps its own cumulative counters, because upstream's
+  counter is reset on every marker.
+- Per-peer outbound circuit breaker (leviculum#66): the shed counter uses
+  upstream's `Counter64`, and the breaker ignores upstream's new `peer` field
+  on `Action::SendPacket`. A multi-peer interface shares one transmit queue,
+  so it keeps one breaker.
+- Upstream's new shared-instance disconnect path now passes the segment
+  assembler (leviculum#62), the plane counters (leviculum#60) and the breakers
+  (leviculum#66) to `dispatch_output`, like every other call site.
+
+## [0.26.0+ciris.1] — CIRIS fork
+
+### Added — a peer that will not drain is shed, not absorbed (leviculum#66)
+
+The canonical showed one peer of 130 taking every one of 34,390 dropped
+packets in 24 h — ~24/s sustained, with no idle hour in the window — while the
+other 129 dropped none. The producer is legitimate and cannot be upgraded yet,
+which is exactly the case a deep absorbing queue handles worst: there is no
+catching up, so the queue sits at its cap discarding continuously, the depth
+buys nothing, and the discard is silent to whatever is producing.
+
+Reticulum puts flow control at Link/Channel and leaves the interface layer
+best-effort, so this does not try to make the interface reliable. It makes the
+shedding cheap and visible, and leaves reliability to the layer that owns it.
+
+- **Shed before masking.** `dispatch_actions` masks a packet — an Ed25519
+  signature plus an HKDF mask stream — and only then discovers the interface
+  will not take it, so a pinned queue paid full IFAC crypto for every packet
+  it was about to discard. The breaker runs before that, so a shed packet
+  costs a state check instead of a signature.
+- **Three refused ticks open the circuit.** The cooldown starts at 500 ms and
+  doubles per failed probe to a 5 minute ceiling — deliberately the cadence a
+  backed-off producer should trickle at, so the probe and the trickle meet
+  rather than beat against each other. One packet is spent per probe.
+- **Proofs are never shed, in any state.** A proof is the delivery
+  confirmation the producer is waiting on; drop it and the producer
+  retransmits, raising the offered load exactly when it is already too high.
+  New data yields; confirmations of data already accepted do not.
+- **The signal is pushed, not polled.** `NodeEvent::PeerCongested` is Control
+  class, so the notice that a peer is being shed cannot itself be dropped
+  under load. `interface_stats()` gains per-interface `circuit_open` and
+  `shed_packets`; `plane_stats()` gains `shed_packets_total`. Per interface on
+  purpose — #66 had 129 healthy peers beside the one that dropped, and a
+  node-wide total cannot name which.
+
+The threshold and the AIMD shape follow the reference channel rather than a
+private scheme (`Channel.py`: window +1 per delivery, −1 per timeout,
+`pow(1.5, tries-1)` backoff scaled by RTT and queue depth, teardown after
+`_max_tries`).
+
+This is the leviculum half. The producer half — honouring `try_send`'s `Busy`
+instead of the absorbing `send()`, backing off exponentially to a trickle — is
+the consumer's, and is being raised on CIRISEdge.
+
+## [0.25.0+ciris.1] — CIRIS fork
+
+### Fixed — the retry queue is diagnosable and quiet (leviculum#63)
+
+Reported from the live canonical, where the retry queue climbed past its
+warning threshold and began discarding traffic while the log read as quiet.
+
+- **The warnings name their peer.** Interfaces were named only at accept
+  time, so a drop line said `iface=7` and mapping that to a peer meant
+  finding the accept line — which a downstream log-dedup layer had
+  suppressed. Every retry-queue warning now carries the interface name.
+- **The depth log is a ladder, not a per-increment stream.** The watermark
+  logged depth 1, 2, 3 … 1024 — hundreds of lines per interface per episode
+  for what is a curve. It now reports on powers of two plus the cap, so the
+  last line before drops is always emitted and an episode costs ~10 lines.
+- **The reported peak no longer understates.** Because of the flood, the
+  observed watermarks were the last lines to survive dedup, not the true
+  peaks; a drop only fires at the cap, so anything that dropped reached it.
+  The drop warning now says so.
+- **`plane_stats()` gains `retry_queued`, `retry_queue_cap` and
+  `retry_dropped_total`**, so the depth is watchable as it climbs rather
+  than announced by the first discard — the treatment the control plane got
+  in leviculum#60.
+
+Whether first-order backpressure should propagate to the producer instead of
+being absorbed by the queue is unchanged and still open: the warning says it
+may be mis-tuned and the evidence agrees, but that is a design change, and it
+wants the measurement these gauges now make possible.
+
+### Fixed — BLE is Linux-only, so its dependencies must be too (leviculum#64)
+
+The catch-up below brought upstream's BLE interface in with `bluer` and `dbus`
+declared unconditionally. Both pull `libdbus-sys`, which does not build on
+macOS or Windows, so `leviculum-std` stopped building on either. That reaches
+a consumer rather than only a CI lane: CIRISEdge's darwin and win_amd64 wheels
+resolve this crate as a git dependency and would have failed at build time.
+
+The dependencies are now target-gated and the two modules using them
+cfg-gated. Configuring a `BLEInterface` off Linux returns a typed `Config`
+error naming the reason (it needs BlueZ over D-Bus) instead of failing to
+compile. Worth offering upstream: it makes their crate buildable off Linux.
+
+### Fixed — a directory fsync is a Unix move, not a portable one (leviculum#65)
+
+Upstream's `cf0e24cc` added a parent-directory fsync after the identity save's
+rename, so the rename is durable. Correct on Unix; on Windows `File::open`
+cannot open a directory at all, failing with `ERROR_ACCESS_DENIED`, so the
+line did not skip the flush there — it failed the save and returned
+`Storage("failed to save identity: Access is denied. (os error 5)")`.
+
+That took every test that builds a node with it: 20+ failures across
+`driver::builder::tests` plus `api::tests::node_lifecycle_without_interfaces`,
+one root cause. `leviculum-core` was unaffected.
+
+The fsync is now `#[cfg(unix)]`. NTFS commits the rename's metadata as part of
+the rename, and the durability this buys on Unix is not something a Windows
+handle can ask for. Upstream's CI is Linux-only, so this was invisible to
+them; offering it back.
+
+### Fixed — a live link survives a rotation, and sealing states its price (leviculum#52)
+
+`s6_live_links_survive_rotation` was failing ~50% of runs. Measuring it found
+one real defect and one wrong assumption in the test.
+
+- **The driver masked with a key the peer had already retired.** The event
+  loop refreshed its IFAC map at the top of each iteration, then parked in
+  `select!`. A rotation phase bumps the generation while the loop is parked,
+  so the send that wakes it was dispatched inside an iteration whose refresh
+  had already run. The map is now refreshed immediately before every
+  dispatch, which is where masking actually happens.
+- **Sealing is the breaking phase, and that is by design.** `install` and
+  `activate` are make-before-break — both keys are accepted, so neither can
+  lose a packet. `seal` retires the old key for inbound too, so anything
+  still masked with it is rejected on arrival: bytes in a socket, in a retry
+  queue, or in the peer's receive buffer. Sealing with no dwell after
+  activating strands that in-flight traffic. The obligation to leave a dwell
+  is now documented on the rotation API, and the test performs the rotation
+  the way an operator must.
+
+Evidence for the split: with the rotation removed the test passed 6/6; with
+install alone 5/5; with install+activate 5/5; only sealing failed, and every
+failing run showed exactly one `drops_ifac` at the peer while no passing run
+showed any. Stress after both fixes: 0/12 failures, was 4/8.
+
+Nothing imposes a dwell in the library. Each phase is an explicit operator
+call precisely so the cutover moment stays theirs to choose.
+
+### Changed — catch-up to upstream master @ `28de8362` (+92)
+
+Mostly LNode firmware, a **BLE interface**, `lnprobe` (probing a destination
+through either daemon), identity-hash readback in `lnflash --set-name`, a
+control-envelope identity query, and a large body of docs and rnsd-interop
+RPC coverage. Rebase was clean; every carried feature symbol-audited after.
+
+Two places where upstream's new code met this fork's carry, both mechanical:
+
+- the new BLE interface constructs `InterfaceInfo`, which the fork extends
+  with the declared-transit flag (leviculum#51) — it takes `transit: true`,
+  relay-by-default like every other interface type, scoped per interface by
+  config;
+- upstream added a `dispatch_output` call site for BLE peer-loss
+  (`handle_interface_peer_lost`), which the fork's signature threads the
+  multi-segment assembler through (leviculum#62).
+
+## [0.24.0+ciris.1] — CIRIS fork
+
+### Added — a transfer of any size is one delivery (leviculum#62)
+
+A payload past `RESOURCE_MAX_EFFICIENT_SIZE` (1 MiB − 1) is split into
+segments, and core delivers one `ResourceCompleted` **per segment**. That is
+right for `leviculum-core` — `no_std`, on boards that cannot hold a
+multi-megabyte transfer in RAM — and wrong for a consumer: the reference
+fires its resource callback **once per transfer**, so code written to
+reference semantics decoded our first event as the whole message and got a
+body cut at the ceiling minus the metadata size. That cost a downstream
+consumer 765 messages, surfacing as decode errors blamed on the *sender*
+(leviculum#61).
+
+`leviculum-std` now reassembles. Intermediate segments are absorbed; the
+final segment becomes one `ResourceCompleted` carrying the whole payload and
+segment 1's metadata. Single-segment transfers and sender-side events pass
+through untouched, and a batch with nothing segmented does no extra work.
+Correlation needed no new wire or event field — a link carries at most one
+incoming resource at a time, so `LinkId` is an exact key.
+
+**Bounded, because the segment count is peer-supplied**: per transfer
+(default 64 MiB, `ReticulumNodeBuilder::max_assembled_resource_size`) and in
+aggregate across links at four times that. A transfer that cannot be
+assembled within the ceilings is **neither dropped nor truncated** — it
+degrades to the documented per-segment delivery with an error naming the
+ceiling and the knob. A link that dies mid-transfer releases its partial.
+
+Assembly runs *before* observation and emission, so the completion registry,
+the event tap and the consumer all see the same whole-transfer event.
+
+### Fixed — the efficient-size ceiling was reported as a typo; the comment was (leviculum#61)
+
+`RESOURCE_MAX_EFFICIENT_SIZE = 1_048_575` **is correct** and must not change:
+reference RNS is `1 * 1024 * 1024 - 1` (`Resource.py:116`), so raising it to
+16 MiB — as reported — would emit segments a reference receiver cannot accept.
+What was wrong is the comment beside it, claiming a "3-byte length encoding
+(0xFFFFFF)", which made a correct value look like an off-by-one-hex-digit
+typo. It is now written as an expression with the reference cited, and
+`NodeEvent::ResourceCompleted` documents the per-segment contract in the
+place a consumer actually reads.
+
+### Changed — catch-up to upstream master @ `50388fc6` (+57)
+
+The largest catch-up since the 0.8.1 line, and almost all of it is LNode
+firmware and radio work: the receiver runs at boosted gain rather than an
+unchosen default, a reception in progress is no longer abandoned for a
+transmission, the radio listens again before handing a packet upward, the
+inter-packet gap is settable, plus register read-back at bring-up, airtime
+and listen-window reporting, and a plain reader for the LNode debug port.
+`leviculum-std` movement is mostly rnsd-interop coverage (RPC, status
+parity, MTU); `leviculum-core` picks up the supporting changes. Nothing
+touched the fork's carry — the rebase was clean, and every carried feature
+was symbol-audited afterwards.
+
+### Fixed — a latent race in this fork's own conformance suite
+
+`plane_stats_report_limits_and_track_the_live_set` read the **responder's**
+live-link gauge immediately after the *initiator's* `await_link_established`
+returned. The two sides reach the established state at different moments and
+that is protocol-correct — the initiator is established once it validates the
+responder's proof, the responder slightly later — so the assertion was a race
+the test happened to keep winning until upstream's timing shifted. It now
+waits for the responder's own `LinkEstablished` before reading its gauge.
+Verified as a test defect, not a regression: the responder does establish and
+the mirror does record it (10× stress clean).
+
+## [0.23.0+ciris.1] — CIRIS fork
+
+### Added — saturation is readable before it bites (leviculum#60, properties 2–3)
+
+Property 1 (the per-drop WARN flood) shipped in v0.22.0. Three bounded
+structures shared one failure shape: invisible until exceeded, so "healthy"
+and "one event from lossy" looked identical.
+
+- **Pre-threshold signal.** The control plane warns at **80% occupancy**, once
+  per saturation episode, re-arming only after it drains below half. Before
+  this the first signal an operator got was the first *drop* — after the loss.
+- **Readable at runtime.** `ReticulumNode::plane_stats()` returns
+  [`PlaneStats`]: depth, capacity and cumulative drops for both planes, plus
+  live-link and recent-outcome occupancy against their limits, so a dashboard
+  plots headroom instead of waiting for the cliff. Cheap enough to poll — two
+  atomic loads, two channel-permit reads, one brief registry lock. The node
+  already held the channel senders, so occupancy needed no new plumbing; only
+  the cumulative drop counters are new.
+- **Declared policy in one place.** `PlaneStats`' doc carries the table of
+  what each limit *does* at saturation — control drops-newest-and-counts, data
+  drops-newest-silently, the live-link envelope drops nothing and only alarms
+  (leviculum#56), the outcomes ring wraps oldest-first and a late `await_*`
+  for an aged-out outcome parks rather than resolving. Previously scattered
+  across four comments in three files.
+
+`PlaneStats` is re-exported at the crate root alongside its siblings.
+
+## [0.22.0+ciris.1] — CIRIS fork
+
+First fixes from the live-canonical incident (CIRISEdge#508, filed here as
+leviculum#56–#60). Two land; one is answered with analysis; two are scoped.
+
+### Fixed
+
+**The completion mirror no longer evicts a live link (leviculum#56).**
+`ESTABLISHED_MIRROR_CAP` evicted FIFO over *live* entries, so the **oldest**
+link lost its completion first — and the oldest links are the long-lived
+canonical peers whose completions matter most. Observed in the field: 130
+live evictions, each silently degrading an `await_link_established` to
+"resolves only at `LinkClosed` or node stop". The comment justifying the cap
+("well above the realistic concurrent-link envelope") was falsified by
+production, and the trade was bad anyway: the mirror self-cleans on
+`LinkClosed`, so occupancy *is* the live set, and a `LinkId` is 16 bytes.
+
+The cap is now an **alarm, not an evictor**: 80% warns, the envelope logs an
+error, further growth reports on a doubling ladder, and nothing is ever
+dropped. Removing the FIFO `VecDeque` also deleted an O(n) scan taken under
+the registry lock on **every** link close — contention leviculum#58 measures
+was partly paying for eviction bookkeeping that should not have existed.
+
+**Control-plane drops log on a ladder, not per event (leviculum#60,
+property 1).** One WARN per dropped event produced 1014 near-identical lines
+in 2000, burying the `CONTROL_PLANE_OVERFLOW` marker — the one carrying the
+aggregate `dropped_count` — 30:1. Drops now log at 1, 2, 4, 8 … each line
+carrying the running total and naming the next report point; the ladder
+resets when the marker flushes, so a fresh episode warns from its first drop.
+No drop goes uncounted; only the repetition is gone.
+
+**Resource events are classified by what they carry, not by variant
+(leviculum#59).** `ResourceTransferStarted` + `ResourceCompleted` were **86%
+of everything dropped** from the 256-deep lossless plane on the saturating
+canonical (556 + 630), crowding out the link- and path-liveness events that
+plane exists for. Both were `Control` on the reasoning that "a dropped
+completion loses the outcome" — true for some of them:
+
+- **receiver-side `ResourceCompleted` stays `Control` at every segment** — its
+  `data` field *is* the delivered payload, so dropping one is silent data
+  loss, strictly worse than the flood it would relieve;
+- **sender-side final-segment `ResourceCompleted` stays `Control`** — the
+  transfer outcome, and what a consumer's completion await is waiting on;
+- **sender-side intermediate segments become `Data`** — progress on our own
+  upload, already covered by `ResourceProgress` and superseded by the final
+  completion;
+- **`ResourceTransferStarted` becomes `Data`** — acceptance was decided at
+  `ResourceAdvertised` (still `Control`) and the outcome arrives regardless.
+
+Completion futures are unaffected: the driver's registry observes events at
+dispatch, *before* the sink, so this changes what reaches a consumer's
+receiver and never what resolves an await.
+
+### Changed — catch-up to upstream master @ `3b52f66a` (+2)
+
+nRF/LoRa CRC-failure counters, and a tier-3 CI gate that keeps the integ
+binary list single-sourced. Neither touches the fork carry.
+
+## [0.21.0+ciris.1] — CIRIS fork
+
+### Documented — the request/response contract (leviculum#55)
+
+leviculum#55 asked for `send_response` to be forwarded onto the std driver.
+**It already is**: `ReticulumNode::send_response`, next to
+`send_response_resource` and `send_file_response`, public on the same `impl`
+as `register_request_handler` and present at the tag the issue cites. A crate
+holding an `Arc<ReticulumNode>` compiles a call to it. Nothing was blocked —
+but a careful consumer searched for it and concluded it was missing, and had
+no stated contract to build a serve path against. Both halves of that are
+now fixed:
+
+- **Findability.** `NodeEvent::RequestReceived`'s doc said "call
+  `send_response()`" without saying *where* it lives; it now names both
+  `NodeCore::send_response` and the async `ReticulumNode::send_response`,
+  plus `send_response_resource` for bodies past the link MDU.
+- **Contract.** The two questions #55 raised are answered by measurement, on
+  the method's own doc and pinned by
+  `leviculum-std/tests/request_response_contract.rs`:
+  - **`Ok(())` means handed to the link, not delivered.** If the peer has
+    vanished but the node has not yet processed the link's death, the reply
+    is accepted and goes nowhere — no layer here can promise otherwise.
+  - **Once the link is known dead, a reply is refused** with
+    `RequestError::LinkNotFound` rather than silently accepted, so a serve
+    loop that outlives its peers gets a typed signal as soon as one exists.
+  - **Replying twice for one `request_id` is accepted**, so a retrying
+    responder needs no bookkeeping to stay safe (the requester may then see
+    the response more than once).
+
+### Changed — catch-up to upstream master @ `352c6a62` (+3)
+
+**Per-interface IFAC size defaults** (upstream Codeberg #293): two peers that
+disagree on the access-code length reject each other's frames in both
+directions with nothing in either log naming the cause — an IFAC-protected
+link that "never came up". Upstream replaced a medium-inferred grouping with
+per-interface-type defaults checked against the reference. The fork's
+scoped-transit paths pass an explicit `ifac_size`, so the conformance harness
+is unaffected (6/6) — but deployments relying on the default should re-read
+it after this bump. Also: the 32-bit `usize` gate now covers the core suite,
+and no longer compiles out the compression module.
+
+### Security
+
+**h2 0.4.15 → 0.4.16 for RUSTSEC-2026-0258** re-applied — the rebase takes
+upstream's lockfile, which reverts it. Lockfile only; h2 enters solely via
+`lblogd` → axum → hyper, not `leviculum-core`/`leviculum-std`. Worth a
+standing check each sync until upstream's own tree carries the bump.
+
+## [0.20.0+ciris.1] — CIRIS fork
+
+### Added
+
+**`ReticulumNode::unregister_destination` — retiring an address is now
+possible from the driver (leviculum#54).** `leviculum-core` has had the verb
+since forever; `leviculum-std` forwarded `register_destination` but never its
+inverse, so a consumer holding an `Arc<ReticulumNode>` could add destinations
+and never remove one. That blocked rotation-with-retirement: a superseded
+address kept answering forever, which re-confirms the node to anyone still
+probing it — the disclosure a rotating address exists to remove — and grew the
+routing table by one stale entry per rotation.
+
+Both semantics the caller has to reason about are contract, pinned by
+`leviculum-std/tests/destination_lifecycle.rs` (written before the verb
+existed, kept as its proof):
+
+- **idempotent** — retiring an already-retired hash, or one never registered
+  here, is a no-op rather than a panic or an error, so a timing-driven
+  retirement may fire twice;
+- **established links are left running** — a link is keyed by `LinkId`, not by
+  the destination it was dialled through, so retirement refuses *new* link
+  requests while traffic already flowing keeps flowing. Non-disruptive by
+  design; close links explicitly if the intent is to cut them.
+
+Requested by CIRISEdge#499 (scope-native destination hashes derived per MLS
+`(group, epoch)`, rotated make-before-break — the seal phase needs this).
+
+### Security
+
+**h2 bumped 0.4.15 → 0.4.16 for RUSTSEC-2026-0258** (unbounded empty DATA
+frames — a remote resource-exhaustion vector). Lockfile-only. h2 reaches this
+workspace solely through `lblogd` → axum → hyper; **`leviculum-core` and
+`leviculum-std` do not depend on it**, so nothing a downstream consumer of the
+mesh crates links against was exposed. Caught by the fork's `cargo deny` lane.
+
+### Changed — catch-up to upstream master @ `f00e4bbf` (+4)
+
+Two of the four are hardening this fork inherits directly:
+
+- **peers no longer size our allocations** (`resource`, `lxmf`): a
+  wire-supplied length can no longer drive a reservation, which is the
+  allocation-exhaustion vector a relay is most exposed to — it carries
+  strangers' framing by definition. Relevant to the relay safety envelope
+  tracked in leviculum#48;
+- **wire-supplied lengths are bounded on 32-bit hosts, and the HDLC frame
+  with them** — the same class one layer down, across the serial/pipe/TCP/
+  local interfaces.
+
+Upstream also **pinned the compiler** (`rust-toolchain.toml`, `1.97.1`) because
+embedded frame sizes move with codegen and an unattributable move is worse
+than a scheduled bump.
+
+**Fork CI fix required by that pin.** `rust-toolchain.toml` governs every
+cargo/rustup call made inside the repo, so `dtolnay/rust-toolchain@stable`'s
+`targets:` input was installing targets into `stable` while the build then ran
+on the pinned toolchain — which carries only the musl target the pin lists.
+Reproduced locally as `can't find crate for core / the thumbv6m-none-eabi
+target may not be installed`, and on CI one layer over as `'cargo-fmt' is not
+installed for the toolchain '1.97.1'` — the pinned toolchain arrives with a
+minimal profile, so the action's `components:` were landing on `stable` too.
+The embedded, cross-check and lint lanes now run an explicit `rustup target
+add` / `rustup component add` from inside the repo, so what the gate needs
+lands on the toolchain that actually runs. Whole gate re-verified on 1.97.1.
+
+## [0.19.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master @ `752baa42` (+11). **The seventh and last of our
+code offers was absorbed**: explicit-hash listen (upstream PR #254 — carried
+in this fork since v0.10.1) is upstream code now, with two review
+hardenings we inherit:
+
+- a path request for an explicit-hash destination is **silently skipped**
+  instead of driving the announce-refusal warn path on every poll (it was a
+  log flood for any deployment using caller-supplied hashes);
+- `register_destination` **warns when a registration displaces a different
+  destination under the same hash** — caller-supplied hashes make that
+  collision reachable, and last-wins is now the documented semantic on
+  `with_explicit_hash`.
+
+Both matter to consumers using federation-rooted addressing
+(`sha256(fed_pubkey)[..16]`). Upstream also added announce-leak mvr cells and
+rnsd interop coverage for the explicit-hash path, so the guarantee that such
+destinations never announce is now enforced against the reference too.
+
+Also new upstream: self-hosted-infrastructure and hardware-coverage docs, and
+a pre-push hook layer (ref guard + Claude-file guard).
+
+### Fork note — do NOT install upstream's pre-push hook as-is
+
+`.githooks/pre-push` refuses any non-`master` branch pushed to a remote
+**named `origin`** or whose URL contains `codeberg.org`. That policy fits
+upstream's topology and breaks ours three ways: our `origin` is the fork's own
+GitHub repo (feature branches there are intentional — CI runs on them), our
+default branch is `main` (so even `git push origin main` would be refused),
+and our `fork` remote is on codeberg.org (where every upstream-offer `up/*`
+branch legitimately goes). The hook ships as a template only and is **not
+installed** (`.git/hooks/pre-push` absent), so nothing is broken today. Its
+Claude-file guard is worth adapting for this fork separately — tracked as
+leviculum#53.
+
+Fork carry after the rebase: scoped transit, the bench suite (modes 1-8 +
+publishing), the pipe-bridge hermetic test fix (upstream PR #259, open), fork
+infra, release history. No fork feature offers remain unoffered.
+
+## [0.18.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master @ `9071f41a` (+38). The absorb cycle closed six
+of our seven offers — upstream merged the PR branches verbatim (#242
+envelope u16, #243 off-lock stages 2-3, #245 NTFS fixtures, #246 prctl gate
++ portable shell tests, #252 off-lock flush, #253 completion futures + tap
++ the sweep-race fix) and layered its own review fixes on top, which this
+release inherits:
+
+- ratchet enforcement applied live at the memo consume site (pr243 review);
+- the announce-verified memo is discarded when the IFAC strip rewrites the
+  packet bytes (pr243 review — composes with this fork's scoped-transit
+  IFAC surface);
+- the remote-mgmt response resource send is counted in the per-link
+  pending-send accounting (pr253 review);
+- byte-exact memo-path payload assertions and a stalled-flush-write
+  inbound-processing test.
+
+Also new upstream: the no_std Telemeter codec for FIELD_TELEMETRY (#237),
+SoftDevice-safe RNG and GPREGRET handling (#249/#250), LXMF opportunistic
+proof-latency instrumentation (#156), and the anchored-calendar time-model
+documentation. Remaining fork carry after the rebase: scoped transit
+(v0.17.0), the bench suite (modes 1-8 + CI publishing), explicit-hash
+listen (upstream PR #254, still open), fork infra, and release history.
+
+## [0.17.0+ciris.1] — CIRIS fork
+
+### Added
+
+**Scoped transit — proxy for members only (leviculum#48/#51/#52).** The
+closed-overlay relay posture, built harness-first: the executable spec
+(`leviculum-std/tests/scoped_transit.rs`, six scenarios) was written before
+the features and the features built to turn it green; it remains the
+permanent conformance suite. Three pieces:
+
+- **Declared per-interface transit policy (#51).** `transit = false` on an
+  interface makes it leaf-only, enforced symmetrically at the announce gate
+  (never rebroadcast across it, in OR out) with a defense-in-depth drop at
+  `forward_packet`. Declared, never silent: a peer on a no-transit interface
+  can never build a path expecting transit the node won't provide. Config
+  key `transit`, builder `add_tcp_server_no_transit`, spawned children
+  inherit it like `mode`. Default stays `true` (relay-by-default, #48).
+- **IFAC three-phase membership-key rotation (#52).** `ifac_install_next`
+  (accept old+new, send old) → `ifac_activate_next` (send new, accept both)
+  → `ifac_seal_rotation` (new only) on `ReticulumNode`, applied to every
+  IFAC'd interface. No fleet flag-day: stragglers keep full service in
+  phase 1, outbound-only in phase 2, are excluded at seal, readmitted on
+  re-key; live links survive all phases (IFAC is per-packet masking).
+  Connections accepted during a window inherit the rotated dual-key state.
+- **Builder surface**: `add_tcp_server_ifac` / `add_tcp_client_ifac`
+  (programmatic IFAC at last), and `add_interface_config` — the general
+  escape hatch equivalent to a config-file interface section (the surface
+  edge's adoption needs).
+
+## [0.16.0+ciris.1] — CIRIS fork
+
+### Added
+
+**leviculum#42 — completion futures resolved at the dispatch layer.** The
+driver's `dispatch_output` now feeds every event through a leaf-level
+`CompletionRegistry` (Arc-shared like `iface_stats_map`, std mutex held for
+map ops only, never nested inside the node lock), ahead of `EventSink::emit`
+so daemon mode resolves futures too. New `ReticulumNode` API, all additive:
+`connect_awaited`, `send_resource_awaited`, `send_request_awaited` — race-free
+by register-before-dispatch — plus after-the-fact `await_link_established`,
+`await_resource_sent`, `await_request_response`, backed by a bounded
+established-links mirror (cap 1024, FIFO evict + warn) and a 256-entry
+recent-terminal-outcomes ring checked under the same mutex observation takes.
+Futures are oneshot-backed, `select!`/cancel-safe (Drop unregisters), and
+resolve with a typed `CompletionError` on `LinkClosed`, `ResourceFailed`,
+`RequestTimedOut`, or node stop — a waiter never hangs on a dead object; the
+caller owns wall-clock timeouts. This deletes CIRISEdge's six poll loops:
+every await/poll path here takes no node lock at all (upstream #199 pressure
+shrinks). Wire format untouched.
+
+**leviculum#42 surface (b) — bounded multi-consumer event tap.**
+`ReticulumNode::subscribe_events()` returns an `EventTap`: a secondary
+observer fed clones at the dispatch layer, BEFORE the two-plane sink, so it
+never consumes from or races the primary `EventReceiver`, sees events the
+data plane is entitled to drop, and works on a daemon-mode node built
+`without_events()`. Backed by a lazy `tokio::broadcast` (256 slots):
+drop-oldest on overrun, surfaced as `TapEvent::Lagged(n)` with a cumulative
+`lost()` counter; `filtered()` adds consumer-side event filtering. With no
+live subscriber the per-event cost is one atomic load. Requires `Clone` on
+`NodeEvent`/`ReceivedAnnounce` in leviculum-core — derive-only, no_std-clean,
+no wire change.
+
+### Changed
+
+**leviculum#44 — periodic storage flush IO off the node lock.** The event
+loop's periodic flush (hourly by default) held the node lock across the full
+known-destinations read+merge+write and the packet-hashlist write; on slow
+storage that was a recurring deaf window for every inbound packet and outbound
+call. The flush now runs in three phases: a brief lock hold snapshots the
+dirty state (memory ops only), the file read+merge+write runs on tokio's
+blocking pool, and a second brief hold clears the dirty flags —
+generation-guarded, so anything dirtied mid-write stays dirty for the next
+interval, and a failed or torn-down write simply retries. The in-flight
+write's JoinHandle doubles as the overlap guard (a timer fire during a write
+re-arms and does nothing), and the shutdown path joins it before `stop()`'s
+synchronous flush so a stale background rename can never clobber the shutdown
+write. Shutdown behavior, on-disk formats, and the Python-compatible disk
+merge are unchanged.
+
+**leviculum#46 — the consumer workload is now the benchmark.** Two new
+bench modes in `transport_fanout_bench.rs`, both CI-published: mode 5
+"link_dance" (N concurrent clients each running edge's unit of work —
+connect → identify → 512 KiB resource → completion → close; event-driven,
+stall-stop, per-N failure taxonomy) and mode 6 "link_dance_overload" (the
+degradation envelope: time-boxed phases past the knee against one serve
+node, with an outside lock-acquire probe, VmRSS, counted
+ControlPlaneOverflow shedding, and time-to-recover as a first-class
+metric). First measured envelope (release, N=8..128, 512 KiB dances):
+goodput flat at ~235 dances/s (service demand ~4.2 ms/dance), latency
+growth linear (~2.4 ms/client), ZERO failures in ~23,000 dances, zero
+overflow, RSS ≤ 25 MiB, recovery 0.3 s — the ideal saturation pattern,
+and the documented ~40-peer downstream collapse does not reproduce at
+this layer. Modes 3-6 all publish provenance-stamped JSON
+(commit/date/runner) to the bench page. The dance path rides
+`send_resource_awaited`, so the numbers double as the completion-future
+API's under-load validation.
+
+
+## [0.15.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master @ `0d93b29` (+107 since 0.8.1: LnFlash tooling,
+LXMF file storage + per-transfer limits, the driver-tick CoreProcessor,
+path-handling reference parity, radio PHY fixes — see upstream `0.8.1` notes;
+the fork's #29 stage 1, #35 telemetry, #38 host codecs, and both test-hygiene
+PRs are upstream code now, credited in their changelog).
+
+### Changed
+
+**leviculum#29 stages 2-3 — inbound crypto off the node lock.** The driver
+classifies each inbound packet from a header peek and precomputes announce
+Ed25519 verification and Single-destination X25519 decryption BEFORE taking
+the node mutex; the in-lock apply consumes the memo (`PrecomputedRx`) instead
+of recomputing. Measured per-packet lock-hold (release, 20-client floods):
+single-dest 35 µs → **1.2-2.3 µs** (~20×), announce 44 µs → **~21 µs** (~2×),
+link data unchanged (A/B control). With stage 1 (off-lock resource builds),
+every expensive crypto class now runs without the lock — the #29 exclusion
+between inbound crypto and outbound calls is structurally gone. Every memo is
+advisory and self-authenticating: a stale snapshot or failed off-lock step
+falls back to the in-lock path (never skips a check). Wire format untouched
+(rnsd interop 316/316). New API: `verify_announce_packet`,
+`Destination::export_decryptor`/`SingleDestDecryptor`, `PrecomputedRx`,
+`handle_packet_precomputed`. A parallel worker-pool variant was measured and
+rejected (task overhead ≥ the crypto moved; announce throughput regressed 2×).
+
+### Fixed
+
+**Windows checkout of the tree (upstream #244).** Upstream 0.8.1's lnflash
+sysfs fixtures carry `:` in path names (`3-2.3.1:1.0`), which NTFS cannot
+represent — `git clone` and every cargo fetch of this repo as a Windows git
+dependency (CIRISEdge's `win_amd64` wheel lane) failed at checkout. The
+committed fixture tree now encodes `:` as `+`; lnflash tests materialize the
+decoded tree into a tempdir before walking it, so the enumeration code still
+sees real sysfs names. Reported upstream as Lew_Palm/leviculum#244.
+
+## [0.14.1+ciris.1] — CIRIS fork
+
+### Fixed
+
+A live-node failure chain on large-MTU links (leviculum#39): `Channel`'s MDU is
+now capped at the envelope's `u16` wire ceiling, so an oversized send returns
+`ChannelError::TooLarge` instead of passing the link-MDU-only guard and hitting
+the `Envelope` length assert as a panic in a lock-holding delivery thread
+("envelope data length 115764 exceeds maximum 65535" in the field). The channel
+send path constructs envelopes via the new fallible `Envelope::try_new`, and the
+three production `lock().unwrap()` sites (`link_is_established`,
+`link_destination`, rpc `derive_authkey`) use `lock_recover()`, so a poisoned
+mutex can no longer turn one panic into a deaf node. Wire format untouched.
+Edge-side counterpart: fragment against `min(link_mdu, 65535)` (CIRISEdge).
+
+## [0.14.0+ciris.1] — CIRIS fork
+
+### Added
+
+The propagation-node HOST direction of the LXMF propagation protocol
+(leviculum#38, for CIRISEdge#169 — a CIRIS fabric node hosting mailboxes for
+asleep mobiles). Promoted from `#[cfg(test)] pub(crate)` to `pub`:
+`MessageGetRequest::decode`, `MessageListResponse::encode`,
+`MessageGetResponse::encode`, `PropagationNodeAnnounce::encode`,
+`PeerError::code`, and the `PropagatedMessage` type; plus a new
+`PropagationUpload::decode` — the inverse of `encode()` for upload envelopes
+received off the wire, recomputing the transient ID from the unstamped bytes so
+a host validates stamps against the same ID an honest client derived
+(singleton-only; the multi-message `/offer` sync form stays out of scope).
+Wire format untouched. Offered upstream as Lew_Palm/leviculum#201.
+
+## [0.13.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master @ `8e3dbef` (+102 since 0.8.0): announce emission
+timestamps carried in unix seconds (#155/#160 — cross-restart path replacement),
+the driver-tick state-machine seam (a consumer can run a protocol state machine
+inside the driver's tick), discovery stamp-cost fix, ingress-control inheritance,
+workspace-wide test gates, and the documented core-lock budget.
+
+Everything from the fork's third upstream-PR round is absorbed and dropped from
+the carry: the #29 stage-1 off-lock resource build + inbound pre-hash (#152),
+both `now_ms()` de-flakes and the macOS absent-daemon error kind (#153), and the
+complete #35 per-link delivery telemetry (#154). The carry is now: the
+explicit-hash listen API (leviculum#30), fork CI/bench/tooling, and release
+bookkeeping.
+
+## [0.12.0+ciris.1] — CIRIS fork
+
+### Added
+
+Per-link delivery telemetry on `LinkStats` (leviculum#35, for CIRISEdge's A/V
+ALM passive capacity estimator): `bytes_delivered` (proof-confirmed channel
+envelopes + completed outgoing resources — the BBR-style delivery-rate
+numerator), `srtt_ms`/`rttvar_ms` (the channel's existing Karn-gated RFC 6298
+smoothed RTT, now exported), `min_rtt_ms` (floor of Karn-valid samples, new),
+the handshake `rtt_ms`, and the backpressure counters
+`busy_rejections`/`pacing_rejections`/`iface_pacing_rejections` (the
+app-limited-vs-congestion-limited signal, by source). Cumulative counters the
+caller samples ~1 Hz and differences; read-only, no wire change, no new task.
+
+## [0.11.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream **0.8.0** (`Lew_Palm/leviculum` master @ `e023994`): the
+LXMF client messaging stack, raw link packets + request Resources, byte-channel
+interfaces with runtime hot-plug, runtime add/remove of every interface kind,
+new interfaces (Pipe/KISS/AX25KISS/RNodeMulti/I2P), per-interface propagation
+modes and rate limits, interface auto-discovery, remote management, tunnel
+synthesis, segmented >1 MiB resources, radio PHY fixes, and the Python-compat
+dedup/LRPROOF/unpadding fixes — see upstream's `## [0.8.0]` section below.
+
+Everything upstream absorbed from the fork's carry is dropped: `FramesDropped`
+(#125), the alias-resolving link accessors (#126), the platform-portability
+tests (#127), and the reverse-path contention repro (#128) are now upstream
+code. The fork's carry shrinks to: the explicit-hash listen API (leviculum#30),
+the leviculum#29 stage-1 off-lock resource build + inbound pre-hash (offered
+upstream next), the two `now_ms()` de-flakes upstream's copy still lacks, and
+fork CI/bench/tooling.
+
+Merge notes: the off-lock pre-hash now composes with upstream's packet-journey
+hash (one hash per packet, driver-precomputed when the bytes are unchanged);
+the phased resource-build API carries over onto upstream's new
+`new_request`/timeout-watchdog constructor surface; the sync script fetches
+upstream `--no-tags` (upstream's independent tags collide with fork-marked
+ones); fork CI initializes `reference/Reticulum` + `reference/LXMF` for the
+interop suite.
+
+## [0.10.2+ciris.1] — CIRIS fork
+
+Stage 1 of the transport concurrency work (leviculum#29, the transport-side
+root of CIRISEdge#370 "rounds time out at scale").
+
+### Changed
+
+- **Resource sends no longer stall the node.** `send_resource`'s bulk build —
+  bz2 compress, bulk token encrypt, full/map hashing — previously ran inside
+  the one `Mutex<StdNodeCore>` critical section: 141 ms for a 1 MiB
+  incompressible (sealed-envelope) payload with compression on, in release,
+  during which every inbound decrypt/route and every other outbound call
+  blocked. Measured as a **32% inbound throughput stall** while round-sized
+  sends run (20-link flood); now **~0%** — the build runs off-lock via a new
+  phased core API (`resource_send_params` → `prepare_resource_send` →
+  `commit_resource_send`, with a token-key epoch guard so a #66 mid-build
+  re-key is caught and retried rather than shipping stale ciphertext).
+  `NodeCore::send_resource` composes the same phases, so no_std/FFI callers
+  and the wire format are unchanged (rnsd interop 295/295 against Python RNS).
+- The per-packet dedup SHA-256 is computed by the driver before taking the
+  node lock (`handle_packet_prehashed`); recomputed internally when an IFAC
+  strip rewrites the bytes.
+
+### Added
+
+- `ResourceError::LinkStateChanged` — retryable: the link re-keyed between an
+  off-lock resource build and its commit.
+- Benchmark: `outbound_resource_latency_under_flood` mode (send-call latency +
+  inbound-dip under N-link flood, `COMPRESS=1` for the incompressible+bz2
+  field case); the published bench (cirisai.github.io/leviculum) now runs in
+  **release** and renders the outbound-under-flood metrics.
+
+## [0.10.1+ciris.1] — CIRIS fork
+
+Restores the explicit-hash **listen** API that the `v0.10.0+ciris.1` re-anchor
+dropped by mistake. The `#16` commit bundled explicit-hash destinations *and*
+`AnnounceControl` (#17); upstream absorbed only `AnnounceControl`, so dropping
+the commit as "absorbed" lost the explicit-hash half. This was the sole blocker
+for CIRISEdge adopting `leviculum-*` (leviculum#30 / CIRISEdge#371).
+
+### Restored (CIRIS-only, not upstream)
+
+- **`Destination::with_explicit_hash(...)`** — build a Single destination indexed
+  by a caller-supplied 16-byte hash (e.g. `sha256(fed_pubkey)[..16]`) instead of
+  the derived `truncated_hash(name_hash || identity_hash)`. Identity crypto is
+  untouched; only the routing index changes.
+- **`Destination::is_explicit_hash()`** and the never-announce guard:
+  `Destination::announce()` returns `AnnounceError::ExplicitHashCannotAnnounce`
+  for such a destination, and the node's scheduled-announce paths skip it — so an
+  explicit-hash destination is reachable only by direct link (opaque hash on the
+  wire) and the announce stream stays Python-RNS compatible.
+
+Not restored (edge migrated to upstream-native equivalents): `connect_at`,
+`register_destination_at`, `send_on_link`.
+
+## [0.10.0+ciris.1] — CIRIS fork
+
+Re-anchored the CIRIS fork on upstream `Lew_Palm/leviculum` (master @ `fdf8d50`,
+crates `0.7.1`), adopting upstream's `reticulum-* → leviculum-*` crate rename.
+Everything the fork had upstreamed — explicit-hash destinations (#16),
+`AnnounceControl` suppression (#17), the `RNodeChannelFactory` byte-channel
+interface (#19), the `announce_app_data_budget` / `packed_size` announce fixes,
+the `destination_data` RPC (#12), and `send_on_link` — is now carried by
+upstream itself and dropped from the fork's patch series.
+
+### Carried forward (CIRIS-only, not yet upstream)
+
+- **`driver::link_is_established`** — alias-resolving establishment gate
+  (CIRISEdge#342).
+- **`driver::link_destination`** — alias-resolving accessor for the destination
+  a link dialed (CIRISEdge#353).
+- **`FramesDropped` node event** — the driver emits `FramesDropped` with a
+  `FrameDropReason` instead of silently destroying in-flight frames when an
+  interface dies mid-send (#25). Being offered upstream.
 
 ## [Unreleased]
 
