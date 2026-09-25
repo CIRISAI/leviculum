@@ -60,7 +60,7 @@ leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4030`).
 - Every accepted I2P stream becomes a handle
   (`new_interface_tx`, `leviculum-std/src/interfaces/i2p/mod.rs:492`).
 - Every accepted shared-instance IPC client becomes a handle
-  (`add_spawned`, `leviculum-std/src/interfaces/local.rs:289`).
+  (`add_spawned`, `leviculum-std/src/interfaces/local.rs:319`).
 
 Four multi-peer carriers, one model: a child interface per peer.
 

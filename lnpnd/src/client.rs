@@ -86,6 +86,22 @@ pub async fn run(options: ClientOptions, action: ClientAction) -> u8 {
     if std::fs::create_dir_all(&options.storage_dir).is_err() {
         return fail(1, "Could not create client storage directory");
     }
+    // Named before the dial, so `-v` shows the resolved socket even when
+    // the dial itself then blocks or fails (#427): the field could not say
+    // whether the client connected to the same instance the daemon uses.
+    let socket = leviculum_std::interfaces::shared_instance_socket_display(&options.instance);
+    tracing::info!(
+        "connecting to shared instance '{}' at {socket}",
+        options.instance
+    );
+    let could_not_join = |error: &dyn std::fmt::Display| {
+        eprintln!(
+            "lnpnd: could not join the Reticulum shared instance named \
+             '{}' at {socket}.\n  Start a daemon with `lnsd` (or Python's `rnsd`), or name \
+             another instance with --rnsconfig / --instance.\n  The stack said: {error}",
+            options.instance
+        );
+    };
     let mut node = match ReticulumNodeBuilder::new()
         .enable_transport(false)
         .connect_to_shared_instance(&options.instance)
@@ -95,17 +111,14 @@ pub async fn run(options: ClientOptions, action: ClientAction) -> u8 {
     {
         Ok(node) => node,
         Err(error) => {
-            eprintln!(
-                "lnpnd: could not join the Reticulum shared instance named \
-                 '{}'.\n  Start a daemon with `lnsd` (or Python's `rnsd`), or name \
-                 another instance with --rnsconfig / --instance.\n  The stack said: {error}",
-                options.instance
-            );
+            could_not_join(&error);
             return 1;
         }
     };
+    // The dial itself happens in `start()` (`build` only records the
+    // instance name), so an absent daemon surfaces here, not above.
     if let Err(error) = node.start().await {
-        eprintln!("lnpnd: node start: {error}");
+        could_not_join(&error);
         return 1;
     }
     let code = query(&node, &options, &action, timeout_name).await;
@@ -143,6 +156,24 @@ async fn query(
         code
     };
     let timeout_exit = format!("{timeout_name} timed out, exiting now");
+    // Which stage died, on stderr. stdout keeps the reference's exact line
+    // (the periculum cells and operator scripts key on it, see `run`'s
+    // callers); stderr says what that line cannot (#427): the stage, the
+    // destination being asked for, the budget against the measured wait,
+    // and the instance the client was talking to — so a field timeout can
+    // be grepped for in the daemon's books by the right hash, instead of
+    // by the propagation hash `--status` happens to print.
+    let socket = leviculum_std::interfaces::shared_instance_socket_display(&options.instance);
+    let stage_timeout = |stage: &str, destination: &[u8], waited: Duration| {
+        eprintln!(
+            "lnpnd: the {stage} stage timed out: destination {}, waited \
+             {:.2} s of a {:.2} s budget, shared instance '{}' ({socket})",
+            prettyhexrep(destination),
+            waited.as_secs_f64(),
+            options.timeout.as_secs_f64(),
+            options.instance
+        );
+    };
 
     // The remote identity: ours for the local daemon, recalled from the
     // propagation announce otherwise (`_get_target_identity`,
@@ -151,13 +182,15 @@ async fn query(
         None => options.identity.clone(),
         Some(remote) => {
             let hash = DestinationHash::new(remote);
-            let deadline = tokio::time::Instant::now() + options.timeout;
+            let started = tokio::time::Instant::now();
+            let deadline = started + options.timeout;
             let mut requested = false;
             loop {
                 if let Some(identity) = node.get_identity(&hash) {
                     break identity;
                 }
                 if tokio::time::Instant::now() >= deadline {
+                    stage_timeout("remote identity resolve", &remote, started.elapsed());
                     return fail(
                         EXIT_TIMEOUT,
                         "Resolving remote identity timed out, exiting now",
@@ -178,7 +211,13 @@ async fn query(
     let name_hash = Destination::compute_name_hash(APP_NAME, &CONTROL_ASPECTS);
     let control_hash = Destination::compute_destination_hash(&name_hash, remote_identity.hash());
 
+    let path_started = tokio::time::Instant::now();
     if !resolve_control_path(node, &control_hash, options.timeout).await {
+        stage_timeout(
+            "control path resolve",
+            control_hash.as_bytes(),
+            path_started.elapsed(),
+        );
         return fail(EXIT_TIMEOUT, &timeout_exit);
     }
 
@@ -190,11 +229,17 @@ async fn query(
             return 1;
         }
     };
+    let link_started = tokio::time::Instant::now();
     if tokio::time::timeout(options.timeout, established)
         .await
         .map(|outcome| outcome.is_err())
         .unwrap_or(true)
     {
+        stage_timeout(
+            "link establishment",
+            control_hash.as_bytes(),
+            link_started.elapsed(),
+        );
         return fail(EXIT_TIMEOUT, &timeout_exit);
     }
     if let Err(error) = node.identify_link(link.link_id(), &options.identity).await {
@@ -215,6 +260,7 @@ async fn query(
         ClientAction::Unpeer(peer) => (UNPEER_REQUEST_PATH, Some(packed_hash(peer))),
     };
     let timeout_ms = options.timeout.as_millis() as u64;
+    let request_started = tokio::time::Instant::now();
     let response = match node
         .send_request_awaited(link.link_id(), path, data.as_deref(), Some(timeout_ms))
         .await
@@ -233,6 +279,11 @@ async fn query(
             // send the reader to the mesh. stdout keeps lxmd's exact line
             // for scripts; the hint goes to stderr.
             _ => {
+                stage_timeout(
+                    "request",
+                    control_hash.as_bytes(),
+                    request_started.elapsed(),
+                );
                 eprintln!(
                     "lnpnd: the link was established and identified, so the node heard                      the request.
   A node that refuses a query it is not configured to                      answer sends nothing back, which looks exactly like this.

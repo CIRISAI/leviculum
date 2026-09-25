@@ -94,6 +94,36 @@ fn connect_local(abstract_name: &str) -> Result<std::net::TcpStream, io::Error> 
     std::net::TcpStream::connect(loopback_addr(abstract_name))
 }
 
+/// The IPC endpoint `connect_to_shared_instance(name)` dials, spelled for an
+/// operator's eyes: `@rns/<name>` for the Linux abstract socket (the form
+/// `ss -xlp` prints for the daemon side), the filesystem path on other
+/// Unixes, the TCP loopback address on Windows.
+///
+/// Public so CLI clients can name the socket they are dialling in their
+/// diagnostics. The field defect behind it (Codeberg #427): a client that
+/// timed out could not say which instance it had been talking to, so
+/// "did it even dial the daemon's socket?" was unanswerable without strace.
+/// Kept in this module beside `connect_local` so the display and the dial
+/// cannot drift apart.
+pub fn shared_instance_socket_display(instance_name: &str) -> String {
+    let abstract_name = format!("rns/{instance_name}");
+    #[cfg(target_os = "linux")]
+    {
+        format!("@{abstract_name}")
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        std::env::temp_dir()
+            .join(format!("leviculum-{}", abstract_name.replace('/', "-")))
+            .display()
+            .to_string()
+    }
+    #[cfg(windows)]
+    {
+        loopback_addr(&abstract_name).to_string()
+    }
+}
+
 /// Configured TCP-loopback ports for the shared-instance data (`.0`) and RPC
 /// (`.1`) channels (`shared_instance_port` / `instance_control_port`). `0`
 /// means unset, so `loopback_addr` falls back to the Python defaults. Set once

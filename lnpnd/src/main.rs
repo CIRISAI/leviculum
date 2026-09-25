@@ -243,6 +243,19 @@ async fn main() -> ExitCode {
 /// The remote-management verbs (`lxmd.py:908-943`): resolve the identity,
 /// run the client, exit with the reference's codes.
 async fn remote_command(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
+    // The client's log level, the reference's way (`_remote_init`,
+    // `lxmd.py:877-878`): the config's loglevel — default 3 there, unlike
+    // the daemon's 4 — shifted by -v/-q, RUST_LOG winning when set. Until
+    // #427 only the daemon path installed a subscriber, so a client `-vvv`
+    // was silence and a field timeout could not even show its own dial.
+    // Stderr, so stdout stays the line-for-line lxmd output scripts parse.
+    let file_loglevel = RawConfig::load(&config_dir.join("config"))
+        .ok()
+        .and_then(|file| file.get_u64("logging", "loglevel").ok().flatten())
+        .unwrap_or(3);
+    let level = (file_loglevel as i64 + args.verbose as i64 - args.quiet as i64).clamp(0, 7) as u64;
+    leviculum_std::event_log::install_global_subscriber(loglevel_filter(level));
+
     let identity_path = match &args.identity {
         Some(path) => path.clone(),
         None => {

@@ -22,6 +22,7 @@ pub(crate) mod i2p;
 pub(crate) mod inventory;
 pub(crate) mod kiss;
 pub(crate) mod local;
+pub use local::shared_instance_socket_display;
 pub(crate) mod netdevice;
 pub(crate) mod pipe;
 pub use pipe::PipeClientHandle;
