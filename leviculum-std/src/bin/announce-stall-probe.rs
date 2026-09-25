@@ -41,7 +41,12 @@
 //! `[fill]` defaults to `1`. Pass `0` to skip the pipe filling entirely and
 //! measure the ordinary case against a plain file.
 
+// The probe needs a Unix FIFO and raw descriptors; elsewhere it builds as a
+// stub so the workspace still compiles (CIRIS fork: the Windows lane).
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::time::Instant;
 
@@ -130,6 +135,7 @@ fn make_announce_raw(hops: u8, aspect: &str) -> (Vec<u8>, [u8; TRUNCATED_HASHBYT
 ///
 /// `ENXIO` means no reader has it open yet; the test's reader is on its way,
 /// so retry briefly rather than failing the run on a scheduling order.
+#[cfg(unix)]
 fn open_filler(path: &str) -> std::fs::File {
     let c = std::ffi::CString::new(path).expect("path");
     let deadline = Instant::now() + std::time::Duration::from_secs(10);
@@ -162,6 +168,13 @@ fn fill_to_eagain(filler: &mut std::fs::File) -> usize {
     }
 }
 
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("announce-stall-probe needs a Unix FIFO; it does nothing on this platform");
+    std::process::exit(2);
+}
+
+#[cfg(unix)]
 fn main() {
     let mut args = std::env::args().skip(1);
     let rounds: usize = args
