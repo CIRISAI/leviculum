@@ -361,8 +361,18 @@ struct PnEmbed {
 impl LxmfHelperProcessor {
     /// Build the processor. Runs before the node does, and touches nothing
     /// that could reach it.
+    ///
+    /// `identity` is the LXMF address this helper will answer at, and it is
+    /// the caller's to choose rather than this constructor's to draw: it used
+    /// to mint a fresh one here, like Python's helper
+    /// (`periculum/assets/scripts/lxmf_node.py:310`), and that is what made a
+    /// restarted deployment come up at a new address (#322). `main.rs` takes
+    /// it from [`crate::identity::load_or_create`] under `LXMF_STORAGE`, so a
+    /// fresh storage directory still means a fresh peer and the same one means
+    /// the same address.
     pub fn new(
         config: HelperConfig,
+        identity: Identity,
         emitter: Emitter,
         inputs: Receiver<Input>,
         stamps: tokio::sync::mpsc::UnboundedSender<StampJob>,
@@ -376,10 +386,7 @@ impl LxmfHelperProcessor {
             stamps,
             builds,
             shutdown,
-            // A fresh identity per start, like Python's `RNS.Identity()`
-            // (`periculum/assets/scripts/lxmf_node.py:75`). The helper is a test peer; persisting one
-            // would make consecutive runs of a scenario share a destination.
-            state: State::Unregistered(Box::new(Identity::generate(&mut rand_core::OsRng))),
+            state: State::Unregistered(Box::new(identity)),
             waits: Vec::new(),
             builds_inflight: HashSet::new(),
             pn: None,
@@ -1295,6 +1302,7 @@ mod tests {
                 defer_resource_builds: false,
                 pn_store_dir: std::env::temp_dir().join(format!("pn-test-{name}")),
             },
+            Identity::generate(&mut rand_core::OsRng),
             Emitter::new(lines_tx, Instant::now()),
             inputs_rx,
             stamps_tx,

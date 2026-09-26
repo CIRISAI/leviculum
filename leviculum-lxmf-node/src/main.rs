@@ -12,6 +12,19 @@
 //! (one per line, flushed), diagnostics on stderr. Identical to
 //! `periculum/assets/scripts/lxmf_node.py` at all three.
 //!
+//! # `LXMF_STORAGE` on a deployment
+//!
+//! The default, `/tmp/lxmf-state`, is right for the test corpus and wrong for
+//! anything standing: a scenario's container is destroyed with the scenario, so
+//! a fresh directory per run is what makes consecutive runs independent peers.
+//! A deployment — a field base, a standing endpoint someone writes to — must
+//! point `LXMF_STORAGE` at a durable directory instead, because the LXMF
+//! address this helper answers at is derived from the identity kept there
+//! (`identity::load_or_create`). On `/tmp` a reboot takes that file with it and
+//! the node comes up at an address nobody has. It did, on 2026-09-26: the field
+//! base was restarted and announced `8f35c8d5…` where its operator had been
+//! given `4c64d723…` (#322).
+//!
 //! Stderr carries two kinds of line: this helper's own `[lxmf-node] …`
 //! diagnostics, written by the emitter thread, and the `tracing` output of
 //! `leviculum-core` / `leviculum-std` underneath it, written by the global
@@ -37,6 +50,7 @@ use std::thread;
 use std::time::Instant;
 
 use leviculum_lxmf::CooperativeStamper;
+use leviculum_lxmf_node::identity::{load_or_create, Provenance, IDENTITY_FILE};
 use leviculum_lxmf_node::processor::{
     run_build_worker, BuildJob, Emitter, HelperConfig, Input, LxmfHelperProcessor, Out, Shutdown,
     StampJob,
@@ -57,6 +71,10 @@ const CONFIG_FLAG: &str = "--config";
 /// paths, announces or packet hashes — this helper registers a destination and
 /// learns identities, so it gets its own. `LXMF_STORAGE` is the variable
 /// Python's helper already reads for the same purpose (`periculum/assets/scripts/lxmf_node.py:66`).
+///
+/// Since #322 it also holds the helper's LXMF identity, and therefore its
+/// address, so the default below is a *test* default: see the module header for
+/// why a deployment has to override it with something durable.
 const STORAGE_ENV: &str = "LXMF_STORAGE";
 const STORAGE_DEFAULT: &str = "/tmp/lxmf-state";
 
@@ -234,6 +252,11 @@ async fn main() -> ExitCode {
             eprintln!(
                 "usage: lxmf-node [{CONFIG_FLAG} <dir>] [{DEFER_FLAG}] [-v|-q]... [display_name]"
             );
+            eprintln!(
+                "  {STORAGE_ENV} (default {STORAGE_DEFAULT}) holds this node's LXMF identity, \
+                 and therefore its address: a deployment must point it at a \
+                 durable directory, or a restart comes up at an address nobody has."
+            );
             return ExitCode::from(2);
         }
     };
@@ -264,6 +287,12 @@ async fn run(args: Args) -> Result<(), String> {
         PathBuf::from(std::env::var_os(STORAGE_ENV).unwrap_or_else(|| STORAGE_DEFAULT.into()));
     std::fs::create_dir_all(&storage_dir)
         .map_err(|e| format!("could not create {}: {e}", storage_dir.display()))?;
+
+    // The address, before anything that could publish it. A corrupt record is
+    // fatal here and leaves through `main`'s error arm rather than becoming a
+    // silent new address (`identity::load_or_create`).
+    let identity_path = storage_dir.join(IDENTITY_FILE);
+    let (identity, provenance) = load_or_create(&identity_path).map_err(|e| e.to_string())?;
 
     // The writer thread owns both output streams. Everything upstream of it —
     // including the hooks, which run under the core mutex — only pushes onto
@@ -297,6 +326,20 @@ async fn run(args: Args) -> Result<(), String> {
         args.display_name,
         storage_dir.display()
     ));
+    // Which of the two happened is the operator's one chance to notice that a
+    // deployment is minting where it should have loaded — the symptom of #322
+    // was invisible until two addresses were compared by hand.
+    emitter.log(match provenance {
+        Provenance::Loaded => format!(
+            "[lxmf-node] lxmf identity loaded from {}",
+            identity_path.display()
+        ),
+        Provenance::Created => format!(
+            "[lxmf-node] no lxmf identity at {}, so a NEW address was created; \
+             a deployment sets {STORAGE_ENV} to a durable directory",
+            identity_path.display()
+        ),
+    });
 
     let processor = LxmfHelperProcessor::new(
         HelperConfig {
@@ -304,6 +347,7 @@ async fn run(args: Args) -> Result<(), String> {
             defer_resource_builds: args.defer_resource_builds,
             pn_store_dir: storage_dir.join("pn-messagestore"),
         },
+        identity,
         emitter.clone(),
         inputs_rx,
         stamps_tx,

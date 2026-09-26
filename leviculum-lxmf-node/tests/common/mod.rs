@@ -195,6 +195,17 @@ impl Helper {
                 defer_resource_builds: setup.defer_resource_builds,
                 pn_store_dir: storage.path().join("pn-messagestore"),
             },
+            // Through the same path `main.rs` uses, on a fresh tempdir: every
+            // helper here is a first start, so it mints, and the harness keeps
+            // the "a fresh storage directory is a fresh peer" property it had
+            // before #322 made the identity persistent.
+            leviculum_lxmf_node::identity::load_or_create(
+                &storage
+                    .path()
+                    .join(leviculum_lxmf_node::identity::IDENTITY_FILE),
+            )
+            .expect("a fresh tempdir mints an identity")
+            .0,
             Emitter::new(lines_tx, Instant::now()),
             inputs_rx,
             stamps_tx,

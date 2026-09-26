@@ -32,9 +32,11 @@
 //! manifest: it is `no_std`, and a binary target on it would pull
 //! `leviculum-std` and tokio into a `no_std` crate's dependency graph.
 
+pub mod identity;
 pub mod processor;
 pub mod protocol;
 
+pub use identity::{load_or_create, IdentityError, Provenance, IDENTITY_FILE};
 pub use processor::{
     run_build_worker, BuildJob, Emitter, HelperConfig, Input, LxmfHelperProcessor, Out, Shutdown,
     StampJob,
