@@ -482,7 +482,7 @@ structural divergence, ⚠ gap not yet addressed, ✗ does not match.
 | `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `DEFAULT_ANNOUNCE_CAP_PERCENT` (`constants.rs:364`); state in `InterfaceAnnounceCap` (`transport.rs:601-608`), holdoff at `allowed_at_ms` (`transport.rs:10883-10895`) |
 | `announce_queue` / deferred-send | `interface.announce_queue` | `InterfaceAnnounceCap.queue` | ✓ | Same intent, Rust-side uses Vec |
 | `mgmt_announce_interval` | 7 200 s | 7 200 000 ms | ✓ | `MGMT_ANNOUNCE_INTERVAL_MS` (`constants.rs:201`); `check_mgmt_announces` (`node/mod.rs:2360-2452`) |
-| mgmt-announce initial 15 s trick | `Transport.py:283` | `schedule_initial_mgmt_announce` (`node/mod.rs:2346-2352`) with `MGMT_ANNOUNCE_INITIAL_DELAY_MS` (`node/mod.rs:203`) | ≈ | Verified by B4 audit; Rust adds a per-node draw on top, `MGMT_ANNOUNCE_INITIAL_JITTER_MS` (`node/mod.rs:222`) |
+| mgmt-announce initial 15 s trick | `Transport.py:283` | `schedule_initial_mgmt_announce` (`node/mod.rs:2346-2352`) with `MGMT_ANNOUNCE_INITIAL_DELAY_MS` (`node/mod.rs:213`) | ≈ | Verified by B4 audit; Rust adds a per-node draw on top, `MGMT_ANNOUNCE_INITIAL_JITTER_MS` (`node/mod.rs:232`) |
 | mgmt-announce iterates all dests | Python walks `mgmt_destinations` | `check_mgmt_announces` walks `mgmt_destinations` | ✓ | Verified by B4 audit |
 | Path-request one-shot broadcast | `Transport.py:2771-2809` | `transport.rs` (to verify in B7) | ≈ | B7 audit |
 | Path-response targeted | targeted-transport branch, section 5 | `target_iface` (`transport.rs:10703-10727`) | ✓ | Preserved |

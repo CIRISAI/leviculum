@@ -108,6 +108,8 @@ mod mvr_link_mtu_floor;
 #[cfg(test)]
 mod mvr_link_rekey_alias;
 #[cfg(test)]
+mod mvr_link_retry_held_route;
+#[cfg(test)]
 mod mvr_lnode_pathresolve;
 #[cfg(test)]
 mod mvr_local_client_announce_immediate;
