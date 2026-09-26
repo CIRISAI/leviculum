@@ -438,6 +438,20 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- The `lxmf-node` test helper installs the same stderr `tracing` subscriber
+  `lnsd` does, so what `leviculum-core` and `leviculum-std` say underneath it
+  is observable at last (Codeberg #330). It installed none, which made every
+  `warn!`, `debug!` and `event=` line in the stack a no-op in this process:
+  a saved conformance run's helper log held 1602 stderr lines, all of them the
+  helper's own `[lxmf-node] …`, so the cells that assert our terminus adopted
+  a link-request proof's hop count could only assert the two core lines'
+  absence. The level comes from the daemon's own config file
+  (`[logging] loglevel`, as on `lnsd`), shifted by a new `-v`/`-q` count and
+  overridden by `RUST_LOG`, default info — so `warn!` is visible unasked, and
+  a periculum node reaches debug through the `loglevel = 5` its rendered
+  config already carries. Stdout is untouched: `EVENT` lines only, which is
+  what the driver parses.
+
 - An LNode now waits as long for the channel as an RNode does, and no
   longer minutes longer (Codeberg #147). The firmware's carrier-sense
   backoff counted its wait in a slot of its own making — a tenth of a

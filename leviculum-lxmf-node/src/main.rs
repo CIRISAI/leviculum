@@ -12,6 +12,14 @@
 //! (one per line, flushed), diagnostics on stderr. Identical to
 //! `periculum/assets/scripts/lxmf_node.py` at all three.
 //!
+//! Stderr carries two kinds of line: this helper's own `[lxmf-node] …`
+//! diagnostics, written by the emitter thread, and the `tracing` output of
+//! `leviculum-core` / `leviculum-std` underneath it, written by the global
+//! subscriber this installs (see [`run`]). Until #330 the second kind reached
+//! nobody — no subscriber was installed at all — so a scenario could not
+//! assert on anything the stack itself said, only on what the helper chose to
+//! repeat. Stdout is untouched by both: it is the driver's data channel.
+//!
 //! The helper connects as a shared-instance client to the daemon running in
 //! its container (`lnsd` or `rnsd` — the IPC and config-file formats are the
 //! same, which is the whole point). All LXMF traffic therefore flows through
@@ -65,14 +73,90 @@ struct Args {
     display_name: String,
     config_dir: PathBuf,
     defer_resource_builds: bool,
+    /// `-v` / `--verbose` occurrences, `lnsd`'s and `lnpnd`'s spelling
+    /// (`leviculum-cli/src/lnsd.rs:85-90`, `lnpnd/src/main.rs:80-83`).
+    verbose: u8,
+    /// `-q` / `--quiet` occurrences.
+    quiet: u8,
+}
+
+/// The verbosity a single argv token contributes, as `(verbose, quiet)`, or
+/// `None` when the token is not a verbosity flag.
+///
+/// Accepts the two long spellings and uniform short clusters (`-v`, `-vv`,
+/// `-qq`); a mixed cluster like `-vq` is not a verbosity flag and falls
+/// through to the caller's normal handling, which keeps a display name that
+/// happens to start with `-` behaving exactly as before.
+fn verbosity_flag(arg: &str) -> Option<(u8, u8)> {
+    match arg {
+        "--verbose" => return Some((1, 0)),
+        "--quiet" => return Some((0, 1)),
+        _ => {}
+    }
+    let short = arg.strip_prefix('-').filter(|rest| !rest.is_empty())?;
+    let count = short.len().min(u8::MAX as usize) as u8;
+    if short.chars().all(|c| c == 'v') {
+        Some((count, 0))
+    } else if short.chars().all(|c| c == 'q') {
+        Some((0, count))
+    } else {
+        None
+    }
+}
+
+/// RNS log level used when the daemon's config names none: 4 = info
+/// (`reference/Reticulum/RNS/__init__.py:66-73`).
+///
+/// Info, not debug, for the same reason `lnsd` defaults there: `warn!` — the
+/// level of the one line that says this terminus adopted a proof's hop count
+/// (`node/link_management.rs:1144`) — must be visible without being asked
+/// for, while the `event=` debug lines are volume and are asked for. Asking
+/// is what every periculum node already does, twice over: the rendered config
+/// carries `[logging] loglevel = 5` (`periculum/src/topology.rs:9186`) and the
+/// container environment carries `RUST_LOG=debug`
+/// (`periculum/src/compose.rs:291-294`), so a scenario gets `PATH_REBALANCE`
+/// (`transport.rs:8319`) without touching the argv.
+const DEFAULT_LOGLEVEL: u8 = 4;
+
+/// Map an RNS log level (0-7) to a tracing env-filter directive.
+///
+/// tracing has no notice/verbose/extreme, so notice folds into info, verbose
+/// into debug and extreme into trace. The third copy of this ladder
+/// (`leviculum-cli/src/lnsd.rs:296`, `lnpnd/src/config.rs:458`); kept local
+/// because this batch is scoped to this crate, and cited from here so a later
+/// consolidation into `leviculum-std` finds all three.
+fn loglevel_filter(level: u8) -> &'static str {
+    match level {
+        0 | 1 => "error",
+        2 => "warn",
+        3 | 4 => "info",
+        5 | 6 => "debug",
+        _ => "trace",
+    }
+}
+
+/// The config level shifted by the CLI's net verbosity, clamped to the RNS
+/// range — `lnpnd`'s arithmetic (`lnpnd/src/main.rs:256`). `RUST_LOG` is not
+/// consulted here: `install_global_subscriber` gives it precedence over
+/// whatever default we hand it.
+fn effective_level(config_loglevel: Option<u8>, verbose: u8, quiet: u8) -> u8 {
+    let base = i16::from(config_loglevel.unwrap_or(DEFAULT_LOGLEVEL));
+    (base + i16::from(verbose) - i16::from(quiet)).clamp(0, 7) as u8
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut display_name = None;
     let mut config_dir = None;
     let mut defer_resource_builds = false;
+    let mut verbose = 0u8;
+    let mut quiet = 0u8;
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
+        if let Some((v, q)) = verbosity_flag(&arg) {
+            verbose = verbose.saturating_add(v);
+            quiet = quiet.saturating_add(q);
+            continue;
+        }
         match arg.as_str() {
             CONFIG_FLAG => {
                 config_dir = Some(PathBuf::from(
@@ -95,6 +179,8 @@ fn parse_args() -> Result<Args, String> {
         display_name: display_name.unwrap_or_else(|| DEFAULT_DISPLAY_NAME.to_string()),
         config_dir: config_dir.unwrap_or_else(Config::default_config_dir),
         defer_resource_builds,
+        verbose,
+        quiet,
     })
 }
 
@@ -113,6 +199,10 @@ struct DaemonConfigKeys {
     instance_name: String,
     max_links: Option<usize>,
     keepalive_interval: Option<u64>,
+    /// `[logging] loglevel`, the same key `lnsd` folds into its default
+    /// tracing filter. The helper is one more leviculum stack on the node, so
+    /// the node's one config file sets its level too.
+    loglevel: Option<u8>,
 }
 
 fn daemon_config_keys(config_dir: &std::path::Path) -> DaemonConfigKeys {
@@ -123,6 +213,7 @@ fn daemon_config_keys(config_dir: &std::path::Path) -> DaemonConfigKeys {
                 instance_name: config.reticulum.instance_name,
                 max_links: config.reticulum.max_links,
                 keepalive_interval: config.reticulum.keepalive_interval,
+                loglevel: config.reticulum.loglevel,
             };
         }
     }
@@ -130,6 +221,7 @@ fn daemon_config_keys(config_dir: &std::path::Path) -> DaemonConfigKeys {
         instance_name: "default".to_string(),
         max_links: None,
         keepalive_interval: None,
+        loglevel: None,
     }
 }
 
@@ -139,7 +231,9 @@ async fn main() -> ExitCode {
         Ok(args) => args,
         Err(e) => {
             eprintln!("[lxmf-node] {e}");
-            eprintln!("usage: lxmf-node [{CONFIG_FLAG} <dir>] [{DEFER_FLAG}] [display_name]");
+            eprintln!(
+                "usage: lxmf-node [{CONFIG_FLAG} <dir>] [{DEFER_FLAG}] [-v|-q]... [display_name]"
+            );
             return ExitCode::from(2);
         }
     };
@@ -153,6 +247,19 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> Result<(), String> {
+    let daemon_keys = daemon_config_keys(&args.config_dir);
+    // The stack's own voice, on stderr: exactly the subscriber `lnsd` installs
+    // (`leviculum-cli/src/lnsd.rs:136`), so `RUST_LOG` wins, `-v`/`-q` shift
+    // the config's level, and `LEVICULUM_EVENT_LOG` picks up the structured
+    // event layer if it is set. Installed before anything else in `run` so no
+    // startup line is lost; `parse_args` failures above it stay plain
+    // `eprintln!`, having no level to obey yet.
+    leviculum_std::event_log::install_global_subscriber(loglevel_filter(effective_level(
+        daemon_keys.loglevel,
+        args.verbose,
+        args.quiet,
+    )));
+
     let storage_dir =
         PathBuf::from(std::env::var_os(STORAGE_ENV).unwrap_or_else(|| STORAGE_DEFAULT.into()));
     std::fs::create_dir_all(&storage_dir)
@@ -184,7 +291,6 @@ async fn run(args: Args) -> Result<(), String> {
     let (builds_tx, builds_rx) = mpsc::channel::<BuildJob>();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<Shutdown>();
 
-    let daemon_keys = daemon_config_keys(&args.config_dir);
     let instance = daemon_keys.instance_name.clone();
     emitter.log(format!(
         "[lxmf-node] starting display_name={} storage={} instance={instance}",
@@ -351,4 +457,74 @@ async fn run(args: Args) -> Result<(), String> {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     drop(writer);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The argv the driver sends today carries no verbosity flag, and a
+    /// display name must keep arriving as a display name.
+    #[test]
+    fn only_verbosity_flags_are_verbosity_flags() {
+        assert_eq!(verbosity_flag("-v"), Some((1, 0)));
+        assert_eq!(verbosity_flag("-vvv"), Some((3, 0)));
+        assert_eq!(verbosity_flag("--verbose"), Some((1, 0)));
+        assert_eq!(verbosity_flag("-q"), Some((0, 1)));
+        assert_eq!(verbosity_flag("-qq"), Some((0, 2)));
+        assert_eq!(verbosity_flag("--quiet"), Some((0, 1)));
+        assert_eq!(verbosity_flag("alice"), None);
+        assert_eq!(verbosity_flag(CONFIG_FLAG), None);
+        assert_eq!(verbosity_flag(DEFER_FLAG), None);
+        assert_eq!(verbosity_flag("-"), None);
+        assert_eq!(verbosity_flag("--"), None);
+        // Not a recognised cluster, so it stays what it was before: a
+        // positional. Nothing in the tree passes one.
+        assert_eq!(verbosity_flag("-vq"), None);
+    }
+
+    /// What a periculum node gets without a flag: the rendered config's
+    /// `loglevel = 5` (`periculum/src/topology.rs`), which is where the
+    /// `event=` debug lines the hop-asymmetry cells assert on live.
+    #[test]
+    fn the_scenarios_config_alone_reaches_debug() {
+        assert_eq!(loglevel_filter(effective_level(Some(5), 0, 0)), "debug");
+    }
+
+    /// No config, no flags: info, so `warn!` — the level of the LRPROOF
+    /// hop-asymmetry line — is visible without being asked for.
+    #[test]
+    fn the_bare_default_still_shows_warnings() {
+        assert_eq!(loglevel_filter(effective_level(None, 0, 0)), "info");
+        assert_eq!(effective_level(None, 0, 0), DEFAULT_LOGLEVEL);
+    }
+
+    /// `-v`/`-q` shift the config's level and clamp at the ends of the RNS
+    /// range, `lnpnd`'s arithmetic.
+    #[test]
+    fn verbosity_shifts_and_clamps() {
+        assert_eq!(loglevel_filter(effective_level(None, 1, 0)), "debug");
+        assert_eq!(loglevel_filter(effective_level(None, 3, 0)), "trace");
+        assert_eq!(loglevel_filter(effective_level(None, 0, 1)), "info");
+        assert_eq!(loglevel_filter(effective_level(None, 0, 2)), "warn");
+        assert_eq!(loglevel_filter(effective_level(None, 0, 4)), "error");
+        // Clamped, not wrapped, at both ends.
+        assert_eq!(effective_level(Some(5), 9, 0), 7);
+        assert_eq!(effective_level(Some(2), 0, 9), 0);
+        assert_eq!(effective_level(None, 255, 255), DEFAULT_LOGLEVEL);
+    }
+
+    /// The RNS ladder this shares with `lnsd` and `lnpnd`; a divergence here
+    /// would make the same config file mean two things on one node.
+    #[test]
+    fn the_rns_ladder_matches_the_daemons() {
+        assert_eq!(loglevel_filter(0), "error");
+        assert_eq!(loglevel_filter(1), "error");
+        assert_eq!(loglevel_filter(2), "warn");
+        assert_eq!(loglevel_filter(3), "info");
+        assert_eq!(loglevel_filter(4), "info");
+        assert_eq!(loglevel_filter(5), "debug");
+        assert_eq!(loglevel_filter(6), "debug");
+        assert_eq!(loglevel_filter(7), "trace");
+    }
 }
