@@ -27,7 +27,7 @@ Three Woodpecker workflows on `ci.codeberg.org`, all in
 
 | File | Fires on | Runs |
 |------|----------|------|
-| `ci.yml` | every push, every pull request, manual | `just ci-gate` — fmt, clippy over all targets, the workspace lib tests |
+| `ci.yml` | every push, every pull request, manual | `just ci-gate` — fmt, clippy over all targets, and every workspace test except the three submodule-bound suites named in `scripts/ci-gate-integ.sh` (Codeberg #312) |
 | `commit-trailers.yml` | every push, every pull request, manual | `scripts/check-commit-trailers.sh` over the pushed range |
 | `nightly.yml` | cron, plus pushes touching the packaging paths | the same gate, then the .deb + tarball build; the cron run also publishes |
 
@@ -49,18 +49,29 @@ it. The gate is deliberately not an alias for `just fast` — the
 recipe's comment lists what a submodule-less host-target container
 cannot prove (the firmware workspace, the cross-compiles, the
 submodule pins), and those stay on the local push path, which has
-the targets. Measured cost, cold: 3m23s including provisioning.
+the targets. Measured cost, cold, of the version that ran `--lib`
+only: 3m23s including provisioning. What Codeberg #312 added to it is
+~280 s of test execution measured on the coder host (10 cores,
+2026-09-26: `cargo test --workspace` is 596 s, of which the interop
+suite this gate does not run is 182 s) plus the link of the ~150 test
+binaries clippy had only compiled to metadata, which no measurement
+here can price honestly — the first cold run on the runner is the
+number that belongs in this line.
 
 ## What may be published
 
-The forge gate is `fmt`, `clippy` and the workspace **lib** tests.
-`rnsd_interop` — the suite that measures whether we still interoperate
-with a Python-RNS peer, which is half of Priority 1 — runs in neither
-forge pipeline and cannot: it needs the `reference/Reticulum`
-submodule and a `python3`, and both pipelines clone with
-`submodules: false` on purpose, which is the property
-`just check-plain-clone` exists to hold (Codeberg #300). Fetching the
-submodule into the release path would undo exactly that.
+The forge gate runs `fmt`, `clippy` and every test in the workspace
+except three suites, and `rnsd_interop` — the suite that measures
+whether we still interoperate with a Python-RNS peer, which is half of
+Priority 1 — is the largest of the three. It runs in neither forge
+pipeline and cannot: it needs the `reference/Reticulum` submodule and a
+`python3`, and both pipelines clone with `submodules: false` on purpose,
+which is the property `just check-plain-clone` exists to hold (Codeberg
+#300). Fetching the submodule into the release path would undo exactly
+that. The other two are `leviculum-lxmf`'s `reference_lock` and
+`lnmsg`'s `python_interop`, for the same reason;
+`scripts/ci-gate-integ.sh` holds the list, one written reason per
+entry, and computes everything else it runs from the tree.
 
 So the interop verdict is **imported rather than re-derived**
 (Codeberg #312). The tier-2 nightly already runs the whole workspace,

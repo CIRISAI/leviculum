@@ -282,6 +282,7 @@ nrf-shellcheck:
         scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh \
         scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh \
         scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh \
+        scripts/ci-gate-integ.sh \
         scripts/check-ci-secrets.sh \
         scripts/check-nightly-green.sh scripts/nightly-green-ref.sh \
         scripts/test-nightly-green.sh scripts/check-publish-nightly-gate.sh \
@@ -1095,9 +1096,21 @@ fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline che
 #                           and the push path already carries it.
 # Those keep running on the push path, which has the targets and the submodules.
 # What is left is what a submodule-less host-target container can actually
-# prove, and it is the majority of the suite: fmt, clippy, a compile check of
+# prove, and it is nearly all of the suite: fmt, clippy, a compile check of
 # every workspace target (#220 — `--lib` gates were green on a tree where eight
-# integration-test targets did not build), and the ~3050 workspace lib tests.
+# integration-test targets did not build), the workspace lib tests, and — since
+# Codeberg #312 — the tests that are not in a lib target.
+#
+# THE TESTS THAT ARE NOT IN A LIB TARGET were the subject of #312, and they are
+# not a rounding error: measured on this host with `cargo test --workspace` on
+# 2026-09-26, 596 s and green, 5916 tests pass, of which `--lib` selects 4279.
+# The other 1637 sat in 134 integration targets, 23 bin unittest targets and 16
+# doctest units, and gated nothing here. `scripts/ci-gate-integ.sh` runs them,
+# less three suites that read a `reference/` submodule this container does not
+# clone; its header names each one, with what covers it instead (the tier-2
+# nightly, whose green ref is what the publish gate reads). That script computes
+# the target list from the tree rather than carrying a copy of it, because a
+# written copy would go stale silently, which is #312's own shape.
 #
 # check-plain-clone is the one check-* that does belong here, and it goes
 # first: it asserts the precondition the rest of this recipe rests on — that
@@ -1118,15 +1131,26 @@ fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline che
 # Re-measured after the widening below, on schneckenschreck with an empty
 # target dir but a warm cargo registry: 1m58s, 3057 tests across 10 units.
 #
+# What the #312 line adds to that is measured on the coder host rather than in
+# the container: 596 s for all of `cargo test --workspace`, of which the interop
+# suite this gate does not run is 182 s, so the test EXECUTION it adds is ~280 s
+# on 10 cores. The container also has to link ~150 test binaries that clippy
+# only ever compiled to metadata, which is the larger half of the bill and the
+# one an interactive measurement here cannot state honestly — the first cold run
+# on the runner is the number to write down, and it goes in this comment.
+# Budgeting it against the runner's own limit is the point: a gate under ten
+# minutes is cheaper than a red master nobody sees until the next nightly.
+#
 # `clippy --all-targets` and no separate `cargo check`: clippy compiles what
 # check compiles, so the check line was a second pass over the same targets.
 # The lint findings that kept clippy off test code until 2026-08-18 are fixed.
-[doc('The gate the forge pipelines run, in their own container')]
+[doc('Forge gate: fmt, clippy, all workspace tests but three interop suites')]
 ci-gate:
     @bash scripts/check-plain-clone.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} ci-gate-workspace-lib -- cargo test --workspace --lib
+    bash scripts/ci-gate-integ.sh
 
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Nothing triggers this
 # automatically: it is typed once per batch. A post-commit hook detached it

@@ -45,10 +45,12 @@ DIST="$ROOT/dist"
 [ -d "$DIST" ] || { echo "dist/ not found — run collect-nightly-debs.sh first"; exit 1; }
 
 # What the forge gate cannot prove, imported from the one run that can
-# (Codeberg #312). `just ci-gate` is fmt, clippy and the workspace LIB tests;
-# `rnsd_interop` — whether we still interoperate with a Python-RNS peer — runs
-# in no forge pipeline, because it needs the `reference/Reticulum` submodule
-# and both pipelines clone without submodules on purpose (#300). So the tier-2
+# (Codeberg #312). `just ci-gate` runs fmt, clippy and every workspace test bar
+# three; `rnsd_interop` — whether we still interoperate with a Python-RNS peer —
+# is one of the three and runs in no forge pipeline, because it needs the
+# `reference/Reticulum` submodule and both pipelines clone without submodules on
+# purpose (#300; the other two and their reasons are in
+# scripts/ci-gate-integ.sh). So the tier-2
 # nightly's verdict is read here instead: it pushes a `refs/nightly/green/*`
 # ref at the commit it tested, and this refuses a commit no such ref covers.
 #

@@ -3,13 +3,14 @@
 #
 # Codeberg #312. `.woodpecker/nightly.yml` publishes .debs, tarballs and the
 # lnflash bundle to strangers. What gates that is `just ci-gate` — fmt, clippy
-# and the workspace LIB tests — and `rnsd_interop`, the suite that measures
-# whether we still interoperate with a Python-RNS peer, is in none of it: the
-# suite needs the `reference/Reticulum` submodule and a python3, and both forge
-# pipelines clone with `submodules: false` on purpose (#300). Fetching that
-# submodule into the release path would undo exactly the property #300 bought,
-# so the interop truth is imported instead of re-derived: the tier-2 nightly
-# runs the whole workspace with submodules every night and pushes
+# and, since this ticket's other half, every test in the workspace but three —
+# and `rnsd_interop`, the suite that measures whether we still interoperate with
+# a Python-RNS peer, is the largest of the three: it needs the
+# `reference/Reticulum` submodule and a python3, and both forge pipelines clone
+# with `submodules: false` on purpose (#300). Fetching that submodule into the
+# release path would undo exactly the property #300 bought, so the interop truth
+# is imported instead of re-derived: the tier-2 nightly runs the whole workspace
+# with submodules every night and pushes
 # `refs/nightly/green/<YYYYMMDDTHHMMSSZ>` at the commit it tested
 # (scripts/nightly-green-ref.sh). This script reads those refs.
 #

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # A red `rnsd_interop` must not be able to reach the publish step (Codeberg #312).
 #
-# THE HOLE THIS CLOSES. The forge gate is `just ci-gate` — fmt, clippy and the
-# workspace LIB tests. `rnsd_interop` is a `tests/` target, it needs the
-# `reference/Reticulum` submodule and a python3, and both forge pipelines clone
-# with `submodules: false` on purpose (#300). So whether we still interoperate
-# with a Python-RNS peer is measured NOWHERE on the path from a commit to the
+# THE HOLE THIS CLOSES. The forge gate is `just ci-gate` — fmt, clippy and every
+# test in the workspace except three suites. `rnsd_interop` is one of the three:
+# it needs the `reference/Reticulum` submodule and a python3, and both forge
+# pipelines clone with `submodules: false` on purpose (#300), so it is excluded
+# by name in `scripts/ci-gate-integ.sh`. Whether we still interoperate with a
+# Python-RNS peer is therefore measured NOWHERE on the path from a commit to the
 # public releases page. The interop truth is not re-derived there — that would
 # put a github fetch back into the release path and undo #300 — it is imported:
 # the tier-2 nightly runs the whole workspace with submodules and pushes
@@ -246,10 +247,10 @@ echo "  evidence  scripts/nightly-green-ref.sh reads rnsd_interop out of the run
 echo "            manifest before it signs, so a green verdict cannot mean a suite" >&2
 echo "            that never ran" >&2
 echo "" >&2
-echo "The forge gate is fmt + clippy + the workspace LIB tests; rnsd_interop needs" >&2
-echo "the reference/Reticulum submodule and both pipelines clone without submodules" >&2
-echo "(Codeberg #300). With a link missing, an interop break reaches the public" >&2
-echo "releases page with every pipeline green." >&2
+echo "The forge gate runs every workspace test but three, and rnsd_interop is one" >&2
+echo "of them: it needs the reference/Reticulum submodule and both pipelines clone" >&2
+echo "without submodules (Codeberg #300). With a link missing, an interop break" >&2
+echo "reaches the public releases page with every pipeline green." >&2
 echo "" >&2
 echo "See docs/src/development-ci.md, \"What may be published\"." >&2
 exit 1

@@ -2,13 +2,15 @@
 # The tier-2 nightly's verdict, written where the forge can read it (Codeberg #312).
 #
 # THE PROBLEM. `.woodpecker/nightly.yml` publishes .debs to strangers from a
-# cron run whose only test is `just ci-gate` — fmt, clippy and the workspace
-# LIB tests. `rnsd_interop`, the suite that measures whether we still
-# interoperate with a Python-RNS peer, runs in no forge pipeline at all: it
-# needs the `reference/Reticulum` submodule and a python3, and both pipelines
-# clone with `submodules: false` deliberately (Codeberg #300, and
-# `just check-plain-clone` is what holds that). So an interop break reaches the
-# public releases page with every forge gate green.
+# cron run whose only test is `just ci-gate` — fmt, clippy and, since this
+# ticket's other half, every test in the workspace bar three. `rnsd_interop`,
+# the suite that measures whether we still interoperate with a Python-RNS peer,
+# is one of the three and runs in no forge pipeline at all: it needs the
+# `reference/Reticulum` submodule and a python3, and both pipelines clone with
+# `submodules: false` deliberately (Codeberg #300, and `just check-plain-clone`
+# is what holds that; `scripts/ci-gate-integ.sh` is where it is excluded by
+# name). So an interop break reaches the public releases page with every forge
+# gate green.
 #
 # The truth exists already. The tier-2 nightly runs
 # `cargo test --workspace --all-targets` over a fresh, pinned clone WITH
