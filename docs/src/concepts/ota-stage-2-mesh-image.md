@@ -244,7 +244,7 @@ Scaling to the 619 264 B image is a factor of 12.1:
 
 869.463 MHz — our default carrier — sits in the 869.4–869.65 MHz
 sub-band, whose lawful duty cycle is 10 %
-(`etsi_eu868_duty_cycle`, `leviculum-core/src/rnode.rs:1449`;
+(`etsi_eu868_duty_cycle`, `leviculum-core/src/rnode.rs:1525`;
 [Regulatory airtime](regulatory-airtime.md)). Ten percent of an hour is
 360 s of airtime, so 1 750–2 000 s of airtime is five hours of wall clock
 however fast the modem is. **The PHY does not change the answer; the

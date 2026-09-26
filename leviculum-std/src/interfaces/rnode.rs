@@ -878,9 +878,18 @@ fn draw_tx_hold_spread_ms(rng: &mut impl RngCore, max_ms: u64) -> u64 {
 /// it instead, from what it already knows:
 ///
 /// ```text
-/// owed = airtime(frame at the running PHY) + DIFS + longest contention draw
+/// owed = airtime(the packets the modem keys for the frame, at the running PHY)
+///        + DIFS + longest contention draw
 /// hold = owed + rand(0 ..= TX_HOLD_SPREAD_SLOTS slots)
 /// ```
+///
+/// The airtime term is [`rnode::host_frame_airtime_ms`] and not
+/// [`rnode::airtime_ms_with_preamble`]: the firmware prefixes a header byte and
+/// splits anything past 254 payload bytes, so one 508-byte handover is three
+/// packets (255 + 255 + 1 bytes) with three preambles. Pricing it as a single
+/// 508-byte packet left the hold 156 ms short at SF7/BW62.5 and 2149 ms short
+/// at SF12/BW125 — a shortfall the hold could not absorb, since every other
+/// term of it is spent on something else (#430, Refs #24).
 ///
 /// The first three terms are the guarantee: DIFS and the contention window are
 /// the firmware's own, taken from its stat frames where it has sent them
@@ -928,7 +937,13 @@ fn tx_hold(
     csma: &FirmwareCsma,
     spread_ms: u64,
 ) -> TxHold {
-    let airtime_ms = rnode::airtime_ms_with_preamble(
+    // The frame as the MODEM keys it, not as it was handed over: the firmware
+    // writes a header byte before the payload and splits anything past 254
+    // payload bytes into further packets, each with its own header and its own
+    // preamble (`rnode::host_frame_airtime_ms`). Pricing the handover as one
+    // packet leaves the hold below the modem's busy time on every frame, and
+    // at the MTU by two whole preambles.
+    let airtime_ms = rnode::host_frame_airtime_ms(
         frame_len,
         bandwidth_hz,
         sf,
@@ -2797,11 +2812,15 @@ where
                 if let Some((baseline_short, baseline_long)) = ledger {
                     // The firmware prepends its own header byte before it
                     // charges the packet (`transmit`,
-                    // `RNode_Firmware/RNode_Firmware.ino:720-724`), and
-                    // `add_airtime` is called with that count, so the cost it
-                    // books is for one byte more than the payload.
-                    let charged_ms = rnode::airtime_ms_with_preamble(
-                        queued.payload_len as u32 + 1,
+                    // `RNode_Firmware/RNode_Firmware.ino:720-724`), calls
+                    // `add_airtime(written)` once per keyed PACKET, and splits
+                    // a handover past 254 payload bytes into several — each
+                    // with its own header and preamble
+                    // (`rnode::host_frame_airtime_ms`). So what the ledger is
+                    // charged for a full-size handover is three packets, not
+                    // one frame one byte longer than the payload.
+                    let charged_ms = rnode::host_frame_airtime_ms(
+                        queued.payload_len as u32,
                         bandwidth_hz,
                         sf,
                         cr,
@@ -4864,7 +4883,9 @@ mod tests {
     /// It does NOT bound every contention BAND: the figure is derived at
     /// spawn, before the modem has sent a `CMD_STAT_CSMA`, so it prices the
     /// band-1 window this interface's own policy draws from (cw 312 ms at
-    /// this PHY). The same part in the firmware's band 3 costs 2586 ms. The
+    /// this PHY). The same part in the firmware's band 3 costs 2669 ms — 2586
+    /// on the night run of 2026-09-23, before #430 priced the two packets the
+    /// modem keys a 491-byte handover into. The
     /// handle reports a fixed number and a reported band widens the real
     /// hold underneath it; carrying the live band out to the handle is
     /// follow-on work, not a hole this test papers over.
@@ -4896,9 +4917,15 @@ mod tests {
                 part_of_the_run.difs_ms,
                 part_of_the_run.cw_ms
             ),
-            (1_506, 48, 312),
+            (1_589, 48, 312),
             "the terms the night run of 2026-09-23 was priced with"
         );
+        // 1589 and not the 1506 this asserted until #430: a 491-byte handover
+        // is two keyed packets, 255 and 238 bytes (`keyed_packet_layout`), so
+        // it pays two headers and two preambles. The 1506 ms figure priced it
+        // as one 491-byte packet and was 83 ms below the air — which is why
+        // the 1866 ms the part actually cost on that run had to be covered by
+        // the window terms alone.
         assert!(
             max_tx_hold(62_500, 7, 5).held_ms >= part_of_the_run.held_ms,
             "the reported turnaround must cover the 1866 ms one 491 B part \

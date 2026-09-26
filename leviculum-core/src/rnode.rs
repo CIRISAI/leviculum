@@ -1128,6 +1128,82 @@ pub fn airtime_ms_with_preamble(
     total_us.div_ceil(1000)
 }
 
+/// How the RNode firmware keys one HOST frame of `frame_len` bytes:
+/// `(full_packets, last_packet_len)`, where every full packet is
+/// `MAX_SINGLE_PAYLOAD + 1` = 255 bytes on the air.
+///
+/// `transmit()` (`RNode_Firmware/RNode_Firmware.ino:716-751`) writes a
+/// one-byte header before the payload, sets `FLAG_SPLIT` when
+/// `size > SINGLE_MTU - HEADER_L` (255 - 1 = 254, `Config.h:59-61`), and then
+/// flushes mid-frame every time the byte counter reaches 255 and the header
+/// carries the split flag — `written == 255 && isSplitPacket(header)`, line
+/// 729. Each flush is an `endPacket()` / `beginPacket()` pair, so each packet
+/// pays its own preamble, and the header byte is re-written at the top of
+/// every one of them. `add_airtime(written)` is called per packet, which is
+/// what makes the per-packet count the unit the modem's own duty ledger is
+/// kept in and not an implementation detail.
+///
+/// The counting consequence the host has to price: a full packet carries 254
+/// PAYLOAD bytes, not 255, because the header occupies the first slot. A frame
+/// whose length is a multiple of 254 therefore flushes on its very last
+/// payload byte and the final `endPacket()` at line 744 keys a packet holding
+/// nothing but the header. [`HW_MTU`] = 508 = 2 * 254 is exactly that case:
+/// three packets of 255, 255 and 1 bytes, 511 bytes and three preambles on
+/// the air for a 508-byte handover.
+pub fn keyed_packet_layout(frame_len: u32) -> (u32, u32) {
+    let payload_per_packet = MAX_SINGLE_PAYLOAD as u32;
+    if frame_len <= payload_per_packet {
+        // No split flag, so the mid-frame flush never fires however long the
+        // firmware's loop runs: one packet, header included.
+        (0, frame_len + 1)
+    } else {
+        (
+            frame_len / payload_per_packet,
+            frame_len % payload_per_packet + 1,
+        )
+    }
+}
+
+/// Total on-air time, in milliseconds, of the packets the RNode firmware keys
+/// for one HOST frame of `frame_len` bytes at this PHY.
+///
+/// This is [`airtime_ms_with_preamble`] applied to the layout
+/// [`keyed_packet_layout`] describes, summed — the frame as the MODEM keys it
+/// rather than as the host handed it over. It is what any host-side wait that
+/// has to outlast the modem's busy time must be priced from:
+/// `airtime_ms_with_preamble(frame_len, …)` charges one packet and no header,
+/// which at [`HW_MTU`] understates the air by two preambles and three header
+/// bytes — 156 ms at SF7/BW62.5, 2149 ms at SF12/BW125.
+///
+/// Each packet is rounded up to the millisecond separately, the same way the
+/// firmware charges each one separately; the arithmetic is therefore never
+/// below the sum of the true airtimes.
+///
+/// Returns 0 for the degenerate inputs [`airtime_ms_with_preamble`] refuses
+/// (bandwidth 0, sf 0, sf above 63), so "no computable airtime" stays
+/// distinguishable from "no airtime" for callers that floor on it.
+pub fn host_frame_airtime_ms(
+    frame_len: u32,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+    preamble_symbols: u16,
+) -> u64 {
+    let (full_packets, last_len) = keyed_packet_layout(frame_len);
+    let last = airtime_ms_with_preamble(last_len, bandwidth_hz, sf, cr, preamble_symbols);
+    if full_packets == 0 {
+        return last;
+    }
+    let full = airtime_ms_with_preamble(
+        MAX_SINGLE_PAYLOAD as u32 + 1,
+        bandwidth_hz,
+        sf,
+        cr,
+        preamble_symbols,
+    );
+    full_packets as u64 * full + last
+}
+
 /// Compute CSMA-fair inter-frame spacing in milliseconds.
 ///
 /// Ensures the firmware's TX queue has at most one frame, so `flush_queue()`
@@ -3290,6 +3366,98 @@ mod tests {
         assert_eq!(airtime_ms_with_preamble(184, 125_000, 0, 5, 8), 0);
         assert_eq!(airtime_ms_with_preamble(184, 125_000, 64, 5, 8), 0);
         assert_eq!(airtime_ms(184, 0, 7, 5), 0);
+    }
+
+    /// The layout the firmware keys a host frame into, and the airtime that
+    /// layout costs — the quantity a host-side wait has to outlast.
+    ///
+    /// Hand-derived at each corpus PHY. Every one of them derives an 18-symbol
+    /// preamble (`derive_preamble_symbols`: SF7/BW62.5 is below the 30 kbps
+    /// fast threshold, and so is every 125 kHz cell at SF8 and slower), so the
+    /// per-packet figures are `airtime_ms_with_preamble(len, …, 18)`:
+    ///
+    /// ```text
+    /// frame 508 B -> packets [255, 255, 1]   (508 = 2 x 254, so the last
+    ///                                         flush lands on the last payload
+    ///                                         byte and the final endPacket
+    ///                                         keys the header alone)
+    ///   SF7/BW62.5   820 + 820 +   73 =  1713 ms   (one packet:  1557)
+    ///   SF8/BW125    728 + 728 +   73 =  1529 ms   (one packet:  1373)
+    ///   SF10/BW125  2378 + 2378 +  289 =  5045 ms  (one packet:  4426)
+    ///   SF12/BW125  9348 + 9348 + 1156 = 19852 ms  (one packet: 17703)
+    /// ```
+    ///
+    /// A 64-byte frame stays under the 254-byte split threshold, so it is one
+    /// packet of 65 bytes and the whole of the difference from
+    /// `airtime_ms_with_preamble(64, …)` is the header byte.
+    #[test]
+    fn a_host_frame_is_priced_as_the_packets_the_firmware_keys() {
+        const PHYS: [(&str, u32, u8, u8, u64); 4] = [
+            ("SF7/BW62.5", 62_500, 7, 5, 1_713),
+            ("SF8/BW125", 125_000, 8, 5, 1_529),
+            ("SF10/BW125", 125_000, 10, 5, 5_045),
+            ("SF12/BW125", 125_000, 12, 5, 19_852),
+        ];
+
+        assert_eq!(
+            keyed_packet_layout(HW_MTU as u32),
+            (2, 1),
+            "a 508-byte handover is two full 255-byte packets and a              header-only third"
+        );
+        assert_eq!(
+            keyed_packet_layout(64),
+            (0, 65),
+            "a 64-byte handover is one packet, header included"
+        );
+        // The split threshold itself: 254 payload bytes still fit one packet,
+        // 255 do not (`size > SINGLE_MTU - HEADER_L`).
+        assert_eq!(keyed_packet_layout(254), (0, 255));
+        assert_eq!(keyed_packet_layout(255), (1, 2));
+
+        for (label, bw, sf, cr, expected) in PHYS {
+            let preamble = derive_preamble_symbols(sf, cr, bw);
+            assert_eq!(
+                preamble, 18,
+                "{label}: the hand-derived figures assume the 18-symbol                  preamble the firmware derives here"
+            );
+
+            let full = airtime_ms_with_preamble(255, bw, sf, cr, preamble);
+            let tail = airtime_ms_with_preamble(1, bw, sf, cr, preamble);
+            assert_eq!(
+                host_frame_airtime_ms(HW_MTU as u32, bw, sf, cr, preamble),
+                2 * full + tail,
+                "{label}: the MTU frame is two full packets plus the                  header-only tail"
+            );
+            assert_eq!(
+                host_frame_airtime_ms(HW_MTU as u32, bw, sf, cr, preamble),
+                expected,
+                "{label}: hand-derived figure for a 508-byte handover"
+            );
+            assert!(
+                host_frame_airtime_ms(HW_MTU as u32, bw, sf, cr, preamble)
+                    > airtime_ms_with_preamble(HW_MTU as u32, bw, sf, cr, preamble),
+                "{label}: pricing the handover as one packet understates the air"
+            );
+
+            assert_eq!(
+                host_frame_airtime_ms(64, bw, sf, cr, preamble),
+                airtime_ms_with_preamble(65, bw, sf, cr, preamble),
+                "{label}: a 64-byte frame is the single-packet figure plus the                  header byte, exactly"
+            );
+        }
+    }
+
+    /// The degenerate PHYs [`airtime_ms_with_preamble`] refuses stay at zero
+    /// through the split arithmetic too: a multi-packet frame must not turn
+    /// "no computable airtime" into a positive figure, because the interface
+    /// tells the two apart to decide whether to floor on the serial minimum
+    /// (`tx_hold`, Codeberg #274).
+    #[test]
+    fn a_host_frame_has_no_airtime_where_one_packet_has_none() {
+        for (bw, sf) in [(0u32, 7u8), (125_000, 0), (125_000, 64)] {
+            assert_eq!(host_frame_airtime_ms(HW_MTU as u32, bw, sf, 5, 18), 0);
+            assert_eq!(host_frame_airtime_ms(64, bw, sf, 5, 18), 0);
+        }
     }
 
     #[test]

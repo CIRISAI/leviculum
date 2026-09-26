@@ -926,9 +926,13 @@ mod tests {
         assert_eq!(h.info.frame_turnaround_ms, None);
         assert_eq!(h.frame_turnaround_ms(), 0);
 
+        // The RNode interface's own figure at the SF7/BW62.5 carrier the
+        // rotation cell runs on: `max_tx_hold(62_500, 7, 5).held_ms`, the owed
+        // hold plus the whole spread. 1917 until #430, which is the same
+        // number with the modem's split packets left unpriced.
         let (mut h, _rx) = make_handle(31);
-        h.info.frame_turnaround_ms = Some(1_917);
-        assert_eq!(h.frame_turnaround_ms(), 1_917);
+        h.info.frame_turnaround_ms = Some(2_169);
+        assert_eq!(h.frame_turnaround_ms(), 2_169);
     }
 
     /// The same, for what the frame that TAKES the carrier pays: absent

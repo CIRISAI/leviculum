@@ -10,7 +10,7 @@ This page is the study Codeberg #347 asked for: five questions, each
 with a number, the reason for it, and the artifact that settled it. It
 is written after the fact. The window landed while the study was still
 open, in `a_directed_packet_is_jittered_on_acquisition_and_free_in_a_burst`
-(`leviculum-std/src/interfaces/rnode.rs:5633`)
+(`leviculum-std/src/interfaces/rnode.rs:5660`)
 and the firmware policy behind it, so four of the five questions are
 answered by code rather than by argument. The fifth is not, and is
 stated as open at the end.
@@ -58,7 +58,7 @@ therefore lives with the airtime and preamble arithmetic in
 is pinned there against a literal float transcription of the reference's
 own three lines over every PHY the reference admits
 (`csma_slot_matches_reference_float`,
-`leviculum-core/src/rnode.rs:3124`).
+`leviculum-core/src/rnode.rs:3200`).
 
 Until Codeberg #147 the firmware had a second one. The CAD retry gate
 counted its backoff in `max(24, airtime(500)/10)` — a tenth of a
@@ -69,7 +69,7 @@ on one busy channel where its RNode neighbours owe at most 58 of theirs.
 The gate now counts in the same slot the draw does
 (`leviculum-nrf/src/lora.rs:1855`), and the before/after figures are
 pinned in `csma_slot_is_no_longer_a_tenth_of_a_500_byte_airtime`
-(`leviculum-core/src/rnode.rs:3210`).
+(`leviculum-core/src/rnode.rs:3286`).
 
 A millisecond constant would have been wrong in both directions. At
 SF12 the clamp is what binds and 12 symbol times would be 393 ms, so
@@ -158,10 +158,10 @@ pinned now, the answering half and the queue jumper's.
 The sentence above is about the ACQUISITION wait, and it still holds: a
 frame that continues a burst serves no acquisition. What it does owe is
 the post-handover hold, and that hold now carries a fresh random term of
-its own (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:923`):
+its own (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:932`):
 
 ```text
-owed = airtime(frame) + DIFS + (cw_max - 1) x slot
+owed = airtime(the packets the modem keys for the frame) + DIFS + (cw_max - 1) x slot
 hold = owed + rand(0 ..= TX_HOLD_SPREAD_SLOTS x slot)
 ```
 
@@ -186,6 +186,38 @@ slots span 0 to 96 ms there against the 80 ms owed. It is counted in
 contention slots and not in milliseconds for the same reason every other
 term here is: a slot is 12 symbol times, and a typed millisecond would be
 true of one carrier only.
+
+**The airtime term is the modem's packets, not the host's frame**
+(Codeberg #430, since 2026-09-26). The host hands the modem one frame
+over KISS; the firmware writes a one-byte header in front of it and, past
+254 payload bytes, splits it, flushing a packet every time its byte
+counter reaches 255 and beginning the next one with the header byte again
+(`transmit`, `reference/RNode_Firmware/RNode_Firmware.ino:716-751`, the
+`written == 255 && isSplitPacket(header)` arm at line 729). Every packet
+therefore pays its own preamble, and `add_airtime(written)` charges each
+one separately. A 508-byte handover — the interface's `HW_MTU`, and
+exactly 2 x 254 — is three packets of 255, 255 and 1 bytes: the last
+flush lands on the last payload byte and the closing `endPacket()` keys
+the header alone. 511 bytes and three preambles on the air for 508 bytes
+handed over.
+
+Until #430 the hold priced that as one 508-byte packet, so it was below
+the modem's busy time on every frame over 254 bytes, at the MTU by two
+preambles and three header bytes:
+
+| PHY | airtime(508) as one packet | as the modem keys it | reported turnaround |
+|---|---|---|---|
+| SF7/62.5 kHz | 1557 ms | 1713 ms | 2013 -> 2169 ms |
+| SF8/125 kHz | 1373 ms | 1529 ms | 1829 -> 1985 ms |
+| SF10/125 kHz | 4426 ms | 5045 ms | 6288 -> 6907 ms |
+| SF12/125 kHz | 17703 ms | 19852 ms | 19603 -> 21752 ms |
+
+The shortfall could not be absorbed anywhere: every other term of the
+hold is spent on something else, the firmware sends no TX-done, and the
+spread deliberately sits on top of `owed` rather than inside it. The
+arithmetic is `rnode::host_frame_airtime_ms`, one function both the hold
+and the modem's airtime-ledger expectation are priced from, so the two
+cannot disagree about what a handover cost.
 
 The interface reports the top of the band — `owed + spread` — as its
 per-frame turnaround, so the receiver's resource part timeout and the
@@ -267,7 +299,7 @@ returns on the first frame — and it is spent at a yield, where the peer's
 turn is the point. A window that ends before the peer's turn can start is
 not a cheaper window, it is a missed reply and a retransmission timeout.
 
-`burst_should_yield` (`leviculum-core/src/rnode.rs:1737`) is unaffected:
+`burst_should_yield` (`leviculum-core/src/rnode.rs:1813`) is unaffected:
 it bounds a burst by frame count and accumulated airtime, and the window
 is spent before the burst starts rather than inside it.
 
@@ -379,8 +411,8 @@ we can change is our own.
 3. `CSMA_DIFS_MS` and `CSMA_MAX_CW_MS` (`leviculum-core/src/rnode.rs:1041`)
    are millisecond constants pinned to a 24 ms slot and are therefore
    wrong at every SF above 8. Their only consumer is `compute_spacing_ms`
-   (`leviculum-core/src/rnode.rs:1140`), which has no caller: the host
+   (`leviculum-core/src/rnode.rs:1216`), which has no caller: the host
    interface prices the same shape from the modem's reported slot
-   instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:923`).
+   instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:932`).
    Nothing is broken by them today and something would be by the next
    caller.
