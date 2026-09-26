@@ -1110,26 +1110,40 @@ tree-clean-selftest:
 # 761 s in total, of which four recipes carry 68 % (`mvr` 209 s,
 # `fuzz-regress` 110 s, `i686-usize-gate` 66 s, `nrf-stack-frames` 50 s) and
 # the whole census/guard/selftest block below is about 20 s. Table in the pass
-# report, 20260926-215512-316.
+# report, 20260926-215512-316. The 36 recipes here measured 19.7-20.3 s over
+# three warm runs and 20.4 s on the first run after a leviculum-core edit --
+# no cold-start penalty at all, which is what dropping `nrf-store-gap` below
+# bought: with it in, the same two numbers were 20.0 s and 70.3 s.
 #
 # THE MEMBERSHIP RULE, for whoever adds the next guard: a recipe belongs here
-# iff it (a) ran under ten seconds on a warm target in that table, (b) compiles
-# no part of the workspace for the host, and (c) drives no test target of its
-# own. `m0-build-gate` and `lxmf-embedded-gate` are in because their compile is
-# one crate for a foreign triple, warm 3.2 s and 4.9 s -- (b) is about the
-# workspace build, not about cargo. `check-processor-seam` (8.7 s) is under the
-# ten but fails (c), and `source-invariant-tests` (18.8 s) fails both (a) and
-# (c) -- but its census half is 0.05 s and passes all three, so the census is
-# here and the run is not. That split is the one deviation from the subset
-# #316's report proposed, and it is the reason the recipe catches #316's own
-# red rather than only #310's.
+# iff it (a) costs under ten seconds STANDING ALONE after a source edit, (b)
+# compiles no part of the workspace for the host, and (c) drives no test target
+# of its own. `m0-build-gate` and `lxmf-embedded-gate` are in because their
+# compile is one crate for a foreign triple, 0.4 s and 0.5 s measured with
+# leviculum-core freshly touched -- (b) is about the workspace build, not about
+# cargo. `check-processor-seam` (8.2 s) is under the ten but fails (c), and
+# `source-invariant-tests` (18.8 s) fails both (a) and (c) -- but its census
+# half is 0.05 s and passes all three, so the census is here and the run is
+# not. Without that split the recipe would catch #310's red and not #316's.
+#
+# "STANDING ALONE" is where the subset #316's report proposed had to be cut by
+# one. `nrf-store-gap` reads the linked firmware ELFs and in `fast` it is
+# preceded by `nrf-stack-frames`, which builds them; #316 therefore timed it at
+# 0.4 s. `guards` excludes `nrf-stack-frames` (50 s), so here the gap gate pays
+# for the firmware link itself: 40.3 s with leviculum-core touched, twice the
+# whole rest of this recipe, for a guard whose product is a trend NUMBER and
+# not one of the two reds above. Out. It stays in `fast`, where it is free.
+# Every other member was re-measured the same way (`touch
+# leviculum-core/src/lib.rs`, then the recipe alone) and none of them
+# free-rides: the worst are `nrf-shellcheck` 5.6 s, `check-supervised-spawns`
+# 3.1 s, `nrf-fw-readback` 2.4 s.
 #
 # NOT a tier. Tiers nest (`standard` contains `fast`); `guards` is a strict
 # subset of `fast` and adds nothing to it, so a green `guards` is a cheap
 # early verdict on part of Tier 0, never a substitute for it. The land gate
 # still runs `fast` and `standard`.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
