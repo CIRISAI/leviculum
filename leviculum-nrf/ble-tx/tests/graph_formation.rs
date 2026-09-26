@@ -264,23 +264,215 @@
 //! `control_the_churn_model_is_a_parameter_and_every_mechanism_fires`
 //! so that no future reader takes an improving churn row for a defence.
 //!
-//! ## What this harness still cannot see
+//! ## Everything above is the formation phase
 //!
-//! A board-to-board link here never ends: boards do not rotate, sessions
-//! do not drop, nothing reboots. So a board that won a board link in the
-//! formation phase never dials again, and the numbers above are the
+//! In every table so far a board-to-board link never ends: boards do not
+//! rotate, sessions do not drop, nothing reboots. So a board that won a
+//! board link never dials again, and those numbers are the
 //! FORMATION-phase cost of a churning peer. The rig measured the
 //! steady-state one — `feld-t114` had its outgoing slot free seven times
-//! over two days and the phone won all seven — and that ratio (100 %)
-//! is worse than this harness's 42 % for exactly that reason. Whatever
-//! fix is measured here has to be measured against link mortality
-//! before it is believed on a board; adding it is the next step, not
-//! this one.
+//! over two days and the phone won all seven — and 100 % is worse than
+//! this harness's 42 % for exactly that reason. [`Mortality`] is that
+//! missing half, and the next section is what it measures.
+//!
+//! # Steady state, link mortality
+//!
+//! [`Mortality`] gives a board-to-board link a drawn lifetime; when it
+//! elapses the link ends at both ends in the same round, the central's
+//! one outgoing slot and the peripheral's incoming slot free together,
+//! and both boards re-enter the scan under today's rules. The parameter's
+//! zero is the formation phase: every table above is measured at
+//! `Mortality::IMMORTAL` and every number in them is pinned as an
+//! equality, which is what makes "zero mortality changes nothing" a
+//! measurement rather than a hope. Where the distribution comes from,
+//! what one lifetime stands for on a board, and the two limits of the
+//! capture it is read off are in [`Mortality`]'s own docs; the two rows
+//! are its short mode ([`Mortality::CAPTURE_SHORT_MODE`], mean 45 s,
+//! measured median 37.2 s) and its tail ([`Mortality::CAPTURE_TAIL`],
+//! mean 600 s, measured p90 188.8 s).
+//!
+//! `freed%` is the share of the dials that spent a FREED outgoing slot
+//! which went to a churning peer — the steady-state quantity the
+//! formation tables have no equivalent of — and `top%` is that same
+//! share for the HIGHEST-ADDRESSED board alone. The distinction is the
+//! whole reading, and the captures state it in the boards' own verdicts
+//! rather than by inference. The three static addresses are
+//! `feld-pocket` `dcb18ad99cdb` < `t114-boot` `e1ac9eb3f05c` <
+//! `feld-t114` `e81d77f09cdc`, and each board's `BLE_SCAN_DECISION`
+//! lines follow: `feld-t114` logged `rule=wait_peer_lower_address` for
+//! both other boards 2301 times and `rule=initiate_lower_address` for
+//! neither of them ONCE, so it has no strict board candidate in that
+//! room at all and every dial it makes is a fallback dial;
+//! `feld-pocket`, the lowest, logged `initiate_lower_address` for both.
+//! `feld-t114`'s 7 of 7 is that board's number, not a room average, and
+//! the room's own average that night was 20 of 37.
+//! `solo%` is how many of the top board's churn dials had no board on
+//! offer at all. `bb` counts links FORMED (in a mortal room that is far
+//! more than the links standing), `d/use` is dials per link that lasted,
+//! `disc` is split board graphs as a snapshot at the horizon.
+//!
+//! The room the rig had — three boards, one dialling phone (per 1000
+//! orders):
+//!
+//! | policy             | life     | freed% | top%  | solo% | bb    | d/use | disc |
+//! |--------------------|----------|-------:|------:|------:|------:|------:|-----:|
+//! | eager/mostfree     | immortal | 100 %  | 100 % |  57 % |  2040 | 2.04  |    0 |
+//! | eager/mostfree     | 45 s     |   6 %  | 100 % |   3 % | 26790 | 1.40  |    0 |
+//! | eager/mostfree     | 600 s    |  57 %  | 100 % |  38 % |  3904 | 1.84  |    0 |
+//! | eager/rotatinglast | immortal | 100 %  | 100 % |  57 % |  2040 | 2.04  |    0 |
+//! | eager/rotatinglast | 45 s     |   6 %  | 100 % |   3 % | 26790 | 1.40  |    0 |
+//! | eager/rotatinglast | 600 s    |  57 %  | 100 % |  38 % |  3904 | 1.84  |    0 |
+//!
+//! Ten and twenty boards, 0 / 1 / 2 churning peers (`-` where no slot
+//! was ever freed, which is what an immortal room with nobody churning
+//! is):
+//!
+//! | n  | churn | policy             | life     | freed% | top%  | bb     | d/use | disc |
+//! |---:|------:|--------------------|----------|-------:|------:|-------:|------:|-----:|
+//! | 10 |     0 | either             | immortal |    -   |   -   |  10000 | 1.00  |    0 |
+//! | 10 |     0 | either             | 45 s     |   0 %  |   0 % | 122812 | 1.27  |    0 |
+//! | 10 |     0 | either             | 600 s    |   0 %  |   0 % |  19270 | 1.03  |   12 |
+//! | 10 |     1 | eager/mostfree     | immortal |   99 % | 100 % |   8984 | 1.03  |   44 |
+//! | 10 |     1 | eager/mostfree     | 45 s     |    3 % | 100 % | 116844 | 1.27  |    0 |
+//! | 10 |     1 | eager/mostfree     | 600 s    |   37 % | 100 % |  17514 | 1.05  |    4 |
+//! | 10 |     1 | eager/rotatinglast | immortal |   83 % |  86 % |   9912 | 1.00  |   22 |
+//! | 10 |     1 | eager/rotatinglast | 45 s     |    3 % |  79 % | 118040 | 1.27  |    0 |
+//! | 10 |     1 | eager/rotatinglast | 600 s    |   12 % |  68 % |  18804 | 1.03  |   14 |
+//! | 10 |     2 | eager/mostfree     | 45 s     |    3 % | 100 % | 116562 | 1.27  |    0 |
+//! | 10 |     2 | eager/rotatinglast | 45 s     |    3 % |  84 % | 117496 | 1.27  |    0 |
+//! | 20 |     0 | either             | immortal |    -   |   -   |  20000 | 1.00  |    0 |
+//! | 20 |     0 | either             | 45 s     |   0 %  |   0 % | 242126 | 1.27  |    0 |
+//! | 20 |     1 | eager/mostfree     | immortal |   97 % | 100 % |  18854 | 1.02  |  180 |
+//! | 20 |     1 | eager/mostfree     | 45 s     |    2 % | 100 % | 236242 | 1.27  |    0 |
+//! | 20 |     1 | eager/mostfree     | 600 s    |   22 % | 100 % |  36260 | 1.04  |   18 |
+//! | 20 |     1 | eager/rotatinglast | immortal |    0 % |   0 % |  20000 | 1.00  |   78 |
+//! | 20 |     1 | eager/rotatinglast | 45 s     |    1 % |  51 % | 239166 | 1.27  |    0 |
+//! | 20 |     1 | eager/rotatinglast | 600 s    |    0 % |   7 % |  38008 | 1.03  |   42 |
+//! | 20 |     2 | eager/mostfree     | 45 s     |    2 % | 100 % | 235948 | 1.27  |    0 |
+//! | 20 |     2 | eager/rotatinglast | 45 s     |    1 % |  50 % | 238916 | 1.27  |    0 |
+//!
+//! (The two policies differ only in the fallback tie-break, so the
+//! churn-0 rows are one row: identical in every column, as they are in
+//! the empty-room table above. The test prints every cell.)
+//!
+//! ## Does the harness reproduce the rig's 100 %? For that board, yes
+//!
+//! **Yes for the board the rig read, and only for that board.** In the
+//! rig's room under the rig's policy the highest-addressed board's freed
+//! outgoing slot goes to the phone 100.00 % of the time — at every
+//! mortality level, immortal included — against `feld-t114`'s 7 of 7.
+//! The room AVERAGE in the same cell is 6 % at the short-mode row and
+//! 57 % at the tail row, and that spread is not a disagreement with the
+//! capture but the same split the capture has: the two lower-addressed
+//! boards have a strict board candidate and re-link to a board, exactly
+//! as `feld-pocket` did (1 of 8 to the phone) and `t114-boot` half did
+//! (12 of 22), while the board with no strict candidate spends every dial
+//! on the phone. The room's 20 of 37 that night sits between the
+//! harness's room average and its 100 % top board, which is what an
+//! average over those two populations looks like — and it is the reason
+//! the top-board column exists: a room average cannot be held against a
+//! one-board measurement.
+//!
+//! ## The shipped fallback order does not defend that slot, and why
+//!
+//! In the rig's own room `eager/rotatinglast` is 100 % too — identical
+//! in every column to the address order it replaced. On the capture's
+//! short-mode row it is NOT because there was nothing else to dial:
+//! `solo%` is 3 %, so a board was on offer in 97 % of those windows and
+//! lost. (The other two rows carry a second reason on top, and it is a
+//! reason no candidate order can address either: with links that stand,
+//! a three-board room has every board excluded by the §4.5 address rule
+//! already, so 57 % of the immortal row's churn dials and 38 % of the
+//! 600 s row's had no board on offer at all.) The key is
+//! (tier, free-slot deficit, rotating group, address or sighting) and the
+//! DEFICIT sits above the group: a phone advertises no capability record
+//! at all, which reads as "all slots free" and deficits by zero, while a
+//! board carrying even one incoming link deficits by one. In a
+//! three-board room every board is carrying one, so the phone wins the
+//! second term before the fourth is ever consulted.
+//! `a_board_that_has_spent_an_incoming_slot_loses_the_fallback_to_a_silent_phone`
+//! is that window on its own, through the real rule and the real table.
+//!
+//! The order does bite where a board with slots to spare still exists:
+//! at twenty boards with one phone it takes the top board's share from
+//! 100 % to 51 % at the 45 s row and to 7 % at 600 s. What it cannot do
+//! is defend the last board in a small room, and a small room is what a
+//! mesh of boards in one flat is.
+//!
+//! ## The tier from #412 part 1 is worth exactly zero here, measured
+//!
+//! `DialPreference::CannotDialUs` never receives a candidate: across
+//! every cell of the table above, 0 of 21 066 436 window offers reach
+//! that tier. The reason is structural and not a seed — no advertisement
+//! in the model carries `CAP_PERIPHERAL_ONLY`, because a board's
+//! `LOCAL_CAPS` is 0 (`columba.rs:213`, lnsd's `links.rs:47`) and a phone
+//! carries no record at all — so a row measured with the tier switched
+//! off would be the same row twice. The tier is counted instead of
+//! switched, which is the stronger statement: it says the tier had
+//! nothing to promote, not merely that the totals matched. Part 1 was
+//! never about a phone; it is about a peripheral-only PEER, and until
+//! something in the room advertises that bit the tier cannot defend a
+//! freed slot in any room this harness can build.
+//!
+//! ## The direction to quote carefully
+//!
+//! For the room as a whole, mortality LOWERS the share of dials spent on
+//! a churning peer: at n=10 with one phone and the address order, 41.7 %
+//! of all dials in the formation phase against 4.0 % in the steady state
+//! (at n=20, 27.7 % against 1.9 %), and the `freed%` column falls from
+//! 99 % to 3 % with it — while `top%` stays at 100 %. A death hands both boards a strict candidate back
+//! and they re-link in the next round, so most freed slots are spent on a
+//! board.
+//! The rig's steady-state number is worse than the formation table's
+//! because of the BOARD it was read on, not because sessions end. And
+//! `bb` rising from 10 000 to 122 812 per 1000 orders is a count of
+//! formations, not of connectivity; `disc` is the connectivity column
+//! and it stays at 0 in a room of boards.
+//!
+//! ## What this harness still cannot see
+//!
+//! Four differences from a board remain, each stated with what it is
+//! worth rather than ranked, because nothing here measures which of them
+//! carries the residual:
+//!
+//! - **Every dial connects.** The captures say a board's dial usually
+//!   does not: `feld-t114` logged 758 `BLE_CENTRAL_CONNECT` and 707
+//!   `BLE_CENTRAL_FAIL`, so 93 % of its dials never came up;
+//!   `feld-pocket` 49 of 107, `t114-boot` 48 of 164. A fallback dial that cannot connect goes into the
+//!   dead-end table for two minutes (`BLE_DIAL_DEAD_END`, 50 times on
+//!   `feld-t114`), which takes the board out of the next windows and
+//!   leaves the phone. The harness only ever condemns an address after a
+//!   duplicate-identity refusal.
+//! - **A dead peer is back in the next round.** Death here is
+//!   instantaneous and symmetric, and the ex-peer advertises again 5 s
+//!   later at its full free-slot count. On a board the two ends learn of
+//!   it up to 45 s apart (the central's supervision timeout is 4 s,
+//!   `conn_params.rs`; the keepalive expiry is `LINK_TIMEOUT_MS`), and a
+//!   peer that died by rebooting is not advertising at all for its boot
+//!   time.
+//! - **The room is boards and phones only.** The rig's room had a
+//!   fourth member the model has no kind for: a static-addressed,
+//!   central-capable host (identity `e19b2b38`, one address
+//!   `d916e2923ed2`, the only one it ever advertised in 2417 lines) that
+//!   took 27 of `feld-t114`'s 37 refill links across the captures, and
+//!   every one of the 25 outgoing links `feld-t114` made after
+//!   2026-09-25, when the shipped order went on the boards. It
+//!   advertises no slot count, so it deficits by zero like a phone and
+//!   then beats the phone on the rotating-last term — which is how the
+//!   shipped order emptied `feld-t114`'s phone column on the rig while
+//!   the harness's three-board room says it cannot. A static
+//!   always-free peer is the first thing to add to this model.
+//! - **Every advertiser is heard in every window.** One round is one
+//!   complete window here. The firmware collects
+//!   `SCAN_WINDOW_COLLECT_MS` (3 s) out of a 5 s cycle and can miss a board advertising on a 1-2 s
+//!   cadence, while a phone advertising sub-second is heard nearly
+//!   always.
 
 use leviculum_ble_tx::{
-    free_slots, judge_duplicate, should_initiate, with_free_slots, CandidateTable, ConnectDecision,
-    DupVerdict, FallbackOrder, Origin, ScanMode, CAP_PERIPHERAL_ONLY, LINK_ABANDONED_MS,
-    LINK_TIMEOUT_MS, MIN_USABLE_MTU, SCAN_FALLBACK_AFTER_MS, WINDOW_CANDIDATES,
+    dial_preference, free_slots, judge_duplicate, should_initiate, with_free_slots, CandidateTable,
+    ConnectDecision, DialPreference, DupVerdict, FallbackOrder, Origin, ScanMode,
+    CAP_PERIPHERAL_ONLY, LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU,
+    SCAN_FALLBACK_AFTER_MS, WINDOW_CANDIDATES,
 };
 
 /// The firmware's incoming-slot count (`PERIPH_LINKS`, #372), taken
@@ -355,16 +547,134 @@ const DEAD_END_SLOTS: usize = 8;
 /// nothing in the capture bounds it further.
 const CHURN_CENTRAL_LINKS: usize = 3;
 
-/// How long an order with a churning peer is replayed (#412).
+/// How long an order that never becomes quiescent is replayed (#412):
+/// one with a churning peer in it, or one with link mortality on.
 ///
 /// Ten simulated minutes. The board graph itself settles inside the
 /// first `n + FALLBACK_AFTER_ROUNDS` rounds, so the horizon is not
 /// about convergence; it is about seeing enough rotations for the
 /// dial ledger to mean something — thirteen of them, against the five
-/// the room capture covers. With no churning peer the harness keeps
-/// its original quiescence break instead, which is what makes the
-/// zero-churn column bit-identical to the pre-#412 numbers.
-const CHURN_HORIZON_ROUNDS: u32 = rounds(10 * 60_000);
+/// the room capture covers — and, since the steady-state section, enough
+/// link deaths per board for the freed slot to be spent many times
+/// (about ten at [`Mortality::CAPTURE_SHORT_MODE`]). With neither churn
+/// nor mortality the harness keeps its original quiescence break
+/// instead, which is what makes those columns bit-identical to the
+/// pre-#412 numbers.
+const HORIZON_ROUNDS: u32 = rounds(10 * 60_000);
+
+/// How a board-to-board link ends (#412 steady state) — a parameter of
+/// the same kind as [`Churn`]: [`Mortality::IMMORTAL`] must reproduce
+/// every row measured before it, bit for bit.
+///
+/// # What the lifetime stands for on a board
+///
+/// One drawn lifetime stands for the whole population of ways a
+/// board-to-board session ends, because the captures do not separate
+/// them: the peer stopped answering and the registry swept the link at
+/// `LINK_TIMEOUT_MS` (`BLE_LINK_EXPIRE role=central silence_ms=45000`),
+/// the controller gave up first at the supervision timeout
+/// (`conn_params.rs`: 4 s in the central role), the peer rebooted, or
+/// it walked out of range. What the board sees in every one of those
+/// cases is the same event pair — `BLE_CENTRAL_DOWN` and
+/// `BLE_CARRIER_DROP` — and the same consequence, which is the one this
+/// section is about: the one outgoing slot is free again and the board
+/// is back in the scan.
+///
+/// Both ends die at once, because a BLE disconnect is symmetric: the
+/// central's outgoing slot and the peripheral's incoming slot free in
+/// the same round, and both boards reset their strict clock exactly as
+/// the expiry sweep above already does (`conn_link_down` ->
+/// `note_strict_reset`).
+///
+/// # Where the distribution comes from
+///
+/// Measured, on the rig's own `ble-drop` captures
+/// (`/home/lew/rig-run/ble-drop/{feld-t114,t114-boot,feld-pocket}.log`,
+/// 2026-09-12 to 2026-09-26): a lifetime is `BLE_CENTRAL_UP peer=P` to
+/// the next `BLE_CENTRAL_DOWN peer=P` on the same board's own clock
+/// (`t=`, ms since boot). Pairs that cross a reboot, and UPs with no
+/// DOWN, are dropped rather than counted short (88 of the 259 UPs, with
+/// 7 more still open when the capture ends, leaving 164 pairs) because a
+/// truncated lifetime biases the distribution downward exactly where the
+/// long-lived links are. The three boards'
+/// identities are `b2a8bea1` (feld-t114), `2fe95060` (t114-boot) and
+/// `1d48253f` (feld-pocket); `b99af2ec` is the phone, which is what
+/// nine addresses under one identity means.
+///
+/// Board-to-board, n = 122:
+///
+/// | min | p10 | p25 | med | p75 | p90 | max | mean |
+/// |----:|----:|----:|----:|----:|----:|----:|-----:|
+/// | 0.0 s | 12.1 s | 28.7 s | **37.2 s** | 54.7 s | 188.8 s | 14495 s | 641.8 s |
+///
+/// It does not give ONE distribution, and that is stated rather than
+/// fitted: 72 of the 122 lifetimes (59 %) fall in [20 s, 50 s), a mode
+/// sitting just under the registry's own 45 s bound, while 11 (9 %)
+/// exceed ten minutes and five exceed an hour. mean/median is 17, where
+/// an exponential's is 1.44, so no single-parameter fit describes both
+/// modes and one would misstate whichever it did not fit. The two modes
+/// are therefore two ROWS, each a stated constant:
+/// [`Mortality::CAPTURE_SHORT_MODE`] and [`Mortality::CAPTURE_TAIL`].
+///
+/// Within a row the draw is memoryless (geometric in rounds, mean
+/// `mean_ms`), which is the null shape to assume when the capture gives
+/// none: a link the model has held for an hour is no likelier to die in
+/// the next round than a fresh one. Two known limits of the population,
+/// both of which point the same way and are not corrected for: the
+/// captures span two weeks of rig work with 61 to 81 board reboots per
+/// log, so part of the short mode is the rig's own reflash cadence
+/// rather than steady-state mesh behaviour; and a round is
+/// [`ROUND_MS`], so the 10 lifetimes under 5 s (8 %) are below the
+/// harness's resolution and are drawn as one round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mortality {
+    /// Mean board-to-board link lifetime in milliseconds; 0 is a link
+    /// that never ends — the pre-steady-state simulation.
+    mean_ms: u64,
+}
+
+impl Mortality {
+    /// A board-to-board link that never ends: every row measured
+    /// before the steady-state section, and the FORMATION-phase cost
+    /// those rows report.
+    const IMMORTAL: Self = Self { mean_ms: 0 };
+
+    /// The capture's short mode, stated as the firmware bound it sits
+    /// under: `LINK_TIMEOUT_MS`, 45 s. The measured interquartile range
+    /// is 28.7 s to 54.7 s and the median 37.2 s, so the bound is inside
+    /// the range, two rounds above the median, and it is a real quantity
+    /// of the stack rather than a fitted one.
+    const CAPTURE_SHORT_MODE: Self = Self {
+        mean_ms: LINK_TIMEOUT_MS,
+    };
+
+    /// The capture's tail, stated as the ten minutes the horizon is:
+    /// p90 is 188.8 s and 9 % of the sample exceeds 600 s, so a mean of
+    /// 600 s puts most of a run's links beyond the horizon and reports
+    /// what a room of mostly-standing links does with the few that end.
+    const CAPTURE_TAIL: Self = Self { mean_ms: 600_000 };
+
+    /// Whether any board-to-board link ends in this configuration. When
+    /// false no draw is taken from the mortality stream at all, which
+    /// is what makes [`Self::IMMORTAL`] bit-identical rather than
+    /// merely equal in aggregate.
+    const fn kills(self) -> bool {
+        self.mean_ms > 0
+    }
+
+    /// One lifetime in rounds, geometric with mean `mean_ms`, at least
+    /// one round. `state` is the mortality stream; the exponential
+    /// inverse-CDF is discretised upward, so the realised mean is half
+    /// a round above the stated one.
+    fn draw_lifetime(self, state: &mut u64) -> u32 {
+        let mean_rounds = (self.mean_ms / ROUND_MS) as f64;
+        // (0, 1]: the 53 significant bits of the draw, never zero, so
+        // the logarithm is always finite.
+        let u = ((next_rand(state) >> 11) + 1) as f64 / (1u64 << 53) as f64;
+        let life = (-u.ln() * mean_rounds).ceil();
+        (life as u32).max(1)
+    }
+}
 
 /// How much churn is in the room (#412) — a parameter, never a
 /// fixture. `Churn::NONE` must reproduce the pre-#412 numbers exactly.
@@ -539,6 +849,12 @@ struct Link {
     /// [`LINK_EXPIRY_ROUNDS`] later, exactly as the registry's expiry
     /// sweep holds it.
     silent_since: Option<u32>,
+    /// The round this board-to-board link ends in, drawn once at
+    /// formation from [`Mortality`]. `None` under
+    /// [`Mortality::IMMORTAL`] and on every link to a churning peer —
+    /// those end at the peer's next rotation, which is a measured
+    /// period and not a drawn one.
+    dies_at: Option<u32>,
 }
 
 impl Link {
@@ -558,6 +874,14 @@ struct Board {
     outgoing: Option<Link>,
     /// Peripheral links, at most [`PERIPH_SLOTS`].
     incoming: Vec<Link>,
+    /// Whether this board has already held an outgoing link in this
+    /// run — set when one FORMS, so a dial refused post-connect does not
+    /// set it: the slot was never occupied and the next dial is the same
+    /// free slot, not a freed one. Every dial made once this is set spends
+    /// a slot that was freed (#412 steady state), which is the quantity
+    /// the rig read directly: `feld-t114`'s outgoing slot was free seven
+    /// times over two days.
+    held_outgoing: bool,
     /// Empty scan rounds since the last link-up or permitted peer —
     /// the sim's copy of the firmware's fallback clock.
     strict_rounds: u32,
@@ -647,8 +971,11 @@ struct Churner {
 #[derive(Debug, Default, Clone, Copy)]
 struct Tally {
     dials: usize,
-    /// Dials that formed a board-to-board link. These never end here
-    /// (boards do not rotate and no session ends), so each is useful.
+    /// Dials that formed a board-to-board link. Under
+    /// [`Mortality::IMMORTAL`] these never end, so each is useful; with
+    /// mortality on, one that died below [`USEFUL_SESSION_MS`] is
+    /// counted in `short` like a churn session, and `useful` keeps
+    /// meaning what it says.
     board_links: usize,
     /// Dials that formed a link to a churning peer, replacements
     /// included.
@@ -656,10 +983,43 @@ struct Tally {
     /// Dials refused post-connect because the identity was already
     /// live — the rotated-address duplicate, spent by definition.
     refused: usize,
-    /// Links to a churning peer whose session ended below
-    /// [`USEFUL_SESSION_MS`]: the dial was paid, the link carried
-    /// nothing.
+    /// Links whose session ended below [`USEFUL_SESSION_MS`]: the dial
+    /// was paid, the link carried nothing. Without [`Mortality`] only a
+    /// link to a churning peer can be one.
     short: usize,
+    /// Board-to-board links that reached their drawn lifetime — the
+    /// mortality model's own positive control.
+    deaths: usize,
+    /// Dials made by a board that had already held an outgoing link:
+    /// every one of them spends a slot that was freed, so this is the
+    /// steady-state denominator the formation phase has no equivalent
+    /// of.
+    refill_dials: usize,
+    /// Of those, the ones aimed at a churning peer.
+    refill_dials_churn: usize,
+    /// The same pair for the HIGHEST-ADDRESSED board alone, which is the
+    /// board the rig read: `feld-t114` holds `e81d77f09cdc`, above both
+    /// `t114-boot` and `feld-pocket`, and its own `BLE_SCAN_DECISION`
+    /// lines say `wait_peer_lower_address` for both of them 2301 times
+    /// and `initiate_lower_address` for neither, so the v2.2 rule leaves
+    /// it no strict board candidate in that room and every dial it makes
+    /// is a fallback dial. A room average mixes that board with the ones
+    /// that have a strict candidate and cannot be held against its 7 of
+    /// 7.
+    refill_dials_top: usize,
+    refill_dials_top_churn: usize,
+    /// Of those: how many had NO board among the permitted candidates at
+    /// all, so the churning peer was not preferred over a board but was
+    /// the only thing the rule allowed. A tie-break cannot defend a slot
+    /// in that window, whatever it orders by, and this counts how often
+    /// the window is that one.
+    refill_dials_top_churn_solo: usize,
+    /// Window offers, and how many of them [`dial_preference`] put in
+    /// [`DialPreference::CannotDialUs`] — 303's tier, counted rather
+    /// than assumed inert. Only the window choices offer anything, so
+    /// [`TargetChoice::FirstSeen`] leaves both at zero.
+    offers: usize,
+    offers_cannot_dial: usize,
 }
 
 impl Tally {
@@ -677,7 +1037,9 @@ struct Sim {
 /// Whether the two boards hold a link in either direction. Board
 /// addresses are static, so the pre-dial address exclusion (Core Spec
 /// §4.5) keeps a linked board from ever being dialled again, and the
-/// sim never forms a second board-to-board link. Churning peers live
+/// sim never holds two links between one pair — under [`Mortality`] a
+/// pair whose link died may of course form a new one, which is the
+/// steady state the section below measures. Churning peers live
 /// at indices `>= n` and can never equal a board index, so the board
 /// graph this walks is the board graph alone — a phone is an endpoint,
 /// not a relay, and two boards that share a phone are not connected.
@@ -687,11 +1049,19 @@ fn linked(boards: &[Board], a: usize, b: usize) -> bool {
 }
 
 /// Replay one arrival order and return the final boards plus the dial
-/// ledger. With `churn == 0` this is the pre-#412 simulation exactly:
-/// the churn paths draw from their own seeded stream, so the main
-/// stream — addresses, arrival order, scan order, first-seen picks —
-/// is byte-identical to what it was.
-fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn: Churn) -> Sim {
+/// ledger. With `churn == 0` and [`Mortality::IMMORTAL`] this is the
+/// pre-#412 simulation exactly: the churn and mortality paths draw from
+/// their own seeded streams, so the main stream — addresses, arrival
+/// order, scan order, first-seen picks — is byte-identical to what it
+/// was.
+fn run_sim(
+    n: usize,
+    seed: u64,
+    spec: FallbackSpec,
+    choice: TargetChoice,
+    churn: Churn,
+    mortality: Mortality,
+) -> Sim {
     let mut rng = seed | 1;
     let mut boards: Vec<Board> = Vec::with_capacity(n);
     while boards.len() < n {
@@ -705,10 +1075,18 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
             arrived: false,
             outgoing: None,
             incoming: Vec::new(),
+            held_outgoing: false,
             strict_rounds: 0,
             dead_ends: Vec::new(),
         });
     }
+
+    // The board the rig's reading is about: the highest-addressed one,
+    // which the v2.2 sort leaves without a single strict board candidate,
+    // so every dial it makes is a fallback dial.
+    let top_board = (0..n)
+        .max_by_key(|&i| boards[i].addr)
+        .expect("a room has boards");
 
     // The arrival order under test: a seeded shuffle, one per round.
     let mut arrival: Vec<usize> = (0..n).collect();
@@ -723,6 +1101,12 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
     // reason one step further (#412): only `FallbackFirstHeard` reads
     // it, and it must leave both streams above untouched.
     let mut offer_rng = (seed ^ 0x0FFE_5ED0_1DE5_7ABC) | 1;
+    // And the link lifetimes from a FOURTH, for the same reason once
+    // more (#412 steady state): a draw is taken only when a
+    // board-to-board link forms and only while `mortality.kills()`, so
+    // `Mortality::IMMORTAL` leaves all three streams above exactly
+    // where they were.
+    let mut death_rng = (seed ^ 0x0DEA_D111_FE71_3E55) | 1;
     let mut churners: Vec<Churner> = (0..churn.peers)
         .map(|_| {
             let addr = (next_rand(&mut churn_rng) & 0x3FFF_FFFF_FFFF) | 0x4000_0000_0000;
@@ -736,10 +1120,10 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
         .collect();
 
     let mut tally = Tally::default();
-    let horizon = if churn.peers == 0 {
+    let horizon = if churn.peers == 0 && !mortality.kills() {
         10_000
     } else {
-        CHURN_HORIZON_ROUNDS
+        HORIZON_ROUNDS
     };
     let mut linkless_streak: u32 = 0;
     for round in 0..horizon {
@@ -784,6 +1168,31 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
             if board.incoming.len() != before {
                 board.strict_rounds = 0;
             }
+        }
+
+        // Link mortality (#412 steady state). A board-to-board link that
+        // reached its drawn lifetime ends, BOTH ends in this round: the
+        // central's one outgoing slot and the peripheral's incoming slot
+        // free together, because a BLE disconnect is symmetric, and both
+        // sides reset the strict clock the way `conn_link_down` does.
+        // Neither address is condemned — a session that ended is not a
+        // dead end, and the firmware's table is for a refusal or a dial
+        // that could not connect.
+        for i in 0..n {
+            let Some(link) = boards[i].outgoing else {
+                continue;
+            };
+            if !link.dies_at.is_some_and(|at| round >= at) {
+                continue;
+            }
+            boards[i].outgoing = None;
+            if link.useful_ms(round) < USEFUL_SESSION_MS {
+                tally.short += 1;
+            }
+            boards[i].strict_rounds = 0;
+            boards[link.peer].incoming.retain(|l| l.peer != i);
+            boards[link.peer].strict_rounds = 0;
+            tally.deaths += 1;
         }
 
         // Scan order within the round is part of the replayed
@@ -890,6 +1299,13 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
                         } else {
                             churners[p - n].addr
                         };
+                        // 303's tier, censused rather than assumed: the
+                        // public rule is asked the same question the
+                        // window's key asks it, per offer.
+                        tally.offers += 1;
+                        if dial_preference(decision, free) == DialPreference::CannotDialUs {
+                            tally.offers_cannot_dial += 1;
+                        }
                         window.offer(addr, decision, free, p);
                     }
                     window
@@ -904,21 +1320,50 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
             // anything was gained by it.
             tally.dials += 1;
             boards[i].strict_rounds = 0;
+            // The steady-state denominator: this board has held an
+            // outgoing link before, so the slot it is spending now is
+            // one that was freed.
+            if boards[i].held_outgoing {
+                tally.refill_dials += 1;
+                if target >= n {
+                    tally.refill_dials_churn += 1;
+                }
+                if i == top_board {
+                    tally.refill_dials_top += 1;
+                    if target >= n {
+                        tally.refill_dials_top_churn += 1;
+                        if !candidates.iter().any(|&(p, _, _)| p < n) {
+                            tally.refill_dials_top_churn_solo += 1;
+                        }
+                    }
+                }
+            }
             if target < n {
                 let (addr, own_addr) = (boards[target].addr, boards[i].addr);
+                // The lifetime is drawn once, here, and only for a
+                // board-to-board link: a link to a churning peer ends at
+                // that peer's next rotation, a measured period.
+                let dies_at = mortality
+                    .kills()
+                    .then(|| round + mortality.draw_lifetime(&mut death_rng));
                 boards[i].outgoing = Some(Link {
                     peer: target,
                     addr,
                     formed: round,
                     silent_since: None,
+                    dies_at,
                 });
                 boards[target].incoming.push(Link {
                     peer: i,
                     addr: own_addr,
                     formed: round,
                     silent_since: None,
+                    // The peripheral end holds no clock of its own: the
+                    // central's `dies_at` removes both entries at once.
+                    dies_at: None,
                 });
                 boards[target].strict_rounds = 0;
+                boards[i].held_outgoing = true;
                 tally.board_links += 1;
                 any_link = true;
                 continue;
@@ -958,7 +1403,9 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
                 addr: churner.addr,
                 formed: round,
                 silent_since: None,
+                dies_at: None,
             });
+            boards[i].held_outgoing = true;
             tally.churn_links += 1;
             any_link = true;
         }
@@ -1021,6 +1468,7 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
                 addr: churner_addr,
                 formed: round,
                 silent_since: None,
+                dies_at: None,
             });
             boards[b].strict_rounds = 0;
             churner.links.push(b);
@@ -1033,15 +1481,24 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
         // links never drop here), so nothing changes hereafter. With a
         // churning peer nothing is ever quiescent — rotations keep
         // arriving — so the run goes to the horizon instead.
-        if churn.peers == 0 && (round as usize) >= n && linkless_streak > FALLBACK_AFTER_ROUNDS {
+        if churn.peers == 0
+            && !mortality.kills()
+            && (round as usize) >= n
+            && linkless_streak > FALLBACK_AFTER_ROUNDS
+        {
             break;
         }
     }
 
     // Settle the links still standing at the horizon by the same rule.
+    // Under `Mortality::IMMORTAL` only a churn session can be short, and
+    // the condition is exactly what it was; with mortality on, every
+    // board link is a session that ends too, so a young one standing at
+    // the horizon is short like any other.
     for board in &boards {
         if let Some(link) = board.outgoing {
-            if link.peer >= n && link.useful_ms(horizon) < USEFUL_SESSION_MS {
+            if (link.peer >= n || mortality.kills()) && link.useful_ms(horizon) < USEFUL_SESSION_MS
+            {
                 tally.short += 1;
             }
         }
@@ -1060,6 +1517,23 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice, churn:
             }
         }
         assert!(boards[a].incoming.len() <= PERIPH_SLOTS);
+        // Both ends of a board-to-board link exist or neither does. A
+        // death that freed the central's outgoing slot but left the
+        // peripheral's incoming one occupied would be invisible in every
+        // column — a board with three stale incoming links still forms
+        // outgoing ones and still shows up connected — so the invariant
+        // is checked on every order rather than in one test.
+        for link in &boards[a].incoming {
+            if link.peer < n {
+                assert_eq!(
+                    boards[link.peer].outgoing.map(|l| l.peer),
+                    Some(a),
+                    "board {a} holds an incoming link from {} that {} does not hold",
+                    link.peer,
+                    link.peer
+                );
+            }
+        }
     }
     assert_eq!(
         tally.dials,
@@ -1122,6 +1596,24 @@ struct Outcome {
     refused: usize,
     /// Of the spent ones: a session below the churn threshold.
     short: usize,
+    /// Board-to-board links that reached their drawn lifetime, summed —
+    /// zero without [`Mortality`], and the model's positive control with
+    /// it.
+    deaths: usize,
+    /// Dials that spent a FREED outgoing slot, summed: the steady-state
+    /// denominator (#412 number 1).
+    refill_dials: usize,
+    /// Of those, the ones aimed at a churning peer.
+    refill_dials_churn: usize,
+    /// The same pair for the highest-addressed board alone — the board
+    /// the rig's 7 of 7 is about — and how many of those dials had no
+    /// board among the permitted candidates at all.
+    refill_dials_top: usize,
+    refill_dials_top_churn: usize,
+    refill_dials_top_churn_solo: usize,
+    /// Window offers and 303's tier among them, summed.
+    offers: usize,
+    offers_cannot_dial: usize,
 }
 
 impl Outcome {
@@ -1133,6 +1625,34 @@ impl Outcome {
             return 0.0;
         }
         (self.churn_links + self.refused) as f64 * 100.0 / self.dials as f64
+    }
+
+    /// What share of the dials that spent a FREED outgoing slot went to
+    /// a churning peer — the rig's steady-state reading of #412, where
+    /// `feld-t114` freed its slot seven times and the phone took all
+    /// seven. `None` when no slot was ever freed, which is what the
+    /// formation phase is: a statement, not a zero.
+    fn share_of_freed_slots_to_churn(&self) -> Option<f64> {
+        (self.refill_dials > 0)
+            .then(|| self.refill_dials_churn as f64 * 100.0 / self.refill_dials as f64)
+    }
+
+    /// The same share for the highest-addressed board alone — the one
+    /// reading that IS comparable to `feld-t114`'s 7 of 7, because that
+    /// board is the one the room's sort leaves without a strict board
+    /// candidate.
+    fn share_of_top_freed_slots_to_churn(&self) -> Option<f64> {
+        (self.refill_dials_top > 0)
+            .then(|| self.refill_dials_top_churn as f64 * 100.0 / self.refill_dials_top as f64)
+    }
+
+    /// Of the top board's freed slots that went to a churning peer: what
+    /// share had no board on offer at all. Where this is 100 %, no
+    /// candidate ORDER can defend the slot — there is nothing to order.
+    fn share_of_top_churn_dials_with_no_board_on_offer(&self) -> Option<f64> {
+        (self.refill_dials_top_churn > 0).then(|| {
+            self.refill_dials_top_churn_solo as f64 * 100.0 / self.refill_dials_top_churn as f64
+        })
     }
 
     /// Dials per board-to-board link — #412's third number read against
@@ -1149,7 +1669,13 @@ impl Outcome {
     }
 }
 
-fn measure(n: usize, spec: FallbackSpec, choice: TargetChoice, churn: Churn) -> Outcome {
+fn measure(
+    n: usize,
+    spec: FallbackSpec,
+    choice: TargetChoice,
+    churn: Churn,
+    mortality: Mortality,
+) -> Outcome {
     let mut outcome = Outcome {
         disconnected: 0,
         linkless: 0,
@@ -1161,9 +1687,17 @@ fn measure(n: usize, spec: FallbackSpec, choice: TargetChoice, churn: Churn) -> 
         useful: 0,
         refused: 0,
         short: 0,
+        deaths: 0,
+        refill_dials: 0,
+        refill_dials_churn: 0,
+        refill_dials_top: 0,
+        refill_dials_top_churn: 0,
+        refill_dials_top_churn_solo: 0,
+        offers: 0,
+        offers_cannot_dial: 0,
     };
     for seed in 0..ORDERS {
-        let sim = run_sim(n, 0xB1E5_0000 + seed, spec, choice, churn);
+        let sim = run_sim(n, 0xB1E5_0000 + seed, spec, choice, churn, mortality);
         let boards = &sim.boards;
         if !is_connected(boards) {
             outcome.disconnected += 1;
@@ -1187,6 +1721,14 @@ fn measure(n: usize, spec: FallbackSpec, choice: TargetChoice, churn: Churn) -> 
         outcome.useful += sim.tally.useful();
         outcome.refused += sim.tally.refused;
         outcome.short += sim.tally.short;
+        outcome.deaths += sim.tally.deaths;
+        outcome.refill_dials += sim.tally.refill_dials;
+        outcome.refill_dials_churn += sim.tally.refill_dials_churn;
+        outcome.refill_dials_top += sim.tally.refill_dials_top;
+        outcome.refill_dials_top_churn += sim.tally.refill_dials_top_churn;
+        outcome.refill_dials_top_churn_solo += sim.tally.refill_dials_top_churn_solo;
+        outcome.offers += sim.tally.offers;
+        outcome.offers_cannot_dial += sim.tally.offers_cannot_dial;
     }
     outcome
 }
@@ -1265,8 +1807,8 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
         "spec/choice     n=10 disc/linkless/sat   n=20 disc/linkless/sat   (per {ORDERS} orders)"
     );
     for (spec, choice, label) in CONFIGS {
-        let at10 = measure(10, spec, choice, Churn::NONE);
-        let at20 = measure(20, spec, choice, Churn::NONE);
+        let at10 = measure(10, spec, choice, Churn::NONE, Mortality::IMMORTAL);
+        let at20 = measure(20, spec, choice, Churn::NONE, Mortality::IMMORTAL);
         println!(
             "{label:<15} {:>4} / {:<4} / {:<8} {:>4} / {:<4} / {:<8}",
             at10.disconnected,
@@ -1434,8 +1976,8 @@ fn a_churning_peer_takes_the_fallback_dial_and_the_board_graph_pays_for_it() {
     );
     for churn in [Churn::NONE, Churn::phones(1), Churn::phones(2)] {
         for (spec, choice, label) in CONFIGS {
-            let at10 = measure(10, spec, choice, churn);
-            let at20 = measure(20, spec, choice, churn);
+            let at10 = measure(10, spec, choice, churn, Mortality::IMMORTAL);
+            let at20 = measure(20, spec, choice, churn, Mortality::IMMORTAL);
             let cells = |outcome: &Outcome| {
                 format!(
                     "{:>6} {:>9} {:>6} {:>5.0} {:>5} {:>5}",
@@ -1597,6 +2139,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
                 FallbackSpec::Eager,
                 TargetChoice::MostFreeSlots,
                 Churn::NONE,
+                Mortality::IMMORTAL,
             );
             assert_eq!(sim.tally.dials, sim.tally.board_links);
             assert_eq!(
@@ -1616,12 +2159,14 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         FallbackSpec::Off,
         TargetChoice::MostFreeSlots,
         Churn::NONE,
+        Mortality::IMMORTAL,
     );
     let strict_churned = measure(
         10,
         FallbackSpec::Off,
         TargetChoice::MostFreeSlots,
         Churn::advertisers(1),
+        Mortality::IMMORTAL,
     );
     assert_eq!(
         (strict_churned.churn_links, strict_churned.refused),
@@ -1647,6 +2192,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         FallbackSpec::Eager,
         TargetChoice::MostFreeSlots,
         Churn::advertisers(1),
+        Mortality::IMMORTAL,
     );
     assert!(
         eager_churned.churn_links > 0,
@@ -1665,12 +2211,19 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
     // spread only has room to help where the choice has not already
     // spread the load — under `MostFreeSlots` the phone's slot adds
     // saturation instead of relieving it, 520 against 498.)
-    let strict_spread = measure(10, FallbackSpec::Off, TargetChoice::FirstSeen, Churn::NONE);
+    let strict_spread = measure(
+        10,
+        FallbackSpec::Off,
+        TargetChoice::FirstSeen,
+        Churn::NONE,
+        Mortality::IMMORTAL,
+    );
     let strict_dialled = measure(
         10,
         FallbackSpec::Off,
         TargetChoice::FirstSeen,
         Churn::phones(1),
+        Mortality::IMMORTAL,
     );
     assert!(
         strict_dialled.saturated < strict_spread.saturated,
@@ -1685,6 +2238,388 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
          re-measure the confound before publishing the table",
         strict_dialled.disconnected,
         strict_spread.disconnected
+    );
+}
+
+/// #412 in the steady state: the same policies with board-to-board
+/// links that END ([`Mortality`]), so a board that won a board link
+/// dials again when it loses one. The formation-phase tables above are
+/// the same instrument with `Mortality::IMMORTAL`.
+///
+/// Three rooms: the one the rig had (three boards, one phone, dialling),
+/// and ten and twenty boards with 0, 1 and 2 churning peers. Two
+/// policies, everything else held equal: the address order the rig ran
+/// under (`eager/mostfree`, what shipped until 2026-09-25) and the
+/// shipped one (`eager/rotatinglast`).
+///
+/// The numbers, per 1000 orders: `freed%` is the share of the dials that
+/// spent a FREED outgoing slot which went to a churning peer — the rig's
+/// own reading, `feld-t114` 7 of 7 — then board-to-board links formed,
+/// dials per link that lasted, and split board graphs (the snapshot at
+/// the horizon, one sample per order).
+///
+/// What this test holds on to is the instrument and the mechanism, in
+/// the module docs' terms:
+///
+/// - **mortality fires and frees both slots**, or nothing below is a
+///   steady state at all;
+/// - **the address order hands the freed slot to the phone**, which is
+///   what the rig measured at 100 % and what makes this harness an
+///   answer to it rather than a second question;
+/// - **the shipped order takes it back**, and the size of that is the
+///   number the next order gets measured against.
+#[test]
+fn the_steady_state_freed_slot_goes_to_the_phone_under_the_address_order() {
+    let mut rows = Vec::new();
+    println!(
+        "#412 steady state — per {ORDERS} orders; freed% = share of dials spending a FREED \
+         outgoing"
+    );
+    println!(
+        "slot that went to a churning peer (the rig read 7 of 7 = 100 %), bb = board-to-board \
+         links"
+    );
+    println!(
+        "formed, d/use = dials per link that lasted, disc = split board graphs at the horizon"
+    );
+    println!(
+        "{:<4} {:<6} {:<19} {:>8} {:>7} {:>7} {:>6} {:>7} {:>6} {:>6} {:>7}",
+        "n", "churn", "policy", "life", "freed%", "top%", "solo%", "bb", "d/use", "disc", "deaths"
+    );
+    for (n, churn) in [
+        (3usize, Churn::phones(1)),
+        (10, Churn::NONE),
+        (10, Churn::phones(1)),
+        (10, Churn::phones(2)),
+        (20, Churn::NONE),
+        (20, Churn::phones(1)),
+        (20, Churn::phones(2)),
+    ] {
+        for (choice, label) in [
+            (TargetChoice::MostFreeSlots, "eager/mostfree"),
+            (TargetChoice::RotatingLast, "eager/rotatinglast"),
+        ] {
+            for (mortality, life) in [
+                (Mortality::IMMORTAL, "immortal"),
+                (Mortality::CAPTURE_SHORT_MODE, "45s"),
+                (Mortality::CAPTURE_TAIL, "600s"),
+            ] {
+                let outcome = measure(n, FallbackSpec::Eager, choice, churn, mortality);
+                println!(
+                    "{n:<4} {:<6} {label:<19} {life:>8} {:>7} {:>7} {:>6} {:>7} {:>6} {:>6} \
+                     {:>7}",
+                    churn.peers,
+                    Ratio(outcome.share_of_freed_slots_to_churn()),
+                    Ratio(outcome.share_of_top_freed_slots_to_churn()),
+                    Ratio(outcome.share_of_top_churn_dials_with_no_board_on_offer()),
+                    outcome.board_links,
+                    Ratio(outcome.dials_per_useful()),
+                    outcome.disconnected,
+                    outcome.deaths,
+                );
+                rows.push(((n, churn.peers, label, life), outcome));
+            }
+        }
+    }
+    let pick = |n: usize, peers: usize, label: &str, life: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rn, rp, rl, rlife), _)| {
+                *rn == n && *rp == peers && *rl == label && *rlife == life
+            })
+            .expect("the row was measured above")
+            .1
+    };
+
+    // 1. The instrument. Without deaths there is no steady state, and a
+    //    death that freed only the central's slot would leave the
+    //    peripheral's occupied forever — which the `bb` column would
+    //    hide, because a board with three stale incoming links still
+    //    forms outgoing ones.
+    for &(n, peers) in &[(3usize, 1usize), (10, 0), (10, 1), (20, 0), (20, 2)] {
+        for life in ["45s", "600s"] {
+            let mortal = pick(n, peers, "eager/rotatinglast", life);
+            assert!(
+                mortal.deaths > 0,
+                "n={n} churn={peers} life={life}: no board-to-board link ever died — \
+                 the mortality parameter is inert and every row below is formation phase"
+            );
+            assert!(
+                mortal.refill_dials > 0,
+                "n={n} churn={peers} life={life}: no dial ever spent a freed slot"
+            );
+        }
+        let immortal = pick(n, peers, "eager/rotatinglast", "immortal");
+        assert_eq!(
+            immortal.deaths, 0,
+            "n={n} churn={peers}: a link died under Mortality::IMMORTAL"
+        );
+    }
+
+    // 2. 303's tier, counted rather than assumed: no advertisement in
+    //    this model carries PERIPHERAL_ONLY (boards advertise
+    //    `LOCAL_CAPS = 0`, `columba.rs:213`, and the phone no record at
+    //    all), so `DialPreference::CannotDialUs` never has a candidate
+    //    and the tier's steady-state value is exactly zero — the same
+    //    zero it has in the formation tables, for the same structural
+    //    reason and not by seed. A switch would print two identical
+    //    tables; this counts the offers the tier could have promoted.
+    let mut offers = 0usize;
+    for ((_, _, _, _), outcome) in &rows {
+        offers += outcome.offers;
+        assert_eq!(
+            outcome.offers_cannot_dial, 0,
+            "an offer reached the cannot-dial-us tier: some peer in the model now \
+             advertises PERIPHERAL_ONLY, and the tier rows have to be measured for real"
+        );
+    }
+    println!("tier census: {offers} window offers, 0 in DialPreference::CannotDialUs");
+    assert!(
+        offers > 1_000_000,
+        "the tier census saw only {offers} offers, too few to say the tier never fired"
+    );
+
+    // 3. The rig's room and the rig's board: `feld-t114` is dialled by
+    //    both the others, so it holds the highest address, so the v2.2
+    //    rule leaves it no strict board candidate and every dial it
+    //    makes is a fallback dial. Its freed slot went to the phone 7
+    //    times out of 7, and the instrument has to reach that
+    //    neighbourhood before its verdict on any fix means anything. The
+    //    ROOM AVERAGE is not that number and must not be read as it: the
+    //    two lower-addressed boards have a strict candidate and re-link
+    //    to a board (the `freed%` column is 6 % where `top%` is 100 %).
+    for life in ["immortal", "45s", "600s"] {
+        let rig = pick(3, 1, "eager/mostfree", life);
+        let top = rig
+            .share_of_top_freed_slots_to_churn()
+            .expect("the rig's room frees the top board's slot");
+        assert!(
+            top >= 90.0,
+            "life={life}: the rig's room under the rig's policy gave the top board's freed \
+             slot to the phone only {top:.0} % of the time ({} of {}); the rig measured 7 of \
+             7, so the model has lost the mechanism it is supposed to reproduce",
+            rig.refill_dials_top_churn,
+            rig.refill_dials_top
+        );
+    }
+
+    // 4. And the finding this instrument exists to produce: in the rig's
+    //    own room the SHIPPED fallback order does not defend that slot
+    //    either — it is 100 % under both orders. The reason is measured
+    //    twice over, here and in
+    //    `a_board_that_has_spent_an_incoming_slot_loses_the_fallback_to_a_silent_phone`:
+    //    it is not that no board was on offer (`solo%` is a few per cent
+    //    at most), it is that a board holding an incoming link deficits
+    //    by one on the term ABOVE the rotating-last order, while a phone
+    //    that advertises no record at all deficits by zero. In a
+    //    three-board room every board is carrying an incoming link, so
+    //    the phone wins the second term before the fourth is consulted.
+    for life in ["immortal", "45s", "600s"] {
+        let shipped = pick(3, 1, "eager/rotatinglast", life);
+        let top = shipped
+            .share_of_top_freed_slots_to_churn()
+            .expect("the rig's room frees the top board's slot");
+        assert!(
+            top >= 90.0,
+            "life={life}: the shipped fallback order now DEFENDS the top board's freed slot \
+             in the rig's three-board room ({top:.0} %). That is the outcome the next order \
+             is for; if it arrived from somewhere else, the reasoning in the module docs \
+             under \"Steady state, link mortality\" is stale and has to be rewritten"
+        );
+    }
+    // The reason, on the row where the claim is made: at the capture's
+    // short mode a board WAS on offer in 97 % of the top board's churn
+    // dials and lost the window. The other two rows carry a second,
+    // independent reason as well — 57 % of those dials have no board on
+    // offer at all when links never end, and 38 % at the 600 s mean —
+    // because a room of three boards whose links stand has every board
+    // excluded by §4.5 already. Neither reason is an order's to fix, and
+    // they are not summed here: this pins the one the mechanism cell
+    // reproduces.
+    let solo = pick(3, 1, "eager/rotatinglast", "45s")
+        .share_of_top_churn_dials_with_no_board_on_offer()
+        .expect("those dials happened");
+    assert!(
+        solo < 10.0,
+        "{solo:.0} % of the top board's churn dials at the 45 s mean had no board on offer \
+         at all, so the 100 % above is a room too small to hold a choice and NOT the key's \
+         term order — re-read the finding before acting on it"
+    );
+
+    // 5. The order is not worthless, and the boundary is where a board
+    //    with every slot still free exists to be preferred: at twenty
+    //    boards the shipped order takes the top board's share from
+    //    ~100 % down (measured 51 % at the 45 s row and 7 % at 600 s).
+    for life in ["45s", "600s"] {
+        let address = pick(20, 1, "eager/mostfree", life)
+            .share_of_top_freed_slots_to_churn()
+            .expect("measured above");
+        let shipped = pick(20, 1, "eager/rotatinglast", life)
+            .share_of_top_freed_slots_to_churn()
+            .expect("measured above");
+        assert!(
+            shipped * 1.5 < address,
+            "n=20 life={life}: the shipped order no longer cuts the top board's freed-slot \
+             share in a room that holds a board with slots to spare (shipped {shipped:.0} %, \
+             address order {address:.0} %)"
+        );
+    }
+
+    // 6. And the direction nobody should quote the wrong way round: for
+    //    the room as a WHOLE, mortality LOWERS the share of dials spent
+    //    on the phone rather than raising it, because a death hands both
+    //    boards a strict candidate back and they re-link in the next
+    //    round. The rig's steady-state number is worse than the
+    //    formation table's not because sessions end but because of the
+    //    board it was read on.
+    for n in [10usize, 20] {
+        let formation = pick(n, 1, "eager/mostfree", "immortal");
+        let steady = pick(n, 1, "eager/mostfree", "45s");
+        println!(
+            "n={n} one phone, address order: dials spent on churn {:.1} % formation -> \
+             {:.1} % steady; freed slots {} -> {}",
+            formation.share_spent_on_churn(),
+            steady.share_spent_on_churn(),
+            Ratio(formation.share_of_freed_slots_to_churn()),
+            Ratio(steady.share_of_freed_slots_to_churn()),
+        );
+        assert!(
+            steady.share_spent_on_churn() < formation.share_spent_on_churn(),
+            "n={n}: link mortality raised the share of the room's dials the address order \
+             spends on the phone ({:.0} % steady against {:.0} % formation). The module \
+             docs say it falls and say why; one of the two is now wrong",
+            steady.share_spent_on_churn(),
+            formation.share_spent_on_churn()
+        );
+    }
+}
+
+/// The mortality model's positive controls, in the shape the churn
+/// model's has: the parameter is a parameter (its zero changes nothing),
+/// and each of its mechanisms is shown firing once before the
+/// steady-state table above may be read as a measurement.
+#[test]
+fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
+    // 1. The distribution is the capture's, stated from the constants it
+    //    was read against, so the model's clock is not free-floating.
+    assert_eq!(
+        Mortality::CAPTURE_SHORT_MODE.mean_ms,
+        LINK_TIMEOUT_MS,
+        "the short mode is the registry's own expiry bound"
+    );
+    assert_eq!(
+        rounds(Mortality::CAPTURE_SHORT_MODE.mean_ms),
+        9,
+        "45 s at 5 s a round"
+    );
+    assert!(!Mortality::IMMORTAL.kills());
+    assert!(Mortality::CAPTURE_SHORT_MODE.kills() && Mortality::CAPTURE_TAIL.kills());
+    // A drawn lifetime is at least one round and the mean is the stated
+    // one: 10 000 draws, within 3 % of 9 rounds.
+    let mut stream = 0x1234_5678_9ABC_DEF1u64;
+    let mut total = 0u64;
+    for _ in 0..10_000 {
+        let life = Mortality::CAPTURE_SHORT_MODE.draw_lifetime(&mut stream);
+        assert!(life >= 1, "a link died in the round it formed");
+        total += u64::from(life);
+    }
+    let mean = total as f64 / 10_000.0;
+    assert!(
+        (mean - 9.5).abs() < 0.3,
+        "the geometric draw's mean is {mean:.2} rounds, not the 9.5 the ceiling of a 9-round \
+         exponential gives — the stated distribution and the drawn one have parted"
+    );
+
+    // 2. `Mortality::IMMORTAL` is the pre-steady-state simulation order
+    //    by order, not just in aggregate: nothing dies, and with nobody
+    //    churning no slot is ever freed, so there is no steady state to
+    //    read and the `freed%` column is `-` rather than 0.
+    for n in [10usize, 20] {
+        for seed in 0..50 {
+            let sim = run_sim(
+                n,
+                0xB1E5_0000 + seed,
+                FallbackSpec::Eager,
+                TargetChoice::RotatingLast,
+                Churn::NONE,
+                Mortality::IMMORTAL,
+            );
+            assert_eq!(sim.tally.deaths, 0);
+            assert_eq!(sim.tally.refill_dials, 0);
+            assert_eq!(sim.tally.dials, sim.tally.board_links);
+        }
+    }
+    // The aggregate half of the same claim is the two tables above: every
+    // row they pin is pinned as an EQUALITY and measured with
+    // `Mortality::IMMORTAL`, so a mortality path that took one draw from
+    // any other stream would have moved them.
+
+    // 3. A death frees BOTH slots. The run-wide invariant in `run_sim`
+    //    catches a half-freed link on every order; this is the direct
+    //    reading, on one order, of the thing that invariant protects: a
+    //    board that has lost links is back under the slot limit and back
+    //    in the scan, so the boards keep forming links all run long
+    //    instead of once.
+    let sim = run_sim(
+        10,
+        0xB1E5_0000,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::NONE,
+        Mortality::CAPTURE_SHORT_MODE,
+    );
+    assert!(
+        sim.tally.deaths > 20,
+        "only {} board-to-board links died over {HORIZON_ROUNDS} rounds at a {} ms mean \
+         lifetime — the sweep is not firing",
+        sim.tally.deaths,
+        Mortality::CAPTURE_SHORT_MODE.mean_ms
+    );
+    assert!(
+        sim.tally.board_links > 10,
+        "the room formed {} board links in total, so nothing re-linked after a death",
+        sim.tally.board_links
+    );
+    for (i, board) in sim.boards.iter().enumerate() {
+        assert!(
+            board.incoming.len() <= PERIPH_SLOTS,
+            "board {i} ended over the incoming slot limit"
+        );
+    }
+
+    // 4. The one direction that must NOT be read as good news, the
+    //    mortality version of the churn model's confound: a room whose
+    //    links die forms far MORE board-to-board links than one whose
+    //    links stand (113 300 against 10 000 per 1000 orders at n=10),
+    //    and that is a count of formations, not of connectivity. The
+    //    split-graph column is the connectivity reading, and it is taken
+    //    as a snapshot at the horizon.
+    let immortal = measure(
+        10,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::NONE,
+        Mortality::IMMORTAL,
+    );
+    let mortal = measure(
+        10,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::NONE,
+        Mortality::CAPTURE_SHORT_MODE,
+    );
+    assert!(
+        mortal.board_links > immortal.board_links * 5,
+        "the mortal room formed {} board links against the immortal room's {}; if that ratio \
+         has collapsed, the `bb` column no longer means formations and the table's reading \
+         of it is stale",
+        mortal.board_links,
+        immortal.board_links
+    );
+    assert_eq!(
+        (immortal.disconnected, mortal.disconnected),
+        (0, 0),
+        "a room of boards with no churning peer in it stopped converging"
     );
 }
 
@@ -1724,6 +2659,7 @@ fn the_shipped_config_connects_every_order_and_strands_nobody() {
                     FallbackSpec::Eager,
                     choice,
                     Churn::NONE,
+                    Mortality::IMMORTAL,
                 );
                 for (i, b) in sim.boards.iter().enumerate() {
                     assert!(
@@ -1750,7 +2686,13 @@ fn the_shipped_config_connects_every_order_and_strands_nobody() {
 /// Carlo says 21 %), 84 of which leave some board with no link at all.
 #[test]
 fn control_the_strict_rule_alone_disconnects_a_fifth_of_the_orders() {
-    let outcome = measure(10, FallbackSpec::Off, TargetChoice::FirstSeen, Churn::NONE);
+    let outcome = measure(
+        10,
+        FallbackSpec::Off,
+        TargetChoice::FirstSeen,
+        Churn::NONE,
+        Mortality::IMMORTAL,
+    );
     assert!(
         outcome.disconnected >= 100,
         "the strict rule connected almost every order ({}/{ORDERS} lost); \
@@ -1799,9 +2741,9 @@ const PHONE_ADDR: u64 = 0x4A1B_2C3D_4E5F;
 
 /// How many rotations a cell replays. The capture's period is
 /// [`CHURN_ROTATE_MS`] and the churn table's horizon is
-/// [`CHURN_HORIZON_ROUNDS`], so this is the same number of redraws the
+/// [`HORIZON_ROUNDS`], so this is the same number of redraws the
 /// measurement above runs to, stated from the same two constants.
-const ROTATIONS: u32 = CHURN_HORIZON_ROUNDS / rounds(CHURN_ROTATE_MS);
+const ROTATIONS: u32 = HORIZON_ROUNDS / rounds(CHURN_ROTATE_MS);
 
 /// One advertiser in a one-window room: the label the assertions name
 /// it by, the address it is advertising under right now, and the
@@ -1856,6 +2798,58 @@ fn dial_either_way(own_addr: u64, room: [Advertiser; 2], mode: ScanMode) -> &'st
         "the choice followed the arrival order: {room:?}"
     );
     forward.expect("the room holds a peer the rule permits")
+}
+
+/// The mechanism the steady-state table found, as one window (#412
+/// steady state). NOT a property anybody wants — a record of why the
+/// shipped fallback order cannot defend the freed slot in a small room,
+/// so that the fix which changes it has something to flip.
+///
+/// The key's terms are (tier, free-slot deficit, rotating group, address
+/// or sighting) and the DEFICIT sits above the group. A phone advertises
+/// no capability record at all, which reads as "all slots free" and
+/// deficits by zero; a board that has spent even one of its three
+/// incoming slots deficits by one. So in any fallback window where every
+/// board on offer is carrying at least one incoming link, the phone wins
+/// on the second term before the rotating-last order is ever consulted.
+///
+/// That is the rig's room: three boards, each holding an incoming link
+/// from the others, and the highest-addressed one — `feld-t114`, dialled
+/// by both the others — has no strict candidate at all. Its slot went to
+/// the phone 7 times out of 7, and the steady-state table reproduces
+/// 100 % under BOTH fallback orders for this reason and not for lack of
+/// a board to dial (the `solo%` column is 3 % there).
+#[test]
+fn a_board_that_has_spent_an_incoming_slot_loses_the_fallback_to_a_silent_phone() {
+    let spent = Advertiser {
+        label: "board holding one incoming link",
+        addr: BOARD_A,
+        caps: record(DUAL_ROLE, PERIPH_SLOTS as u8 - 1),
+    };
+    let phone = Advertiser {
+        label: "phone",
+        addr: PHONE_ADDR,
+        caps: None,
+    };
+    assert_eq!(
+        dial_either_way(BOARD_B, [spent, phone], ScanMode::Fallback),
+        "phone",
+        "the deficit term no longer outranks the rotating-last order — if this is now the \
+         board, the steady-state table's 100 % rows at n=3 are stale and have to be re-measured"
+    );
+    // The same window with a board that has spent nothing: then the
+    // deficits tie and the rotating-last order decides, which is the
+    // behaviour #412 shipped and which still holds.
+    let free = Advertiser {
+        label: "board with every slot free",
+        addr: BOARD_A,
+        caps: record(DUAL_ROLE, PERIPH_SLOTS as u8),
+    };
+    assert_eq!(
+        dial_either_way(BOARD_B, [free, phone], ScanMode::Fallback),
+        "board with every slot free",
+        "the rotating-last order lost a window it decides today"
+    );
 }
 
 /// #412 part 1, the cell that was red before the preference existed:
