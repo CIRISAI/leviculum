@@ -296,6 +296,7 @@ nrf-shellcheck:
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
         scripts/install-esptool.sh \
         scripts/run-fuzz.sh scripts/test-run-fuzz.sh \
+        scripts/check-tree-clean.sh scripts/test-tree-clean.sh \
         scripts/test-just-sweep.sh \
         scripts/check-firmware-images.sh
 
@@ -408,7 +409,8 @@ fuzz-nightly:
 # tree: the gate after it refused a dirty tree at gate-run.sh:51 with rc=5 and
 # landing stopped, with no log saying which run had written the file. The lock
 # is now a precondition the recipe fails on by name
-# (`run-fuzz.sh::assert_lock_current`).
+# (`run-fuzz.sh::assert_lock_current`), and `check-tree-clean` below is the
+# backstop for whatever else in this tier learns the same habit.
 [doc('Replay the fuzz corpus and the defect seeds through every target')]
 fuzz-regress:
     bash scripts/run-fuzz.sh --regress --skip-if-unavailable
@@ -1053,6 +1055,43 @@ source-invariant-tests: check-source-invariant-census
 check-source-invariant-census:
     @python3 scripts/check-source-invariant-census.py
 
+# The two halves of the tree-hygiene check, #295. A gate must not modify the
+# tree it runs in: `just fast` -> `fuzz-regress` rewrote a stale
+# `leviculum-std/fuzz/Cargo.lock` in the gate's push tree on 80c11aae, stayed
+# green over it, and the next gate refused the dirty tree (gate-run.sh:51,
+# rc=5) on 3b1bf00e. Landing stopped and no log named the run that had written
+# the file.
+#
+# The pair is deliberately NOT "assert the tree is clean". The push tree is
+# clean before a gate starts, but a developer's checkout is not, and a tier
+# that went red over its author's uncommitted work would be switched off
+# within a week. So `tree-snapshot` records the dirt that was already there
+# and `check-tree-clean` reports only the DELTA, by path and by content hash.
+#
+# They are wired into `fast` -- snapshot as its first dependency, the verify as
+# the last line of its body -- because that is the tier that ran the offending
+# recipe, and every later tier reaches it through `fast`. Run by hand,
+# `check-tree-clean` with no snapshot compares against a clean tree and says
+# so on its BASELINE line.
+[doc('Record which tracked files were already dirty before a tier')]
+tree-snapshot:
+    @bash scripts/check-tree-clean.sh --snapshot
+
+[doc('Report any tracked file a tier modified, by path and content')]
+check-tree-clean:
+    @bash scripts/check-tree-clean.sh --verify
+
+# Fixture test for that pair, on the push path for the same reason the fuzz
+# selftest is: a check for "the gate dirtied its tree" that has never been
+# watched fire is a comfort, not a guardrail. Every case injects the damage
+# into a throwaway checkout -- the #295 lockfile rewrite through a real
+# justfile whose steps run in the same order `fast`'s do, an already-dirty
+# tree that must stay green, a second edit to an already-modified file that
+# only the content hash can see. ~2 s.
+[doc('Drive the tree-hygiene check against an injected dirty file')]
+tree-clean-selftest:
+    bash scripts/test-tree-clean.sh
+
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
 # + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
@@ -1067,7 +1106,9 @@ check-source-invariant-census:
 # from the sources (#191c, the binary count of it is in `standard`)
 # + the release gate's two halves
 # (#312: the nightly green-ref signal, and the wiring that keeps a red
-# rnsd_interop out of the publish step).
+# rnsd_interop out of the publish step)
+# + the tree-hygiene pair (#295: the snapshot that opens the tier, the verify
+# that closes it, and the fixture test that has watched it fire).
 #
 # notices-guard sits after lint-nrf deliberately: it reads the firmware
 # workspace `--frozen`, and lint-nrf is what guarantees that workspace's git
@@ -1081,10 +1122,14 @@ check-source-invariant-census:
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
+fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
+    # LAST, and after the three lines above rather than among the dependencies:
+    # the subject is everything this tier did, and `cargo test` writing a file
+    # into the tree would refuse the next gate exactly as the fuzz build did.
+    @bash scripts/check-tree-clean.sh --verify
 
 # The gate the forge runs: `.woodpecker/ci.yml` on every push (Codeberg #299)
 # and `.woodpecker/nightly.yml` before it builds anything it publishes (#266).
