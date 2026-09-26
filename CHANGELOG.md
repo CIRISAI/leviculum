@@ -404,6 +404,21 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A node no longer holds the path answer it asked for itself (Codeberg
+  #428). On every interface that runs the announce ingress burst limiter —
+  which is every shared-medium interface, LoRa included — an announce for
+  an unknown destination arriving during a burst was queued until the
+  burst calmed. The exemption for a destination a path request is waiting
+  on covered only requests this node forwards on a neighbour's behalf, so
+  a node that issued its own path request and then received the answer
+  inside the burst window held that answer, and on a busy node the burst
+  need never calm. `lnpnd --status`, `rnprobe` and every `wait_for_path`
+  caller could time out against a reachable destination for that reason
+  alone. The reference exempts both tables at once (Transport.py:1701).
+  Ours now does too, for 15 s after the request went out — the point at
+  which the requester has given up and the announce is no longer anybody's
+  answer. An announce nobody here asked for is still held, unchanged.
+
 - `lnpnd --status` answers on a loaded shared instance (Codeberg #427). On
   a transport node under sustained announce traffic the query timed out 7
   of 8 times, at 5, 20 and 60 s alike, while the daemon worked fine the

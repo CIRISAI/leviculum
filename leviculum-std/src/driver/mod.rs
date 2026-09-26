@@ -3131,9 +3131,19 @@ impl ReticulumNode {
     /// (Codeberg #44): a young daemon-to-daemon peer interface under the
     /// stricter burst rate can hold a forwarded peer announce for
     /// `IC_BURST_HOLD` seconds, well past a client path-wait budget. A
-    /// client-issued PATH_REQUEST both registers a waiting path request (which
-    /// skips the ingress-limit check on the next inbound announce) and is
-    /// answered directly from the daemon's path table, so it bypasses the hold.
+    /// PATH_REQUEST is answered directly from the upstream's path table, so it
+    /// bypasses that hold, and the request also records this node's own
+    /// outstanding path request, which exempts the answering announce from OUR
+    /// ingress burst limiter for `PATH_REQUEST_TIMEOUT_MS` after it was sent
+    /// (`Transport::own_path_request_pending`, read at the announce ingress
+    /// gate in `leviculum-core/src/transport.rs::handle_announce`). Until
+    /// Codeberg #428 that second half was not true off the Local uplink: this
+    /// comment described an exemption the code only had for requests raised on
+    /// another node's behalf, so a loaded node could hold its own answer
+    /// indefinitely. Pinned by
+    /// `transport::tests::ingress_burst_tests::own_path_request_exempts_its_answer_from_the_burst_hold`
+    /// in `leviculum-core/src/transport.rs`, with the still-held and
+    /// past-the-window controls beside it.
     ///
     /// This is purely client-side: it issues the same PATH_REQUEST the stack
     /// already sends on demand and carries no medium awareness, so it stays

@@ -5394,10 +5394,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // exempt so path recovery is never starved.
         self.record_incoming_announce(interface_index);
         let dest_unknown = !self.storage.has_path(&dest_hash);
+        // Both of Python's exemption tables, not just the discovery one
+        // (Transport.py:1701 tests `path_requests` OR `discovery_path_requests`).
+        // `discovery_path_requests` holds requests we are answering FOR someone
+        // else; `path_requests` holds the ones this node raised for itself,
+        // written by `request_path` at Transport.py:2811 — which is
+        // `Transport::request_path` here. Without the second table a node on
+        // any ingress-controlled interface holds the very path response it
+        // asked for until the burst calms, which on a loaded node may never
+        // happen (Codeberg #428; #427 had removed only the Local-uplink case).
         let awaiting_pr = self
             .storage
             .get_discovery_path_request(&dest_hash)
-            .is_some();
+            .is_some()
+            || self.own_path_request_pending(&dest_hash, now);
         //
         // A released announce (from_held) bypasses this check: it was already
         // burst-limited once and process_held_announces only releases when the
@@ -8876,6 +8886,36 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             Some(d) => Self::deque_frequency(d, now_ms, IC_DEQUE_MIN_SAMPLE),
             None => 0.0,
         }
+    }
+
+    /// Is a path request THIS node raised still outstanding for `dest_hash`?
+    ///
+    /// The second arm of Python's ingress exemption (Transport.py:1701 tests
+    /// `packet.destination_hash in Transport.path_requests`), over the table
+    /// `request_path` writes at Transport.py:2811. Both of our writers of that
+    /// table correspond to that one reference line: `Transport::request_path`
+    /// for a path this node wants, and the re-origination in
+    /// `handle_path_request` for one it forwards on a neighbour's behalf —
+    /// Python reaches the same table through `request_path` in both cases.
+    ///
+    /// The edge, and our one deviation here: an entry older than
+    /// `PATH_REQUEST_TIMEOUT_MS` (15 s, Python `PATH_REQUEST_TIMEOUT`,
+    /// Transport.py:79) is NOT an exemption. Python does not window the
+    /// membership test at all; its entries simply live until
+    /// `PATH_REQUEST_GATE_TIMEOUT` (120 s, Transport.py:80/794) prunes them,
+    /// so its effective window is 120 s. Ours is the shorter one because
+    /// 15 s is when the requester itself gives up: past that no caller is
+    /// holding a deadline open for this answer, so it is an ordinary announce
+    /// and the burst limiter should have it back. The deviation only ever
+    /// HOLDS more than the reference, never drops more, and a hold is a delay
+    /// — wire and semantic compatibility are untouched. Pinned by
+    /// `path_request_older_than_the_window_is_no_longer_an_exemption`.
+    fn own_path_request_pending(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES], now: u64) -> bool {
+        self.storage
+            .get_path_request_time(dest_hash)
+            .is_some_and(|requested_at| {
+                now.saturating_sub(requested_at) < crate::constants::PATH_REQUEST_TIMEOUT_MS
+            })
     }
 
     /// Announce ingress-limit state machine (Codeberg #87; Python
@@ -15221,7 +15261,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6085), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6095), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -28512,6 +28552,168 @@ mod tests {
             assert!(
                 held < 12,
                 "the burst must not hold every announce; the first ones pass"
+            );
+        }
+
+        /// Codeberg #428: the answer to a path request THIS node issued must
+        /// reach the path table even while the receiving interface's ingress
+        /// burst is armed.
+        ///
+        /// Python exempts it by membership in `Transport.path_requests`
+        /// (Transport.py:1701), the table `request_path` fills at
+        /// Transport.py:2811. Before the exemption existed on our side, a node
+        /// on any ingress-controlled interface held the very path response it
+        /// had asked for until the burst calmed, which on a loaded node may
+        /// never happen.
+        #[test]
+        fn own_path_request_exempts_its_answer_from_the_burst_hold() {
+            let mut transport = make_transport();
+
+            // The answer we are going to wait for. Built first so its
+            // destination hash is known before the request goes out; the
+            // transport does not see it until the very end.
+            let (answer_raw, answered_dest) = make_announce_raw();
+
+            // Arm the burst with foreign announces on the ingress-controlled
+            // interface: the same flood
+            // `handle_announce_holds_excess_during_burst` proves holds.
+            for _ in 0..12 {
+                let (raw, _dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport
+                    .handle_announce(packet, NET_IFACE, &raw, false, false)
+                    .unwrap();
+                transport.clock.advance(100);
+            }
+            assert!(
+                burst_active(&transport, NET_IFACE),
+                "the flood must arm the burst, or this test proves nothing"
+            );
+            let held_before = held_count(&transport, NET_IFACE);
+
+            // This node now asks for the path itself, and the answer arrives
+            // well inside PATH_REQUEST_TIMEOUT_MS.
+            transport
+                .request_path(&answered_dest, None, &[0xA5u8; TRUNCATED_HASHBYTES])
+                .unwrap();
+            transport.clock.advance(500);
+            let packet = Packet::unpack(&answer_raw).unwrap();
+            transport
+                .handle_announce(packet, NET_IFACE, &answer_raw, false, false)
+                .unwrap();
+
+            assert!(
+                transport.has_path(&answered_dest),
+                "the answer to our own path request must reach the path table, \
+                 not the hold queue"
+            );
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                held_before,
+                "the exempt announce must not be queued"
+            );
+            assert!(
+                burst_active(&transport, NET_IFACE),
+                "the exemption is per announce; it must not disarm the burst"
+            );
+        }
+
+        /// Negative control for #428: the exemption is keyed on OUR outstanding
+        /// request, nothing wider. An announce for a destination this node never
+        /// asked about still meets the hold, so the burst limiter keeps doing
+        /// its job.
+        #[test]
+        fn announce_we_never_asked_for_is_still_held_during_the_burst() {
+            let mut transport = make_transport();
+
+            let (foreign_raw, foreign_dest) = make_announce_raw();
+            for _ in 0..12 {
+                let (raw, _dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport
+                    .handle_announce(packet, NET_IFACE, &raw, false, false)
+                    .unwrap();
+                transport.clock.advance(100);
+            }
+            assert!(burst_active(&transport, NET_IFACE));
+            let held_before = held_count(&transport, NET_IFACE);
+
+            // A request for a DIFFERENT destination must not carry the
+            // exemption over to this one.
+            let (_other_raw, other_dest) = make_announce_raw();
+            transport
+                .request_path(&other_dest, None, &[0x5Au8; TRUNCATED_HASHBYTES])
+                .unwrap();
+            transport.clock.advance(500);
+            let packet = Packet::unpack(&foreign_raw).unwrap();
+            transport
+                .handle_announce(packet, NET_IFACE, &foreign_raw, false, false)
+                .unwrap();
+
+            assert!(
+                !transport.has_path(&foreign_dest),
+                "an announce nobody here asked for must not bypass the hold"
+            );
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                held_before + 1,
+                "the unasked-for announce must be queued"
+            );
+        }
+
+        /// The documented edge of the #428 exemption: a request older than
+        /// `PATH_REQUEST_TIMEOUT_MS` is no longer an exemption. The requester
+        /// has given up by then (15 s is the client-side path-request timeout,
+        /// Python `PATH_REQUEST_TIMEOUT`, Transport.py:79), so the arriving
+        /// announce is no longer an answer anyone is holding a deadline open
+        /// for, and the burst limiter takes it back.
+        ///
+        /// No `poll()` runs in this test on purpose: the request entry is still
+        /// in storage (it is pruned only at `PATH_REQUEST_MIN_INTERVAL_MS`, 20 s),
+        /// so what is measured here is the window check and not table expiry.
+        #[test]
+        fn path_request_older_than_the_window_is_no_longer_an_exemption() {
+            let mut transport = make_transport();
+
+            let (answer_raw, answered_dest) = make_announce_raw();
+            for _ in 0..12 {
+                let (raw, _dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport
+                    .handle_announce(packet, NET_IFACE, &raw, false, false)
+                    .unwrap();
+                transport.clock.advance(100);
+            }
+            assert!(burst_active(&transport, NET_IFACE));
+            let held_before = held_count(&transport, NET_IFACE);
+
+            transport
+                .request_path(&answered_dest, None, &[0xC3u8; TRUNCATED_HASHBYTES])
+                .unwrap();
+            transport
+                .clock
+                .advance(crate::constants::PATH_REQUEST_TIMEOUT_MS + 1);
+            assert!(
+                transport
+                    .storage
+                    .get_path_request_time(&answered_dest)
+                    .is_some(),
+                "the request entry must still exist, or this measures expiry"
+            );
+
+            let packet = Packet::unpack(&answer_raw).unwrap();
+            transport
+                .handle_announce(packet, NET_IFACE, &answer_raw, false, false)
+                .unwrap();
+
+            assert!(
+                !transport.has_path(&answered_dest),
+                "an answer to a timed-out request must not bypass the hold"
+            );
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                held_before + 1,
+                "the late answer must be queued like any other announce"
             );
         }
 
