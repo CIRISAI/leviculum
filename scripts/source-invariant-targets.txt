@@ -184,11 +184,13 @@ skip  lnmsg           stamp_timing               # tokio runtime around the stam
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer
+skip  lnpnd           client_verbose_stderr      # spawns the shipped binary to read its stderr: a process, so not admissible however fast
 skip  lnpnd           control_permission         # binds sockets under a tokio runtime
 skip  lnpnd           event_log_analysis         # spawns the lnpnd binary over a temp-dir log
 skip  lnpnd           first_start_identity       # spawns the daemon and inspects what it wrote
 skip  lnpnd           lxmd_identity_takeover     # spawns the daemon against an lxmd identity
 skip  lnpnd           start_waits_for_daemon     # tokio runtime and a startup race with sleeps
 skip  lnpnd           status_default_budget      # tokio runtime with sleeps
+skip  lnpnd           status_under_transport_load # tokio runtime, local instance sockets, an announce storm and minute-scale timeouts
 skip  nmea0183        parsing                    # sentence corpus in-process; subject is the parser
 skip  vectors-verify  corpus                     # reads the vector corpus, but the subject is the codecs under it
