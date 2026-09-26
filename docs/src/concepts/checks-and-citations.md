@@ -597,6 +597,54 @@ injected-drift control, because two of the three verdicts are "leave it
 alone", and a fixer that has stopped repairing anything leaves
 everything alone.
 
+### 8. A green guard has to say how much of the corpus it read
+
+Sections 5-7 made the guard see more. What it still did not do was say
+how much it had not seen, and that omission is the whole of Codeberg
+#307 as it was actually experienced: the guard reported the file
+carrying the 1035-line-stale `has_path` row as fine. It was not lying —
+it had checked everything it could check. What it never said was that
+this was 912 of 1188 citations.
+
+So the status line now names three groups rather than one, because they
+are three different claims:
+
+```text
+doc citations: 1661 total; 809 checked against the symbol they name and
+holding; 0 named but not holding (reported below); 852 could not be
+checked (844 bare: existence and length only, 8 external: not in this
+workspace)
+```
+
+and when the third group is more than half the corpus, a warning line
+follows it saying so with the number. Measured 2026-09-26, all three
+corpora:
+
+| Corpus | Total | Checked against a symbol, holding | Could not be checked | Warns |
+|--------|-------|-----------------------------------|----------------------|-------|
+| doc (`docs/src/**`) | 1661 | 809 | 852 (51 %) | yes |
+| source (the four crates) | 2013 | 182 | 1831 (90 %) | yes |
+| script (`scripts/*.sh`, `Justfile`) | 8 | 1 | 7 (87 %) | yes |
+
+A warning and not a failure, deliberately. The source corpus is 90 %
+bare by nature — a `//` comment cites a line without writing the name
+beside it — and a guard that fails on that gets switched off within a
+week, which is worse than a guard that counts out loud. The number is
+the point: it is the size of the blind spot, and it is now in front of
+whoever reads a green run. Section 5's history anchor is the partial
+backstop for that class and prints its own split (1181 of the book's
+bare citations still hold their text, 100 undecidable; 2571 and 171 in
+source), so "could not be checked *by name*" is not the same as "not
+checked at all".
+
+The same pass gave the drift report the distance it had been leaving to
+the reader. It printed the cited line and the nearest occurrence of the
+identifier and stopped there; now it prints how far apart they are,
+because that is the number #307 was argued from. "1035 lines from the
+cited span" distinguishes a citation a refactor slid past from one
+nobody has read in a year, and a reader should not have to subtract two
+four-digit line numbers to learn which one they are looking at.
+
 ### What C cannot reach
 
 Issue comments, commit messages and batch reports carry hundreds of
