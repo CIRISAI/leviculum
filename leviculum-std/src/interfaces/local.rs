@@ -1227,48 +1227,13 @@ mod tests {
         );
     }
 
-    /// Capture tracing output for the duration of the returned guard.
-    ///
-    /// Thread-local default subscriber on a current-thread runtime, so the
-    /// tasks spawned by the test log into this buffer and no other test's.
-    /// Same pattern as the serial interface's arming-line test.
-    #[derive(Clone)]
-    struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogSink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock_recover().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
-        type Writer = LogSink;
-        fn make_writer(&'a self) -> LogSink {
-            self.clone()
-        }
-    }
-
-    fn capture_logs() -> (
-        Arc<std::sync::Mutex<Vec<u8>>>,
-        tracing::subscriber::DefaultGuard,
-    ) {
-        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(LogSink(Arc::clone(&buf)))
-            .with_max_level(tracing::Level::DEBUG)
-            .with_ansi(false)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
-        (buf, guard)
-    }
-
-    fn captured(buf: &Arc<std::sync::Mutex<Vec<u8>>>) -> String {
-        String::from_utf8_lossy(&buf.lock_recover()).into_owned()
-    }
+    // Capture tracing output for the duration of the returned guard:
+    // thread-local default subscriber on a current-thread runtime, so the
+    // tasks spawned by the test log into this buffer and no other test's.
+    // Shared with the `rnode` and `serial` test modules, which each carried
+    // their own copy until Codeberg #290; the shared helper is where that
+    // finding's callsite-interest pinning lives.
+    use crate::test_support::log_capture::{capture_logs, captured};
 
     /// Bring a shared-instance server up on `instance_name`, retrying the
     /// bind until the previous one's socket is released (dropping a listener

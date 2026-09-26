@@ -2217,35 +2217,14 @@ mod tests {
     #[tokio::test]
     async fn test_drop_direct_ingress_announces_arming_at_the_serial_boundary() {
         let _guard = serial_io_task_test_guard();
-        /// Capture tracing output for the duration of the returned guard.
-        /// Thread-local default subscriber + current-thread tokio runtime,
-        /// same pattern as the rnode airtime-lock tests.
-        #[derive(Clone)]
-        struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for LogSink {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
-            type Writer = LogSink;
-            fn make_writer(&'a self) -> LogSink {
-                self.clone()
-            }
-        }
 
         async fn logs_from_io_task(drop_direct: bool) -> String {
-            let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(LogSink(Arc::clone(&buf)))
-                .with_max_level(tracing::Level::DEBUG)
-                .with_ansi(false)
-                .finish();
-            let _guard = tracing::subscriber::set_default(subscriber);
+            // Thread-local capture + current-thread tokio runtime. Shared
+            // with the `rnode` and `local` test modules; this test asserts on
+            // the SAME callsite as the rnode one
+            // (`super::log_direct_ingress_filter_armed`), which is what made
+            // Codeberg #290's interest-cache race reachable from either side.
+            let (buf, _guard) = crate::test_support::log_capture::capture_logs();
 
             let (port, peer) = tokio::io::duplex(8192);
             let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
@@ -2268,8 +2247,7 @@ mod tests {
             drop(outgoing_tx);
             drop(peer);
             let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
-            let captured = buf.lock().unwrap();
-            String::from_utf8_lossy(&captured).into_owned()
+            crate::test_support::log_capture::captured(&buf)
         }
 
         let logs = logs_from_io_task(true).await;

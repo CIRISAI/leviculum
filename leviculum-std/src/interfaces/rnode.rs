@@ -4236,6 +4236,14 @@ pub(crate) fn spawn_rnode_multi_interface(
 mod tests {
     use super::*;
 
+    // Captures formatted tracing output into a buffer for the lifetime of the
+    // returned guard. Thread-local, and it sees the io task's events because a
+    // `#[tokio::test]`'s current-thread runtime polls every task it spawns on
+    // the test thread. Shared with the `serial` and `local` test modules,
+    // which each carried their own copy until Codeberg #290; the shared helper
+    // is where that finding's callsite-interest pinning lives.
+    use crate::test_support::log_capture::capture_logs;
+
     /// In-process RNode firmware stub over one half of a `tokio::io::duplex`
     /// pair. Answers the detect probe (so firmware validation passes) and echoes
     /// each radio-config command back as its confirmation. When it receives the
@@ -9827,42 +9835,6 @@ mod tests {
             &[1, 2, 3]
         ));
         assert!(c.radio_stats().is_none());
-    }
-
-    /// Capture tracing output for the duration of the returned guard. Uses a
-    /// thread-local default subscriber, which sees the io task's events
-    /// because the current-thread tokio test runtime runs every task on the
-    /// test thread. Same pattern as the core TUNNEL event test.
-    #[derive(Clone)]
-    struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for LogSink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
-        type Writer = LogSink;
-        fn make_writer(&'a self) -> LogSink {
-            self.clone()
-        }
-    }
-
-    fn capture_logs() -> (
-        Arc<std::sync::Mutex<Vec<u8>>>,
-        tracing::subscriber::DefaultGuard,
-    ) {
-        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(LogSink(Arc::clone(&buf)))
-            .with_max_level(tracing::Level::DEBUG)
-            .with_ansi(false)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
-        (buf, guard)
     }
 
     // -----------------------------------------------------------------
