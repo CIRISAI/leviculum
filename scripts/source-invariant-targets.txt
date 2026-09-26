@@ -134,6 +134,7 @@ skip  leviculum-lxmf  timebase_jump              # clock-jump behaviour; subject
 skip  leviculum-lxmf  wall_clock_producer        # reads a fixture, but the subject is the producer
 skip  leviculum-lxmf-node control_loopback       # tokio runtime, two nodes, sleeps
 skip  leviculum-lxmf-node deferred_resource_builds # tokio runtime and sleeps
+skip  leviculum-lxmf-node identity_persists      # runs the shipped lxmf-node executable three times, plus a shared-instance daemon
 skip  leviculum-lxmf-node peering_loopback       # tokio runtime, two nodes, sleeps
 skip  leviculum-lxmf-node propagation_loopback   # tokio runtime, two nodes, sleeps
 skip  leviculum-lxmf-node stamped_upload_loopback # tokio runtime, two nodes, sleeps
