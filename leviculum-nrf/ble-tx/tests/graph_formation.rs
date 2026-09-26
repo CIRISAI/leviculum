@@ -650,16 +650,148 @@
 //! both also hand back 17.6 % more board-to-board links in that room than
 //! the shipped order. Neither candidate can be chosen over the other on
 //! any row this instrument can measure, because the phone is the only peer
-//! that is both silent and rotating. The dial ledger stays the next order:
-//! what no candidate KEY defends is the window with one candidate in it
-//! (`solo%` = 100 % on the immortal rows, 57 % of the rig room's churn
-//! dials when links stand), and a ledger is the only thing that can refuse
-//! a dial the window has nobody to prefer over.
+//! that is both silent and rotating. What no candidate KEY defends is the
+//! window with one candidate in it (`solo%` = 100 % on the immortal rows,
+//! 57 % of the rig room's churn dials when links stand), and a ledger is
+//! the only thing that can refuse a dial the window has nobody to prefer
+//! over — which is the section below.
+//!
+//! # The dial ledger: what a board remembers (#412 part 2)
+//!
+//! Every policy above ORDERS the peers a window heard, and 311's own
+//! closing sentence is that an order needs something to prefer: `solo%`
+//! is 100 % of the top board's churn dials on the immortal rows, 57 % of
+//! the rig room's when links stand and 38 % at the 600 s mean. Part 2 is
+//! the parameter for that window — [`Ledger`], keyed by IDENTITY, fed by
+//! every dial outcome including the post-connect duplicate refusal, and
+//! consulted before a fallback dial. The rule itself is not here: it is
+//! [`leviculum_ble_tx::DialLedger`], and [`Ledger::policy`] is the whole
+//! of what this file says about it, so the tables below measure the
+//! shipped rule rather than a restatement of it.
+//!
+//! `hold` counts the windows the pause held shut where the board would
+//! otherwise have spent a fallback dial, `hold%` the share of those that
+//! had no board on offer at all — the solo window — and `refused` the
+//! dials spent to be told the identity was already live. The room is the
+//! rig's, three boards and a phone, under the shipped order; `none` is
+//! without the solar node and `rig` with it.
+//!
+//! | room | ledger | life     | hold  | hold% | dials | refused | bb    | d/use | disc |
+//! |------|--------|----------|------:|------:|------:|--------:|------:|------:|-----:|
+//! | none | off    | immortal |     0 |   -   |  9556 |    4746 |  2040 | 2.04  |    0 |
+//! | none | k=2    | immortal |  8410 | 24.54 |  7402 |    2248 |  2040 | 1.47  |    0 |
+//! | none | k=3    | immortal |  6526 | 15.81 |  7686 |    2704 |  2040 | 1.59  |    0 |
+//! | none | k=5    | immortal |  5674 | 18.19 |  7970 |    2988 |  2040 | 1.64  |    0 |
+//! | none | off    | 45 s     |     0 |   -   | 32258 |    3570 | 26790 | 1.40  |    0 |
+//! | none | k=3    | 45 s     |  3160 |  0.00 | 30960 |    2272 | 26790 | 1.34  |    0 |
+//! | none | off    | 600 s    |     0 |   -   | 11574 |    5058 |  3904 | 1.84  |    0 |
+//! | none | k=3    | 600 s    |  7104 |  7.60 |  9314 |    2706 |  3904 | 1.46  |    0 |
+//! | rig  | off    | immortal |     0 |   -   |  4220 |     204 |  2090 | 1.07  |    0 |
+//! | rig  | k=3    | immortal |     0 |   -   |  4220 |     204 |  2090 | 1.07  |    0 |
+//! | rig  | off    | 45 s     |     0 |   -   | 31594 |      32 | 26840 | 1.27  |    0 |
+//! | rig  | k=3    | 45 s     |    58 |  0.00 | 31588 |      32 | 26852 | 1.27  |    0 |
+//! | rig  | off    | 600 s    |     0 |   -   |  6670 |     424 |  3976 | 1.10  |   22 |
+//! | rig  | k=3    | 600 s    |   482 |  2.07 |  6570 |     326 |  3964 | 1.08  |   22 |
+//!
+//! ## It defends the window, and it costs that room nothing
+//!
+//! In the room 311 left open — three boards and a phone, no other node —
+//! the ledger refuses about one solo window per arrival order (1032 of
+//! the 6526 windows it holds shut at `k=3`, immortal) and takes the
+//! room's dials from 9556 to 7686, its refused dials from 4746 to 2704
+//! and its dials per link that lasted from 2.04 to 1.59. The
+//! board-to-board links formed and the split-graph count do not move by
+//! one: **2040 and 0 at every K in {2, 3, 5} and at every lifetime**,
+//! asserted as equalities. Every board link in that room is won on a
+//! strict verdict, and the ledger never touches a strict verdict.
+//!
+//! What it does NOT do is send the dial somewhere better. In the solo
+//! window there is nowhere better — `freed%` and `top%` stay at 100 %,
+//! because the dials that still happen still have only the phone to go
+//! to. The slot stays free instead of being spent, which is the only
+//! defence that window admits, and the column that shows it is `dials`.
+//!
+//! ## In the rig's real room it is nearly inert, which is the right answer
+//!
+//! With the solar node present the shipped order already sends the freed
+//! slot to a peer whose sessions last, so there is no run of waste to
+//! remember: at the capture's short mode the ledger holds 58 windows of
+//! the room's 31 588 dials shut and board-to-board links go UP by 12. At
+//! the 600 s row it holds 482 and costs 12 of 3976 links (0.3 %) at
+//! `disc` unchanged. The bound the test asserts is 1 % of the room's
+//! links and `disc` no worse than the shipped row, at every K.
+//!
+//! ## Ten and twenty boards: measurably inert
+//!
+//! At ten boards the ledger holds at most 1324 windows of a thousand
+//! orders shut and `disc` and the stranded-board count are IDENTICAL to
+//! the shipped row in every room, at every lifetime, for every K. At
+//! twenty the phone room is inert to the last dial — that room makes no
+//! refused dial at all over the thousand orders, so no K has anything to
+//! remember. A board in a room of ten has strict candidates and rarely
+//! reaches a fallback dial; the ledger is a small-room mechanism, and a
+//! small room is what a mesh of boards in one flat is.
+//!
+//! In a room of boards whose links never end it cannot fire at all, by
+//! construction rather than by seed: no dial ever has a wasted outcome,
+//! so #375's own guarantee cell (`disc` = 0, `bb` = 10 000 and 20 000,
+//! `d/use` = 1.00) is bit-identical with the ledger on. That is asserted
+//! as an equality for every K.
+//!
+//! ## The two parameters that are not K, measured
+//!
+//! **The pause is the knob, and one scan cycle is too short by
+//! construction.** A teardown resets the strict clock, so a board spends
+//! one full scan cycle ([`SCAN_FALLBACK_AFTER_MS`], 30 s) in strict mode
+//! before it can reach a fallback dial at all; a pause of exactly that
+//! length expires in the round the fallback becomes available and holds
+//! **nothing** shut — every column of the `k=3 pause=30s` row equals the
+//! `off` row, which the test asserts. The tables are measured at 120 s,
+//! the period the firmware's address table already waits after a dial
+//! that bought nothing ([`DEAD_END_TTL_MS`]); three minutes holds more
+//! windows and starts costing `disc` in the rig room (22 -> 24).
+//!
+//! **T under-states the waste on purpose.** At
+//! [`USEFUL_SESSION_MS`] (15 s, one keepalive interval) the ledger holds
+//! 6526 windows shut in the `none` immortal room; at 30 s it holds 10 636
+//! and at 45 s 11 948, with `hold%` rising from 15.8 % to 48.4 % and
+//! 54.0 % — more of the pause landing on the window it is for. Both also
+//! start costing: in the rig room at 600 s, `disc` 22 -> 24 and links
+//! 3976 -> 3952. The generous bound is the one that moves no other
+//! column.
+//!
+//! ## Where the immortal rows' waste comes from, and it is not sessions
+//!
+//! The two feeds are separable and the control separates them. With a
+//! churning peer that only ADVERTISES — no duplicate refusal is possible,
+//! the room's `refused` column is exactly zero — and links that never
+//! end, the ledger fires **not at all**, and the reason is a phase lock:
+//! the top board's cycle after a rotation is the expiry sweep
+//! ([`LINK_EXPIRY_ROUNDS`], 9 rounds) plus the strict phase
+//! ([`FALLBACK_AFTER_ROUNDS`], 6), so it re-dials 6 rounds into the
+//! peer's 9-round rotation and every session it buys is exactly 3 rounds
+//! — exactly [`USEFUL_SESSION_MS`], which belongs to the useful side. So
+//! on the immortal rows every wasted dial the ledger sees is a REFUSAL,
+//! and what it removes there is the duplicate-refusal storm. Turn
+//! mortality on in the same room and the session-length feed appears on
+//! its own, with `refused` still zero.
+//!
+//! ## What part 2 does not answer
+//!
+//! The firmware wiring is the next order, with its boot proof: nothing in
+//! `src/ble/columba.rs` reads [`leviculum_ble_tx::DialLedger`] yet, and
+//! the two sites that would feed it (`columba.rs:867` and `:2050`, the
+//! duplicate refusals) still write only the 120 s address skip. And the
+//! harness still holds the four limits stated under "What this harness
+//! still cannot see" — above all that every dial connects, where the
+//! captures say 93 % of `feld-t114`'s did not. A ledger fed by failed
+//! CONNECTS as well as by refusals and short sessions would have more to
+//! remember than this instrument can show it.
 
 use leviculum_ble_tx::{
     dial_preference, free_slots, judge_duplicate, should_initiate, with_free_slots, CandidateTable,
-    ConnectDecision, DialPreference, DupVerdict, FallbackOrder, Origin, ScanMode,
-    CAP_PERIPHERAL_ONLY, LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU,
+    ConnectDecision, DialLedger, DialPreference, DupVerdict, FallbackOrder, LedgerPolicy, Origin,
+    ScanMode, CAP_PERIPHERAL_ONLY, LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU,
     SCAN_FALLBACK_AFTER_MS, WINDOW_CANDIDATES,
 };
 
@@ -1030,6 +1162,146 @@ impl Statics {
     }
 }
 
+/// The dial ledger (#412 part 2) — a parameter of the same kind as
+/// [`Churn`], [`Mortality`] and [`Statics`], and `Ledger::NONE`
+/// reproduces every row 311 measured bit for bit.
+///
+/// # What it is for
+///
+/// Every candidate KEY measured in this file orders the peers a window
+/// heard. `solo%` is the share of the top board's churn dials in which
+/// the window heard exactly one thing it was allowed to dial, and it is
+/// 100 % on every immortal row, 57 % of the rig room's churn dials when
+/// links stand and 38 % at the 600 s mean (306 §3, 311 §4). No order can
+/// defend that window: there is nothing to prefer. Only a memory of what
+/// the last dials BOUGHT can, and that is this.
+///
+/// # Why the key is the identity and the effect is board-wide
+///
+/// The two are one fact, not two decisions. The identity behind an
+/// advertisement is unknowable before connecting
+/// (`columba.rs:1723`) — the board learns it from the Identity
+/// characteristic, post-connect — so a table keyed by identity cannot be
+/// consulted per candidate at all. What it CAN do is decide whether this
+/// board may spend a fallback dial at all right now, which is what the
+/// order calls "strict verdicts only, no fallback, longer pause": while
+/// the hold stands the board dials strict verdicts (a board below it in
+/// the address sort) and nothing else, and a window holding only peers it
+/// would have to reach for with a fallback verdict is a window it leaves
+/// alone.
+///
+/// Keying by identity rather than by address is what lets the count
+/// reach `k` at all: the firmware's address table
+/// (`columba.rs:1660`, fed at `:867` and `:2050`) forgets a rotating peer
+/// at every rotation, which is the hole #412 is about — five addresses in
+/// four minutes, so each entry is a first offence forever.
+///
+/// # What counts as wasted
+///
+/// One dial, one outcome, against the peer's identity:
+///
+/// - refused post-connect because that identity was already live (the
+///   rotated-address duplicate, `columba.rs:867`): wasted, always. The
+///   connect, the discovery and the identity read were paid for and the
+///   session never existed.
+/// - a session that ended below `t_ms`: wasted. The dial was paid, the
+///   link carried nothing.
+/// - a session that ended at or above `t_ms`: not wasted, and the
+///   identity's count goes back to zero. The ledger remembers a RUN of
+///   waste, never a total.
+///
+/// A link still standing when the run ends has no outcome yet and is not
+/// recorded, which is the same rule the `short` column already follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ledger {
+    /// Wasted dials to ONE identity, in a row, before the board stops
+    /// spending fallback dials. Zero keeps no ledger at all.
+    k: u32,
+    /// The session length below which a dial counts as wasted.
+    t_ms: u64,
+    /// How long the board then goes without a fallback dial, in rounds,
+    /// counted from the wasted outcome that armed it. Every further
+    /// wasted dial to a condemned identity re-arms it, so a condemned
+    /// peer is reached for at most once per pause.
+    pause_rounds: u32,
+}
+
+impl Ledger {
+    /// No ledger: every row measured before #412 part 2.
+    const NONE: Self = Self {
+        k: 0,
+        t_ms: 0,
+        pause_rounds: 0,
+    };
+
+    /// The pause the tables are measured with: the firmware's own
+    /// [`DEAD_END_TTL_MS`], 120 s, which is what it already waits after
+    /// a dial that bought nothing — the same period, keyed by identity
+    /// instead of by address.
+    ///
+    /// One *scan cycle* ([`FALLBACK_AFTER_ROUNDS`], 30 s), which the
+    /// order proposed, cannot be the default and the reason is
+    /// structural rather than measured: a teardown resets the strict
+    /// clock (`conn_link_down` -> `note_strict_reset`), so the board
+    /// already spends one full scan cycle in strict mode before it can
+    /// reach a fallback dial. A pause of exactly that length expires in
+    /// the round the fallback becomes available and suppresses nothing.
+    /// `control_the_dial_ledger_is_a_parameter_and_every_mechanism_fires`
+    /// measures that inertness rather than asserting it.
+    const PAUSE_ROUNDS: u32 = rounds(DEAD_END_TTL_MS);
+
+    /// The defaults the tables are measured with: `k` wasted dials in a
+    /// row, `t_ms` = [`USEFUL_SESSION_MS`] (the most generous bound
+    /// available, so the ledger under-states the waste rather than
+    /// manufacturing it) and [`Self::PAUSE_ROUNDS`].
+    const fn after(k: u32) -> Self {
+        Self {
+            k,
+            t_ms: USEFUL_SESSION_MS,
+            pause_rounds: Self::PAUSE_ROUNDS,
+        }
+    }
+
+    /// The same with one of the two other parameters moved, for the
+    /// sweeps: the threshold a session has to reach, and the pause.
+    const fn with_t(k: u32, t_ms: u64) -> Self {
+        Self {
+            k,
+            t_ms,
+            pause_rounds: Self::PAUSE_ROUNDS,
+        }
+    }
+
+    const fn with_pause(k: u32, pause_rounds: u32) -> Self {
+        Self {
+            k,
+            t_ms: USEFUL_SESSION_MS,
+            pause_rounds,
+        }
+    }
+
+    /// Whether this configuration keeps a ledger at all. When false
+    /// nothing is recorded and nothing is consulted, which is what makes
+    /// [`Self::NONE`] bit-identical rather than merely equal in
+    /// aggregate.
+    const fn keeps(self) -> bool {
+        self.k > 0
+    }
+
+    /// The row as the SHARED rule states it
+    /// ([`leviculum_ble_tx::LedgerPolicy`]), which is the rule every
+    /// number in the tables below is measured through. The harness holds
+    /// no second copy of the rule: it states the policy in the units the
+    /// rest of the file is written in (rounds) and hands it over.
+    const fn policy(self) -> LedgerPolicy {
+        LedgerPolicy {
+            wasted_run: self.k,
+            useful_session_ms: self.t_ms,
+            pause_ms: self.pause_rounds as u64 * ROUND_MS,
+        }
+    }
+}
+
 /// The ATT MTU handed to the duplicate rule for BOTH links of a
 /// duplicate pair.
 ///
@@ -1312,6 +1584,11 @@ struct Board {
     /// The firmware's `DEAD_ENDS` table, per board: address and the
     /// round its entry expires.
     dead_ends: Vec<(u64, u32)>,
+    /// The #412 part 2 ledger, as the shared type holds it
+    /// ([`leviculum_ble_tx::DialLedger`]): per identity the run of dials
+    /// this board paid for and got nothing back from, and the one pause
+    /// those runs arm.
+    ledger: DialLedger,
 }
 
 impl Board {
@@ -1347,6 +1624,28 @@ impl Board {
             .min_by_key(|(_, until)| *until)
             .expect("the table is full, so it is not empty");
         *oldest = (addr, until);
+    }
+
+    /// One dial outcome, against the identity the dial turned out to
+    /// have (#412 part 2), through the shared rule itself — `round` is
+    /// the harness's clock and [`ROUND_MS`] is what one round is worth,
+    /// which is the only conversion between the two.
+    ///
+    /// `session_ms` is `None` for a dial refused post-connect: there was
+    /// no session.
+    fn note_dial_outcome(
+        &mut self,
+        ledger: Ledger,
+        identity: &[u8; 16],
+        session_ms: Option<u64>,
+        round: u32,
+    ) {
+        self.ledger.note(
+            ledger.policy(),
+            identity,
+            session_ms,
+            u64::from(round) * ROUND_MS,
+        );
     }
 
     /// The live link, if any, that already belongs to this identity —
@@ -1395,6 +1694,11 @@ struct Churner {
 /// like a board's.
 struct StaticPeer {
     addr: u64,
+    /// Its 16-byte identity — the solar node's `e19b2b38...` is one
+    /// identity under one address, so the ledger's key and the §4.5
+    /// address exclusion agree about it, which is the whole difference
+    /// from the phone.
+    identity: [u8; 16],
     /// Its one central link, and the round it dies in.
     outgoing: Option<Link>,
     /// Peripheral links, at most [`PERIPH_SLOTS`] — the count it
@@ -1477,6 +1781,24 @@ struct Tally {
     /// [`TargetChoice::FirstSeen`] leaves both at zero.
     offers: usize,
     offers_cannot_dial: usize,
+    /// Windows the [`Ledger`] held shut (#412 part 2): the board had
+    /// reached its fallback bound, the ledger's pause stood, the strict
+    /// window was empty and the fallback window would NOT have been. So
+    /// this counts the dials the ledger refused to make — nothing else in
+    /// the model can tell that from a board that simply had nobody to
+    /// dial. Zero under [`Ledger::NONE`] by construction.
+    held_windows: usize,
+    /// Of those: the windows whose fallback candidates held no BOARD at
+    /// all — the solo window, the one no candidate ORDER can defend,
+    /// which is what the ledger exists to close. The rest are windows
+    /// where a board was on offer and the ledger declined it too; that is
+    /// the cost side, and `bb` and `disc` are where it shows up.
+    held_windows_solo: usize,
+    /// The same pair for the highest-addressed board alone — the board
+    /// the rig read, and the only one whose `solo%` is comparable to
+    /// `feld-t114`'s.
+    held_windows_top: usize,
+    held_windows_top_solo: usize,
 }
 
 impl Tally {
@@ -1489,6 +1811,72 @@ impl Tally {
 struct Sim {
     boards: Vec<Board>,
     tally: Tally,
+}
+
+/// Everything board `i`'s scan pass would offer its window in `mode`:
+/// arrived, advertising (a full board is not, #372), not itself, not
+/// already linked to it (the Core Spec §4.5 exclusion), not backed off by
+/// the dead-end table — and then the real rule's verdict, keeping only
+/// the peers it says to dial.
+///
+/// `(peer index, address, verdict, advertised free slots)` in peer-space
+/// order. A churning peer is always advertising and never full — that is
+/// what "always in the room" means.
+///
+/// It is a function rather than the inline block it was because #412 part
+/// 2 needs the same window asked twice: once in the mode the board is
+/// allowed to use, and once in [`ScanMode::Fallback`] to count what the
+/// ledger's pause refused. Asking it twice is free of randomness — the
+/// window reads state and consumes no draw — so the counterfactual cannot
+/// move a single row.
+fn window_offers(
+    i: usize,
+    mode: ScanMode,
+    round: u32,
+    choice: TargetChoice,
+    boards: &[Board],
+    churners: &[Churner],
+    static_peers: &[StaticPeer],
+) -> Vec<(usize, u64, ConnectDecision, Option<u8>)> {
+    let churn_base = boards.len();
+    let static_base = churn_base + churners.len();
+    let peers = static_base + static_peers.len();
+    (0..peers)
+        .filter_map(|p| {
+            if p == i {
+                return None;
+            }
+            let free_of = |held: usize| {
+                choice
+                    .advertises_slots()
+                    .then(|| u8::try_from(PERIPH_SLOTS - held).expect("slots fit a byte"))
+            };
+            let (addr, caps, free) = if p < churn_base {
+                if !boards[p].arrived || boards[p].incoming.len() >= PERIPH_SLOTS {
+                    return None;
+                }
+                (boards[p].addr, Some(0), free_of(boards[p].incoming.len()))
+            } else if p < static_base {
+                // No v0.3.0 record at all: full capability per
+                // §3.2, no slot count per item 3.
+                (churners[p - churn_base].addr, None, None)
+            } else {
+                // The rig's fourth kind: a full record with a
+                // real count, like the board it is (#372 stops
+                // its advertising when the last slot goes).
+                let peer = &static_peers[p - static_base];
+                if peer.incoming.len() >= PERIPH_SLOTS {
+                    return None;
+                }
+                (peer.addr, Some(0), free_of(peer.incoming.len()))
+            };
+            if boards[i].addr_linked(addr) || boards[i].dead_end(addr, round) {
+                return None;
+            }
+            let decision = should_initiate(0, boards[i].addr, caps, addr, mode);
+            decision.initiate().then_some((p, addr, decision, free))
+        })
+        .collect()
 }
 
 /// Whether the two boards hold a link in either direction. Board
@@ -1511,6 +1899,11 @@ fn linked(boards: &[Board], a: usize, b: usize) -> bool {
 /// their own seeded streams, so the main stream — addresses, arrival
 /// order, scan order, first-seen picks — is byte-identical to what it
 /// was.
+// Eight parameters, and each one is a room or policy knob a table varies
+// on its own: the two sizes, the seed, the two #375 policies and the
+// three #412 models. A struct around them would move the same list one
+// indirection away without removing a call site or a parameter.
+#[allow(clippy::too_many_arguments)]
 fn run_sim(
     n: usize,
     seed: u64,
@@ -1519,6 +1912,7 @@ fn run_sim(
     churn: Churn,
     mortality: Mortality,
     statics: Statics,
+    ledger: Ledger,
 ) -> Sim {
     let mut rng = seed | 1;
     let mut boards: Vec<Board> = Vec::with_capacity(n);
@@ -1536,6 +1930,7 @@ fn run_sim(
             held_outgoing: false,
             strict_rounds: 0,
             dead_ends: Vec::new(),
+            ledger: DialLedger::new(),
         });
     }
 
@@ -1585,9 +1980,10 @@ fn run_sim(
     // Where each kind lives in the peer space: boards below `churn_base`,
     // churning peers below `static_base`, static peers above it. Every
     // comparison in the loop below names one of these rather than `n`.
+    // ([`window_offers`] derives the same two bounds from the slice
+    // lengths it is handed, so the peer space has one definition.)
     let churn_base = n;
     let static_base = churn_base + churn.peers;
-    let peers = static_base + statics.peers;
 
     // The static peer's address: a static-random one like a board's
     // (`11` on top), drawn BELOW every board's in the rig's own
@@ -1612,6 +2008,7 @@ fn run_sim(
         }
         static_peers.push(StaticPeer {
             addr,
+            identity: identity_from(addr),
             outgoing: None,
             incoming: Vec::new(),
             strict_rounds: 0,
@@ -1660,6 +2057,16 @@ fn run_sim(
                 if link.useful_ms(round) < USEFUL_SESSION_MS {
                     tally.short += 1;
                 }
+                // The dial that bought this link has its outcome now
+                // (#412 part 2). Only a peer that goes SILENT reaches the
+                // expiry sweep, and only a churning peer ever does, so
+                // the identity is the churner's — the one identity behind
+                // however many addresses it has spent.
+                let identity = churners
+                    .get(link.peer.wrapping_sub(churn_base))
+                    .expect("only a churning peer ever goes silent")
+                    .identity;
+                board.note_dial_outcome(ledger, &identity, Some(link.useful_ms(round)), round);
                 board.strict_rounds = 0;
             }
             let before = board.incoming.len();
@@ -1693,6 +2100,17 @@ fn run_sim(
                 tally.short += 1;
             }
             boards[i].strict_rounds = 0;
+            // This board's dial has its outcome (#412 part 2). A session
+            // that ended below the ledger's threshold is a wasted dial
+            // whoever it was spent on: the ledger has no notion of a peer
+            // kind, only of what a dial bought, and a board whose links
+            // keep dying young is exactly as bad a target as a phone.
+            let identity = if link.peer < churn_base {
+                boards[link.peer].identity
+            } else {
+                static_peers[link.peer - static_base].identity
+            };
+            boards[i].note_dial_outcome(ledger, &identity, Some(link.useful_ms(round)), round);
             if link.peer < churn_base {
                 boards[link.peer].incoming.retain(|l| l.peer != i);
                 boards[link.peer].strict_rounds = 0;
@@ -1742,55 +2160,50 @@ fn run_sim(
             // a live connection); an outgoing link already stopped the
             // scan above, so incoming links are what decides here.
             let suspended = spec == FallbackSpec::Quiet && !boards[i].incoming.is_empty();
-            let mode = if spec != FallbackSpec::Off
+            let wants_fallback = spec != FallbackSpec::Off
                 && !suspended
-                && boards[i].strict_rounds >= FALLBACK_AFTER_ROUNDS
-            {
+                && boards[i].strict_rounds >= FALLBACK_AFTER_ROUNDS;
+            // #412 part 2: the ledger's pause. It only ever takes a
+            // fallback dial away — a strict verdict is the #375 guarantee
+            // and the ledger never touches one — so it is read exactly
+            // where the mode would have flipped.
+            let held = ledger.keeps()
+                && wants_fallback
+                && boards[i].ledger.fallback_held(u64::from(round) * ROUND_MS);
+            let mode = if wants_fallback && !held {
                 ScanMode::Fallback
             } else {
                 ScanMode::Strict
             };
-            // Visible: arrived, advertising (a full board is not), not
-            // ourselves, not already linked to us, not backed off; then
-            // the real rule. A churning peer is always advertising and
-            // never full — that is what "always in the room" means.
-            let candidates: Vec<(usize, u64, ConnectDecision, Option<u8>)> = (0..peers)
-                .filter_map(|p| {
-                    if p == i {
-                        return None;
-                    }
-                    let free_of = |held: usize| {
-                        choice
-                            .advertises_slots()
-                            .then(|| u8::try_from(PERIPH_SLOTS - held).expect("slots fit a byte"))
-                    };
-                    let (addr, caps, free) = if p < churn_base {
-                        if !boards[p].arrived || boards[p].incoming.len() >= PERIPH_SLOTS {
-                            return None;
-                        }
-                        (boards[p].addr, Some(0), free_of(boards[p].incoming.len()))
-                    } else if p < static_base {
-                        // No v0.3.0 record at all: full capability per
-                        // §3.2, no slot count per item 3.
-                        (churners[p - churn_base].addr, None, None)
-                    } else {
-                        // The rig's fourth kind: a full record with a
-                        // real count, like the board it is (#372 stops
-                        // its advertising when the last slot goes).
-                        let peer = &static_peers[p - static_base];
-                        if peer.incoming.len() >= PERIPH_SLOTS {
-                            return None;
-                        }
-                        (peer.addr, Some(0), free_of(peer.incoming.len()))
-                    };
-                    if boards[i].addr_linked(addr) || boards[i].dead_end(addr, round) {
-                        return None;
-                    }
-                    let decision = should_initiate(0, boards[i].addr, caps, addr, mode);
-                    decision.initiate().then_some((p, addr, decision, free))
-                })
-                .collect();
+            let candidates =
+                window_offers(i, mode, round, choice, &boards, &churners, &static_peers);
             if candidates.is_empty() {
+                // What the pause cost, counted where it was paid: the
+                // strict window is empty, so this board dials nothing
+                // this round, and the fallback window it was not allowed
+                // to open would have offered something. `solo` is the
+                // window #412 part 2 exists for — one with no board in it
+                // at all, which no candidate ORDER can defend.
+                if held {
+                    let would = window_offers(
+                        i,
+                        ScanMode::Fallback,
+                        round,
+                        choice,
+                        &boards,
+                        &churners,
+                        &static_peers,
+                    );
+                    if !would.is_empty() {
+                        let solo = !would.iter().any(|&(p, _, _, _)| p < churn_base);
+                        tally.held_windows += 1;
+                        tally.held_windows_solo += usize::from(solo);
+                        if i == top_board {
+                            tally.held_windows_top += 1;
+                            tally.held_windows_top_solo += usize::from(solo);
+                        }
+                    }
+                }
                 if suspended {
                     boards[i].strict_rounds = 0;
                 } else {
@@ -1947,9 +2360,16 @@ fn run_sim(
                     DupVerdict::KeepOld(_) | DupVerdict::Wait => {
                         // Refused. The address is backed off — and the
                         // peer's next rotation walks straight past it.
+                        // The IDENTITY is what the ledger writes down
+                        // instead (#412 part 2, and the outcome part 3
+                        // named): a dial that was paid for in full and
+                        // bought no session at all is wasted whatever
+                        // address it was spent on.
                         tally.refused += 1;
                         let addr = churner.addr;
+                        let identity = churner.identity;
                         boards[i].note_dead_end(addr, round);
+                        boards[i].note_dial_outcome(ledger, &identity, None, round);
                         continue;
                     }
                 }
@@ -2010,6 +2430,16 @@ fn run_sim(
                             if link.useful_ms(round) < USEFUL_SESSION_MS {
                                 tally.short += 1;
                             }
+                            // The peer's own dial displaced the link OUR
+                            // dial paid for, so that dial's outcome is
+                            // known here too (#412 part 2).
+                            let identity = churner.identity;
+                            boards[b].note_dial_outcome(
+                                ledger,
+                                &identity,
+                                Some(link.useful_ms(round)),
+                                round,
+                            );
                             boards[b].strict_rounds = 0;
                         }
                         Origin::Incoming => boards[b].incoming.retain(|l| l.peer != n + k),
@@ -2274,6 +2704,14 @@ struct Outcome {
     /// Window offers and 303's tier among them, summed.
     offers: usize,
     offers_cannot_dial: usize,
+    /// Windows the [`Ledger`] held shut, summed, and the ones among them
+    /// that had no board on offer at all — the solo window #412 part 2
+    /// exists for. Zero under [`Ledger::NONE`].
+    held_windows: usize,
+    held_windows_solo: usize,
+    /// The same pair for the highest-addressed board alone.
+    held_windows_top: usize,
+    held_windows_top_solo: usize,
 }
 
 impl Outcome {
@@ -2330,6 +2768,15 @@ impl Outcome {
         })
     }
 
+    /// Of the windows the ledger held shut, the share that had no board
+    /// on offer at all: how much of the pause landed on the window it is
+    /// FOR. `None` when the ledger never held a window shut, which is
+    /// what [`Ledger::NONE`] is and a statement rather than a zero.
+    fn share_of_held_windows_solo(&self) -> Option<f64> {
+        (self.held_windows > 0)
+            .then(|| self.held_windows_solo as f64 * 100.0 / self.held_windows as f64)
+    }
+
     /// Dials per board-to-board link — #412's third number read against
     /// the Leitstern instead of against link lifetime. A link to a
     /// phone is useful TO THE PHONE; it is not a link the mesh gained.
@@ -2351,6 +2798,7 @@ fn measure(
     churn: Churn,
     mortality: Mortality,
     statics: Statics,
+    ledger: Ledger,
 ) -> Outcome {
     let mut outcome = Outcome {
         disconnected: 0,
@@ -2374,6 +2822,10 @@ fn measure(
         refill_dials_top_churn_solo: 0,
         offers: 0,
         offers_cannot_dial: 0,
+        held_windows: 0,
+        held_windows_solo: 0,
+        held_windows_top: 0,
+        held_windows_top_solo: 0,
     };
     for seed in 0..ORDERS {
         let sim = run_sim(
@@ -2384,6 +2836,7 @@ fn measure(
             churn,
             mortality,
             statics,
+            ledger,
         );
         let boards = &sim.boards;
         if !is_connected(boards) {
@@ -2419,6 +2872,10 @@ fn measure(
         outcome.refill_dials_top_churn_solo += sim.tally.refill_dials_top_churn_solo;
         outcome.offers += sim.tally.offers;
         outcome.offers_cannot_dial += sim.tally.offers_cannot_dial;
+        outcome.held_windows += sim.tally.held_windows;
+        outcome.held_windows_solo += sim.tally.held_windows_solo;
+        outcome.held_windows_top += sim.tally.held_windows_top;
+        outcome.held_windows_top_solo += sim.tally.held_windows_top_solo;
     }
     outcome
 }
@@ -2504,6 +2961,7 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
             Churn::NONE,
             Mortality::IMMORTAL,
             Statics::NONE,
+            Ledger::NONE,
         );
         let at20 = measure(
             20,
@@ -2512,6 +2970,7 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
             Churn::NONE,
             Mortality::IMMORTAL,
             Statics::NONE,
+            Ledger::NONE,
         );
         println!(
             "{label:<15} {:>4} / {:<4} / {:<8} {:>4} / {:<4} / {:<8}",
@@ -2680,8 +3139,24 @@ fn a_churning_peer_takes_the_fallback_dial_and_the_board_graph_pays_for_it() {
     );
     for churn in [Churn::NONE, Churn::phones(1), Churn::phones(2)] {
         for (spec, choice, label) in CONFIGS {
-            let at10 = measure(10, spec, choice, churn, Mortality::IMMORTAL, Statics::NONE);
-            let at20 = measure(20, spec, choice, churn, Mortality::IMMORTAL, Statics::NONE);
+            let at10 = measure(
+                10,
+                spec,
+                choice,
+                churn,
+                Mortality::IMMORTAL,
+                Statics::NONE,
+                Ledger::NONE,
+            );
+            let at20 = measure(
+                20,
+                spec,
+                choice,
+                churn,
+                Mortality::IMMORTAL,
+                Statics::NONE,
+                Ledger::NONE,
+            );
             let cells = |outcome: &Outcome| {
                 format!(
                     "{:>6} {:>9} {:>6} {:>5.0} {:>5} {:>5}",
@@ -2845,6 +3320,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
                 Churn::NONE,
                 Mortality::IMMORTAL,
                 Statics::NONE,
+                Ledger::NONE,
             );
             assert_eq!(sim.tally.dials, sim.tally.board_links);
             assert_eq!(
@@ -2866,6 +3342,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         Churn::NONE,
         Mortality::IMMORTAL,
         Statics::NONE,
+        Ledger::NONE,
     );
     let strict_churned = measure(
         10,
@@ -2874,6 +3351,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         Churn::advertisers(1),
         Mortality::IMMORTAL,
         Statics::NONE,
+        Ledger::NONE,
     );
     assert_eq!(
         (strict_churned.churn_links, strict_churned.refused),
@@ -2901,6 +3379,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         Churn::advertisers(1),
         Mortality::IMMORTAL,
         Statics::NONE,
+        Ledger::NONE,
     );
     assert!(
         eager_churned.churn_links > 0,
@@ -2926,6 +3405,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         Churn::NONE,
         Mortality::IMMORTAL,
         Statics::NONE,
+        Ledger::NONE,
     );
     let strict_dialled = measure(
         10,
@@ -2934,6 +3414,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         Churn::phones(1),
         Mortality::IMMORTAL,
         Statics::NONE,
+        Ledger::NONE,
     );
     assert!(
         strict_dialled.saturated < strict_spread.saturated,
@@ -3021,6 +3502,7 @@ fn the_steady_state_freed_slot_goes_to_the_phone_under_the_address_order() {
                     churn,
                     mortality,
                     Statics::NONE,
+                    Ledger::NONE,
                 );
                 println!(
                     "{n:<4} {:<6} {label:<19} {life:>8} {:>7} {:>7} {:>6} {:>7} {:>6} {:>6} \
@@ -3289,6 +3771,7 @@ fn the_static_peer_takes_the_freed_slot_the_phone_was_blamed_for() {
                     Churn::phones(1),
                     mortality,
                     statics,
+                    Ledger::NONE,
                 );
                 println!(
                     "{room:<8} {label:<19} {life:>8} {:>7} {:>7} {:>7} {:>6} {:>7} {:>7} \
@@ -3457,6 +3940,7 @@ fn the_two_candidate_keys_with_a_static_peer_at_ten_and_twenty_boards() {
                     Churn::phones(1),
                     mortality,
                     Statics::rig(1),
+                    Ledger::NONE,
                 );
                 println!(
                     "{n:<4} {label:<19} {life:>8} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} {:>6} \
@@ -3551,6 +4035,7 @@ fn the_two_candidate_keys_cost_the_empty_room_nothing() {
                 Churn::NONE,
                 Mortality::IMMORTAL,
                 Statics::NONE,
+                Ledger::NONE,
             );
             println!(
                 "n={n} {label} empty room: disc {} boardless {} bb {} d/use {}",
@@ -3596,6 +4081,7 @@ fn the_two_candidate_keys_cost_the_empty_room_nothing() {
             Churn::phones(1),
             Mortality::CAPTURE_SHORT_MODE,
             Statics::NONE,
+            Ledger::NONE,
         );
         println!(
             "n=3 {label} one phone, 45 s, no static peer: top% {} bb {} disc {} d/use {}",
@@ -3625,6 +4111,653 @@ fn the_two_candidate_keys_cost_the_empty_room_nothing() {
     }
 }
 
+/// The ledger configurations the tables below sweep (#412 part 2). The
+/// defaults are `k` in {2, 3, 5} at T = [`USEFUL_SESSION_MS`] and the
+/// [`Ledger::PAUSE_ROUNDS`] pause; the last four move one parameter at a
+/// time off the middle of that sweep, so every row differs from `k=3` in
+/// exactly one number.
+const LEDGERS: [(Ledger, &str); 8] = [
+    (Ledger::NONE, "off"),
+    (Ledger::after(2), "k=2"),
+    (Ledger::after(3), "k=3"),
+    (Ledger::after(5), "k=5"),
+    (Ledger::with_t(3, LINK_ABANDONED_MS), "k=3 T=30s"),
+    (Ledger::with_t(3, LINK_TIMEOUT_MS), "k=3 T=45s"),
+    (
+        Ledger::with_pause(3, FALLBACK_AFTER_ROUNDS),
+        "k=3 pause=30s",
+    ),
+    (
+        Ledger::with_pause(3, 6 * FALLBACK_AFTER_ROUNDS),
+        "k=3 pause=3m",
+    ),
+];
+
+/// #412 part 2 in the room the rig has: three boards, one phone, with and
+/// without the solar node, under the SHIPPED candidate order and every
+/// [`Ledger`] the sweep above states.
+///
+/// The columns are 311's plus the two the ledger adds: `hold` counts the
+/// windows the pause held shut where the board would otherwise have
+/// spent a fallback dial, and `hold%` is the share of those windows that
+/// had no board on offer at all — the solo window, the one #412 part 2
+/// exists for. `bb` and `disc` are where the cost of holding the OTHER
+/// windows shut shows up.
+#[test]
+fn the_dial_ledger_and_the_solo_window_in_the_rig_room() {
+    let mut rows = Vec::new();
+    println!(
+        "#412 part 2 — the rig's room (3 boards, 1 phone), shipped order, per {ORDERS} orders. \
+         `hold` is the windows the pause held shut, `hold%` the share of those with no board \
+         on offer at all, `refused` the dials spent to be told the identity was already live."
+    );
+    println!(
+        "{:<6} {:<14} {:>8} {:>7} {:>7} {:>6} {:>6} {:>7} {:>6} {:>7} {:>8} {:>6} {:>7} \
+         {:>6} {:>5}",
+        "room",
+        "ledger",
+        "life",
+        "freed%",
+        "top%",
+        "solo%",
+        "top#",
+        "hold",
+        "hold%",
+        "dials",
+        "refused",
+        "sb",
+        "bb",
+        "d/use",
+        "disc"
+    );
+    for (statics, room) in [(Statics::NONE, "none"), (Statics::rig(1), "rig")] {
+        for (ledger, label) in LEDGERS {
+            for (mortality, life) in LIFETIMES {
+                let outcome = measure(
+                    3,
+                    FallbackSpec::Eager,
+                    TargetChoice::RotatingLast,
+                    Churn::phones(1),
+                    mortality,
+                    statics,
+                    ledger,
+                );
+                println!(
+                    "{room:<6} {label:<14} {life:>8} {:>7} {:>7} {:>6} {:>6} {:>7} {:>6} \
+                     {:>7} {:>8} {:>6} {:>7} {:>6} {:>5}",
+                    Ratio(outcome.share_of_freed_slots_to_churn()),
+                    Ratio(outcome.share_of_top_freed_slots_to_churn()),
+                    Ratio(outcome.share_of_top_churn_dials_with_no_board_on_offer()),
+                    outcome.refill_dials_top_churn,
+                    outcome.held_windows,
+                    Ratio(outcome.share_of_held_windows_solo()),
+                    outcome.dials,
+                    outcome.refused,
+                    outcome.static_links,
+                    outcome.board_links,
+                    Ratio(outcome.dials_per_useful()),
+                    outcome.disconnected,
+                );
+                rows.push(((room, label, life), outcome));
+            }
+        }
+    }
+    let pick = |room: &str, label: &str, life: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rr, rl, rlife), _)| *rr == room && *rl == label && *rlife == life)
+            .expect("the row was measured above")
+            .1
+    };
+    // The parameter is a parameter: with no ledger the room is 311's room
+    // to the link, in both of its rooms and at every lifetime. Equalities
+    // — the ledger draws from no stream at all, so `Ledger::NONE` cannot
+    // move a seed.
+    for (room, life, bb, disc) in [
+        ("none", "immortal", 2040, 0),
+        ("none", "45s", 26_790, 0),
+        ("none", "600s", 3904, 0),
+        ("rig", "immortal", 2090, 0),
+        ("rig", "45s", 26_840, 0),
+        ("rig", "600s", 3976, 22),
+    ] {
+        let off = pick(room, "off", life);
+        assert_eq!(
+            (off.board_links, off.disconnected, off.held_windows),
+            (bb, disc, 0),
+            "{room} {life}: the ledger moved a row measured without one"
+        );
+    }
+
+    // 1. The pause the order proposed — one scan cycle — holds nothing
+    //    shut, in every room and at every lifetime, and the reason is
+    //    structural rather than a seed: a teardown resets the strict
+    //    clock, so the board spends one full scan cycle in strict mode
+    //    before it can reach a fallback dial at all, and a pause of
+    //    exactly that length expires in the round the fallback becomes
+    //    available. It is in the sweep as the control of the pause knob:
+    //    a ledger whose pause is too short is a ledger that does nothing,
+    //    which is not the same statement as "the ledger does nothing".
+    for (_, life) in LIFETIMES {
+        for room in ["none", "rig"] {
+            let one_cycle = pick(room, "k=3 pause=30s", life);
+            let off = pick(room, "off", life);
+            assert_eq!(
+                (
+                    one_cycle.held_windows,
+                    one_cycle.board_links,
+                    one_cycle.dials
+                ),
+                (0, off.board_links, off.dials),
+                "{room} {life}: a pause of one scan cycle now withholds a dial, so the strict \
+                 phase after a teardown is no longer one scan cycle long and \
+                 `Ledger::PAUSE_ROUNDS` has to be re-derived"
+            );
+        }
+    }
+
+    // 2. The room with no fourth kind in it is the room 311 left open:
+    //    `solo%` is 57 % of the top board's churn dials when links stand
+    //    and 38 % at the 600 s mean, and no candidate order can defend a
+    //    window with one candidate in it. The ledger does: it holds those
+    //    windows shut, and it costs this room NOTHING — not one
+    //    board-to-board link, not one split graph, at every K in the
+    //    sweep. Every board link here is won on a strict verdict, which
+    //    the ledger never touches.
+    for k in ["k=2", "k=3", "k=5"] {
+        for (_, life) in LIFETIMES {
+            let with = pick("none", k, life);
+            let off = pick("none", "off", life);
+            assert_eq!(
+                (with.board_links, with.disconnected),
+                (off.board_links, off.disconnected),
+                "none {k} {life}: the ledger cost the phone-only room board links or \
+                 connectivity"
+            );
+            assert!(
+                with.held_windows > 0,
+                "none {k} {life}: the ledger never held a window shut, so the row measures \
+                 nothing"
+            );
+            assert!(
+                with.dials < off.dials,
+                "none {k} {life}: the ledger held {} windows shut and the room still made {} \
+                 dials against {} without it",
+                with.held_windows,
+                with.dials,
+                off.dials
+            );
+        }
+    }
+    // And what it bought, on the two rows whose windows are the solo
+    // ones: dials per link that lasted, which is #412's third number.
+    for (life, ceiling) in [("immortal", 1.70), ("600s", 1.55)] {
+        let with = pick("none", "k=3", life);
+        let off = pick("none", "off", life);
+        let (with_ratio, off_ratio) = (
+            with.dials_per_useful().expect("dials were made"),
+            off.dials_per_useful().expect("dials were made"),
+        );
+        assert!(
+            with_ratio < ceiling && with_ratio < off_ratio,
+            "none k=3 {life}: dials per useful link is {with_ratio:.2} with the ledger and \
+             {off_ratio:.2} without it"
+        );
+    }
+
+    // 3. And in the room the rig actually has, the one with the solar
+    //    node, the ledger is nearly inert — which is the right answer,
+    //    not a disappointment: the shipped order already sends the top
+    //    board's freed slot to a peer whose sessions last (0.32 % to the
+    //    phone), so there is no run of waste to remember. The bound is
+    //    what matters: it must not take the room's links away.
+    for k in ["k=2", "k=3", "k=5"] {
+        for (_, life) in LIFETIMES {
+            let with = pick("rig", k, life);
+            let off = pick("rig", "off", life);
+            let lost = off.board_links.saturating_sub(with.board_links);
+            assert!(
+                lost * 100 <= off.board_links,
+                "rig {k} {life}: the ledger cost {lost} of {} board-to-board links, past the \
+                 1 % the sweep measures it at",
+                off.board_links
+            );
+            assert!(
+                with.disconnected <= off.disconnected,
+                "rig {k} {life}: split board graphs went from {} to {} with the ledger — it \
+                 has to cost this room no connectivity at all, and at K = 2 it measurably \
+                 improves it",
+                off.disconnected,
+                with.disconnected
+            );
+        }
+    }
+}
+
+/// One size's ledger table (#412 part 2, item 2): the three rooms 311
+/// measured — boards alone, boards with a phone, and the rig's room with
+/// the solar node in it as well — under the SHIPPED candidate order, at
+/// the capture's two lifetimes, for each [`Ledger`] handed in.
+///
+/// The immortal row is measured for the room of boards alone only: that
+/// is #375's own guarantee cell (`disc` = 0 with every board linked), and
+/// at these sizes a room with a churning peer in it has almost no
+/// freed-slot denominator before the horizon — the rig's three-board
+/// table above is where the immortal churn rows live.
+///
+/// `refused` is the column the ledger is really about at these sizes: a
+/// dial refused post-connect is a connect, a discovery and an identity
+/// read spent to be told the identity was already live.
+fn ledger_rows(
+    n: usize,
+    ledgers: &[(Ledger, &'static str)],
+) -> Vec<((&'static str, &'static str, &'static str), Outcome)> {
+    println!("#412 part 2 — n={n}, shipped order, per {ORDERS} orders");
+    println!(
+        "{:<6} {:<6} {:>8} {:>7} {:>7} {:>7} {:>6} {:>8} {:>8} {:>6} {:>5} {:>6}",
+        "room",
+        "ledger",
+        "life",
+        "freed%",
+        "top%",
+        "hold",
+        "hold%",
+        "bb",
+        "refused",
+        "d/use",
+        "disc",
+        "board-"
+    );
+    let mut rows = Vec::new();
+    for (churn, statics, room) in [
+        (Churn::NONE, Statics::NONE, "empty"),
+        (Churn::phones(1), Statics::NONE, "phone"),
+        (Churn::phones(1), Statics::rig(1), "rig"),
+    ] {
+        for &(ledger, label) in ledgers {
+            for (mortality, life) in LIFETIMES {
+                if mortality == Mortality::IMMORTAL && room != "empty" {
+                    continue;
+                }
+                let outcome = measure(
+                    n,
+                    FallbackSpec::Eager,
+                    TargetChoice::RotatingLast,
+                    churn,
+                    mortality,
+                    statics,
+                    ledger,
+                );
+                println!(
+                    "{room:<6} {label:<6} {life:>8} {:>7} {:>7} {:>7} {:>6} {:>8} {:>8} {:>6} \
+                     {:>5} {:>6}",
+                    Ratio(outcome.share_of_freed_slots_to_churn()),
+                    Ratio(outcome.share_of_top_freed_slots_to_churn()),
+                    outcome.held_windows,
+                    Ratio(outcome.share_of_held_windows_solo()),
+                    outcome.board_links,
+                    outcome.refused,
+                    Ratio(outcome.dials_per_useful()),
+                    outcome.disconnected,
+                    outcome.boardless,
+                );
+                rows.push(((room, label, life), outcome));
+            }
+        }
+    }
+    rows
+}
+
+/// What the rows above have to hold whatever the size: the ledger's zero
+/// is a zero, a room of boards whose links never end never records a
+/// single outcome, and nothing the ledger does may cost #375's guarantee.
+fn assert_ledger_costs_the_room_nothing(
+    n: usize,
+    rows: &[((&'static str, &'static str, &'static str), Outcome)],
+    ledgers: &[(Ledger, &'static str)],
+) {
+    let pick = |room: &str, label: &str, life: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rr, rl, rlife), _)| *rr == room && *rl == label && *rlife == life)
+            .expect("the row was measured above")
+            .1
+    };
+    for &(ledger, label) in ledgers {
+        if !ledger.keeps() {
+            continue;
+        }
+        // 1. A room of boards whose links never end: no dial ever has a
+        //    wasted outcome, so the ledger writes nothing and the row is
+        //    the shipped row dial for dial. An equality, and the strongest
+        //    statement available — it says the mechanism cannot fire
+        //    there, not merely that the totals matched.
+        let (with, off) = (
+            pick("empty", label, "immortal"),
+            pick("empty", "off", "immortal"),
+        );
+        assert_eq!(
+            (
+                with.held_windows,
+                with.board_links,
+                with.dials,
+                with.disconnected,
+                with.boardless
+            ),
+            (0, off.board_links, off.dials, 0, 0),
+            "n={n} {label}: the ledger moved #375's own guarantee cell — a room of boards \
+             with links that never end, where no dial can have a wasted outcome at all"
+        );
+        // 2. And with mortality on, where links DO die young and the
+        //    ledger does fire in a room with no phone in it, it must not
+        //    strand a board or split the graph. `bb` may move — a held
+        //    window is a dial not made — and the bound is what the
+        //    tables above measure it at.
+        for (room, life) in [
+            ("empty", "45s"),
+            ("empty", "600s"),
+            ("phone", "45s"),
+            ("phone", "600s"),
+            ("rig", "45s"),
+            ("rig", "600s"),
+        ] {
+            let (with, off) = (pick(room, label, life), pick(room, "off", life));
+            assert!(
+                with.boardless <= off.boardless,
+                "n={n} {room} {life} {label}: the ledger left {} boards with no board link at \
+                 all against {} without it",
+                with.boardless,
+                off.boardless
+            );
+            let lost = off.board_links.saturating_sub(with.board_links);
+            assert!(
+                lost * 100 <= off.board_links,
+                "n={n} {room} {life} {label}: the ledger cost {lost} of {} board-to-board \
+                 links, past the 1 % the tables measure it at",
+                off.board_links
+            );
+        }
+    }
+}
+
+/// #412 part 2 at ten boards, with the K sweep the order asks for.
+#[test]
+fn the_dial_ledger_at_ten_boards() {
+    let sweep = [
+        (Ledger::NONE, "off"),
+        (Ledger::after(2), "k=2"),
+        (Ledger::after(3), "k=3"),
+        (Ledger::after(5), "k=5"),
+    ];
+    let rows = ledger_rows(10, &sweep);
+    let pick = |room: &str, label: &str, life: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rr, rl, rlife), _)| *rr == room && *rl == label && *rlife == life)
+            .expect("the row was measured above")
+            .1
+    };
+    // The parameter is a parameter, on the cells 311 published for this
+    // size under the shipped order.
+    for (room, life, bb, disc) in [
+        ("empty", "immortal", 10_000, 0),
+        ("empty", "45s", 122_812, 0),
+        ("empty", "600s", 19_270, 12),
+        ("phone", "45s", 118_040, 0),
+        ("phone", "600s", 18_804, 14),
+        ("rig", "45s", 116_710, 0),
+        ("rig", "600s", 17_610, 32),
+    ] {
+        let off = pick(room, "off", life);
+        assert_eq!(
+            (off.board_links, off.disconnected, off.held_windows),
+            (bb, disc, 0),
+            "n=10 {room} {life}: the ledger moved a row 311 measured without one"
+        );
+    }
+    assert_ledger_costs_the_room_nothing(10, &rows, &sweep);
+    // The ledger is nearly INERT at this size, and that is a finding
+    // rather than a gap: a board in a room of ten has strict candidates,
+    // so it rarely reaches a fallback dial at all, and the whole thousand
+    // orders hold four refused dials against the three-board room's
+    // thousands. It still fires — the size does not switch the mechanism
+    // off — and what it costs is nothing: split graphs and stranded
+    // boards identical to the shipped row in every room, at every
+    // lifetime, for every K.
+    assert!(
+        ["k=2", "k=3", "k=5"]
+            .iter()
+            .any(|k| pick("phone", k, "45s").held_windows > 0),
+        "n=10: the ledger never held one window shut in the phone room, so the rows above \
+         measure nothing at this size"
+    );
+    for k in ["k=2", "k=3", "k=5"] {
+        for (room, life) in [
+            ("empty", "45s"),
+            ("empty", "600s"),
+            ("phone", "45s"),
+            ("phone", "600s"),
+            ("rig", "45s"),
+            ("rig", "600s"),
+        ] {
+            let (with, off) = (pick(room, k, life), pick(room, "off", life));
+            assert_eq!(
+                (with.disconnected, with.boardless),
+                (off.disconnected, off.boardless),
+                "n=10 {room} {life} {k}: the ledger moved connectivity at a size where it \
+                 holds at most {} of the room's windows shut",
+                with.held_windows
+            );
+        }
+    }
+}
+
+/// #412 part 2 at twenty boards, the size #375's guarantee is stated at.
+/// Two ledgers rather than the sweep: the K sweep is in the two tables
+/// above, and this size is the expensive one — what it is here for is the
+/// guarantee cell and the cost columns.
+#[test]
+fn the_dial_ledger_at_twenty_boards() {
+    let sweep = [(Ledger::NONE, "off"), (Ledger::after(3), "k=3")];
+    let rows = ledger_rows(20, &sweep);
+    let pick = |room: &str, label: &str, life: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rr, rl, rlife), _)| *rr == room && *rl == label && *rlife == life)
+            .expect("the row was measured above")
+            .1
+    };
+    for (room, life, bb, disc) in [
+        ("empty", "immortal", 20_000, 0),
+        ("empty", "45s", 242_126, 0),
+        ("phone", "45s", 239_166, 0),
+        ("phone", "600s", 38_008, 42),
+        ("rig", "45s", 236_596, 0),
+        ("rig", "600s", 36_554, 78),
+    ] {
+        let off = pick(room, "off", life);
+        assert_eq!(
+            (off.board_links, off.disconnected, off.held_windows),
+            (bb, disc, 0),
+            "n=20 {room} {life}: the ledger moved a row 311 measured without one"
+        );
+    }
+    assert_ledger_costs_the_room_nothing(20, &rows, &sweep);
+    // At twenty boards the phone room is inert to the last dial: the room
+    // makes no refused dial at all over the thousand orders, so there is
+    // no run of waste for any K to remember, and the shipped row and the
+    // ledger row are the same row. Where the ledger does fire at this
+    // size — the rooms whose links die young — it costs nothing.
+    let (with, off) = (pick("phone", "k=3", "45s"), pick("phone", "off", "45s"));
+    assert_eq!(
+        (
+            with.held_windows,
+            with.refused,
+            with.board_links,
+            with.dials
+        ),
+        (0, 0, off.board_links, off.dials),
+        "n=20 phone 45s: the ledger now has something to remember in a room of twenty, so \
+         the inertness this size is quoted for has to be re-measured"
+    );
+    for (room, life) in [
+        ("empty", "45s"),
+        ("empty", "600s"),
+        ("rig", "45s"),
+        ("rig", "600s"),
+    ] {
+        let (with, off) = (pick(room, "k=3", life), pick(room, "off", life));
+        assert_eq!(
+            (with.disconnected, with.boardless),
+            (off.disconnected, off.boardless),
+            "n=20 {room} {life}: the ledger moved connectivity at the size #375's guarantee \
+             is stated at, holding {} windows shut",
+            with.held_windows
+        );
+    }
+}
+
+/// The ledger's positive controls, in the shape the churn model's, the
+/// mortality model's and the static peer's have: the parameter is a
+/// parameter, the two things that feed it are shown feeding it
+/// separately, and the constants the tables are measured at are the
+/// crate's own rather than a second copy of them.
+#[test]
+fn control_the_dial_ledger_is_a_parameter_and_every_mechanism_fires() {
+    // 1. The harness measures the SHIPPED rule, not a restatement of it:
+    //    the row labelled `k=3` is `LedgerPolicy::MEASURED` to the
+    //    millisecond, and each of the three defaults is the crate
+    //    constant it is read off. Three assertions rather than one, so a
+    //    drift names which parameter drifted.
+    assert_eq!(
+        Ledger::after(3).policy(),
+        LedgerPolicy::MEASURED,
+        "the sweep's middle row is no longer the policy the crate ships"
+    );
+    assert_eq!(
+        (USEFUL_SESSION_MS, LedgerPolicy::USEFUL_SESSION_MS),
+        (LedgerPolicy::USEFUL_SESSION_MS, LINK_ABANDONED_MS / 2),
+        "the harness's useful-session bound and the crate's have parted"
+    );
+    assert_eq!(
+        (u64::from(Ledger::PAUSE_ROUNDS) * ROUND_MS, DEAD_END_TTL_MS),
+        (LedgerPolicy::PAUSE_MS, LedgerPolicy::PAUSE_MS),
+        "the pause is meant to be the period the firmware's address table already waits"
+    );
+
+    // 2. The two things that feed the ledger, shown feeding it one at a
+    //    time, in the two rooms that hold exactly one of them.
+    //
+    //    A churning peer that only ADVERTISES can never produce a
+    //    duplicate refusal — a duplicate needs a link in the other role,
+    //    so the room's `refused` column is exactly zero. In that room
+    //    with links that never end the ledger fires NOT AT ALL, and the
+    //    reason is a phase lock worth knowing about: the top board's
+    //    cycle after a rotation is the expiry sweep
+    //    ([`LINK_EXPIRY_ROUNDS`], 9 rounds) plus the strict phase
+    //    ([`FALLBACK_AFTER_ROUNDS`], 6), so it re-dials 6 rounds into the
+    //    peer's 9-round rotation and every session it buys is exactly 3
+    //    rounds — exactly [`USEFUL_SESSION_MS`], which belongs to the
+    //    useful side. So in the immortal room every wasted dial the
+    //    ledger sees is a REFUSAL, and that is what the tables' immortal
+    //    rows are measuring.
+    let advertiser_immortal = measure(
+        3,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::advertisers(1),
+        Mortality::IMMORTAL,
+        Statics::NONE,
+        Ledger::after(3),
+    );
+    assert_eq!(
+        (
+            advertiser_immortal.refused,
+            advertiser_immortal.held_windows
+        ),
+        (0, 0),
+        "a room whose only churning peer never dials has no refusal to feed the ledger, and \
+         its every churn session is exactly one useful-session bound long; if it now fires, \
+         one of those two facts has moved and the immortal rows mean something else"
+    );
+    //    Turn the mortality row on in the same room and the OTHER feed
+    //    appears on its own: no refusal anywhere, and sessions that end
+    //    below the bound, and the ledger fires on those alone.
+    let advertiser_mortal = measure(
+        3,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::advertisers(1),
+        Mortality::CAPTURE_SHORT_MODE,
+        Statics::NONE,
+        Ledger::after(3),
+    );
+    assert_eq!(
+        advertiser_mortal.refused, 0,
+        "a peer that never dials produced a duplicate refusal, so this row is not the \
+         session-length feed on its own"
+    );
+    assert!(
+        advertiser_mortal.held_windows > 0,
+        "with no refusal in the room and sessions dying below the bound, the ledger still \
+         never fired: the session-length half does not feed the table at all"
+    );
+    //    And with the same peer dialling, the refusal feed is added to
+    //    it: strictly more windows held, same room otherwise.
+    let dialling_mortal = measure(
+        3,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::phones(1),
+        Mortality::CAPTURE_SHORT_MODE,
+        Statics::NONE,
+        Ledger::after(3),
+    );
+    assert!(
+        dialling_mortal.refused > 0
+            && dialling_mortal.held_windows > advertiser_mortal.held_windows,
+        "the refusal half added nothing: {} refusals and {} held windows against {} held \
+         windows with no refusal in the room",
+        dialling_mortal.refused,
+        dialling_mortal.held_windows,
+        advertiser_mortal.held_windows
+    );
+
+    // 3. And the pause is what withholds the dial, not the bookkeeping: a
+    //    ledger whose pause is zero records every run exactly as the
+    //    measured one does and holds nothing, so the room is the shipped
+    //    room dial for dial.
+    let no_pause = measure(
+        3,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::phones(1),
+        Mortality::IMMORTAL,
+        Statics::NONE,
+        Ledger::with_pause(3, 0),
+    );
+    let off = measure(
+        3,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::phones(1),
+        Mortality::IMMORTAL,
+        Statics::NONE,
+        Ledger::NONE,
+    );
+    assert_eq!(
+        (
+            no_pause.held_windows,
+            no_pause.dials,
+            no_pause.board_links,
+            no_pause.refused
+        ),
+        (0, off.dials, off.board_links, off.refused),
+        "a ledger with a zero pause changed the room, so something other than the pause is \
+         withholding dials"
+    );
+}
+
 /// The static peer's positive controls, in the shape the churn model's
 /// and the mortality model's have: the parameter is a parameter, and each
 /// of its mechanisms is shown firing before the tables above may be read
@@ -3646,6 +4779,7 @@ fn control_the_static_peer_is_a_parameter_and_dials_like_the_capture() {
             Churn::phones(1),
             mortality,
             Statics::NONE,
+            Ledger::NONE,
         );
         assert_eq!(
             (
@@ -3668,6 +4802,7 @@ fn control_the_static_peer_is_a_parameter_and_dials_like_the_capture() {
         Churn::phones(1),
         Mortality::CAPTURE_SHORT_MODE,
         Statics::accepting(1),
+        Ledger::NONE,
     );
     assert!(
         accepting.static_links > 0,
@@ -3691,6 +4826,7 @@ fn control_the_static_peer_is_a_parameter_and_dials_like_the_capture() {
                 Churn::NONE,
                 Mortality::CAPTURE_SHORT_MODE,
                 statics,
+                Ledger::NONE,
             );
             seen |= sim
                 .boards
@@ -3715,6 +4851,7 @@ fn control_the_static_peer_is_a_parameter_and_dials_like_the_capture() {
         Churn::NONE,
         Mortality::CAPTURE_SHORT_MODE,
         Statics::rig(1),
+        Ledger::NONE,
     );
     assert!(
         no_phone.static_links > 0 && no_phone.refused == 0,
@@ -3793,6 +4930,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
                 Churn::NONE,
                 Mortality::IMMORTAL,
                 Statics::NONE,
+                Ledger::NONE,
             );
             assert_eq!(sim.tally.deaths, 0);
             assert_eq!(sim.tally.refill_dials, 0);
@@ -3818,6 +4956,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
         Churn::NONE,
         Mortality::CAPTURE_SHORT_MODE,
         Statics::NONE,
+        Ledger::NONE,
     );
     assert!(
         sim.tally.deaths > 20,
@@ -3852,6 +4991,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
         Churn::NONE,
         Mortality::IMMORTAL,
         Statics::NONE,
+        Ledger::NONE,
     );
     let mortal = measure(
         10,
@@ -3860,6 +5000,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
         Churn::NONE,
         Mortality::CAPTURE_SHORT_MODE,
         Statics::NONE,
+        Ledger::NONE,
     );
     assert!(
         mortal.board_links > immortal.board_links * 5,
@@ -3914,6 +5055,7 @@ fn the_shipped_config_connects_every_order_and_strands_nobody() {
                     Churn::NONE,
                     Mortality::IMMORTAL,
                     Statics::NONE,
+                    Ledger::NONE,
                 );
                 for (i, b) in sim.boards.iter().enumerate() {
                     assert!(
@@ -3947,6 +5089,7 @@ fn control_the_strict_rule_alone_disconnects_a_fifth_of_the_orders() {
         Churn::NONE,
         Mortality::IMMORTAL,
         Statics::NONE,
+        Ledger::NONE,
     );
     assert!(
         outcome.disconnected >= 100,
