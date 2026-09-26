@@ -17,24 +17,42 @@
 //! hand-rolled.
 //!
 //! The one thing deliberately NOT shared with `lnflash::envelope::transact` is
-//! its `drain_input()` before each write. The driver has none, and the field
-//! ACK arrived 0.7 ms after the write — too fast for a USB round trip to look
-//! like — so leftover bytes in the input buffer were the first suspect, and a
-//! tool that always drains cannot see the thing it is looking for. `--drain`
-//! and `--peek` turn the two halves of that suspicion on separately.
+//! its `drain_input()` before each write. The driver had none when this was
+//! written, and the field ACK arrived 0.7 ms after the write — too fast for a
+//! USB round trip to look like — so leftover bytes in the input buffer were
+//! the first suspect, and a tool that always drains cannot see the thing it is
+//! looking for. `--drain` and `--peek` turn the two halves of that suspicion
+//! on separately. (The driver drains now —
+//! `leviculum-std/src/interfaces/serial.rs::drain_stale_input` — which is why
+//! this tool keeps the arms: it is the only way left to observe an undrained
+//! port.)
 //!
-//! What it answered, run against both rig T114s on 2026-09-26 with no drain
-//! and no peek (so: exactly the driver's sequence):
+//! What it answered, run on 2026-09-26 with no drain and no peek (so: exactly
+//! the driver's sequence). The last two rows are the same afternoon's
+//! re-measurement of the two boards the field `--set-tx-power` could not read,
+//! `--peek` and no `--config`, so no field board's stored profile was touched:
 //!
-//! | board                    | config ACK | query at 0/200 ms/1/3/10 s |
-//! |--------------------------|------------|----------------------------|
-//! | `DEC9947DAD9D2869`       | 0.425 ms   | report, all five           |
-//! | `183004F712B4A7FE`       | 0.630 ms   | `REFUSE_BUSY`, all five    |
+//! | board                    | config ACK | query, every delay asked |
+//! |--------------------------|------------|--------------------------|
+//! | `DEC9947DAD9D2869`       | 0.425 ms   | report                   |
+//! | `183004F712B4A7FE`       | 0.630 ms   | `REFUSE_BUSY`            |
+//! | `ABFAB3F1807E459B` (RAK) | not sent   | `REFUSE_BUSY` in 0.31 ms |
+//! | `183004F712B4A7FE`       | not sent   | `REFUSE_BUSY` in 0.30 ms |
 //!
 //! So a sub-millisecond ACK is ordinary on this link and was never evidence of
-//! stale bytes; and on the board that refused, the refusal was a state and not
-//! a race — its debug port said `[MEDIA] lora=off ble=on src=flash`, i.e. the
-//! stored profile had the carrier switched off and no LoRa task ever ran.
+//! stale bytes; and the refusal is a state and not a race — it lands in about
+//! 0.3 ms, at every delay, ten seconds apart. `--peek` said `input buffer
+//! empty` on both boards, once more against stale bytes.
+//!
+//! **The media report is what turns the refusal into an action, and only it.**
+//! Both refusing boards answered `running_lora=0 configured_lora=1` at 14:41
+//! and 14:45 CEST: the carrier IS on their stored page, this boot just never
+//! started its LoRa task, so a reset is the entire remedy and a flash would
+//! change nothing. Their debug ports say `[MEDIA] lora=off ble=on src=flash`
+//! — which is the *running* half by construction
+//! (`leviculum-nrf/src/media.rs::log_banner`), so reading a stored `lora=off`
+//! out of that line is reading a field the line does not carry. Ask the media
+//! query.
 //!
 //! ```text
 //! radio_query_timing <port> [--config] [--reset] [--drain] [--peek]

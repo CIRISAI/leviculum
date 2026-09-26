@@ -769,27 +769,81 @@ pub fn send_radio_config(fd: &Fd, cfg: &RadioConfigWire) -> io::Result<ControlOu
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// What the board said when it was asked what its radio is running.
+///
+/// Three answers and not two, because "no settings came back" hid three
+/// different boards behind one sentence and they want three different things
+/// done about them. Measured on the field boards on 2026-09-26
+/// (`lnflash/examples/radio_query_timing.rs`): the RAK4631 and the T114
+/// `1830…A7FE` both refused the query as `BUSY` in about 0.31 ms, five times
+/// over ten seconds — they were answering, promptly, and what they answered
+/// was that no radio is running to name. An operator told only "the board did
+/// not report" reads that as a link problem or as old firmware and flashes,
+/// which is the one action that does not help.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadioQueryAnswer {
+    /// The profile the board's LoRa task has actually configured — the only
+    /// answer a read-modify-write may act on.
+    Reported(RadioConfigWire),
+    /// The board refused the query with a reason that is a statement about
+    /// the *radio*: [`REFUSE_BUSY`] (this boot never spawned the LoRa task,
+    /// so there is nothing to name) or [`REFUSE_NOT_RUNNING`]. The board is
+    /// healthy and talking; its modem is off, and only a reset — after the
+    /// stored profile has LoRa on — brings it up.
+    NoRunningRadio(u8),
+    /// The board refused the *frame*: it does not know the query
+    /// ([`REFUSE_UNKNOWN_TYPE`]) or carries no consumer for it
+    /// ([`REFUSE_UNSUPPORTED`]). This says nothing about the radio, and it is
+    /// the one case where newer firmware is the remedy.
+    QueryRefused(u8),
+    /// Nothing this tool could read as an answer arrived inside
+    /// [`CONTROL_TIMING`] — silence, or a report whose payload is not a
+    /// config block. A board that answered the capability probe and then goes
+    /// quiet here is a different fault from either refusal above.
+    Silent,
+}
+
 /// Ask the board what its radio is running (#349, `TYPE_RADIO_QUERY`).
 ///
-/// `Ok(None)` is "no report came back": firmware without the query, or a
-/// board whose radio has not come up yet and answered `REFUSE_BUSY`. Either
-/// way the caller has no current settings, and the one thing it must not do
-/// is invent them — a config frame carries the whole parameter set, so
-/// substituting defaults for the fields it did not mean to touch is how a
-/// power sweep quietly resets the bandwidth.
-pub fn query_radio_config(fd: &Fd) -> io::Result<Option<RadioConfigWire>> {
-    transact(
+/// Anything but [`RadioQueryAnswer::Reported`] leaves the caller without
+/// current settings, and the one thing it must not do is invent them — a
+/// config frame carries the whole parameter set, so substituting defaults for
+/// the fields it did not mean to touch is how a power sweep quietly resets
+/// the bandwidth.
+///
+/// The refusal is classified here rather than at the call site because the
+/// split is a property of the wire: a refusal names the frame it refuses, and
+/// one that names some other frame is not this query's answer at all.
+pub fn query_radio_config(fd: &Fd) -> io::Result<RadioQueryAnswer> {
+    let answer = transact(
         fd,
         &leviculum_core::envelope::encode_radio_query(),
         CONTROL_TIMING,
         |data| {
             let frame = decode_frame(data).ok()?;
-            if frame.frame_type != leviculum_core::envelope::TYPE_RADIO_REPORT {
-                return None;
+            match frame.frame_type {
+                leviculum_core::envelope::TYPE_RADIO_REPORT => {
+                    leviculum_core::envelope::decode_radio_report_payload(frame.payload)
+                        .map(RadioQueryAnswer::Reported)
+                }
+                TYPE_REFUSAL => match decode_refusal_payload(frame.payload) {
+                    Some((refused, reason))
+                        if refused == leviculum_core::envelope::TYPE_RADIO_QUERY =>
+                    {
+                        Some(match reason {
+                            REFUSE_BUSY | REFUSE_NOT_RUNNING => {
+                                RadioQueryAnswer::NoRunningRadio(reason)
+                            }
+                            other => RadioQueryAnswer::QueryRefused(other),
+                        })
+                    }
+                    _ => None,
+                },
+                _ => None,
             }
-            leviculum_core::envelope::decode_radio_report_payload(frame.payload)
         },
-    )
+    )?;
+    Ok(answer.unwrap_or(RadioQueryAnswer::Silent))
 }
 
 /// The scripted boards every control-plane test drives.
@@ -1347,6 +1401,43 @@ pub(crate) mod testing {
     /// profile that is not honoured is what a measurement run would read
     /// as "this node is single-medium now", and every number it then
     /// produced would be a lie.
+    /// A scripted board in the state both field boards were in on
+    /// 2026-09-26: the firmware is current — it accepts every frame and
+    /// answers the capability probe — but this boot never spawned its LoRa
+    /// task, so the radio query comes back `REFUSE_BUSY` and the media
+    /// report says the carrier is configured on and not running.
+    ///
+    /// The RAK4631's own answers, verbatim
+    /// (`lnflash/examples/radio_query_timing.rs`, 14:41 CEST):
+    /// `refusal of type=0x07 reason=0x04 (BUSY)` and
+    /// `running_lora=0 configured_lora=1`. A board, not a mood: nothing here
+    /// is slow or intermittent, which is why a host that treats the refusal
+    /// as a timeout misreads it in exactly one direction.
+    pub fn taskless_radio_firmware_stub(pty: &Pty, seen: Seen) {
+        spawn_stub(pty, move |frame_bytes| {
+            seen.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
+                ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
+                ControlAction::RadioQuery => {
+                    Some(encode_refusal(TYPE_RADIO_QUERY, super::REFUSE_BUSY))
+                }
+                ControlAction::MediaQuery => Some(media_query_answer(
+                    true,
+                    MediaProfileWire {
+                        lora_enabled: false,
+                        ble_enabled: true,
+                    },
+                    MediaProfileWire::BOTH,
+                )),
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => Some(encode_refusal(refused_type, reason)),
+                _ => None,
+            }
+        });
+    }
+
     pub fn medialess_firmware_stub(pty: &Pty, seen: Seen) {
         spawn_stub(pty, move |frame_bytes| {
             seen.lock().unwrap().push(frame_bytes.to_vec());
@@ -2021,7 +2112,7 @@ mod tests {
 
         assert_eq!(
             query_radio_config(&fd).unwrap(),
-            Some(stub_running_config())
+            RadioQueryAnswer::Reported(stub_running_config())
         );
     }
 
@@ -2041,7 +2132,9 @@ mod tests {
         envelope_firmware_stub(&pty, seen.clone());
         let fd = Fd::open_serial(&pty.slave_path).unwrap();
 
-        let mut cfg = query_radio_config(&fd).unwrap().expect("board reports");
+        let RadioQueryAnswer::Reported(mut cfg) = query_radio_config(&fd).unwrap() else {
+            panic!("the scripted board reports its profile");
+        };
         cfg.tx_power_dbm = -9;
         assert_eq!(send_radio_config(&fd, &cfg).unwrap(), ControlOutcome::Acked);
 
@@ -2061,7 +2154,8 @@ mod tests {
     }
 
     /// Firmware without the query answers nothing usable, and the caller is
-    /// told so rather than handed a plausible config it can act on.
+    /// told so rather than handed a plausible config it can act on — as a
+    /// refusal of the FRAME, which is the one case where flashing helps.
     #[test]
     fn a_board_without_the_query_yields_no_config_rather_than_a_guess() {
         let pty = Pty::open();
@@ -2070,7 +2164,57 @@ mod tests {
 
         let caps = probe_capabilities(&fd).unwrap().unwrap();
         assert!(!caps.accepts(leviculum_core::envelope::TYPE_RADIO_QUERY));
-        assert_eq!(query_radio_config(&fd).unwrap(), None);
+        assert_eq!(
+            query_radio_config(&fd).unwrap(),
+            RadioQueryAnswer::QueryRefused(REFUSE_UNKNOWN_TYPE)
+        );
+    }
+
+    /// **The field boards' answer, told apart from the one above.** A board
+    /// whose LoRa task never came up refuses the query as busy, and that is a
+    /// statement about the radio, not about the frame: the caller must be
+    /// able to distinguish it from old firmware, because the remedies are
+    /// opposite (a reset against a flash).
+    #[test]
+    fn a_board_whose_radio_never_came_up_says_so_rather_than_looking_old() {
+        let pty = Pty::open();
+        taskless_radio_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let caps = probe_capabilities(&fd).unwrap().unwrap();
+        assert!(
+            caps.accepts(leviculum_core::envelope::TYPE_RADIO_QUERY),
+            "this board's firmware knows the query — that is the whole point"
+        );
+        assert_eq!(
+            query_radio_config(&fd).unwrap(),
+            RadioQueryAnswer::NoRunningRadio(REFUSE_BUSY)
+        );
+        // And the carrier state that names the remedy: stored on, not
+        // running, so a reset is what starts it.
+        let media = query_media_profile(&fd)
+            .unwrap()
+            .expect("it reports carriers");
+        assert!(!media.running.lora_enabled && media.configured.lora_enabled);
+        assert!(
+            media.needs_reboot(),
+            "a reset is the remedy this state names"
+        );
+    }
+
+    /// Silence is its own answer. A board that accepts the query and then
+    /// says nothing to it must not be reported as either refusal — nothing
+    /// was refused, and a host that folded this into "old firmware" would
+    /// send an operator to flash a board with a live fault.
+    #[test]
+    fn a_board_that_accepts_the_query_and_says_nothing_reads_as_silence() {
+        let pty = Pty::open();
+        booting_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let caps = probe_capabilities(&fd).unwrap().unwrap();
+        assert!(caps.accepts(leviculum_core::envelope::TYPE_RADIO_QUERY));
+        assert_eq!(query_radio_config(&fd).unwrap(), RadioQueryAnswer::Silent);
     }
 
     // -----------------------------------------------------------------

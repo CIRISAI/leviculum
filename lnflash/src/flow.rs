@@ -1303,14 +1303,9 @@ pub fn set_tx_power(
                  outside the part's -9..=22 range is clamped there, not here. Persisted: a reset \
                  comes back on this power."
             )),
-            Ok(TxPowerOutcome::Unreadable) => {
+            Ok(TxPowerOutcome::Unreadable(answer)) => {
                 all_took_it = false;
-                ui.say(&format!(
-                    "{port}: the board did not report its current radio settings, so nothing was \
-                     sent. A config frame carries every parameter at once; writing one without \
-                     knowing the other values would set the power and move the modulation with \
-                     it. Flash the current bundle first."
-                ));
+                report_unreadable_radio(ui, port, answer);
             }
             Ok(TxPowerOutcome::Answered(reply)) => {
                 all_took_it &= reply.took_it();
@@ -1346,12 +1341,70 @@ pub fn set_tx_power(
     Ok(all_took_it)
 }
 
+/// Say why the board's radio settings could not be read, and what to do
+/// about *that* board.
+///
+/// One sentence per case, because the three cases have nothing in common but
+/// the missing report:
+///
+/// * **No running radio.** The board answered, promptly, and its answer is
+///   that it has no radio to describe. Nothing about the link or the firmware
+///   version is wrong; the modem is off for this boot. Both field boards that
+///   "did not report" on 2026-09-26 were this — `REFUSE_BUSY` in 0.31 ms,
+///   five times over ten seconds (`lnflash/examples/radio_query_timing.rs`) —
+///   and the one line they got sent the operator to flash the bundle, which
+///   would not have changed a thing. The RAK4631's media report named the
+///   remedy exactly: `configured_lora=1 running_lora=0`, i.e. the stored
+///   profile has the carrier and only a reset starts it.
+/// * **Query refused.** The firmware does not know this frame. Here, and only
+///   here, is newer firmware the answer.
+/// * **Silent.** The board answered the capability probe and then said
+///   nothing to a frame it had just declared it accepts. That is a fault in
+///   its own right and belongs on its debug port, not in a flash.
+fn report_unreadable_radio(ui: &mut dyn Ui, port: &str, answer: crate::envelope::RadioQueryAnswer) {
+    use crate::envelope::RadioQueryAnswer;
+
+    let head = format!(
+        "{port}: the board did not report its current radio settings, so nothing was sent. A \
+         config frame carries every parameter at once; writing one without knowing the other \
+         values would set the power and move the modulation with it."
+    );
+    match answer {
+        RadioQueryAnswer::Reported(_) => {
+            debug_assert!(false, "a reported profile is not an unreadable one")
+        }
+        RadioQueryAnswer::NoRunningRadio(reason) => ui.say(&format!(
+            "{head} The board refused the radio query — {}. It answered, so this is its state \
+             and not a timeout or old firmware: no radio is running on this boot, and no power \
+             can be set on a modem that was never keyed. Read the board's carriers with \
+             --summarize: if LoRa is configured on and not running, a reset starts it; if it is \
+             configured off, switch it on with --set-media first. Flashing changes nothing here.",
+            crate::envelope::reason_str(reason)
+        )),
+        RadioQueryAnswer::QueryRefused(reason) => ui.say(&format!(
+            "{head} The board refused the radio query itself — {}. This firmware cannot be \
+             swept read-modify-write; flash the current bundle first.",
+            crate::envelope::reason_str(reason)
+        )),
+        RadioQueryAnswer::Silent => ui.say(&format!(
+            "{head} The board declared in its capability report that it accepts the radio \
+             query and then answered nothing readable to it within {} ms across {} attempts. \
+             That silence is a board-side fault of its own: read its debug port (if00) before \
+             flashing anything.",
+            crate::envelope::CONTROL_TIMING.window.as_millis(),
+            crate::envelope::CONTROL_TIMING.attempts
+        )),
+    }
+}
+
 /// What one board did with a `--set-tx-power` session.
 enum TxPowerOutcome {
     /// The board reported its settings and acked the changed ones back.
     Applied { was: i8, now: i8 },
-    /// The board never reported its settings, so nothing was sent.
-    Unreadable,
+    /// The board did not report its settings, so nothing was sent. Which of
+    /// the three ways it failed to report is carried along: they want three
+    /// different things done about them (see [`report_unreadable_radio`]).
+    Unreadable(crate::envelope::RadioQueryAnswer),
     /// Settings were read and a config frame went out, but the board did not
     /// ack it.
     Answered(SessionReply),
@@ -1371,8 +1424,9 @@ fn send_tx_power_to(fd: &crate::sys::Fd, dbm: i8) -> io::Result<TxPowerOutcome> 
     if !caps.accepts(TYPE_RADIO_QUERY) || !caps.accepts(TYPE_RADIO_CONFIG) {
         return Ok(TxPowerOutcome::Answered(SessionReply::NotAccepted));
     }
-    let Some(mut cfg) = envelope::query_radio_config(fd)? else {
-        return Ok(TxPowerOutcome::Unreadable);
+    let mut cfg = match envelope::query_radio_config(fd)? {
+        envelope::RadioQueryAnswer::Reported(cfg) => cfg,
+        unreadable => return Ok(TxPowerOutcome::Unreadable(unreadable)),
     };
     let was = cfg.tx_power_dbm;
     // One field. Everything else in `cfg` is the board's own answer, passed
@@ -2675,6 +2729,77 @@ mod tests {
         let said = ui.transcript();
         assert!(said.contains("carries no telemetry reporter"), "{said}");
         assert!(said.contains("ttyACM9"), "{said}");
+    }
+
+    /// **The line the field run needed.** The three ways a radio query can
+    /// fail to produce a profile are rendered as three different sentences
+    /// with three different remedies, and the busy one — both field boards on
+    /// 2026-09-26 — is the one that must NOT say "flash".
+    ///
+    /// Asserted on the remedies rather than on the phrasing: what went wrong
+    /// with the old single line was not its wording but that an operator
+    /// reading it flashed a board whose LoRa task only needed a reset.
+    #[test]
+    fn an_unreadable_radio_names_which_of_the_three_it_was() {
+        use crate::envelope::RadioQueryAnswer;
+        use leviculum_core::envelope::{REFUSE_BUSY, REFUSE_UNKNOWN_TYPE};
+
+        let busy = {
+            let mut ui = crate::ui::testing::Fake::agreeing();
+            report_unreadable_radio(
+                &mut ui,
+                "ttyACM9",
+                RadioQueryAnswer::NoRunningRadio(REFUSE_BUSY),
+            );
+            ui.transcript()
+        };
+        assert!(busy.contains("ttyACM9"), "{busy}");
+        assert!(
+            busy.contains("reset"),
+            "the remedy for a dead LoRa task: {busy}"
+        );
+        assert!(
+            busy.contains("Flashing changes nothing"),
+            "the action the old line sent the operator to do: {busy}"
+        );
+        assert!(
+            !busy.contains("timeout") || busy.contains("not a timeout"),
+            "a refusal in 0.3 ms must not read as a timeout: {busy}"
+        );
+
+        let old = {
+            let mut ui = crate::ui::testing::Fake::agreeing();
+            report_unreadable_radio(
+                &mut ui,
+                "ttyACM9",
+                RadioQueryAnswer::QueryRefused(REFUSE_UNKNOWN_TYPE),
+            );
+            ui.transcript()
+        };
+        assert!(
+            old.contains("flash the current bundle"),
+            "old firmware is the one case flashing fixes: {old}"
+        );
+        assert!(
+            !old.contains("reset"),
+            "a reset does not teach a board a frame: {old}"
+        );
+
+        let silent = {
+            let mut ui = crate::ui::testing::Fake::agreeing();
+            report_unreadable_radio(&mut ui, "ttyACM9", RadioQueryAnswer::Silent);
+            ui.transcript()
+        };
+        assert!(
+            silent.contains("if00"),
+            "silence from a board that accepts the frame belongs on its debug port: {silent}"
+        );
+
+        // And the three are actually distinguishable, which is the property
+        // the single old line did not have.
+        assert_ne!(busy, old);
+        assert_ne!(busy, silent);
+        assert_ne!(old, silent);
     }
 
     /// A one-board bundle, with the real vendored SoftDevice hex so the
