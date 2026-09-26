@@ -1126,9 +1126,11 @@ fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-in
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
-    # LAST, and after the three lines above rather than among the dependencies:
-    # the subject is everything this tier did, and `cargo test` writing a file
-    # into the tree would refuse the next gate exactly as the fuzz build did.
+    @# LAST, and after the three lines above rather than among the dependencies:
+    @# the subject is everything this tier did, and `cargo test` writing a file
+    @# into the tree would refuse the next gate exactly as the fuzz build did.
+    @# (`@#`, because just echoes a bare comment line into the gate log as if it
+    @# were a command, and this one is for the next author, not for the log.)
     @bash scripts/check-tree-clean.sh --verify
 
 # The gate the forge runs: `.woodpecker/ci.yml` on every push (Codeberg #299)
