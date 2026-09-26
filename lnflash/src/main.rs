@@ -329,6 +329,44 @@ struct Cli {
     #[arg(long)]
     no_telemetry: bool,
 
+    /// Allow this identity to read the board's status remotely
+    /// (`rnstatus -R` / `lnstatus -R`), then exit. No flashing. Repeatable,
+    /// at most 8 identities; 32 hex characters, the
+    /// form `rnid -i` prints. Given with no value it only reads the boards
+    /// back; --clear-management empties the list.
+    ///
+    /// The identity is the querying instance's own, not a destination: on a
+    /// daemon it is the one under `identity` in its storage directory, which
+    /// `rnstatus -R` signs the link with. The list is written over USB and
+    /// only over USB — nothing on the air can add itself to it — and it takes
+    /// effect at the board's next reset, because the management destination
+    /// is created at boot. The board says which case it is in.
+    #[arg(
+        long,
+        value_name = "HEX",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "clear_management"]
+    )]
+    management_identity: Vec<String>,
+
+    /// Empty the remote-management allow-list on every running LNode, then
+    /// exit: the board serves `rnstatus -R` to nobody again, which is the
+    /// state it ships in. Takes effect at the next reset — until then the
+    /// board is still serving the list it booted with, and the transcript
+    /// says so.
+    #[arg(
+        long,
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize"]
+    )]
+    clear_management: bool,
+
+    /// Do not ask about remote management at flash time and send no
+    /// allow-list: the board keeps whatever it had. Distinct from
+    /// --clear-management, which empties one.
+    #[arg(long, conflicts_with_all = ["management_identity", "clear_management"])]
+    no_management: bool,
+
     /// Frequency in Hz for the radio settings written after the flash.
     /// Giving any --radio-* value skips the prompt; the ones not given keep
     /// their EU868 default.
@@ -536,9 +574,66 @@ fn telemetry_plan(cli: &Cli) -> Result<TelemetryPlan, Box<dyn std::error::Error>
     }))
 }
 
+/// What the `--management-*` flags ask for. Three states, and the outer two
+/// must not collapse:
+///
+/// * `None` — neither flag was given, so no management session runs and the
+///   flash-time question decides instead.
+/// * `Some(None)` — the read-only form (`--management-identity` with no
+///   value): read the boards back and change nothing.
+/// * `Some(Some(list))` — set the list, or empty it with
+///   `--clear-management`. An empty list there is a decision somebody made;
+///   `None` above leaves whatever is on the board alone.
+///
+/// Resolved up front for the same reason [`telemetry_plan`] is: a mistyped
+/// hash has to stop the run at the command line, not after a board has been
+/// written and is waiting for a frame it would refuse.
+#[allow(clippy::type_complexity)]
+fn management_flags(
+    cli: &Cli,
+) -> Result<Option<Option<Vec<lnflash::mgmt::IdentityHash>>>, Box<dyn std::error::Error>> {
+    if cli.clear_management {
+        // Clap already refuses the two set flags together; stated here as
+        // well because this function is what the tests drive.
+        if !cli.management_identity.is_empty() {
+            return Err(
+                "--clear-management empties the allow-list and --management-identity fills it; \
+                 pick one"
+                    .into(),
+            );
+        }
+        return Ok(Some(Some(Vec::new())));
+    }
+    if cli.management_identity.is_empty() {
+        return Ok(None);
+    }
+    // Clap's `default_missing_value` gives the bare flag as one empty
+    // string. The bare form and a typed hash cannot be mixed: the bare form
+    // means "change nothing", so honouring both would be a set that also
+    // claimed to be a read.
+    let typed: Vec<String> = cli
+        .management_identity
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .collect();
+    if typed.is_empty() {
+        return Ok(Some(None));
+    }
+    if typed.len() != cli.management_identity.len() {
+        return Err(
+            "--management-identity with no value reads the board back and with a value sets it; \
+             pick one"
+                .into(),
+        );
+    }
+    Ok(Some(Some(lnflash::mgmt::parse_identities(&typed)?)))
+}
+
 fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let radio = radio_plan(cli)?;
     let telemetry = telemetry_plan(cli)?;
+    let management_flags = management_flags(cli)?;
     // Parsed up front like the radio and telemetry flags: a mistyped
     // coordinate has to stop the run at the command line, not after a
     // board has been rebooted or written.
@@ -733,6 +828,25 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         });
     }
 
+    // The two management flags configure running boards and exit, the shape
+    // `--set-name` and `--set-media` have: an access-control change is
+    // something an operator does to a deployed board, not a step of flashing
+    // one. The flash-time question is asked interactively instead
+    // (`flow::set_mgmt_on`), so neither path silently stands in for the
+    // other.
+    if let Some(allowed) = &management_flags {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_mgmt(&catalogue, &sysfs, ui, allowed.as_deref())?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
     if let Some(chosen) = name {
         let sysfs = match &cli.sysfs {
             Some(path) => Sysfs::new(path),
@@ -808,6 +922,13 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         dry_run: cli.dry_run,
         radio,
         telemetry,
+        // The flags above exit before any flashing, so what reaches a flash
+        // run is the question or the refusal to ask it.
+        management: if cli.no_management {
+            lnflash::mgmt::MgmtPlan::Skip
+        } else {
+            lnflash::mgmt::MgmtPlan::Ask
+        },
         ..Options::default()
     };
 
@@ -1817,6 +1938,131 @@ mod tests {
             vec!["--clear-name", "--set-time"],
         ] {
             let err = name_flags(&args).unwrap_err();
+            assert!(err.contains("cannot be used with"), "{args:?}: {err}");
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Remote management (#235)
+    // ---------------------------------------------------------------
+
+    /// Parse and resolve the management flags the way `run` does.
+    #[allow(clippy::type_complexity)]
+    fn management(
+        args: &[&str],
+    ) -> Result<Option<Option<Vec<lnflash::mgmt::IdentityHash>>>, String> {
+        let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+            .map_err(|err| err.to_string())?;
+        management_flags(&cli).map_err(|err| err.to_string())
+    }
+
+    const HASH_A: &str = "0123456789abcdef0123456789abcdef";
+    const HASH_B: &str = "fedcba9876543210fedcba9876543210";
+
+    #[test]
+    fn no_management_flag_leaves_the_choice_to_the_prompt() {
+        // `None` is "neither flag was given", which is what makes the
+        // flash-time question the decider rather than an empty list.
+        assert_eq!(management(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn the_identities_are_carried_in_the_order_they_were_given() {
+        // Order is what the board stores and reports back, so an operator
+        // reading the transcript can match it against what they typed.
+        let allowed = management(&[
+            "--management-identity",
+            HASH_A,
+            "--management-identity",
+            HASH_B,
+        ])
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(allowed.len(), 2);
+        assert_eq!(allowed[0], lnflash::mgmt::parse_identity(HASH_A).unwrap());
+        assert_eq!(allowed[1], lnflash::mgmt::parse_identity(HASH_B).unwrap());
+    }
+
+    #[test]
+    fn clearing_is_an_empty_list_and_not_the_absence_of_a_flag() {
+        // The distinction the whole feature rests on: one empties a list,
+        // the other leaves whatever is on the board alone.
+        assert_eq!(
+            management(&["--clear-management"]).unwrap(),
+            Some(Some(Vec::new()))
+        );
+        assert_eq!(management(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn the_bare_flag_is_the_read_only_form_and_not_an_empty_list() {
+        // Three states that must not collapse: no flag leaves the board
+        // alone, the bare flag reads it back, and `--clear-management`
+        // empties it. Collapsing the middle two would make a read a
+        // revocation.
+        assert_eq!(management(&["--management-identity"]).unwrap(), Some(None));
+        assert_eq!(management(&[]).unwrap(), None);
+        assert_eq!(
+            management(&["--clear-management"]).unwrap(),
+            Some(Some(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn reading_and_setting_in_one_command_is_a_usage_error() {
+        // The bare form means "change nothing"; honouring it beside a typed
+        // hash would be a set that also claimed to be a read.
+        let err =
+            management(&["--management-identity", "--management-identity", HASH_A]).unwrap_err();
+        assert!(err.contains("--management-identity"), "{err}");
+        assert!(err.contains("pick one"), "{err}");
+    }
+
+    #[test]
+    fn filling_and_emptying_the_list_are_two_commands() {
+        let err = management(&["--management-identity", HASH_A, "--clear-management"]).unwrap_err();
+        assert!(err.contains("cannot be used with"), "{err}");
+    }
+
+    #[test]
+    fn a_mistyped_hash_stops_the_run_before_a_board_is_touched() {
+        let err = management(&["--management-identity", "abcd"]).unwrap_err();
+        assert!(err.contains("--management-identity"), "{err}");
+        assert!(err.contains("32"), "{err}");
+    }
+
+    #[test]
+    fn the_management_session_does_not_combine_with_the_other_configure_sessions() {
+        // Each of these ends the run after talking to the boards, so two of
+        // them in one command is a request that cannot be honoured.
+        for args in [
+            vec!["--management-identity", HASH_A, "--set-time"],
+            vec!["--management-identity", HASH_A, "--set-telemetry"],
+            vec!["--management-identity", HASH_A, "--set-name", "Balkon"],
+            vec!["--management-identity", HASH_A, "--clear-name"],
+            vec!["--management-identity", HASH_A, "--set-media", "lora=on"],
+            vec!["--management-identity", HASH_A, "--clear-position"],
+            vec!["--management-identity", HASH_A, "--watch"],
+            vec!["--clear-management", "--set-time"],
+            vec!["--clear-management", "--set-name", "Balkon"],
+            vec!["--clear-management", "--set-media", "lora=on"],
+        ] {
+            let err = management(&args).unwrap_err();
+            assert!(err.contains("cannot be used with"), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn suppressing_the_question_is_not_the_same_as_answering_it() {
+        // `--no-management` must not look like a set or a clear: it is
+        // "leave the board alone and do not ask".
+        assert_eq!(management(&["--no-management"]).unwrap(), None);
+        for args in [
+            vec!["--no-management", "--management-identity", HASH_A],
+            vec!["--no-management", "--clear-management"],
+        ] {
+            let err = management(&args).unwrap_err();
             assert!(err.contains("cannot be used with"), "{args:?}: {err}");
         }
     }

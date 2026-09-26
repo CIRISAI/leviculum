@@ -86,7 +86,7 @@ waits when a board needs the manual double-tap. Radio settings can be
 given at flash time with `--radio-preset` (`eu868`, `us915`, `au915`) or
 the individual `--radio-freq`, `--radio-bw`, `--radio-sf`, `--radio-cr`
 and `--radio-txpower` flags; `--no-radio` leaves the board's stored
-configuration alone. (`lnflash/src/main.rs:42-364`. The board keeps what
+configuration alone. (`lnflash/src/main.rs:42-402`. The board keeps what
 it is given across resets and across the next flash, so this is part of
 the flash rather than a later configuration step.)
 

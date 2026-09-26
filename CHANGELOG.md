@@ -20,6 +20,37 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- A board can be asked who may read its status remotely. A standalone LNode
+  now serves `rnstransport.remote.management` with the `/status` handler when
+  — and only when — it carries an allow-list of identity hashes, so
+  `rnstatus -R <board>` and `lnstatus -R <board>` address a board the way they
+  address a daemon, over whichever carrier reaches it. The list lives in a new
+  `"LMGA"` record on the telemetry flash page, is read at boot, and is written
+  by a new control-envelope frame (`MGMT_ALLOW`, 0x13, with `MGMT_ALLOW_QUERY`
+  0x14 to read it back and `MGMT_ALLOW_REPORT` 0x89 as the answer);
+  `lnflash --management-identity <hex>` (repeatable) and
+  `lnflash --clear-management` are the host side, plus a flash-time question
+  beside the radio one whose default answer is no (Codeberg #235, #238, #86).
+
+  Two properties are the point of the feature rather than details of it.
+  **The list is writable over USB and never over the air:** the envelope is
+  classified on the transport CDC read path and nowhere else, and the same
+  frame arriving from the LoRa or BLE interface is dropped in packet parsing,
+  which `leviculum-core/src/node/mvr_mgmt_allow_is_usb_only.rs` drives on a
+  real `NodeCore` instead of asserting by inspection. **An absent or empty
+  list registers nothing at all** — no destination, no handler, no announce.
+  That is a deliberate deviation from the daemon, which registers the handler
+  and consults an empty list per request the way Python does: a daemon sits on
+  a machine with an operator and a login, while a board is left on a mast, and
+  an unattended node announcing a management destination with nobody on the
+  list is advertising a door.
+
+  The answer is a report rather than an ack because two states honestly
+  differ: the management destination is created while the node is built, so a
+  list set now is served after the next reset — and an identity revoked now is
+  still being served until then, which is the sentence the operator who
+  revoked it most needs to read.
+
 - `lnstest selftest --messages N` sizes the ratchet exchange: how many
   messages each direction sends under `--mode ratchet-basic` and
   `--mode ratchet-enforced`, 10 by default, so an invocation without the flag

@@ -20,16 +20,18 @@ use std::time::{Duration, Instant};
 
 use leviculum_core::envelope::{
     decode_ack_payload, decode_capability_report_payload, decode_frame,
-    decode_identity_report_payload, decode_media_report_payload, decode_node_name_report_payload,
-    decode_position_source_report_payload, decode_refusal_payload, encode_capability_query,
-    encode_fixed_position, encode_identity_query, encode_media_profile, encode_media_query,
-    encode_node_name, encode_node_name_query, encode_position_source_query, encode_radio_config,
+    decode_identity_report_payload, decode_media_report_payload, decode_mgmt_allow_state,
+    decode_node_name_report_payload, decode_position_source_report_payload, decode_refusal_payload,
+    encode_capability_query, encode_fixed_position, encode_identity_query, encode_media_profile,
+    encode_media_query, encode_mgmt_allow, encode_mgmt_allow_query, encode_node_name,
+    encode_node_name_query, encode_position_source_query, encode_radio_config,
     encode_telemetry_target, encode_tx_spacing, encode_wall_time, FixedPositionWire,
-    IdentityReportWire, MediaProfileWire, NodeNameState, TelemetryTargetWire, REFUSE_BUSY,
-    REFUSE_MALFORMED, REFUSE_NOT_RUNNING, REFUSE_NO_CLOCK, REFUSE_PERSIST, REFUSE_UNKNOWN_TYPE,
-    REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_IDENTITY_QUERY,
-    TYPE_IDENTITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT, TYPE_NODE_NAME,
-    TYPE_NODE_NAME_QUERY, TYPE_NODE_NAME_REPORT, TYPE_POSITION_SOURCE_QUERY,
+    IdentityReportWire, MediaProfileWire, MgmtAllowState, NodeNameState, TelemetryTargetWire,
+    REFUSE_BUSY, REFUSE_MALFORMED, REFUSE_NOT_RUNNING, REFUSE_NO_CLOCK, REFUSE_PERSIST,
+    REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT,
+    TYPE_IDENTITY_QUERY, TYPE_IDENTITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY,
+    TYPE_MEDIA_REPORT, TYPE_MGMT_ALLOW, TYPE_MGMT_ALLOW_QUERY, TYPE_MGMT_ALLOW_REPORT,
+    TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_NODE_NAME_REPORT, TYPE_POSITION_SOURCE_QUERY,
     TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
@@ -663,6 +665,78 @@ pub fn query_node_name(fd: &Fd) -> io::Result<Result<NodeNameState, ControlOutco
     )
 }
 
+/// The classifier both allow-list conversations share: the report, or a
+/// refusal naming the frame that was sent.
+fn mgmt_allow_reply(
+    sent_type: u8,
+) -> impl Fn(&[u8]) -> Option<Result<MgmtAllowState, u8>> + 'static {
+    move |data: &[u8]| {
+        let frame = decode_frame(data).ok()?;
+        match frame.frame_type {
+            TYPE_MGMT_ALLOW_REPORT => Some(Ok(decode_mgmt_allow_state(frame.payload)?)),
+            TYPE_REFUSAL => match decode_refusal_payload(frame.payload) {
+                Some((refused, reason)) if refused == sent_type => Some(Err(reason)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+/// Set the board's remote-management allow-list — an empty slice is the
+/// explicit clear (`TYPE_MGMT_ALLOW`, Codeberg #235).
+///
+/// Answered with a report rather than an ack on purpose: the list on the
+/// page and the list this boot is serving differ for the whole span
+/// between a set and the next reset, and only the board knows both. The
+/// report is also what "the list the board acknowledged" means — the
+/// identities it actually stored, not a repeat of the host's own argv.
+///
+/// The frame is up to 134 bytes, so it travels behind [`probed`] on the
+/// flow path: well over the 19-byte Reticulum minimum, it must never be
+/// sent on a guess.
+pub fn send_mgmt_allow(
+    fd: &Fd,
+    allowed: &[[u8; 16]],
+) -> io::Result<Result<MgmtAllowState, ControlOutcome>> {
+    let payload = encode_mgmt_allow(allowed);
+    Ok(
+        match transact(
+            fd,
+            &payload,
+            CONTROL_TIMING,
+            mgmt_allow_reply(TYPE_MGMT_ALLOW),
+        )? {
+            Some(Ok(state)) => Ok(state),
+            Some(Err(reason)) => Err(ControlOutcome::Refused { reason }),
+            None => Err(ControlOutcome::NoAnswer),
+        },
+    )
+}
+
+/// Ask the board who may read its status (`TYPE_MGMT_ALLOW_QUERY`).
+///
+/// `Ok(Err(..))` is "no report came back": firmware from before the frame
+/// refuses it by name (`REFUSE_UNKNOWN_TYPE`), a binary that never read
+/// the record refuses `REFUSE_UNSUPPORTED`, and pre-envelope firmware
+/// never answers at all. The caller must not invent an answer — "nobody is
+/// allowed" and "this firmware cannot say" are different facts, and only
+/// the first is safe to print.
+pub fn query_mgmt_allow(fd: &Fd) -> io::Result<Result<MgmtAllowState, ControlOutcome>> {
+    Ok(
+        match transact(
+            fd,
+            &encode_mgmt_allow_query(),
+            CONTROL_TIMING,
+            mgmt_allow_reply(TYPE_MGMT_ALLOW_QUERY),
+        )? {
+            Some(Ok(state)) => Ok(state),
+            Some(Err(reason)) => Err(ControlOutcome::Refused { reason }),
+            None => Err(ControlOutcome::NoAnswer),
+        },
+    )
+}
+
 /// Ask the board for its identity hashes (`TYPE_IDENTITY_QUERY`).
 ///
 /// `Ok(Err(..))` is "no report came back": firmware from before the
@@ -859,12 +933,13 @@ pub(crate) mod testing {
     use leviculum_core::envelope::{
         classify_control_frame, encode_ack, encode_capability_report, encode_media_report,
         encode_radio_report, encode_refusal, fixed_position_answer, identity_query_answer,
-        media_profile_answer, media_query_answer, node_name_answer, node_name_query_answer,
-        position_source_query_answer, telemetry_target_answer, telemetry_target_key_usable,
-        ControlAction, IdentityReportWire, MediaProfileWire, Persist, NODE_NAME_FLAG_BLE_PENDING,
-        NODE_NAME_FLAG_STORED, POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_ANNOUNCE,
-        TYPE_BLE_TX_GAP, TYPE_CAPABILITIES, TYPE_FIXED_POSITION, TYPE_IDENTITY_QUERY,
-        TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY,
+        media_profile_answer, media_query_answer, mgmt_allow_answer, node_name_answer,
+        node_name_query_answer, position_source_query_answer, telemetry_target_answer,
+        telemetry_target_key_usable, ControlAction, IdentityReportWire, MediaProfileWire, Persist,
+        NODE_NAME_FLAG_BLE_PENDING, NODE_NAME_FLAG_STORED, POSITION_SOURCE_FIXED,
+        POSITION_SOURCE_GNSS, TYPE_ANNOUNCE, TYPE_BLE_TX_GAP, TYPE_CAPABILITIES,
+        TYPE_FIXED_POSITION, TYPE_IDENTITY_QUERY, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY,
+        TYPE_MGMT_ALLOW, TYPE_MGMT_ALLOW_QUERY, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY,
         TYPE_POSITION_SOURCE_QUERY, TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET,
         TYPE_STORE_STORM, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
     };
@@ -903,6 +978,8 @@ pub(crate) mod testing {
         TYPE_ANNOUNCE,
         TYPE_BLE_TX_GAP,
         TYPE_STORE_STORM,
+        TYPE_MGMT_ALLOW,
+        TYPE_MGMT_ALLOW_QUERY,
     ];
 
     /// The scripted board's probe and LXMF destination hashes. Distinct
@@ -1061,6 +1138,45 @@ pub(crate) mod testing {
 
     /// A board that booted on both carriers, which is the default and the
     /// state every fielded board is in.
+    /// The scripted board's remote-management allow-list (#235): what is
+    /// on its page, and whether its boot registered the destination.
+    ///
+    /// Both, because the whole report exists for the span in which they
+    /// disagree — a list set now against a boot that had none.
+    pub struct StubMgmt {
+        stored: Option<Vec<[u8; 16]>>,
+        running: bool,
+    }
+
+    /// A board that booted with no allow-list: nothing stored, nothing
+    /// served. The state a freshly flashed board is in.
+    pub fn mgmt_state() -> Arc<Mutex<StubMgmt>> {
+        Arc::new(Mutex::new(StubMgmt {
+            stored: None,
+            running: false,
+        }))
+    }
+
+    /// A board that booted WITH an allow-list and is serving it — the
+    /// state in which a set or a clear is one reset behind.
+    pub fn mgmt_state_serving(allowed: &[[u8; 16]]) -> Arc<Mutex<StubMgmt>> {
+        Arc::new(Mutex::new(StubMgmt {
+            stored: Some(allowed.to_vec()),
+            running: true,
+        }))
+    }
+
+    /// The allow-list the stub decoded, if a set frame reached it. The
+    /// **last** one, like [`node_name_frame`].
+    pub fn mgmt_allow_frame(seen: &Seen) -> Option<Vec<[u8; 16]>> {
+        seen.lock().unwrap().iter().rev().find_map(|f| {
+            match classify_control_frame(f, FIRMWARE_ACCEPTS) {
+                ControlAction::MgmtAllow(list) => Some(list.hashes().to_vec()),
+                _ => None,
+            }
+        })
+    }
+
     pub fn media_state() -> Arc<Mutex<StubMedia>> {
         media_state_booted(MediaProfileWire::BOTH)
     }
@@ -1170,6 +1286,32 @@ pub(crate) mod testing {
         sources: Arc<Mutex<u8>>,
         name: Arc<Mutex<StubName>>,
     ) {
+        envelope_firmware_stub_full_managed(pty, seen, media, sources, name, mgmt_state())
+    }
+
+    /// [`envelope_firmware_stub`] with the allow-list state handed in, so a
+    /// test can watch a set land on a board that is already serving a list
+    /// — the case whose report is one reset behind.
+    pub fn envelope_firmware_stub_with_mgmt(pty: &Pty, seen: Seen, mgmt: Arc<Mutex<StubMgmt>>) {
+        envelope_firmware_stub_full_managed(
+            pty,
+            seen,
+            media_state(),
+            gnss_board(),
+            name_state(),
+            mgmt,
+        )
+    }
+
+    /// The scripted board with every cell handed in.
+    pub fn envelope_firmware_stub_full_managed(
+        pty: &Pty,
+        seen: Seen,
+        media: Arc<Mutex<StubMedia>>,
+        sources: Arc<Mutex<u8>>,
+        name: Arc<Mutex<StubName>>,
+        mgmt: Arc<Mutex<StubMgmt>>,
+    ) {
         spawn_stub(pty, move |frame_bytes| {
             seen.lock().unwrap().push(frame_bytes.to_vec());
             match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
@@ -1269,6 +1411,29 @@ pub(crate) mod testing {
                         lxmf: Some(STUB_LXMF_HASH),
                     })))
                 }
+                // The allow-list gate, run exactly as the board runs it:
+                // store, then answer from the record — including the
+                // running half, which stays at what the boot registered
+                // until the board is reset.
+                ControlAction::MgmtAllow(list) => {
+                    let mut mgmt = mgmt.lock().unwrap();
+                    mgmt.stored = Some(list.hashes().to_vec());
+                    Some(mgmt_allow_answer(
+                        TYPE_MGMT_ALLOW,
+                        Persist::Durable,
+                        mgmt.stored.as_deref(),
+                        mgmt.running,
+                    ))
+                }
+                ControlAction::MgmtAllowQuery => {
+                    let mgmt = mgmt.lock().unwrap();
+                    Some(mgmt_allow_answer(
+                        TYPE_MGMT_ALLOW_QUERY,
+                        Persist::Durable,
+                        mgmt.stored.as_deref(),
+                        mgmt.running,
+                    ))
+                }
                 ControlAction::Refuse {
                     refused_type,
                     reason,
@@ -1289,6 +1454,54 @@ pub(crate) mod testing {
                 ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
                 ControlAction::NodeName(_) => Some(node_name_answer(false, Persist::Durable, None)),
                 ControlAction::NodeNameQuery => Some(node_name_query_answer(false, None)),
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => Some(encode_refusal(refused_type, reason)),
+                _ => None,
+            }
+        });
+    }
+
+    /// A scripted device whose binary never read the allow-list record: it
+    /// advertises the frame types (the envelope layer knows them) but its
+    /// answer runs the firmware's capability gate with the capability
+    /// absent, so the list comes back refused by name rather than stored.
+    pub fn mgmtless_firmware_stub(pty: &Pty, seen: Seen) {
+        spawn_stub(pty, move |frame_bytes| {
+            seen.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
+                ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
+                ControlAction::MgmtAllow(_) => {
+                    Some(encode_refusal(TYPE_MGMT_ALLOW, super::REFUSE_UNSUPPORTED))
+                }
+                ControlAction::MgmtAllowQuery => Some(encode_refusal(
+                    TYPE_MGMT_ALLOW_QUERY,
+                    super::REFUSE_UNSUPPORTED,
+                )),
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => Some(encode_refusal(refused_type, reason)),
+                _ => None,
+            }
+        });
+    }
+
+    /// A scripted device whose flash page refuses the write: it takes the
+    /// frame and answers `REFUSE_PERSIST`, the #358 shape a host must not
+    /// read as "stored".
+    pub fn unpersisting_mgmt_firmware_stub(pty: &Pty, seen: Seen) {
+        spawn_stub(pty, move |frame_bytes| {
+            seen.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
+                ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
+                ControlAction::MgmtAllow(_) => Some(mgmt_allow_answer(
+                    TYPE_MGMT_ALLOW,
+                    Persist::Lost,
+                    None,
+                    false,
+                )),
                 ControlAction::Refuse {
                     refused_type,
                     reason,

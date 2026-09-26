@@ -403,6 +403,10 @@ pub struct Options {
     /// What to do about the telemetry target once the board is up (#236).
     /// The default is to ask, and the default answer to that is no.
     pub telemetry: TelemetryPlan,
+    /// What to do about the remote-management allow-list once the board is
+    /// up (#235). The default is to ask, and the default answer to that is
+    /// no — an unattended board must come up serving nobody.
+    pub management: crate::mgmt::MgmtPlan,
 }
 
 impl Default for Options {
@@ -414,6 +418,7 @@ impl Default for Options {
             banner_budget: verify::FRESH_BANNER_BUDGET,
             radio: RadioPlan::default(),
             telemetry: TelemetryPlan::default(),
+            management: crate::mgmt::MgmtPlan::default(),
         }
     }
 }
@@ -1838,6 +1843,154 @@ fn report_name(
     }
 }
 
+/// The `--management-identity` / `--clear-management` session (#235): who
+/// may read this board's status remotely.
+///
+/// `allowed == None` is the read-only form — no frame that changes the
+/// board goes out, so an operator can check who is on the list without
+/// touching it. `Some(&[])` is the explicit clear.
+///
+/// The list is decided once and goes to every board found, like the
+/// telemetry target: a two-board bench is not two access-control
+/// decisions.
+pub fn set_mgmt(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    allowed: Option<&[crate::mgmt::IdentityHash]>,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --management-identity talks to flashed boards; a board \
+             in its bootloader has no allow-list to configure.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        let fd = match open_transport(sysfs, &board.device, &board.tty) {
+            Ok(fd) => fd,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        let outcome = match match allowed {
+            None => crate::mgmt::query(&fd),
+            Some(list) => crate::mgmt::send(&fd, list),
+        } {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= outcome.is_ok();
+        report_mgmt(ui, port, allowed, outcome);
+    }
+    Ok(all_took_it)
+}
+
+/// Say what the board reported about who may read it.
+///
+/// Every refusal is named rather than folded into "failed": the difference
+/// between "this firmware has no allow-list" and "the record did not reach
+/// flash" decides whether the operator flashes the bundle or retries, and
+/// the difference between those and silence decides whether they look at
+/// the cable.
+fn report_mgmt(
+    ui: &mut dyn Ui,
+    port: &str,
+    asked: Option<&[crate::mgmt::IdentityHash]>,
+    outcome: Result<leviculum_core::envelope::MgmtAllowState, SessionReply>,
+) {
+    let state = match outcome {
+        Ok(state) => state,
+        Err(SessionReply::Refused(reason))
+            if reason == leviculum_core::envelope::REFUSE_UNSUPPORTED =>
+        {
+            return ui.say(&format!(
+                "{port}: this board's firmware carries no remote-management allow-list — the \
+                 list was refused, not stored. Neither retrying nor rebooting helps; only \
+                 firmware that honours it does. The board answers no rnstatus -R."
+            ));
+        }
+        Err(SessionReply::Refused(reason)) if reason == leviculum_core::envelope::REFUSE_VALUE => {
+            return ui.say(&format!(
+                "{port}: the board refused the list as too long — it holds at most {} \
+                 identities, and nothing was stored. Nothing was truncated either: the list on \
+                 the board is the one it had.",
+                leviculum_core::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES
+            ));
+        }
+        Err(SessionReply::Refused(reason))
+            if reason == leviculum_core::envelope::REFUSE_PERSIST =>
+        {
+            return ui.say(&format!(
+                "{port}: the board could not write the allow-list to flash, so a reset would \
+                 lose it and nothing is claimed. Retry; if it keeps failing the page is the \
+                 suspect, and the board's own [TELEMETRY] persist lines on if00 say which write \
+                 gave up."
+            ));
+        }
+        Err(SessionReply::Refused(reason)) => {
+            return ui.say(&format!(
+                "{port}: the board refused the allow-list — {}.",
+                crate::envelope::reason_str(reason)
+            ));
+        }
+        Err(SessionReply::NoAnswer) => {
+            return ui.say(&format!(
+                "{port}: the board did not answer about its allow-list, so whoever was on it \
+                 still is."
+            ));
+        }
+        Err(SessionReply::ProbeSilent) => {
+            return ui.say(&format!(
+                "{port}: the board did not answer the capability probe, so its allow-list was \
+                 left alone. {}",
+                crate::envelope::PROBE_SILENCE_HINT
+            ));
+        }
+        Err(SessionReply::NotAccepted) => {
+            return ui.say(&format!(
+                "{port}: this firmware speaks the envelope but has no remote-management \
+                 allow-list. Flash the current bundle first."
+            ));
+        }
+        // Not reachable through `crate::mgmt`, whose senders only ever
+        // produce a report or one of the failures above — said rather than
+        // asserted, like the name session's arm.
+        Err(SessionReply::Acked) => {
+            return ui.say(&format!(
+                "{port}: the board acked the allow-list frame instead of reporting it, so who \
+                 may read this board is unknown. Read it back with --management-identity."
+            ));
+        }
+    };
+    let note = crate::mgmt::reboot_note(&state);
+    let described = crate::mgmt::describe(&state);
+    match asked {
+        None => ui.say(&format!("{port}: {described}.{note}")),
+        Some([]) => ui.say(&format!(
+            "{port}: allow-list cleared — {described}. The board serves remote management to \
+             nobody.{note}"
+        )),
+        Some(_) => ui.say(&format!(
+            "{port}: allow-list set — {described}. It survives resets; the board's own [MGMT] \
+             line on if00 says the same.{note}"
+        )),
+    }
+}
+
 /// The `--set-telemetry` session (#236 scope item 5): the same telemetry
 /// configuration the flash flow offers, without flashing anything.
 /// Activation is configuration, so a board that is already running takes a
@@ -2185,6 +2338,7 @@ fn resolve(
     if let Some(app) = &booted.app {
         outcome.radio = set_radio(sysfs, ui, opts, app, &port)?;
         outcome.telemetry = set_telemetry_on(sysfs, ui, opts, app, &port)?;
+        set_mgmt_on(sysfs, ui, opts, app, &port)?;
     }
     outcome.verdict = Some(booted.verdict);
     Ok(Some(outcome))
@@ -2241,6 +2395,63 @@ fn set_telemetry_on(
     };
     report_telemetry(ui, port, &target, reply, sources);
     Ok(Some(TelemetryOutcome { target, reply }))
+}
+
+/// Ask who may read this board's status remotely, and if anybody, send the
+/// allow-list (#235).
+///
+/// Runs after the telemetry step because it is the same shape of question
+/// about the same board on the same port, and last because it is the one an
+/// operator is least likely to want: the default answer is no, and a board
+/// that comes up serving nobody is the state #235 requires of an unattended
+/// one. Never fails the run, for the reason [`set_radio`] gives: the
+/// firmware is already written and confirmed, and a board without an
+/// allow-list is a board a `lnflash --management-identity` run can still
+/// fix.
+///
+/// The outcome is reported and not carried in [`Outcome`]: nothing
+/// downstream branches on it, and the board's own `[MGMT]` line on if00 is
+/// the second witness.
+fn set_mgmt_on(
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    opts: &Options,
+    app: &Device,
+    port: &str,
+) -> Result<(), Error> {
+    let Some(allowed) = crate::mgmt::resolve(ui, &opts.management)? else {
+        return Ok(());
+    };
+
+    let Some(tty) =
+        entry::wait_for_interface_tty(sysfs, app, radio::TRANSPORT_INTERFACE, opts.appear_within)?
+    else {
+        ui.say(&format!(
+            "{port}: the firmware is on the board, but its transport port (if{:02}) never \
+             appeared, so the management allow-list was not sent. Re-run `lnflash \
+             --management-identity` once it enumerates.",
+            radio::TRANSPORT_INTERFACE
+        ));
+        return Ok(());
+    };
+
+    ui.say(&format!(
+        "{port}: sending the management allow-list to {} — {} identities",
+        tty.display(),
+        allowed.len()
+    ));
+    let outcome =
+        match open_transport(sysfs, app, &tty).and_then(|fd| crate::mgmt::send(&fd, &allowed)) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                return Ok(());
+            }
+        };
+    report_mgmt(ui, port, Some(&allowed), outcome);
+    Ok(())
 }
 
 /// Choose a radio configuration, send it, and say what happened.

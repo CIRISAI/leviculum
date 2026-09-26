@@ -27,6 +27,7 @@ pub mod ihex;
 pub mod infouf2;
 pub mod manifest;
 pub mod media;
+pub mod mgmt;
 pub mod name;
 pub mod position;
 pub mod radio;
