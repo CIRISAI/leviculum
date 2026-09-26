@@ -182,9 +182,24 @@ async fn status_at_the_shipped_budget_on_a_loaded_instance() {
     }
     // The announces are queued through channels on both sides; the table
     // is loaded when the instance's count says so, not when the loop ends.
+    //
+    // BOTH conditions, because the count reaching the cap is not the one
+    // this test needs. `path_count()` hits 4096 on the 4096th insertion —
+    // the first eviction has not happened yet — and the control entry is
+    // evicted somewhere in the ~1000 insertions after that. A poll landing
+    // in that window sees a full table with the entry still in it, and the
+    // assertion below then fails a test whose fill was working. Measured
+    // 2026-09-26 with a 20 ms probe: count crosses the cap and the entry
+    // goes in the same window (cap at t=1659 ms, `has_control=false` at
+    // 1659 ms, from `has_control=true` at 1638 ms with 4078 paths), and the
+    // 200 ms poll that used to stand here landed inside it once in a
+    // ci-gate run (`PATH_FILL announced=5096 table=4096 cap=4096
+    // elapsed_ms=1581`, the control entry present). Waiting for the
+    // eviction itself is waiting for the precondition instead of for a
+    // proxy that precedes it.
     let filled = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
-            if shared.path_count() >= PATH_TABLE_CAP {
+            if shared.path_count() >= PATH_TABLE_CAP && !shared.has_path(&control_hash) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -198,11 +213,20 @@ async fn status_at_the_shipped_budget_on_a_loaded_instance() {
     );
     assert!(
         filled.is_ok(),
-        "the instance never reached its path-table ceiling ({} of \
-         {PATH_TABLE_CAP} after {FILL_ANNOUNCES} announces) — the load \
+        "60 s after {FILL_ANNOUNCES} announces the instance holds {} of \
+         {PATH_TABLE_CAP} paths and the control entry is {} — the load \
          this test exists to apply was not applied",
-        shared.path_count()
+        shared.path_count(),
+        if shared.has_path(&control_hash) {
+            "still there"
+        } else {
+            "gone"
+        }
     );
+    // Restated as an assertion although the wait above already holds it:
+    // it is the one line that says WHY the eviction matters, and an edit
+    // that loosens the wait condition should fail here rather than quietly
+    // measure a cached answer.
     assert!(
         !shared.has_path(&control_hash),
         "the fill was meant to evict the control destination's path entry \
