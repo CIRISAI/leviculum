@@ -23,6 +23,13 @@
 #      asserts the order they are now published in: every upload before any
 #      delete.
 #
+# Codeberg #270 added a third: A DELETE THAT ANSWERED 504 WAS CALLED A FAILED
+# SWAP. Pipeline 471 was failed by two gateway timeouts out of 36 deletions
+# whose assets the forge had in fact removed. The judgement now comes from a
+# read-back of the release, and a 5xx is retried; the three `delete-504-*` and
+# `delete-403-*` cases below fix both halves of that — green when the retry
+# gets through, red when the duplicate is really there.
+#
 # PUBLISH_SH overrides the script under test, which is how the pre-fix
 # version is checked to be red: `PUBLISH_SH=<old copy> bash
 # scripts/test-publish-nightly.sh`.
@@ -83,23 +90,35 @@ emit() {  # <status> <body>
     exit 0
 }
 
+release_json() {  # the release as the forge reports it, assets and all
+    local assets
+    assets=$(awk -F'\t' '{printf "%s{\"id\":%s,\"name\":\"%s\"}", (NR>1?",":""), $1, $2}' "$D/assets")
+    printf '{"id":42,"assets":[%s]}' "$assets"
+}
+
 case "$url" in
     */releases/tags/*)
         log "LOOKUP"
         if [ -f "$D/no-release" ]; then
             emit 404 '{"errors":["release not found"]}'
         fi
-        assets=$(awk -F'\t' '{printf "%s{\"id\":%s,\"name\":\"%s\"}", (NR>1?",":""), $1, $2}' "$D/assets")
-        emit 200 "{\"id\":42,\"assets\":[$assets]}"
+        emit 200 "$(release_json)"
         ;;
     */assets/*)
         [ "$method" = "DELETE" ] || { echo "fixture curl: unexpected $method on $url" >&2; exit 99; }
         n=$(bump deletes)
         id="${url##*/}"
-        if [ "${FAKE_DELETE_FAIL_AT:-}" = "$n" ]; then
-            log "DELETE-FAIL $id"
-            emit 500 '{"message":"internal server error"}'
-        fi
+        # FAKE_DELETE_FAIL_AT is a space-separated list of delete REQUEST
+        # numbers, not asset ids: a retry of the same asset is a further
+        # number, which is how "504 then 204" and "504 every time" are told
+        # apart. FAKE_DELETE_STATUS picks the answer (504 is the one the forge
+        # gave in pipeline 471).
+        for f in ${FAKE_DELETE_FAIL_AT:-}; do
+            if [ "$f" = "$n" ]; then
+                log "DELETE-FAIL $id"
+                emit "${FAKE_DELETE_STATUS:-500}" '{"message":"gateway timeout"}'
+            fi
+        done
         if ! grep -q "^${id}	" "$D/assets"; then
             log "DELETE-MISSING $id"
             emit 404 '{"errors":["attachment does not exist"]}'
@@ -133,6 +152,12 @@ case "$url" in
         emit 201 '{"id":42}'
         ;;
     */releases/*)
+        # The read-back after the swap: since Codeberg #270 the publisher's
+        # verdict on the delete loop is this listing, not the delete statuses.
+        if [ "$method" = "GET" ]; then
+            log "LIST"
+            emit 200 "$(release_json)"
+        fi
         [ "$method" = "PATCH" ] || { echo "fixture curl: unexpected $method on $url" >&2; exit 99; }
         log "PATCH"
         if [ -n "${FAKE_PATCH_FAIL:-}" ]; then
@@ -193,7 +218,15 @@ case "$sub" in
 esac
 exit 0
 EOF
-chmod +x "$BIN/curl" "$BIN/git"
+# The retry backoff, made free. A stub rather than a knob in the script: the
+# production path keeps one behaviour, and the wait is still an assertion here
+# because every skipped one is logged.
+cat > "$BIN/sleep" <<'EOF'
+#!/usr/bin/env bash
+printf 'SLEEP %s\n' "$*" >> "$FAKE_DIR/log"
+exit 0
+EOF
+chmod +x "$BIN/curl" "$BIN/git" "$BIN/sleep"
 
 # Six assets under the fixture's previous build, named as the README's
 # download URLs are: those names are what a failed run must not take away.
@@ -290,17 +323,58 @@ grep -qE '^DELETE [1-6]$' "$FAKE_DIR/log" && fail "deleted a previous asset alth
 grep -q '^GIT ' "$FAKE_DIR/log" && fail "moved the tag although the upload failed"
 [ "$failures" -eq "$before" ] || dumplog
 
-# --- Case: a delete fails -------------------------------------------------
+# --- Case: a delete answers 504 and the retry gets through ----------------
 #
-# The new assets are up, so the run is not lost, but a previous asset with
-# the same name survives beside them — the accumulation 3cece2ce fixed. The
-# run says so, and the tag does not move onto a release nobody has checked.
-echo "[case] delete-fails"
+# Codeberg #270: pipeline 471 was failed by two 504s out of 36 deletions whose
+# assets were in fact gone. The first delete here answers 504, the retry 204,
+# and the release ends up exactly as on the happy path — so the run is green.
+# The retry is asserted as a request, not inferred from the exit code: seven
+# delete requests for six assets, and a backoff waited before the seventh.
+echo "[case] delete-504-then-retry"
 before=$failures
-setup delete-fails
-FAKE_DELETE_FAIL_AT=1 run_publish
-[ "$(rc)" != "0" ] || fail "exit 0 although deleting a replaced asset failed"
+setup delete-504-retry
+FAKE_DELETE_FAIL_AT=1 FAKE_DELETE_STATUS=504 run_publish
+[ "$(rc)" = "0" ] || fail "exit $(rc) although the retried delete succeeded"
+expected=$(find "$TREE/dist" -maxdepth 1 -type f -printf '%f\n' | sort)
+[ "$(asset_names)" = "$expected" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(echo "$expected" | tr '\n' ' ')"
+[ "$(cat "$FAKE_DIR/deletes")" = "7" ] || fail "$(cat "$FAKE_DIR/deletes") delete requests for six assets, expected 7 (one retried)"
+grep -q '^SLEEP ' "$FAKE_DIR/log" || fail "retried without any backoff"
+grep -q '^LIST' "$FAKE_DIR/log" || fail "the release was never read back"
+grep -q '^GIT ' "$FAKE_DIR/log" || fail "tag was not pushed after a swap that worked"
+[ "$failures" -eq "$before" ] || dumplog
+
+# --- Case: a delete answers 504 every time --------------------------------
+#
+# Same answer, other end state: the asset is still there when the retries run
+# out, and the release holds two files under one name — the accumulation
+# 3cece2ce fixed. The listing is what says so, and the run fails with the
+# wording that names the manual repair.
+echo "[case] delete-504-survives"
+before=$failures
+setup delete-504-survives
+FAKE_DELETE_FAIL_AT="1 2 3 4" FAKE_DELETE_STATUS=504 run_publish
+[ "$(rc)" != "0" ] || fail "exit 0 although a replaced asset survived the swap"
+grep -q 'a replaced asset survived the swap' "$FAKE_DIR/out" \
+    || fail "the failure does not name what is wrong with the release"
+grep -q 'twice: leviculum-nightly-amd64.deb' "$FAKE_DIR/out" \
+    || fail "the failure does not name the asset that appears twice"
+grep -q '^LIST' "$FAKE_DIR/log" || fail "the verdict was taken without reading the release back"
 grep -q '^UPLOAD ' "$FAKE_DIR/log" || fail "expected the uploads to have happened first"
+grep -q '^GIT ' "$FAKE_DIR/log" && fail "moved the tag although a replaced asset survived"
+[ "$failures" -eq "$before" ] || dumplog
+
+# --- Case: a delete is refused, not timed out -----------------------------
+#
+# 403 is a refusal, not a hiccup; retrying it only spends time. One request,
+# and the listing still decides — here it shows the duplicate, so red.
+echo "[case] delete-403-not-retried"
+before=$failures
+setup delete-403
+FAKE_DELETE_FAIL_AT=1 FAKE_DELETE_STATUS=403 run_publish
+[ "$(rc)" != "0" ] || fail "exit 0 although a replaced asset survived the swap"
+[ "$(cat "$FAKE_DIR/deletes")" = "6" ] || fail "$(cat "$FAKE_DIR/deletes") delete requests, expected 6: a 403 is not retried"
+grep -q 'a replaced asset survived the swap' "$FAKE_DIR/out" \
+    || fail "the failure does not name what is wrong with the release"
 grep -q '^GIT ' "$FAKE_DIR/log" && fail "moved the tag although a replaced asset survived"
 [ "$failures" -eq "$before" ] || dumplog
 

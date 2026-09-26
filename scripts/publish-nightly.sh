@@ -177,6 +177,66 @@ die() {  # <message...> — print the forge's own answer with it
     exit 1
 }
 
+# Deleting one replaced asset, with the forge's gateway errors treated as the
+# transient answers they are (Codeberg #270). In pipeline 471 two of 36
+# deletions were answered with HTTP 504; measured on the forge a quarter of an
+# hour later, both assets were gone and the release held exactly the 36 files
+# this run had uploaded. The run had failed anyway, on the status code alone.
+# What each answer means here:
+#
+#   2xx      deleted.
+#   404      the asset is not on the release — after a 5xx or a 000 that is the
+#            earlier attempt having landed after all, and either way the end
+#            state is the one this loop is for.
+#   5xx      500, 502, 503, 504: the forge or its gateway, not the request.
+#            Retry with a short backoff.
+#   000      curl reached no answer at all (the wrapper's own code for it).
+#            Same treatment as a 5xx.
+#   4xx      anything else — 401, 403, 422 — is a refusal, not a hiccup, and
+#            retrying it only spends time. Give up on this id.
+#
+# No caller reads a verdict off this: whether the swap left the release sound
+# is read off the release itself below, never off these statuses.
+DELETE_ATTEMPTS=4        # the first try plus three retries
+DELETE_BACKOFF_START=2   # seconds before the first retry, doubled after each
+
+delete_asset() {  # <asset_id>
+    local id="$1" attempt=1 backoff="$DELETE_BACKOFF_START" status transient=0
+    while : ; do
+        status=$(api -X DELETE -H "$AUTH_HEADER" \
+            "$API/repos/$CI_REPO/releases/$release_id/assets/$id")
+        case "$status" in
+            2*)
+                echo "[publish]   delete asset $id → HTTP $status"
+                return 0
+                ;;
+            404)
+                if [ "$transient" -eq 1 ]; then
+                    echo "[publish]   delete asset $id → HTTP 404, the retried delete had landed"
+                else
+                    echo "[publish]   delete asset $id → HTTP 404, already gone"
+                fi
+                return 0
+                ;;
+            5*|000)
+                transient=1
+                if [ "$attempt" -ge "$DELETE_ATTEMPTS" ]; then
+                    echo "[publish]   delete asset $id → HTTP $status, giving up after $attempt attempts"
+                    return 1
+                fi
+                echo "[publish]   delete asset $id → HTTP $status, retry $attempt/$((DELETE_ATTEMPTS - 1)) in ${backoff}s"
+                sleep "$backoff"
+                attempt=$((attempt + 1))
+                backoff=$((backoff * 2))
+                ;;
+            *)
+                echo "[publish]   delete asset $id → HTTP $status, not a transient answer"
+                return 1
+                ;;
+        esac
+    done
+}
+
 # Find existing release
 echo "[publish] looking up release tag=${TAG}"
 release_json=$(curl -sS -H "$AUTH_HEADER" "$API/repos/$CI_REPO/releases/tags/$TAG" || echo '{}')
@@ -271,20 +331,46 @@ if [ -n "$replaced_asset_ids" ]; then
     # 404 with -sS, which is exactly what happened before 3cece2ce and
     # caused assets to accumulate across runs (12 stale entries on the
     # nightly tag pointing at three different builds).
-    delete_failed=0
     while read -r asset_id; do
         [ -n "$asset_id" ] || continue
-        status=$(api -X DELETE -H "$AUTH_HEADER" \
-            "$API/repos/$CI_REPO/releases/$release_id/assets/$asset_id")
-        echo "[publish]   delete asset $asset_id → HTTP $status"
-        ok "$status" || delete_failed=1
+        delete_asset "$asset_id" || true
     done <<< "$replaced_asset_ids"
-    if [ "$delete_failed" -ne 0 ]; then
+
+    # The verdict is the release's own listing, not the statuses above. A 504
+    # on a deletion the forge carried out anyway says nothing about the state
+    # this run leaves behind (Codeberg #270), and neither does a 204 that
+    # somehow did not stick. Ask once what the release holds, and fail on the
+    # thing that actually breaks a download: the same name twice, which is the
+    # state in which Forgejo serves whichever of the two it picks.
+    echo "[publish] reading back the release to check the swap"
+    status=$(api -H "$AUTH_HEADER" "$API/repos/$CI_REPO/releases/$release_id")
+    ok "$status" || die "could not read the release back after the swap: HTTP $status"
+    duplicates=$(jq -r '[(.assets // [])[].name] | group_by(.) | map(select(length > 1) | .[0]) | .[]' < "$RESP")
+    if [ -n "$duplicates" ]; then
+        printf '%s\n' "$duplicates" | sed 's/^/[publish]   twice: /'
         echo "[publish] a replaced asset survived the swap: the release now holds two"
         echo "[publish] files under that name, and the download URL serves whichever"
         echo "[publish] Forgejo picks. Delete the stale one by hand. Failing the run."
         exit 1
     fi
+    # A replaced asset can also survive under a name nothing uploaded this run
+    # — a file that has left dist/. No download URL is ambiguous then, so this
+    # does not fail the run; but this log is the only place anybody would see
+    # it, so it is said out loud.
+    remaining_ids=$(jq -r '(.assets // [])[].id' < "$RESP")
+    leftover=""
+    while read -r asset_id; do
+        [ -n "$asset_id" ] || continue
+        if printf '%s\n' "$remaining_ids" | grep -qx "$asset_id"; then
+            leftover="$leftover $asset_id"
+        fi
+    done <<< "$replaced_asset_ids"
+    if [ -n "$leftover" ]; then
+        echo "[publish] note: replaced asset(s)$leftover are still on the release, under"
+        echo "[publish] a name this build did not republish. No download URL is ambiguous,"
+        echo "[publish] so the run stands; delete them by hand when convenient."
+    fi
+    echo "[publish] swap complete, no name appears twice"
 fi
 
 # The release rolls, so the git tag must roll with it. Forgejo points the
