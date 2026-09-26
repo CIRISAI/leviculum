@@ -36,6 +36,7 @@
 
 pub mod adv;
 pub mod conn_params;
+pub mod dial_ledger;
 pub mod drain;
 pub mod gap;
 pub mod gatt_bytes;
@@ -56,6 +57,7 @@ pub use conn_params::{
     ConnParamsReqLine, LinkPhase, LinkRole, REQUESTED_SUPERVISION_TIMEOUT_UNITS,
     SUPERVISION_TIMEOUT_FLOOR_MS,
 };
+pub use dial_ledger::{DialLedger, LedgerPolicy, Noted, LEDGER_SLOTS};
 pub use drain::{DrainRouter, DrainSlot, NO_CONN_HANDLE};
 pub use gap::{effective_tx_gap_ms, TxGap, DEFAULT_TX_GAP_MS};
 pub use gatt_bytes::{GattBytes, OversizeFrom, OversizeLine, ATT_MTU, GATT_VALUE_MAX};
