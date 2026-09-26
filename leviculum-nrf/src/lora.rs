@@ -224,7 +224,7 @@ impl Interface for LoRaInterface {
         InterfaceId(IFACE_INDEX)
     }
     fn name(&self) -> &str {
-        "lora_sx1262"
+        crate::iface_bytes::NAMES[crate::iface_bytes::LORA]
     }
     fn mtu(&self) -> usize {
         500
@@ -282,24 +282,32 @@ impl Interface for LoRaInterface {
             );
             return Err(InterfaceError::BufferFull);
         }
-        self.sender.try_send(data.to_vec()).map_err(|_| {
-            // Unreachable while the reservation and the channel agree — the
-            // slot bound the budget enforces is the channel's own capacity.
-            // Handed back rather than asserted: a leaked reservation would
-            // close the queue permanently, and the line below says the two
-            // disagreed, which is the bug to see.
-            OUTGOING_BUDGET.release(data.len());
-            crate::log::log_fmt(
-                "[IFACE_FULL] ",
-                format_args!(
-                    "iface={} bound=channel depth={} len={}",
-                    self.name(),
-                    self.sender.capacity(),
-                    data.len()
-                ),
-            );
-            InterfaceError::BufferFull
-        })
+        let bytes = data.len();
+        self.sender
+            .try_send(data.to_vec())
+            // Counted here and not at key-up: the reference counts the
+            // unframed packet as the interface accepts it
+            // (`RNodeInterface.py:725`), so split-frame headers and the
+            // airtime a retry costs stay out of the number.
+            .map(|()| crate::iface_bytes::note_tx(crate::iface_bytes::LORA, bytes))
+            .map_err(|_| {
+                // Unreachable while the reservation and the channel agree — the
+                // slot bound the budget enforces is the channel's own capacity.
+                // Handed back rather than asserted: a leaked reservation would
+                // close the queue permanently, and the line below says the two
+                // disagreed, which is the bug to see.
+                OUTGOING_BUDGET.release(data.len());
+                crate::log::log_fmt(
+                    "[IFACE_FULL] ",
+                    format_args!(
+                        "iface={} bound=channel depth={} len={}",
+                        self.name(),
+                        self.sender.capacity(),
+                        data.len()
+                    ),
+                );
+                InterfaceError::BufferFull
+            })
     }
 }
 
@@ -1113,6 +1121,7 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
                     p8[0], p8[1], p8[2], p8[3], p8[4], p8[5], p8[6], p8[7], plen
                 ),
             );
+            crate::iface_bytes::note_rx(crate::iface_bytes::LORA, plen);
             self.incoming_tx.send(data).await;
         } else if len >= 2 && (frame[0] & leviculum_core::rnode::FLAG_SPLIT) != 0 {
             crate::log::log_fmt(

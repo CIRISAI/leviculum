@@ -652,6 +652,10 @@ async fn retic_serial_task(
                             match envelope::classify_control_frame(data, ACCEPTED_CONTROL_TYPES) {
                                 ControlAction::NotControl => {
                                     log_u32("SER: frame complete", data.len() as u32);
+                                    crate::iface_bytes::note_rx(
+                                        crate::iface_bytes::SERIAL,
+                                        data.len(),
+                                    );
                                     incoming_tx.send(data.clone()).await;
                                 }
                                 // Host-requested reboot: ACK, let the ACK

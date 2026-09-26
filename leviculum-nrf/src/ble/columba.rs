@@ -910,10 +910,14 @@ async fn gatt_events(
                             // channel is full, drop the packet rather than block
                             // here (we're in a sync closure, can't await).
                             let bytes = packet.capacity();
+                            let len = packet.len();
                             if incoming_tx.try_send((link_peer.get(), packet)).is_ok() {
                                 // #388 census: BLE_INCOMING custody; the
                                 // main loop subtracts on receive.
                                 super::incoming_held_add(bytes);
+                                // #235: the packet, not the allocation —
+                                // the reference counts payload bytes.
+                                crate::iface_bytes::note_rx(crate::iface_bytes::BLE, len);
                             }
                         }
                         DefragResult::NeedMore | DefragResult::Error => {}
@@ -2214,9 +2218,11 @@ async fn run_central_session(
                     frags
                 );
                 let bytes = packet.capacity();
+                let len = packet.len();
                 if incoming_tx.try_send((Some(peer_id), packet)).is_ok() {
                     // #388 census, as on the peripheral side.
                     super::incoming_held_add(bytes);
+                    crate::iface_bytes::note_rx(crate::iface_bytes::BLE, len);
                 }
             }
             DefragResult::NeedMore | DefragResult::Error => {}

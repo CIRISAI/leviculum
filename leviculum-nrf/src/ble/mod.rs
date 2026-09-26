@@ -683,7 +683,7 @@ impl Interface for BleInterface {
         InterfaceId(2)
     }
     fn name(&self) -> &str {
-        "ble"
+        crate::iface_bytes::NAMES[crate::iface_bytes::BLE]
     }
     fn mtu(&self) -> usize {
         INTERFACE_MTU
@@ -748,7 +748,10 @@ impl BleInterface {
         let bytes = data.len();
         self.sender
             .try_send((aim, data.to_vec()))
-            .map(|()| OUTGOING_HELD.add(bytes))
+            .map(|()| {
+                OUTGOING_HELD.add(bytes);
+                crate::iface_bytes::note_tx(crate::iface_bytes::BLE, bytes);
+            })
             .map_err(|_| {
                 // Codeberg #344: same silence as the other two. A phone that
                 // stops draining the notify path fills this queue, and the board

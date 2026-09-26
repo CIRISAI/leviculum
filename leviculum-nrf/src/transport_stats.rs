@@ -18,11 +18,20 @@
 //!
 //! ```text
 //! [TRANSPORT] fwd=<n> rx=<n> tx=<n> nopath=<n> dup=<n> overheard=<n> maxhops=<n> paths=<n>
+//! [TRANSPORT] iface=<name> rxb=<n> txb=<n>
 //! ```
 //!
 //! `paths=` is on the same line on purpose: `nopath` against a populated path
 //! table and `nopath` against an empty one are different diagnoses, and one
 //! line that carries both cannot be correlated wrongly.
+//!
+//! The byte counters (Codeberg #235) get **one line per interface** rather
+//! than six more fields on the totals line: the totals line is already at the
+//! width a serial capture wraps, and a per-interface line is what
+//! `grep 'iface=lora_sx1262'` turns into a single carrier's time series.
+//! They come from [`crate::iface_bytes`], which is also what the `/status`
+//! bundle answers `rnstatus -R` with, so the instrument and the remote answer
+//! agree by construction rather than by review.
 
 use embassy_time::{Duration, Instant};
 use leviculum_core::node::NodeCore;
@@ -87,6 +96,9 @@ impl Ticker {
         // Re-arm from `now`, not from `self.next`: a loop that was busy for
         // longer than a period must not then emit a burst of catch-up lines.
         self.next = now + PERIOD;
+        // One sampler, one cadence: the speed window a `/status` answer
+        // reports is the window whose bytes were just printed.
+        crate::iface_bytes::sample_all(now.as_millis());
         log(node);
     }
 }
@@ -123,4 +135,14 @@ where
             node.path_count(),
         ),
     );
+    for (id, name) in crate::iface_bytes::NAMES.iter().enumerate() {
+        let Some(counters) = crate::iface_bytes::counters(id) else {
+            continue;
+        };
+        let (rxb, txb) = counters.totals();
+        crate::log::log_fmt(
+            "[TRANSPORT] ",
+            format_args!("iface={name} rxb={rxb} txb={txb}"),
+        );
+    }
 }

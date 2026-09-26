@@ -29,7 +29,7 @@ impl Interface for EmbeddedInterface<'_> {
     }
 
     fn name(&self) -> &str {
-        "serial_usb"
+        crate::iface_bytes::NAMES[crate::iface_bytes::SERIAL]
     }
 
     fn mtu(&self) -> usize {
@@ -41,22 +41,30 @@ impl Interface for EmbeddedInterface<'_> {
     }
 
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
-        self.sender.try_send(data.to_vec()).map_err(|_| {
-            // Codeberg #344: the frame is going nowhere and the caller sees
-            // only `BufferFull`. Say it at the interface, where the depth
-            // that filled is known. Error path, so the cost is irrelevant;
-            // the depth comes from the channel itself so the line cannot
-            // drift from the queue it describes.
-            crate::log::log_fmt(
-                "[IFACE_FULL] ",
-                format_args!(
-                    "iface={} depth={} len={}",
-                    self.name(),
-                    self.sender.capacity(),
-                    data.len()
-                ),
-            );
-            InterfaceError::BufferFull
-        })
+        let bytes = data.len();
+        self.sender
+            .try_send(data.to_vec())
+            // The reference counts the unframed packet where the interface
+            // accepts it for the medium (`RNodeInterface.py:725`); HDLC
+            // framing is added downstream and is outside the count, as it is
+            // there.
+            .map(|()| crate::iface_bytes::note_tx(crate::iface_bytes::SERIAL, bytes))
+            .map_err(|_| {
+                // Codeberg #344: the frame is going nowhere and the caller sees
+                // only `BufferFull`. Say it at the interface, where the depth
+                // that filled is known. Error path, so the cost is irrelevant;
+                // the depth comes from the channel itself so the line cannot
+                // drift from the queue it describes.
+                crate::log::log_fmt(
+                    "[IFACE_FULL] ",
+                    format_args!(
+                        "iface={} depth={} len={}",
+                        self.name(),
+                        self.sender.capacity(),
+                        data.len()
+                    ),
+                );
+                InterfaceError::BufferFull
+            })
     }
 }

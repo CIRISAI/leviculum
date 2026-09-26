@@ -57,6 +57,7 @@ pub mod flash;
 #[cfg(feature = "softdevice")]
 pub mod heap_census;
 pub mod identity;
+pub mod iface_bytes;
 pub mod interface;
 pub mod log;
 pub mod lora;
@@ -76,6 +77,7 @@ pub mod radio_store;
 /// region `memory.x` reserves behind the image. Nothing is stored in it yet —
 /// the module carries the mount and the bench instrument that exercises it.
 pub mod record_store;
+pub mod remote_status;
 pub mod rng;
 // T114 ST7789 status display — rides with the BSP (not the V2's
 // `display` feature): the panel is write-only, presence detection is

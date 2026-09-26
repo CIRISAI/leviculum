@@ -771,6 +771,22 @@ async fn main(spawner: Spawner) {
             // Board-visible core-event lines (LINK_REFUSED, #388) render
             // regardless of whether a propagation role runs.
             leviculum_nrf::events::log_events($events, node.now_ms());
+            // #235: answer a `/status` request from an allow-listed identity.
+            // In this macro because every arm that produces core events runs
+            // it, and a remote query may arrive over any of the three
+            // carriers — a responder wired into one arm would answer only the
+            // carrier its author had in mind.
+            {
+                let mut status_out = leviculum_core::transport::TickOutput::empty();
+                leviculum_nrf::remote_status::handle_events(&mut node, $events, &mut status_out);
+                if !status_out.actions.is_empty() {
+                    let mut ifaces: [&mut dyn Interface; 3] =
+                        [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                    let dispatched =
+                        dispatch_actions(&mut ifaces, status_out.actions, &ifac_configs);
+                    leviculum_nrf::dispatch::settle("remote-status", &mut node, &dispatched);
+                }
+            }
             if let Some(pn) = pn_engine.as_mut() {
                 let mut pn_out = pn.on_events(&mut node, $events);
                 pn_out.merge(pn.settle(&mut node).await);
