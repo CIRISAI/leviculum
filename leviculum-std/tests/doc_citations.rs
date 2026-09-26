@@ -29,9 +29,14 @@
 //!   name has to be *defined* at the cited line, not merely occur there:
 //!   see [`defines_recipe`].
 //!
-//! A bare citation that names nothing only gets the existence check. Both
-//! kinds are counted and printed so the coverage is visible: run with
-//! `--nocapture` to see the counts.
+//! A bare citation that names nothing only gets the existence check. The
+//! status line therefore reports three groups and not one — checked
+//! against the symbol they name and holding, named but not holding, and
+//! could not be checked — and warns when the third is the majority of the
+//! corpus. See [`coverage_lines`]: a run that prints only "no failures"
+//! over a corpus it could mostly not read is how Codeberg #307 was
+//! experienced, and the counts are what keep that reading unavailable.
+//! Run with `--nocapture` to see them.
 //!
 //! ## What "names what it points at" means
 //!
@@ -669,6 +674,12 @@ struct Offset {
 #[derive(Default)]
 struct Counts {
     with_ident: usize,
+    /// Of `with_ident`, the ones whose identifier was actually found where
+    /// the citation says it is. The difference between this and
+    /// `with_ident` is the reported drift: on a green run they are equal,
+    /// and the point of carrying both is that "checked" and "checked and
+    /// holds" are different claims and the status line has to make each.
+    holds: usize,
     bare: usize,
     external: usize,
     /// One entry per identifier citation that resolved by adjacency.
@@ -682,6 +693,64 @@ impl Counts {
     fn total(&self) -> usize {
         self.with_ident + self.bare + self.external
     }
+
+    /// The citations this run could say nothing about beyond "a file of
+    /// that name exists and is long enough": the bare ones, which name no
+    /// symbol to check, and the external ones, whose file is not in this
+    /// workspace at all.
+    ///
+    /// Codeberg #307 is what this number is for. The guard reported the
+    /// file that carried the 1035-line-stale `has_path` row as fine, and
+    /// it was not lying: it had checked what it could check. What it never
+    /// said was that this was 912 of 1188 citations.
+    fn unchecked(&self) -> usize {
+        self.bare + self.external
+    }
+}
+
+/// The status line for one corpus, plus the warning when most of the
+/// corpus went unchecked.
+///
+/// Three groups, kept apart because they are three different claims:
+/// checked and holding, named but not holding (the failures printed
+/// below), and not checkable here. A single "N citations, no failures"
+/// collapses all three into the first, which is the misreading #307 was.
+///
+/// The majority rule is a judgement, so it is written down rather than
+/// left to the reader: when more than half of a corpus cannot be checked,
+/// a green run is not evidence that the corpus is sound, and the line says
+/// so. It stays a warning and not a failure for now because the source
+/// corpus is 89 % bare by nature (comments cite a line without naming it)
+/// and failing on that would switch the guard off rather than fix it;
+/// `bare_citations_still_point_at_the_text_they_cited` is the partial
+/// backstop for that class, via the tree's own history rather than via a
+/// name.
+fn coverage_lines(label: &str, counts: &Counts) -> Vec<String> {
+    let not_holding = counts.with_ident.saturating_sub(counts.holds);
+    let mut out = vec![format!(
+        "{label} citations: {} total; {} checked against the symbol they name \
+         and holding; {not_holding} named but not holding (reported below); \
+         {} could not be checked ({} bare: existence and length only, {} \
+         external: not in this workspace)",
+        counts.total(),
+        counts.holds,
+        counts.unchecked(),
+        counts.bare,
+        counts.external,
+    )];
+    if counts.unchecked() * 2 > counts.total() {
+        let pct = counts.unchecked() * 100 / counts.total().max(1);
+        out.push(format!(
+            "{label} citations: WARNING -- {} of {} ({pct} %) could not be \
+             checked. For those, a green run means a file of that name exists \
+             and is long enough, not that the citation points at what it \
+             claims. This is not a passing grade for the corpus; it is the \
+             size of the blind spot (Codeberg #307).",
+            counts.unchecked(),
+            counts.total(),
+        ));
+    }
+    out
 }
 
 /// The offset histogram for a corpus, plus every non-exact citation by
@@ -908,6 +977,7 @@ fn check<'a>(root: &Path, citations: &'a [Citation]) -> (Counts, Vec<Failure>, V
                         nearest,
                     });
                 }
+                counts.holds += 1;
                 passed = true;
                 break;
             }
@@ -924,12 +994,27 @@ fn check<'a>(root: &Path, citations: &'a [Citation]) -> (Counts, Vec<Failure>, V
                 path: (*cand).to_string(),
                 nearest_ident: nearest.copied(),
             });
+            // The distance is spelled out rather than left to be subtracted.
+            // #307 was argued from one number -- the cited line was 1035
+            // lines from `has_path` -- and that number is what tells a
+            // reader whether they are looking at a citation that slipped by
+            // a refactor or at one that has not been read in a year. A
+            // report that prints both line numbers and leaves the
+            // subtraction to the reader buries it.
             candidate_notes.push(match nearest {
-                Some(&n) => format!(
-                    "    {what} not within {WINDOW} lines of the cited span in {cand}\n    cited line {cited_first}: {}\n    nearest {what}: line {n}: {}",
-                    lines[cited_first - 1].trim(),
-                    lines[n - 1].trim()
-                ),
+                Some(&n) => {
+                    let d = c
+                        .spans
+                        .iter()
+                        .map(|&s| span_distance(n, s))
+                        .min()
+                        .unwrap_or(0);
+                    format!(
+                        "    {what} not within {WINDOW} lines of the cited span in {cand}\n    cited line {cited_first}: {}\n    nearest {what}: line {n}, {d} lines from the cited span: {}",
+                        lines[cited_first - 1].trim(),
+                        lines[n - 1].trim()
+                    )
+                }
                 None => format!("    {what} does not occur anywhere in {cand}"),
             });
         }
@@ -1796,6 +1881,160 @@ fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
     assert_eq!(ident(&first), None);
 }
 
+/// Codeberg #307 end to end, in the shape that raised it: a reference-table
+/// row whose citation has aged past the method it names.
+///
+/// [`a_citation_names_its_subject_in_either_spelling_and_in_nothing_else`]
+/// pins that the row's signature is read as a name; this pins what the guard
+/// then does with it, which is the half #307 actually asked for -- see the
+/// moved symbol, and say how far it moved. The distance is the assertion
+/// rather than the mere red, because the number is the argument: "1035 lines"
+/// is what distinguishes a citation a refactor slid past from one nobody has
+/// read in a year, and a report that prints two line numbers and leaves the
+/// subtraction to the reader does not make it.
+///
+/// Both directions, as everywhere else in this file: the row that lands on
+/// its method must stay quiet and must be counted as holding, or the guard
+/// becomes noise and gets switched off.
+#[test]
+fn a_moved_symbol_in_a_table_row_is_reported_with_how_far_it_moved() {
+    // The #307 geometry: the method sits 1035 lines below the cited line,
+    // as `has_path` did when the guard called the file fine.
+    let (cited, lives_at) = (10usize, 1045usize);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+
+    let src = root.join("leviculum-std/src/driver");
+    fs::create_dir_all(&src).unwrap();
+    let mut lines = vec!["    // filler".to_string(); lives_at + 40];
+    lines[lives_at - 1] =
+        "    pub fn has_path(&self, dest_hash: &DestinationHash) -> bool {".to_string();
+    fs::write(src.join("mod.rs"), lines.join("\n")).unwrap();
+
+    let docs = root.join("docs/src/developer");
+    fs::create_dir_all(&docs).unwrap();
+    let spec = docs.join("rust-api-spec.md");
+    // Built, not spelled out: a literal citation in this file is scanned as
+    // part of the source corpus this file guards, and the fixer would then
+    // rewrite the number the assertions below stand on.
+    let row = |line: usize| {
+        format!(
+            "| Signature | Purpose |\n|-----------|---------|\n\
+             | `fn has_path(&self, dest_hash: &DestinationHash) -> bool` \
+             \u{2014} `driver/mod.rs:{line}` | Whether a path is known |\n"
+        )
+    };
+
+    fs::write(&spec, row(cited)).unwrap();
+    let citations = scan(root, std::slice::from_ref(&spec), Corpus::Book);
+    assert_eq!(
+        citations.len(),
+        1,
+        "the table row was not parsed as one citation, but as {}",
+        citations.len()
+    );
+    let (counts, failures, _) = check(root, &citations);
+    assert_eq!(
+        (counts.with_ident, counts.holds),
+        (1, 0),
+        "the row's signature must name the citation (with_ident) and that \
+         name must not be found where the row points (holds)"
+    );
+    assert_eq!(
+        failures.len(),
+        1,
+        "the drifted row was not reported: {:?}",
+        failures.iter().map(|f| &f.message).collect::<Vec<_>>()
+    );
+    assert_eq!(failures[0].kind, FailureKind::Drift);
+    let distance = lives_at - cited;
+    assert!(
+        failures[0]
+            .message
+            .contains(&format!("{distance} lines from the cited span")),
+        "the report does not say how far `has_path` has moved ({distance} \
+         lines); a reader cannot tell a slipped citation from an abandoned \
+         one without it:\n{}",
+        failures[0].message
+    );
+
+    // The other direction: on the method, quiet, and counted as holding.
+    fs::write(&spec, row(lives_at)).unwrap();
+    let citations = scan(root, std::slice::from_ref(&spec), Corpus::Book);
+    let (counts, failures, _) = check(root, &citations);
+    assert_eq!(
+        (counts.with_ident, counts.holds),
+        (1, 1),
+        "a row that lands on its method must count as checked and holding"
+    );
+    assert!(
+        failures.is_empty(),
+        "a correct table row was reported: {:?}",
+        failures.iter().map(|f| &f.message).collect::<Vec<_>>()
+    );
+}
+
+/// The status line separates what was checked from what could not be, and
+/// says so loudly when the second is the majority.
+///
+/// #307's guard was not wrong about anything it printed. It printed
+/// "no failures" over a corpus in which 912 of 1188 citations carried no
+/// name to check, and the reader took that for a verdict on the corpus.
+/// Both counts on the line, and a warning above the halfway mark, is what
+/// makes the difference between the two readings visible without anyone
+/// having to know this file.
+#[test]
+fn the_status_line_names_what_it_could_not_check() {
+    // A corpus the guard mostly could check: counts split, no warning.
+    let good = Counts {
+        with_ident: 10,
+        holds: 9,
+        bare: 2,
+        external: 0,
+        offsets: Vec::new(),
+    };
+    let lines = coverage_lines("doc", &good);
+    assert_eq!(
+        lines.len(),
+        1,
+        "a minority blind spot must not warn: {lines:?}"
+    );
+    for part in [
+        "12 total",
+        "9 checked against the symbol they name",
+        "1 named but not holding",
+        "2 could not be checked",
+    ] {
+        assert!(
+            lines[0].contains(part),
+            "the status line does not say `{part}`: {}",
+            lines[0]
+        );
+    }
+
+    // #307's shape: most of the corpus is unnamed, so most of it was only
+    // existence-checked, and a green run says nothing about it.
+    let blind = Counts {
+        with_ident: 4,
+        holds: 4,
+        bare: 8,
+        external: 1,
+        offsets: Vec::new(),
+    };
+    let lines = coverage_lines("source", &blind);
+    assert_eq!(
+        lines.len(),
+        2,
+        "9 unchecked of 13 is a majority and must warn: {lines:?}"
+    );
+    assert!(lines[1].contains("WARNING"), "{}", lines[1]);
+    assert!(
+        lines[1].contains("9 of 13") && lines[1].contains("69 %"),
+        "the warning must carry the number, not just the adjective: {}",
+        lines[1]
+    );
+}
+
 /// Guarantee C, kind 2: a figure a doc comment attributes to a document
 /// must occur in that document (Codeberg #200).
 #[test]
@@ -1839,14 +2078,9 @@ fn doc_citations_resolve() {
     let citations = book_citations(&root);
     let (counts, failures, _) = check(&root, &citations);
 
-    println!(
-        "doc citations: {} total, {} identifier-checked, {} bare \
-         (existence/length only), {} external (unchecked)",
-        counts.total(),
-        counts.with_ident,
-        counts.bare,
-        counts.external
-    );
+    for line in coverage_lines("doc", &counts) {
+        println!("{line}");
+    }
     report_offsets("doc", &counts);
 
     // Tripwire against parser rot, not a coverage target: the corpus has
@@ -1892,15 +2126,10 @@ fn source_citations_resolve() {
     // is existence-and-length checking, which catches renames and deletions
     // and not drift inside a file that stays long enough. Converting them to
     // the ``ident` (`path:line`)` form is editorial work (#167).
-    println!(
-        "source citations ({}): {} total, {} identifier-checked, {} bare \
-         (existence/length only), {} external (unchecked)",
-        SOURCE_CRATES.join(", "),
-        counts.total(),
-        counts.with_ident,
-        counts.bare,
-        counts.external
-    );
+    println!("source citations cover {}", SOURCE_CRATES.join(", "));
+    for line in coverage_lines("source", &counts) {
+        println!("{line}");
+    }
     report_offsets("source", &counts);
 
     // Same tripwire role as the book floors above.
@@ -1936,14 +2165,10 @@ fn script_citations_resolve() {
     let citations = script_citations(&root);
     let (counts, failures, _) = check(&root, &citations);
 
-    println!(
-        "script citations (scripts/*.sh, Justfile): {} total, {} identifier-checked, \
-         {} bare (existence/length only), {} external (unchecked)",
-        counts.total(),
-        counts.with_ident,
-        counts.bare,
-        counts.external
-    );
+    println!("script citations cover scripts/*.sh and the Justfile");
+    for line in coverage_lines("script", &counts) {
+        println!("{line}");
+    }
     report_offsets("script", &counts);
 
     // Same tripwire role as the floors on the other two corpora, one order of
