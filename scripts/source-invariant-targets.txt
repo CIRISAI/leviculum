@@ -164,6 +164,7 @@ skip  leviculum-std   lxmd_messagestore_takeover # spawns lxmd against a temp-di
 skip  leviculum-std   lxmf_rapid_identical_messages # in-process dedup behaviour; subject is the code
 skip  leviculum-std   manifest_tmp_race          # spawns racing manifest writers
 skip  leviculum-std   mvr                        # already run by the `mvr` step of `just fast`
+skip  leviculum-std   mvr_capture_misses_a_callsite_a_bare_thread_registered # in-process tracing dispatcher ordering; subject is the code
 skip  leviculum-std   mvr_event_log_sink_stalls_transport # spawns a daemon and stalls its sink
 skip  leviculum-std   obs_ann_tx_drop_events     # drives the real emit sites in-process; subject is the code
 skip  leviculum-std   obs_event_node_name_whitespace # drives the real emit sites in-process; subject is the code
