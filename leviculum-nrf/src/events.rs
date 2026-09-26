@@ -17,6 +17,49 @@
 //! [`leviculum_log_line`].
 
 use leviculum_core::node::NodeEvent;
+use leviculum_drop_budget::DropBudget;
+
+/// The board's one budget for `[DROP]` lines.
+///
+/// A static for the same reason [`crate::announce`]'s cadence is one: the
+/// limit is a property of the debug port, not of any node object, and
+/// [`log_events`] is a free function every bin calls through its engine-pass
+/// macro. Same locking shape, uncontended on the single-core cooperative
+/// executor.
+///
+/// `.bss` cost of the whole #346 feature: this cell. A `u64` window start,
+/// two `u32` counters, a flag, inside the critical-section mutex.
+static DROP_BUDGET: embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::RefCell<DropBudget>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(DropBudget::new()));
+
+/// Emit the `[DROP] suppressed=` summary of a rate-limit window that has
+/// expired without a further drop to close it.
+///
+/// Called once per main-loop iteration, not from [`log_events`]: a storm that
+/// stops dead produces no further event, and the silence AFTER a storm is
+/// exactly the reading the summary is for. On a board that has dropped
+/// nothing this is one `Instant` comparison behind a critical section.
+pub fn flush_drop_summary(now_ms: u64) {
+    let summary = DROP_BUDGET.lock(|cell| cell.borrow_mut().flush(now_ms));
+    if let Some(s) = summary {
+        log_suppressed(s);
+    }
+}
+
+fn log_suppressed(s: leviculum_drop_budget::Suppressed) {
+    crate::log::log_fmt(
+        "[DROP] ",
+        format_args!(
+            "{}",
+            leviculum_log_line::DropSuppressedBody {
+                suppressed: s.lines,
+                window_ms: s.window_ms,
+            }
+        ),
+    );
+}
 
 /// Render the events that carry board-visible evidence, and feed the
 /// announce cadence the one event it takes from this stream.
@@ -77,13 +120,6 @@ pub fn log_events(events: &[NodeEvent], now_ms: u64) {
                 ),
             );
         }
-        // What this board did with ONE packet a neighbour addressed to it
-        // for relay (#346). Off-board the same decision is already legible
-        // as the journey events PKT_FORWARD / PKT_DROP / DEDUP_DROP; here
-        // they are compiled out, and the periodic `[TRANSPORT]` counter line
-        // can only say how many, never which. Only the ADDRESSED relay path
-        // reaches this — an overheard copy bound elsewhere stays on the
-        // counter, so the line cannot drown a shared-medium capture.
         // Why this board just talked (#405). Since the board registers an
         // airtime cap (#402) a capture shows announce-sized transmissions
         // that the cap's holdoff cannot account for, and nothing said which
@@ -114,6 +150,56 @@ pub fn log_events(events: &[NodeEvent], now_ms: u64) {
                 ),
             );
         }
+        // Why this board threw ONE packet away (#346). The complement of
+        // `PKT_RELAY` below, never a second copy of it: the core's two event
+        // sites are disjoint, so a packet that raises `RelayDecided` never
+        // raises `PacketDropped`, and one dropped packet is one line.
+        //
+        // There is deliberately no `forwarded` line here. A line per
+        // successfully relayed packet is a line nobody reads on a busy mesh,
+        // and the count is already on the periodic `[TRANSPORT] fwd=` field
+        // (`crate::transport_stats`).
+        //
+        // Rate-limited, because this is the path that carries the overheard
+        // copies: on a shared medium the board hears every packet routed via
+        // its neighbours. Unlimited, a storm would not lose drop lines — the
+        // 8 KiB `LOG_RING` overwrites oldest-first — it would evict the
+        // `[STACK]`, `[TRANSPORT]` and panic lines the capture was taken
+        // for. `leviculum-drop-budget` holds the policy and its derivation.
+        if let NodeEvent::PacketDropped {
+            destination_hash,
+            reason,
+            interface_in,
+            ..
+        } = event
+        {
+            let decision = DROP_BUDGET.lock(|cell| cell.borrow_mut().admit(now_ms));
+            // The closed window's summary first, so the capture reads in the
+            // order the events happened.
+            if let Some(s) = decision.summary {
+                log_suppressed(s);
+            }
+            if decision.emit {
+                crate::log::log_fmt(
+                    "[DROP] ",
+                    format_args!(
+                        "{}",
+                        leviculum_log_line::PacketDroppedBody {
+                            reason: reason.kebab(),
+                            dest: *destination_hash.as_bytes(),
+                            iface_in: *interface_in,
+                        }
+                    ),
+                );
+            }
+        }
+        // What this board did with ONE packet a neighbour addressed to it
+        // for relay (#346). Off-board the same decision is already legible
+        // as the journey events PKT_FORWARD / PKT_DROP / DEDUP_DROP; here
+        // they are compiled out, and the periodic `[TRANSPORT]` counter line
+        // can only say how many, never which. Only the ADDRESSED relay path
+        // reaches this; an overheard copy bound elsewhere is the `[DROP]`
+        // line above, so the two never double-report one packet.
         if let NodeEvent::RelayDecided {
             destination_hash,
             packet_hash_prefix,

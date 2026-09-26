@@ -767,6 +767,10 @@ async fn main(spawner: Spawner) {
     // 9. Telemetry evaluation tick (only while a target is configured)
     loop {
         transport_stats.poll(&node);
+        // Close a `[DROP]` rate-limit window that expired without a further
+        // drop to carry its summary (#346): the silence after a storm is the
+        // reading that summary is for, and no event arrives to trigger it.
+        leviculum_nrf::events::flush_drop_summary(node.now_ms());
         heap_census.poll(&node, pn_engine.as_ref());
         // Clamped by the stats deadline so the line is still emitted on a
         // channel quiet enough that the node itself has nothing scheduled.

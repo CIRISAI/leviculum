@@ -221,7 +221,7 @@ recipes below keeps you safe. The release profile is size-optimized
 is kept in the `.elf` (`strip = "none"`, `debug = true`) for HardFault
 post-mortem analysis, but the UF2 only carries loadable sections, so the
 debug info does not bloat what lands on the device.
-(`leviculum-nrf/Cargo.toml:346-356`)
+(`leviculum-nrf/Cargo.toml:352-362`)
 
 ### The build/flash workflow
 
@@ -352,7 +352,7 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
 ```
 
 (`Justfile:1631-1637`; `rak-baseboard` aggregate
-`leviculum-nrf/Cargo.toml:336`)
+`leviculum-nrf/Cargo.toml:342`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
 

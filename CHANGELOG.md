@@ -60,6 +60,37 @@ Toolchain: Rust 1.97.1
   comes out of it); one line is 114 bytes on the debug CDC at its widest and
   nothing at all when no reader is attached. Refs #346.
 
+- A board now says WHY it threw a packet away, at the moment it does, and not
+  only for the packets it was asked to relay. The line is `[DROP]
+  reason=<kebab> dst=<hex8> iface=<n> t=<ms>`, carrying the drop taxonomy's
+  own reason string — the same spelling a peer's `lnsd` prints on its
+  `PKT_DROP` — so a field capture names the drop instead of a reviewer
+  reconstructing it from three serial ports. It covers the receive-path drops
+  that reach no relay decision and were therefore reachable ONLY as a step in
+  a periodic counter: the overheard copies bound elsewhere
+  (`overheard-transport-id`, the commonest drop on a shared medium), the
+  relayed link request with no path onward (`no-path`), and the
+  same-interface link echo (`link-repeat-echo`) whose storm cost a rig day in
+  August. The core's new `NodeEvent::PacketDropped` is the complement of
+  `RelayDecided`, never a second copy: the two sets of call sites are
+  disjoint, so one dropped packet produces exactly one line, on one of the
+  two — pinned as a test rather than left as an intention
+  (`test_addressed_relay_drop_raises_no_packet_dropped`). There is
+  deliberately no `forwarded` counterpart; that count is already on the
+  periodic `[TRANSPORT] fwd=` field, and a line per successful relay is a line
+  nobody reads. Because the overheard path is the highest-volume event the
+  core raises, the board renders it through a rate limit of 3 lines per
+  second, then one `[DROP] suppressed=<n> window_ms=<w>` naming what the
+  window held back — derived in `leviculum-nrf/drop-budget` from the 8 KiB
+  `LOG_RING`, which on overflow does not lose drop lines but evicts the
+  `[STACK]`, `[TRANSPORT]` and panic lines the capture was taken for. Measured
+  cost: `NodeEvent` and `TransportEvent` both stay 232 bytes; `.bss` grows 28 B
+  on the t114 and the solarnode and 32 B on the rak4631 — the limiter's window
+  start, its two counters and the flag, which is what keeps this inside the
+  T114's ~13 KiB stack margin instead of compiling the real `tracing` crate
+  in — and `.text` grows 496 B, 656 B and 600 B respectively. Refs #346,
+  #344, #413.
+
 - A board that learns a path from an announce and passes it on to nobody now
   says so. That outcome is not a drop — the announce arrived, was validated,
   and the path is installed — so no counter moves and, until now, no line was

@@ -958,6 +958,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-drop-budget"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-gnss-init"
 version = "0.1.0"
 
@@ -1023,6 +1027,7 @@ dependencies = [
  "leviculum-boot-trace",
  "leviculum-channel-access",
  "leviculum-core",
+ "leviculum-drop-budget",
  "leviculum-gnss-init",
  "leviculum-gnss-presence",
  "leviculum-gnss-time",

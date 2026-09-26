@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "boot-count", "settle-budget", "sync-batch", "upload-proof", "mute-lease"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "boot-count", "settle-budget", "drop-budget", "sync-batch", "upload-proof", "mute-lease"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -71,6 +71,12 @@ leviculum-upload-proof = { path = "upload-proof" }
 # host-testable like sd-policy/ble-tx (#344). Not in leviculum-core: that
 # crate must build for thumbv6m, which has no atomic CAS.
 leviculum-queue-budget = { path = "queue-budget" }
+# How many per-drop `[DROP]` lines the debug CDC may carry per second, and
+# what one clipped window reports (#346). The overheard-packet drop is the
+# highest-volume event the core raises, so the board renders it through this
+# budget; the window arithmetic is only provable against a fake clock, which
+# the firmware crate cannot run.
+leviculum-drop-budget = { path = "drop-budget" }
 # Pure debug-log line shaping, including the board-side `t=<ms>` uptime
 # stamp. The firmware crate cross-compiles and runs no host tests, so the
 # byte-exact shape every capture consumer greps lives here where it can be

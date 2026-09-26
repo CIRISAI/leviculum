@@ -358,6 +358,82 @@ impl core::fmt::Display for AnnounceTransmittedBody {
     }
 }
 
+/// The body of the firmware's `[DROP]` line, rendered from the core's
+/// `NodeEvent::PacketDropped` (Codeberg #346).
+///
+/// ```text
+/// [DROP] reason=<kebab> dst=<8 hex> iface=<n>
+/// ```
+///
+/// One line per packet the receive path threw away, naming the taxonomy's own
+/// reason. The periodic `[TRANSPORT]` counter line can only say how many
+/// drops of each kind a board has accumulated since boot; this says which
+/// packet, and when. Reconstructing one drop from the counter line meant
+/// correlating three serial ports against packet-length arithmetic, which is
+/// the story Codeberg #344 was opened on.
+///
+/// `dst=` is the first 4 bytes, like [`RelayDecidedBody`]'s, a prefix of the
+/// 32-hex `dst=` the host's own `PKT_DROP` carries, so a board line and a
+/// peer's `lnsd` log stitch on one id.
+///
+/// **There is no `forwarded` counterpart and there must not be one.** A line
+/// per successfully relayed packet is a line nobody reads, and the count is
+/// already on the periodic `[TRANSPORT] fwd=` field. The relay path's own
+/// decisions — including the ones that are drops — stay on `PKT_RELAY`
+/// ([`RelayDecidedBody`]); the two event sites are disjoint in the core, so
+/// one dropped packet produces exactly one line, on one of the two.
+pub struct PacketDroppedBody {
+    /// The reason scalar, the core's own (`DropReason::kebab`), passed
+    /// through as `&'static str` so this crate keeps no dependencies.
+    pub reason: &'static str,
+    /// The destination the packet was for.
+    pub dest: [u8; 16],
+    /// The interface it arrived on.
+    pub iface_in: usize,
+}
+
+impl core::fmt::Display for PacketDroppedBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "reason={} dst=", self.reason)?;
+        for byte in &self.dest[..4] {
+            write!(f, "{byte:02x}")?;
+        }
+        write!(f, " iface={}", self.iface_in)
+    }
+}
+
+/// The body of the firmware's `[DROP] suppressed=` line: what one rate-limit
+/// window held back (Codeberg #346).
+///
+/// ```text
+/// [DROP] suppressed=<n> window_ms=<w>
+/// ```
+///
+/// Emitted once per window that refused anything, never on a window that did
+/// not. It shares the `[DROP]` prefix with [`PacketDroppedBody`] on purpose:
+/// a reader greps one tag to get both the drops and the proof that more of
+/// them happened than are printed. Without it a storm and a trickle read the
+/// same on a capture, since both show [`leviculum_drop_budget::LINES_PER_WINDOW`]
+/// lines per second.
+///
+/// [`leviculum_drop_budget::LINES_PER_WINDOW`]: https://codeberg.org/Lew_Palm/leviculum
+pub struct DropSuppressedBody {
+    /// How many `[DROP]` lines the window refused. Never zero.
+    pub suppressed: u32,
+    /// The window they were refused over, in milliseconds.
+    pub window_ms: u32,
+}
+
+impl core::fmt::Display for DropSuppressedBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "suppressed={} window_ms={}",
+            self.suppressed, self.window_ms
+        )
+    }
+}
+
 /// The uptime stamp of a captured line: its LAST `t=` field.
 ///
 /// `None` for a line that carries none — every line the current
@@ -560,6 +636,57 @@ iface_out=none t=7\r\n"
             iface_out: Some(99),
         };
         let rendered = line("PKT_RELAY ", format_args!("{body}"), u64::MAX);
+        assert!(
+            rendered.len() < 128,
+            "{} bytes: {rendered:?}",
+            rendered.len()
+        );
+        assert_eq!(parse_stamp(&rendered), Some(u64::MAX));
+    }
+
+    /// The #346 line, byte for byte. The reason scalar is the core's kebab,
+    /// so the string a board prints and the string `lnsd`'s `PKT_DROP`
+    /// prints are one value with one spelling.
+    #[test]
+    fn a_dropped_packet_names_its_reason_the_destination_and_the_ingress() {
+        let mut dest = [0u8; 16];
+        dest[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let body = PacketDroppedBody {
+            reason: "overheard-transport-id",
+            dest,
+            iface_in: 1,
+        };
+        assert_eq!(
+            line("[DROP] ", format_args!("{body}"), 1234),
+            "[DROP] reason=overheard-transport-id dst=deadbeef iface=1 t=1234\r\n"
+        );
+    }
+
+    /// The summary line, byte for byte, and under the same `[DROP]` tag so
+    /// one grep returns the storm and the proof that it was clipped.
+    #[test]
+    fn the_suppression_summary_names_the_count_and_the_window() {
+        let body = DropSuppressedBody {
+            suppressed: 417,
+            window_ms: 1000,
+        };
+        assert_eq!(
+            line("[DROP] ", format_args!("{body}"), 60_000),
+            "[DROP] suppressed=417 window_ms=1000 t=60000\r\n"
+        );
+    }
+
+    /// The widest drop line has to leave room for the stamp inside one
+    /// 256-byte log buffer, the same bound the relay line is held to.
+    #[test]
+    fn the_widest_drop_line_fits_the_firmware_log_buffer() {
+        let body = PacketDroppedBody {
+            // The longest kebab in the taxonomy (`DropReason::kebab`).
+            reason: "overheard-transport-id",
+            dest: [0xff; 16],
+            iface_in: usize::MAX,
+        };
+        let rendered = line("[DROP] ", format_args!("{body}"), u64::MAX);
         assert!(
             rendered.len() < 128,
             "{} bytes: {rendered:?}",
