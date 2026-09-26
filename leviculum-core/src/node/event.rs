@@ -12,7 +12,8 @@ use crate::constants::TRUNCATED_HASHBYTES;
 use crate::destination::DestinationHash;
 use crate::link::{LinkCloseReason, LinkId};
 use crate::transport::{
-    AnnounceTableClosed, AnnounceTxOccasion, DiscoveryWindow, RelayOutcome, PKT_PH_BYTES,
+    AnnounceTableClosed, AnnounceTxOccasion, DiscoveryWindow, DropReason, RelayOutcome,
+    PKT_PH_BYTES,
 };
 
 /// Why the driver destroyed frames bound to an interface (#25).
@@ -264,6 +265,31 @@ pub enum NodeEvent {
         /// [`RelayOutcome::Forwarded`]; `None` for every outcome that reached
         /// no interface.
         interface_out: Option<usize>,
+    },
+
+    /// One packet this node heard and threw away, and the reason it was
+    /// thrown away for (Codeberg #346).
+    ///
+    /// See
+    /// [`TransportEvent::PacketDropped`](crate::transport::TransportEvent::PacketDropped)
+    /// for the mechanism, for why it is the complement of
+    /// [`RelayDecided`](NodeEvent::RelayDecided) rather than a second copy of
+    /// it, and for why the rate limit belongs to the consumer.
+    ///
+    /// Like [`RelayDecided`](NodeEvent::RelayDecided) it exists so the boards
+    /// can see it: they build leviculum-core without `tracing`, so the
+    /// `PKT_DROP` line that says the same thing off-board is compiled out
+    /// there. They render it as one `[DROP]` line on the debug CDC, through a
+    /// rate limiter.
+    PacketDropped {
+        /// The destination the packet was for.
+        destination_hash: DestinationHash,
+        /// Why it was dropped.
+        reason: DropReason,
+        /// The interface it arrived on.
+        interface_in: usize,
+        /// The packet's hop count as it arrived.
+        hops: u8,
     },
 
     /// One announce this node transmitted, and which occasion put it on the
@@ -596,6 +622,9 @@ impl NodeEvent {
             // A relay decision is about somebody else's packet in transit;
             // this node terminates no link it names.
             | NodeEvent::RelayDecided { .. }
+            // A dropped packet reached no link at all — that is the point of
+            // it.
+            | NodeEvent::PacketDropped { .. }
             // An announce is a broadcast: it names no link even when it
             // leaves on exactly one interface.
             | NodeEvent::AnnounceTransmitted { .. }
@@ -657,6 +686,11 @@ impl NodeEvent {
             // busiest node in the mesh. A lost one costs a reader one line of
             // a repeating condition; the counters still total correctly.
             | NodeEvent::RelayDecided { .. }
+            // The same reasoning at a higher volume still: on a shared medium
+            // one of these accompanies every packet the node overhears, which
+            // is most of what it hears. A CONTROL classification would let the
+            // noisiest diagnostic in the stack crowd out path discovery.
+            | NodeEvent::PacketDropped { .. }
             // Instrumentation again, and on the busiest node in the mesh one
             // of these accompanies every announce it passes on. Nothing reads
             // it back; a lost one costs a reader one line.
@@ -721,6 +755,7 @@ impl NodeEvent {
             NodeEvent::PathLost { .. } => "PathLost",
             NodeEvent::AnnounceLearnedNotRelayed { .. } => "AnnounceLearnedNotRelayed",
             NodeEvent::RelayDecided { .. } => "RelayDecided",
+            NodeEvent::PacketDropped { .. } => "PacketDropped",
             NodeEvent::AnnounceTransmitted { .. } => "AnnounceTransmitted",
             NodeEvent::PacketReceived { .. } => "PacketReceived",
             NodeEvent::PacketDeliveryConfirmed { .. } => "PacketDeliveryConfirmed",

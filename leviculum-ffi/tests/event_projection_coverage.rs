@@ -58,6 +58,15 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     // from being told a second time that they left, and nothing it could act
     // on from a relayed one. The line exists to be read from a capture.
     "AnnounceTransmitted",
+    // Why this node threw away a packet it heard (#346): pure instrumentation,
+    // for the same reason as the three above, and the highest-volume event the
+    // core raises. It is about a packet the application does not own and
+    // mostly about destinations it never registered — the commonest reason is
+    // `overheard-transport-id`, a copy bound elsewhere on a shared medium.
+    // The decision is already made when the event exists; a C app that wants
+    // to know whether its own traffic arrived uses the delivery-confirmation
+    // events it already gets. The line exists to be read from a capture.
+    "PacketDropped",
 ];
 
 /// Variants whose `destination_hash` is deliberately not projected into

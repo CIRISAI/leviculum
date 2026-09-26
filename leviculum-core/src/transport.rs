@@ -2075,12 +2075,15 @@ pub enum TransportEvent {
     ///
     /// **Scope is the ADDRESSED relay path and nothing else.** The event is
     /// emitted only for packets whose transport header names this node, i.e.
-    /// packets a neighbour explicitly asked it to carry. Overheard copies
-    /// bound elsewhere stay on the counter, as they must: on a shared medium a
-    /// transport node hears every packet routed via its neighbours, and an
-    /// event per reception is the 99 %-noise problem `record_drop` was kept
-    /// away from. Relayed announces and broadcasts are addressed to nobody and
-    /// are likewise out of scope here.
+    /// packets a neighbour explicitly asked it to carry. Relayed announces and
+    /// broadcasts are addressed to nobody and are out of scope here.
+    ///
+    /// Overheard copies bound elsewhere are out of scope too. They get
+    /// [`PacketDropped`](TransportEvent::PacketDropped) instead, and the two
+    /// sites are disjoint: no drop raises both, so one capture line means one
+    /// drop, once. That event carries the 99 %-noise volume this one was kept
+    /// away from — on a shared medium a transport node hears every packet
+    /// routed via its neighbours — and its consumer carries the rate limit.
     RelayDecided {
         /// The destination the packet was for.
         destination_hash: [u8; TRUNCATED_HASHBYTES],
@@ -2097,6 +2100,44 @@ pub enum TransportEvent {
         /// [`RelayOutcome::Forwarded`]; `None` for every outcome that
         /// reached no interface.
         interface_out: Option<usize>,
+    },
+
+    /// One packet this node HEARD and threw away, with the reason it was
+    /// thrown away for (Codeberg #346).
+    ///
+    /// The complement of [`RelayDecided`](TransportEvent::RelayDecided), not a
+    /// second copy of it. That event covers the ADDRESSED relay path — a
+    /// packet a neighbour asked this node to carry — and already names
+    /// `no-path`, `duplicate` and `forward-max-hops` there. This one covers
+    /// the receive-path drops that reach no such decision: the overheard
+    /// copies bound elsewhere, the link request with no path onward, the
+    /// same-medium link echo. Together the two account for every reason
+    /// Codeberg #346 asks a board to state, and **no drop produces both** —
+    /// the sites are disjoint, so a capture line means one drop, once.
+    ///
+    /// Off the boards this is the `PKT_DROP` journey line, which carries the
+    /// same `dst` and `reason` and more besides. On a board none of the
+    /// core's tracing exists (`leviculum-core/src/lib.rs:83-100`), so a drop
+    /// was reachable only as a step in the periodic `[TRANSPORT]` counter
+    /// line: the number rose, and which packet it rose for was the reviewer's
+    /// to reconstruct from three serial ports and packet-length arithmetic
+    /// (the #344 story). Boards render this as one `[DROP]` line.
+    ///
+    /// **This is the high-volume path**, deliberately: on a shared medium a
+    /// transport node hears every packet routed via its neighbours, and
+    /// `overheard-transport-id` is the commonest drop there is. The rate limit
+    /// that keeps such a storm off the debug CDC is the CONSUMER's — the core
+    /// emits the event and counts nothing new; see
+    /// `leviculum-drop-budget` for the board's policy.
+    PacketDropped {
+        /// The destination the packet was for.
+        destination_hash: [u8; TRUNCATED_HASHBYTES],
+        /// Why it was dropped, the taxonomy's own reason.
+        reason: DropReason,
+        /// The interface it arrived on.
+        interface_in: usize,
+        /// The packet's hop count as it arrived.
+        hops: u8,
     },
 
     /// One announce transmission, and which of the occasions in
@@ -3094,8 +3135,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // High-volume "overheard / not for us" path: on a shared medium a
                 // transport node hears every HEADER_2 packet routed via its
                 // neighbours. This is correct overhearing, not loss, so it gets a
-                // counter only (surfaced in the periodic PKT_DROP_SUMMARY) and NO
-                // per-packet event, to avoid reproducing the 99%-noise problem.
+                // counter (surfaced in the periodic PKT_DROP_SUMMARY) and NO
+                // per-packet TRACING event, to avoid reproducing the 99%-noise
+                // problem in a collector's log.
+                //
+                // Since #346 it also gets a `PacketDropped` on the event
+                // stream. That is not the same flood: the event stream is
+                // drained by ONE consumer that knows its own budget, and the
+                // board — the only consumer with no tracing at all — rate-
+                // limits it before a byte reaches the debug CDC.
                 //
                 // That reasoning covers packets bound elsewhere. It does not
                 // cover a destination this node itself delivers to: such a
@@ -3128,6 +3176,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         );
                     }
                 }
+                // The board's one line for this drop (#346). The counter
+                // above says how many; this says which, and it is the only
+                // statement a board makes about an overheard copy — the
+                // journey `PKT_DROP` above it compiles out there.
+                Self::push_packet_drop(
+                    &mut self.events,
+                    &packet,
+                    interface_index,
+                    DropReason::OverheardTransportId,
+                );
                 self.stats.record_drop(DropReason::OverheardTransportId);
                 return Ok(());
             }
@@ -3406,6 +3464,32 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             outcome,
             hops: packet.hops,
             interface_out,
+        });
+    }
+
+    /// Queue the [`TransportEvent::PacketDropped`] for one packet the receive
+    /// path threw away.
+    ///
+    /// An associated function over `&mut self.events` rather than a method,
+    /// because several of its call sites hold a live borrow of another field
+    /// of `self` — the link table entry whose hop counts just decided the
+    /// drop, for one — and a `&mut self` receiver would take the whole
+    /// struct. The event queue is the only field this needs.
+    ///
+    /// Pair it with the `stats.record_drop(reason)` at the site, the way
+    /// [`Self::push_relay_decision`] is paired: this pushes an event and
+    /// counts nothing, so the counters stay the single source of totals.
+    fn push_packet_drop(
+        events: &mut Vec<TransportEvent>,
+        packet: &Packet,
+        iface_in: usize,
+        reason: DropReason,
+    ) {
+        events.push(TransportEvent::PacketDropped {
+            destination_hash: packet.destination_hash,
+            reason,
+            interface_in: iface_in,
+            hops: packet.hops,
         });
     }
 
@@ -4685,7 +4769,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3243. A destination with no cached
+    /// link-request path uses at transport.rs:3301. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6156,14 +6240,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // must be ignored: processing it OVERWRITES the entry keyed by this
         // link id with the overheard direction, severing the local-client
         // leg and arming the LRPROOF echo storm (rig lora_3node_relay,
-        // 2026-08-12). Same class as the HEADER_2 overheard filter: a
-        // counter, no per-packet event.
+        // 2026-08-12). Same class as the HEADER_2 overheard filter, and
+        // accounted the same way: a counter, no per-packet tracing event, and
+        // the `PacketDropped` a board renders as a rate-limited `[DROP]`.
         let designated_hop = packet.transport_id == Some(*self.identity.hash());
         if !(designated_hop || from_local || for_local) {
             crate::tracing::trace!(
                 "Ignoring overheard link request for <{}> on {}, not the designated hop",
                 HexShort(&dest_hash),
                 self.iface_name(interface_index)
+            );
+            Self::push_packet_drop(
+                &mut self.events,
+                &packet,
+                interface_index,
+                DropReason::OverheardTransportId,
             );
             self.stats.record_drop(DropReason::OverheardTransportId);
             return Ok(());
@@ -6192,6 +6283,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     );
                     self.pkt_drop_event(
                         &truncated_hash,
+                        &packet,
+                        interface_index,
+                        DropReason::NoPath,
+                    );
+                    Self::push_packet_drop(
+                        &mut self.events,
                         &packet,
                         interface_index,
                         DropReason::NoPath,
@@ -6528,6 +6625,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         );
                         self.pkt_drop_event(
                             &cache_hash,
+                            &packet,
+                            interface_index,
+                            DropReason::LinkRepeatEcho,
+                        );
+                        Self::push_packet_drop(
+                            &mut self.events,
                             &packet,
                             interface_index,
                             DropReason::LinkRepeatEcho,
@@ -7356,9 +7459,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         self.iface_name(interface_index)
                     );
                     // Same account as the HEADER_2 copies bound elsewhere: a
-                    // counter, no per-packet event. This is correct
-                    // overhearing on a shared medium, not loss, and it is the
-                    // highest-volume path there is.
+                    // counter, no per-packet tracing event, and the
+                    // `PacketDropped` a board renders as `[DROP]`. This is
+                    // correct overhearing on a shared medium, not loss, and it
+                    // is the highest-volume path there is — which is why the
+                    // CONSUMER of the event carries the rate limit, not this
+                    // site.
+                    Self::push_packet_drop(
+                        &mut self.events,
+                        &packet,
+                        interface_index,
+                        DropReason::OverheardTransportId,
+                    );
                     self.stats.record_drop(DropReason::OverheardTransportId);
                     return Ok(());
                 }
@@ -13246,7 +13358,11 @@ mod tests {
             }
 
             // OBS-2: the overheard path increments its reason counter but emits NO
-            // per-packet event (no flood).
+            // per-packet TRACING event (no flood in a collector's log). The
+            // `PacketDropped` it pushes on the event stream since #346 is a
+            // different surface with one rate-limiting consumer; this test
+            // pins the tracing side, `test_overheard_drop_pushes_packet_dropped`
+            // the other.
             #[test]
             fn test_overheard_drop_counter_no_per_packet_event() {
                 let mut transport = make_transport_enabled();
@@ -13276,6 +13392,89 @@ mod tests {
                     !logs.contains("PKT_LOCAL_DROP"),
                     "a destination this node does not serve stays on the quiet \
                      path; logs:\n{logs}"
+                );
+            }
+
+            // Codeberg #346: the same overheard drop that stays off the
+            // tracing surface DOES reach the event stream, carrying the
+            // destination and the ingress interface a board needs to name it.
+            // Without this the board's only statement about an overheard
+            // packet is a counter that went up.
+            #[test]
+            fn test_overheard_drop_pushes_packet_dropped() {
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                let raw = make_overheard_packet([0xAB; TRUNCATED_HASHBYTES]);
+                transport.process_incoming(0, &raw).unwrap();
+
+                let dropped: Vec<_> = transport
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        TransportEvent::PacketDropped {
+                            destination_hash,
+                            reason,
+                            interface_in,
+                            hops,
+                        } => Some((*destination_hash, *reason, *interface_in, *hops)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    dropped.len(),
+                    1,
+                    "exactly one PacketDropped, so a capture line means one drop \
+                     once; events: {:?}",
+                    transport.events
+                );
+                let (dst, reason, iface_in, hops) = dropped[0];
+                assert_eq!(reason, DropReason::OverheardTransportId);
+                assert_eq!(
+                    dst, [0x11; TRUNCATED_HASHBYTES],
+                    "the event must name the destination the packet was for, \
+                     not this node"
+                );
+                assert_eq!(iface_in, 0, "the interface it was heard on");
+                assert_eq!(
+                    hops, 2,
+                    "the hop count AFTER the receipt increment, the same \
+                     operand RelayDecided carries, so the two lines are \
+                     comparable"
+                );
+            }
+
+            // The complement of the test above, and the reason the two events
+            // can never double-report one drop: a packet ADDRESSED to this
+            // node for relay raises `RelayDecided` and no `PacketDropped`.
+            // Both firing would put two lines on a board's CDC for one packet,
+            // which is exactly what #346 asks the board NOT to do.
+            #[test]
+            fn test_addressed_relay_drop_raises_no_packet_dropped() {
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                // Addressed at us: the transport id names this node, so the
+                // overheard filter passes it through to the relay decision,
+                // which has no path for it.
+                let raw = make_overheard_packet(*transport.identity.hash());
+                transport.process_incoming(0, &raw).unwrap();
+
+                assert!(
+                    transport
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, TransportEvent::RelayDecided { .. })),
+                    "the addressed relay path must still decide; events: {:?}",
+                    transport.events
+                );
+                assert!(
+                    !transport
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, TransportEvent::PacketDropped { .. })),
+                    "and must NOT also raise PacketDropped; events: {:?}",
+                    transport.events
                 );
             }
 
@@ -15367,7 +15566,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6095), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6179), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
