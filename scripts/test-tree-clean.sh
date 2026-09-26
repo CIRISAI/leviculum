@@ -94,7 +94,7 @@ grep -q "TREE_DIRTIED path=Cargo.lock" <<< "$OUT"
 assert $? "the finding names the file, not just the fact"
 grep -q "TREE_CLEAN_CHECK status=RED .*dirtied=1" <<< "$OUT"
 assert $? "the verdict line counts it"
-grep -q "gate-run.sh:51" <<< "$OUT"
+grep -q "refuses the NEXT gate" <<< "$OUT"
 assert $? "the message says what this breaks next"
 [ "$FAILED" = 0 ] || echo "$OUT" >&2
 

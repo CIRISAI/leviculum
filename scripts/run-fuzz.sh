@@ -180,10 +180,10 @@ crate_slug() {
 # Each fuzz crate carries its own committed Cargo.lock, and it resolves the
 # same path graph the workspace does -- so a dependency added anywhere under
 # it makes the fuzz lock stale, and the next build silently rewrites it. That
-# is how `just fast` -> `fuzz-regress` left three lines of dirt in the gate's
-# push tree on 80c11aae: the following gate refused the tree at
-# gate-run.sh:51 with rc=5 and landing stopped, with nothing in either log
-# saying which run had written the file.
+# is how `just fast` -> `fuzz-regress` left three lines of dirt in the landing
+# gate's shared push tree on 80c11aae: a gate refuses to run in a dirty tree, so
+# the next one stopped with rc=5, and nothing in either log said which run had
+# written the file.
 #
 # So the lock is a PRECONDITION here, not an output. cargo-fuzz 0.13 has no
 # `--locked` of its own and passes trailing arguments to libFuzzer, so the

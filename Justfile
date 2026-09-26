@@ -405,9 +405,9 @@ fuzz-nightly:
 # A LOCKED BUILD, because this recipe runs in trees that are not its own
 # (#295). Each fuzz crate carries its own Cargo.lock and resolves the same
 # path graph the workspace does, so a dependency added anywhere under it makes
-# that lock stale -- and the build then rewrote it, here, in the gate's push
-# tree: the gate after it refused a dirty tree at gate-run.sh:51 with rc=5 and
-# landing stopped, with no log saying which run had written the file. The lock
+# that lock stale -- and the build then rewrote it, here, in the landing gate's
+# shared push tree: a gate refuses to run in a dirty tree, so the next one
+# stopped with rc=5 and no log said which run had written the file. The lock
 # is now a precondition the recipe fails on by name
 # (`run-fuzz.sh::assert_lock_current`), and `check-tree-clean` below is the
 # backstop for whatever else in this tier learns the same habit.
@@ -1057,10 +1057,10 @@ check-source-invariant-census:
 
 # The two halves of the tree-hygiene check, #295. A gate must not modify the
 # tree it runs in: `just fast` -> `fuzz-regress` rewrote a stale
-# `leviculum-std/fuzz/Cargo.lock` in the gate's push tree on 80c11aae, stayed
-# green over it, and the next gate refused the dirty tree (gate-run.sh:51,
-# rc=5) on 3b1bf00e. Landing stopped and no log named the run that had written
-# the file.
+# `leviculum-std/fuzz/Cargo.lock` in the landing gate's shared push tree on
+# 80c11aae and stayed green over it; a gate refuses to run in a dirty tree, so
+# the next one stopped with rc=5 on 3b1bf00e and no log named the run that had
+# written the file.
 #
 # The pair is deliberately NOT "assert the tree is clean". The push tree is
 # clean before a gate starts, but a developer's checkout is not, and a tier

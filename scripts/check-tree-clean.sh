@@ -3,11 +3,11 @@
 #
 # What happened: `just fast` -> `fuzz-regress` built a fuzz crate whose
 # committed Cargo.lock no longer matched its dependency graph, cargo wrote the
-# three missing lines to disk, and the run stayed green. The tree it had
-# written into was /home/lew/ci/push-tree, and the NEXT gate refuses a dirty
-# push tree (gate-run.sh:51, rc=5). Landing stopped on 3b1bf00e, and nothing in
-# either gate's log said which run had modified the file -- the gate that broke
-# it was green, and the gate that reported it had not run anything yet.
+# three missing lines to disk, and the run stayed green. The tree it wrote into
+# was the landing gate's shared push tree, and a gate refuses to run in a dirty
+# one: the next one stopped with rc=5 on 3b1bf00e, and nothing in either gate's
+# log said which run had modified the file -- the gate that broke it was green,
+# and the gate that reported it had not run anything yet.
 #
 # The lock is fixed at its source and `run-fuzz.sh` now refuses a stale one by
 # name. This script is the layer BELOW that: whatever else in the tier learns
@@ -81,9 +81,10 @@ HEAD_SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unborn)"
 
 # One line per dirty tracked path: "<path>\t<XY>\t<sha256-of-worktree-content>",
 # path first so the file sorts, and reads, by the name a person is looking for.
-# `--untracked-files=no` is deliberate and is the same question gate-run.sh:51
-# asks: a build that leaves a log or a target/ artefact behind is untidy, a
-# build that edits a TRACKED file is what refuses the next gate.
+# `--untracked-files=no` is deliberate, and is the same question the landing
+# gate's own precondition asks: a build that leaves a log or a target/ artefact
+# behind is untidy, a build that edits a TRACKED file is what refuses the next
+# gate.
 #
 # core.quotepath=off keeps a non-ASCII path readable rather than escaped, and
 # the path is everything after the two status columns and one space. A rename
@@ -164,8 +165,9 @@ echo "TREE_CLEAN_CHECK status=RED baseline=$source_kind dirtied=$dirtied undirti
 {
     echo
     echo "A recipe in this run modified the tracked file(s) named above."
-    echo "That is what refuses the NEXT gate in a shared tree (gate-run.sh:51,"
-    echo "rc=5), and it stops landing until somebody reverts the file by hand."
+    echo "That is what refuses the NEXT gate in a shared tree: its clean-tree"
+    echo "precondition fails with rc=5, and landing stops until somebody reverts"
+    echo "the file by hand."
     echo "Find the recipe that writes it and make the file an input:"
     echo "  * a Cargo.lock: the build resolves a graph the lock does not match."
     echo "    Regenerate and COMMIT it, and build --locked so the next stale"
