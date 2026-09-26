@@ -375,6 +375,14 @@
 //!
 //! ## The shipped fallback order does not defend that slot, and why
 //!
+//! **Superseded in its conclusion by the last section of these docs, and
+//! kept because its mechanism is still exactly right**: every row below
+//! is a room of boards and phones, and the rig's room had a fourth
+//! member. With that member in it the shipped order DOES defend the slot
+//! (0.32 % to the phone, `Statics`). What follows is what the key does
+//! when a phone is the only thing on offer, which is still the room a
+//! mesh of boards in one flat is when no fourth node is up.
+//!
 //! In the rig's own room `eager/rotatinglast` is 100 % too — identical
 //! in every column to the address order it replaced. On the capture's
 //! short-mode row it is NOT because there was nothing else to dial:
@@ -429,6 +437,7 @@
 //! formations, not of connectivity; `disc` is the connectivity column
 //! and it stays at 0 in a room of boards.
 //!
+//!
 //! ## What this harness still cannot see
 //!
 //! Four differences from a board remain, each stated with what it is
@@ -450,23 +459,202 @@
 //!   `conn_params.rs`; the keepalive expiry is `LINK_TIMEOUT_MS`), and a
 //!   peer that died by rebooting is not advertising at all for its boot
 //!   time.
-//! - **The room is boards and phones only.** The rig's room had a
-//!   fourth member the model has no kind for: a static-addressed,
-//!   central-capable host (identity `e19b2b38`, one address
-//!   `d916e2923ed2`, the only one it ever advertised in 2417 lines) that
-//!   took 27 of `feld-t114`'s 37 refill links across the captures, and
-//!   every one of the 25 outgoing links `feld-t114` made after
-//!   2026-09-25, when the shipped order went on the boards. It
-//!   advertises no slot count, so it deficits by zero like a phone and
-//!   then beats the phone on the rotating-last term — which is how the
-//!   shipped order emptied `feld-t114`'s phone column on the rig while
-//!   the harness's three-board room says it cannot. A static
-//!   always-free peer is the first thing to add to this model.
+//! - **A static peer's own uptime.** The fourth kind is in the model
+//!   since the section below ([`Statics`]), but it is modelled as a peer
+//!   that is always there: the solar node the rig's room had is
+//!   solar-powered and its sessions with `feld-t114` ended 31 times in
+//!   two weeks. The harness ends them on the same [`Mortality`] draw a
+//!   board-to-board session ends on, which is the population the
+//!   lifetimes were measured over, and it never takes the peer out of
+//!   the room for a night. A peer that vanishes for hours frees the
+//!   slots it held and stops competing for others, and nothing here
+//!   measures which of the two dominates.
+//! - **The static peer dials boards only.** The captures place all 84
+//!   links it initiated at the three boards and cannot see a link of its
+//!   own to the phone (they are the boards' logs, not its). So the model
+//!   does not invent one, and its own outgoing slot is therefore never
+//!   spent on the phone the way a board's is.
 //! - **Every advertiser is heard in every window.** One round is one
 //!   complete window here. The firmware collects
 //!   `SCAN_WINDOW_COLLECT_MS` (3 s) out of a 5 s cycle and can miss a board advertising on a 1-2 s
 //!   cadence, while a phone advertising sub-second is heard nearly
 //!   always.
+//!
+//! # The fourth kind in the room: the solar node (#412 steady state 2)
+//!
+//! 306's largest stated gap was that the rig's room had a member this
+//! model had no kind for, and every reading above is a reading of a room
+//! missing it. [`Statics`] is that kind, with the identity check, the
+//! address class and the advertisement it carries measured off the same
+//! captures rather than assumed — including the one thing 306 got wrong
+//! about it: it DOES advertise a capability record with a real free-slot
+//! count (`caps_record=1 free_slots=3` on 1835 of the 2450
+//! `BLE_SCAN_DECISION` lines the three boards logged for it, `free_slots=2`
+//! on 581), so it deficits by zero because it is empty, not because it is
+//! silent. And it is one of our own boards: identity
+//! `e19b2b38912698a9cba4a114fb692857` is **the solar node**, which
+//! periculum's own scenario declares (`hardware/ble_mesh_formation_solar.
+//! toml`: `solarnode:e19b2b38`).
+//!
+//! ## The rig's room, with and without it
+//!
+//! Three boards and one phone, per 1000 orders. `stat%` is the share of
+//! the TOP board's freed-slot dials that went to the static peer and
+//! `top%` the share that went to the phone; `sb` counts links formed to
+//! the static peer. `none` is 306's room, and every cell of it is pinned
+//! as an equality here.
+//!
+//! | room | policy             | life     | freed% | stat%  | top%   | sb   | bb    | d/use | disc |
+//! |------|--------------------|----------|-------:|-------:|-------:|-----:|------:|------:|-----:|
+//! | none | eager/mostfree     | immortal | 100.00 |   0.00 | 100.00 |    0 |  2040 | 2.04  |    0 |
+//! | none | eager/mostfree     | 45 s     |   5.81 |   0.00 | 100.00 |    0 | 26790 | 1.40  |    0 |
+//! | none | eager/mostfree     | 600 s    |  56.90 |   0.00 | 100.00 |    0 |  3904 | 1.84  |    0 |
+//! | none | eager/rotatinglast | immortal | 100.00 |   0.00 | 100.00 |    0 |  2040 | 2.04  |    0 |
+//! | none | eager/rotatinglast | 45 s     |   5.81 |   0.00 | 100.00 |    0 | 26790 | 1.40  |    0 |
+//! | none | eager/rotatinglast | 600 s    |  56.90 |   0.00 | 100.00 |    0 |  3904 | 1.84  |    0 |
+//! | none | eager/groupfirst   | immortal | 100.00 |   0.00 | 100.00 |    0 |  2618 | 1.31  |    0 |
+//! | none | eager/groupfirst   | 45 s     |   0.06 |   0.00 |   0.41 |    0 | 31500 | 1.27  |    0 |
+//! | none | eager/groupfirst   | 600 s    |  26.95 |   0.00 |  59.04 |    0 |  5238 | 1.16  |    0 |
+//! | none | eager/silencefull  | 45 s     |   0.06 |   0.00 |   0.41 |    0 | 31500 | 1.27  |    0 |
+//! | rig  | eager/mostfree     | immortal |  97.01 |   2.27 |  97.11 |  472 |  2090 | 1.33  |    0 |
+//! | rig  | eager/mostfree     | 45 s     |   6.71 |   0.11 |  99.89 |   98 | 26734 | 1.40  |    0 |
+//! | rig  | eager/mostfree     | 600 s    |  54.87 |   6.29 |  91.91 |  586 |  3960 | 1.40  |   16 |
+//! | rig  | eager/rotatinglast | immortal |  98.83 |   0.00 |  98.83 |  738 |  2090 | 1.07  |    0 |
+//! | rig  | eager/rotatinglast | 45 s     |   0.04 |  99.68 |   0.32 | 4640 | 26840 | 1.27  |    0 |
+//! | rig  | eager/rotatinglast | 600 s    |  22.34 |  45.69 |  50.94 | 1472 |  3976 | 1.10  |   22 |
+//! | rig  | eager/groupfirst   | immortal |    -   |    -   |    -   |  838 |  2162 | 1.00  |    0 |
+//! | rig  | eager/groupfirst   | 45 s     |   0.00 |  99.47 |   0.00 | 4658 | 26932 | 1.27  |    0 |
+//! | rig  | eager/groupfirst   | 600 s    |   0.52 |  79.10 |   1.74 | 1546 |  4138 | 1.03  |   26 |
+//! | rig  | eager/silencefull  | 45 s     |   0.00 |  99.47 |   0.00 | 4658 | 26932 | 1.27  |    0 |
+//!
+//! (`eager/silencefull` is identical to `eager/groupfirst` in every cell
+//! of every row, so only one of its rows is repeated here; the test
+//! prints both and asserts the equality. Why they coincide is the second
+//! finding below.)
+//!
+//! **306's finding does not survive the fourth kind.** In the rig's own
+//! room under the shipped order the top board's freed outgoing slot goes
+//! to the static peer 99.68 % of the time at the capture's short mode and
+//! to the phone 0.32 % — which is the rig's own ledger after 2026-09-25,
+//! when the shipped order reached the boards: `feld-t114` made 25
+//! outgoing links from then on and all 25 went to the solar node. The
+//! same room under the order the shipped one REPLACED gives the slot back
+//! to the phone (99.89 %), which is the rig's earlier ledger (20 of
+//! `feld-t114`'s 65 outgoing links went to the phone, 42 to the solar
+//! node, 3 to a board). The model reproduces both eras of the capture and
+//! the only thing that moves between them is the fallback order. So the
+//! shipped order DOES defend the freed slot in the small room — against
+//! the phone. What 306 measured as "100 % to the phone, under both
+//! orders" was a three-board model of a four-board room.
+//!
+//! ## Ten and twenty boards, one phone and one static peer
+//!
+//! `sfreed%` is the room-average version of `stat%`. The immortal row is
+//! left out: at these sizes every board is linked long before the horizon
+//! and the freed-slot column has almost no denominator.
+//!
+//! | n  | policy             | life  | freed% | sfreed% | stat%  | top%   | sb   | bb     | d/use | disc |
+//! |---:|--------------------|-------|-------:|--------:|-------:|-------:|-----:|-------:|------:|-----:|
+//! | 10 | eager/mostfree     | 45 s  |   3.47 |    0.00 |   0.00 | 100.00 |    2 | 116870 | 1.27  |    0 |
+//! | 10 | eager/mostfree     | 600 s |  36.84 |    0.00 |   0.00 | 100.00 |   12 |  17526 | 1.05  |    2 |
+//! | 10 | eager/rotatinglast | 45 s  |   0.00 |    4.30 |  99.92 |   0.04 | 5810 | 116710 | 1.27  |    0 |
+//! | 10 | eager/rotatinglast | 600 s |   0.88 |    7.60 |  87.19 |   8.87 | 1650 |  17610 | 1.03  |   32 |
+//! | 10 | eager/groupfirst   | 45 s  |   0.00 |    4.31 |  99.88 |   0.00 | 5822 | 116726 | 1.27  |    0 |
+//! | 10 | eager/groupfirst   | 600 s |   0.00 |    7.62 |  92.13 |   0.00 | 1672 |  17618 | 1.02  |   36 |
+//! | 20 | eager/mostfree     | 45 s  |   1.63 |    0.00 |   0.00 | 100.00 |    6 | 236070 | 1.27  |    0 |
+//! | 20 | eager/mostfree     | 600 s |  22.06 |    0.00 |   0.00 | 100.00 |   16 |  36272 | 1.04  |   12 |
+//! | 20 | eager/rotatinglast | 45 s  |   0.00 |    1.96 | 100.00 |   0.00 | 5390 | 236596 | 1.27  |    0 |
+//! | 20 | eager/rotatinglast | 600 s |   0.01 |    3.44 |  86.76 |   0.28 | 1614 |  36554 | 1.03  |   78 |
+//! | 20 | eager/groupfirst   | 45 s  |   0.00 |    1.95 | 100.00 |   0.00 | 5386 | 236646 | 1.27  |    0 |
+//! | 20 | eager/groupfirst   | 600 s |   0.00 |    3.45 |  86.52 |   0.00 | 1620 |  36550 | 1.03  |   78 |
+//!
+//! The three-board result is not a small-room artefact: at ten and twenty
+//! boards the shipped order spends the top board's freed slot on the
+//! static peer too (99.92 % and 100.00 %), and the address order still
+//! spends it on the phone (100 % at both sizes). One static peer in the
+//! room is enough to empty the phone's column at every size measured.
+//!
+//! ## Where the static peer's ADDRESS sits is the other half
+//!
+//! The rig's solar node held `d916e2923ed2`, below all three boards
+//! (`dcb18ad99cdb` < `e1ac9eb3f05c` < `e81d77f09cdc`), and that is the
+//! benign position: the strict rule hands IT every board and hands no
+//! board a verdict for it, so it can only ever take a FALLBACK dial. With
+//! its address drawn like a board's instead ([`Statics::drawn`]), every
+//! board below it dials it STRICTLY and spends its one outgoing slot
+//! there: in the three-board room the board graph then splits in 624 of
+//! 1000 orders under the shipped order (against 0 with the peer at the
+//! rig's address and 0 without the peer at all), and `bb` falls from 2040
+//! to 1248. A room's fourth node is cheap or ruinous depending on where
+//! its address lands, and #375's own question — the fallback class
+//! spreading across boards — is not what decides that; the strict sort is.
+//!
+//! Read the `disc` column with the definition in mind: it counts the `n`
+//! boards' own graph, and a link to the static peer counts in neither
+//! `disc` nor `bb`, exactly as a link to a phone does not. On the rig the
+//! solar node IS a mesh node, so those columns overstate what it costs
+//! the mesh. `stat%` is the column that answers #412: where the dial
+//! went.
+//!
+//! ## Item 3's two candidate keys, measured
+//!
+//! Both are harness-side policies over the SHIPPED table (no `src`
+//! change): [`TargetChoice::GroupAboveDeficit`] asks the rotating group
+//! above the free-slot deficit — the shipped key's two middle terms
+//! swapped — and [`TargetChoice::SilenceIsFull`] leaves the key alone and
+//! reads a peer that advertised no record as FULL instead of empty.
+//!
+//! - **In the empty room they cost nothing, measured as an equality.** At
+//!   ten and twenty boards, `disc` 0, boardless 0, `bb` 10 000 and
+//!   20 000, `d/use` 1.00 — the same cells as the shipped order, dial for
+//!   dial. So neither is the deviation from #375's guarantee (`disc` = 0
+//!   at n = 20) that #375 does not allow.
+//! - **In the room 306 measured — three boards and a phone, no static
+//!   peer — they are what defends the freed slot.** The top board's share
+//!   of it spent on the phone falls from 100.00 % to 0.41 % at the
+//!   capture's short mode, `bb` RISES from 26 790 to 31 500 (+17.6 %) and
+//!   `d/use` falls from 1.40 to 1.27. At the 600 s row, from 100.00 % to
+//!   59.04 %; at `immortal`, neither can do anything, and the reason is
+//!   in the `solo%` column — 100 % of those windows have no board on
+//!   offer at all, so there is nothing to prefer.
+//! - **With the static peer present they add almost nothing at the short
+//!   mode** (99.68 % of the top board's freed slots already went to the
+//!   static peer) **and they close the residual at the tail**: 8.87 % ->
+//!   0.00 % at n = 10 and 0.28 % -> 0.00 % at n = 20 on the 600 s row,
+//!   and 50.94 % -> 1.74 % in the rig's three-board room.
+//! - **This instrument cannot choose between the two.** Every cell of
+//!   every row is identical, and that is a fact about the ROOM: the only
+//!   peer in it with no capability record is the phone, and the only peer
+//!   with a rotating address is the phone, so both keys demote the same
+//!   single peer. They come apart only for a peer in one set and not the
+//!   other — a rotating peer that advertises a record (no Columba does
+//!   today), or a static peer that advertises none (an older board) — and
+//!   `the_two_candidate_keys_are_two_different_policies` is that pair of
+//!   windows, through the real table.
+//!
+//! ## The sentence for #412
+//!
+//! With the rig's fourth kind in the room, the shipped fallback order
+//! already defends the freed slot: the phone takes 0.32 % of the top
+//! board's freed slots in the rig's own three-board room, 0.04 % at ten
+//! boards and 0.00 % at twenty, and the model reproduces the capture's
+//! two eras on either side of 2026-09-25 with nothing but the order
+//! changing. 306's "the shipped order does not defend that slot" was an
+//! artefact of a three-board model of a four-board room, and the tier
+//! from part 1 is still worth exactly zero (0 of the offers in every cell
+//! here reach `DialPreference::CannotDialUs` — the solar node advertises
+//! `caps=0x1e`/`0x1c`, bit 0 clear). What remains open is the room with NO
+//! such peer, and there both of item 3's candidates defend it — 100.00 %
+//! to 0.41 % at the capture's short mode — at zero cost in `disc` and
+//! `d/use` in the empty room, so neither is a deviation #375 forbids;
+//! both also hand back 17.6 % more board-to-board links in that room than
+//! the shipped order. Neither candidate can be chosen over the other on
+//! any row this instrument can measure, because the phone is the only peer
+//! that is both silent and rotating. The dial ledger stays the next order:
+//! what no candidate KEY defends is the window with one candidate in it
+//! (`solo%` = 100 % on the immortal rows, 57 % of the rig room's churn
+//! dials when links stand), and a ledger is the only thing that can refuse
+//! a dial the window has nobody to prefer over.
 
 use leviculum_ble_tx::{
     dial_preference, free_slots, judge_duplicate, should_initiate, with_free_slots, CandidateTable,
@@ -726,6 +914,122 @@ impl Churn {
     }
 }
 
+/// The fourth kind in the rig's room (#412 steady state 2) — a
+/// parameter of the same kind as [`Churn`] and [`Mortality`], and
+/// `Statics::NONE` reproduces every row measured before it bit for bit.
+///
+/// # Which of our own things it is
+///
+/// Identity `e19b2b38912698a9cba4a114fb692857`, the peer that took 42 of
+/// `feld-t114`'s 65 outgoing links across the `ble-drop` captures, is
+/// **the solar node** — one of our own boards, not a host adapter. The
+/// null hypothesis was checked before the kind was modelled, three ways:
+///
+/// - periculum's own scenario names it:
+///   `hardware/ble_mesh_formation_solar.toml` declares
+///   `solarnode:e19b2b38`, and `rig-run/solar-20260922T0545Z.log` logs
+///   `PARTICIPANTS ... e19b2b38 (solarnode, 1 link-up line)`.
+/// - it is not lnsd on a host adapter: every identity file on the rig
+///   host (27 of them, `~/.reticulum` and each `*/storage/
+///   transport_identity`) was hashed the way Reticulum hashes one and
+///   none of them is `e19b2b38`.
+/// - and it could not be lnsd anyway, which is the load-bearing half:
+///   lnsd advertises `LOCAL_CAPS` unmodified (`bluez.rs:75` —
+///   `manufacturer_data_with_hint(LOCAL_CAPS, &hint)`, no
+///   `with_free_slots`), so it states no free-slot count, while this
+///   peer states one in every window (below). Only the firmware's
+///   advertising path does that (`columba.rs:285`).
+///
+/// # What the capture shows it doing, and where 306 was wrong
+///
+/// One address in all 2416 lines that carry its identity hint
+/// (`d916e2923ed2`, top bits `11` — a static random address, so the
+/// shipped [`FallbackOrder::RotatingLast`] never demotes it), and it
+/// **does advertise a capability record**: `caps_record=1` with a valid
+/// free-slot count in all 2450 `BLE_SCAN_DECISION` lines the three
+/// boards logged for it — `free_slots=3` in 1835 of them and
+/// `free_slots=2` in 581. 306's model of it ("advertises no slot count,
+/// so it deficits by zero like a phone") is therefore wrong in its
+/// mechanism and right in its effect: it deficits by zero because it is
+/// genuinely EMPTY in three windows out of four, not because it is
+/// silent.
+///
+/// It dials, like [`Churn`]'s `dials = true` half: `feld-pocket` logged
+/// 76 identity writes from it (`[BLE ] peer id: e19b2b38`) and never
+/// dialled it once, `feld-t114` 6 and `t114-boot` 2 — 84 links it
+/// initiated. That follows from its address rather than from a
+/// parameter: `d916e2923ed2` is BELOW all three boards
+/// (`dcb18ad99cdb` < `e1ac9eb3f05c` < `e81d77f09cdc`), so
+/// [`should_initiate`] hands it every board strictly (`initiate_lower_
+/// address`) and hands no board a strict verdict for it — every one of
+/// the boards' 42 + 1 dials to it is `rule=initiate_fallback`, which is
+/// exactly what the `BLE_SCAN_WINDOW` lines say.
+///
+/// So the kind is: a static, non-rotating address; a real record with a
+/// real count; one outgoing slot and [`PERIPH_SLOTS`] incoming ones,
+/// like the board it is; sessions that end on the same [`Mortality`]
+/// draw a board-to-board session ends on (the distribution was measured
+/// over `BLE_CENTRAL_UP`/`DOWN` pairs that INCLUDE this peer's, so the
+/// two are one population). What it is not is a member of the board
+/// graph the `disc`, `bb` and `boardless` columns count — those stay the
+/// `n` boards under study, so a link to the static peer counts in
+/// neither, exactly as a link to a phone does not. On the rig it IS a
+/// mesh node, so those columns OVERSTATE what a static peer costs the
+/// mesh; the column that answers #412 is `stat%`, where the dial went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Statics {
+    /// Static peers in the room.
+    peers: usize,
+    /// Whether they dial boards as well as accept dials.
+    dials: bool,
+    /// Whether their address is drawn BELOW every board's, which is the
+    /// rig's own configuration (`d916e2923ed2` under all three boards).
+    /// `false` draws it uniformly in the static-random class, like a
+    /// board's, so the peer is the lowest in the room about one order in
+    /// `n + 1`.
+    lowest: bool,
+}
+
+impl Statics {
+    /// The rooms measured before this section: boards and phones only.
+    const NONE: Self = Self {
+        peers: 0,
+        dials: false,
+        lowest: false,
+    };
+
+    /// The rig's own fourth kind: static address below every board's,
+    /// dialling boards as the capture's 84 initiated links show.
+    const fn rig(peers: usize) -> Self {
+        Self {
+            peers,
+            dials: true,
+            lowest: true,
+        }
+    }
+
+    /// The same peer with its address drawn like a board's — the rig's
+    /// address order was one draw of four and this is the rest of them.
+    const fn drawn(peers: usize) -> Self {
+        Self {
+            peers,
+            dials: true,
+            lowest: false,
+        }
+    }
+
+    /// The accept-only half on its own: it advertises and takes dials
+    /// but initiates none, so a row measures the slot theft without the
+    /// load-spreading its own links do.
+    const fn accepting(peers: usize) -> Self {
+        Self {
+            peers,
+            dials: false,
+            lowest: true,
+        }
+    }
+}
+
 /// The ATT MTU handed to the duplicate rule for BOTH links of a
 /// duplicate pair.
 ///
@@ -780,6 +1084,33 @@ enum TargetChoice {
     /// for candidates whose address stays put and puts the ones that
     /// redraw it behind them.
     RotatingLast,
+    /// Candidate (a) of 306, measured and not built: the shipped key
+    /// with its two MIDDLE terms swapped, so the rotating group is
+    /// asked ABOVE the free-slot deficit — `(tier, group, deficit,
+    /// address-or-sighting)` instead of `(tier, deficit, group, ...)`.
+    ///
+    /// It is a harness-side re-offer of the shipped table rather than a
+    /// second key: the non-rotating candidates get a window of their
+    /// own and the rotating ones are offered only if that window came
+    /// out empty (see [`elect`]). That is exactly the swapped key here,
+    /// not an approximation of it, because the group term is only ever
+    /// set for candidates in the WORST tier ([`DialPreference::
+    /// Fallback`], `window.rs`'s `rank`), so no rotating candidate can
+    /// outrank a non-rotating one on the tier the swap moved it above.
+    GroupAboveDeficit,
+    /// The other way to take the phone's free ride away without
+    /// touching the group order: a peer that advertised NO capability
+    /// record deficits as if it were FULL instead of empty. Silence is
+    /// not "all slots free".
+    ///
+    /// Also harness-side, and also the real table: a recordless
+    /// candidate is offered as `Some(0)` free slots instead of `None`,
+    /// which is what the window would read off an advertisement that
+    /// said so. Everything else — tier, group, address — is the shipped
+    /// key. In a room where every peer advertises a count (an empty room
+    /// of boards, or one with a static peer and no phone in it) this row
+    /// is the shipped row bit for bit, which the control asserts.
+    SilenceIsFull,
 }
 
 impl TargetChoice {
@@ -788,7 +1119,11 @@ impl TargetChoice {
     fn advertises_slots(self) -> bool {
         matches!(
             self,
-            Self::MostFreeSlots | Self::FallbackFirstHeard | Self::RotatingLast
+            Self::MostFreeSlots
+                | Self::FallbackFirstHeard
+                | Self::RotatingLast
+                | Self::GroupAboveDeficit
+                | Self::SilenceIsFull
         )
     }
 
@@ -796,7 +1131,9 @@ impl TargetChoice {
     fn fallback_order(self) -> FallbackOrder {
         match self {
             Self::FallbackFirstHeard => FallbackOrder::FirstHeard,
-            Self::RotatingLast => FallbackOrder::RotatingLast,
+            Self::RotatingLast | Self::GroupAboveDeficit | Self::SilenceIsFull => {
+                FallbackOrder::RotatingLast
+            }
             _ => FallbackOrder::Address,
         }
     }
@@ -806,7 +1143,94 @@ impl TargetChoice {
     /// — a row that never reads it must not consume the draw either,
     /// or the two would not be the same replay.
     fn reads_arrival_order(self) -> bool {
-        matches!(self, Self::FallbackFirstHeard | Self::RotatingLast)
+        matches!(
+            self,
+            Self::FallbackFirstHeard
+                | Self::RotatingLast
+                | Self::GroupAboveDeficit
+                | Self::SilenceIsFull
+        )
+    }
+}
+
+/// Whether the shipped table puts this candidate in the fallback class's
+/// ROTATING group — read off the table itself rather than restated here.
+///
+/// The rule lives in `window.rs` (`rotating_address`, the top two
+/// address bits) and is not exported, and a second copy of it in the
+/// harness would be a second policy. So the question is asked of the
+/// real table: offer the candidate against a probe that ties with it on
+/// every other term — same verdict, same slot count — at the LAST
+/// address of the non-rotating class. The probe wins iff the candidate
+/// sits in the group behind it.
+fn in_rotating_group(addr: u64, decision: ConnectDecision, free: Option<u8>) -> bool {
+    /// `11` on top, so never a rotating address, and the highest one
+    /// there is: any non-rotating candidate beats it on the address
+    /// term, and no drawn address can equal it.
+    const PROBE: u64 = 0xFFFF_FFFF_FFFF;
+    assert_ne!(addr, PROBE, "the probe's address is in the room");
+    let mut table: CandidateTable<bool, 2> =
+        CandidateTable::with_fallback_order(FallbackOrder::RotatingLast);
+    table.offer(addr, decision, free, false);
+    table.offer(PROBE, decision, free, true);
+    table
+        .into_best()
+        .map(|(_, _, probe_won)| probe_won)
+        .expect("an initiate verdict is a candidate")
+}
+
+/// One collected window's election under `choice`, through the real
+/// [`CandidateTable`] in every case — including the two policies #412
+/// steady state 2 measures, which are re-offers and not a second key
+/// (see [`TargetChoice::GroupAboveDeficit`] and
+/// [`TargetChoice::SilenceIsFull`]).
+///
+/// `offers` is `(peer index, address, verdict, advertised free slots)`
+/// in the order the advertising PDUs arrived. The tier census happens
+/// here, once per offer, whatever the policy does with the offer
+/// afterwards.
+fn elect(
+    choice: TargetChoice,
+    offers: &[(usize, u64, ConnectDecision, Option<u8>)],
+    tally: &mut Tally,
+) -> usize {
+    let silence_is_full = choice == TargetChoice::SilenceIsFull;
+    let read_slots = |free: Option<u8>| {
+        if silence_is_full {
+            free.or(Some(0))
+        } else {
+            free
+        }
+    };
+    // 303's tier, censused rather than assumed: the public rule is
+    // asked the same question the window's key asks it, per offer.
+    for &(_, _, decision, free) in offers {
+        tally.offers += 1;
+        if dial_preference(decision, read_slots(free)) == DialPreference::CannotDialUs {
+            tally.offers_cannot_dial += 1;
+        }
+    }
+    let pass = |group: Option<bool>| -> Option<usize> {
+        let mut window: CandidateTable<usize, WINDOW_CANDIDATES> =
+            CandidateTable::with_fallback_order(choice.fallback_order());
+        for &(p, addr, decision, free) in offers {
+            let free = read_slots(free);
+            if group.is_some_and(|want| in_rotating_group(addr, decision, free) != want) {
+                continue;
+            }
+            window.offer(addr, decision, free, p);
+        }
+        window.into_best().map(|(_, _, p)| p)
+    };
+    if choice == TargetChoice::GroupAboveDeficit {
+        // The group term first: the candidates whose address is a key
+        // get the window, and the ones that redraw it are only asked
+        // when that window is empty.
+        pass(Some(false))
+            .or_else(|| pass(Some(true)))
+            .expect("a non-empty candidate set chooses")
+    } else {
+        pass(None).expect("a non-empty candidate set chooses")
     }
 }
 
@@ -963,11 +1387,31 @@ struct Churner {
     links: Vec<usize>,
 }
 
+/// The #412 static peer: the solar node as [`Statics`] describes it —
+/// one fixed static-random address, a capability record with its real
+/// free-slot count, one outgoing slot and [`PERIPH_SLOTS`] incoming
+/// ones. It never goes silent (nothing rotates), so no link to it ever
+/// reaches the expiry sweep; its sessions end on a [`Mortality`] draw
+/// like a board's.
+struct StaticPeer {
+    addr: u64,
+    /// Its one central link, and the round it dies in.
+    outgoing: Option<Link>,
+    /// Peripheral links, at most [`PERIPH_SLOTS`] — the count it
+    /// advertises is this vector's complement, which is why it reads as
+    /// "all free" in three windows out of four.
+    incoming: Vec<Link>,
+    /// Its own fallback clock. It only ever runs when the peer is NOT
+    /// the lowest address in the room ([`Statics::drawn`]); at the rig's
+    /// own address order every board is a strict candidate for it.
+    strict_rounds: u32,
+}
+
 /// What a run spent and what it got, per #412's three numbers.
 ///
 /// `dials` counts every dial that reached the identity read, which is
 /// where a spent one is recognised; `dials == board_links + churn_links
-/// + refused` is checked at the end of every run.
+/// + static_links + refused` is checked at the end of every run.
 #[derive(Debug, Default, Clone, Copy)]
 struct Tally {
     dials: usize,
@@ -980,6 +1424,11 @@ struct Tally {
     /// Dials that formed a link to a churning peer, replacements
     /// included.
     churn_links: usize,
+    /// Dials that formed a link to a [`StaticPeer`] — the rig's fourth
+    /// kind. No replacement can be one: the peer's address never
+    /// changes, so the §4.5 address exclusion catches the duplicate
+    /// before the dial, which the rotation is what defeats.
+    static_links: usize,
     /// Dials refused post-connect because the identity was already
     /// live — the rotated-address duplicate, spent by definition.
     refused: usize,
@@ -997,6 +1446,9 @@ struct Tally {
     refill_dials: usize,
     /// Of those, the ones aimed at a churning peer.
     refill_dials_churn: usize,
+    /// And the ones aimed at a static peer (#412 steady state 2) — the
+    /// dials the rig's captures show going to the solar node.
+    refill_dials_static: usize,
     /// The same pair for the HIGHEST-ADDRESSED board alone, which is the
     /// board the rig read: `feld-t114` holds `e81d77f09cdc`, above both
     /// `t114-boot` and `feld-pocket`, and its own `BLE_SCAN_DECISION`
@@ -1008,6 +1460,11 @@ struct Tally {
     /// 7.
     refill_dials_top: usize,
     refill_dials_top_churn: usize,
+    /// And the top board's refill dials that went to a static peer —
+    /// the column #412 steady state 2 asks for, because on the rig it is
+    /// where 42 of `feld-t114`'s 65 outgoing links went and all 25 of
+    /// the ones it made after the shipped order reached the boards.
+    refill_dials_top_static: usize,
     /// Of those: how many had NO board among the permitted candidates at
     /// all, so the churning peer was not preferred over a board but was
     /// the only thing the rule allowed. A tie-break cannot defend a slot
@@ -1025,7 +1482,7 @@ struct Tally {
 impl Tally {
     /// Dials that produced a link that lasted.
     fn useful(&self) -> usize {
-        self.board_links + self.churn_links - self.short
+        self.board_links + self.churn_links + self.static_links - self.short
     }
 }
 
@@ -1061,6 +1518,7 @@ fn run_sim(
     choice: TargetChoice,
     churn: Churn,
     mortality: Mortality,
+    statics: Statics,
 ) -> Sim {
     let mut rng = seed | 1;
     let mut boards: Vec<Board> = Vec::with_capacity(n);
@@ -1107,6 +1565,11 @@ fn run_sim(
     // `Mortality::IMMORTAL` leaves all three streams above exactly
     // where they were.
     let mut death_rng = (seed ^ 0x0DEA_D111_FE71_3E55) | 1;
+    // And the static peers from a FIFTH, for the same reason once more
+    // (#412 steady state 2): a draw is taken only while
+    // `statics.peers > 0`, so `Statics::NONE` leaves all four streams
+    // above exactly where they were.
+    let mut static_rng = (seed ^ 0x57A7_1C00_DDE5_C11B) | 1;
     let mut churners: Vec<Churner> = (0..churn.peers)
         .map(|_| {
             let addr = (next_rand(&mut churn_rng) & 0x3FFF_FFFF_FFFF) | 0x4000_0000_0000;
@@ -1119,8 +1582,44 @@ fn run_sim(
         })
         .collect();
 
+    // Where each kind lives in the peer space: boards below `churn_base`,
+    // churning peers below `static_base`, static peers above it. Every
+    // comparison in the loop below names one of these rather than `n`.
+    let churn_base = n;
+    let static_base = churn_base + churn.peers;
+    let peers = static_base + statics.peers;
+
+    // The static peer's address: a static-random one like a board's
+    // (`11` on top), drawn BELOW every board's in the rig's own
+    // configuration, where `d916e2923ed2` sat under all three. The
+    // `drawn` variant puts it in the same range as a board, so the rig's
+    // address order is one draw among `n + 1`.
+    const STATIC_FLOOR: u64 = 0xC000_0000_0000;
+    let lowest_board = boards
+        .iter()
+        .map(|b| b.addr)
+        .min()
+        .expect("a room has boards");
+    let mut static_peers: Vec<StaticPeer> = Vec::with_capacity(statics.peers);
+    while static_peers.len() < statics.peers {
+        let addr = if statics.lowest {
+            STATIC_FLOOR + next_rand(&mut static_rng) % (lowest_board - STATIC_FLOOR).max(1)
+        } else {
+            (next_rand(&mut static_rng) & 0xFFFF_FFFF_FFFF) | STATIC_FLOOR
+        };
+        if boards.iter().any(|b| b.addr == addr) || static_peers.iter().any(|s| s.addr == addr) {
+            continue;
+        }
+        static_peers.push(StaticPeer {
+            addr,
+            outgoing: None,
+            incoming: Vec::new(),
+            strict_rounds: 0,
+        });
+    }
+
     let mut tally = Tally::default();
-    let horizon = if churn.peers == 0 && !mortality.kills() {
+    let horizon = if churn.peers == 0 && statics.peers == 0 && !mortality.kills() {
         10_000
     } else {
         HORIZON_ROUNDS
@@ -1178,6 +1677,10 @@ fn run_sim(
         // Neither address is condemned — a session that ended is not a
         // dead end, and the firmware's table is for a refusal or a dial
         // that could not connect.
+        // A link to a STATIC peer ends the same way and for the same
+        // reason: both ends are our own firmware, and the lifetime
+        // distribution was measured over a population that includes this
+        // peer's own sessions.
         for i in 0..n {
             let Some(link) = boards[i].outgoing else {
                 continue;
@@ -1190,9 +1693,35 @@ fn run_sim(
                 tally.short += 1;
             }
             boards[i].strict_rounds = 0;
-            boards[link.peer].incoming.retain(|l| l.peer != i);
-            boards[link.peer].strict_rounds = 0;
+            if link.peer < churn_base {
+                boards[link.peer].incoming.retain(|l| l.peer != i);
+                boards[link.peer].strict_rounds = 0;
+            } else {
+                let peer = &mut static_peers[link.peer - static_base];
+                peer.incoming.retain(|l| l.peer != i);
+                peer.strict_rounds = 0;
+            }
             tally.deaths += 1;
+        }
+
+        // The static peer's OWN outgoing link dies on the same draw. It
+        // is not in the boards' ledger — `deaths` counts the links the
+        // room's dials paid for, and this one was the peer's dial — but
+        // the board whose incoming slot it held gets the slot and its
+        // strict clock back, which is the half the boards can see.
+        for (k, peer) in static_peers.iter_mut().enumerate() {
+            let Some(link) = peer.outgoing else {
+                continue;
+            };
+            if !link.dies_at.is_some_and(|at| round >= at) {
+                continue;
+            }
+            peer.outgoing = None;
+            peer.strict_rounds = 0;
+            boards[link.peer]
+                .incoming
+                .retain(|l| l.peer != static_base + k);
+            boards[link.peer].strict_rounds = 0;
         }
 
         // Scan order within the round is part of the replayed
@@ -1225,30 +1754,40 @@ fn run_sim(
             // ourselves, not already linked to us, not backed off; then
             // the real rule. A churning peer is always advertising and
             // never full — that is what "always in the room" means.
-            let candidates: Vec<(usize, ConnectDecision, Option<u8>)> = (0..n + churn.peers)
+            let candidates: Vec<(usize, u64, ConnectDecision, Option<u8>)> = (0..peers)
                 .filter_map(|p| {
                     if p == i {
                         return None;
                     }
-                    let (addr, caps, free) = if p < n {
+                    let free_of = |held: usize| {
+                        choice
+                            .advertises_slots()
+                            .then(|| u8::try_from(PERIPH_SLOTS - held).expect("slots fit a byte"))
+                    };
+                    let (addr, caps, free) = if p < churn_base {
                         if !boards[p].arrived || boards[p].incoming.len() >= PERIPH_SLOTS {
                             return None;
                         }
-                        let free = choice.advertises_slots().then(|| {
-                            u8::try_from(PERIPH_SLOTS - boards[p].incoming.len())
-                                .expect("slots fit a byte")
-                        });
-                        (boards[p].addr, Some(0), free)
-                    } else {
+                        (boards[p].addr, Some(0), free_of(boards[p].incoming.len()))
+                    } else if p < static_base {
                         // No v0.3.0 record at all: full capability per
                         // §3.2, no slot count per item 3.
-                        (churners[p - n].addr, None, None)
+                        (churners[p - churn_base].addr, None, None)
+                    } else {
+                        // The rig's fourth kind: a full record with a
+                        // real count, like the board it is (#372 stops
+                        // its advertising when the last slot goes).
+                        let peer = &static_peers[p - static_base];
+                        if peer.incoming.len() >= PERIPH_SLOTS {
+                            return None;
+                        }
+                        (peer.addr, Some(0), free_of(peer.incoming.len()))
                     };
                     if boards[i].addr_linked(addr) || boards[i].dead_end(addr, round) {
                         return None;
                     }
                     let decision = should_initiate(0, boards[i].addr, caps, addr, mode);
-                    decision.initiate().then_some((p, decision, free))
+                    decision.initiate().then_some((p, addr, decision, free))
                 })
                 .collect();
             if candidates.is_empty() {
@@ -1270,17 +1809,14 @@ fn run_sim(
                 // eligible advertiser was heard, the table chooses.
                 // `LowestEligible` replays item 2 by having nobody
                 // advertise a count; `MostFreeSlots` is the shipped
-                // policy, every board stating its free slots.
-                TargetChoice::LowestEligible
-                | TargetChoice::MostFreeSlots
-                | TargetChoice::FallbackFirstHeard
-                | TargetChoice::RotatingLast => {
-                    let mut window: CandidateTable<usize, WINDOW_CANDIDATES> =
-                        CandidateTable::with_fallback_order(choice.fallback_order());
+                // policy, every board stating its free slots; the last
+                // two are #412 steady state 2's candidate keys, which
+                // [`elect`] builds out of the same table.
+                _ => {
                     // The order the advertising PDUs arrive in. It is
                     // the candidate order for every row that does not
-                    // read it, and a seeded shuffle for the one that
-                    // does. The shuffle has a stream of ITS OWN, a
+                    // read it, and a seeded shuffle for the ones that
+                    // do. The shuffle has a stream of ITS OWN, a
                     // third one: drawing from the main stream would
                     // move the arrival and scan orders, and drawing
                     // from the churn stream would give this row a
@@ -1293,25 +1829,7 @@ fn run_sim(
                             offers.swap(i, (next_rand(&mut offer_rng) as usize) % (i + 1));
                         }
                     }
-                    for &(p, decision, free) in &offers {
-                        let addr = if p < n {
-                            boards[p].addr
-                        } else {
-                            churners[p - n].addr
-                        };
-                        // 303's tier, censused rather than assumed: the
-                        // public rule is asked the same question the
-                        // window's key asks it, per offer.
-                        tally.offers += 1;
-                        if dial_preference(decision, free) == DialPreference::CannotDialUs {
-                            tally.offers_cannot_dial += 1;
-                        }
-                        window.offer(addr, decision, free, p);
-                    }
-                    window
-                        .into_best()
-                        .map(|(_, _, p)| p)
-                        .expect("a non-empty candidate set chooses")
+                    elect(choice, &offers, &mut tally)
                 }
             };
             // The dial. From here on the connection exists, so the
@@ -1324,21 +1842,59 @@ fn run_sim(
             // outgoing link before, so the slot it is spending now is
             // one that was freed.
             if boards[i].held_outgoing {
+                let churned = (churn_base..static_base).contains(&target);
+                let static_peer = target >= static_base;
                 tally.refill_dials += 1;
-                if target >= n {
+                if churned {
                     tally.refill_dials_churn += 1;
+                }
+                if static_peer {
+                    tally.refill_dials_static += 1;
                 }
                 if i == top_board {
                     tally.refill_dials_top += 1;
-                    if target >= n {
+                    if static_peer {
+                        tally.refill_dials_top_static += 1;
+                    }
+                    if churned {
                         tally.refill_dials_top_churn += 1;
-                        if !candidates.iter().any(|&(p, _, _)| p < n) {
+                        if !candidates.iter().any(|&(p, _, _, _)| p < churn_base) {
                             tally.refill_dials_top_churn_solo += 1;
                         }
                     }
                 }
             }
-            if target < n {
+            if target >= static_base {
+                // The rig's fourth kind. No identity check is reachable
+                // here: its address never changes, so a link it already
+                // holds with us was excluded by the §4.5 rule before the
+                // dial. The duplicate is what a ROTATION makes.
+                let own_addr = boards[i].addr;
+                let dies_at = mortality
+                    .kills()
+                    .then(|| round + mortality.draw_lifetime(&mut death_rng));
+                let peer = &mut static_peers[target - static_base];
+                boards[i].outgoing = Some(Link {
+                    peer: target,
+                    addr: peer.addr,
+                    formed: round,
+                    silent_since: None,
+                    dies_at,
+                });
+                peer.incoming.push(Link {
+                    peer: i,
+                    addr: own_addr,
+                    formed: round,
+                    silent_since: None,
+                    dies_at: None,
+                });
+                peer.strict_rounds = 0;
+                boards[i].held_outgoing = true;
+                tally.static_links += 1;
+                any_link = true;
+                continue;
+            }
+            if target < churn_base {
                 let (addr, own_addr) = (boards[target].addr, boards[i].addr);
                 // The lifetime is drawn once, here, and only for a
                 // board-to-board link: a link to a churning peer ends at
@@ -1368,7 +1924,7 @@ fn run_sim(
                 any_link = true;
                 continue;
             }
-            let churner = &mut churners[target - n];
+            let churner = &mut churners[target - churn_base];
             // Post-connect: the Identity characteristic. A live link to
             // this identity under an older address is the #412 case.
             if let Some((origin, old)) = boards[i].link_with(target) {
@@ -1474,6 +2030,75 @@ fn run_sim(
             churner.links.push(b);
         }
 
+        // The static peer's own scan pass (#412 steady state 2). It is
+        // the board it is: ONE outgoing link at a time, the same
+        // [`should_initiate`] rule, the same window and the same
+        // fallback clock. At the rig's own address order it is the
+        // lowest in the room, so every board is a strict candidate for
+        // it and the clock never runs — which is why the capture shows
+        // 84 links it initiated and not one board that strictly elected
+        // it. It dials boards only: the captures place all 84 at the
+        // three boards, and they cannot see a link of its own to the
+        // phone, so the model does not invent one.
+        for (k, peer) in static_peers.iter_mut().enumerate() {
+            if !statics.dials || peer.outgoing.is_some() {
+                continue;
+            }
+            let own_addr = peer.addr;
+            let mode = if spec != FallbackSpec::Off && peer.strict_rounds >= FALLBACK_AFTER_ROUNDS {
+                ScanMode::Fallback
+            } else {
+                ScanMode::Strict
+            };
+            let offers: Vec<(usize, u64, ConnectDecision, Option<u8>)> = (0..n)
+                .filter_map(|b| {
+                    if !boards[b].arrived
+                        || boards[b].incoming.len() >= PERIPH_SLOTS
+                        || boards[b].addr_linked(own_addr)
+                    {
+                        return None;
+                    }
+                    let free = choice.advertises_slots().then(|| {
+                        u8::try_from(PERIPH_SLOTS - boards[b].incoming.len())
+                            .expect("slots fit a byte")
+                    });
+                    let decision = should_initiate(0, own_addr, Some(0), boards[b].addr, mode);
+                    decision
+                        .initiate()
+                        .then_some((b, boards[b].addr, decision, free))
+                })
+                .collect();
+            if offers.is_empty() {
+                peer.strict_rounds += 1;
+                continue;
+            }
+            // Its dials are not in the boards' ledger — the room did not
+            // pay for them — so the tier census must not count them
+            // either; the window it opens is its own.
+            let mut side_ledger = Tally::default();
+            let b = elect(choice, &offers, &mut side_ledger);
+            let dies_at = mortality
+                .kills()
+                .then(|| round + mortality.draw_lifetime(&mut death_rng));
+            peer.outgoing = Some(Link {
+                peer: b,
+                addr: boards[b].addr,
+                formed: round,
+                silent_since: None,
+                dies_at,
+            });
+            peer.strict_rounds = 0;
+            boards[b].incoming.push(Link {
+                peer: static_base + k,
+                addr: own_addr,
+                formed: round,
+                silent_since: None,
+                dies_at: None,
+            });
+            boards[b].strict_rounds = 0;
+            any_link = true;
+        }
+
         linkless_streak = if any_link { 0 } else { linkless_streak + 1 };
         // Quiescent: everyone has arrived and even the boards that
         // reached fallback during the streak found nobody. Visibility
@@ -1482,6 +2107,7 @@ fn run_sim(
         // churning peer nothing is ever quiescent — rotations keep
         // arriving — so the run goes to the horizon instead.
         if churn.peers == 0
+            && statics.peers == 0
             && !mortality.kills()
             && (round as usize) >= n
             && linkless_streak > FALLBACK_AFTER_ROUNDS
@@ -1495,10 +2121,13 @@ fn run_sim(
     // the condition is exactly what it was; with mortality on, every
     // board link is a session that ends too, so a young one standing at
     // the horizon is short like any other.
+    // A standing link to a STATIC peer is not a churn session: nothing
+    // rotates it away, so it is short only if the mortality row says
+    // every session ends.
     for board in &boards {
         if let Some(link) = board.outgoing {
-            if (link.peer >= n || mortality.kills()) && link.useful_ms(horizon) < USEFUL_SESSION_MS
-            {
+            let churning = (churn_base..static_base).contains(&link.peer);
+            if (churning || mortality.kills()) && link.useful_ms(horizon) < USEFUL_SESSION_MS {
                 tally.short += 1;
             }
         }
@@ -1535,9 +2164,33 @@ fn run_sim(
             }
         }
     }
+    // The static peer's own bookkeeping: its slot bound holds, and both
+    // ends of every link it holds exist. A one-sided static link would
+    // silently take a board's incoming slot out of the room forever.
+    for (k, peer) in static_peers.iter().enumerate() {
+        assert!(peer.incoming.len() <= PERIPH_SLOTS);
+        for link in &peer.incoming {
+            assert_eq!(
+                boards[link.peer].outgoing.map(|l| l.peer),
+                Some(static_base + k),
+                "the static peer holds an incoming link from board {} that the board does not",
+                link.peer
+            );
+        }
+        if let Some(link) = peer.outgoing {
+            assert!(
+                boards[link.peer]
+                    .incoming
+                    .iter()
+                    .any(|l| l.peer == static_base + k),
+                "the static peer holds an outgoing link to board {} that the board does not",
+                link.peer
+            );
+        }
+    }
     assert_eq!(
         tally.dials,
-        tally.board_links + tally.churn_links + tally.refused,
+        tally.board_links + tally.churn_links + tally.static_links + tally.refused,
         "a dial went uncounted"
     );
     Sim { boards, tally }
@@ -1588,6 +2241,10 @@ struct Outcome {
     /// `feld-t114` made 7 outgoing links in two days and all 7 were the
     /// phone; `t114-boot` 12 of 22.
     churn_links: usize,
+    /// Dials that landed on a static peer and formed a link, summed —
+    /// the volume behind the `stat%` column, and on the rig the 42 links
+    /// `feld-t114` spent on the solar node.
+    static_links: usize,
     /// Dials that produced a link that lasted at least
     /// [`USEFUL_SESSION_MS`], summed — #412's third number is
     /// `dials / useful`.
@@ -1605,11 +2262,14 @@ struct Outcome {
     refill_dials: usize,
     /// Of those, the ones aimed at a churning peer.
     refill_dials_churn: usize,
+    /// And at a static peer (#412 steady state 2).
+    refill_dials_static: usize,
     /// The same pair for the highest-addressed board alone — the board
     /// the rig's 7 of 7 is about — and how many of those dials had no
     /// board among the permitted candidates at all.
     refill_dials_top: usize,
     refill_dials_top_churn: usize,
+    refill_dials_top_static: usize,
     refill_dials_top_churn_solo: usize,
     /// Window offers and 303's tier among them, summed.
     offers: usize,
@@ -1646,6 +2306,21 @@ impl Outcome {
             .then(|| self.refill_dials_top_churn as f64 * 100.0 / self.refill_dials_top as f64)
     }
 
+    /// The column #412 steady state 2 asks for: of the top board's dials
+    /// that spent a freed slot, the share that went to a STATIC peer.
+    /// On the rig this is the number that emptied the phone's column —
+    /// `feld-t114` spent 25 of 25 there after 2026-09-25.
+    fn share_of_top_freed_slots_to_static(&self) -> Option<f64> {
+        (self.refill_dials_top > 0)
+            .then(|| self.refill_dials_top_static as f64 * 100.0 / self.refill_dials_top as f64)
+    }
+
+    /// The same for the room as a whole.
+    fn share_of_freed_slots_to_static(&self) -> Option<f64> {
+        (self.refill_dials > 0)
+            .then(|| self.refill_dials_static as f64 * 100.0 / self.refill_dials as f64)
+    }
+
     /// Of the top board's freed slots that went to a churning peer: what
     /// share had no board on offer at all. Where this is 100 %, no
     /// candidate ORDER can defend the slot — there is nothing to order.
@@ -1675,6 +2350,7 @@ fn measure(
     choice: TargetChoice,
     churn: Churn,
     mortality: Mortality,
+    statics: Statics,
 ) -> Outcome {
     let mut outcome = Outcome {
         disconnected: 0,
@@ -1684,20 +2360,31 @@ fn measure(
         board_links: 0,
         dials: 0,
         churn_links: 0,
+        static_links: 0,
         useful: 0,
         refused: 0,
         short: 0,
         deaths: 0,
         refill_dials: 0,
         refill_dials_churn: 0,
+        refill_dials_static: 0,
         refill_dials_top: 0,
         refill_dials_top_churn: 0,
+        refill_dials_top_static: 0,
         refill_dials_top_churn_solo: 0,
         offers: 0,
         offers_cannot_dial: 0,
     };
     for seed in 0..ORDERS {
-        let sim = run_sim(n, 0xB1E5_0000 + seed, spec, choice, churn, mortality);
+        let sim = run_sim(
+            n,
+            0xB1E5_0000 + seed,
+            spec,
+            choice,
+            churn,
+            mortality,
+            statics,
+        );
         let boards = &sim.boards;
         if !is_connected(boards) {
             outcome.disconnected += 1;
@@ -1718,14 +2405,17 @@ fn measure(
         outcome.board_links += sim.tally.board_links;
         outcome.dials += sim.tally.dials;
         outcome.churn_links += sim.tally.churn_links;
+        outcome.static_links += sim.tally.static_links;
         outcome.useful += sim.tally.useful();
         outcome.refused += sim.tally.refused;
         outcome.short += sim.tally.short;
         outcome.deaths += sim.tally.deaths;
         outcome.refill_dials += sim.tally.refill_dials;
         outcome.refill_dials_churn += sim.tally.refill_dials_churn;
+        outcome.refill_dials_static += sim.tally.refill_dials_static;
         outcome.refill_dials_top += sim.tally.refill_dials_top;
         outcome.refill_dials_top_churn += sim.tally.refill_dials_top_churn;
+        outcome.refill_dials_top_static += sim.tally.refill_dials_top_static;
         outcome.refill_dials_top_churn_solo += sim.tally.refill_dials_top_churn_solo;
         outcome.offers += sim.tally.offers;
         outcome.offers_cannot_dial += sim.tally.offers_cannot_dial;
@@ -1807,8 +2497,22 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
         "spec/choice     n=10 disc/linkless/sat   n=20 disc/linkless/sat   (per {ORDERS} orders)"
     );
     for (spec, choice, label) in CONFIGS {
-        let at10 = measure(10, spec, choice, Churn::NONE, Mortality::IMMORTAL);
-        let at20 = measure(20, spec, choice, Churn::NONE, Mortality::IMMORTAL);
+        let at10 = measure(
+            10,
+            spec,
+            choice,
+            Churn::NONE,
+            Mortality::IMMORTAL,
+            Statics::NONE,
+        );
+        let at20 = measure(
+            20,
+            spec,
+            choice,
+            Churn::NONE,
+            Mortality::IMMORTAL,
+            Statics::NONE,
+        );
         println!(
             "{label:<15} {:>4} / {:<4} / {:<8} {:>4} / {:<4} / {:<8}",
             at10.disconnected,
@@ -1976,8 +2680,8 @@ fn a_churning_peer_takes_the_fallback_dial_and_the_board_graph_pays_for_it() {
     );
     for churn in [Churn::NONE, Churn::phones(1), Churn::phones(2)] {
         for (spec, choice, label) in CONFIGS {
-            let at10 = measure(10, spec, choice, churn, Mortality::IMMORTAL);
-            let at20 = measure(20, spec, choice, churn, Mortality::IMMORTAL);
+            let at10 = measure(10, spec, choice, churn, Mortality::IMMORTAL, Statics::NONE);
+            let at20 = measure(20, spec, choice, churn, Mortality::IMMORTAL, Statics::NONE);
             let cells = |outcome: &Outcome| {
                 format!(
                     "{:>6} {:>9} {:>6} {:>5.0} {:>5} {:>5}",
@@ -2140,6 +2844,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
                 TargetChoice::MostFreeSlots,
                 Churn::NONE,
                 Mortality::IMMORTAL,
+                Statics::NONE,
             );
             assert_eq!(sim.tally.dials, sim.tally.board_links);
             assert_eq!(
@@ -2160,6 +2865,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         TargetChoice::MostFreeSlots,
         Churn::NONE,
         Mortality::IMMORTAL,
+        Statics::NONE,
     );
     let strict_churned = measure(
         10,
@@ -2167,6 +2873,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         TargetChoice::MostFreeSlots,
         Churn::advertisers(1),
         Mortality::IMMORTAL,
+        Statics::NONE,
     );
     assert_eq!(
         (strict_churned.churn_links, strict_churned.refused),
@@ -2193,6 +2900,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         TargetChoice::MostFreeSlots,
         Churn::advertisers(1),
         Mortality::IMMORTAL,
+        Statics::NONE,
     );
     assert!(
         eager_churned.churn_links > 0,
@@ -2217,6 +2925,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         TargetChoice::FirstSeen,
         Churn::NONE,
         Mortality::IMMORTAL,
+        Statics::NONE,
     );
     let strict_dialled = measure(
         10,
@@ -2224,6 +2933,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         TargetChoice::FirstSeen,
         Churn::phones(1),
         Mortality::IMMORTAL,
+        Statics::NONE,
     );
     assert!(
         strict_dialled.saturated < strict_spread.saturated,
@@ -2304,7 +3014,14 @@ fn the_steady_state_freed_slot_goes_to_the_phone_under_the_address_order() {
                 (Mortality::CAPTURE_SHORT_MODE, "45s"),
                 (Mortality::CAPTURE_TAIL, "600s"),
             ] {
-                let outcome = measure(n, FallbackSpec::Eager, choice, churn, mortality);
+                let outcome = measure(
+                    n,
+                    FallbackSpec::Eager,
+                    choice,
+                    churn,
+                    mortality,
+                    Statics::NONE,
+                );
                 println!(
                     "{n:<4} {:<6} {label:<19} {life:>8} {:>7} {:>7} {:>6} {:>7} {:>6} {:>6} \
                      {:>7}",
@@ -2494,6 +3211,538 @@ fn the_steady_state_freed_slot_goes_to_the_phone_under_the_address_order() {
     }
 }
 
+/// The four policies #412 steady state 2 compares: the address order the
+/// shipped one replaced, the shipped one, and item 3's two candidates.
+const POLICIES: [(TargetChoice, &str); 4] = [
+    (TargetChoice::MostFreeSlots, "eager/mostfree"),
+    (TargetChoice::RotatingLast, "eager/rotatinglast"),
+    (TargetChoice::GroupAboveDeficit, "eager/groupfirst"),
+    (TargetChoice::SilenceIsFull, "eager/silencefull"),
+];
+
+/// The three mortality rows, as the steady-state table states them.
+const LIFETIMES: [(Mortality, &str); 3] = [
+    (Mortality::IMMORTAL, "immortal"),
+    (Mortality::CAPTURE_SHORT_MODE, "45s"),
+    (Mortality::CAPTURE_TAIL, "600s"),
+];
+/// The rig's room with the fourth kind in it (#412 steady state 2):
+/// three boards, one phone, and the static peer [`Statics`] names — the
+/// solar node. The columns are 306's plus `stat%`, the share of the TOP
+/// board's freed-slot dials that went to the static peer. That is the
+/// column the rig's own ledger reads in: of `feld-t114`'s 65 outgoing
+/// links, 42 went to the solar node, 20 to the phone and 3 to a board,
+/// and every one of the 25 it made after 2026-09-25 — when the shipped
+/// fallback order reached the boards — went to the solar node.
+///
+/// Four policies, because item 3 of the batch asks the same table of the
+/// two candidate keys as well: the address order the shipped one
+/// replaced, the shipped one, and the two ways of taking the free ride
+/// away ([`TargetChoice::GroupAboveDeficit`] and
+/// [`TargetChoice::SilenceIsFull`]).
+///
+/// Three rooms, because the fourth kind's ADDRESS is the other half of
+/// the mechanism: `Statics::NONE` is 306's room and every cell of it is
+/// pinned here as an equality; [`Statics::rig`] puts the peer below every
+/// board as `d916e2923ed2` was; [`Statics::drawn`] draws its address like
+/// a board's, which is a different room and not a worse seed — see the
+/// assertion at the end.
+#[test]
+fn the_static_peer_takes_the_freed_slot_the_phone_was_blamed_for() {
+    let mut rows = Vec::new();
+    println!(
+        "#412 steady state 2 — the rig's room (3 boards, 1 phone), per {ORDERS} orders. \
+         freed% = share"
+    );
+    println!(
+        "of dials spending a FREED outgoing slot that went to the PHONE; stat% and top% = the \
+         top board's"
+    );
+    println!(
+        "freed slot to the static peer and to the phone; sb = links formed to the static peer"
+    );
+    println!(
+        "{:<8} {:<19} {:>8} {:>7} {:>7} {:>7} {:>6} {:>7} {:>7} {:>6} {:>6}",
+        "statics",
+        "policy",
+        "life",
+        "freed%",
+        "stat%",
+        "top%",
+        "solo%",
+        "sb",
+        "bb",
+        "d/use",
+        "disc"
+    );
+    for (statics, room) in [
+        (Statics::NONE, "none"),
+        (Statics::rig(1), "rig"),
+        (Statics::drawn(1), "drawn"),
+    ] {
+        for (choice, label) in POLICIES {
+            for (mortality, life) in LIFETIMES {
+                let outcome = measure(
+                    3,
+                    FallbackSpec::Eager,
+                    choice,
+                    Churn::phones(1),
+                    mortality,
+                    statics,
+                );
+                println!(
+                    "{room:<8} {label:<19} {life:>8} {:>7} {:>7} {:>7} {:>6} {:>7} {:>7} \
+                     {:>6} {:>6}",
+                    Ratio(outcome.share_of_freed_slots_to_churn()),
+                    Ratio(outcome.share_of_top_freed_slots_to_static()),
+                    Ratio(outcome.share_of_top_freed_slots_to_churn()),
+                    Ratio(outcome.share_of_top_churn_dials_with_no_board_on_offer()),
+                    outcome.static_links,
+                    outcome.board_links,
+                    Ratio(outcome.dials_per_useful()),
+                    outcome.disconnected,
+                );
+                rows.push(((room, label, life), outcome));
+            }
+        }
+    }
+    let pick = |room: &str, label: &str, life: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rr, rl, rlife), _)| *rr == room && *rl == label && *rlife == life)
+            .expect("the row was measured above")
+            .1
+    };
+
+    // 1. The parameter is a parameter: with no static peer in it, the
+    //    room is 306's room to the link, under both orders it published.
+    //    Equalities, not bounds — the static peer draws from a stream of
+    //    its own and `Statics::NONE` takes nothing out of it.
+    for policy in ["eager/mostfree", "eager/rotatinglast"] {
+        for (life, bb) in [("immortal", 2040), ("45s", 26790), ("600s", 3904)] {
+            let row = pick("none", policy, life);
+            assert_eq!(
+                (row.board_links, row.disconnected),
+                (bb, 0),
+                "{policy} {life}: the static peer moved a row measured without one"
+            );
+            let top = row
+                .share_of_top_freed_slots_to_churn()
+                .expect("the rig's room frees the top board's slot");
+            assert!(
+                top >= 99.0,
+                "{policy} {life}: 306's finding (the top board's freed slot goes to the phone \
+                 in the rig's three-board room) is {top:.2} % here, so the row it is read off \
+                 has moved"
+            );
+            assert_eq!(
+                row.static_links, 0,
+                "a link to a static peer formed in a room that has none"
+            );
+        }
+    }
+
+    // 2. And the finding: the fourth kind takes that slot. Under the
+    //    SHIPPED order at the capture's short mode the top board's freed
+    //    slot goes to the static peer, not the phone — which is the rig's
+    //    own ledger after 2026-09-25 (25 of 25 to the solar node) and
+    //    exactly the column 306 had no kind for.
+    let shipped = pick("rig", "eager/rotatinglast", "45s");
+    let to_static = shipped
+        .share_of_top_freed_slots_to_static()
+        .expect("the room frees the top board's slot");
+    let to_phone = shipped
+        .share_of_top_freed_slots_to_churn()
+        .expect("same denominator");
+    assert!(
+        to_static > 95.0 && to_phone < 5.0,
+        "the shipped order sent the top board's freed slot to the static peer {to_static:.2} % \
+         and to the phone {to_phone:.2} % of the time; the rig's post-2026-09-25 ledger is 25 \
+         of 25 to the solar node, so the model no longer reproduces it"
+    );
+
+    // 3. The same room under the order the shipped one REPLACED gives it
+    //    to the phone instead — which is the rig's ledger BEFORE that
+    //    date (20 of `feld-t114`'s 65 links). The model reproduces both
+    //    eras of the capture, and the only thing that moved between them
+    //    is the fallback order.
+    let address_order = pick("rig", "eager/mostfree", "45s")
+        .share_of_top_freed_slots_to_churn()
+        .expect("same denominator");
+    assert!(
+        address_order > 95.0,
+        "under the address order the top board's freed slot went to the phone only \
+         {address_order:.2} % of the time with the static peer present; the capture's earlier \
+         era (the phone taking 20 of 65) is then unexplained"
+    );
+
+    // 4. The two candidate keys are indistinguishable in this model, in
+    //    every column of every row — and that is a statement about the
+    //    ROOM, not about the policies: the only peer here with no
+    //    capability record is the phone, and the only peer with a
+    //    rotating address is the phone, so demoting silence and demoting
+    //    the rotating group demote the same single peer. The unit cell
+    //    `the_two_candidate_keys_are_two_different_policies` separates
+    //    them with a peer in one set and not the other, which is the
+    //    advertisement no Columba sends today.
+    for room in ["none", "rig", "drawn"] {
+        for (_, life) in LIFETIMES {
+            let group = pick(room, "eager/groupfirst", life);
+            let silence = pick(room, "eager/silencefull", life);
+            assert_eq!(
+                (
+                    group.board_links,
+                    group.static_links,
+                    group.disconnected,
+                    group.refill_dials_top_churn,
+                    group.refill_dials_top_static
+                ),
+                (
+                    silence.board_links,
+                    silence.static_links,
+                    silence.disconnected,
+                    silence.refill_dials_top_churn,
+                    silence.refill_dials_top_static
+                ),
+                "{room} {life}: the two candidate keys now differ in the Monte Carlo, so a \
+                 peer that is in one of the two sets and not the other has appeared in the \
+                 model and the tables have to be read as two policies"
+            );
+        }
+    }
+
+    // 5. Where the fourth kind's address sits is the other half of it. At
+    //    the rig's own order — below every board — no board ever STRICTLY
+    //    elects it, so it takes fallback dials only and the board graph
+    //    survives. Drawn like a board's, every board below it dials it
+    //    strictly and spends its one outgoing slot there, and the
+    //    three-board graph splits in most orders. The rig's room was the
+    //    benign draw of the two.
+    let rig_split = pick("rig", "eager/rotatinglast", "immortal").disconnected;
+    let drawn_split = pick("drawn", "eager/rotatinglast", "immortal").disconnected;
+    assert!(
+        drawn_split > 10 * rig_split.max(1),
+        "a static peer drawn at a board's address split the board graph {drawn_split} times \
+         per {ORDERS} orders against {rig_split} at the rig's address order; if those are now \
+         the same, the strict-dial half of the mechanism is gone"
+    );
+}
+
+/// The same tables at ten and twenty boards (#412 steady state 2, item
+/// 2), one phone and one static peer, both lifetimes — the sizes 306
+/// measured, with the kind it was missing.
+///
+/// The immortal row is left out here on purpose: with links that stand, a
+/// room of ten or twenty boards has every board linked long before the
+/// horizon and the freed-slot column has almost no denominator. It is in
+/// the rig's three-board table above, where it does.
+#[test]
+fn the_two_candidate_keys_with_a_static_peer_at_ten_and_twenty_boards() {
+    let mut rows = Vec::new();
+    println!("#412 steady state 2 — n=10/20, one phone + one static peer, per {ORDERS} orders");
+    println!(
+        "{:<4} {:<19} {:>8} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} {:>6} {:>6}",
+        "n", "policy", "life", "freed%", "sfreed%", "stat%", "top%", "sb", "bb", "d/use", "disc"
+    );
+    for n in [10usize, 20] {
+        for (choice, label) in POLICIES {
+            for (mortality, life) in LIFETIMES {
+                if mortality == Mortality::IMMORTAL {
+                    continue;
+                }
+                let outcome = measure(
+                    n,
+                    FallbackSpec::Eager,
+                    choice,
+                    Churn::phones(1),
+                    mortality,
+                    Statics::rig(1),
+                );
+                println!(
+                    "{n:<4} {label:<19} {life:>8} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} {:>6} \
+                     {:>6}",
+                    Ratio(outcome.share_of_freed_slots_to_churn()),
+                    Ratio(outcome.share_of_freed_slots_to_static()),
+                    Ratio(outcome.share_of_top_freed_slots_to_static()),
+                    Ratio(outcome.share_of_top_freed_slots_to_churn()),
+                    outcome.static_links,
+                    outcome.board_links,
+                    Ratio(outcome.dials_per_useful()),
+                    outcome.disconnected,
+                );
+                rows.push(((n, label, life), outcome));
+            }
+        }
+    }
+    let pick = |n: usize, label: &str, life: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rn, rl, rlife), _)| *rn == n && *rl == label && *rlife == life)
+            .expect("the row was measured above")
+            .1
+    };
+    // The finding of the three-board table is not a small-room artefact:
+    // at ten and twenty boards the shipped order spends the top board's
+    // freed slot on the static peer too, and the phone's share of it is
+    // in the noise. 306's open question — "the shipped order cannot
+    // defend the freed slot in a small room" — was a room with a member
+    // missing, at every size.
+    for n in [10usize, 20] {
+        let shipped = pick(n, "eager/rotatinglast", "45s");
+        let to_static = shipped
+            .share_of_top_freed_slots_to_static()
+            .expect("the room frees the top board's slot");
+        let to_phone = shipped
+            .share_of_top_freed_slots_to_churn()
+            .expect("same denominator");
+        assert!(
+            to_static > 95.0 && to_phone < 5.0,
+            "n={n}: with a static peer in the room the shipped order gave the top board's \
+             freed slot to the static peer {to_static:.2} % and to the phone {to_phone:.2} %"
+        );
+        // And the address order still gives it to the phone at both
+        // sizes, so the static peer is not simply swallowing every dial:
+        // it is the ORDER that elects it.
+        let address = pick(n, "eager/mostfree", "45s")
+            .share_of_top_freed_slots_to_churn()
+            .expect("same denominator");
+        assert!(
+            address > 95.0,
+            "n={n}: the address order no longer sends the top board's freed slot to the phone \
+             ({address:.2} %), so the two orders can no longer be compared on this column"
+        );
+    }
+    // What the candidate keys add here: at the 600 s row, where links
+    // stand and the phone is sometimes the only thing left, they take the
+    // residual to zero (measured 8.87 % -> 0 % at n=10, 0.28 % -> 0 % at
+    // n=20) and they cost nothing on the `bb` column.
+    for n in [10usize, 20] {
+        let shipped = pick(n, "eager/rotatinglast", "600s")
+            .share_of_top_freed_slots_to_churn()
+            .expect("measured above");
+        let candidate = pick(n, "eager/groupfirst", "600s")
+            .share_of_top_freed_slots_to_churn()
+            .expect("measured above");
+        assert!(
+            candidate <= shipped,
+            "n=600s n={n}: the candidate key spends MORE of the top board's freed slots on the \
+             phone than the shipped order ({candidate:.2} % against {shipped:.2} %)"
+        );
+    }
+}
+
+/// What the two candidate keys cost where #375's guarantee lives: an
+/// empty room of boards, and a room with a phone but no static peer —
+/// which is the room 306's finding was made in.
+///
+/// Both questions are here because they are the price side of item 4's
+/// sentence, and the answer is measured rather than argued: in the empty
+/// room the candidates are the shipped order to the link, and in the
+/// three-board room with a phone they are what defends the slot.
+#[test]
+fn the_two_candidate_keys_cost_the_empty_room_nothing() {
+    for n in [10usize, 20] {
+        let mut empty = Vec::new();
+        for (choice, label) in POLICIES {
+            let outcome = measure(
+                n,
+                FallbackSpec::Eager,
+                choice,
+                Churn::NONE,
+                Mortality::IMMORTAL,
+                Statics::NONE,
+            );
+            println!(
+                "n={n} {label} empty room: disc {} boardless {} bb {} d/use {}",
+                outcome.disconnected,
+                outcome.boardless,
+                outcome.board_links,
+                Ratio(outcome.dials_per_useful())
+            );
+            empty.push((label, outcome));
+        }
+        // #375's own guarantee: 0 split graphs and 0 boardless boards at
+        // both sizes, and `bb` and `d/use` identical to the shipped
+        // order's. A candidate that bought the freed slot by giving this
+        // back would be the deviation #375 does not allow; neither is.
+        let (_, shipped) = empty
+            .iter()
+            .find(|(label, _)| *label == "eager/rotatinglast")
+            .expect("the shipped policy is in the table");
+        for (label, outcome) in &empty {
+            assert_eq!(
+                (
+                    outcome.disconnected,
+                    outcome.boardless,
+                    outcome.board_links,
+                    outcome.dials
+                ),
+                (0, 0, shipped.board_links, shipped.dials),
+                "n={n} {label}: the candidate key changed the empty room, which is where \
+                 #375's guarantee is"
+            );
+        }
+    }
+    // The room 306's finding was made in: three boards and a phone, no
+    // static peer. Here the candidates DO defend the freed slot — the
+    // top board's share of it spent on the phone falls from 100 % to
+    // under 1 % at the capture's short mode — and they hand back more
+    // board-to-board links than the shipped order, not fewer.
+    for (choice, label) in POLICIES {
+        let outcome = measure(
+            3,
+            FallbackSpec::Eager,
+            choice,
+            Churn::phones(1),
+            Mortality::CAPTURE_SHORT_MODE,
+            Statics::NONE,
+        );
+        println!(
+            "n=3 {label} one phone, 45 s, no static peer: top% {} bb {} disc {} d/use {}",
+            Ratio(outcome.share_of_top_freed_slots_to_churn()),
+            outcome.board_links,
+            outcome.disconnected,
+            Ratio(outcome.dials_per_useful())
+        );
+        let top = outcome
+            .share_of_top_freed_slots_to_churn()
+            .expect("the room frees the top board's slot");
+        let defended = matches!(
+            choice,
+            TargetChoice::GroupAboveDeficit | TargetChoice::SilenceIsFull
+        );
+        assert_eq!(
+            top < 1.0,
+            defended,
+            "{label}: the top board's freed slot went to the phone {top:.2} % of the time in \
+             the room 306 measured; the candidate keys are the ones that defend it and the \
+             two shipped orders are the ones that do not"
+        );
+        assert_eq!(
+            outcome.disconnected, 0,
+            "{label}: a split board graph in a three-board room with one phone"
+        );
+    }
+}
+
+/// The static peer's positive controls, in the shape the churn model's
+/// and the mortality model's have: the parameter is a parameter, and each
+/// of its mechanisms is shown firing before the tables above may be read
+/// as measurements.
+#[test]
+fn control_the_static_peer_is_a_parameter_and_dials_like_the_capture() {
+    // 1. Its zero moves nothing, at the sizes 306 published and on the
+    //    exact cells it published. Equalities: the peer draws from a
+    //    stream of its own.
+    for (n, life, mortality, bb, disc) in [
+        (10usize, "45s", Mortality::CAPTURE_SHORT_MODE, 118_040, 0),
+        (20, "45s", Mortality::CAPTURE_SHORT_MODE, 239_166, 0),
+        (20, "600s", Mortality::CAPTURE_TAIL, 38_008, 42),
+    ] {
+        let outcome = measure(
+            n,
+            FallbackSpec::Eager,
+            TargetChoice::RotatingLast,
+            Churn::phones(1),
+            mortality,
+            Statics::NONE,
+        );
+        assert_eq!(
+            (
+                outcome.board_links,
+                outcome.disconnected,
+                outcome.static_links
+            ),
+            (bb, disc, 0),
+            "n={n} life={life}: `Statics::NONE` moved a cell 306 measured"
+        );
+    }
+
+    // 2. It accepts dials: the room's boards reach it, and every one of
+    //    those links is a dial the boards would otherwise have spent on
+    //    each other or on the phone.
+    let accepting = measure(
+        3,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::phones(1),
+        Mortality::CAPTURE_SHORT_MODE,
+        Statics::accepting(1),
+    );
+    assert!(
+        accepting.static_links > 0,
+        "no board ever dialled the static peer, so the kind is inert and every row with it is \
+         a row without it"
+    );
+
+    // 3. It DIALS, which is the half the capture proves (84 links it
+    //    initiated across the three boards, 76 of them to `feld-pocket`,
+    //    which never dialled it once). The switch is a switch: with it
+    //    off no board ever holds an incoming link from the peer, with it
+    //    on they do.
+    for (statics, expected) in [(Statics::accepting(1), false), (Statics::rig(1), true)] {
+        let mut seen = false;
+        for seed in 0..50 {
+            let sim = run_sim(
+                3,
+                0xB1E5_0000 + seed,
+                FallbackSpec::Eager,
+                TargetChoice::RotatingLast,
+                Churn::NONE,
+                Mortality::CAPTURE_SHORT_MODE,
+                statics,
+            );
+            seen |= sim
+                .boards
+                .iter()
+                .any(|b| b.incoming.iter().any(|l| l.peer >= 3));
+        }
+        assert_eq!(
+            seen, expected,
+            "{statics:?}: the peer's own dialling half does not follow its switch"
+        );
+    }
+
+    // 4. A static address cannot produce the duplicate the rotation
+    //    produces: the §4.5 exclusion catches a peer we already hold a
+    //    link with before the dial, so no dial to it is ever refused
+    //    post-connect. That is the one structural difference from the
+    //    phone, and it is measured rather than asserted from the code.
+    let no_phone = measure(
+        3,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::NONE,
+        Mortality::CAPTURE_SHORT_MODE,
+        Statics::rig(1),
+    );
+    assert!(
+        no_phone.static_links > 0 && no_phone.refused == 0,
+        "{} dials to a static peer were refused as duplicates; without a rotation there is no \
+         second address for the identity to arrive under",
+        no_phone.refused
+    );
+
+    // 5. And 303's tier is still worth zero with the fourth kind in the
+    //    room: it advertises a record, but not a peripheral-only one
+    //    (`caps=0x1e` and `0x1c` in the capture, bit 0 clear).
+    assert_eq!(
+        no_phone.offers_cannot_dial, 0,
+        "an offer reached the cannot-dial-us tier: something in the model now advertises \
+         PERIPHERAL_ONLY and the tier rows have to be measured for real"
+    );
+    // A three-board room with no phone in it offers far less than the
+    // steady-state table's millions — measured 51 474 over the thousand
+    // orders — so the bound says "enough windows to see the tier fire if
+    // it could", not "as many as that table".
+    assert!(
+        no_phone.offers > 10_000,
+        "the tier census saw only {} offers with a static peer in the room, too few to say the \
+         tier never fired",
+        no_phone.offers
+    );
+}
+
 /// The mortality model's positive controls, in the shape the churn
 /// model's has: the parameter is a parameter (its zero changes nothing),
 /// and each of its mechanisms is shown firing once before the
@@ -2543,6 +3792,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
                 TargetChoice::RotatingLast,
                 Churn::NONE,
                 Mortality::IMMORTAL,
+                Statics::NONE,
             );
             assert_eq!(sim.tally.deaths, 0);
             assert_eq!(sim.tally.refill_dials, 0);
@@ -2567,6 +3817,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
         TargetChoice::RotatingLast,
         Churn::NONE,
         Mortality::CAPTURE_SHORT_MODE,
+        Statics::NONE,
     );
     assert!(
         sim.tally.deaths > 20,
@@ -2600,6 +3851,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
         TargetChoice::RotatingLast,
         Churn::NONE,
         Mortality::IMMORTAL,
+        Statics::NONE,
     );
     let mortal = measure(
         10,
@@ -2607,6 +3859,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
         TargetChoice::RotatingLast,
         Churn::NONE,
         Mortality::CAPTURE_SHORT_MODE,
+        Statics::NONE,
     );
     assert!(
         mortal.board_links > immortal.board_links * 5,
@@ -2660,6 +3913,7 @@ fn the_shipped_config_connects_every_order_and_strands_nobody() {
                     choice,
                     Churn::NONE,
                     Mortality::IMMORTAL,
+                    Statics::NONE,
                 );
                 for (i, b) in sim.boards.iter().enumerate() {
                     assert!(
@@ -2692,6 +3946,7 @@ fn control_the_strict_rule_alone_disconnects_a_fifth_of_the_orders() {
         TargetChoice::FirstSeen,
         Churn::NONE,
         Mortality::IMMORTAL,
+        Statics::NONE,
     );
     assert!(
         outcome.disconnected >= 100,
@@ -3097,5 +4352,154 @@ fn a_peer_that_cannot_dial_and_has_no_room_is_not_promoted() {
     assert_eq!(
         dial_either_way(OUR_BOARD, [silent, reachable], ScanMode::Strict),
         "peripheral-only, silent"
+    );
+}
+
+/// The fourth kind in one window (#412 steady state 2): the mechanism
+/// that emptied the phone's column on the rig, with nothing in it but the
+/// real rule and the real table.
+///
+/// The three advertisers are the rig's room as the capture describes it:
+/// a board that has spent one of its three incoming slots (so it deficits
+/// by one), the phone with no capability record at all (deficit zero,
+/// rotating address), and the solar node — a STATIC address with a record
+/// stating three free slots, which is what `caps=0x1e free_slots=3` on
+/// 1835 of its `BLE_SCAN_DECISION` lines says. Under the shipped order it
+/// wins the deficit term against the board and the rotating-group term
+/// against the phone, so it takes the dial, and that is the whole of the
+/// rig's post-2026-09-25 ledger.
+#[test]
+fn a_static_peer_with_every_slot_free_takes_the_fallback_from_board_and_phone() {
+    let spent = Advertiser {
+        label: "board holding one incoming link",
+        addr: BOARD_A,
+        caps: record(DUAL_ROLE, PERIPH_SLOTS as u8 - 1),
+    };
+    let phone = Advertiser {
+        label: "phone",
+        addr: PHONE_ADDR,
+        caps: None,
+    };
+    // Below every board, as `d916e2923ed2` was below all three — and
+    // still a static random address, so it is not in the rotating group.
+    let solar = Advertiser {
+        label: "static peer, every slot free",
+        addr: OUR_BOARD,
+        caps: record(DUAL_ROLE, PERIPH_SLOTS as u8),
+    };
+    assert_eq!(
+        dial_from(BOARD_B, &[spent, phone, solar], ScanMode::Fallback),
+        Some("static peer, every slot free"),
+        "the static peer lost the rig's own window; the steady-state-2 table's reading of the \
+         capture is then wrong"
+    );
+    // Without it, the same window is 306's finding: the phone.
+    assert_eq!(
+        dial_from(BOARD_B, &[spent, phone], ScanMode::Fallback),
+        Some("phone"),
+        "306's mechanism cell has changed under this order"
+    );
+}
+
+/// One window elected under a stated policy, through the same [`elect`]
+/// the simulation calls — so a cell can put the two candidate keys of
+/// #412 steady state 2 against each other on one advertisement set.
+fn elect_from(own_addr: u64, room: &[Advertiser], choice: TargetChoice) -> &'static str {
+    let offers: Vec<(usize, u64, ConnectDecision, Option<u8>)> = room
+        .iter()
+        .enumerate()
+        .filter_map(|(k, peer)| {
+            let decision = should_initiate(
+                DUAL_ROLE,
+                own_addr,
+                peer.caps,
+                peer.addr,
+                ScanMode::Fallback,
+            );
+            decision
+                .initiate()
+                .then_some((k, peer.addr, decision, peer.caps.and_then(free_slots)))
+        })
+        .collect();
+    let mut side_ledger = Tally::default();
+    room[elect(choice, &offers, &mut side_ledger)].label
+}
+
+/// The two candidate keys ARE two different policies, which the Monte
+/// Carlo cannot show: every room it can build has one peer that is both
+/// recordless AND rotating (the phone), so both keys demote the same
+/// peer and every cell of the tables is identical. Separating them takes
+/// a peer in one set and not the other, and the two below are exactly
+/// those:
+///
+/// - a rotating peer that DOES advertise a record — an Android Columba
+///   that adopted v0.3.0's capability byte, which none does today;
+/// - a static peer that advertises NOTHING — an older board, or another
+///   implementation's node.
+///
+/// The cell is the reason item 4's sentence cannot choose between the two
+/// on the tables alone.
+#[test]
+fn the_two_candidate_keys_are_two_different_policies() {
+    let spent = Advertiser {
+        label: "board holding one incoming link",
+        addr: BOARD_A,
+        caps: record(DUAL_ROLE, PERIPH_SLOTS as u8 - 1),
+    };
+    // A phone that states three free slots: rotating, but not silent.
+    let talking_phone = Advertiser {
+        label: "rotating peer with a record",
+        addr: PHONE_ADDR,
+        caps: record(DUAL_ROLE, PERIPH_SLOTS as u8),
+    };
+    assert_eq!(
+        elect_from(BOARD_B, &[spent, talking_phone], TargetChoice::RotatingLast),
+        "rotating peer with a record",
+        "the shipped key's deficit term no longer outranks its group term"
+    );
+    assert_eq!(
+        elect_from(
+            BOARD_B,
+            &[spent, talking_phone],
+            TargetChoice::GroupAboveDeficit
+        ),
+        "board holding one incoming link",
+        "ranking the group above the deficit did not demote a rotating peer that had stated a \
+         better slot count"
+    );
+    assert_eq!(
+        elect_from(
+            BOARD_B,
+            &[spent, talking_phone],
+            TargetChoice::SilenceIsFull
+        ),
+        "rotating peer with a record",
+        "the silence-is-full key demoted a peer that was not silent"
+    );
+
+    // And the mirror: a static peer that says nothing at all.
+    let silent_board = Advertiser {
+        label: "static peer with no record",
+        addr: OUR_BOARD,
+        caps: None,
+    };
+    assert_eq!(
+        elect_from(BOARD_B, &[spent, silent_board], TargetChoice::RotatingLast),
+        "static peer with no record",
+        "silence stopped reading as `all slots free` under the shipped key"
+    );
+    assert_eq!(
+        elect_from(
+            BOARD_B,
+            &[spent, silent_board],
+            TargetChoice::GroupAboveDeficit
+        ),
+        "static peer with no record",
+        "the group term demoted a peer whose address does not rotate"
+    );
+    assert_eq!(
+        elect_from(BOARD_B, &[spent, silent_board], TargetChoice::SilenceIsFull),
+        "board holding one incoming link",
+        "the silence-is-full key still let a recordless peer deficit by zero"
     );
 }
