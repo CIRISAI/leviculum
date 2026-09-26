@@ -430,6 +430,23 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- An LNode now waits as long for the channel as an RNode does, and no
+  longer minutes longer (Codeberg #147). The firmware's carrier-sense
+  backoff counted its wait in a slot of its own making — a tenth of a
+  500-byte airtime, floored at 24 ms and with no ceiling at all — which is
+  5x the reference RNode firmware's slot at SF7 and 27x it at SF12/BW125,
+  where one slot came to 2.7 s. It multiplied into the doubling contention
+  window the gate draws in, so a board on a busy channel could owe over a
+  minute of backoff while its RNode neighbours owed under six seconds: a
+  node that yields the channel that much is not a neighbour the others can
+  interoperate with, and on a shared medium it starves rather than
+  colliding. The slot is now the reference's own — 12 symbol times clamped
+  to [24, 100] ms, 6 ms above 30 kbps — derived once in
+  `leviculum_core::rnode::csma_slot_ms` and pinned against a literal
+  transcription of the firmware's three lines over every PHY it admits.
+  The acquisition jitter already used that slot; the board no longer has
+  two slots that can disagree.
+
 - A node no longer holds the path answer it asked for itself (Codeberg
   #428). On every interface that runs the announce ingress burst limiter —
   which is every shared-medium interface, LoRa included — an announce for

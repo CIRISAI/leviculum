@@ -68,6 +68,15 @@ pub const CAD_MAX_RETRIES: u8 = 8;
 /// nodes that simultaneously detect traffic desynchronize meaningfully.
 pub const CAD_CW_INITIAL: u8 = 2;
 /// Maximum contention window (slots) after exponential back-off.
+///
+/// The reference has no doubling window; it widens a fixed one by airtime
+/// band, `cw_max = band * CSMA_CW_PER_BAND_WINDOWS - 1`, so its widest draw
+/// is band 4's 45..=58 slots (Config.h:108-111,
+/// RNode_Firmware.ino:1614-1617). Ours is 0..=63, one band-width above that
+/// ceiling and reached by observed CAD-busy rather than by an airtime
+/// average — the substitution the crate docs above describe. In slot times
+/// the two ceilings are 5.8 s and 6.3 s at the 100 ms slot, which is what
+/// makes the escalation comparable rather than merely analogous.
 pub const CAD_CW_MAX: u8 = 64;
 
 /// DIFS in slots: `CSMA_SIFS_MS + 2 * csma_slot_ms` with SIFS = 0
@@ -78,39 +87,34 @@ pub const JITTER_DIFS_SLOTS: u64 = 2;
 /// RNode_Firmware.ino:1626, Arduino `random` upper-exclusive).
 pub const JITTER_CW_SLOTS: u32 = 14;
 /// One jitter slot is 12 symbol times (reference Config.h:107).
-pub const JITTER_SLOT_SYMBOLS: u64 = 12;
+pub const JITTER_SLOT_SYMBOLS: u64 = leviculum_core::rnode::CSMA_SLOT_SYMBOLS;
 /// Slot ceiling in ms (reference Config.h:104).
-pub const JITTER_SLOT_MAX_MS: u64 = 100;
+pub const JITTER_SLOT_MAX_MS: u64 = leviculum_core::rnode::CSMA_SLOT_MAX_MS;
 /// Slot floor in ms (reference Config.h:105).
-pub const JITTER_SLOT_MIN_MS: u64 = 24;
+pub const JITTER_SLOT_MIN_MS: u64 = leviculum_core::rnode::CSMA_SLOT_MIN_MS;
 /// Slot floor at fast rates: `CSMA_SLOT_MIN_MS - CSMA_SLOT_MIN_FAST_DELTA`
 /// = 24 - 18 (reference Config.h:105-106, Utilities.h:1246).
-pub const JITTER_SLOT_MIN_FAST_MS: u64 = 6;
+pub const JITTER_SLOT_MIN_FAST_MS: u64 =
+    leviculum_core::rnode::CSMA_SLOT_MIN_MS - leviculum_core::rnode::CSMA_SLOT_MIN_FAST_DELTA;
 /// Rates above this count as fast (reference Config.h:87,
 /// `LORA_FAST_THRESHOLD_BPS`).
-pub const JITTER_FAST_THRESHOLD_BPS: u64 = 30_000;
+pub const JITTER_FAST_THRESHOLD_BPS: u64 = leviculum_core::rnode::LORA_FAST_THRESHOLD_BPS as u64;
 
-/// The reference's jitter slot for a modulation: 12 symbol times clamped
-/// to `[24, 100]` ms, floor 6 ms at rates above 30 kbps (Utilities.h:
-/// 1244-1252). Integer ms, computed in µs so SF7's 12.288 ms does not
-/// truncate before the clamp compares it.
+/// The reference's CSMA slot for a modulation: 12 symbol times clamped to
+/// `[24, 100]` ms, floor 6 ms at rates above 30 kbps (Utilities.h:
+/// 1244-1252).
+///
+/// The derivation itself is [`leviculum_core::rnode::csma_slot_ms`], where it
+/// sits beside the airtime and preamble arithmetic it shares its reference
+/// lines with, is pinned against a literal float transcription of those
+/// lines over every PHY the reference admits, and is mirrored into
+/// `periculum-wire`. It is reached through this name because the slot is a
+/// channel-access quantity to every caller here, and because there must be
+/// exactly one of it: the CAD backoff in the firmware's transmit path used
+/// to derive a second, unclamped slot of its own from a 500-byte airtime,
+/// 27 times this one at SF12 (Codeberg #147).
 pub fn jitter_slot_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
-    // Guard the degenerate configs a corrupt flash page could feed us:
-    // a zero divisor must not trap in the radio task.
-    if bw_hz == 0 || cr_denom == 0 || sf == 0 || sf > 31 {
-        return JITTER_SLOT_MAX_MS;
-    }
-    let symbol_us = (1u64 << sf) * 1_000_000 / bw_hz as u64;
-    let slot_ms = JITTER_SLOT_SYMBOLS * symbol_us / 1_000;
-    // Reference bitrate (Utilities.h:1237):
-    // sf * (4 / cr) / symbol_time * 1000, in bits per second.
-    let bitrate_bps = sf as u64 * 4 * bw_hz as u64 / (cr_denom as u64 * (1u64 << sf));
-    let slot_min = if bitrate_bps > JITTER_FAST_THRESHOLD_BPS {
-        JITTER_SLOT_MIN_FAST_MS
-    } else {
-        JITTER_SLOT_MIN_MS
-    };
-    slot_ms.clamp(slot_min, JITTER_SLOT_MAX_MS)
+    leviculum_core::rnode::csma_slot_ms(bw_hz, sf, cr_denom)
 }
 
 /// The widest wait a node can owe before it keys up on a fresh channel
@@ -184,8 +188,8 @@ pub enum Verdict {
     /// the channel still busy; `retries` is the attempt count for the
     /// `[LORA_CSMA_TX]` line.
     Transmit { forced: bool, retries: u8 },
-    /// Listen for this many backoff slots (caller multiplies by its
-    /// backoff slot time), then CAD again.
+    /// Listen for this many backoff slots (caller multiplies by the CSMA
+    /// slot, [`ChannelAccess::jitter_slot`]), then CAD again.
     Backoff { slots: u64 },
     /// CAD itself failed; retry it immediately. Bounded by the same
     /// retry budget as busy, so a radio that cannot CAD still transmits.
@@ -469,8 +473,10 @@ mod tests {
 
     /// The window `leviculum-nrf/src/lora.rs` opened before #423: one reply
     /// airtime plus `PACING_MARGIN_MS` plus two slots of the *backoff*
-    /// slot, `max(24, airtime(500)/10)`, which is the CAD gate's slot and
-    /// not the one a peer draws its contention window in.
+    /// slot, `max(24, airtime(500)/10)`, which was the CAD gate's own slot
+    /// and not the one a peer draws its contention window in. Reconstructed
+    /// history twice over: that second slot is gone since #147 and the gate
+    /// now counts in [`jitter_slot_ms`] like everything else.
     fn window_before_423(bw: u32, sf: u8, cr: u8) -> u64 {
         let backoff_slot = core::cmp::max(
             JITTER_SLOT_MIN_MS,

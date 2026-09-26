@@ -651,9 +651,8 @@ impl AnnounceCap {
 
 // CSMA/CA constants. The retry gate itself (attempt budget, contention
 // window, forced give-up) lives in `leviculum_channel_access`, where a host
-// test can drive it against scripted CAD outcomes.
-/// Floor for slot time, matches the 24ms slot used by the RNode firmware.
-const CSMA_SLOT_MS_MIN: u64 = 24;
+// test can drive it against scripted CAD outcomes, and so does the slot
+// every one of its waits is counted in (`ChannelAccess::jitter_slot`).
 
 /// Peer-turn yield tunable: after this many consecutive empty post-TX ack
 /// windows, the sender stops draining its own queue for one bounded RX so the
@@ -683,21 +682,6 @@ fn xorshift32(state: &mut u32) -> u32 {
     *state ^= *state >> 17;
     *state ^= *state << 5;
     *state
-}
-
-/// The CAD retry gate's BACKOFF slot in ms, from the current radio profile:
-/// `max(24, airtime(500) / 10)`, scaling with spreading factor so SF10/SF12
-/// don't keep retrying inside the same airtime window.
-///
-/// This is not the slot a contention window is drawn in. That one is 12
-/// symbol times clamped to `[24, 100]` ms
-/// (`leviculum_channel_access::jitter_slot_ms`), and the two diverge at wide
-/// bandwidths, where this one sits on its floor while the other tracks the
-/// symbol. Sizing anything against a peer's wait with this slot is the
-/// defect of Codeberg #423.
-fn compute_slot_ms(cfg: &RadioConfig) -> u64 {
-    let airtime = leviculum_core::rnode::airtime_ms(500, cfg.bw_hz, cfg.sf, cfg.cr_denom);
-    core::cmp::max(CSMA_SLOT_MS_MIN, airtime / 10)
 }
 
 /// RX listening window (ms) opened after every transmission, before the next
@@ -1397,8 +1381,8 @@ pub fn channel_seed() -> u32 {
 }
 
 /// Program a runtime config override into the radio and refresh every piece
-/// of loop state derived from it: the slot time, the channel-access PHY, the
-/// airtime limits, the published running config.
+/// of loop state derived from it: the channel-access PHY (which carries the
+/// CSMA slot), the airtime limits, the published running config.
 ///
 /// One caller, the loop's single intake at the top of the turn. Every window
 /// the loop can park in wakes on a queued config without consuming it
@@ -1411,7 +1395,6 @@ async fn apply_runtime_config(
     radio: &mut Radio,
     new_cfg: RadioConfig,
     config: &mut RadioConfig,
-    slot_ms: &mut u64,
     access: &mut leviculum_channel_access::ChannelAccess,
     airtime: &mut leviculum_core::rnode::AirtimeTracker,
     lease: &mut leviculum_mute_lease::MuteLease,
@@ -1438,7 +1421,6 @@ async fn apply_runtime_config(
             );
             *config = new_cfg;
             publish_running_config(config);
-            *slot_ms = compute_slot_ms(config);
             access.set_phy(config.bw_hz, config.sf, config.cr_denom);
             apply_airtime_limits(airtime, config);
             CONFIG_APPLIED.signal(());
@@ -1593,7 +1575,6 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     // suppression is logged as a run and not as one line per frame. See
     // `admit_for_transmit`.
     let mut muted = leviculum_media_state::DropRun::new();
-    let mut slot_ms: u64 = compute_slot_ms(&config);
     // Count of consecutive post-TX ack windows that expired with no reception.
     // Drives the peer-turn yield (see PEER_YIELD_AFTER_EMPTY). Reset to 0 on any
     // reception, anywhere rx_window returns true.
@@ -1638,7 +1619,6 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 &mut radio,
                 new_cfg,
                 &mut config,
-                &mut slot_ms,
                 &mut access,
                 &mut airtime,
                 &mut mute_lease,
@@ -1821,7 +1801,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                         format_args!(
                             "retries={} forced=false slot_ms={}",
                             access.retries(),
-                            slot_ms
+                            access.jitter_slot()
                         ),
                     );
                     transmit_all_frames(
@@ -1846,7 +1826,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                         leviculum_channel_access::Verdict::Transmit { retries, .. } => {
                             crate::log::log_fmt(
                                 "[LORA_CSMA_TX] ",
-                                format_args!("retries={} forced=true slot_ms={}", retries, slot_ms),
+                                format_args!(
+                                    "retries={} forced=true slot_ms={}",
+                                    retries,
+                                    access.jitter_slot()
+                                ),
                             );
                             transmit_all_frames(
                                 &mut radio,
@@ -1862,7 +1846,13 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                             airtime_since_yield_ms += tx_cost_ms;
                         }
                         leviculum_channel_access::Verdict::Backoff { slots } => {
-                            let backoff_ms = slots * slot_ms;
+                            // The slot the gate counts its backoff in is the
+                            // reference CSMA slot, the same one the
+                            // acquisition jitter draws in — there is one slot
+                            // on a shared channel, and the second one this
+                            // site used to derive from a 500-byte airtime was
+                            // 27x it at SF12 (Codeberg #147).
+                            let backoff_ms = slots * access.jitter_slot();
                             // RX during the backoff so incoming packets aren't lost.
                             // Clamp to >=1ms, the SX1262 needs a non-zero timeout.
                             let rx_ms = backoff_ms.clamp(1, 10_000) as u32;
@@ -1895,7 +1885,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     {
                         crate::log::log_fmt(
                             "[LORA_CSMA_TX] ",
-                            format_args!("retries={} forced=true slot_ms={}", retries, slot_ms),
+                            format_args!(
+                                "retries={} forced=true slot_ms={}",
+                                retries,
+                                access.jitter_slot()
+                            ),
                         );
                         transmit_all_frames(
                             &mut radio,

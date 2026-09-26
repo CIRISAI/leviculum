@@ -934,6 +934,99 @@ pub fn derive_preamble_symbols(sf: u8, cr: u8, bandwidth_hz: u32) -> u16 {
     symbols.clamp(LORA_PREAMBLE_SYMBOLS_MIN as u64, u16::MAX as u64) as u16
 }
 
+/// One CSMA slot is 12 symbol times (`CSMA_SLOT_SYMBOLS`,
+/// `RNode_Firmware/Config.h:107`).
+pub const CSMA_SLOT_SYMBOLS: u64 = 12;
+
+/// Upper clamp on the CSMA slot, in ms (`CSMA_SLOT_MAX_MS`,
+/// `RNode_Firmware/Config.h:104`).
+pub const CSMA_SLOT_MAX_MS: u64 = 100;
+
+/// Lower clamp on the CSMA slot, in ms (`CSMA_SLOT_MIN_MS`,
+/// `RNode_Firmware/Config.h:105`).
+pub const CSMA_SLOT_MIN_MS: u64 = 24;
+
+/// Milliseconds taken off the lower clamp above the fast-rate threshold
+/// (`CSMA_SLOT_MIN_FAST_DELTA`, `RNode_Firmware/Config.h:106`), the same
+/// band-dependent shortening [`LORA_PREAMBLE_FAST_DELTA`] applies to the
+/// preamble target.
+pub const CSMA_SLOT_MIN_FAST_DELTA: u64 = 18;
+
+/// The CSMA slot time in ms for a modulation: the unit every channel-access
+/// wait on a shared LoRa channel is counted in.
+///
+/// This is the quantity a neighbour running the reference firmware counts its
+/// DIFS and its contention window in, so it is a compatibility figure and not
+/// a tuning knob: a node whose slot is ten times its neighbours' either talks
+/// over them or starves behind them.
+///
+/// Reference: `RNode_Firmware/Config.h:104-107` for the constants and
+/// `RNode_Firmware/Utilities.h:1235-1254` for the derivation:
+///
+/// ```text
+/// lora_symbol_rate    = bw / 2^sf                          [Hz]
+/// lora_symbol_time_ms = 1000 / lora_symbol_rate            [ms]
+/// fast_rate           = lora_bitrate > LORA_FAST_THRESHOLD_BPS
+/// csma_slot_min_ms    = CSMA_SLOT_MIN_MS - (fast_rate ? CSMA_SLOT_MIN_FAST_DELTA : 0)
+/// csma_slot_ms        = lora_symbol_time_ms * CSMA_SLOT_SYMBOLS   (int, truncating)
+/// if csma_slot_ms > CSMA_SLOT_MAX_MS { csma_slot_ms = CSMA_SLOT_MAX_MS }
+/// if csma_slot_ms < CSMA_SLOT_MIN_MS { csma_slot_ms = csma_slot_min_ms }
+/// ```
+///
+/// The two clamps are what makes this bounded at both ends, and the second
+/// one is not a `clamp`: the reference compares against the *unshortened*
+/// 24 ms and then assigns the possibly-shortened floor, so at a fast rate a
+/// slot of, say, 12 ms is pulled DOWN to 6. That is transcribed literally
+/// here rather than tidied into a `clamp`, and the difference is unreachable
+/// on any real modem: a rate counts as fast only above 30 kbps, and
+/// `12 * symbol_time` is then already below `1.6 * sf / cr` ms, i.e. under
+/// 3.9 ms for every `sf <= 12` — always below both floors.
+/// `csma_slot_fast_rates_land_on_the_short_floor` checks that on the grid.
+///
+/// `lora_bitrate` is [`compute_bitrate`], the reference's `Utilities.h:1237`
+/// truncated to `uint32_t`, which is what integer division does here.
+///
+/// # Where this is not bit-identical to the reference
+///
+/// The reference evaluates the symbol time in `float` and truncates the
+/// product into an `int`; this evaluates `12 * (2^sf * 1e6 / bw) / 1000` in
+/// integers, truncating twice. The two agree over every PHY the reference
+/// itself admits — its ten bandwidths, SF5..=SF12, CR4/5..4/8 — which
+/// `csma_slot_matches_reference_float` asserts by exhaustion. Outside that
+/// domain (an arbitrary bandwidth from a config file) the inner truncation
+/// can cost one millisecond where the float form keeps it.
+///
+/// Returns [`CSMA_SLOT_MAX_MS`] for degenerate inputs (a zero bandwidth,
+/// spreading factor or coding rate, or an `sf` past what the shift can hold):
+/// the longest slot is the politest one to fall back to, and a corrupt config
+/// must not divide by zero inside a radio task. `sf > 31` rather than the
+/// `sf > 12` of the real modems, because this is only the arithmetic's own
+/// domain guard and the callers validate the PHY (see [`validate_config`]).
+pub fn csma_slot_ms(bandwidth_hz: u32, sf: u8, cr: u8) -> u64 {
+    if bandwidth_hz == 0 || sf == 0 || sf > 31 || cr == 0 {
+        return CSMA_SLOT_MAX_MS;
+    }
+
+    // Symbol time in µs, so SF7/BW125's 12.288 ms slot is not truncated to
+    // 12 ms before the clamps have seen it.
+    let symbol_us = (1u64 << sf) * 1_000_000 / bandwidth_hz as u64;
+    let mut slot_ms = CSMA_SLOT_SYMBOLS * symbol_us / 1_000;
+
+    let slot_min_ms = if compute_bitrate(sf, cr, bandwidth_hz) > LORA_FAST_THRESHOLD_BPS {
+        CSMA_SLOT_MIN_MS - CSMA_SLOT_MIN_FAST_DELTA
+    } else {
+        CSMA_SLOT_MIN_MS
+    };
+
+    if slot_ms > CSMA_SLOT_MAX_MS {
+        slot_ms = CSMA_SLOT_MAX_MS;
+    }
+    if slot_ms < CSMA_SLOT_MIN_MS {
+        slot_ms = slot_min_ms;
+    }
+    slot_ms
+}
+
 /// Maximum random jitter (ms) for the first packet after idle.
 /// Matches Python's PATHFINDER_RW = 0.5s.
 pub const JITTER_MAX_MS: u64 = 500;
@@ -2981,6 +3074,167 @@ mod tests {
         // The u16 clamp, reachable only at the lowest SF and a bandwidth in
         // the hundreds of megahertz: 6 ms / (32 / 4294.97 MHz) = 805307.
         assert_eq!(derive_preamble_symbols(5, 5, u32::MAX), u16::MAX);
+    }
+
+    // CSMA slot tests
+    //
+    // Checked over the same REFERENCE_BANDWIDTHS grid as the preamble above:
+    // the slot comes out of the same three reference lines and is the unit
+    // every channel-access wait is counted in.
+
+    /// The reference slot derivation transcribed literally, in the types the
+    /// firmware uses — `float` symbol time, truncated into an `int` slot —
+    /// so the integer implementation has something to be compared against
+    /// rather than re-derived from.
+    ///
+    /// `RNode_Firmware/Utilities.h:1235-1252`, `Config.h:104-107`.
+    fn reference_csma_slot_ms_f32(bw: u32, sf: u8, cr: u8) -> u64 {
+        let two_pow_sf = 2f64.powi(sf as i32);
+        // Utilities.h:1235-1236
+        let lora_symbol_rate = (bw as f32) / (two_pow_sf as f32);
+        let lora_symbol_time_ms = ((1.0f64 / lora_symbol_rate as f64) * 1000.0) as f32;
+        // Utilities.h:1237, truncated to uint32_t
+        let lora_bitrate = ((sf as f64)
+            * ((4.0f64 / cr as f64) / ((two_pow_sf as f32) as f64 / (bw as f64 / 1000.0)))
+            * 1000.0) as u32;
+        // Utilities.h:1244-1246
+        let fast_rate = lora_bitrate > 30_000;
+        let mut csma_slot_min_ms: i32 = 24;
+        if fast_rate {
+            csma_slot_min_ms -= 18;
+        }
+        // Utilities.h:1249-1252: the product truncates into an `int`, the
+        // upper clamp is a clamp, and the lower one compares against the
+        // UNSHORTENED 24 while assigning the shortened floor.
+        let mut csma_slot_ms = (lora_symbol_time_ms * 12.0) as i32;
+        if csma_slot_ms > 100 {
+            csma_slot_ms = 100;
+        }
+        if csma_slot_ms < 24 {
+            csma_slot_ms = csma_slot_min_ms;
+        }
+        csma_slot_ms as u64
+    }
+
+    /// Over every PHY the reference itself can be configured for, our integer
+    /// slot is exactly the one the firmware's float derivation produces. This
+    /// is the assertion behind the "not bit-identical" caveat in the doc
+    /// comment — it says where the two *are* identical, by exhaustion.
+    #[test]
+    fn csma_slot_matches_reference_float() {
+        for sf in 5..=12u8 {
+            for cr in 5..=8u8 {
+                for bw in REFERENCE_BANDWIDTHS {
+                    assert_eq!(
+                        csma_slot_ms(bw, sf, cr),
+                        reference_csma_slot_ms_f32(bw, sf, cr),
+                        "bw={bw} sf={sf} cr={cr}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The table for the two bandwidths every LoRa scenario and every rig
+    /// measurement runs on, at both ends of the coding-rate range. T_sym is
+    /// 2^SF/BW, the slot is 12 of those clamped to [24, 100] ms:
+    ///
+    /// ```text
+    /// BW125:  SF7 12.3 -> 24   SF8 24.6 -> 24   SF9  49.2 -> 49
+    ///         SF10 98.3 -> 98   SF11 196.6 -> 100  SF12 393.2 -> 100
+    /// BW62.5: SF7 24.6 -> 24   SF8 49.2 -> 49   SF9  98.3 -> 98
+    ///         SF10 196.6 -> 100  SF11 393.2 -> 100  SF12 786.4 -> 100
+    /// ```
+    ///
+    /// No cell here is a fast rate (the fastest, SF7/BW125/CR4/5, is
+    /// 5468 bps against a 30 kbps threshold), so the coding rate cannot
+    /// reach the result and both CR columns are the same.
+    #[test]
+    fn csma_slot_bench_bandwidths_hand_computed() {
+        for cr in [5u8, 8] {
+            assert_eq!(csma_slot_ms(125_000, 7, cr), 24, "cr={cr}");
+            assert_eq!(csma_slot_ms(125_000, 8, cr), 24, "cr={cr}");
+            assert_eq!(csma_slot_ms(125_000, 9, cr), 49, "cr={cr}");
+            assert_eq!(csma_slot_ms(125_000, 10, cr), 98, "cr={cr}");
+            assert_eq!(csma_slot_ms(125_000, 11, cr), 100, "cr={cr}");
+            assert_eq!(csma_slot_ms(125_000, 12, cr), 100, "cr={cr}");
+
+            assert_eq!(csma_slot_ms(62_500, 7, cr), 24, "cr={cr}");
+            assert_eq!(csma_slot_ms(62_500, 8, cr), 49, "cr={cr}");
+            assert_eq!(csma_slot_ms(62_500, 9, cr), 98, "cr={cr}");
+            assert_eq!(csma_slot_ms(62_500, 10, cr), 100, "cr={cr}");
+            assert_eq!(csma_slot_ms(62_500, 11, cr), 100, "cr={cr}");
+            assert_eq!(csma_slot_ms(62_500, 12, cr), 100, "cr={cr}");
+        }
+    }
+
+    /// The band-dependent floor: every cell on the grid that clears the
+    /// 30 kbps fast threshold gets the 6 ms floor, and every other cell the
+    /// 24 ms one. Seven cells are fast — BW500k/SF5 (all CRs), BW500k/SF6
+    /// (CR4/5 and 4/6) and BW250k/SF5 (CR4/5) — and all seven sit on 6 ms
+    /// rather than somewhere between the two floors, which is why the
+    /// literal transcription of the reference's asymmetric lower clamp and a
+    /// plain `clamp(floor, 100)` cannot be told apart on real hardware.
+    #[test]
+    fn csma_slot_fast_rates_land_on_the_short_floor() {
+        let mut fast_cells = 0;
+        for sf in 5..=12u8 {
+            for cr in 5..=8u8 {
+                for bw in REFERENCE_BANDWIDTHS {
+                    let slot = csma_slot_ms(bw, sf, cr);
+                    if compute_bitrate(sf, cr, bw) > LORA_FAST_THRESHOLD_BPS {
+                        fast_cells += 1;
+                        assert_eq!(
+                            slot,
+                            CSMA_SLOT_MIN_MS - CSMA_SLOT_MIN_FAST_DELTA,
+                            "bw={bw} sf={sf} cr={cr}"
+                        );
+                    } else {
+                        assert!(slot >= CSMA_SLOT_MIN_MS, "bw={bw} sf={sf} cr={cr} {slot}");
+                    }
+                    assert!(slot <= CSMA_SLOT_MAX_MS, "bw={bw} sf={sf} cr={cr}");
+                }
+            }
+        }
+        assert_eq!(fast_cells, 7, "the grid's fast cells");
+    }
+
+    /// What this replaced, and why it is an interoperability defect rather
+    /// than a tuning preference: the firmware used to derive its slot from a
+    /// tenth of a 500-byte airtime, which is a quantity with no upper clamp
+    /// and no relation to what the neighbours count in. At the bench PHY it
+    /// was 5 times the reference slot at SF7 and 27 times at SF12 — a node
+    /// that waits half a minute where its RNode neighbours wait a tenth of a
+    /// second (Codeberg #147).
+    #[test]
+    fn csma_slot_is_no_longer_a_tenth_of_a_500_byte_airtime() {
+        let old = |bw, sf, cr| core::cmp::max(24, airtime_ms(500, bw, sf, cr) / 10);
+        assert_eq!((old(125_000, 7, 8), csma_slot_ms(125_000, 7, 8)), (120, 24));
+        assert_eq!(
+            (old(125_000, 12, 8), csma_slot_ms(125_000, 12, 8)),
+            (2_687, 100)
+        );
+        assert_eq!(
+            (old(62_500, 12, 8), csma_slot_ms(62_500, 12, 8)),
+            (5_375, 100)
+        );
+        // The old derivation had no ceiling at all: it grew without bound as
+        // the modulation slowed, which is the property the clamp removes.
+        assert!(old(7_800, 12, 8) > 40_000);
+        assert_eq!(csma_slot_ms(7_800, 12, 8), CSMA_SLOT_MAX_MS);
+    }
+
+    /// Degenerate inputs return the longest slot rather than dividing by zero
+    /// or wrapping the shift — the politest fallback, and the one the radio
+    /// task's channel-access state is initialised with.
+    #[test]
+    fn csma_slot_degenerate_inputs() {
+        assert_eq!(csma_slot_ms(0, 7, 5), CSMA_SLOT_MAX_MS);
+        assert_eq!(csma_slot_ms(125_000, 0, 5), CSMA_SLOT_MAX_MS);
+        assert_eq!(csma_slot_ms(125_000, 7, 0), CSMA_SLOT_MAX_MS);
+        assert_eq!(csma_slot_ms(125_000, 32, 5), CSMA_SLOT_MAX_MS);
+        // Inside the guard's domain but past any real modem: still bounded.
+        assert_eq!(csma_slot_ms(125_000, 31, 5), CSMA_SLOT_MAX_MS);
     }
 
     // Airtime tests

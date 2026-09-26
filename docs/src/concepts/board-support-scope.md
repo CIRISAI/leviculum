@@ -180,7 +180,7 @@ drive them, and being liftable is the same property as being portable:
   (`leviculum-nrf/channel-access/src/lib.rs:329`), `cad_error`
   (`leviculum-nrf/channel-access/src/lib.rs:346`) — and the jitter slot is
   derived from bandwidth, spreading factor and coding rate
-  (`jitter_slot_ms`, `leviculum-nrf/channel-access/src/lib.rs:97`), which
+  (`jitter_slot_ms`, `leviculum-nrf/channel-access/src/lib.rs:116`), which
   are properties of the modulation rather than of the part. Only the
   module's own text names the SX1262
   (`leviculum-nrf/channel-access/src/lib.rs:17`).

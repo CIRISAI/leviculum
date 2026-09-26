@@ -85,10 +85,11 @@ fn pushed_config() -> RadioConfigWire {
 /// longer than everything the serial task will wait.
 ///
 /// `post_tx_rx_window_ms` is one full single-frame reply's airtime plus a
-/// turnaround margin (the pacing margin and two CSMA slots), clamped to
-/// 10 s, and the peer-turn yield is two of them. At SF12/125 kHz the sum
-/// runs past the clamp, so the yield is exactly the 20 000 ms the capture
-/// reports and no slower profile can make it shorter.
+/// turnaround margin (the pacing margin and the widest wait a peer can owe
+/// before it keys up), clamped to 10 s, and the peer-turn yield is two of
+/// them. At SF12/125 kHz the sum runs past the clamp, so the yield is
+/// exactly the 20 000 ms the capture reports and no slower profile can make
+/// it shorter.
 #[test]
 fn the_peer_yield_window_dwarfs_the_serial_answer_budget() {
     // `post_tx_rx_window_ms`: header + max single payload, at the PHY the
@@ -96,11 +97,13 @@ fn the_peer_yield_window_dwarfs_the_serial_answer_budget() {
     let reply_bytes = (leviculum_core::rnode::MAX_SINGLE_PAYLOAD + 1) as u32;
     let reply_airtime =
         leviculum_core::rnode::airtime_ms_with_preamble(reply_bytes, 125_000, 12, 5, 16);
-    // `compute_slot_ms`: a tenth of a 500-byte frame's airtime. Its
-    // `CSMA_SLOT_MS_MIN` floor of 24 ms does not bind at this PHY — it is
-    // there for the fast profiles — so the floor is not reproduced here.
-    let slot_ms = leviculum_core::rnode::airtime_ms(500, 125_000, 12, 5) / 10;
-    let turnaround = leviculum_core::rnode::PACING_MARGIN_MS + 2 * slot_ms;
+    // The turnaround the firmware budgets: the pacing margin plus the peer's
+    // widest wait before it keys up (Codeberg #423). Taken from the policy
+    // crate rather than restated, so this cell moves with the window it
+    // describes; since #147 the board counts every wait in that one slot and
+    // there is no second, airtime-derived one to reproduce here.
+    let turnaround = leviculum_core::rnode::PACING_MARGIN_MS
+        + leviculum_channel_access::widest_acquisition_wait_ms(125_000, 12, 5);
     assert!(
         reply_airtime + turnaround >= 10_000,
         "an SF12/125k post-TX window is {} ms, so the 10 s clamp in \
