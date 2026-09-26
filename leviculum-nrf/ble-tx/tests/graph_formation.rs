@@ -278,9 +278,9 @@
 //! this one.
 
 use leviculum_ble_tx::{
-    judge_duplicate, should_initiate, CandidateTable, ConnectDecision, DupVerdict, FallbackOrder,
-    Origin, ScanMode, LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU, SCAN_FALLBACK_AFTER_MS,
-    WINDOW_CANDIDATES,
+    free_slots, judge_duplicate, should_initiate, with_free_slots, CandidateTable, ConnectDecision,
+    DupVerdict, FallbackOrder, Origin, ScanMode, CAP_PERIPHERAL_ONLY, LINK_ABANDONED_MS,
+    LINK_TIMEOUT_MS, MIN_USABLE_MTU, SCAN_FALLBACK_AFTER_MS, WINDOW_CANDIDATES,
 };
 
 /// The firmware's incoming-slot count (`PERIPH_LINKS`, #372), taken
@@ -1761,5 +1761,347 @@ fn control_the_strict_rule_alone_disconnects_a_fifth_of_the_orders() {
         outcome.linkless >= 50,
         "strict orders with a fully linkless board: {}/{ORDERS}",
         outcome.linkless
+    );
+}
+
+// ── #412 part 1: the scarce slot goes to the peer that cannot dial ──
+//
+// Everything above measures a room over a thousand arrival orders. The
+// cells below are rooms of two, replayed in both arrival orders, and
+// they ask the one question the Monte Carlo cannot: with the outgoing
+// slot free and two peers permitted, WHICH one is it spent on? The
+// design comment on #412 (2026-09-16) answers it first of four: the
+// slot goes to the peer whose advertisement says it cannot initiate,
+// because a central-capable peer comes to us and lands in one of the
+// three incoming slots, which cost nothing.
+//
+// The Monte Carlo cannot see this because no peer in it is ever
+// peripheral-only: boards advertise `LOCAL_CAPS = 0` and the churning
+// peer carries no record at all. That is also why every pinned number
+// above is unmoved by part 1 — the preference splits a class whose
+// members the harness never produces — and the tables holding as
+// equalities is the proof of it, not a hope.
+
+/// A board's own capability byte: the firmware's `LOCAL_CAPS` and
+/// lnsd's, dual-role since #255 phase B, so bit 0 is clear.
+const DUAL_ROLE: u8 = 0;
+
+/// Static random addresses (`11` on top, Core Spec Vol 6 Part B
+/// §1.3.2.2) — what every board in the room has — in ascending order,
+/// so a cell can put a peer on either side of the v2.2 sort.
+const OUR_BOARD: u64 = 0xC000_0000_0001;
+const BOARD_A: u64 = 0xC000_0000_0002;
+const BOARD_B: u64 = 0xC000_0000_0003;
+
+/// One resolvable private address (`01` on top): an Android Columba,
+/// central-capable, carrying no v0.3.0 record at all.
+const PHONE_ADDR: u64 = 0x4A1B_2C3D_4E5F;
+
+/// How many rotations a cell replays. The capture's period is
+/// [`CHURN_ROTATE_MS`] and the churn table's horizon is
+/// [`CHURN_HORIZON_ROUNDS`], so this is the same number of redraws the
+/// measurement above runs to, stated from the same two constants.
+const ROTATIONS: u32 = CHURN_HORIZON_ROUNDS / rounds(CHURN_ROTATE_MS);
+
+/// One advertiser in a one-window room: the label the assertions name
+/// it by, the address it is advertising under right now, and the
+/// v0.3.0 capability byte it carries. `None` is a peer with no record
+/// at all — per §3.2 full capability, per the window "all slots free".
+#[derive(Debug, Clone, Copy)]
+struct Advertiser {
+    label: &'static str,
+    addr: u64,
+    caps: Option<u8>,
+}
+
+/// A capability record stating a role and a free-slot count, built by
+/// the same [`with_free_slots`] the advertiser builds it with, so a
+/// cell cannot state a byte the wire could not carry.
+const fn record(caps: u8, free: u8) -> Option<u8> {
+    Some(with_free_slots(caps, free))
+}
+
+/// One scan window of a board at `own_addr` over `room`, with the REAL
+/// rule and the REAL table: every advertiser gets a [`should_initiate`]
+/// verdict, the eligible ones enter the window in the order listed, and
+/// the window elects the dial. `None` is "the rule permitted nobody" —
+/// the searching state, not a choice.
+///
+/// The capability byte goes in and a dial comes out, which is what
+/// makes these rooms and not table lookups: a preference that did not
+/// survive the decode would fail here.
+fn dial_from(own_addr: u64, room: &[Advertiser], mode: ScanMode) -> Option<&'static str> {
+    let mut window: CandidateTable<&'static str, WINDOW_CANDIDATES> = CandidateTable::new();
+    for peer in room {
+        let decision = should_initiate(DUAL_ROLE, own_addr, peer.caps, peer.addr, mode);
+        window.offer(
+            peer.addr,
+            decision,
+            peer.caps.and_then(free_slots),
+            peer.label,
+        );
+    }
+    window.into_best().map(|(_, _, label)| label)
+}
+
+/// The same room heard both ways round. Which advertiser the radio
+/// happened to hear first may not decide a strict choice — the one
+/// place it may is the fallback class's own tie-break, and no cell
+/// below puts two fallback candidates against each other.
+fn dial_either_way(own_addr: u64, room: [Advertiser; 2], mode: ScanMode) -> &'static str {
+    let forward = dial_from(own_addr, &room, mode);
+    let reversed = dial_from(own_addr, &[room[1], room[0]], mode);
+    assert_eq!(
+        forward, reversed,
+        "the choice followed the arrival order: {room:?}"
+    );
+    forward.expect("the room holds a peer the rule permits")
+}
+
+/// #412 part 1, the cell that was red before the preference existed:
+/// two peers the rule permits, one of which can dial us back.
+///
+/// Both terms that decided this before part 1 point the wrong way on
+/// purpose. The central-capable neighbour advertises MORE free slots,
+/// so it won the #375 item 3 preference, and it holds the LOWER
+/// address, so it would have won the term after that too. It is also
+/// the peer that needs us least: it sorts above us, so it will dial us
+/// and land in one of three incoming slots. The peripheral-only board
+/// has no way to reach us at all, and we have one outgoing slot.
+#[test]
+fn the_window_prefers_the_peer_that_cannot_dial_us_back() {
+    let cannot = Advertiser {
+        label: "peripheral-only board",
+        addr: BOARD_B,
+        caps: record(CAP_PERIPHERAL_ONLY, 2),
+    };
+    let can = Advertiser {
+        label: "dual-role board",
+        addr: BOARD_A,
+        caps: record(DUAL_ROLE, 3),
+    };
+    // The verdicts the two get are both strict, which is why the class
+    // term alone never separated them.
+    assert_eq!(
+        should_initiate(
+            DUAL_ROLE,
+            OUR_BOARD,
+            cannot.caps,
+            cannot.addr,
+            ScanMode::Strict
+        ),
+        ConnectDecision::InitiatePeripheralOnlyPeer
+    );
+    assert_eq!(
+        should_initiate(DUAL_ROLE, OUR_BOARD, can.caps, can.addr, ScanMode::Strict),
+        ConnectDecision::InitiateLowerAddress
+    );
+    assert_eq!(
+        dial_either_way(OUR_BOARD, [cannot, can], ScanMode::Strict),
+        "peripheral-only board"
+    );
+    // And with the slot counts equal, so that the cell above cannot be
+    // read as "the emptier peer lost by accident".
+    let can = Advertiser {
+        caps: record(DUAL_ROLE, 2),
+        ..can
+    };
+    assert_eq!(
+        dial_either_way(OUR_BOARD, [cannot, can], ScanMode::Strict),
+        "peripheral-only board"
+    );
+}
+
+/// The room the design comment names: one central-capable phone and
+/// one peripheral-only board.
+///
+/// On a BOARD this half was already held, and by a different term. A
+/// resolvable private address is below every static random one
+/// (`peer.rs`), so the v2.2 sort never permits a board to dial a phone
+/// at all: the phone can only ever be a FALLBACK candidate, which the
+/// class term has outranked since #375 item 2. The cell states that
+/// rather than assuming it, because part 1 must not be credited with
+/// it.
+///
+/// The half part 1 does decide is the same room seen by a scanner that
+/// sorts BELOW the phone — lnsd on a host adapter with a low public
+/// address, running this very table. There the phone IS a strict
+/// candidate, it advertises no slot count so it ranks as empty, and
+/// before part 1 it took the slot from the peer that has no other way
+/// in.
+#[test]
+fn a_phone_does_not_take_the_slot_from_a_board_that_cannot_dial() {
+    let phone = Advertiser {
+        label: "phone",
+        addr: PHONE_ADDR,
+        caps: None,
+    };
+    let board = Advertiser {
+        label: "peripheral-only board",
+        addr: BOARD_A,
+        caps: record(CAP_PERIPHERAL_ONLY, 1),
+    };
+    for mode in [ScanMode::Strict, ScanMode::Fallback] {
+        assert_eq!(
+            should_initiate(
+                DUAL_ROLE,
+                OUR_BOARD,
+                phone.caps,
+                phone.addr,
+                ScanMode::Strict
+            ),
+            ConnectDecision::WaitPeerHasLowerAddress,
+            "a board never gets a strict verdict for an RPA"
+        );
+        assert_eq!(
+            dial_either_way(OUR_BOARD, [phone, board], mode),
+            "peripheral-only board"
+        );
+    }
+    let low_host = PHONE_ADDR - 1;
+    assert!(
+        should_initiate(
+            DUAL_ROLE,
+            low_host,
+            phone.caps,
+            phone.addr,
+            ScanMode::Strict
+        )
+        .initiate(),
+        "the cell needs a scanner the sort sends AT the phone"
+    );
+    assert_eq!(
+        dial_either_way(low_host, [phone, board], ScanMode::Strict),
+        "peripheral-only board"
+    );
+}
+
+/// Two peers that both cannot dial: the order between them is the one
+/// they had before part 1, because nothing about them differs on the
+/// new term. Emptiest first (#375 item 3), equal counts by the lowest
+/// address (#375 item 2).
+#[test]
+fn two_peers_that_cannot_dial_keep_the_order_they_had() {
+    let fuller = Advertiser {
+        label: "one slot left",
+        addr: BOARD_A,
+        caps: record(CAP_PERIPHERAL_ONLY, 1),
+    };
+    let emptier = Advertiser {
+        label: "three slots left",
+        addr: BOARD_B,
+        caps: record(CAP_PERIPHERAL_ONLY, 3),
+    };
+    assert_eq!(
+        dial_either_way(OUR_BOARD, [fuller, emptier], ScanMode::Strict),
+        "three slots left"
+    );
+    let low = Advertiser {
+        label: "low",
+        addr: BOARD_A,
+        caps: record(CAP_PERIPHERAL_ONLY, 2),
+    };
+    let high = Advertiser {
+        label: "high",
+        addr: BOARD_B,
+        caps: record(CAP_PERIPHERAL_ONLY, 2),
+    };
+    assert_eq!(
+        dial_either_way(OUR_BOARD, [low, high], ScanMode::Strict),
+        "low"
+    );
+}
+
+/// A rotating peer redraws its address, never its standing. A fresh
+/// draw of the whole 46-bit space is a fresh chance to win an ordering
+/// term — that is #412's mechanism — and part 1 must not open a new
+/// door to it. Every redraw the churn horizon covers, against a board
+/// of each kind, in both scan modes.
+#[test]
+fn a_redrawn_address_never_takes_the_slot_from_a_board() {
+    let boards = [
+        Advertiser {
+            label: "board",
+            addr: BOARD_A,
+            caps: record(CAP_PERIPHERAL_ONLY, 1),
+        },
+        Advertiser {
+            label: "board",
+            addr: BOARD_A,
+            caps: record(DUAL_ROLE, 1),
+        },
+    ];
+    let mut rng = 0x0412_0412_0412_0412;
+    let mut phone = Advertiser {
+        label: "phone",
+        addr: PHONE_ADDR,
+        caps: None,
+    };
+    for _ in 0..ROTATIONS {
+        // A resolvable private address: `01` on top, the rest redrawn.
+        phone.addr = (next_rand(&mut rng) & 0x3FFF_FFFF_FFFF) | (0b01 << 46);
+        for board in boards {
+            for mode in [ScanMode::Strict, ScanMode::Fallback] {
+                assert_eq!(
+                    dial_either_way(OUR_BOARD, [phone, board], mode),
+                    "board",
+                    "rotation to {:012x} won a term it should not have",
+                    phone.addr
+                );
+            }
+        }
+    }
+    // A preference inside what the rule already permits, never an
+    // exclusion: with nobody else advertising, the phone is the dial.
+    assert_eq!(
+        dial_from(OUR_BOARD, &[phone], ScanMode::Fallback),
+        Some("phone")
+    );
+}
+
+/// The preference is for the peer that cannot dial US, not for one
+/// that cannot take the dial either. A peer advertising zero free
+/// incoming slots refuses the connection when it lands, and the
+/// deficit term has sorted it last inside its class since #375 item 3;
+/// promoting it over every reachable peer would have inverted that.
+///
+/// Silence is not zero, here as everywhere: a peripheral-only peer that
+/// said nothing about its slots is ranked as having them all, so it
+/// keeps the preference.
+#[test]
+fn a_peer_that_cannot_dial_and_has_no_room_is_not_promoted() {
+    let full = Advertiser {
+        label: "peripheral-only, full",
+        addr: BOARD_A,
+        caps: record(CAP_PERIPHERAL_ONLY, 0),
+    };
+    let reachable = Advertiser {
+        label: "dual-role, room left",
+        addr: BOARD_B,
+        caps: record(DUAL_ROLE, 1),
+    };
+    assert_eq!(
+        dial_either_way(OUR_BOARD, [full, reachable], ScanMode::Strict),
+        "dual-role, room left"
+    );
+    // Still a candidate, and still the dial when it is the only one: a
+    // count that may be stale must not cost a peer its only chance.
+    assert_eq!(
+        dial_from(OUR_BOARD, &[full], ScanMode::Strict),
+        Some("peripheral-only, full")
+    );
+    let silent = Advertiser {
+        label: "peripheral-only, silent",
+        caps: Some(CAP_PERIPHERAL_ONLY),
+        ..full
+    };
+    assert_eq!(
+        silent.caps.and_then(free_slots),
+        None,
+        "no count was stated"
+    );
+    assert_eq!(
+        dial_either_way(OUR_BOARD, [silent, reachable], ScanMode::Strict),
+        "peripheral-only, silent"
     );
 }

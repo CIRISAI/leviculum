@@ -71,8 +71,8 @@ pub use registry::{
 };
 pub use session_census::{HeldBytes, SessionHeld};
 pub use window::{
-    CandidateTable, FallbackOrder, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
-    WINDOW_CANDIDATES,
+    dial_preference, CandidateTable, DialPreference, FallbackOrder, SCAN_FALLBACK_AFTER_MS,
+    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 
 /// Upper bound on a single wait for the SoftDevice's

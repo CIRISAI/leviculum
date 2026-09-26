@@ -43,6 +43,40 @@
 //! untouched, and a peer that advertised a free slot and has none left
 //! refuses the connection exactly as it does today.
 //!
+//! # The peer that cannot dial back goes first (#412 part 1)
+//!
+//! The two preferences above order candidates the rule has permitted;
+//! neither asks what the dial is WORTH. A board has one outgoing slot
+//! (`CENTRAL_LINKS = 1`) and three incoming ones, so the outgoing one
+//! is the scarce resource, and #412's design comment (2026-09-16)
+//! spends it first on the peers that have no other way in: an
+//! advertisement carrying [`crate::CAP_PERIPHERAL_ONLY`] says its
+//! sender cannot initiate at all, while a central-capable peer will
+//! come to us and land in a slot that costs nothing.
+//!
+//! So the key's first term is the tier [`dial_preference`] reads off
+//! one advertisement — cannot-dial-us, then the rest of what the rule
+//! permitted, then #375's fallback verdicts — and the free-slot and
+//! address terms order candidates inside it, unchanged. Only the split
+//! of the former strict class is new: a peripheral-only peer and a
+//! peer the address sort elected used to tie on the first term and be
+//! separated by their slot counts, which is the wrong question about
+//! the wrong slot.
+//!
+//! One peer does NOT get the promotion: one that says it has no
+//! incoming slot left. It would refuse the connection when it landed,
+//! and the deficit term has sorted it last inside its tier since item
+//! 3. That is a demotion out of the new tier, never an exclusion —
+//! stated counts go stale, and a peer nobody else competes with is
+//! still dialled whatever it advertised.
+//!
+//! What the tier does not cover, and what parts 2 to 4 of the design
+//! are for: a central-capable peer that arrives while no other
+//! candidate is visible still takes the slot, because a window with
+//! one candidate has nothing to prefer it over. Slot release, the
+//! dial ledger and the rate limit are the answers to that, and they
+//! are not this term.
+//!
 //! # Why the fallback class is NOT ordered by address (#412)
 //!
 //! A resolvable private address has `01` in its top two bits and a
@@ -217,38 +251,100 @@ struct Candidate<T> {
     payload: T,
 }
 
-/// Preference key, lowest wins: strict-class verdicts (the sort or the
-/// capability override permitted the dial) outrank fallback-class
-/// verdicts; within a class the peer with the most free incoming slots
-/// wins; and equal counts fall back to the third term.
+/// Which preference tier one permitted candidate sits in — the first
+/// term of the window's key, and the name a capture reads it by
+/// (`pref=` on `BLE_SCAN_DECISION`, both stacks).
+///
+/// It is a pure function of one advertisement ([`dial_preference`]),
+/// which is what lets the scanner print it per PDU, before it knows
+/// what else the window will hold. Declaration order IS the
+/// preference order; lowest wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DialPreference {
+    /// #412 part 1: the peer's advertisement says it cannot initiate
+    /// ([`crate::CAP_PERIPHERAL_ONLY`]) and it has not said it is out
+    /// of incoming room. Our one outgoing slot is the only way this
+    /// peer ever gets a link with us, so it goes first.
+    CannotDialUs,
+    /// A peer the rule permits that can also come to us: the v2.2
+    /// sort's own winner, and a peripheral-only peer that advertised
+    /// its last incoming slot as gone.
+    Permitted,
+    /// #375's fallback verdict — dialled only because the strict rule
+    /// produced nothing for the whole bound.
+    Fallback,
+}
+
+impl DialPreference {
+    /// The tier for the structured log line (no whitespace, stable).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CannotDialUs => "cannot_dial_us",
+            Self::Permitted => "permitted",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+/// Which tier an advertisement puts a permitted peer in (#412 part 1).
+///
+/// `free_slots` is what the peer advertised, `None` when it said
+/// nothing — and silence is not zero here either: a peripheral-only
+/// peer that stated no count keeps the preference, exactly as it is
+/// ranked "all slots free" by the term after this one.
+///
+/// A verdict that is not an initiate has no tier that means anything;
+/// it is reported as [`DialPreference::Permitted`] and never reaches
+/// the window, which refuses it in [`CandidateTable::offer`].
+#[must_use]
+pub fn dial_preference(decision: ConnectDecision, free_slots: Option<u8>) -> DialPreference {
+    match decision {
+        ConnectDecision::InitiateFallback => DialPreference::Fallback,
+        // The peer cannot dial us AND can still take a dial. The
+        // second half is not a second eligibility rule: a peer that
+        // says it is full is refused by nothing here, it merely loses
+        // the promotion — the deficit term has sorted it last inside
+        // its tier since #375 item 3, and promoting it over every
+        // reachable peer would have inverted that.
+        ConnectDecision::InitiatePeripheralOnlyPeer if free_slots != Some(0) => {
+            DialPreference::CannotDialUs
+        }
+        _ => DialPreference::Permitted,
+    }
+}
+
+/// Preference key, lowest wins: the tier a peer's advertisement puts
+/// it in ([`dial_preference`] — the peer that cannot dial us, then the
+/// rest of what the rule permitted, then #375's fallback verdicts);
+/// within a tier the peer with the most free incoming slots wins; and
+/// equal counts fall back to the third term.
 ///
 /// The middle term is a DEFICIT (`PERIPH_SLOTS` minus the count) so
 /// that "lowest key wins" stays the one comparison rule, and a peer
 /// that advertised no count deficits by zero: it ties with the most
 /// generous advertisers and the last term decides, as before item 3.
 ///
-/// The last two terms are the lower address in the strict class — the
+/// The last two terms are the lower address in the strict tiers — the
 /// order the strict sort itself would have produced — and, since #412,
-/// the [`FallbackOrder`] in the fallback class: a group term, then
+/// the [`FallbackOrder`] in the fallback one: a group term, then
 /// either the address or the sighting order within it. `seq` and
-/// `addr` are never compared against each other: class is the first
+/// `addr` are never compared against each other: the tier is the first
 /// term and the group the third, so a key that carries a `seq` is only
 /// ever ordered against other `seq` keys.
-fn rank<T>(candidate: &Candidate<T>, order: FallbackOrder) -> (u8, u8, u8, u64) {
-    let class = match candidate.decision {
-        ConnectDecision::InitiateFallback => 1,
-        _ => 0,
-    };
+fn rank<T>(candidate: &Candidate<T>, order: FallbackOrder) -> (DialPreference, u8, u8, u64) {
+    let pref = dial_preference(candidate.decision, candidate.free_slots);
+    let fallback = pref == DialPreference::Fallback;
     let deficit = PERIPH_SLOTS.saturating_sub(candidate.free_slots.unwrap_or(PERIPH_SLOTS));
-    let (group, tie) = match (class, order) {
-        (0, _) | (_, FallbackOrder::Address) => (0, candidate.addr),
+    let (group, tie) = match (fallback, order) {
+        (false, _) | (_, FallbackOrder::Address) => (0, candidate.addr),
         (_, FallbackOrder::FirstHeard) => (0, u64::from(candidate.seq)),
         (_, FallbackOrder::RotatingLast) if rotating_address(candidate.addr) => {
             (1, u64::from(candidate.seq))
         }
         (_, FallbackOrder::RotatingLast) => (0, candidate.addr),
     };
-    (class, deficit, group, tie)
+    (pref, deficit, group, tie)
 }
 
 /// One scan window's eligible candidates, bounded and allocation-free.
@@ -393,13 +489,85 @@ mod tests {
     type Table = CandidateTable<&'static str, 4>;
 
     #[test]
-    fn the_lowest_address_wins_within_a_class() {
+    fn the_lowest_address_wins_within_a_tier() {
         let mut t = Table::new();
         assert!(t.offer(0x30, InitiateLowerAddress, None, "c"));
         assert!(t.offer(0x10, InitiateLowerAddress, None, "a"));
-        assert!(t.offer(0x20, InitiatePeripheralOnlyPeer, None, "b"));
+        assert!(t.offer(0x20, InitiateLowerAddress, None, "b"));
         assert_eq!(t.seen(), 3);
         assert_eq!(t.into_best(), Some((0x10, InitiateLowerAddress, "a")));
+    }
+
+    /// #412 part 1. Until it shipped, the case above held the
+    /// peripheral-only peer at 0x20 as a third member of one class and
+    /// let the address decide across it — which spent the one outgoing
+    /// slot on the peer that was going to dial US.
+    #[test]
+    fn the_peer_that_cannot_dial_us_outranks_the_address_sorts_winner() {
+        let mut t = Table::new();
+        assert!(t.offer(0x10, InitiateLowerAddress, Some(3), "sort winner, empty"));
+        assert!(t.offer(
+            0x20,
+            InitiatePeripheralOnlyPeer,
+            Some(1),
+            "cannot dial us, nearly full"
+        ));
+        assert_eq!(
+            t.into_best(),
+            Some((
+                0x20,
+                InitiatePeripheralOnlyPeer,
+                "cannot dial us, nearly full"
+            )),
+            "the tier is the first term: neither the count nor the address may overturn it"
+        );
+    }
+
+    /// The demotion out of the new tier, and its bound: a peer that
+    /// says it has no incoming slot left cannot take the dial either,
+    /// so it stays where the deficit term always put it — but it is
+    /// still a candidate, and still the dial when it is the only one.
+    #[test]
+    fn a_peer_that_cannot_dial_us_and_has_no_room_keeps_the_ordinary_tier() {
+        assert_eq!(
+            dial_preference(InitiatePeripheralOnlyPeer, Some(0)),
+            DialPreference::Permitted
+        );
+        assert_eq!(
+            dial_preference(InitiatePeripheralOnlyPeer, None),
+            DialPreference::CannotDialUs,
+            "silence is not zero"
+        );
+        let mut t = Table::new();
+        assert!(t.offer(0x20, InitiatePeripheralOnlyPeer, Some(0), "full"));
+        assert!(t.offer(0x10, InitiateLowerAddress, Some(1), "room left"));
+        assert_eq!(
+            t.into_best(),
+            Some((0x10, InitiateLowerAddress, "room left"))
+        );
+        let mut alone = Table::new();
+        assert!(alone.offer(0x20, InitiatePeripheralOnlyPeer, Some(0), "full"));
+        assert_eq!(
+            alone.into_best(),
+            Some((0x20, InitiatePeripheralOnlyPeer, "full"))
+        );
+    }
+
+    /// The three tiers name themselves for `pref=` on
+    /// `BLE_SCAN_DECISION`, and the names are what a capture greps.
+    #[test]
+    fn every_tier_has_its_own_stable_name() {
+        assert_eq!(
+            dial_preference(InitiatePeripheralOnlyPeer, Some(2)).as_str(),
+            "cannot_dial_us"
+        );
+        assert_eq!(
+            dial_preference(InitiateLowerAddress, None).as_str(),
+            "permitted"
+        );
+        assert_eq!(dial_preference(InitiateFallback, None).as_str(), "fallback");
+        assert!(DialPreference::CannotDialUs < DialPreference::Permitted);
+        assert!(DialPreference::Permitted < DialPreference::Fallback);
     }
 
     #[test]
