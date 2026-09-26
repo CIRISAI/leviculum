@@ -206,6 +206,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         ],
     },
     EventSchema {
+        // A link-request proof that travelled the route corrected the path
+        // entry's LENGTH in place (#330). Only `hops` moved, which is why the
+        // shape carries the count before and after and nothing else: the
+        // interface and the next hop are still the announce's.
+        name: "PATH_REBALANCE",
+        required_keys: &["dst", "from", "to"],
+    },
+    EventSchema {
         name: "PKT_LOCAL",
         required_keys: &["dst", "iface", "matched"],
     },

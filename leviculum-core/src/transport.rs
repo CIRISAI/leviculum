@@ -6480,6 +6480,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // hops away reads remaining_hops; a client N hops away reads
                 // target+N == its own frozen count.
                 let mut rewrite_hops: Option<u8> = None;
+                // #330: the hop count this proof wants adopted into the link
+                // entry and the path table (Python 1.5.0 `Transport.py:2540`,
+                // `ALLOW_LINK_PATH_REBALANCE`). Set on the mismatch branch,
+                // applied only AFTER the Ed25519 signature validated below —
+                // an unsigned hop count must never move a path entry.
+                let mut adopt_hops: Option<u8> = None;
                 let same_iface =
                     link_entry.next_hop_interface_index == link_entry.received_interface_index;
                 // Observability (#38): log BOTH frozen counts and WHICH interface
@@ -6576,6 +6582,36 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                 "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (remaining_hops)"
                             );
                             rewrite_hops = Some(link_entry.remaining_hops);
+                            // #330: Python 1.5.0 does not merely tolerate this
+                            // mismatch, it ADOPTS the proof's count into the
+                            // link entry and the path table
+                            // (`Transport.py:2540-2560`, gated on
+                            // `ALLOW_LINK_PATH_REBALANCE` and on the entry not
+                            // being validated yet). The proof travelled the
+                            // route it claims, so its count is the live length
+                            // and the frozen one is stale. Two preconditions,
+                            // both from the reference:
+                            //   * `!link_entry.validated` — the first proof
+                            //     rebalances, later copies do not, so a
+                            //     returning echo cannot move the count again
+                            //     (`and not link_entry[IDX_LT_VALIDATED]`);
+                            //   * we hold the peer's signing key, so the
+                            //     signature check below is real. Python reaches
+                            //     its rebalance through
+                            //     `Identity.recall(...)`; without a recalled
+                            //     identity it raises and rebalances nothing.
+                            // The adoption itself happens after that check.
+                            // The context gate keeps this on the arm Python's
+                            // rebalance lives on: a data proof takes the same
+                            // link-table route but is never signature-checked
+                            // here, so its hop count stays unauthenticated and
+                            // must not move a path entry.
+                            if packet.context == PacketContext::Lrproof
+                                && !link_entry.validated
+                                && link_entry.peer_signing_key.is_some()
+                            {
+                                adopt_hops = Some(packet.hops);
+                            }
                         } else {
                             // Strict reference behaviour (#38): the operand did
                             // not match `remaining_hops`, so Python
@@ -6787,6 +6823,44 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             "forwarding LRPROOF without signature validation — announce not cached for link"
                         );
                     }
+                }
+
+                // #330: the proof's signature held (the branch above returns on
+                // every failure), so the hop count it arrived with is as
+                // authentic as the key material it carries. Adopt it into the
+                // link entry and the path table, the way Python 1.5.0 does
+                // (`Transport.py:2556-2560`: `link_entry[IDX_LT_REM_HOPS] =
+                // packet.hops`, then `path_entry[IDX_PT_HOPS] = packet.hops`).
+                // Nothing else moves: not the interfaces, not `link_entry.hops`,
+                // not the path's next hop or expiry.
+                //
+                // The forwarded copy still carries the PRE-adoption count
+                // (`rewrite_hops`, #38). That is deliberate and it is where we
+                // keep deviating from 1.5.0, which forwards `packet.hops`
+                // unchanged: the peer on the initiator side froze ITS expectation
+                // from the announce we rebroadcast, i.e. from the stale count, and
+                // a 1.3.5 initiator drops a proof that disagrees with it
+                // (`Transport.py:2228`). Forwarding the count the downstream peer
+                // expects lands the link for a 1.3.5 AND a 1.5 initiator; adopting
+                // it into our own tables is what stops the mismatch from recurring
+                // on the next link over that path. See
+                // `docs/src/architecture-hop-counting.md`.
+                if let Some(new_hops) = adopt_hops {
+                    if let Some(entry) = self.storage.get_link_entry_mut(&dest_hash) {
+                        entry.remaining_hops = new_hops;
+                    }
+                    let path_before =
+                        self.rebalance_path_hops(&link_entry.destination_hash, new_hops);
+                    crate::tracing::warn!(
+                        link_id = %HexShort(&dest_hash),
+                        dest = %HexShort(&link_entry.destination_hash),
+                        packet_hops = packet.hops,
+                        remaining_hops_before = link_entry.remaining_hops,
+                        remaining_hops_after = new_hops,
+                        path_hops_before = ?path_before,
+                        dir = "next_hop",
+                        "LRPROOF hop asymmetry: rebalanced link and path to the validated proof's hop count (#330)"
+                    );
                 }
 
                 // Mark link as validated on first proof
@@ -8216,6 +8290,38 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 String::from("none"),
             ),
         }
+    }
+
+    /// Adopt `hops` as the path length to `dest_hash` (#330, Python 1.5.0
+    /// `Transport.py:2556-2560` on the relay, `:2632-2637` at the link
+    /// terminus). Returns the hop count the entry carried before, or `None`
+    /// when there is no entry to rebalance.
+    ///
+    /// Only `hops` moves. The interface, the next hop, the expiry and the
+    /// random blobs are what the announce installed and stay that way: this is
+    /// a correction of the LENGTH of a route already known, from a
+    /// signature-validated link-request proof that travelled it, not a new
+    /// path. Callers must validate that signature FIRST — an adopted hop count
+    /// is adopted on the word of whoever sent the proof.
+    pub fn rebalance_path_hops(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        hops: u8,
+    ) -> Option<u8> {
+        let mut entry = self.storage.get_path(dest_hash)?.clone();
+        let before = entry.hops;
+        if before == hops {
+            return Some(before);
+        }
+        entry.hops = hops;
+        self.storage.set_path(*dest_hash, entry);
+        crate::tracing::debug!(
+            event = "PATH_REBALANCE",
+            dst = %HexShort(dest_hash),
+            from = before,
+            to = hops,
+        );
+        Some(before)
     }
 
     /// Returns a displayable interface name for logging.

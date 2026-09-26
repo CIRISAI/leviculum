@@ -462,8 +462,8 @@ async fn test_announce_cap_forwarding_rate_limit() {
 ///    rebroadcast from a Rust relay.
 ///
 ///    The retry scheduler removes the announce-table entry when
-///    `PATHFINDER_RETRIES` (transport.rs:10340) is exceeded OR
-///    `local_rebroadcasts` (transport.rs:10341) reaches
+///    `PATHFINDER_RETRIES` (transport.rs:10445) is exceeded OR
+///    `local_rebroadcasts` (transport.rs:10446) reaches
 ///    `LOCAL_REBROADCASTS_MAX`. A sustained stream
 ///    of identical re-arrivals from a peer must not produce unbounded
 ///    rebroadcast traffic.

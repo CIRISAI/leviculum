@@ -234,6 +234,32 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- A link-request proof whose hop count disagrees with what our tables froze is
+  now believed about the route it travelled, not only tolerated. RNS 1.5.0 added
+  `ALLOW_LINK_PATH_REBALANCE` (`Transport.py:150` in the 1.5.0 tag) and with it
+  two adoption sites: a relay validates the proof's signature and then writes
+  `packet.hops` into the link entry and into the path entry for the link's
+  destination (`Transport.py:2540` onwards), and a link terminus does the same
+  for `link.expected_hops` (`Transport.py:2608` onwards). 1.3.5 — the version
+  `reference/Reticulum` is pinned to — had the bare equality check at
+  `Transport.py:2176` and `:2228` and dropped everything else, which is what our
+  #38 work reproduced. We now adopt at both sites: on a mismatch whose Ed25519
+  signature holds, the count the proof arrived with replaces the frozen one in
+  the link entry or on the `Link`, and the path entry's length follows. Only
+  `hops` moves; the interface, the next hop and the expiry stay what the announce
+  installed, and a proof whose signature does not hold adopts nothing (one
+  negative control per site). What we did NOT take from 1.5.0 is the honest wire:
+  the forwarded copy still carries the pre-adoption count, because a 1.3.5
+  initiator behind us froze its expectation from the announce WE rebroadcast and
+  rejects anything else (`Transport.py:2228`) — measured, not inferred, by
+  `lrproof_hop_undercount_interop_tests.rs`, which drives a real Python 1.3.5
+  initiator over the asymmetric topology and passes with the adoption in place.
+  The shared-medium relay arm also stays as it was, an echo drop, because there
+  the hop equality is the only loop breaker we have measured (the
+  `lora_3node_relay` storm of 2026-08-12). New diagnostic event
+  `PATH_REBALANCE dst= from= to=`. The reasoning, including the two things this
+  does not settle, is in `docs/src/architecture-hop-counting.md`. Codeberg #330.
+
 - The firmware no longer carries a floating-point number parser. Every
   decimal field of every NMEA sentence went through `str::parse::<f32>()` or
   `::<f64>()` inside `nmea0183` 0.6.0, and those two monomorphisations linked

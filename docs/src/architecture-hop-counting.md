@@ -81,7 +81,7 @@ A path learned from a path response therefore inherits the responder's STORED co
 measured one. Staleness propagates through this channel.
 
 leviculum matches this as of 2026-07-10 (D3, fixed on branch `path-response-hops`). When a transport
-node answers a path request from a network peer (`handle_path_request` case 2b, `transport.rs:6960`)
+node answers a path request from a network peer (`handle_path_request` case 2b, `transport.rs:7033`)
 it now emits `self.storage.get_path(&requested_hash).map(|p| p.hops)`, the receipt-incremented stored
 count, exactly as `:2956` does. It previously emitted `cached_packet.hops`, the AS-RECEIVED wire byte
 (`set_announce_cache` stores the raw pre-increment buffer; the receipt increment at `transport.rs:2160`
@@ -178,16 +178,16 @@ Recorded 2026-07-10 against `reference/Reticulum` as vendored.
 | Receipt increment | `:1498` | `transport.rs:2033` | matches |
 | IPC exception, instance side | `:1523` | `transport.rs:1750` | matches |
 | IPC exception, client side | `:1525` | `transport.rs:1750` (else-arm of the `has_local_clients` gate) | matches — **fixed 2026-07-10 (D2, commit `06aadaff`); was absent** |
-| Announce rebroadcast | `:2050` | `transport.rs:6831` | matches |
+| Announce rebroadcast | `:2050` | `transport.rs:6904` | matches |
 | Path table store | `:1909`, `:2055` | `transport.rs:3631` | matches |
 | Path acceptance | `:1806`, `:2412` | `transport.rs:3727` (`should_update`) | matches |
-| Path-response hop emission | `:2997` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:6960` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
+| Path-response hop emission | `:2997` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:7033` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
 | Link entry fields | `:1615-1625` | `storage_types.rs:60 (destination_hash at :76)` | matches, including the destination hash |
 | LRPROOF relay check | `:2215-2206` (single `== remaining_hops`, drop else; the `:1697` disjunction is gated OUT for LRPROOF at `:1687`) | `transport.rs:4398`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
-| Healing, no path | `:737` | `transport.rs:7393` | matches |
-| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:7675` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
-| Healing, destination direct | `:753` | `transport.rs:7401` | matches |
-| Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:7694` | matches |
+| Healing, no path | `:737` | `transport.rs:7466` | matches |
+| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:7748` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
+| Healing, destination direct | `:753` | `transport.rs:7474` | matches |
+| Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:7767` | matches |
 
 ### The deliberate deviation, and its cost
 
@@ -200,6 +200,10 @@ It also costs three things:
 1. It suppresses the sensor. The link validates, `clean_link_table` skips it (`if entry.validated
    { continue; }`), no path request is issued, and the wrong path survives. Measured in the field:
    the same warning recurs on an exact five minute heartbeat, indefinitely.
+   **Since #330 the second half of that sentence no longer holds:** the wrong path does not
+   survive, because a signature-validated proof now re-balances the path entry and the link
+   entry in place (see "What we do since #330" below). The sensor is still suppressed and the
+   sweep still asks for nothing — it no longer has anything to ask for.
 2. It sometimes LOWERS the counter. Measured on miauhaus 2026-07-10: `packet_hops=7` rewritten to
    `3`. That is four hops of extra life handed to a packet that `max_hops` was meant to kill.
 3. It overwrites a measurement with an assertion. Downstream consumers of `hops` receive what this
@@ -320,6 +324,80 @@ demands for the strict flag, run against both a 1.3.5 and a 1.5.x peer. The fixt
 relay half already exists — `mvr_hop_asymmetry.rs` builds the honest asymmetric topology and
 asserts both arms of `lrproof_rewrite_on_asymmetry` — so a fix pass starts from a working
 reproduction, not from scratch.
+
+**Decided 2026-09-26: (c).** The next section records what was implemented, which half of the
+A/B was measured, and which half is still owed.
+
+### What we do since #330: option (c), measured on the 1.3.5 half
+
+Implemented 2026-09-26, `leviculum-core/src/transport.rs` (relay arm) and
+`leviculum-core/src/node/link_management.rs` (terminus arm). Read against the 1.5.0 tag
+(`e32d4df7`), whose line numbers differ from the 1.5.2 ones quoted above:
+
+* `Transport.py:150` — `ALLOW_LINK_PATH_REBALANCE = True`.
+* Relay, `Transport.py:2540` (`if packet.hops != link_entry[IDX_LT_REM_HOPS] and
+  Transport.ALLOW_LINK_PATH_REBALANCE:`) with the adoption at `:2555-2560`
+  (`if peer_identity.validate(signature, signed_data) and not link_entry[IDX_LT_VALIDATED]:`
+  then `link_entry[IDX_LT_REM_HOPS] = packet.hops` and `path_entry[IDX_PT_HOPS] = packet.hops`).
+  The 1.3.5 line it replaced is `Transport.py:2176`, the bare
+  `if packet.hops == link_entry[IDX_LT_REM_HOPS]:` whose only else drops.
+* Terminus, `Transport.py:2608` with the adoption at `:2627-2637`
+  (`link.rebalanced = time.time()`, `link.expected_hops = packet.hops`,
+  `path_entry[IDX_PT_HOPS] = packet.hops`). The 1.3.5 line it replaced is `Transport.py:2228`,
+  `if packet.hops == link.expected_hops or link.expected_hops == RNS.Transport.PATHFINDER_M:`,
+  which matched no pending link otherwise and let `create_link` time out.
+
+What we adopted, and what we did not:
+
+* **Adopted, both arms.** On a hop mismatch whose Ed25519 signature holds, the proof's count
+  replaces the frozen one in the link entry (relay) or on the `Link` (terminus), and the path
+  entry for the link's DESTINATION follows. Only `hops` moves — not the interface, not the next
+  hop, not the expiry, not `link_entry.hops`. Preconditions are the reference's: the relay arm
+  requires `!validated` (so a returning echo cannot move the count a second time) and a recalled
+  peer signing key (Python reaches its rebalance through `Identity.recall`; without an identity
+  it raises and adopts nothing). At the terminus the once-only property is structural: the link
+  leaves `PendingOutgoing` on the same proof and the phase gate refuses every later one, which
+  is what Python's `link.rebalanced` flag buys.
+* **Not adopted: the honest wire.** The forwarded copy still carries the PRE-adoption frozen
+  count, the #38 rewrite. This is option (c) above and it is a deviation from 1.5.0, which
+  forwards `packet.hops` unchanged. The reason is measured, not inferred:
+  `lrproof_hop_undercount_interop_tests.rs` drives a real Python 1.3.5 initiator out of
+  `reference/Reticulum` behind our relay over the asymmetric topology, and both of its cells
+  pass with the adoption in place (2026-09-26). Forwarding the true count instead would hand
+  that initiator a proof its `Transport.py:2228` gate rejects — the initiator froze its
+  expectation from the announce WE rebroadcast, i.e. from the stale count. A 1.5.0 initiator
+  accepts the frozen count too: it equals what its own path table says, so its re-balance arm
+  simply does not fire.
+* **Not adopted: the shared-medium arm.** Unchanged, still an echo drop. 1.5.0 would re-balance
+  there (its `receiving_interface == IDX_LT_NH_IF` test passes when the two interfaces are one)
+  and bound the loop with `IDX_LT_VALIDATED` instead of the hop equality. Swapping our loop
+  breaker for that one is a rig question — the `lora_3node_relay` storm of 2026-08-12, pinned by
+  `mvr_lrproof_echo_storm.rs` — and no desk argument settles it.
+
+Deviation rule, clause by clause: the wire format is untouched (a hop byte, as before);
+semantic compatibility improves, because the set of initiators that establish through us over an
+asymmetric path is unchanged for 1.3.5 and unchanged for 1.5.0, while our own tables stop being
+wrong; and priority 1 gains the drain — the next link to that destination freezes the
+re-balanced count, so the asymmetry does not recur for the life of the path entry.
+
+What this does NOT settle, and is still owed:
+
+* The **1.5.x half of the interop A/B**. Nothing in this tree runs a 1.5.x daemon
+  (`reference/Reticulum` is pinned at 1.3.5 and every interop cell drives that), so "a 1.5.0
+  initiator accepts the frozen count" is a source reading, not a measurement.
+* The **stale-downstream window**. Once our path entry is re-balanced, the mismatch stops
+  firing, so the rewrite stops firing with it — and a downstream 1.3.5 initiator whose own
+  expectation is still the stale count now disagrees with what we forward. It re-agrees when the
+  next announce from that destination reaches it through us. Between the re-balance and that
+  announce, a link attempt from such a peer can fail where the pre-#330 rewrite would have
+  papered over it. Python 1.5.0 has the same window and pays it in full (it never rewrites); we
+  pay it only after the first successful link. Measuring it needs the 1.5.x A/B fixture above
+  plus a second link attempt inside the window.
+
+The fixtures are in `mvr_hop_asymmetry.rs`: the relay shape
+(`relay_adopts_validated_proof_hop_count_into_link_and_path`), the terminus shape
+(`initiator_adopts_validated_proof_hop_count_into_link_and_path`), and one negative control per
+arm pinning that a forged signature adopts nothing.
 
 ## The ceiling, and what 1.5.x does at it
 

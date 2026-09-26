@@ -1121,6 +1121,36 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
 
+        // #330: path re-balancing at the link terminus (Python 1.5.0
+        // `Transport.py:2608-2637`, `ALLOW_LINK_PATH_REBALANCE`). The proof came
+        // back over a route of a different length than the path table promised
+        // when `connect` froze `link.hops` from it. `process_proof` above already
+        // validated the responder's signature — the same precondition Python
+        // checks inline before it touches `link.expected_hops` — so the count the
+        // proof arrived with is authentic and is the live length of the route.
+        // Adopt it into the link and into the path entry for the destination.
+        //
+        // Once per link, like Python's `link.rebalanced` guard: a link leaves
+        // `PendingOutgoing` a few lines below and the phase gate at the top of
+        // this function refuses every later proof for it, so no second adoption
+        // can reach here.
+        if packet.hops != link.hops() {
+            let hops_before = link.hops();
+            let dest_hash = *link.destination_hash();
+            link.set_hops(packet.hops);
+            let path_before = self
+                .transport
+                .rebalance_path_hops(dest_hash.as_bytes(), packet.hops);
+            crate::tracing::warn!(
+                link = %HexShort(link_id.as_bytes()),
+                dest = %HexShort(dest_hash.as_bytes()),
+                packet_hops = packet.hops,
+                link_hops_before = hops_before,
+                path_hops_before = ?path_before,
+                "LRPROOF hop asymmetry at link terminus: rebalanced link and path to the validated proof's hop count (#330)"
+            );
+        }
+
         // Proof verified! Calculate RTT and transition to established
         let now_secs = now_ms / MS_PER_SECOND;
         let measured_rtt_ms = match link.phase() {

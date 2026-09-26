@@ -256,10 +256,30 @@ struct Outcome {
     path_request_time_after_sweep: Option<u64>,
     /// Sanity: did the initiator establish the link?
     initiator_established: bool,
+    /// #330: A's stored path length to R AFTER the validated proof was handled.
+    /// 1.5.0 rebalances it to the length the proof travelled; 1.3.5 leaves the
+    /// stale value standing.
+    a_hops_to_r_after_proof: Option<u8>,
+    /// #330: A's frozen `remaining_hops` for the link AFTER the proof.
+    a_remaining_hops_after_proof: Option<u8>,
+    /// The hop byte A put on the wire when it forwarded the proof to I. Pins the
+    /// #38 rewrite: the downstream peer still reads the count IT expects, even
+    /// though A adopted the other one for itself.
+    forwarded_proof_wire_hops: Option<u8>,
     logs: String,
 }
 
 fn run_scenario() -> Outcome {
+    run_scenario_forge(false)
+}
+
+/// The scenario above, with one switch: `forge_proof_signature` flips a byte of
+/// the returning proof's Ed25519 signature just before it reaches A. Everything
+/// else — the topology, the hop counts, the honest mismatch — is identical, so
+/// the only difference in the outcome is what an INVALID signature buys: the
+/// negative control for #330's adoption (a convenient hop count on an unsigned
+/// proof must move nothing).
+fn run_scenario_forge(forge_proof_signature: bool) -> Outcome {
     let mut warn_packet_hops = None;
     let mut warn_remaining_hops = None;
     let mut warn_taken_hops = None;
@@ -269,6 +289,9 @@ fn run_scenario() -> Outcome {
     let mut a_drop_delta = 0;
     let mut path_request_time_after_sweep = None;
     let mut initiator_established = false;
+    let mut a_hops_to_r_after_proof = None;
+    let mut a_remaining_hops_after_proof = None;
+    let mut forwarded_proof_wire_hops = None;
 
     let ((), logs) = with_captured_logs(|| {
         let (mut responder, dest_r, signing_key, announce_long, announce_short, _announce_heal) =
@@ -346,11 +369,35 @@ fn run_scenario() -> Outcome {
         let out = relay_z.handle_packet(InterfaceId(z_to_r), &proof);
         let z_proof = one_packet(&out);
 
+        // Negative control: corrupt the first signature byte (proof data starts
+        // at wire offset 19 on a Type1 packet: flags(1) hops(1) dest(16)
+        // context(1)). The hop byte is untouched, so the mismatch A sees is
+        // exactly the same one.
+        let z_proof = if forge_proof_signature {
+            let mut forged = z_proof;
+            assert!(forged.len() > 19, "proof packet must carry proof data");
+            forged[19] ^= 0xff;
+            forged
+        } else {
+            z_proof
+        };
+
         // Proof reaches A with packet.hops = 2 while remaining_hops = 3: the
         // honest mismatch. A warns, rewrites, validates, forwards to I.
         let dropped_before = relay_a.transport().stats().packets_dropped;
         let out = relay_a.handle_packet(InterfaceId(a_to_z), &z_proof);
         a_drop_delta = relay_a.transport().stats().packets_dropped - dropped_before;
+
+        // #330 observables, read at the moment the proof was handled: what A now
+        // believes the route to R costs, what it froze for the link, and what it
+        // actually put on the wire toward I.
+        a_hops_to_r_after_proof = relay_a.hops_to(&dest_r);
+        a_remaining_hops_after_proof = relay_a
+            .transport()
+            .storage()
+            .get_link_entry(init_link.as_bytes())
+            .map(|e| e.remaining_hops);
+        forwarded_proof_wire_hops = action_data(&out).first().map(|p| p[1]);
 
         for pkt in action_data(&out) {
             let iout = initiator.handle_packet(InterfaceId(i_to_a), &pkt);
@@ -406,6 +453,9 @@ fn run_scenario() -> Outcome {
         a_drop_delta,
         path_request_time_after_sweep,
         initiator_established,
+        a_hops_to_r_after_proof,
+        a_remaining_hops_after_proof,
+        forwarded_proof_wire_hops,
         logs,
     }
 }
@@ -507,21 +557,27 @@ fn hop_asymmetry_rewrite_validates_link_at_relay() {
 }
 
 // ----------------------------------------------------------------------------
-// Assertion 3: healing is suppressed — clean_link_table issues NO path request.
+// Assertion 3: no path request after the sweep — and since #330, none is owed.
 // ----------------------------------------------------------------------------
 
-/// THE bug: a validated entry is skipped by `clean_link_table`
+/// A validated entry is skipped by `clean_link_table`
 /// (`if entry.validated { continue; }`), so after the link times out and the
-/// table is swept, A issues NO fresh path request for R. The wrong path (the
-/// stale long arm) is never corrected and the mismatch would recur forever.
+/// table is swept, A issues NO fresh path request for R.
 ///
-/// Mirror case (assertion 4): the SAME link entry, had it NOT validated, WOULD
-/// request a path — this is exactly the unit test
+/// Until #330 that was the bug: the rewrite validated the link, the sweep asked
+/// for nothing, and the stale long-arm path survived to mis-freeze the next
+/// link. Since #330 the sweep has nothing to ask FOR — the validated proof
+/// rebalanced the path entry in place (see
+/// `relay_adopts_validated_proof_hop_count_into_link_and_path`), so the silence
+/// here is correctness, not suppression. The companion assertion below pins
+/// exactly that, so this test cannot go green on a stale path again.
+///
+/// Mirror case: the SAME link entry, had it NOT validated, WOULD request a path
+/// — this is exactly the unit test
 /// `transport::tests::...::clean_link_table_local_client_link_requests_path`
 /// (transport.rs), which sets an UNVALIDATED local-client entry (hops == 0) with
 /// a known non-direct path and asserts `get_path_request_time(&dest).is_some()`
-/// after the sweep. The only difference from this scenario is the `validated`
-/// flag flipped by the rewrite; that flag is what suppresses the heal here.
+/// after the sweep.
 #[test]
 fn hop_asymmetry_validation_suppresses_path_rediscovery() {
     let o = run_scenario();
@@ -535,10 +591,94 @@ fn hop_asymmetry_validation_suppresses_path_rediscovery() {
     );
     assert!(
         o.path_request_time_after_sweep.is_none(),
-        "healing suppressed: no path request must be issued for R after the \
-         validated link times out (clean_link_table skips validated entries). \
-         got {:?}.\n--- logs ---\n{}",
+        "no path request must be issued for R after the validated link times \
+         out (clean_link_table skips validated entries). got {:?}.\n--- logs ---\n{}",
         o.path_request_time_after_sweep,
+        o.logs
+    );
+    // And the reason the silence is harmless: the path is already right.
+    assert_eq!(
+        o.a_hops_to_r_after_proof,
+        Some(2),
+        "#330: nothing is owed to the sweep because the validated proof already \
+         corrected the path to R.\n--- logs ---\n{}",
+        o.logs
+    );
+}
+
+// ----------------------------------------------------------------------------
+// #330 (relay shape): the validated proof's hop count is ADOPTED, not dropped.
+//
+// Python 1.5.0 `Transport.py:2540` + `ALLOW_LINK_PATH_REBALANCE = True`:
+//   if packet.hops != link_entry[IDX_LT_REM_HOPS] and ALLOW_LINK_PATH_REBALANCE:
+//       ... validate signature ...
+//       if peer_identity.validate(signature, signed_data) and not link_entry[IDX_LT_VALIDATED]:
+//           link_entry[IDX_LT_REM_HOPS] = packet.hops
+//           path_entry[IDX_PT_HOPS]     = packet.hops
+// 1.3.5 (`Transport.py:2176`) had only the `==` check and dropped everything
+// else, which is what our #38 work reproduced with a rewrite bolted on.
+//
+// This is the same honest topology as the tests above; the proof travelled
+// A <- Z <- R, two hops, while A's announce-learned entry says three. The proof
+// is the better witness: it went the route.
+// ----------------------------------------------------------------------------
+
+/// The relay adopts the hop count of a signature-validated LRPROOF into both the
+/// link entry and the path table, and keeps forwarding the count the downstream
+/// peer expects (#38, so a 1.3.5 initiator behind us still accepts the proof).
+#[test]
+fn relay_adopts_validated_proof_hop_count_into_link_and_path() {
+    let o = run_scenario();
+
+    // The mismatch really happened (topology, not shim).
+    assert_eq!(o.a_hops_to_r, Some(3), "A's frozen path length (long arm)");
+    assert_eq!(
+        (o.warn_packet_hops, o.warn_remaining_hops),
+        (Some(2), Some(3)),
+        "precondition: the honest mismatch (proof 2 hops, frozen 3).\n--- logs ---\n{}",
+        o.logs
+    );
+
+    // Adoption, both halves, exactly what 1.5.0 writes.
+    assert_eq!(
+        o.a_remaining_hops_after_proof,
+        Some(2),
+        "#330: the link entry's remaining_hops must become the proof's count \
+         (Transport.py:2556).\n--- logs ---\n{}",
+        o.logs
+    );
+    assert_eq!(
+        o.a_hops_to_r_after_proof,
+        Some(2),
+        "#330: the path entry for R must become the proof's count \
+         (Transport.py:2560).\n--- logs ---\n{}",
+        o.logs
+    );
+
+    // The adoption is logged as such, with both counts on the line.
+    assert!(
+        o.logs.contains(
+            "LRPROOF hop asymmetry: rebalanced link and path to the validated \
+proof's hop count (#330)"
+        ),
+        "the rebalance must be visible in the journal.\n--- logs ---\n{}",
+        o.logs
+    );
+
+    // Our one deviation from 1.5.0 (which forwards packet.hops unchanged): the
+    // copy leaving toward the initiator still carries the PRE-adoption count, so
+    // a strict 1.3.5 initiator that froze its expectation from the stale
+    // announce still matches its pending link (#38, Transport.py:2228).
+    assert_eq!(
+        o.forwarded_proof_wire_hops,
+        Some(3),
+        "the forwarded proof must still carry the frozen count for the \
+         downstream peer.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert!(
+        o.initiator_established,
+        "and the link must still establish at the initiator.\n--- logs ---\n{}",
         o.logs
     );
 }
@@ -873,6 +1013,317 @@ fn strict_flag_second_attempt_converges_after_heal() {
         o.second_initiator_established,
         "the matching proof must establish the link at the initiator. \
          Convergence: fail once, heal, succeed.\n--- logs ---\n{}",
+        o.logs
+    );
+}
+
+// ----------------------------------------------------------------------------
+// #330 negative control (relay shape): a forged proof adopts NOTHING.
+// ----------------------------------------------------------------------------
+
+/// The same honest mismatch, but the proof's signature does not hold. Python
+/// 1.5.0 rebalances only inside `if peer_identity.validate(signature,
+/// signed_data) and not link_entry[IDX_LT_VALIDATED]` (`Transport.py:2555`), and
+/// so do we: the proof is dropped, the link entry keeps its frozen count, and the
+/// path table keeps the length the announce installed. A convenient hop count is
+/// not an argument; a signature is.
+#[test]
+fn relay_refuses_to_adopt_the_hop_count_of_a_forged_proof() {
+    let o = run_scenario_forge(true);
+
+    // Same honest mismatch as the valid run (the hop byte was not touched).
+    assert_eq!(o.a_hops_to_r, Some(3), "A's frozen path length (long arm)");
+    assert_eq!(
+        (o.warn_packet_hops, o.warn_remaining_hops),
+        (Some(2), Some(3)),
+        "precondition: the forged proof presents the same mismatch.\n--- logs ---\n{}",
+        o.logs
+    );
+
+    // It was dropped for the signature, not forwarded.
+    assert_eq!(
+        o.a_drop_delta, 1,
+        "the forged proof must be dropped.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert!(
+        o.logs
+            .contains("Dropped LRPROOF, signature verification failed"),
+        "the drop must be attributed to the signature.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert!(
+        !o.initiator_established,
+        "no link may establish on a forged proof.\n--- logs ---\n{}",
+        o.logs
+    );
+
+    // And nothing was adopted.
+    assert_eq!(
+        o.a_remaining_hops_after_proof,
+        Some(3),
+        "#330 negative control: the link entry must keep its frozen count.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert_eq!(
+        o.a_hops_to_r_after_proof,
+        Some(3),
+        "#330 negative control: the path to R must keep the announce's length.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert!(
+        !o.logs.contains("rebalanced link and path"),
+        "no rebalance may be logged for a forged proof.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert!(
+        !o.logs.contains("PATH_REBALANCE"),
+        "no path rebalance may happen for a forged proof.\n--- logs ---\n{}",
+        o.logs
+    );
+}
+
+// ----------------------------------------------------------------------------
+// #330, second shape: WE are the INITIATOR, the proof returns over a shorter
+// route than our path table promised.
+//
+// Python 1.5.0 `Transport.py:2608` + `ALLOW_LINK_PATH_REBALANCE = True`:
+//   if packet.hops != link.expected_hops and link.status == PENDING and ALLOW...:
+//       ... validate signature against link.destination.identity ...
+//       if valid and not link.rebalanced:
+//           link.expected_hops = packet.hops
+//           path_entry[IDX_PT_HOPS] = packet.hops
+// 1.3.5 (`Transport.py:2228`) had only `packet.hops == link.expected_hops` (or
+// the PATHFINDER_M escape) and matched no pending link otherwise, so the proof
+// was never validated and `create_link` timed out.
+//
+// Our endpoint never had that gate: it validates whatever proof carries the
+// link id, so the LINK has always formed here (see the
+// `lrproof_hop_undercount` interop tests). What it did NOT do is learn
+// anything from the disagreement — the path entry kept the announce's length.
+// That is what this shape pins.
+//
+// Topology (the announce takes the long arm, the link takes the short one):
+//
+// ```text
+//   R --R_to_Y--> Y --Y_to_Z--> Z --Z_to_I--> I     (announce, 3 hops at I)
+//   R <--Z_to_R--> Z <--Z_to_I--> I                 (link + proof, 2 hops at I)
+// ```
+// ----------------------------------------------------------------------------
+
+/// An endpoint that keeps a path table (`MemoryStorage`) but forwards nothing
+/// for anybody (`enable_transport` stays off, the default). `make_initiator`
+/// above uses `NoStorage`, which cannot hold the stale path this shape needs.
+fn make_initiator_with_paths() -> TransportNode {
+    let clock = MockClock::new(TEST_TIME_MS);
+    NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults())
+}
+
+struct TerminusOutcome {
+    /// I's stored path length to R before the link (the long arm).
+    i_hops_to_r_before: Option<u8>,
+    /// Z's stored path length to R (the short arm it routes over).
+    z_hops_to_r: Option<u8>,
+    /// The hop count the proof carried when I counted it (wire byte + receipt).
+    proof_packet_hops: Option<u8>,
+    /// What `connect` froze on the link from the path table.
+    link_hops_before: Option<u8>,
+    /// I's stored path length to R after the proof was validated.
+    i_hops_to_r_after: Option<u8>,
+    /// The link's hop count after the proof was validated.
+    link_hops_after: Option<u8>,
+    /// Did the link establish at I?
+    established: bool,
+    logs: String,
+}
+
+fn run_terminus_scenario(forge_proof_signature: bool) -> TerminusOutcome {
+    let mut i_hops_to_r_before = None;
+    let mut z_hops_to_r = None;
+    let mut proof_packet_hops = None;
+    let mut link_hops_before = None;
+    let mut i_hops_to_r_after = None;
+    let mut link_hops_after = None;
+    let mut established = false;
+
+    let ((), logs) = with_captured_logs(|| {
+        let (mut responder, dest_r, signing_key, announce_long, announce_short, _announce_heal) =
+            make_responder();
+        let mut initiator = make_initiator_with_paths();
+        let mut relay_z = make_transport_node();
+        let mut relay_y = make_transport_node();
+
+        let i_to_z = add_iface(&mut initiator, "I_to_Z", false);
+        let z_to_i = add_iface(&mut relay_z, "Z_to_I", false);
+        let z_to_r = add_iface(&mut relay_z, "Z_to_R", false); // short direct arm
+        let z_from_y = add_iface(&mut relay_z, "Z_from_Y", false); // long arm
+        let y_from_r = add_iface(&mut relay_y, "Y_from_R", false);
+        let _y_to_z = add_iface(&mut relay_y, "Y_to_Z", false);
+        let r_to_z = add_iface(&mut responder, "R_to_Z", false);
+
+        // --- Path learning over the LONG arm: R -> Y -> Z -> I ---------------
+        let y_fwds = forward_announce(&mut relay_y, y_from_r, &announce_long);
+        assert_eq!(y_fwds.len(), 1, "Y forwards exactly one announce");
+        let mut z_fwds = Vec::new();
+        for f in &y_fwds {
+            z_fwds.extend(forward_announce(&mut relay_z, z_from_y, f));
+        }
+        assert_eq!(z_fwds.len(), 1, "Z forwards exactly one announce");
+        for f in &z_fwds {
+            let _ = initiator.handle_packet(InterfaceId(i_to_z), f);
+        }
+        i_hops_to_r_before = initiator.hops_to(&dest_r);
+        assert_eq!(
+            i_hops_to_r_before,
+            Some(3),
+            "I must record the LONG arm length (3 hops) as its path to R"
+        );
+
+        // --- Z acquires the SHORT direct arm and does NOT re-announce --------
+        let znow = relay_z.transport().clock().now_ms();
+        relay_z.transport().clock().set(znow + 30_000);
+        let _ = relay_z.handle_packet(InterfaceId(z_to_r), &announce_short);
+        z_hops_to_r = relay_z.hops_to(&dest_r);
+        assert_eq!(
+            z_hops_to_r,
+            Some(1),
+            "Z must now hold the SHORT direct arm (1 hop) to R, unknown to I"
+        );
+
+        // --- I opens the link; it freezes hops = 3 from its stale path -------
+        let (link, _routed, out) = initiator.connect(dest_r, &signing_key).expect("connect");
+        link_hops_before = initiator.link(&link).map(|l| l.hops());
+        let request = one_packet(&out);
+
+        // Z routes it over the short direct arm; R accepts and proves.
+        let out = relay_z.handle_packet(InterfaceId(z_to_i), &request);
+        let z_forwarded = one_packet(&out);
+        let out = responder.handle_packet(InterfaceId(r_to_z), &z_forwarded);
+        let proof = one_packet(&out);
+
+        // Proof back through Z: packet.hops(1) == its remaining(1), no asymmetry
+        // at Z — the disagreement belongs to the terminus.
+        let out = relay_z.handle_packet(InterfaceId(z_to_r), &proof);
+        let z_proof = one_packet(&out);
+        let z_proof = if forge_proof_signature {
+            let mut forged = z_proof;
+            assert!(forged.len() > 19, "proof packet must carry proof data");
+            forged[19] ^= 0xff;
+            forged
+        } else {
+            z_proof
+        };
+
+        // I counts the returning proof as wire byte + one receipt increment.
+        proof_packet_hops = Some(z_proof[1].saturating_add(1));
+
+        let out = initiator.handle_packet(InterfaceId(i_to_z), &z_proof);
+        established = has_link_established(&out);
+        i_hops_to_r_after = initiator.hops_to(&dest_r);
+        link_hops_after = initiator.link(&link).map(|l| l.hops());
+    });
+
+    TerminusOutcome {
+        i_hops_to_r_before,
+        z_hops_to_r,
+        proof_packet_hops,
+        link_hops_before,
+        i_hops_to_r_after,
+        link_hops_after,
+        established,
+        logs,
+    }
+}
+
+/// #330, terminus shape: the proof came back two hops where the path table said
+/// three, its signature holds, so both the link and the path entry adopt the two.
+#[test]
+fn initiator_adopts_validated_proof_hop_count_into_link_and_path() {
+    let o = run_terminus_scenario(false);
+
+    // The honest disagreement: frozen 3, proof 2.
+    assert_eq!(o.i_hops_to_r_before, Some(3), "I's path length (long arm)");
+    assert_eq!(o.z_hops_to_r, Some(1), "Z's path length (short arm)");
+    assert_eq!(
+        o.link_hops_before,
+        Some(3),
+        "connect must freeze the stale path length on the link.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert_eq!(
+        o.proof_packet_hops,
+        Some(2),
+        "the proof must arrive at I two hops long.\n--- logs ---\n{}",
+        o.logs
+    );
+
+    // The link forms — it always did here, we never had 1.3.5's terminus gate.
+    assert!(
+        o.established,
+        "the link must establish at the terminus.\n--- logs ---\n{}",
+        o.logs
+    );
+
+    // Adoption, both halves (Python 1.5.0 Transport.py:2632-2637).
+    assert_eq!(
+        o.link_hops_after,
+        Some(2),
+        "#330: the link must adopt the proof's hop count.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert_eq!(
+        o.i_hops_to_r_after,
+        Some(2),
+        "#330: the path entry for R must adopt the proof's hop count.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert!(
+        o.logs.contains("LRPROOF hop asymmetry at link terminus"),
+        "the terminus rebalance must be visible in the journal.\n--- logs ---\n{}",
+        o.logs
+    );
+    // And it is the TERMINUS arm that did it, not the relay one: Z saw its own
+    // frozen count agree with the proof (1 == 1) and logged no asymmetry at all.
+    assert!(
+        !o.logs.contains("LRPROOF hop asymmetry: rebalanced"),
+        "the relay arm must not be involved in this shape.\n--- logs ---\n{}",
+        o.logs
+    );
+}
+
+/// #330 negative control at the terminus: a proof whose signature does not hold
+/// establishes nothing and teaches nothing. `process_proof` refuses it, the link
+/// is closed, and the path keeps the announce's length.
+#[test]
+fn initiator_refuses_to_adopt_the_hop_count_of_a_forged_proof() {
+    let o = run_terminus_scenario(true);
+
+    assert_eq!(o.i_hops_to_r_before, Some(3), "I's path length (long arm)");
+    assert_eq!(
+        o.proof_packet_hops,
+        Some(2),
+        "precondition: the forged proof presents the same short count.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert!(
+        !o.established,
+        "no link may establish on a forged proof.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert_eq!(
+        o.i_hops_to_r_after,
+        Some(3),
+        "#330 negative control: the path to R must keep the announce's length.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert!(
+        !o.logs.contains("LRPROOF hop asymmetry at link terminus"),
+        "no terminus rebalance may be logged for a forged proof.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert!(
+        !o.logs.contains("PATH_REBALANCE"),
+        "no path rebalance may happen for a forged proof.\n--- logs ---\n{}",
         o.logs
     );
 }
