@@ -27,6 +27,14 @@
 #      check that cannot fail is the #290 failure wearing a gate's clothes.
 #   7. REGRESS WITH NOTHING TO REPLAY IS AN ERROR. An empty corpus and no
 #      seeds means the check checked nothing; exit 2, never green.
+#   8. A STALE LOCKFILE IS REFUSED, NOT REWRITTEN. The #295 failure: a path
+#      crate under the fuzz crate grows a dependency, the fuzz crate's
+#      committed Cargo.lock no longer matches, and the next build edits it --
+#      in the gate's push tree, where the gate after it then refuses a dirty
+#      tree and landing stops. The fixture reproduces exactly that shape (a
+#      helper crate gains a second path dependency) and asserts the runner
+#      exits 2, names the lockfile, and leaves it byte-identical -- then that
+#      the same run is green again once the lock matches.
 #
 # Needs the nightly toolchain and cargo-fuzz (cases 1-4 build a real fuzz
 # target); skips with a named reason if they are absent. ~1 min.
@@ -51,6 +59,31 @@ FIX="$WORK/fixture-fuzz"
 STATE="$WORK/state"
 mkdir -p "$FIX/fuzz_targets"
 
+# Two ordinary path crates below the fuzz crate. Nothing fuzzes them; they are
+# here so case 8 can add a dependency one level DOWN, which is the only way to
+# make a fuzz crate's lockfile stale without touching the fuzz crate itself --
+# and is what happened in #295, where `leviculum-channel-access` grew a
+# dependency on `leviculum-core`.
+HELPER="$WORK/fixture-helper"
+DEEP="$WORK/fixture-deep"
+mkdir -p "$HELPER/src" "$DEEP/src"
+cat > "$HELPER/Cargo.toml" <<'EOF'
+[package]
+name = "fixture-helper"
+version = "0.1.0"
+edition = "2021"
+publish = false
+EOF
+cat > "$DEEP/Cargo.toml" <<'EOF'
+[package]
+name = "fixture-deep"
+version = "0.1.0"
+edition = "2021"
+publish = false
+EOF
+echo 'pub fn helper() -> u8 { 7 }' > "$HELPER/src/lib.rs"
+echo 'pub fn deep() -> u8 { 9 }' > "$DEEP/src/lib.rs"
+
 cat > "$FIX/Cargo.toml" <<'EOF'
 [package]
 name = "leviculum-fixture-fuzz"
@@ -63,6 +96,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+
+[dependencies.fixture-helper]
+path = "../fixture-helper"
 
 [workspace]
 
@@ -235,6 +271,43 @@ RC=$?
 expect_eq "$RC" 2 "exit 2 when neither corpus nor seeds hold an input"
 grep -q "status=ERROR inputs=0" <<< "$OUT"
 assert $? "the error says the corpus was empty"
+
+echo "=== case 8: a stale lockfile is refused, and left untouched ==="
+# Cases 1-3 built the fixture, so $FIX/Cargo.lock exists and matches. Now the
+# helper grows a dependency the lock has never heard of: the graph below the
+# fuzz crate changed, and a build would quietly write the difference into a
+# file git tracks.
+LOCK="$FIX/Cargo.lock"
+[ -f "$LOCK" ] && pass "the fixture build wrote a lockfile to assert against"
+[ -f "$LOCK" ] || fail "no $LOCK -- cases 1-3 must have built the fixture first"
+BEFORE_SUM="$(sha256sum "$LOCK" | cut -d' ' -f1)"
+cp "$HELPER/Cargo.toml" "$WORK/helper-Cargo.toml.orig"
+cat >> "$HELPER/Cargo.toml" <<EOF
+
+[dependencies.fixture-deep]
+path = "$DEEP"
+EOF
+OUT="$(run_fixture bash "$RUNNER" --regress fixture_clean 2>&1)"
+RC=$?
+expect_eq "$RC" 2 "exit 2 when the fuzz crate's lockfile no longer matches its graph"
+grep -q "Cargo.lock does not match" <<< "$OUT"
+assert $? "the error names the lockfile rather than the build that would rewrite it"
+grep -q "metadata --manifest-path" <<< "$OUT"
+assert $? "the error carries the command that regenerates it"
+AFTER_SUM="$(sha256sum "$LOCK" | cut -d' ' -f1)"
+expect_eq "$AFTER_SUM" "$BEFORE_SUM" "the lockfile is byte-identical: nothing rewrote a tracked file"
+grep -q "FUZZ_REGRESS name=fixture_clean" <<< "$OUT"
+refute $? "no target ran: the lock is a precondition, not something a run discovers"
+
+# The counterweight, so case 8 is not "this always fails": the same invocation,
+# the same lock, with the helper's dependency taken back out.
+cp "$WORK/helper-Cargo.toml.orig" "$HELPER/Cargo.toml"
+OUT="$(run_fixture bash "$RUNNER" --regress fixture_clean 2>&1)"
+RC=$?
+expect_eq "$RC" 0 "exit 0 once the lock matches the graph again"
+grep -q "FUZZ_REGRESS name=fixture_clean .*status=GREEN" <<< "$OUT"
+assert $? "the replay runs again with the lock unchanged"
+expect_eq "$(sha256sum "$LOCK" | cut -d' ' -f1)" "$BEFORE_SUM" "the green run did not rewrite the lock either"
 
 echo
 if [ "$FAILED" = 0 ]; then

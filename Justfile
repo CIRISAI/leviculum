@@ -350,10 +350,10 @@ fuzz *args:
 # mode is silence: a fuzz run whose finding is not preserved, or whose exit
 # code says clean when nothing ran, buys the confidence without doing the work.
 # Every case injects the failure into a throwaway fuzz crate -- a crashing
-# target, an unregistered target, a missing cargo-fuzz -- and asserts what the
-# runner concluded. ~15 s; skips with a named reason where nightly or
-# cargo-fuzz is absent, so it does not make the toolchain a push-path
-# dependency.
+# target, an unregistered target, a missing cargo-fuzz, a stale lockfile -- and
+# asserts what the runner concluded. ~16 s; skips with a named reason where
+# nightly or cargo-fuzz is absent, so it does not make the toolchain a
+# push-path dependency.
 [doc('Drive the fuzz runner against an injected crash and a missing tool')]
 fuzz-selftest:
     bash scripts/test-run-fuzz.sh
@@ -373,6 +373,13 @@ fuzz-selftest:
 # directory: the nightly host throws that away wholesale when the build cache
 # passes its hard size cap, and a corpus on a cache eviction schedule is a
 # corpus that silently restarts.
+#
+# The build takes each fuzz crate's committed Cargo.lock as GIVEN and refuses a
+# stale one (#295, `run-fuzz.sh::assert_lock_current`), rather than resolving
+# the graph afresh and writing the difference to disk. This run happens in a
+# fresh clone nobody reads the working tree of afterwards, so a lock it
+# rewrote would be a diff that exists only until the clone is deleted -- and
+# the same file on the push path is the one that stopped landing.
 [doc('The scheduled fuzz run: FUZZ_SECS (120) per target over the kept corpus')]
 fuzz-nightly:
     bash scripts/run-fuzz.sh --nightly
@@ -393,6 +400,15 @@ fuzz-nightly:
 # On the push path because a regression check nobody runs is what #290 is
 # about. Skips with a named reason where nightly or cargo-fuzz is absent, so
 # it does not make the toolchain a push-path dependency.
+#
+# A LOCKED BUILD, because this recipe runs in trees that are not its own
+# (#295). Each fuzz crate carries its own Cargo.lock and resolves the same
+# path graph the workspace does, so a dependency added anywhere under it makes
+# that lock stale -- and the build then rewrote it, here, in the gate's push
+# tree: the gate after it refused a dirty tree at gate-run.sh:51 with rc=5 and
+# landing stopped, with no log saying which run had written the file. The lock
+# is now a precondition the recipe fails on by name
+# (`run-fuzz.sh::assert_lock_current`).
 [doc('Replay the fuzz corpus and the defect seeds through every target')]
 fuzz-regress:
     bash scripts/run-fuzz.sh --regress --skip-if-unavailable

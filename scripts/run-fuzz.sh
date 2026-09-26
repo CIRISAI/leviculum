@@ -26,7 +26,8 @@
 # Exit codes (a run that could not happen must never look like a clean one):
 #   0  every target ran its full time budget and found nothing
 #   1  at least one target crashed -- the input is under $LEVICULUM_FUZZ_STATE/findings
-#   2  could not run: missing toolchain, missing crate, unregistered target
+#   2  could not run: missing toolchain, missing crate, unregistered target,
+#      or a fuzz crate whose committed Cargo.lock no longer matches its graph
 #
 # Two modes, because fuzzing and regression-checking are different jobs:
 #
@@ -105,7 +106,7 @@ while [ $# -gt 0 ]; do
         --skip-if-unavailable) SKIP_IF_UNAVAILABLE=1; shift ;;
         --nightly) MODE=nightly; shift ;;
         --list) LIST_ONLY=1; shift ;;
-        -h|--help) sed -n '2,74p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,75p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 2 ;;
         *) WANTED+=("$1"); shift ;;
     esac
@@ -174,6 +175,42 @@ crate_slug() {
     basename "$(dirname "$(cd "$dir" && pwd)")"
 }
 
+# A BUILD MUST NOT REWRITE A TRACKED FILE (Codeberg #295).
+#
+# Each fuzz crate carries its own committed Cargo.lock, and it resolves the
+# same path graph the workspace does -- so a dependency added anywhere under
+# it makes the fuzz lock stale, and the next build silently rewrites it. That
+# is how `just fast` -> `fuzz-regress` left three lines of dirt in the gate's
+# push tree on 80c11aae: the following gate refused the tree at
+# gate-run.sh:51 with rc=5 and landing stopped, with nothing in either log
+# saying which run had written the file.
+#
+# So the lock is a PRECONDITION here, not an output. cargo-fuzz 0.13 has no
+# `--locked` of its own and passes trailing arguments to libFuzzer, so the
+# assertion is made with the resolver directly: `cargo metadata --locked`
+# re-resolves the graph and refuses to write, which is the same question the
+# build would have answered by editing the file. It costs ~0.2 s per crate
+# and it fails as exit 2 -- a run that could not happen, never a green one.
+#
+# Deliberately in every mode that builds, not only on the push path: the
+# scheduled `fuzz-nightly` runs in a fresh clone whose dirt nobody reads, and
+# an interactive `just fuzz` writes into somebody's working tree, where the
+# file is tracked just the same. `--list` builds nothing and is exempt.
+# No --offline: a fresh clone has no registry cache, and the build that
+# follows needs those manifests anyway.
+assert_lock_current() {
+    local dir="$1" rel="$2" out
+    [ -f "$dir/Cargo.lock" ] || return 0
+    if ! out="$("$CARGO" "+$TOOLCHAIN" metadata --locked --format-version 1 \
+                --manifest-path "$dir/Cargo.toml" 2>&1 >/dev/null)"; then
+        echo "$out" >&2
+        die "$rel/Cargo.lock does not match $rel's dependency graph, and a build
+       would rewrite it. Regenerate it minimally and commit the diff:
+         $CARGO +$TOOLCHAIN metadata --manifest-path $rel/Cargo.toml \\
+             --format-version 1 --offline >/dev/null"
+    fi
+}
+
 # The per-target status lines carry the mode in their KEY, not in a field: a
 # regress line and a fuzz line report different things (inputs replayed vs
 # inputs explored) and a report that greps one must not catch the other.
@@ -190,6 +227,8 @@ for crate_rel in $CRATES; do
     esac
     [ -f "$FUZZ_DIR/Cargo.toml" ] || die "no fuzz crate at $FUZZ_DIR"
     slug="$(crate_slug "$FUZZ_DIR")"
+
+    [ "$LIST_ONLY" = 1 ] || assert_lock_current "$FUZZ_DIR" "$crate_rel"
 
     if ! listed="$("$CARGO" "+$TOOLCHAIN" fuzz list --fuzz-dir "$FUZZ_DIR" 2>&1)"; then
         echo "$listed" >&2
