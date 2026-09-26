@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use leviculum_std::driver::ReticulumNodeBuilder;
+use leviculum_std::process::spawn_supervised;
 
 /// The daemon config periculum renders for a rust node, cut to the keys this
 /// test needs: the shared instance to join, and `loglevel = 5`, which is
@@ -125,7 +126,8 @@ async fn the_cores_tracing_lines_reach_the_helpers_stderr() {
     write_config(config.path(), &instance);
     let storage = tempfile::tempdir().expect("helper storage");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_lxmf-node"))
+    let mut helper_cmd = Command::new(env!("CARGO_BIN_EXE_lxmf-node"));
+    helper_cmd
         .arg("--config")
         .arg(config.path())
         .arg("alice")
@@ -136,9 +138,11 @@ async fn the_cores_tracing_lines_reach_the_helpers_stderr() {
         .env_remove("LEVICULUM_EVENT_LOG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the helper");
+        .stderr(Stdio::piped());
+    // Supervised, not bare: the helper holds three pipes and outlives every
+    // assertion below, so a `SIGKILL`ed test runner has to take it with it
+    // rather than leave it attached to the shared instance.
+    let mut child = spawn_supervised(helper_cmd).expect("spawn the helper");
     let mut stdin = child.stdin.take().expect("stdin piped");
     let stdout_lines = collect(child.stdout.take().expect("stdout piped"));
     let stderr_lines = collect(child.stderr.take().expect("stderr piped"));
