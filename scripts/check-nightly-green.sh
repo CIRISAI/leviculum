@@ -165,6 +165,14 @@ fi
 # Newest COVERING, not newest overall: a later ref that does not cover this
 # commit says nothing about it, and the older ref that does is still honest
 # evidence. The staleness bound is then applied to the ref that was chosen.
+#
+# The DIRECTION of the ancestry question below is the whole gate: a ref at an
+# ancestor of this commit — last night's ref under today's push — covers
+# nothing, because the nightly saw the code under the change and none of the
+# change. `scripts/test-nightly-green.sh` pins both directions, the covering
+# one in `check/covered-as-ancestor` and this one in
+# `check/older-ref-does-not-cover-a-newer-commit`; an implementation that
+# accepted either direction passed every other case in that file.
 best_ref=""; best_sha=""; best_stamp=""
 newest_ref=""; newest_sha=""; newest_stamp=""
 seen=0

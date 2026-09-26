@@ -190,6 +190,29 @@ grep -q 'REFUSED (NOT-COVERED)' "$FAKE_DIR/out" || fail "the refusal does not na
 grep -q "${OTHER_SHA:0:12}" "$FAKE_DIR/out" || fail "the refusal does not say what the newest ref points at"
 [ "$failures" -eq "$before" ] || dumpout
 
+# --- Case: the green ref is an ANCESTOR of the commit ---------------------
+#
+# The ordinary shape of "this commit landed after the last green night", and
+# the one the coverage rule has to get the right way round: last night's ref
+# names a commit this one is built on top of, so the nightly has seen the
+# code UNDER the change and nothing of the change itself. `check/not-covered`
+# above does not pin this, because there the two commits are unrelated and
+# `merge-base --is-ancestor` is false in both directions — an implementation
+# that asked the question backwards, or that accepted either direction, would
+# pass that case and publish a sha no night has ever tested. Here the
+# ancestry is real and points the wrong way, so only the correct direction
+# refuses.
+echo "[case] check/older-ref-does-not-cover-a-newer-commit"
+before=$failures
+setup check-older-ref
+add_ref "$STAMP_NOW" "$OTHER_SHA"
+echo "$OTHER_SHA $HEAD_SHA" > "$FAKE_DIR/ancestry"
+run_check
+[ "$(rc)" != "0" ] || fail "exit 0 although the only green ref is an ANCESTOR of the commit"
+grep -q 'REFUSED (NOT-COVERED)' "$FAKE_DIR/out" || fail "the refusal does not name NOT-COVERED"
+grep -q 'ancestor of it' "$FAKE_DIR/out" || fail "the refusal does not say what coverage would have meant"
+[ "$failures" -eq "$before" ] || dumpout
+
 # --- Case: the covering ref is too old ------------------------------------
 echo "[case] check/too-old"
 before=$failures
