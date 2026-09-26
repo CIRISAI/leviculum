@@ -167,6 +167,8 @@ Options:
           Messages per second per direction [default: 1]
       --mode <MODE>
           Which test phases to run [default: all]
+      --messages <MESSAGES>
+          Messages per direction in the ratchet exchange [default: 10]
       --discovery-timeout <DISCOVERY_TIMEOUT>
           Discovery timeout in seconds (Phase 2: mutual path discovery) [default: 60]
 ```
@@ -176,6 +178,29 @@ The `--mode` flag selects which phases run; the values are `all`,
 `bulk-transfer`, and `ratchet-rotation` (default `all`). `--duration`
 defaults to 180 seconds, `--rate` to 1 message per second per
 direction, and `--discovery-timeout` to 60 seconds.
+
+`--messages` sizes the ratchet exchange: how many messages each
+direction sends under `--mode ratchet-basic` and `--mode
+ratchet-enforced`, 10 by default. `--duration` and `--rate` do not
+reach that count — they size Phase 5 (sustained link exchange) and
+Phase 8 (single-packet exchange), and no ratchet mode runs either — so
+`--messages` is the only way to widen a ratchet measurement. The other
+two ratchet modes keep counts that are part of what they test:
+`bulk-transfer` sends 100 each direction, and `ratchet-rotation` sends
+5 before and 5 after the key change so the two halves can be compared.
+Given the flag, they print a line saying it sized nothing.
+
+A wider exchange is worth asking for when a percentage has to decide
+something. A pass/fail bar sits inside the confidence interval 20
+packets support, which is about 25 points wide, so a run of 10 each way
+can distinguish full delivery from collapse and little in between; 40
+each way narrows it enough for a bar in the eighties to be decided
+either way.
+
+```sh
+# 40 each direction, for a delivery floor that has to be decidable
+lnstest selftest 127.0.0.1:4242 127.0.0.1:4242 --mode ratchet-basic --messages 40
+```
 
 ```sh
 # Full self-test through one relay

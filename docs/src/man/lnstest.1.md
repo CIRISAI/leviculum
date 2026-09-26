@@ -56,6 +56,9 @@ Options:
 **--mode** *mode*
 :   Which phases to run: all, link, packet, ratchet-basic, ratchet-enforced, bulk-transfer, ratchet-rotation (default: all).
 
+**--messages** *n*
+:   Messages per direction in the ratchet exchange (default: 10). Sizes **--mode** ratchet-basic and ratchet-enforced; **--duration** and **--rate** do not reach that count, because they size the link and single-packet phases, which no ratchet mode runs. The other two ratchet modes keep their own counts — bulk-transfer sends 100 each direction, ratchet-rotation 5 before and 5 after the key change — and print a line saying so when the flag is given.
+
 Every single-packet phase waits for what is still in flight before it reads the receive counter. On a radio link that wait must be sized from the link, and the tool has no radio of its own, so give it the global **-c**/**--config** pointing at the config directory of the daemon that owns the radio: it reads that daemon's `interface_stats` and sizes each window from the reported on-air bitrate and pre-TX jitter ceiling. Without it — or against a daemon reporting no radio — the phases keep a fixed wait, and the run prints which state it is in.
 
 ### lnstest diag

@@ -20,6 +20,14 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- `lnstest selftest --messages N` sizes the ratchet exchange: how many
+  messages each direction sends under `--mode ratchet-basic` and
+  `--mode ratchet-enforced`, 10 by default, so an invocation without the flag
+  is unchanged. `--duration` and `--rate` size the link and single-packet
+  phases, which no ratchet mode runs, so until now a ratchet measurement was
+  fixed at 20 packets — too few for a delivery bar in the eighties to be
+  decided either way (Codeberg #429, #188).
+
 - A board can now account for a SINGLE named packet it was asked to relay,
   not only for aggregate counts. `leviculum-nrf/Cargo.toml` pulls
   leviculum-core with `default-features = false`, so the `tracing` feature is

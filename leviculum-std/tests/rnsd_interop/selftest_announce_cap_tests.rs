@@ -159,6 +159,7 @@ async fn phase_two_completes_through_the_second_announce_when_the_cap_ate_the_fi
         vec![d1.rns_addr().to_string(), d2.rns_addr().to_string()],
         1,
         1.0,
+        None,
         "packet",
         None,
         DISCOVERY_WINDOW_SECS,

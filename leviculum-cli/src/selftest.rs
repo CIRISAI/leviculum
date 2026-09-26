@@ -1372,11 +1372,26 @@ async fn resolve_address(addr: &str) -> Result<SocketAddr, Box<dyn std::error::E
     Ok(resolved)
 }
 
+/// Messages per direction the ratchet exchange sends when `--messages` is
+/// not given.
+///
+/// The count this tool has sent since the ratchet modes existed, kept as the
+/// default so that every invocation, log line and periculum cell that does
+/// not pass the flag prints exactly the numbers it printed before
+/// (`sent=20` per summary). Codeberg #429 is about making it *reachable*,
+/// not about moving it.
+const RATCHET_DEFAULT_MESSAGES: u64 = 10;
+
 // Main Entry Point
+// One argument over clippy's threshold, and the alternative — an options
+// struct — would rename the entry point the interop tests and the binary
+// both call for no gain in what it means.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_selftest(
     targets: Vec<String>,
     duration: u64,
     rate: f64,
+    messages: Option<u64>,
     mode: &str,
     corrupt_every: Option<u64>,
     discovery_timeout_secs: u64,
@@ -1397,6 +1412,25 @@ pub async fn run_selftest(
              ratchet-basic, ratchet-enforced, bulk-transfer, or ratchet-rotation"
         )
         .into());
+    }
+
+    // A count of zero would send nothing and then grade the nothing: sent=0
+    // divides into a 0.0% verdict that reads like total loss. Refuse it where
+    // the other argument errors are raised rather than print a FAIL nobody
+    // asked for.
+    if messages == Some(0) {
+        return Err("invalid --messages 0: at least one message per direction".into());
+    }
+
+    // A flag that sizes nothing must say so rather than be swallowed. Only
+    // the two single-exchange ratchet modes read it: bulk-transfer's 100 per
+    // direction IS the bulk, and rotation's 5 before and 5 after frame one
+    // key change, so neither count is a window to widen.
+    if messages.is_some() && !(run_ratchet_basic || run_ratchet_enforced) {
+        println!(
+            "[selftest] --messages sizes --mode ratchet-basic and ratchet-enforced only; \
+             {mode} keeps its own counts"
+        );
     }
 
     if targets.is_empty() {
@@ -2167,7 +2201,7 @@ pub async fn run_selftest(
         };
 
         if run_ratchet_basic || run_ratchet_enforced {
-            let msg_count = 10u64;
+            let msg_count = messages.unwrap_or(RATCHET_DEFAULT_MESSAGES);
             println!(
                 "[selftest] Ratchet: sending {msg_count} messages each direction (threshold: {pass_threshold:.0}%)"
             );
@@ -2237,6 +2271,8 @@ pub async fn run_selftest(
             );
             ratchet_verdict = Some(verdict);
         } else if run_bulk_transfer {
+            // Not `messages`: this phase's 100 per direction is what makes it
+            // the bulk phase, and its 80 % bar was measured at that load.
             let msg_count = 100u64;
             println!(
                 "[selftest] Ratchet: bulk transfer {msg_count} messages each direction (threshold: {pass_threshold:.0}%)"
@@ -2315,7 +2351,9 @@ pub async fn run_selftest(
                 st.sp_late = 0;
             }
 
-            // Pre-rotation exchange
+            // Pre-rotation exchange. Not `messages` either: the two fives
+            // around the key change are what the phase compares, and the
+            // drain expectations below are written against them.
             let mut wire_bytes = 0usize;
             for seq in 0..5u64 {
                 if let Some(n) = send_single_msg(&ep_a, "ab", seq, start_time, &state, true).await {

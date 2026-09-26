@@ -384,6 +384,18 @@ enum Commands {
         /// Which test phases to run: all, link, packet, ratchet-basic, ratchet-enforced, bulk-transfer, ratchet-rotation
         #[arg(long, default_value = "all")]
         mode: String,
+        // Deliberately one paragraph: a second one turns clap's `--help` from
+        // the compact list into the long form for every other flag too, and
+        // the docs quote that list. The detail lives in the guide.
+        //
+        // `--duration` and `--rate` do not reach this count — they size the
+        // link and single-packet phases, which no ratchet mode runs — and the
+        // other two ratchet modes keep their own counts (`bulk-transfer` 100
+        // each way, `ratchet-rotation` 5 before and 5 after the key change)
+        // and say so when the flag is given.
+        /// Messages per direction in the ratchet exchange: ratchet-basic, ratchet-enforced [default: 10]
+        #[arg(long)]
+        messages: Option<u64>,
         /// Discovery timeout in seconds (Phase 2: mutual path discovery)
         #[arg(long, default_value = "60")]
         discovery_timeout: u64,
@@ -1079,12 +1091,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             duration,
             rate,
             mode,
+            messages,
             discovery_timeout,
         } => {
             let verdict = selftest::run_selftest(
                 targets,
                 duration,
                 rate,
+                messages,
                 &mode,
                 args.corrupt_every,
                 discovery_timeout,
