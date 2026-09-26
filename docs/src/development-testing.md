@@ -57,6 +57,16 @@ up from scratch.
 Each tier includes every lower tier, so a green nightly proves the
 whole stack.
 
+`just guards` is not a fifth tier: it is the coder pass's standing gate —
+run beside `cargo fmt`, `cargo clippy -D warnings` and
+`cargo test --workspace` after every batch — and it is the subset of Tier 0's
+guards, censuses and selftests that costs under ten seconds each, about 20 s
+warm in total. `fast` and `standard` stay the landing gate's, unchanged: a
+green `guards` is an early verdict on part of Tier 0, never a substitute for
+it. It exists because the recipes in it are the ones a coder never ran and
+the landing gate did, which cost two landings an hour each on 2026-09-26
+(`check-supervised-spawns`, `check-source-invariant-census`).
+
 [^t2]: Tier 2 had a 12:30/18:30 timer until 2026-06-12, when it was
 retired in favour of on-demand runs (`scripts/install-ci.sh` step 9,
 which also deletes any timer a previous install left behind). This page

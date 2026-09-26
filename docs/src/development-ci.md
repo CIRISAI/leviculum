@@ -20,6 +20,13 @@ pipelines are below them.
 Each tier runs everything from the lower tiers as well, so a green
 nightly proves the entire stack.
 
+`just guards` is not in this table because it is not a tier: it is the
+coder-side subset of Tier 0's sub-ten-second guards and censuses (~20 s warm),
+run beside fmt, clippy and the workspace tests after a batch so that a guard
+red is found by its author rather than by the landing gate. `fast` and
+`standard` remain what the push path and the landing gate run. See
+[Testing](development-testing.md#the-four-tiers).
+
 ## What the forge runs
 
 Three Woodpecker workflows on `ci.codeberg.org`, all in
