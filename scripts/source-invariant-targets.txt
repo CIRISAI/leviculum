@@ -137,6 +137,7 @@ skip  leviculum-lxmf-node deferred_resource_builds # tokio runtime and sleeps
 skip  leviculum-lxmf-node peering_loopback       # tokio runtime, two nodes, sleeps
 skip  leviculum-lxmf-node propagation_loopback   # tokio runtime, two nodes, sleeps
 skip  leviculum-lxmf-node stamped_upload_loopback # tokio runtime, two nodes, sleeps
+skip  leviculum-lxmf-node tracing_reaches_stderr # runs the shipped lxmf-node executable as a process, plus a shared-instance daemon
 skip  leviculum-lxmf-node two_node_loopback      # tokio runtime, two nodes, sleeps
 skip  leviculum-micron parser_tests              # reads README.mu for snippets, but the subject is the parser
 skip  leviculum-proxy log_backpressure           # spawns the proxy binary
