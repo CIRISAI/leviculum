@@ -125,6 +125,13 @@ async fn main(spawner: Spawner) {
     // the derived default while the record is still unread, and before
     // the first announce and `ble::init`, which both display it.
     leviculum_nrf::name::load_at_boot(solarnode::CONFIG.telemetry_flash_page);
+    // Remote management (#235): the identity allow-list this board serves
+    // `rnstransport.remote.management` `/status` to, read on the same page
+    // and this early because the answer decides how the NODE IS BUILT —
+    // the destination is created by the builder below and cannot be added
+    // or withdrawn while the node runs. Also before USB, so a host frame
+    // is never answered against an unread record.
+    let mgmt_allow = leviculum_nrf::mgmt::load_at_boot(solarnode::CONFIG.telemetry_flash_page);
     // How many times this board has restarted, appended to its own flash
     // page. Here because it must be before `Softdevice::enable` — after
     // it, writing internal flash means going through the SD, and a board
@@ -236,6 +243,18 @@ async fn main(spawner: Spawner) {
         .max_random_blobs(8)
         .respond_to_probes(true);
 
+    // Only a stored, NON-EMPTY list registers anything. That rule is
+    // `leviculum_core::mgmt_allow_store::remote_mgmt_decision`, and it is
+    // deliberately not the daemon's: `lnsd` and Python's `rnsd` register
+    // the handler with an empty list and consult it per request
+    // (`leviculum-std/src/config.rs:88-96`), which is safe on a machine
+    // with an operator and a login, and is not safe on a board left on a
+    // mast — an unattended node announcing a management destination with
+    // nobody on the list is advertising a door (#235).
+    if let leviculum_nrf::mgmt::RemoteMgmtDecision::Enabled(allowed) = &mgmt_allow {
+        builder = builder.remote_management(true, allowed.clone());
+    }
+
     let identity_loaded = {
         use leviculum_core::identity_store::IdentityStore;
         // Critical for the same reason as the `[IDENTITY]` banner below
@@ -268,6 +287,15 @@ async fn main(spawner: Spawner) {
         >()) <= leviculum_nrf::HEAP_SIZE,
         "HEAP_BUDGET total exceeds the heap (#388): shrink a term"
     );
+
+    // What the builder actually did with the allow-list, on the critical
+    // log path: `[MGMT] enabled allowed=N`, or `disabled (no allow-list)`
+    // for the state a board ships in. Read `remote_mgmt_dest_hash` rather
+    // than assuming, so a boot that could not derive the destination says
+    // so instead of promising a service nothing serves.
+    let mgmt_registered = node.remote_mgmt_dest_hash().is_some();
+    leviculum_nrf::mgmt::note_registered(mgmt_registered);
+    leviculum_nrf::mgmt::log_banner(&mgmt_allow, mgmt_registered);
 
     let initial_path_len = node.path_count();
     info!("[BOOT] path_table_initial_len={}", initial_path_len);

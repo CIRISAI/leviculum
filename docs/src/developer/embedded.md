@@ -49,7 +49,7 @@ The three entry points (signatures in the
 - `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1034`. Feed one
   received frame, tagged with the [`InterfaceId`](rust-api-spec.md#core-tickoutput-and-action)
   it arrived on.
-- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1318`. Run periodic
+- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1320`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
 - `next_deadline()` (`leviculum-core/src/node/mod.rs:2500`). The earliest timer
@@ -66,8 +66,8 @@ The shape is: compute the next deadline, wait for whichever of "a packet on any
 interface" or "the deadline" happens first, call the matching entry point,
 dispatch the resulting actions. This is exactly the `leviculum-nrf` T114 main
 loop: the deadline comes from `next_deadline`
-(`leviculum-nrf/src/bin/t114.rs:711-716`) and the wait from Embassy's `select4`
-(`leviculum-nrf/src/bin/t114.rs:769-788`). The board selects over nine event
+(`leviculum-nrf/src/bin/t114.rs:739-744`) and the wait from Embassy's `select4`
+(`leviculum-nrf/src/bin/t114.rs:797-816`). The board selects over nine event
 sources; the loop below narrows that to the three interfaces (serial, LoRa,
 BLE) and the timer:
 

@@ -41,6 +41,7 @@ use leviculum_core::envelope::{
 use leviculum_core::fixed_position_store::{decode_fixed_position, encode_fixed_position};
 use leviculum_core::identity::Identity;
 use leviculum_core::media_profile_store::{decode_media_profile, encode_media_profile};
+use leviculum_core::mgmt_allow_store::{decode_mgmt_allow, encode_mgmt_allow, StoredMgmtAllow};
 use leviculum_core::node::{NodeCore, NodeEvent};
 use leviculum_core::node_name::NodeName;
 use leviculum_core::node_name_store::{decode_node_name, encode_node_name};
@@ -242,19 +243,22 @@ pub fn inbound_fixed_position_receiver(
 /// +0x200  media profile record     ("LMED", media_profile_store)        8 B
 /// +0x300  node name record         ("LNAM", node_name_store)          44 B
 /// +0x400  propagation-node config  ("LPNC", pn_config_store)          12 B
+/// +0x500  remote-mgmt allow-list   ("LMGA", mgmt_allow_store)        136 B
 /// ```
 ///
 /// The target keeps offset 0, where every fielded board already has it, so
 /// this layout is what those boards are running the moment they first
 /// persist one of the later records. Erase granularity is the whole page,
-/// so the store task rewrites all four records on every save; each
+/// so the store task rewrites every record on every save; each
 /// record's own magic + checksum keeps a torn write from becoming a
 /// garbage target, a garbage pin, a board on the wrong carriers or a
 /// board announcing a name nobody set.
 ///
-/// The offsets are 0x100 apart and the longest record is 44 bytes, so no
-/// two records overlap and the page (4096 B) has room for twelve more.
-/// The compile-time assertion below is what keeps that true when a record
+/// The offsets are 0x100 apart and the longest record is 136 bytes (the
+/// allow-list, whose own bound is argued in
+/// [`leviculum_core::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES`]), so no
+/// two records overlap and the page (4096 B) has room for ten more. The
+/// compile-time assertion below is what keeps that true when a record
 /// grows.
 const TARGET_OFFSET: u32 = 0x000;
 /// See [`TARGET_OFFSET`].
@@ -265,6 +269,8 @@ const MEDIA_OFFSET: u32 = 0x200;
 const NAME_OFFSET: u32 = 0x300;
 /// See [`TARGET_OFFSET`].
 const PN_CONFIG_OFFSET: u32 = 0x400;
+/// See [`TARGET_OFFSET`].
+const MGMT_ALLOW_OFFSET: u32 = 0x500;
 
 /// The page layout's collision check, run by the compiler rather than by
 /// a reviewer reading three offsets: each record must end before the next
@@ -289,15 +295,19 @@ const _: () = {
     );
     assert!(
         PN_CONFIG_OFFSET + leviculum_core::pn_config_store::ENCODED_SIZE_ALIGNED as u32
+            <= MGMT_ALLOW_OFFSET
+    );
+    assert!(
+        MGMT_ALLOW_OFFSET + leviculum_core::mgmt_allow_store::ENCODED_SIZE_ALIGNED as u32
             <= PAGE_SIZE
     );
 };
 
 /// Pending save requests. Depth 1 for the same reason as the radio store:
 /// the newest value of each record is the one that must end up on the
-/// page. Four channels rather than one queue so a target save, a fixed
-/// position save, a media save and a name save can never displace each
-/// other.
+/// page. One channel per record rather than one queue, so a target save, a
+/// fixed position save, a media save, a name save, a cost save and an
+/// allow-list save can never displace each other.
 ///
 /// Each item carries the [`SaveTicket`] the requester is waiting on, so
 /// the store task can hand back the outcome of *that* write rather than
@@ -314,6 +324,8 @@ static PENDING_SAVE_MEDIA: Channel<CriticalSectionRawMutex, (SaveTicket, MediaPr
 static PENDING_SAVE_NAME: Channel<CriticalSectionRawMutex, (SaveTicket, Option<NodeName>), 1> =
     Channel::new();
 static PENDING_SAVE_PN: Channel<CriticalSectionRawMutex, (SaveTicket, StoredPnConfig), 1> =
+    Channel::new();
+static PENDING_SAVE_MGMT: Channel<CriticalSectionRawMutex, (SaveTicket, StoredMgmtAllow), 1> =
     Channel::new();
 
 /// One record's persist bookkeeping: the [`PersistGate`] that says whether
@@ -358,12 +370,13 @@ static FIXED_PERSIST: PersistSlot = PersistSlot::new();
 static MEDIA_PERSIST: PersistSlot = PersistSlot::new();
 static NAME_PERSIST: PersistSlot = PersistSlot::new();
 static PN_PERSIST: PersistSlot = PersistSlot::new();
+static MGMT_PERSIST: PersistSlot = PersistSlot::new();
 
 /// A save the caller may wait for with [`confirm`], returned by every
 /// `request_save*`.
 ///
 /// Carries its own record's slot so a caller cannot wait on the wrong
-/// gate — the store task rewrites all four records on every save, but
+/// gate — the store task rewrites every record on every save, but
 /// only the one a request names carries the requester's value.
 #[must_use = "a control-envelope ack on the persist path must wait for this (Codeberg #358)"]
 #[derive(Clone, Copy)]
@@ -495,6 +508,17 @@ pub fn load_pn_config(page: u32) -> Option<StoredPnConfig> {
     decode_pn_config(&read_pn_record(page))
 }
 
+/// Read the persisted remote-management allow-list, or `None` if its
+/// record is blank, corrupt, or written by a different format version —
+/// all of which mean "no list", which on a board means remote management
+/// off ([`leviculum_core::mgmt_allow_store::remote_mgmt_decision`]), which
+/// is the default. Same read-safety argument as [`load`], and the reason
+/// it matters here: this runs before `Softdevice::enable`, because the
+/// answer decides how the node is BUILT.
+pub fn load_mgmt_allow(page: u32) -> Option<StoredMgmtAllow> {
+    decode_mgmt_allow(&read_mgmt_record(page))
+}
+
 fn read_target_record(
     page: u32,
 ) -> [u8; leviculum_core::telemetry_target_store::ENCODED_SIZE_ALIGNED] {
@@ -517,6 +541,10 @@ fn read_name_record(page: u32) -> [u8; leviculum_core::node_name_store::ENCODED_
 
 fn read_pn_record(page: u32) -> [u8; leviculum_core::pn_config_store::ENCODED_SIZE_ALIGNED] {
     read_record(page + PN_CONFIG_OFFSET)
+}
+
+fn read_mgmt_record(page: u32) -> [u8; leviculum_core::mgmt_allow_store::ENCODED_SIZE_ALIGNED] {
+    read_record(page + MGMT_ALLOW_OFFSET)
 }
 
 fn read_record<const N: usize>(addr: u32) -> [u8; N] {
@@ -597,6 +625,20 @@ pub fn request_save_pn_config(config: StoredPnConfig) -> PendingSave {
     save
 }
 
+/// Ask the store task to persist the remote-management allow-list
+/// ([`StoredMgmtAllow::EMPTY`] persists the explicit clear). Never
+/// blocks, like [`request_save`]. The caller passes the resolved list —
+/// the bound and the duplicate drop happened in the envelope, where the
+/// frame was classified.
+pub fn request_save_mgmt_allow(list: StoredMgmtAllow) -> PendingSave {
+    let save = MGMT_PERSIST.issue();
+    if PENDING_SAVE_MGMT.try_send((save.ticket, list)).is_err() {
+        let _ = PENDING_SAVE_MGMT.try_receive();
+        let _ = PENDING_SAVE_MGMT.try_send((save.ticket, list));
+    }
+    save
+}
+
 /// 4-byte-aligned record buffer. `sd_flash_write` writes whole 32-bit
 /// words and rejects an unaligned source pointer.
 #[repr(align(4))]
@@ -621,7 +663,7 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 PENDING_SAVE_MEDIA.receive(),
                 PENDING_SAVE_NAME.receive(),
             ),
-            PENDING_SAVE_PN.receive(),
+            select(PENDING_SAVE_PN.receive(), PENDING_SAVE_MGMT.receive()),
         )
         .await;
         // Whichever record the request names, the others are read back off
@@ -632,6 +674,7 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
         let mut media = Aligned(read_media_record(page));
         let mut name = Aligned(read_name_record(page));
         let mut pn = Aligned(read_pn_record(page));
+        let mut mgmt = Aligned(read_mgmt_record(page));
         // Which record this request names, its ticket, and the word the
         // log line uses. The ticket goes back through the slot on every
         // exit path below — that is what the requester's ack waits on.
@@ -652,9 +695,13 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 name = Aligned(encode_node_name(chosen.as_ref()));
                 (&NAME_PERSIST, ticket, "node-name")
             }
-            Either::Second((ticket, config)) => {
+            Either::Second(Either::First((ticket, config))) => {
                 pn = Aligned(encode_pn_config(&config));
                 (&PN_PERSIST, ticket, "pn-config")
+            }
+            Either::Second(Either::Second((ticket, list))) => {
+                mgmt = Aligned(encode_mgmt_allow(&list));
+                (&MGMT_PERSIST, ticket, "mgmt-allow")
             }
         };
 
@@ -668,6 +715,7 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
             && read_media_record(page) == media.0
             && read_name_record(page) == name.0
             && read_pn_record(page) == pn.0
+            && read_mgmt_record(page) == mgmt.0
         {
             crate::log::log_fmt("[TELEMETRY] ", format_args!("persist skipped, unchanged"));
             slot.finish(ticket, Persisted::Durable);
@@ -683,7 +731,8 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 flash.write(page + FIXED_POSITION_OFFSET, &fixed.0).await?;
                 flash.write(page + MEDIA_OFFSET, &media.0).await?;
                 flash.write(page + NAME_OFFSET, &name.0).await?;
-                flash.write(page + PN_CONFIG_OFFSET, &pn.0).await
+                flash.write(page + PN_CONFIG_OFFSET, &pn.0).await?;
+                flash.write(page + MGMT_ALLOW_OFFSET, &mgmt.0).await
             }
             .await;
             match result {

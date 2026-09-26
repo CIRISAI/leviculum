@@ -30,16 +30,16 @@ runs an event-driven main loop that dispatches packets between them:
 | `ble` | 2 | BLE peripheral, Columba v2.2 | 564 |
 
 (Interface registration and MTUs:
-`set_interface_name` (`leviculum-nrf/src/bin/t114.rs:246-254`) and
-`leviculum-nrf/src/bin/rak4631.rs:297-338`. The main loop selecting over
+`set_interface_name` (`leviculum-nrf/src/bin/t114.rs:265-282`) and
+`leviculum-nrf/src/bin/rak4631.rs:325-366`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/bin/t114.rs:573`.)
+`leviculum-nrf/src/bin/t114.rs:601`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
 transport-enabled `lnsd`.
 (`enable_transport` (`leviculum-nrf/src/bin/t114.rs:196`),
-`leviculum-nrf/src/bin/rak4631.rs:231`)
+`leviculum-nrf/src/bin/rak4631.rs:238`)
 
 ## Hardware coverage
 
@@ -417,15 +417,15 @@ board. Exactly one BSP feature must be enabled per build; a
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
-> (`leviculum-nrf/src/bin/t114.rs:344`,
-> `leviculum-nrf/src/bin/rak4631.rs:401`). The Cargo `softdevice`
+> (`leviculum-nrf/src/bin/t114.rs:372`,
+> `leviculum-nrf/src/bin/rak4631.rs:429`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
 > features (`leviculum-nrf/Cargo.toml:295`,
 > `leviculum-nrf/Cargo.toml:163`).
 
 The baseboard peripherals are each gated behind their own Cargo feature
 (`leviculum-nrf/Cargo.toml:334-342`) and spawned only when that feature
-is on (`leviculum-nrf/src/bin/rak4631.rs:337-364`). Because each of them
+is on (`leviculum-nrf/src/bin/rak4631.rs:365-392`). Because each of them
 either probes for its hardware or degrades to nothing when it is absent,
 the aggregate build is what we ship for the whole family rather than a
 Pocket-V2-only image.
@@ -509,7 +509,7 @@ RNode configuration on the same LoRa network.
 (`leviculum-nrf/README.md:8`. The profile the firmware loads at boot,
 `eu_medium` (`leviculum-nrf/src/lora.rs:333-362`), applied at
 `leviculum-nrf/src/bin/t114.rs:305` and
-`leviculum-nrf/src/bin/rak4631.rs:393`.)
+`leviculum-nrf/src/bin/rak4631.rs:421`.)
 
 See [Flashing](flashing.md) for how to build and write these binaries to
 a board, and [Recovery](recovery.md) for the bootloader-entry details.

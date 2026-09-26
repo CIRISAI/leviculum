@@ -303,6 +303,40 @@ pub const TYPE_PN_CONFIG: u8 = 0x12;
 /// able to announce it.
 pub const PN_COST_KEEP: u8 = 0xFF;
 
+/// Set or clear the board's remote-management allow-list (Codeberg #235):
+/// `lnflash --management-identity <hex>` (repeatable) /
+/// `--clear-management`.
+///
+/// Payload is `[count: u8][count × TRUNCATED_HASHBYTES]` — the identity
+/// hashes permitted to query `rnstransport.remote.management` `/status`
+/// on this board. `count == 0` is the explicit clear; a count above
+/// [`crate::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES`] is refused with
+/// [`REFUSE_VALUE`], and a payload whose length does not match its own
+/// count is [`REFUSE_MALFORMED`]. Answered with a
+/// [`TYPE_MGMT_ALLOW_REPORT`] rather than a bare ack, because the stored
+/// list and the list this boot is serving honestly differ (see that
+/// type).
+///
+/// **This frame is the only way the list can be written, and it is
+/// USB-only.** The envelope is classified on the transport CDC read path
+/// alone (`leviculum_nrf::usb::retic_serial_task`, the single caller of
+/// [`classify_control_frame`] in the firmware); bytes arriving from the
+/// LoRa or BLE interface go to the node core as a Reticulum packet and
+/// are dropped there, because the first byte of [`ENVELOPE_MAGIC`] has
+/// the IFAC bit set and no radio carrier on a board runs IFAC. #235's
+/// requirement — writable over USB and NEVER over the air — is therefore
+/// a property of where the parser sits, not of a check inside it.
+///
+/// At 1 + 8 × 16 = 129 payload bytes this frame is far above the 19-byte
+/// minimum Reticulum packet, so like [`TYPE_RADIO_CONFIG`] it is only
+/// sent after a capability report proved the peer is envelope-speaking
+/// firmware.
+pub const TYPE_MGMT_ALLOW: u8 = 0x13;
+
+/// Read the board's remote-management allow-list (Codeberg #235).
+/// Read-only, empty payload, answered with [`TYPE_MGMT_ALLOW_REPORT`].
+pub const TYPE_MGMT_ALLOW_QUERY: u8 = 0x14;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -368,6 +402,36 @@ pub const TYPE_NODE_NAME_REPORT: u8 = 0x87;
 /// ([`decode_identity_report_payload`]), so an older lnflash keeps
 /// reading the first three hashes from a longer report.
 pub const TYPE_IDENTITY_REPORT: u8 = 0x88;
+/// Remote-management allow-list report (Codeberg #235); payload is
+/// `[flags, count, count × TRUNCATED_HASHBYTES]`. The answer to
+/// [`TYPE_MGMT_ALLOW`] and [`TYPE_MGMT_ALLOW_QUERY`].
+///
+/// A report rather than an ack for the reason [`TYPE_NODE_NAME_REPORT`]
+/// is one: two states differ and only the board knows both. The list on
+/// the page is what the next boot will serve; the management destination
+/// this boot registered was decided before the host connected and cannot
+/// be created or withdrawn while the node runs
+/// ([`MGMT_ALLOW_FLAG_RUNNING`]). An ack would claim the board is
+/// answering `rnstatus -R` now, which is false for exactly the operator
+/// who just enabled it — and the operator who just *revoked* an identity
+/// needs to know the old list is still live until the reset.
+///
+/// The list is echoed back rather than assumed: it is what
+/// [`crate::mgmt_allow_store::StoredMgmtAllow::from_hashes`] made of what
+/// was sent (duplicates dropped), so "the list the board acknowledged"
+/// is a fact the host prints instead of a repeat of its own argv.
+pub const TYPE_MGMT_ALLOW_REPORT: u8 = 0x89;
+
+/// [`TYPE_MGMT_ALLOW_REPORT`] flag: a stored allow-list record exists.
+/// Distinguishes an operator's explicit clear from a board that never had
+/// one — both serve nobody, but only the first is a decision somebody
+/// made.
+pub const MGMT_ALLOW_FLAG_STORED: u8 = 0x01;
+/// [`TYPE_MGMT_ALLOW_REPORT`] flag: this boot registered the
+/// `rnstransport.remote.management` destination, so the board is serving
+/// `/status` right now — to the list it read at boot, which after a set
+/// is not yet the list in this report.
+pub const MGMT_ALLOW_FLAG_RUNNING: u8 = 0x02;
 
 /// [`TYPE_IDENTITY_REPORT`] flag: the probe hash field is a registered
 /// `rnstransport.probe` responder destination.
@@ -623,6 +687,161 @@ pub fn decode_pn_config_payload(payload: &[u8]) -> Option<PnConfigWire> {
         stamp_cost: bytes[0],
         peering_cost: bytes[1],
     })
+}
+
+/// What one [`TYPE_MGMT_ALLOW`] asks for, or one
+/// [`TYPE_MGMT_ALLOW_REPORT`] carries (Codeberg #235): the identity
+/// hashes allowed to query remote management.
+///
+/// Borrowed, not owned: this crate is `no_std + alloc` and the decode
+/// runs on a board, where a frame's identities are read straight out of
+/// the receive buffer and copied once into the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MgmtAllowWire<'a> {
+    payload: &'a [u8],
+    count: usize,
+}
+
+impl<'a> MgmtAllowWire<'a> {
+    /// How many identities the frame carries. `0` is the explicit clear.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Whether the frame clears the list.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The identities, in the order the frame listed them.
+    pub fn hashes(&self) -> impl Iterator<Item = [u8; TRUNCATED_HASHBYTES]> + 'a {
+        let payload = self.payload;
+        (0..self.count).map(move |i| {
+            let start = i * TRUNCATED_HASHBYTES;
+            let mut hash = [0u8; TRUNCATED_HASHBYTES];
+            hash.copy_from_slice(&payload[start..start + TRUNCATED_HASHBYTES]);
+            hash
+        })
+    }
+}
+
+/// Encode a complete remote-management allow-list frame (#235).
+///
+/// The caller is responsible for the count bound; this function encodes
+/// what it is given so a test can build the over-long frame
+/// [`classify_control_frame`] has to refuse.
+pub fn encode_mgmt_allow(hashes: &[[u8; TRUNCATED_HASHBYTES]]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + hashes.len() * TRUNCATED_HASHBYTES);
+    payload.push(hashes.len() as u8);
+    for hash in hashes {
+        payload.extend_from_slice(hash);
+    }
+    encode_frame(TYPE_MGMT_ALLOW, &payload)
+}
+
+/// Encode an allow-list query frame (#235).
+pub fn encode_mgmt_allow_query() -> Vec<u8> {
+    encode_frame(TYPE_MGMT_ALLOW_QUERY, &[])
+}
+
+/// Decode an allow-list payload: a count byte followed by exactly that
+/// many 16-byte hashes.
+///
+/// Shape only — the [`crate::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES`]
+/// bound is a value judgement and belongs to [`classify_control_frame`],
+/// which refuses it with [`REFUSE_VALUE`] rather than calling the frame
+/// malformed. A length that disagrees with the count *is* malformed: the
+/// frame contradicts itself, and there is no reading of it that is a
+/// truncated or extended version of a list somebody meant.
+pub fn decode_mgmt_allow_payload(payload: &[u8]) -> Option<MgmtAllowWire<'_>> {
+    let (&count, rest) = payload.split_first()?;
+    if rest.len() != count as usize * TRUNCATED_HASHBYTES {
+        return None;
+    }
+    Some(MgmtAllowWire {
+        payload: rest,
+        count: count as usize,
+    })
+}
+
+/// Encode an allow-list report (#235): `[flags, count, hashes…]`.
+pub fn encode_mgmt_allow_report(flags: u8, hashes: &[[u8; TRUNCATED_HASHBYTES]]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(2 + hashes.len() * TRUNCATED_HASHBYTES);
+    payload.push(flags);
+    payload.push(hashes.len() as u8);
+    for hash in hashes {
+        payload.extend_from_slice(hash);
+    }
+    encode_frame(TYPE_MGMT_ALLOW_REPORT, &payload)
+}
+
+/// Decode an allow-list report payload, returning the flags and the list.
+pub fn decode_mgmt_allow_report_payload(payload: &[u8]) -> Option<(u8, MgmtAllowWire<'_>)> {
+    let (&flags, rest) = payload.split_first()?;
+    Some((flags, decode_mgmt_allow_payload(rest)?))
+}
+
+/// What a board said about its remote-management allow-list — the owned
+/// form a host tool keeps past the receive buffer.
+///
+/// Three facts, and the middle one is why this is a report and not an ack:
+/// `stored` is what the page holds, `running` is what this boot is
+/// serving, and they honestly differ for the whole span between a set and
+/// the next reset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MgmtAllowState {
+    /// A record exists on the page. False after a factory-fresh flash and
+    /// false again only if the record is unreadable — an explicit clear is
+    /// `stored` with an empty list, which is a decision somebody made.
+    pub stored: bool,
+    /// This boot registered `rnstransport.remote.management`, so the board
+    /// answers `rnstatus -R` right now. A set on a board that booted
+    /// without a list leaves this false until the reset.
+    pub running: bool,
+    /// The identities on the page, in the order the board stored them.
+    pub allowed: Vec<[u8; TRUNCATED_HASHBYTES]>,
+}
+
+/// Decode an allow-list report into its owned form.
+///
+/// Unknown flag bits are kept rather than refused, exactly as
+/// [`decode_node_name_report_payload`] keeps them: a newer board that
+/// grows a third state must not read as malformed to an older host, which
+/// only asks about the two bits it knows.
+pub fn decode_mgmt_allow_state(payload: &[u8]) -> Option<MgmtAllowState> {
+    let (flags, wire) = decode_mgmt_allow_report_payload(payload)?;
+    Some(MgmtAllowState {
+        stored: flags & MGMT_ALLOW_FLAG_STORED != 0,
+        running: flags & MGMT_ALLOW_FLAG_RUNNING != 0,
+        allowed: wire.hashes().collect(),
+    })
+}
+
+/// The answer to a [`TYPE_MGMT_ALLOW`] or [`TYPE_MGMT_ALLOW_QUERY`] frame.
+///
+/// `persist` is the #358 clause every write on the persist path carries:
+/// a list that did not reach the page is answered [`REFUSE_PERSIST`],
+/// because the whole point of a set is that the *next* boot serves it.
+/// `stored` is the decoded record (`None` = no record at all) and
+/// `running` says whether this boot registered the management
+/// destination — the two flags of [`TYPE_MGMT_ALLOW_REPORT`].
+pub fn mgmt_allow_answer(
+    for_type: u8,
+    persist: Persist,
+    stored: Option<&[[u8; TRUNCATED_HASHBYTES]]>,
+    running: bool,
+) -> Vec<u8> {
+    if persist == Persist::Lost {
+        return encode_refusal(for_type, REFUSE_PERSIST);
+    }
+    let mut flags = 0u8;
+    if stored.is_some() {
+        flags |= MGMT_ALLOW_FLAG_STORED;
+    }
+    if running {
+        flags |= MGMT_ALLOW_FLAG_RUNNING;
+    }
+    encode_mgmt_allow_report(flags, stored.unwrap_or(&[]))
 }
 
 /// Decode a BLE transmit-gap payload: exactly 2 bytes, u16 big-endian.
@@ -1645,6 +1864,22 @@ pub enum ControlAction {
     /// record is on the page (#358). The running role reads the record at
     /// boot, so the ack's meaning is "the next reset comes up with this".
     PnConfig(PnConfigWire),
+    /// Envelope remote-management allow-list (Codeberg #235): replace the
+    /// stored list with these identities (an empty list is the explicit
+    /// clear), persist, and answer via [`mgmt_allow_answer`] only once the
+    /// record is on the page (#358). The list this boot is serving was
+    /// read at boot and does not change, which the report's
+    /// [`MGMT_ALLOW_FLAG_RUNNING`] flag says out loud.
+    ///
+    /// Not borrowed like the wire type: the executor is a different task
+    /// from the classifier on every binary, and a bound array is what the
+    /// record wants anyway. The count is already inside
+    /// [`crate::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES`] — the
+    /// classifier refused anything longer.
+    MgmtAllow(crate::mgmt_allow_store::StoredMgmtAllow),
+    /// Envelope allow-list query: answer via [`mgmt_allow_answer`].
+    /// Read-only, like [`MediaQuery`](Self::MediaQuery).
+    MgmtAllowQuery,
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -1823,6 +2058,37 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
             },
             None => malformed,
         },
+        TYPE_MGMT_ALLOW => match decode_mgmt_allow_payload(frame.payload) {
+            // The bound here in the shared decision function, for the
+            // reason the BLE gap's and the storm's are: every binary and
+            // every host-side stub then refuses the same frames by the
+            // same rule. A count past the record's capacity is a VALUE
+            // refusal, not malformed — the frame is well-formed and says
+            // plainly what it wants, and an operator who listed nine
+            // identities needs to be told the bound, not that they typed
+            // something unparseable. Truncating to the first eight is the
+            // one answer that must never happen: a list that arrives
+            // different from the one that was sent is a permission set
+            // nobody authorised.
+            Some(wire) => {
+                let hashes: Vec<[u8; TRUNCATED_HASHBYTES]> = wire.hashes().collect();
+                match crate::mgmt_allow_store::StoredMgmtAllow::from_hashes(&hashes) {
+                    Some(list) => ControlAction::MgmtAllow(list),
+                    None => ControlAction::Refuse {
+                        refused_type: TYPE_MGMT_ALLOW,
+                        reason: REFUSE_VALUE,
+                    },
+                }
+            }
+            None => malformed,
+        },
+        TYPE_MGMT_ALLOW_QUERY => {
+            if frame.payload.is_empty() {
+                ControlAction::MgmtAllowQuery
+            } else {
+                malformed
+            }
+        }
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -1857,6 +2123,8 @@ mod tests {
         TYPE_BLE_TX_GAP,
         TYPE_STORE_STORM,
         TYPE_PN_CONFIG,
+        TYPE_MGMT_ALLOW,
+        TYPE_MGMT_ALLOW_QUERY,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -3781,6 +4049,186 @@ mod tests {
                 refused_type: TYPE_PN_CONFIG,
                 reason: REFUSE_UNKNOWN_TYPE,
             }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Remote-management allow-list (#235)
+    // -----------------------------------------------------------------
+
+    fn mgmt_hash(seed: u8) -> [u8; TRUNCATED_HASHBYTES] {
+        [seed; TRUNCATED_HASHBYTES]
+    }
+
+    #[test]
+    fn an_allow_list_round_trips_through_the_frame() {
+        let hashes = [mgmt_hash(1), mgmt_hash(2), mgmt_hash(3)];
+        let bytes = encode_mgmt_allow(&hashes);
+        let frame = decode_frame(&bytes).unwrap();
+        assert_eq!(frame.frame_type, TYPE_MGMT_ALLOW);
+        let wire = decode_mgmt_allow_payload(frame.payload).unwrap();
+        assert_eq!(wire.len(), 3);
+        assert_eq!(wire.hashes().collect::<Vec<_>>(), hashes.to_vec());
+    }
+
+    #[test]
+    fn an_allow_list_classifies_into_the_record_it_will_be_stored_as() {
+        let hashes = [mgmt_hash(9), mgmt_hash(4)];
+        assert_eq!(
+            classify_control_frame(&encode_mgmt_allow(&hashes), ACCEPTED),
+            ControlAction::MgmtAllow(
+                crate::mgmt_allow_store::StoredMgmtAllow::from_hashes(&hashes).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn an_empty_allow_list_is_the_explicit_clear_and_not_a_refusal() {
+        // Zero identities is a command an operator gives on purpose
+        // (`--clear-management`), unlike the PN config's both-keep frame
+        // which asks for nothing at all. What it means on the board is in
+        // `mgmt_allow_store::remote_mgmt_decision`: register nothing.
+        assert_eq!(
+            classify_control_frame(&encode_mgmt_allow(&[]), ACCEPTED),
+            ControlAction::MgmtAllow(crate::mgmt_allow_store::StoredMgmtAllow::EMPTY)
+        );
+    }
+
+    #[test]
+    fn an_allow_list_past_the_bound_is_a_value_refusal_not_a_truncation() {
+        let hashes: Vec<_> = (0..=crate::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES)
+            .map(|i| mgmt_hash(i as u8 + 1))
+            .collect();
+        assert_eq!(
+            classify_control_frame(&encode_mgmt_allow(&hashes), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_MGMT_ALLOW,
+                reason: REFUSE_VALUE,
+            }
+        );
+        // Exactly the bound still passes: the refusal is off-by-one-proof.
+        let at_bound = &hashes[..crate::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES];
+        assert!(matches!(
+            classify_control_frame(&encode_mgmt_allow(at_bound), ACCEPTED),
+            ControlAction::MgmtAllow(_)
+        ));
+    }
+
+    #[test]
+    fn an_allow_list_whose_length_contradicts_its_count_is_malformed() {
+        // A count byte that promises more or fewer hashes than follow is a
+        // frame that contradicts itself; there is no reading of it that is
+        // somebody's intended list.
+        for payload in [
+            vec![2u8; 1 + TRUNCATED_HASHBYTES],     // count 2, one hash
+            vec![1u8; 1 + TRUNCATED_HASHBYTES * 2], // count 1, two hashes
+            vec![1u8; TRUNCATED_HASHBYTES],         // count byte eaten
+        ] {
+            assert_eq!(
+                classify_control_frame(&encode_frame(TYPE_MGMT_ALLOW, &payload), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: TYPE_MGMT_ALLOW,
+                    reason: REFUSE_MALFORMED,
+                },
+                "payload len {} was not refused as malformed",
+                payload.len()
+            );
+        }
+        // Not even a count byte.
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_MGMT_ALLOW, &[]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_MGMT_ALLOW,
+                reason: REFUSE_MALFORMED,
+            }
+        );
+    }
+
+    #[test]
+    fn the_allow_list_query_is_read_only_and_takes_no_payload() {
+        assert_eq!(
+            classify_control_frame(&encode_mgmt_allow_query(), ACCEPTED),
+            ControlAction::MgmtAllowQuery
+        );
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_MGMT_ALLOW_QUERY, &[0x00]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_MGMT_ALLOW_QUERY,
+                reason: REFUSE_MALFORMED,
+            }
+        );
+    }
+
+    #[test]
+    fn a_firmware_without_the_allow_list_refuses_it_by_name() {
+        // How an lnflash that knows #235 detects a board that does not:
+        // a named refusal, so it can say "this firmware is older" instead
+        // of timing out.
+        assert_eq!(
+            classify_control_frame(&encode_mgmt_allow(&[mgmt_hash(1)]), ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_MGMT_ALLOW,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+
+    #[test]
+    fn the_allow_list_answer_says_stored_and_running_apart() {
+        let hashes = [mgmt_hash(5)];
+        // Set on a board whose boot found no list: stored now, not running
+        // until the reset. This is the case the report exists for.
+        let bytes = mgmt_allow_answer(TYPE_MGMT_ALLOW, Persist::Durable, Some(&hashes), false);
+        let frame = decode_frame(&bytes).unwrap();
+        assert_eq!(frame.frame_type, TYPE_MGMT_ALLOW_REPORT);
+        let (flags, wire) = decode_mgmt_allow_report_payload(frame.payload).unwrap();
+        assert_eq!(flags & MGMT_ALLOW_FLAG_STORED, MGMT_ALLOW_FLAG_STORED);
+        assert_eq!(flags & MGMT_ALLOW_FLAG_RUNNING, 0);
+        assert_eq!(wire.hashes().collect::<Vec<_>>(), hashes.to_vec());
+
+        // A board that booted with a list and is serving it now.
+        let bytes = mgmt_allow_answer(TYPE_MGMT_ALLOW_QUERY, Persist::Durable, Some(&hashes), true);
+        let frame = decode_frame(&bytes).unwrap();
+        let (flags, _) = decode_mgmt_allow_report_payload(frame.payload).unwrap();
+        assert_eq!(flags, MGMT_ALLOW_FLAG_STORED | MGMT_ALLOW_FLAG_RUNNING);
+
+        // No record at all: neither flag, and an empty list.
+        let bytes = mgmt_allow_answer(TYPE_MGMT_ALLOW_QUERY, Persist::Durable, None, false);
+        let frame = decode_frame(&bytes).unwrap();
+        let (flags, wire) = decode_mgmt_allow_report_payload(frame.payload).unwrap();
+        assert_eq!(flags, 0);
+        assert!(wire.is_empty());
+    }
+
+    #[test]
+    fn an_allow_list_that_did_not_reach_the_page_is_refused_not_reported() {
+        // #358: the only thing a set is for is the next boot, so a report
+        // for a record that is not on the page would be a lie about
+        // exactly the moment that matters.
+        let bytes = mgmt_allow_answer(TYPE_MGMT_ALLOW, Persist::Lost, Some(&[mgmt_hash(5)]), false);
+        let frame = decode_frame(&bytes).unwrap();
+        assert_eq!(frame.frame_type, TYPE_REFUSAL);
+        assert_eq!(
+            decode_refusal_payload(frame.payload),
+            Some((TYPE_MGMT_ALLOW, REFUSE_PERSIST))
+        );
+    }
+
+    #[test]
+    fn an_allow_list_frame_is_never_packet_shaped_for_a_radio_peer() {
+        // #235's "never over the air" rests on where the parser sits
+        // (`leviculum_nrf::usb` is the only caller of
+        // `classify_control_frame`), and on this: the same bytes reaching
+        // a node from a radio interface cannot be read as anything a
+        // Reticulum peer would emit, because 0xA4 carries the IFAC bit and
+        // no radio carrier on a board runs IFAC. Pinned here as well as in
+        // `mvr_mgmt_allow_is_usb_only`, which drives the node itself.
+        let bytes = encode_mgmt_allow(&[mgmt_hash(1)]);
+        assert_eq!(bytes[0], 0xA4);
+        assert_ne!(
+            bytes[0] & 0x80,
+            0,
+            "the IFAC bit is what makes it undeliverable"
         );
     }
 }

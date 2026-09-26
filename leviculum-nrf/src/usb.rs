@@ -77,6 +77,8 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_BLE_TX_GAP,
     envelope::TYPE_STORE_STORM,
     envelope::TYPE_PN_CONFIG,
+    envelope::TYPE_MGMT_ALLOW,
+    envelope::TYPE_MGMT_ALLOW_QUERY,
 ];
 
 /// nRF52840 FICR base address
@@ -1058,6 +1060,79 @@ async fn retic_serial_task(
                                         .await
                                     {
                                         log("SER: pn-config answer write failed");
+                                    }
+                                }
+                                ControlAction::MgmtAllow(list) => {
+                                    // Store-and-persist on this task, like
+                                    // the node name: nothing here needs the
+                                    // node, and the report must not leave
+                                    // before the record is on the page
+                                    // (#358) — the whole meaning of a set
+                                    // is what the next boot serves.
+                                    //
+                                    // A binary that never read the record
+                                    // must not report on it either: the
+                                    // gate is `mgmt_wired`, and without it
+                                    // the answer is a named refusal rather
+                                    // than a report describing a list
+                                    // nothing will honour.
+                                    let wired = crate::mgmt::mgmt_wired();
+                                    // What the page held before this frame,
+                                    // so a write that did not land can be
+                                    // undone rather than left published.
+                                    let previous = crate::mgmt::stored();
+                                    let persist =
+                                        persist_outcome(wired, || crate::mgmt::apply(list)).await;
+                                    if wired && persist == envelope::Persist::Lost {
+                                        crate::mgmt::revert(previous);
+                                    }
+                                    let mut hashes = crate::mgmt::EMPTY_REPORT;
+                                    let answer = if wired {
+                                        let len = crate::mgmt::report_into(&mut hashes);
+                                        envelope::mgmt_allow_answer(
+                                            envelope::TYPE_MGMT_ALLOW,
+                                            persist,
+                                            len.map(|n| &hashes[..n]),
+                                            crate::mgmt::running(),
+                                        )
+                                    } else {
+                                        envelope::encode_refusal(
+                                            envelope::TYPE_MGMT_ALLOW,
+                                            envelope::REFUSE_UNSUPPORTED,
+                                        )
+                                    };
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
+                                        log("SER: mgmt-allow answer write failed");
+                                    }
+                                }
+                                ControlAction::MgmtAllowQuery => {
+                                    // Read-only, like the media query: safe
+                                    // to send to a board mid-measurement,
+                                    // and the way a host learns whether the
+                                    // board is serving `rnstatus -R` now or
+                                    // only after the next reset.
+                                    let wired = crate::mgmt::mgmt_wired();
+                                    let mut hashes = crate::mgmt::EMPTY_REPORT;
+                                    let answer = if wired {
+                                        let len = crate::mgmt::report_into(&mut hashes);
+                                        envelope::mgmt_allow_answer(
+                                            envelope::TYPE_MGMT_ALLOW_QUERY,
+                                            envelope::Persist::Durable,
+                                            len.map(|n| &hashes[..n]),
+                                            crate::mgmt::running(),
+                                        )
+                                    } else {
+                                        envelope::encode_refusal(
+                                            envelope::TYPE_MGMT_ALLOW_QUERY,
+                                            envelope::REFUSE_UNSUPPORTED,
+                                        )
+                                    };
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
+                                        log("SER: mgmt-allow report write failed");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {

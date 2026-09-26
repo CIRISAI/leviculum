@@ -50,6 +50,9 @@ Commands (host → board):
 | 0x0F | ANNOUNCE         | empty — announce now: the LXMF delivery destination, and the propagation destination where that role runs (#376, #384) |
 | 0x10 | BLE_TX_GAP       | BLE inter-packet gap in ms, u16 BE (2 B), 0..=5000 (#376) |
 | 0x11 | STORE_STORM      | record count and body size, two u16 BE (4 B), 1..=1000 and 0..=1024 (#384) |
+| 0x12 | PN_CONFIG        | announced stamp cost and required peering cost, one byte each (2 B); `0xFF` in a field keeps the persisted value (#384) |
+| 0x13 | MGMT_ALLOW       | see below — set or clear the remote-management allow-list (#235) |
+| 0x14 | MGMT_ALLOW_QUERY | empty (a query) — answered with MGMT_ALLOW_REPORT |
 
 Responses (board → host):
 
@@ -63,6 +66,7 @@ Responses (board → host):
 | 0x86 | POSITION_SOURCE_REPORT | one flag byte (bit0 fixed position set, bit1 GNSS built in and active) |
 | 0x87 | NODE_NAME_REPORT  | `[flags, mesh_len, mesh…, ble_len, ble…]` — see below |
 | 0x88 | IDENTITY_REPORT   | `[flags, identity(16), probe(16), lxmf(16)]`, 49 B fixed |
+| 0x89 | MGMT_ALLOW_REPORT | `[flags, count, count × identity(16)]` — see below |
 
 Refusal reasons: `0x01` unknown type, `0x02` malformed, `0x03` value
 refused, `0x04` busy, `0x05` unsupported (the envelope layer knows the
@@ -74,6 +78,55 @@ running (the value is durably on the flash page and applies at the next
 reset, but the carrier it configures did not come up this boot — see
 below). The version in the capability report (`1`) names the envelope framing itself;
 new frame types extend the accepted list without bumping it.
+
+### MGMT_ALLOW (0x13) and MGMT_ALLOW_QUERY (0x14) — who may read the board
+
+A board with a remote-management allow-list serves
+`rnstransport.remote.management` with the `/status` handler, so `rnstatus
+-R <board>` and `lnstatus -R <board>` read it exactly as they read a
+daemon (#235, #86). The list is identity hashes — the querying instance's
+own identity, the one it signs the link with, not a destination.
+
+`MGMT_ALLOW`'s payload is `[count, count × 16 B]`, at most eight
+identities (`leviculum_core::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES`,
+which argues the bound against the flash slot and the #388 heap budget).
+`count == 0` is the explicit clear. A count above the bound is refused
+`0x03` (value) — never truncated, because a permission set that arrives
+different from the one that was sent is one nobody authorised. A payload
+whose length disagrees with its own count is refused `0x02` (malformed).
+
+Both frames are answered with `MGMT_ALLOW_REPORT`, not an ack, because
+two states differ and only the board knows both: bit0 of its flags says a
+record is on the page, bit1 says **this boot** registered the management
+destination. The destination is created while the node is built, from the
+record read at boot, so a list set now is served after the next reset —
+and an identity revoked now is still being served until then. The report
+also echoes what the board stored (duplicates dropped), so a host prints
+the list the board acknowledged rather than a repeat of its own argv. A
+record that did not reach flash is refused `0x06` (not persisted): the
+whole point of a set is the next boot.
+
+**This frame is the only way the list can be written, and it is
+USB-only.** That is a property of where the parser sits, not of a check
+inside it: `classify_control_frame` has exactly one caller in the
+firmware, the transport CDC read path (`leviculum-nrf/src/usb.rs`), and
+bytes arriving from the LoRa or BLE interface go to the node core as
+Reticulum packets, where the same frame is dropped — its first byte
+`0xA4` has the IFAC bit set and no radio carrier on a board runs IFAC.
+Driven on a real NodeCore in
+`leviculum-core/src/node/mvr_mgmt_allow_is_usb_only.rs`.
+
+An absent **or empty** list registers nothing at all on a board: no
+destination, no handler, no announce. That is a deliberate deviation from
+the daemon, which registers the handler and consults an empty list per
+request the way Python does (`leviculum-std/src/config.rs`). A daemon
+sits on a machine with an operator and a login; a board is left on a mast,
+and an unattended node announcing a management destination with nobody on
+the list is advertising a door.
+
+Host side: `lnflash --management-identity <hex>` (repeatable) and
+`lnflash --clear-management`, plus the flash-time question beside the
+radio one.
 
 ### ANNOUNCE (0x0F) and BLE_TX_GAP (0x10) — the #376 bench instruments
 

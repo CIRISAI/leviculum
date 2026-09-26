@@ -117,7 +117,7 @@ pays and that a mesh path pays in full: between the `GPREGRET` write and
 `sys_reset()` there must be no await, no allocation and no logging, and
 under a live SoftDevice the write must go through the SoC syscalls
 rather than the register, or it records a bogus MWU panic per attempt
-(`leviculum-nrf/src/usb.rs:230-258`, Codeberg #249). A mesh-borne
+(`leviculum-nrf/src/usb.rs:232-260`, Codeberg #249). A mesh-borne
 command always arrives with the SoftDevice enabled, so only the syscall
 branch of that code is ever exercised — the branch the cable case takes
 least often.

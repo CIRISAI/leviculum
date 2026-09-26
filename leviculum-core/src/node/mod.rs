@@ -119,6 +119,8 @@ mod mvr_lrproof;
 mod mvr_lrproof_echo_storm;
 #[cfg(test)]
 mod mvr_lrproof_legacy_shape;
+#[cfg(test)]
+mod mvr_mgmt_allow_is_usb_only;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_obs_endpoint;
 #[cfg(test)]

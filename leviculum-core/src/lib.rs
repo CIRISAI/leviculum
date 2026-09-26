@@ -126,6 +126,7 @@ pub mod known_destinations;
 pub mod link;
 pub mod media_profile_store;
 pub mod memory_storage;
+pub mod mgmt_allow_store;
 /// The crate's one hand-rolled msgpack reader/writer. Top-level rather than
 /// under `resource/` because `destination`, `discovery` and `node` all decode
 /// msgpack too, and a decoder under `resource/` made every one of those an

@@ -61,6 +61,10 @@ pub mod interface;
 pub mod log;
 pub mod lora;
 pub mod media;
+/// Remote management on the board (#235): the identity allow-list
+/// `rnstatus -R` / `lnstatus -R` are gated on, read at boot from the
+/// telemetry page and writable over USB only.
+pub mod mgmt;
 pub mod name;
 /// The propagation-node role (#384 part 3): the board twin of lnpnd's
 /// engine, over the record-log adapters of `leviculum-pn-store`.
