@@ -128,6 +128,30 @@ pub(crate) fn write_fixarray_header(buf: &mut Vec<u8>, count: usize) {
     buf.push(0x90 | (count as u8));
 }
 
+/// Write an array header of any length, in the compact form Python
+/// `umsgpack._pack_array` chooses:
+///
+/// - `< 16` elements: fixarray (`0x90 | len`)
+/// - `< 65536`: array16 (`0xdc` + 2 len bytes BE)
+/// - larger: array32 (`0xdd` + 4 len bytes BE)
+///
+/// [`write_fixarray_header`] stays for the call sites whose element count is
+/// a compile-time-bounded handful; this one is for a list whose length comes
+/// from a collection, where a 16th element must widen the header instead of
+/// corrupting it (the fixarray writer only `debug_assert!`s, so a release
+/// build would emit a malformed frame).
+pub(crate) fn write_array_header(buf: &mut Vec<u8>, count: usize) {
+    if count < 16 {
+        buf.push(0x90 | (count as u8));
+    } else if count < 65536 {
+        buf.push(0xdc);
+        buf.extend_from_slice(&(count as u16).to_be_bytes());
+    } else {
+        buf.push(0xdd);
+        buf.extend_from_slice(&(count as u32).to_be_bytes());
+    }
+}
+
 /// Write a float64 value.
 pub(crate) fn write_float64(buf: &mut Vec<u8>, val: f64) {
     buf.push(0xcb); // float64 tag

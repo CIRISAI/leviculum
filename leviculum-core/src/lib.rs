@@ -144,6 +144,7 @@ pub mod ratchet_store;
 pub(crate) mod receipt;
 pub mod resource;
 pub mod rnode;
+pub mod status_bundle;
 pub mod storage_census;
 pub mod storage_types;
 pub mod sx126x;
