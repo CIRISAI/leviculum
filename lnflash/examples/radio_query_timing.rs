@@ -46,9 +46,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use leviculum_core::envelope::{
-    decode_frame, decode_radio_report_payload, decode_refusal_payload, encode_radio_query,
-    encode_reset, REFUSE_BUSY, REFUSE_NOT_RUNNING, TYPE_RADIO_QUERY, TYPE_RADIO_REPORT,
-    TYPE_REFUSAL,
+    decode_frame, decode_media_report_payload, decode_radio_report_payload, decode_refusal_payload,
+    encode_media_query, encode_radio_query, encode_reset, REFUSE_BUSY, REFUSE_NOT_RUNNING,
+    TYPE_MEDIA_REPORT, TYPE_RADIO_QUERY, TYPE_RADIO_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::rnode::{build_radio_config_frame, RADIO_CONFIG_ACK};
@@ -167,6 +167,17 @@ fn describe(data: &[u8]) -> String {
                 format!("refusal of type=0x{refused:02x} reason=0x{reason:02x} ({name})")
             }
             None => "refusal (payload does not parse)".to_string(),
+        },
+        TYPE_MEDIA_REPORT => match decode_media_report_payload(f.payload) {
+            Some((running, configured)) => format!(
+                "media-report running_lora={} running_ble={} configured_lora={} \
+                 configured_ble={}",
+                u8::from(running.lora_enabled),
+                u8::from(running.ble_enabled),
+                u8::from(configured.lora_enabled),
+                u8::from(configured.ble_enabled)
+            ),
+            None => "media-report (payload is not two known flag bytes)".to_string(),
         },
         t => format!("envelope type=0x{t:02x} payload={} bytes", f.payload.len()),
     }
@@ -360,6 +371,35 @@ fn run(args: &Args) -> Result<(), String> {
         for data in seen.iter().filter(|d| !answers_the_query(d)) {
             println!("{:>8}   {:>8}   also: {}", "", "", describe(data));
         }
+    }
+
+    // The follow-up question, always asked, because it is the one that turns a
+    // refused radio query into something to do about it — and because the
+    // driver now asks it too (`serial.rs::ask_media_profile`), so this is the
+    // exchange it will have with this board.
+    println!();
+    let mut framed = Vec::new();
+    frame(&encode_media_query(), &mut framed);
+    let asked = Instant::now();
+    fd.write_all(&framed, Instant::now() + WRITE_WITHIN)
+        .map_err(|e| format!("media query write: {e}"))?;
+    let seen = frames_until(
+        &fd,
+        &mut deframer,
+        args.window,
+        |d| matches!(decode_frame(d), Ok(f) if f.frame_type == TYPE_MEDIA_REPORT),
+    )
+    .map_err(|e| format!("media query wait: {e}"))?;
+    match seen
+        .iter()
+        .find(|d| matches!(decode_frame(d), Ok(f) if f.frame_type == TYPE_MEDIA_REPORT))
+    {
+        Some(data) => println!(
+            "media     {} (in {:.3} ms)",
+            describe(data),
+            asked.elapsed().as_secs_f64() * 1e3
+        ),
+        None => println!("media     no media report within {:?}", args.window),
     }
     Ok(())
 }

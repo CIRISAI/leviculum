@@ -1009,10 +1009,20 @@ fn dead_radio_media_keys(
 /// What to do about a dead radio, in one sentence, chosen by what the board
 /// said about its carriers.
 ///
-/// Three different situations reach `outcome=dead-radio` and they have three
-/// different remedies; a single sentence covering all of them is the one that
-/// sent a field operator looking for a driver bug on 2026-09-26, when the
-/// board had simply been left with LoRa switched off.
+/// Three different board states reach `outcome=dead-radio` and their remedies
+/// have nothing in common — reflash the profile, reset the board, or read the
+/// board's own log. A single sentence covering all three is what sent a field
+/// operator looking for a driver bug on 2026-09-26, so the split is made here,
+/// off the two flags the board itself reports.
+///
+/// The middle case is the one that field run hit, and it is not a guess: the
+/// media report's two halves are documented to part exactly here
+/// ([`leviculum_core::envelope::TYPE_MEDIA_REPORT`]) — a carrier that did not
+/// come up at boot has no driver task to un-ignore, so switching it on in the
+/// stored profile cannot start it before the next reset. The board measured
+/// that day answered `running_lora=0 configured_lora=1`, which is that state
+/// exactly, and its banner agreed (`[MEDIA] lora=off ble=on src=flash`, where
+/// `lora=` is what the boot is *running*).
 fn dead_radio_remedy(
     media: Option<(
         leviculum_core::envelope::MediaProfileWire,
@@ -1020,27 +1030,36 @@ fn dead_radio_remedy(
     )>,
 ) -> &'static str {
     match media {
-        // The stored profile has LoRa off, so the boot spawned no LoRa task
-        // and the next boot will not either. Nothing on this side is retryable.
+        // The stored profile has LoRa off, so this boot spawned no LoRa task
+        // and the next boot would not either. A reset alone changes nothing.
         Some((_, configured)) if !configured.lora_enabled => {
-            "the board's own media profile has LoRa switched off, which is why \
-             there is no running profile to name: no retry here can change \
-             that, and neither can a reset — re-enable the carrier on the board \
-             (`lnflash --set-media lora=on`) and reset it"
+            "the board's stored media profile has LoRa switched off, which is \
+             why it has no running profile to name: no retry here can change \
+             that, and neither can a reset on its own — switch the carrier back \
+             on (`lnflash --set-media lora=on`) and then reset the board"
         }
-        // LoRa is meant to be on, so the task should have published a profile:
-        // `configure_lora` did not return Ok this boot.
+        // Configured on, not running: the carrier was switched on after a boot
+        // that came up without it, and it cannot start until the board resets.
+        Some((running, _)) if !running.lora_enabled => {
+            "the board's stored media profile has LoRa on but this boot is not \
+             running it, which is the one state where those two honestly \
+             differ: a carrier that did not come up at boot has no task to \
+             un-ignore and cannot start before the next reset. Reset the board \
+             and its radio comes up on the stored profile — nothing needs to be \
+             reconfigured and nothing here needs to retry"
+        }
+        // Running, yet no profile to name: `configure_lora` did not return Ok.
         Some(_) => {
-            "the board's media profile has LoRa enabled, so its LoRa task was \
-             expected to name a profile and did not: read the board's debug port \
-             (if00) for `[LORA] reconfig FAILED` or a fault before the first \
-             `[LORA] active config`"
+            "the board is running its LoRa carrier and still names no profile, \
+             so its LoRa task did not get through `configure_lora`: read the \
+             board's debug port (if00) for `[LORA] reconfig FAILED` or a fault \
+             before the first `[LORA] active config`"
         }
         // Old firmware, or a board too sick to answer the second question.
         None => {
             "the board would not name its carriers either, so whether LoRa is \
-             switched off or failed to start has to come off its debug port \
-             (if00, `[MEDIA] lora=…`)"
+             switched off, switched on but not started, or started and broken \
+             has to come off its debug port (if00, `[MEDIA] lora=…`)"
         }
     }
 }
@@ -2777,10 +2796,50 @@ mod tests {
         );
     }
 
-    /// The other way a radio is dead: LoRa is meant to be on, so the board's
-    /// LoRa task did not get through `configure_lora` and the debug port is
-    /// where that is written. A single sentence for both would send the
-    /// operator to the wrong place in one of them.
+    /// The state the 2026-09-26 field board was actually in, read off it over
+    /// the port: the stored profile has LoRa on, the boot is not running it.
+    /// The remedy is a reset and nothing else — telling the operator to
+    /// reconfigure a carrier that is already configured correctly, or to go
+    /// read a debug log, would both be wrong here.
+    #[test]
+    fn a_carrier_configured_on_but_not_running_asks_for_a_reset() {
+        use leviculum_core::envelope::MediaProfileWire;
+
+        let refusal = radio_pricing_phy(
+            &RadioBringUp::Dead {
+                media: Some((
+                    MediaProfileWire {
+                        lora_enabled: false,
+                        ble_enabled: true,
+                    },
+                    MediaProfileWire::BOTH,
+                )),
+            },
+            &requested_test_phy(),
+            "serial_0",
+        )
+        .expect_err("a boot that did not start its LoRa carrier has no radio");
+
+        assert!(
+            refusal.contains("media_running_lora=0") && refusal.contains("media_configured_lora=1"),
+            "both halves have to be in the line — the difference IS the finding: {refusal}"
+        );
+        assert!(
+            refusal.contains("Reset the board"),
+            "a carrier that cannot start before the next reset asks for that \
+             reset: {refusal}"
+        );
+        assert!(
+            !refusal.contains("--set-media"),
+            "the stored profile is already right; changing it is not the \
+             remedy: {refusal}"
+        );
+    }
+
+    /// The third way a radio is dead: the carrier IS running and the board
+    /// still names no profile, so `configure_lora` did not return Ok and the
+    /// debug port is where that is written. A single sentence for all three
+    /// would send the operator to the wrong place in two of them.
     #[test]
     fn a_dead_radio_with_lora_enabled_points_at_the_boards_own_log() {
         use leviculum_core::envelope::MediaProfileWire;

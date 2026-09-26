@@ -411,28 +411,33 @@ async fn a_board_that_answers_neither_frame_does_not_come_up() {
 // **Acceptance**: the first test below is red against the policy this replaces
 // (ack ends the bring-up at `Adopted`), green with the policy this pass lands.
 
-/// The 2026-09-26 field bring-up, end to end over the port: the board acks the
-/// legacy config, refuses the radio query as busy, and then — asked — names a
-/// stored media profile with LoRa switched off.
+/// The 2026-09-26 field bring-up, end to end over the port, with the board's
+/// answers taken from the board: ack the legacy config, refuse the radio query
+/// as busy, then — asked — report `running_lora=0 configured_lora=1`.
 ///
 /// Measured on the rig T114 `183004F712B4A7FE` that morning
-/// (`lnflash/examples/radio_query_timing.rs`, `[MEDIA] lora=off ble=on
-/// src=flash` on its debug port): the refusal held at 0 ms, 200 ms, 1 s, 3 s
-/// and 10 s after the ack, so the verdict below is not a race that a retry
-/// would win. What the run cost was the diagnosis, which is why this asserts
-/// on the line and not only on the outcome.
+/// (`lnflash/examples/radio_query_timing.rs`): the refusal held at 0 ms,
+/// 200 ms, 1 s, 3 s and 10 s after the ack, so the verdict is not a race a
+/// retry would win, and the media report named the reason — a carrier switched
+/// on in the stored profile after a boot that came up without it, which cannot
+/// start before the next reset. Its banner agreed: `[MEDIA] lora=off ble=on
+/// src=flash`, where `lora=` is what the boot is running.
+///
+/// What the field run cost was the diagnosis, so this asserts on the line and
+/// not only on the outcome.
 #[tokio::test(start_paused = true)]
-async fn a_board_with_lora_switched_off_says_so_when_asked() {
+async fn the_field_boards_answers_name_the_reset_that_fixes_it() {
     let (mut host, board) = tokio::io::duplex(8192);
-    let off = envelope::MediaProfileWire {
+    let running = envelope::MediaProfileWire {
         lora_enabled: false,
         ble_enabled: true,
     };
+    let configured = envelope::MediaProfileWire::BOTH;
     scripted_board_with_media(
         board,
         true,
         QueryAnswer::Refuse(envelope::REFUSE_BUSY),
-        Some((off, off)),
+        Some((running, configured)),
     );
 
     let requested = requested_phy();
@@ -440,19 +445,20 @@ async fn a_board_with_lora_switched_off_says_so_when_asked() {
     assert_eq!(
         outcome,
         RadioBringUp::Dead {
-            media: Some((off, off))
+            media: Some((running, configured))
         },
         "a board that refuses the radio query is asked about its carriers, and \
          what it answers belongs to the verdict"
     );
 
     let refusal = radio_pricing_phy(&outcome, &requested, "mvr")
-        .expect_err("a board with LoRa switched off has no radio to price");
+        .expect_err("a boot that never started its LoRa carrier has no radio to price");
     for key in [
         "outcome=dead-radio",
         "media_answered=1",
-        "media_configured_lora=0",
-        "--set-media lora=on",
+        "media_running_lora=0",
+        "media_configured_lora=1",
+        "Reset the board",
     ] {
         assert!(
             refusal.contains(key),
