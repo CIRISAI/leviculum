@@ -458,10 +458,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // (leviculum-nrf ble/columba.rs), so a merged rig timeline correlates
     // the two sides of one decision; the link lifecycle events carry the
     // same `peer=<hex8>` the firmware logs. Emitted once per
-    // (address, decision) change, not per advertising PDU.
+    // (address, decision) change, not per advertising PDU. `rule` is the
+    // verdict that made the peer eligible, `pref` (#412 part 1) the tier
+    // the window then orders it by — a peer can be permitted and still
+    // lose every window, and only the second key says why.
     EventSchema {
         name: "BLE_SCAN_DECISION",
-        required_keys: &["addr", "caps", "caps_record", "initiate", "rule"],
+        required_keys: &["addr", "caps", "caps_record", "initiate", "pref", "rule"],
     },
     EventSchema {
         name: "BLE_LINK_UP",

@@ -30,13 +30,13 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
-    addr_value, identity_hint, judge_supervision_timeout, manufacturer_data_with_hint,
-    parse_peer_advertisement, should_initiate, with_free_slots, CandidateTable, ConnParams,
-    ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision, GattBytes,
-    LinkPhase, LinkRole, LinkUp, Origin, OversizeFrom, OversizeLine, PeerRegistry, ScanMode, TxGap,
-    ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY,
-    LINK_TIMEOUT_MS, MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS,
-    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    addr_value, dial_preference, identity_hint, judge_supervision_timeout,
+    manufacturer_data_with_hint, parse_peer_advertisement, should_initiate, with_free_slots,
+    CandidateTable, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine,
+    ConnectDecision, GattBytes, LinkPhase, LinkRole, LinkUp, Origin, OversizeFrom, OversizeLine,
+    PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, GATT_VALUE_MAX,
+    IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS, MANUFACTURER_DATA_HINT_LEN,
+    PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -1771,10 +1771,11 @@ fn dead_end(addr: u64) -> bool {
 
 /// Scan until one advertisement wins an initiate decision, keep
 /// collecting further eligible advertisers for one bounded window
-/// ([`SCAN_WINDOW_COLLECT_MS`]), then return the best candidate —
-/// strict verdicts before fallback verdicts, the emptiest advertiser
-/// first, ties broken by the lowest address except among peers that
-/// redraw theirs (#412) — plus the rule that permitted it (the caller resets the fallback
+/// ([`SCAN_WINDOW_COLLECT_MS`]), then return the best candidate — the
+/// peer that cannot dial us first (#412 part 1), then the rest of what
+/// the rule permitted, then fallback verdicts; the emptiest advertiser
+/// first inside each, ties broken by the lowest address except among
+/// peers that redraw theirs (#412) — plus the rule that permitted it (the caller resets the fallback
 /// clock on a strict verdict, #375) and the window's `seen` count for
 /// the `BLE_SCAN_WINDOW` log line.
 ///
@@ -1858,14 +1859,27 @@ async fn find_peer_to_initiate(
                     // same reason free_slots has one: a peer that said
                     // nothing about who it is is not a peer named
                     // 00000000.
+                    //
+                    // pref is the window's FIRST ordering term (#412
+                    // part 1), a pure function of this one
+                    // advertisement, so it can be printed here rather
+                    // than only at the window's close: `cannot_dial_us`
+                    // is the peer whose record says it can never
+                    // initiate, and a capture showing one of those
+                    // losing a window to a `permitted` peer is the
+                    // preference NOT firing. `rule=` next to it stays
+                    // the verdict that made the peer eligible at all —
+                    // the two answer different questions and a capture
+                    // needs both.
                     "BLE_SCAN_DECISION addr={:012x} caps_record={} caps={:#04x} free_slots={} \
-                     hint={} rule={} initiate={}",
+                     hint={} rule={} pref={} initiate={}",
                     peer_value,
                     u8::from(parsed.caps.is_some()),
                     parsed.caps.unwrap_or(0),
                     FreeSlots(free_slots),
                     IdentityHint(parsed.identity_hint),
                     decision.as_str(),
+                    dial_preference(decision, free_slots).as_str(),
                     u8::from(decision.initiate()),
                 ),
             );

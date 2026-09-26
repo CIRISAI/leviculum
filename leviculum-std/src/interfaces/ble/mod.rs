@@ -44,6 +44,7 @@ use super::{
     ReadySignal,
 };
 use crate::event_log::Scalar;
+use leviculum_ble_tx::dial_preference;
 use leviculum_core::traits::{InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
 use links::{
@@ -575,6 +576,12 @@ impl BleTask {
                         hint = %links::hint_str(decision.identity_hint),
                         initiate = u8::from(decision.decision.initiate()),
                         rule = decision.decision.as_str(),
+                        // The window's first ordering term (#412 part
+                        // 1), the same key the firmware prints: a pure
+                        // function of this advertisement, so a merged
+                        // rig timeline can compare the two stacks' tiers
+                        // on one peer.
+                        pref = dial_preference(decision.decision, decision.free_slots).as_str(),
                     );
                     // Only when the allow-list is what stops the dial:
                     // a peer the sort tells us to wait for is not one
@@ -617,10 +624,11 @@ impl BleTask {
                 }
                 // Eligible: into the collection window instead of an
                 // immediate dial — the firmware's window, the same
-                // CandidateTable, the same choice: emptiest advertised
-                // peer first (#375 item 3), then the lowest address,
-                // except that a peer which redraws its address does not
-                // get to win that tie with it (#412).
+                // CandidateTable, the same choice: the peer that cannot
+                // dial us at all first (#412 part 1), then the emptiest
+                // advertised peer (#375 item 3), then the lowest
+                // address, except that a peer which redraws its address
+                // does not get to win that tie with it (#412).
                 scheduler.offer(addr.0, decision.decision, decision.free_slots, now);
                 self.dial_window_choice(
                     scheduler,
