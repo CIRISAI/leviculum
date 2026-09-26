@@ -513,6 +513,20 @@ const CONFIG_ATTEMPTS: u8 = 3;
 /// frame lands, so anything past it is a board that is not going to answer.
 const RADIO_REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long the port has to stay quiet before the bring-up believes it has
+/// the board's whole backlog. [`FRAME_TIMEOUT`]'s value, and for its reason:
+/// that is already this driver's judgement of "the board has stopped
+/// talking", and a drain that called the port quiet sooner than the io task
+/// does would leave half a frame for the ACK wait to trip over.
+const DRAIN_IDLE_WINDOW: Duration = FRAME_TIMEOUT;
+
+/// The longest the drain may run whatever the board does. A board writing
+/// continuously — a debug build logging on its data port, a firmware stuck
+/// in a report loop — must not be able to keep the interface from ever
+/// coming up, and past this the stale bytes are the deframer's problem
+/// again, which is where they were before the drain existed.
+const DRAIN_BUDGET: Duration = Duration::from_secs(1);
+
 /// What a board ended up running after a radio config was pushed at it, as
 /// far as the board itself has said.
 ///
@@ -629,9 +643,82 @@ fn phy_differs(a: &RadioConfigWire, b: &RadioConfigWire) -> bool {
         || a.preamble_len != b.preamble_len
 }
 
+/// Throw away whatever the board wrote before this host asked it anything,
+/// and say how much that was.
+///
+/// The same move `lnflash::envelope::transact` makes before every control
+/// transaction, and for the same reason: a frame already sitting in the
+/// input queue when our first byte goes out cannot be an answer to it. It is
+/// a leftover — a boot banner fragment, a report whose window had run down,
+/// the ack of a config the previous daemon incarnation sent — and the ACK
+/// wait below cannot tell the difference, because the legacy
+/// [`leviculum_core::rnode::RADIO_CONFIG_ACK`] is three bytes that name
+/// neither a frame nor a profile. One stale copy of it and this host reports
+/// `Adopted` for a config the board never saw.
+///
+/// Nothing is lost by dropping it. The io task does not exist yet, so a data
+/// packet arriving here has nothing to be handed to and is dropped by the
+/// ACK wait anyway; what changes is only that it is dropped before it can be
+/// mistaken for an answer.
+///
+/// A bounded read loop and not `tcflush`, which is what `transact` uses:
+/// this runs on whatever `S` the caller brought, an in-memory duplex in the
+/// tests and a `tokio_serial::SerialStream` in the daemon, and only the
+/// second of those has a file descriptor to flush. The bound is the reason
+/// `transact` gives for preferring the syscall — a loop against a board that
+/// talks continuously has no end — so it is spelled out here as
+/// [`DRAIN_BUDGET`] rather than trusted to the board.
+async fn drain_stale_input<S>(port: &mut S, name: &str) -> usize
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let give_up = Instant::now() + DRAIN_BUDGET;
+    let mut buf = [0u8; READ_BUF_SIZE];
+    let mut dropped = 0usize;
+    loop {
+        let window = give_up
+            .saturating_duration_since(Instant::now())
+            .min(DRAIN_IDLE_WINDOW);
+        if window.is_zero() {
+            tracing::warn!(
+                "Serial {}: the port was still writing after {} ms of draining;                  {} stale bytes dropped and the radio config goes out anyway",
+                name,
+                DRAIN_BUDGET.as_millis(),
+                dropped
+            );
+            break;
+        }
+        match tokio::time::timeout(window, port.read(&mut buf)).await {
+            // EOF. Nothing to drain, and nothing to ask either — the caller
+            // finds that out on its own write.
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => dropped += n,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "Serial {}: read failed while draining the port: {} —                      the radio config goes out on an undrained port",
+                    name,
+                    e
+                );
+                break;
+            }
+            // Quiet for a whole idle window: the backlog is ours now.
+            Err(_) => break,
+        }
+    }
+    if dropped > 0 {
+        tracing::info!(
+            "Serial {}: dropped {} bytes the board had written before the radio              config went out; none of them could have been an answer to it",
+            name,
+            dropped
+        );
+    }
+    dropped
+}
+
 /// Push `requested` at the LNode firmware and find out what it ends up
 /// running.
 ///
+/// The port is drained first ([`drain_stale_input`]), then
 /// `CONFIG_ATTEMPTS` pushes of the legacy config frame, each waiting
 /// `CONFIG_ACK_TIMEOUT` for the legacy ACK. Then — ACK or no ACK — the host
 /// asks the board what it is running (`ask_radio_report`), because the
@@ -657,19 +744,27 @@ fn phy_differs(a: &RadioConfigWire, b: &RadioConfigWire) -> bool {
 /// (`lnflash/examples/radio_query_timing.rs`), because the field run that
 /// asked for them invited the opposite inference from both:
 ///
-/// * **The refusal is a state, not a race.** On a board whose stored media
-///   profile had LoRa switched off, the query came back `REFUSE_BUSY` at
-///   0 ms, 200 ms, 1 s, 3 s and 10 s after an ACKed config; on the board
-///   beside it, with LoRa on, every one of those five answered with a report.
-///   So waiting and re-querying would buy nothing here, and coming up
-///   `Adopted` on the refusal would put an interface on a board with no LoRa
-///   task at all.
+/// * **The refusal is a state, not a race.** On a board whose LoRa task never
+///   came up, the query came back `REFUSE_BUSY` at 0 ms, 200 ms, 1 s, 3 s and
+///   10 s after an ACKed config; on the board beside it, with its task
+///   running, every one of those five answered with a report. So waiting and
+///   re-querying would buy nothing here, and coming up `Adopted` on the
+///   refusal would put an interface on a board with no LoRa task at all.
+///   The refusing board's *stored* profile is not what is off: asked again at
+///   14:45 CEST the same day it answered `running_lora=0 configured_lora=1`,
+///   so the carrier is on its page and a reset is what starts it. The
+///   `[MEDIA] lora=off` line on its debug port names the running half only
+///   (`leviculum-nrf/src/media.rs::log_banner`) — which is why
+///   [`ask_media_profile`] is asked for the remedy instead of that line.
 /// * **A sub-millisecond ACK is ordinary on this link.** The legacy ACK
 ///   arrived 0.43 ms and 0.63 ms after the write on the two boards, carrying
 ///   an answer that could only have been composed for that frame — so an ACK
 ///   faster than a round trip looks is not evidence of leftover bytes in the
-///   input buffer, and the missing `drain_input` before the config (which
-///   `lnflash::envelope::transact` does do) is not what this was.
+///   input buffer, and the drain this bring-up was missing at the time is not
+///   what that was. It drains anyway now ([`drain_stale_input`]): the
+///   measurement says stale bytes were not the cause on those two boards, not
+///   that a stale `RADIO_CONFIG_ACK` would be distinguishable from a real one
+///   if there ever were any.
 pub async fn radio_bring_up<S>(
     port: &mut S,
     requested: &RadioConfigWire,
@@ -679,6 +774,10 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     use leviculum_core::rnode::RADIO_CONFIG_ACK;
+
+    // Before the first frame goes out, not after: everything already on the
+    // port belongs to a conversation this host did not have.
+    drain_stale_input(port, name).await;
 
     let payload = leviculum_core::rnode::build_radio_config_frame(requested);
     let mut frame_buf = Vec::new();
@@ -2619,6 +2718,163 @@ mod tests {
         drop(outgoing_tx);
         drop(far);
         let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
+    // -----------------------------------------------------------------
+    // The port is drained before the radio config goes out
+    // -----------------------------------------------------------------
+
+    /// A board on the far end of an in-memory duplex that acks the legacy
+    /// radio config iff `acks`, and answers
+    /// [`leviculum_core::envelope::TYPE_RADIO_QUERY`] with `report` when it
+    /// is `Some`.
+    ///
+    /// Deliberately mute to everything else: a stub that answers a frame the
+    /// host did not send would let a drain test pass on a coincidence.
+    fn duplex_board(
+        mut port: tokio::io::DuplexStream,
+        acks: bool,
+        report: Option<RadioConfigWire>,
+    ) {
+        tokio::spawn(async move {
+            let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU as usize);
+            let mut buf = [0u8; 256];
+            let mut out = Vec::new();
+            loop {
+                let n = match port.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                for r in deframer.process(&buf[..n]) {
+                    let DeframeResult::Frame(data) = r else {
+                        continue;
+                    };
+                    let reply = if data.starts_with(&leviculum_core::rnode::RADIO_CONFIG_MAGIC) {
+                        if !acks {
+                            continue;
+                        }
+                        leviculum_core::rnode::RADIO_CONFIG_ACK.to_vec()
+                    } else {
+                        match leviculum_core::envelope::decode_frame(&data) {
+                            Ok(f) if f.frame_type == leviculum_core::envelope::TYPE_RADIO_QUERY => {
+                                match report {
+                                    Some(wire) => {
+                                        leviculum_core::envelope::encode_radio_report(&wire)
+                                    }
+                                    None => continue,
+                                }
+                            }
+                            _ => continue,
+                        }
+                    };
+                    frame(&reply, &mut out);
+                    if port.write_all(&out).await.is_err() {
+                        return;
+                    }
+                    let _ = port.flush().await;
+                    out.clear();
+                }
+            }
+        });
+    }
+
+    /// **The claim.** A `RADIO_CONFIG_ACK` that was already on the port when
+    /// the bring-up started is not the ack of the config the bring-up sends.
+    ///
+    /// The board here answers nothing at all, so the honest verdict is
+    /// [`RadioBringUp::Silent`] — no ack, no report, no profile this host may
+    /// price an interface at. Without the drain the stale three bytes are
+    /// read as the ack of attempt 1, the query then goes unanswered, and the
+    /// `Unavailable if acked` branch comes up `Adopted`: an interface running
+    /// on a PHY nothing ever confirmed, built out of a frame from an earlier
+    /// conversation. That flip is what this test holds shut.
+    ///
+    /// Paused time: the honest wait is three 2 s config attempts and one 2 s
+    /// query, which the runtime parks through rather than sleeps.
+    #[tokio::test(start_paused = true)]
+    async fn bytes_waiting_before_the_config_do_not_become_its_ack() {
+        let (mut host, mut board) = tokio::io::duplex(8192);
+
+        // The leftover: one framed legacy ACK, written before the host has
+        // sent anything at all.
+        let mut stale = Vec::new();
+        frame(&leviculum_core::rnode::RADIO_CONFIG_ACK, &mut stale);
+        board.write_all(&stale).await.expect("the duplex takes it");
+        board.flush().await.expect("the duplex flushes");
+
+        // A board that says nothing from here on. `board` is kept alive so
+        // the host reads silence rather than EOF — silence is what a real
+        // attached board that has stopped talking gives.
+        let requested = requested_test_phy();
+        let outcome = radio_bring_up(&mut host, &requested, "drain").await;
+
+        assert_eq!(
+            outcome,
+            RadioBringUp::Silent,
+            "a stale ACK from before the config was read as the config's own"
+        );
+        assert!(
+            radio_pricing_phy(&outcome, &requested, "drain").is_err(),
+            "nothing here reported a profile, so nothing may be priced"
+        );
+        drop(board);
+    }
+
+    /// The drain takes the leftovers and not the answers: same stale ACK on
+    /// the port, but a board that acks the config and reports its profile
+    /// comes up `Adopted` on that profile.
+    ///
+    /// The other half of the test above. A drain that ran long enough, or
+    /// kept reading past the port going quiet, would swallow the real ack
+    /// too — and the symptom would be this test's `Silent`, not a compile
+    /// error.
+    #[tokio::test(start_paused = true)]
+    async fn the_drain_does_not_swallow_the_answer_that_follows_it() {
+        let (mut host, mut board) = tokio::io::duplex(8192);
+
+        let mut stale = Vec::new();
+        frame(&leviculum_core::rnode::RADIO_CONFIG_ACK, &mut stale);
+        board.write_all(&stale).await.expect("the duplex takes it");
+        board.flush().await.expect("the duplex flushes");
+
+        let requested = requested_test_phy();
+        duplex_board(board, true, Some(requested));
+
+        assert_eq!(
+            radio_bring_up(&mut host, &requested, "drain").await,
+            RadioBringUp::Adopted,
+            "the board acked and reported the requested profile"
+        );
+    }
+
+    /// The drain reports what it dropped, and leaves the port usable: the
+    /// count is what the log line an operator reads is built from, and a
+    /// drain that consumed the stream would make every later read silent.
+    #[tokio::test(start_paused = true)]
+    async fn the_drain_counts_the_bytes_it_dropped_and_leaves_the_port_open() {
+        let (mut host, mut board) = tokio::io::duplex(8192);
+        board
+            .write_all(b"[MEDIA] lora=on ble=on src=flash\n")
+            .await
+            .expect("the duplex takes it");
+        board.flush().await.expect("the duplex flushes");
+
+        assert_eq!(
+            drain_stale_input(&mut host, "drain").await,
+            33,
+            "the whole banner fragment, and only it"
+        );
+        assert_eq!(
+            drain_stale_input(&mut host, "drain").await,
+            0,
+            "a drained port has nothing left to drain"
+        );
+
+        board.write_all(b"after").await.expect("still writable");
+        board.flush().await.expect("the duplex flushes");
+        let mut got = [0u8; 5];
+        host.read_exact(&mut got).await.expect("still readable");
+        assert_eq!(&got, b"after");
     }
 
     /// A daemon holding no firmware board reports that it reached none,
