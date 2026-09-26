@@ -718,7 +718,7 @@ where
 /// Push `requested` at the LNode firmware and find out what it ends up
 /// running.
 ///
-/// The port is drained first ([`drain_stale_input`]), then
+/// The port is drained first (`drain_stale_input`), then
 /// `CONFIG_ATTEMPTS` pushes of the legacy config frame, each waiting
 /// `CONFIG_ACK_TIMEOUT` for the legacy ACK. Then — ACK or no ACK — the host
 /// asks the board what it is running (`ask_radio_report`), because the
@@ -755,13 +755,13 @@ where
 ///   so the carrier is on its page and a reset is what starts it. The
 ///   `[MEDIA] lora=off` line on its debug port names the running half only
 ///   (`leviculum-nrf/src/media.rs::log_banner`) — which is why
-///   [`ask_media_profile`] is asked for the remedy instead of that line.
+///   `ask_media_profile` is asked for the remedy instead of that line.
 /// * **A sub-millisecond ACK is ordinary on this link.** The legacy ACK
 ///   arrived 0.43 ms and 0.63 ms after the write on the two boards, carrying
 ///   an answer that could only have been composed for that frame — so an ACK
 ///   faster than a round trip looks is not evidence of leftover bytes in the
 ///   input buffer, and the drain this bring-up was missing at the time is not
-///   what that was. It drains anyway now ([`drain_stale_input`]): the
+///   what that was. It drains anyway now (`drain_stale_input`): the
 ///   measurement says stale bytes were not the cause on those two boards, not
 ///   that a stale `RADIO_CONFIG_ACK` would be distinguishable from a real one
 ///   if there ever were any.

@@ -16,7 +16,7 @@
 //! # Why the helper must pin the callsite-interest cache (Codeberg #290)
 //!
 //! What the same measurement showed missing was ONE line: the `info!` at
-//! [`crate::interfaces::log_direct_ingress_filter_armed`].  A freshly
+//! `crate::interfaces::log_direct_ingress_filter_armed`.  A freshly
 //! minted `info!` emitted from the very same task, on the same thread,
 //! through the same dispatcher, landed in the buffer.  So the suppression
 //! is not per-thread and not per-dispatcher — it is per CALLSITE.
