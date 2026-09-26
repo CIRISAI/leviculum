@@ -196,8 +196,23 @@ enum QueryAnswer {
 /// iff `acks_config`, and answers the radio query as `answer` says.
 ///
 /// Deliberately nothing else: a board that answers more than it was asked
-/// would let a test pass on a frame the host never requested.
-fn scripted_board(mut port: DuplexStream, acks_config: bool, answer: QueryAnswer) {
+/// would let a test pass on a frame the host never requested. A board that
+/// also names its carriers is [`scripted_board_with_media`].
+fn scripted_board(port: DuplexStream, acks_config: bool, answer: QueryAnswer) {
+    scripted_board_with_media(port, acks_config, answer, None)
+}
+
+/// The same board, plus an answer to
+/// [`envelope::TYPE_MEDIA_QUERY`] — `(running, configured)`, which is what a
+/// real LNode reports and what the host asks for once the radio query has been
+/// refused. `None` is a board that does not answer that query, which is also
+/// what older firmware does.
+fn scripted_board_with_media(
+    mut port: DuplexStream,
+    acks_config: bool,
+    answer: QueryAnswer,
+    media: Option<(envelope::MediaProfileWire, envelope::MediaProfileWire)>,
+) {
     tokio::spawn(async move {
         let mut deframer = Deframer::with_max_frame(564);
         let mut buf = vec![0u8; 1024];
@@ -229,6 +244,12 @@ fn scripted_board(mut port: DuplexStream, acks_config: bool, answer: QueryAnswer
                             envelope::encode_refusal(envelope::TYPE_RADIO_QUERY, reason)
                         }
                         QueryAnswer::Silence => continue,
+                    },
+                    Ok(f) if f.frame_type == envelope::TYPE_MEDIA_QUERY => match media {
+                        Some((running, configured)) => {
+                            envelope::encode_media_report(&running, &configured)
+                        }
+                        None => continue,
                     },
                     Ok(_) => continue,
                 };
@@ -390,6 +411,56 @@ async fn a_board_that_answers_neither_frame_does_not_come_up() {
 // **Acceptance**: the first test below is red against the policy this replaces
 // (ack ends the bring-up at `Adopted`), green with the policy this pass lands.
 
+/// The 2026-09-26 field bring-up, end to end over the port: the board acks the
+/// legacy config, refuses the radio query as busy, and then — asked — names a
+/// stored media profile with LoRa switched off.
+///
+/// Measured on the rig T114 `183004F712B4A7FE` that morning
+/// (`lnflash/examples/radio_query_timing.rs`, `[MEDIA] lora=off ble=on
+/// src=flash` on its debug port): the refusal held at 0 ms, 200 ms, 1 s, 3 s
+/// and 10 s after the ack, so the verdict below is not a race that a retry
+/// would win. What the run cost was the diagnosis, which is why this asserts
+/// on the line and not only on the outcome.
+#[tokio::test(start_paused = true)]
+async fn a_board_with_lora_switched_off_says_so_when_asked() {
+    let (mut host, board) = tokio::io::duplex(8192);
+    let off = envelope::MediaProfileWire {
+        lora_enabled: false,
+        ble_enabled: true,
+    };
+    scripted_board_with_media(
+        board,
+        true,
+        QueryAnswer::Refuse(envelope::REFUSE_BUSY),
+        Some((off, off)),
+    );
+
+    let requested = requested_phy();
+    let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
+    assert_eq!(
+        outcome,
+        RadioBringUp::Dead {
+            media: Some((off, off))
+        },
+        "a board that refuses the radio query is asked about its carriers, and \
+         what it answers belongs to the verdict"
+    );
+
+    let refusal = radio_pricing_phy(&outcome, &requested, "mvr")
+        .expect_err("a board with LoRa switched off has no radio to price");
+    for key in [
+        "outcome=dead-radio",
+        "media_answered=1",
+        "media_configured_lora=0",
+        "--set-media lora=on",
+    ] {
+        assert!(
+            refusal.contains(key),
+            "the line an operator reads must carry {key}: {refusal}"
+        );
+    }
+}
+
 /// #363 from the host end: an ack plus a busy radio query is a board whose
 /// radio never came up, and the interface must not come up over it.
 #[tokio::test(start_paused = true)]
@@ -401,7 +472,7 @@ async fn an_ack_from_a_board_with_no_radio_is_not_an_adopted_interface() {
     let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
     assert_eq!(
         outcome,
-        RadioBringUp::Dead,
+        RadioBringUp::Dead { media: None },
         "the legacy ack is a receipt for the flash page; a board that then \
          refuses to name a running profile has no radio this boot"
     );
@@ -507,7 +578,7 @@ async fn a_busy_query_without_an_ack_is_also_a_dead_radio() {
 
     let requested = requested_phy();
     let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
-    assert_eq!(outcome, RadioBringUp::Dead);
+    assert_eq!(outcome, RadioBringUp::Dead { media: None });
     radio_pricing_phy(&outcome, &requested, "mvr")
         .expect_err("a radio the board says is not running is not priced");
 }

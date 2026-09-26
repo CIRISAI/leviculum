@@ -557,7 +557,24 @@ pub enum RadioBringUp {
     /// Distinct from [`Silent`](RadioBringUp::Silent) because the board did
     /// answer, and the answer is worse than no answer: there is no profile
     /// to price because there is no modem to price.
-    Dead,
+    ///
+    /// `media` is what the board then said about its carriers
+    /// ([`leviculum_core::envelope::TYPE_MEDIA_QUERY`]), as
+    /// `(running, configured)`, or `None` from a board that would not answer
+    /// that either. It is carried in the value rather than logged where it is
+    /// read because it is the operator's next action and not a detail: a
+    /// `configured_lora=0` says the radio is off *by the board's stored
+    /// profile*, which no amount of retrying on this side can change, and a
+    /// `configured_lora=1` with no running profile is a LoRa task that did
+    /// not get through `configure_lora`. Measured on the rig T114s on
+    /// 2026-09-26 (`lnflash/examples/radio_query_timing.rs`): the first is
+    /// what a field board looked like, and its refusal never cleared.
+    Dead {
+        media: Option<(
+            leviculum_core::envelope::MediaProfileWire,
+            leviculum_core::envelope::MediaProfileWire,
+        )>,
+    },
 }
 
 /// The config block as it goes on the wire, and as the board's own report
@@ -635,6 +652,24 @@ fn phy_differs(a: &RadioConfigWire, b: &RadioConfigWire) -> bool {
 /// firmware either refuses it as a frame it does not know or says nothing
 /// at all, and neither is the board stating that its radio is off; the ACK
 /// is then the only word it has, and this host takes it.
+///
+/// Two things about the refusal were measured on the rig T114s on 2026-09-26
+/// (`lnflash/examples/radio_query_timing.rs`), because the field run that
+/// asked for them invited the opposite inference from both:
+///
+/// * **The refusal is a state, not a race.** On a board whose stored media
+///   profile had LoRa switched off, the query came back `REFUSE_BUSY` at
+///   0 ms, 200 ms, 1 s, 3 s and 10 s after an ACKed config; on the board
+///   beside it, with LoRa on, every one of those five answered with a report.
+///   So waiting and re-querying would buy nothing here, and coming up
+///   `Adopted` on the refusal would put an interface on a board with no LoRa
+///   task at all.
+/// * **A sub-millisecond ACK is ordinary on this link.** The legacy ACK
+///   arrived 0.43 ms and 0.63 ms after the write on the two boards, carrying
+///   an answer that could only have been composed for that frame — so an ACK
+///   faster than a round trip looks is not evidence of leftover bytes in the
+///   input buffer, and the missing `drain_input` before the config (which
+///   `lnflash::envelope::transact` does do) is not what this was.
 pub async fn radio_bring_up<S>(
     port: &mut S,
     requested: &RadioConfigWire,
@@ -727,8 +762,12 @@ where
         RadioReport::Running(running) => RadioBringUp::Running(running),
         // The board says it has no running radio. With an ACK in hand this is
         // the `lora=off` boot; without one it is the same board state reached
-        // without the flash-page receipt. Either way there is no modem here.
-        RadioReport::NotRunning => RadioBringUp::Dead,
+        // without the flash-page receipt. Either way there is no modem here —
+        // and one more question turns that into something an operator can act
+        // on, so it is asked before the verdict is returned.
+        RadioReport::NotRunning => RadioBringUp::Dead {
+            media: ask_media_profile(port, name).await,
+        },
         // Nothing readable came back. An ACK is then the only statement the
         // board has made, and older firmware that does not know the query at
         // all must keep coming up on it.
@@ -867,6 +906,145 @@ where
     }
 }
 
+/// Ask a board that just refused the radio query which carriers it has
+/// ([`leviculum_core::envelope::TYPE_MEDIA_QUERY`]), as `(running,
+/// configured)`.
+///
+/// Only ever called on the way to [`RadioBringUp::Dead`], and only to name the
+/// reason in the log. The bring-up decision does not depend on the answer: a
+/// board with no running profile has no modem to price whatever it says about
+/// its carriers, so a board that will not answer this costs a diagnosis and
+/// never a wrong verdict.
+///
+/// Why it is worth one more frame: on 2026-09-26 a field base spent fifty
+/// minutes on `outcome=dead-radio` while the board's own debug port said
+/// `[MEDIA] lora=off ble=on src=flash` — the stored profile had LoRa
+/// switched off, so no LoRa task ever ran and the query was refused for as
+/// long as anyone asked (measured to 10 s,
+/// `lnflash/examples/radio_query_timing.rs`). That one fact is the whole
+/// remedy (`lnflash --set-media lora=on`, then reset), and it was on the
+/// board the host was already talking to.
+///
+/// Shares `ask_radio_report`'s rules: this runs before the io task exists, so
+/// frames that are neither answer are dropped, and the refusal of *another*
+/// frame type is not this frame's answer.
+async fn ask_media_profile<S>(
+    port: &mut S,
+    name: &str,
+) -> Option<(
+    leviculum_core::envelope::MediaProfileWire,
+    leviculum_core::envelope::MediaProfileWire,
+)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use leviculum_core::envelope;
+
+    let mut frame_buf = Vec::new();
+    frame(&envelope::encode_media_query(), &mut frame_buf);
+    if port.write_all(&frame_buf).await.is_err() || port.flush().await.is_err() {
+        return None;
+    }
+
+    let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU as usize);
+    let mut buf = vec![0u8; READ_BUF_SIZE];
+    let deadline = tokio::time::Instant::now() + MEDIA_ANSWER_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::debug!(
+                "Serial {}: no media report within {:?} of the media query, so the \
+                 dead-radio diagnosis cannot name the carriers",
+                name,
+                MEDIA_ANSWER_TIMEOUT
+            );
+            return None;
+        }
+        let n = match tokio::time::timeout(remaining, port.read(&mut buf)).await {
+            Ok(Ok(0)) | Ok(Err(_)) => return None,
+            Ok(Ok(n)) => n,
+            Err(_) => continue,
+        };
+        for r in deframer.process(&buf[..n]) {
+            let DeframeResult::Frame(data) = r else {
+                continue;
+            };
+            match envelope::decode_frame(&data) {
+                Ok(f) if f.frame_type == envelope::TYPE_MEDIA_REPORT => {
+                    return envelope::decode_media_report_payload(f.payload);
+                }
+                Ok(f) if f.frame_type == envelope::TYPE_REFUSAL => {
+                    if matches!(
+                        envelope::decode_refusal_payload(f.payload),
+                        Some((refused, _)) if refused == envelope::TYPE_MEDIA_QUERY
+                    ) {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The media half of a dead-radio verdict, as the scalar keys periculum and
+/// an operator's grep both read. `media_answered=0` when the board would not
+/// say, so a log line is never silently missing the fields.
+fn dead_radio_media_keys(
+    media: Option<(
+        leviculum_core::envelope::MediaProfileWire,
+        leviculum_core::envelope::MediaProfileWire,
+    )>,
+) -> String {
+    match media {
+        Some((running, configured)) => format!(
+            "media_answered=1 {} {}",
+            media_keys("media_running", running),
+            media_keys("media_configured", configured)
+        ),
+        None => "media_answered=0".to_string(),
+    }
+}
+
+/// What to do about a dead radio, in one sentence, chosen by what the board
+/// said about its carriers.
+///
+/// Three different situations reach `outcome=dead-radio` and they have three
+/// different remedies; a single sentence covering all of them is the one that
+/// sent a field operator looking for a driver bug on 2026-09-26, when the
+/// board had simply been left with LoRa switched off.
+fn dead_radio_remedy(
+    media: Option<(
+        leviculum_core::envelope::MediaProfileWire,
+        leviculum_core::envelope::MediaProfileWire,
+    )>,
+) -> &'static str {
+    match media {
+        // The stored profile has LoRa off, so the boot spawned no LoRa task
+        // and the next boot will not either. Nothing on this side is retryable.
+        Some((_, configured)) if !configured.lora_enabled => {
+            "the board's own media profile has LoRa switched off, which is why \
+             there is no running profile to name: no retry here can change \
+             that, and neither can a reset — re-enable the carrier on the board \
+             (`lnflash --set-media lora=on`) and reset it"
+        }
+        // LoRa is meant to be on, so the task should have published a profile:
+        // `configure_lora` did not return Ok this boot.
+        Some(_) => {
+            "the board's media profile has LoRa enabled, so its LoRa task was \
+             expected to name a profile and did not: read the board's debug port \
+             (if00) for `[LORA] reconfig FAILED` or a fault before the first \
+             `[LORA] active config`"
+        }
+        // Old firmware, or a board too sick to answer the second question.
+        None => {
+            "the board would not name its carriers either, so whether LoRa is \
+             switched off or failed to start has to come off its debug port \
+             (if00, `[MEDIA] lora=…`)"
+        }
+    }
+}
+
 /// The profile this interface prices its airtime at, given what the board
 /// said — or the refusal that keeps the interface off the air.
 ///
@@ -907,19 +1085,21 @@ pub fn radio_pricing_phy(
         // bring-up currently reaches: a board running the requested profile
         // is priced at its own report, and there is nothing to warn about.
         RadioBringUp::Running(running) => Ok((*running, None)),
-        RadioBringUp::Dead => Err(format!(
+        RadioBringUp::Dead { media } => Err(format!(
             "RADIO_BRINGUP iface={name} outcome=dead-radio lora=off \
              query_frame=0x{:02x} query_answer=radio-not-running \
-             query_wait_ms={} {} (the board answered the radio query by \
+             query_wait_ms={} {} {} (the board answered the radio query by \
              refusing to name a running profile: this boot never brought its \
              radio up. A legacy config ACK does not contradict that — it is \
              a receipt for the flash page, a reset away from meaning \
              anything — so an interface here would report Up and hand every \
              frame to a modem that does not exist. It does not come up, and \
-             the daemon keeps running without it)",
+             the daemon keeps running without it. {})",
             leviculum_core::envelope::TYPE_RADIO_QUERY,
             RADIO_REPORT_TIMEOUT.as_millis(),
             phy_keys("requested", requested),
+            dead_radio_media_keys(*media),
+            dead_radio_remedy(*media),
         )),
         RadioBringUp::Silent => Err(format!(
             "RADIO_BRINGUP iface={name} outcome=refused config_frame=legacy-radio-config \
@@ -2560,5 +2740,111 @@ mod tests {
         // subscriber the moment this test is done with it.
         task.abort();
         let _ = task.await;
+    }
+
+    /// The 2026-09-26 field bring-up in one assertion: the board refused the
+    /// radio query and its stored media profile had LoRa off. The verdict was
+    /// right; what cost fifty minutes was that the line did not say the board
+    /// had been left with its radio switched off, so the remedy has to be in
+    /// it — and as scalar keys, because that is what periculum and a grep
+    /// both read.
+    #[test]
+    fn a_dead_radio_names_the_media_profile_that_switched_it_off() {
+        use leviculum_core::envelope::MediaProfileWire;
+
+        let off = MediaProfileWire {
+            lora_enabled: false,
+            ble_enabled: true,
+        };
+        let refusal = radio_pricing_phy(
+            &RadioBringUp::Dead {
+                media: Some((off, off)),
+            },
+            &requested_test_phy(),
+            "serial_0",
+        )
+        .expect_err("a board with no running radio is not priced");
+
+        assert!(
+            refusal.contains("media_answered=1")
+                && refusal.contains("media_configured_lora=0")
+                && refusal.contains("media_running_lora=0"),
+            "the carriers the board named have to be in the line: {refusal}"
+        );
+        assert!(
+            refusal.contains("--set-media lora=on"),
+            "the remedy for a switched-off carrier is to switch it on: {refusal}"
+        );
+    }
+
+    /// The other way a radio is dead: LoRa is meant to be on, so the board's
+    /// LoRa task did not get through `configure_lora` and the debug port is
+    /// where that is written. A single sentence for both would send the
+    /// operator to the wrong place in one of them.
+    #[test]
+    fn a_dead_radio_with_lora_enabled_points_at_the_boards_own_log() {
+        use leviculum_core::envelope::MediaProfileWire;
+
+        let refusal = radio_pricing_phy(
+            &RadioBringUp::Dead {
+                media: Some((MediaProfileWire::BOTH, MediaProfileWire::BOTH)),
+            },
+            &requested_test_phy(),
+            "serial_0",
+        )
+        .expect_err("a board with no running radio is not priced");
+
+        assert!(
+            refusal.contains("media_configured_lora=1"),
+            "the line must still state what the board said: {refusal}"
+        );
+        assert!(
+            !refusal.contains("--set-media"),
+            "nothing is wrong with the carrier here, so nothing should tell the \
+             operator to change it: {refusal}"
+        );
+        assert!(
+            refusal.contains("reconfig FAILED"),
+            "a LoRa task that published no profile is diagnosed on the board's \
+             own debug port: {refusal}"
+        );
+    }
+
+    /// A board too old or too sick to answer the media query still gets a
+    /// verdict — the diagnosis is what degrades, never the decision — and the
+    /// line says which of the two it is missing.
+    #[test]
+    fn a_dead_radio_says_so_even_when_the_media_query_goes_unanswered() {
+        let refusal = radio_pricing_phy(
+            &RadioBringUp::Dead { media: None },
+            &requested_test_phy(),
+            "serial_0",
+        )
+        .expect_err("a board with no running radio is not priced");
+
+        assert!(
+            refusal.contains("outcome=dead-radio") && refusal.contains("media_answered=0"),
+            "an unanswered media query is a stated absence, not a missing field: {refusal}"
+        );
+    }
+
+    /// The profile the field base pushes at its T114 (`/home/lew/feld/config`
+    /// on 2026-09-26), so the tests above assert on the line an operator
+    /// actually read.
+    fn requested_test_phy() -> RadioConfigWire {
+        RadioConfigWire {
+            frequency_hz: 869_463_000,
+            bandwidth_hz: 125_000,
+            sf: 8,
+            cr: 5,
+            tx_power_dbm: 20,
+            preamble_len: 18,
+            csma_enabled: true,
+            radio_silent: false,
+            st_alock: 0,
+            lt_alock: 1000,
+            lt_alock_present: true,
+            silence_lease_s: 0,
+        }
     }
 }
