@@ -10,7 +10,7 @@
 //!
 //! # Two sinks, one rendering
 //!
-//! Every reading is rendered exactly once, into [`Column`]s, and both sinks
+//! Every reading is rendered exactly once, into `Column`s, and both sinks
 //! print those columns:
 //!
 //! * one `EVENT lxmf_telemetry_received …` line, so a walk is readable in
@@ -336,7 +336,7 @@ impl Report {
     /// Hand-written rather than serde: the crate has no JSON dependency, and
     /// every string value here is either hex, one of this module's own
     /// literals, or a decoder message — all of which go through
-    /// [`json_string`], so the row is valid JSON whatever the decoder said.
+    /// `json_string`, so the row is valid JSON whatever the decoder said.
     ///
     /// `received_at` is passed in rather than read from the clock so the
     /// decision and the timestamp are separable in a test
