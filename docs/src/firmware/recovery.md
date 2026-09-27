@@ -67,7 +67,7 @@ the ordinary double-tap-the-button trick does not apply. On this board:
   which runs `meshtastic --port /dev/ttyACM0 --enter-dfu`. This
   firmware-side admin command is the only software-only DFU entry on a
   board with no accessible RESET pin. Requires the `meshtastic` CLI
-  (`pip install meshtastic`). (`Justfile:1759-1768`)
+  (`pip install meshtastic`). (`Justfile:1773-1782`)
 
 - **Manual fallback.** Where the software command is unavailable, the
   bootloader is reached by a **needle double-tap in the hidden pinhole**
@@ -75,7 +75,7 @@ the ordinary double-tap-the-button trick does not apply. On this board:
   through a small pinhole, double-tapped with a needle. *(This pinhole
   detail comes from project field notes, not from the firmware source;
   the source confirms only that the device "has no externally accessible
-  RESET pin", `Justfile:1760-1761`.)*
+  RESET pin", `Justfile:1774-1775`.)*
 
 - **The same pinhole gives a plain reset with a single tap**, which is
   what [When USB stays dark](#when-usb-stays-dark) asks for first: one
@@ -86,7 +86,7 @@ the ordinary double-tap-the-button trick does not apply. On this board:
 
 - **After our firmware lands**, subsequent flashes use the touch handler
   in `src/usb.rs` and the DFU recipe is no longer needed.
-  (`Justfile:1762-1763`)
+  (`Justfile:1776-1777`)
 
 > **Do not flash foreign nRF52 firmware onto the Pocket V2 without a
 > recovery plan.** Project field experience is that prebuilt
@@ -186,7 +186,7 @@ If the board enumerates nothing on USB after a flash or a bad image:
    RESET to get the UF2 drive regardless of the running image
    (`leviculum-nrf/README.md:38`). On a Pocket V2, use the hidden-pinhole
    needle double-tap (see above) — the board has no accessible RESET pin
-   (`Justfile:1760-1761`).
+   (`Justfile:1774-1775`).
 5. **Re-flash the known-good LNode firmware** once the UF2 drive appears:
    `just flash` (T114) or `just flash-rak4631` /
    `just flash-rak4631-pocket` (RAK4631). See [Flashing](flashing.md).
@@ -204,4 +204,4 @@ physical device.)**
 > always recoverable by re-running the flash recipe. The nRF52 LNodes
 > (T114, RAK4631) are different — a bad external image can leave the
 > device USB-dark, which is why a recovery plan matters here.
-> (`Justfile:1770-1774`)
+> (`Justfile:1784-1788`)
