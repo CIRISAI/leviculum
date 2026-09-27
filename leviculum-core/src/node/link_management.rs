@@ -1138,7 +1138,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let hops_before = link.hops();
             let dest_hash = *link.destination_hash();
             link.set_hops(packet.hops);
-            let path_before = self
+            // The link always adopts; the PATH entry may decline when adopting
+            // would strand the relay it still names (#332), and
+            // `path_rebalance` says which it did.
+            let path_rebalance = self
                 .transport
                 .rebalance_path_hops(dest_hash.as_bytes(), packet.hops);
             crate::tracing::warn!(
@@ -1146,7 +1149,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 dest = %HexShort(dest_hash.as_bytes()),
                 packet_hops = packet.hops,
                 link_hops_before = hops_before,
-                path_hops_before = ?path_before,
+                path_rebalance = ?path_rebalance,
                 "LRPROOF hop asymmetry at link terminus: rebalanced link and path to the validated proof's hop count (#330)"
             );
         }

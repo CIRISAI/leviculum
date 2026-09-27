@@ -84,7 +84,7 @@ leviculum matches this as of 2026-07-10 (D3, fixed on branch `path-response-hops
 node answers a path request from a network peer (`handle_path_request` case 2b, `transport.rs:7033`)
 it now emits `self.storage.get_path(&requested_hash).map(|p| p.hops)`, the receipt-incremented stored
 count, exactly as `:2956` does. It previously emitted `cached_packet.hops`, the AS-RECEIVED wire byte
-(`set_announce_cache` stores the raw pre-increment buffer; the receipt increment at `transport.rs:2201`
+(`set_announce_cache` stores the raw pre-increment buffer; the receipt increment at `transport.rs:2232`
 touches only the in-memory packet). That value is `stored - 1`, so every peer learning through our
 transport path response was one hop short, and the deficit COMPOUNDED on each re-learn through a
 leviculum transport. Case 1 (local dest) and case 2a (local-client answer, explicit `+1`) were already
@@ -175,24 +175,24 @@ Recorded 2026-07-10 against `reference/Reticulum` as vendored.
 
 | Rule | Reference | leviculum | Verdict |
 |------|-----------|-----------|---------|
-| Receipt increment | `:1498` | `transport.rs:2033` | matches |
+| Receipt increment | `:1498` | `transport.rs:2064` | matches |
 | IPC exception, instance side | `:1523` | `transport.rs:1750` | matches |
 | IPC exception, client side | `:1525` | `transport.rs:1750` (else-arm of the `has_local_clients` gate) | matches — **fixed 2026-07-10 (D2, commit `06aadaff`); was absent** |
 | Announce rebroadcast | `:2050` | `transport.rs:6904` | matches |
-| Path table store | `:1909`, `:2055` | `transport.rs:3715` | matches |
-| Path acceptance | `:1806`, `:2412` | `transport.rs:3811` (`should_update`) | matches |
+| Path table store | `:1909`, `:2055` | `transport.rs:3746` | matches |
+| Path acceptance | `:1806`, `:2412` | `transport.rs:3842` (`should_update`) | matches |
 | Path-response hop emission | `:2997` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:7033` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
 | Link entry fields | `:1615-1625` | `storage_types.rs:60 (destination_hash at :76)` | matches, including the destination hash |
-| LRPROOF relay check | `:2215-2206` (single `== remaining_hops`, drop else; the `:1697` disjunction is gated OUT for LRPROOF at `:1687`) | `transport.rs:4482`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
-| Healing, no path | `:737` | `transport.rs:7578` | matches |
-| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:7860` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
-| Healing, destination direct | `:753` | `transport.rs:7586` | matches |
+| LRPROOF relay check | `:2215-2206` (single `== remaining_hops`, drop else; the `:1697` disjunction is gated OUT for LRPROOF at `:1687`) | `transport.rs:4513`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
+| Healing, no path | `:737` | `transport.rs:7612` | matches |
+| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:7894` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
+| Healing, destination direct | `:753` | `transport.rs:7620` | matches |
 | Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:7767` | matches |
 
 ### The deliberate deviation, and its cost
 
 On a mismatch we log a warning and REWRITE the forwarded proof's hop count to the frozen value, so
-that a strict Python client accepts it (`transport.rs:4506`, commit `5d0833d7`). It buys
+that a strict Python client accepts it (`transport.rs:4537`, commit `5d0833d7`). It buys
 interoperability today: without it, NomadNet cannot establish a link through our relay.
 
 It also costs three things:
@@ -398,6 +398,99 @@ The fixtures are in `mvr_hop_asymmetry.rs`: the relay shape
 (`relay_adopts_validated_proof_hop_count_into_link_and_path`), the terminus shape
 (`initiator_adopts_validated_proof_hop_count_into_link_and_path`), and one negative control per
 arm pinning that a forged signature adopts nothing.
+
+### The guard #330 needed: a proof that took the short way back does not move the route (#332)
+
+#330 landed the adoption and asked for an mvr "before any change" that shows what the
+adoption costs when the proof's route is not a shortening of the path entry's route but a
+DIFFERENT route. Periculum pass 327 (2026-09-27,
+the periculum tree's own report `2026-09-10-pathchoice-sweep`, section 10) measured it in the
+emulated pathchoice cells: twelve arms under `measure`, `rnsd` (1.3.5 in the containers)
+carrying 8/8 transfers on every relayed arm, `lnsd` reading 7/8, 3/8, 4/8, 8/8, 8/8 at
+L = 0.3/0.5/0.7/0.9/1.0. Ten of ten failed `lnsd` attempts had sent their link request over
+the direct lossy pair; all 21 relayed link requests in the run belonged to attempts that
+succeeded. The route moved without an announce:
+
+```text
+PATH_ADD hops=2 next_hop=<bravo> reason="new_destination"
+LINK_ENTRY_SET remaining_hops=2            <- attempt 1, relayed, ok
+LRPROOF arrived dest=… iface=serial_0 hops=1
+WARN LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count … packet_hops=1 remaining_hops=2
+event="PATH_REBALANCE" dst=… from=2 to=1
+LINK_ENTRY_SET remaining_hops=1            <- every later attempt, direct
+```
+
+The mechanism is one line of arithmetic. `PathEntry::needs_relay()` is
+`hops > 1 && next_hop.is_some()` (`storage_types.rs:60`), and it is the sole switch that puts
+a transport header on an originated packet (`transport.rs::send_to_destination`,
+`route_via_transport`; `connect` reads it too). Writing `hops = 1` into an entry whose
+`next_hop` still names the relay therefore does not shorten a route, it DELETES one: the relay
+is still recorded, still the only way to the destination, and no longer addressed by anything
+we send. Every later attempt is a coin toss on the pair that lost the first one. At L >= 0.9 no
+proof crosses the pair at all, nothing rebalances, and the arm reads 8/8 — the damage is done
+by the ONE frame that gets through.
+
+**The rule, as of #332:** a rebalance may not adopt a hop count that turns `needs_relay()`
+false while `next_hop` still names a transport peer. `rebalance_path_hops`
+(`leviculum-core/src/transport.rs`) refuses such a count, leaves the entry untouched, reports
+`PathRebalance::HeldForNextHop` to its caller and emits
+`PATH_REBALANCE_HELD dst= from= refused= next_hop= iface=`. Both adoption sites go through that
+one function, so the rule holds at the relay arm and at the terminus alike. Nothing else
+changes: `link_entry.remaining_hops` and `link.hops()` still adopt, and the forwarded copy still
+carries the frozen count (#38's rewrite).
+
+**What the entry should do with the information instead: nothing.** The proof proves that one
+frame crossed a route of that length, not that the route is ours to use — the path entry has no
+interface and no next hop for it, and a rebalance has no authority to invent either, because a
+route arrives by announce. Keeping `hops = 2` keeps the entry internally consistent and keeps
+the relay that has been delivering. The direct sighting is genuinely worth keeping, but where
+route CHOICE can weigh it (#230's second-best route), not in the field that decides whether a
+header is written; #332 deliberately does not build that.
+
+**Is this a mis-port or a deviation? A deviation — Python 1.5.2 has the same hole.** Read
+against `/home/lew/coding/Reticulum` at `ea98db4f` (1.5.2; these numbers do not resolve inside
+the pinned 1.3.5 submodule):
+
+* Relay site, `Transport.py:2632-2634`:
+  ```python
+  link_entry[IDX_LT_REM_HOPS] = packet.hops
+  path_entry = Transport.path_table.get(link_destination)
+  if path_entry: path_entry[IDX_PT_HOPS] = packet.hops
+  ```
+* Terminus site, `Transport.py:2704-2707`:
+  ```python
+  link.expected_hops = packet.hops
+  path_entry = Transport.path_table.get(link.destination.hash)
+  if path_entry:
+      path_entry[IDX_PT_HOPS] = packet.hops
+  ```
+
+Neither reads `IDX_PT_NEXT_HOP`, and neither clears it. And Python routes on the same predicate
+we do. In its outbound path, `Transport.py:1396-1429` (1.5.2), the line
+`if path_entry[IDX_PT_HOPS] > 1:` inserts the transport header with
+`new_raw += path_entry[IDX_PT_NEXT_HOP]`, and the `else` that closes the chain
+"know[s] the destination is directly reachable" and transmits HEADER_1. So a 1.5.2 node whose
+2-hop entry is rebalanced to 1 stops addressing its relay for exactly the same reason ours did.
+One difference is worth recording because it narrows Python's exposure without closing it: the
+relay site is additionally gated on `packet.receiving_interface == link_entry[IDX_LT_NH_IF]`
+(`Transport.py:2615`), so a proof that comes back on another interface rebalances nothing there.
+On one shared carrier — the pathchoice cells, and any LoRa mesh — that test passes and the hole
+is open. The terminus site has no interface test at all.
+
+Deviation rule, clause by clause: **wire unchanged** (the proof is still accepted and still
+forwarded with the frozen count, #38's rule stays; only the path table, which is ours alone,
+declines a write); **semantics unchanged for peers** (no peer can observe a path entry; what a
+peer observes is a relay that keeps being addressed, i.e. what it observed before #330);
+**priority 1 measurably served** — the baseline is pass 327's `K/8` transfer column above, and
+the prediction for the reviewer's rerun is 8/8 on all five relayed `lnsd` arms.
+
+The fixtures are in `leviculum-core/src/node/mvr_link_proof_rebalance_next_hop.rs`: the
+single-carrier reproduction in the emulated cell's own shape (all three nodes on one interface,
+bravo measured to forward the first request and to forward the second one too), the same
+mechanism with the proof arriving on a second carrier (where the stranded request left on the
+RELAY's carrier, not the direct one — the rebalance never moves `interface_index` either), and
+the guard in isolation with its positive controls: a 3 -> 2 adoption that keeps the relay still
+happens, and an entry naming no next hop still moves freely.
 
 ## The ceiling, and what 1.5.x does at it
 

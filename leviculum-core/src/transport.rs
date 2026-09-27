@@ -1021,6 +1021,37 @@ impl AcquisitionCeiling {
     }
 }
 
+/// What [`Transport::rebalance_path_hops`] did with a link-request proof's hop
+/// count (#330, #332). Returned rather than logged from inside so a caller's
+/// journal line can state the outcome it actually got, and so the refusal is
+/// testable without scraping logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathRebalance {
+    /// No path entry for this destination; nothing to rebalance.
+    NoEntry,
+    /// The entry already carried this count.
+    Unchanged {
+        /// The count the entry carries, which is also the proof's.
+        hops: u8,
+    },
+    /// The entry adopted the proof's count.
+    Adopted {
+        /// What the entry carried before.
+        before: u8,
+        /// What it carries now — the proof's count.
+        after: u8,
+    },
+    /// Refused (#332): adopting would have made [`PathEntry::needs_relay`]
+    /// false while `next_hop` still names a transport peer, which deletes the
+    /// only known route instead of shortening it. The entry is untouched.
+    HeldForNextHop {
+        /// The count the entry keeps.
+        hops: u8,
+        /// The count that was refused.
+        refused: u8,
+    },
+}
+
 /// Exported path table entry for RPC reporting.
 #[derive(Debug, Clone)]
 pub struct PathTableExport {
@@ -4769,7 +4800,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3301. A destination with no cached
+    /// link-request path uses at transport.rs:3332. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -5564,7 +5595,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1244 ran in the
+        // Gate on the already-incremented hops (transport.rs:1275 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -6952,7 +6983,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     if let Some(entry) = self.storage.get_link_entry_mut(&dest_hash) {
                         entry.remaining_hops = new_hops;
                     }
-                    let path_before =
+                    // The link entry always adopts (the wire behaviour #330
+                    // shipped); the PATH entry may decline, and `path_rebalance`
+                    // says which it did (#332).
+                    let path_rebalance =
                         self.rebalance_path_hops(&link_entry.destination_hash, new_hops);
                     crate::tracing::warn!(
                         link_id = %HexShort(&dest_hash),
@@ -6960,7 +6994,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         packet_hops = packet.hops,
                         remaining_hops_before = link_entry.remaining_hops,
                         remaining_hops_after = new_hops,
-                        path_hops_before = ?path_before,
+                        path_rebalance = ?path_rebalance,
                         dir = "next_hop",
                         "LRPROOF hop asymmetry: rebalanced link and path to the validated proof's hop count (#330)"
                     );
@@ -8404,10 +8438,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
-    /// Adopt `hops` as the path length to `dest_hash` (#330, Python 1.5.0
-    /// `Transport.py:2556-2560` on the relay, `:2632-2637` at the link
-    /// terminus). Returns the hop count the entry carried before, or `None`
-    /// when there is no entry to rebalance.
+    /// Adopt `hops` as the path length to `dest_hash` (#330, Python 1.5.2
+    /// `Transport.py:2630-2634` on the relay, `:2704-2707` at the link
+    /// terminus).
     ///
     /// Only `hops` moves. The interface, the next hop, the expiry and the
     /// random blobs are what the announce installed and stay that way: this is
@@ -8415,15 +8448,80 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// signature-validated link-request proof that travelled it, not a new
     /// path. Callers must validate that signature FIRST — an adopted hop count
     /// is adopted on the word of whoever sent the proof.
+    ///
+    /// # The rule this refuses to break (#332)
+    ///
+    /// **A rebalance may not adopt a hop count that turns
+    /// [`PathEntry::needs_relay`] false while `next_hop` still names a
+    /// transport peer.** `needs_relay()` is `hops > 1 && next_hop.is_some()`,
+    /// and it is the sole switch that puts a transport header on an originated
+    /// packet ([`Self::send_to_destination`], `route_via_transport`). Adopting
+    /// a 1 into a 2-hop entry that names a relay therefore does not shorten
+    /// the route, it DELETES it: the relay is still recorded, still the only
+    /// way to the destination, and no longer addressed by anything we send.
+    /// Such an adoption is refused and reported as
+    /// [`PathRebalance::HeldForNextHop`].
+    ///
+    /// What the entry does with the information instead: **nothing.** The
+    /// proof proves that one frame crossed a route of that length, not that
+    /// the route is ours to use — the entry has no interface and no next hop
+    /// for it, and this function has no authority to invent either (a route
+    /// arrives by announce). Keeping `hops = 2` keeps the entry internally
+    /// consistent and keeps the relay that has been delivering. The direct
+    /// sighting is worth remembering where route CHOICE can weigh it later
+    /// (#230's second-best route); it is deliberately not built here.
+    ///
+    /// # Deviation-rule check (this is a deviation from Python 1.5.2)
+    ///
+    /// Python has the same hole at both sites and does not guard it: both
+    /// write `path_entry[IDX_PT_HOPS] = packet.hops` without reading or
+    /// touching `IDX_PT_NEXT_HOP`, and `Transport.outbound` inserts the
+    /// transport header on `path_entry[IDX_PT_HOPS] > 1` alone
+    /// (`Transport.py:1396`). So the guard is ours, and it clears all three
+    /// conditions:
+    ///
+    /// 1. **Wire unchanged.** Nothing about a proof's acceptance or its
+    ///    forwarding moves: the forwarded copy still carries the frozen count
+    ///    (#38's rewrite), and `link_entry.remaining_hops` / `link.hops()`
+    ///    still adopt the proof's count exactly as #330 shipped them. Only the
+    ///    PATH TABLE, which is ours alone, declines the write.
+    /// 2. **Semantics unchanged for peers.** No peer can observe a path
+    ///    entry. What a peer observes is that a relay keeps being addressed —
+    ///    i.e. exactly what it observed before #330.
+    /// 3. **Priority 1 measurably served.** The baseline is pass 327's `K/8`
+    ///    transfer column: `lnsd` 7/8, 3/8, 4/8, 8/8, 8/8 at
+    ///    L = 0.3/0.5/0.7/0.9/1.0 against `rnsd` 8/8 on every relayed arm.
+    ///    Prediction for the rerun: 8/8 on all five relayed `lnsd` arms.
+    ///
+    /// See `node/mvr_link_proof_rebalance_next_hop.rs` and
+    /// `docs/src/architecture-hop-counting.md`.
     pub fn rebalance_path_hops(
         &mut self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
         hops: u8,
-    ) -> Option<u8> {
-        let mut entry = self.storage.get_path(dest_hash)?.clone();
+    ) -> PathRebalance {
+        let Some(entry) = self.storage.get_path(dest_hash) else {
+            return PathRebalance::NoEntry;
+        };
+        let mut entry = entry.clone();
         let before = entry.hops;
         if before == hops {
-            return Some(before);
+            return PathRebalance::Unchanged { hops: before };
+        }
+        // #332: the adoption that deletes the route instead of shortening it.
+        if hops <= 1 && entry.next_hop.is_some() {
+            crate::tracing::debug!(
+                event = "PATH_REBALANCE_HELD",
+                dst = %HexShort(dest_hash),
+                from = before,
+                refused = hops,
+                next_hop = %HexShort(entry.next_hop.as_ref().map_or(&[][..], |h| &h[..])),
+                iface = %self.iface_name(entry.interface_index),
+            );
+            return PathRebalance::HeldForNextHop {
+                hops: before,
+                refused: hops,
+            };
         }
         entry.hops = hops;
         self.storage.set_path(*dest_hash, entry);
@@ -8433,7 +8531,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             from = before,
             to = hops,
         );
-        Some(before)
+        PathRebalance::Adopted {
+            before,
+            after: hops,
+        }
     }
 
     /// Returns a displayable interface name for logging.
@@ -10012,7 +10113,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1984`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2015`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -15566,7 +15667,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6179), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6210), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -21270,7 +21371,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1244) before
+        // The inbound path increments hops once (transport.rs:1275) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

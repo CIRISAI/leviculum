@@ -214,6 +214,16 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["dst", "from", "to"],
     },
     EventSchema {
+        // The rebalance above, REFUSED (#332): the proof's count would have
+        // made `PathEntry::needs_relay()` false while `next_hop` still named a
+        // transport peer, which deletes the only known route instead of
+        // shortening it. The entry is untouched, so the shape names the count
+        // it keeps (`from`), the one it refused (`refused`) and the relay the
+        // refusal protects.
+        name: "PATH_REBALANCE_HELD",
+        required_keys: &["dst", "from", "refused", "next_hop", "iface"],
+    },
+    EventSchema {
         name: "PKT_LOCAL",
         required_keys: &["dst", "iface", "matched"],
     },

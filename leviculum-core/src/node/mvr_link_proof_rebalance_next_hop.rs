@@ -3,7 +3,7 @@
 //!
 //! Host-side reproduction of the `pathchoice_*_lnsd` mechanism measured by
 //! periculum pass 327 (2026-09-27,
-//! `periculum/docs/measurements/2026-09-10-pathchoice-sweep.md` section 10):
+//! the periculum tree's own report `2026-09-10-pathchoice-sweep`, section 10):
 //! twelve arms under `measure`, `rnsd` carrying 8/8 transfers on every relayed
 //! arm while `lnsd` read 7/8, 3/8, 4/8, 8/8, 8/8 at L = 0.3/0.5/0.7/0.9/1.0.
 //! Ten of ten failed `lnsd` attempts had sent their link request over the
@@ -34,6 +34,16 @@
 //! toss on the pair that lost the first one. At L >= 0.9 no proof crosses the
 //! pair at all, nothing rebalances, and the arm reads 8/8 — the damage is
 //! done by the ONE frame that gets through.
+//!
+//! ## What the guard is
+//!
+//! `rebalance_path_hops` refuses a count that turns `needs_relay()` false
+//! while `next_hop` still names a transport peer, and reports the refusal as
+//! `PathRebalance::HeldForNextHop` (`transport.rs::rebalance_path_hops` states
+//! the rule and the deviation-rule check; Python 1.5.2 has the same hole and
+//! does not guard it). The assertions below are written for the guard; each
+//! one names what it read before the guard landed, so the pair reads as the
+//! red and the green of one change.
 //!
 //! ## The topology
 //!
@@ -71,7 +81,7 @@ use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
 use crate::packet::{HeaderType, Packet, PacketType};
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::traits::Clock;
-use crate::transport::{Action, InterfaceId, PathEntry, TickOutput};
+use crate::transport::{Action, InterfaceId, PathEntry, PathRebalance, TickOutput};
 
 // NOT NoStorage: the subject is the path table, and NoStorage drops every
 // write to it.
@@ -254,13 +264,17 @@ fn the_relayed_announce_installs_a_two_hop_route_over_bravo() {
 // ---------------------------------------------------------------------------
 
 /// The proof comes back over the direct pair, one hop, while the route it
-/// answered is two hops over bravo. TODAY the path entry adopts the 1 and so
-/// stops needing a relay — with bravo still named in it — and the next link
-/// request leaves as a final-hop packet that bravo will not forward.
+/// answered is two hops over bravo. The path entry must keep its 2: adopting
+/// the 1 would leave bravo named in an entry that no longer routes through
+/// him, and the next link request would go out as a final-hop packet nobody
+/// forwards.
 ///
-/// These are the assertions the #330 guard must flip.
+/// Before the guard (commit before this one, measured, all four green as
+/// assertions of the defect): `path.hops == 1`, `needs_relay() == false`,
+/// attempt 2 `HeaderType::Type1` with `transport_id == None`, and bravo
+/// forwarding 0 of the 1 request it heard.
 #[test]
-fn a_proof_over_the_direct_pair_strands_the_relayed_route() {
+fn a_proof_over_the_direct_pair_must_not_strand_the_relayed_route() {
     let (mut charlie, dest_hash, signing_key, announce) = make_responder();
     let mut bravo = make_relay();
     let mut alpha = make_endpoint();
@@ -316,37 +330,40 @@ fn a_proof_over_the_direct_pair_strands_the_relayed_route() {
         "the proof is valid and the link must establish"
     );
 
-    // --- TODAY: the entry adopted the 1 and stopped being a relay route,
-    // while still naming bravo.
+    // --- The guard: the count is refused, the entry is untouched, and it is
+    // still a relay route naming bravo.
     let path = alpha.transport().path(&dest).expect("path still there");
-    assert_eq!(path.hops, 1, "TODAY: the proof's count is adopted");
+    assert_eq!(
+        path.hops, 2,
+        "#332: a count that would strand the next hop is not adopted"
+    );
     assert_eq!(
         path.next_hop,
         Some(bravo_id),
         "the rebalance does not touch the next hop"
     );
     assert!(
-        !path.needs_relay(),
-        "TODAY: hops = 1 with a next hop is not a relay route any more"
+        path.needs_relay(),
+        "#332: the entry that names a relay must keep routing through it"
     );
 
-    // --- And that is what the next attempt pays: a final-hop request, no
-    // transport header, on the carrier both routes share.
+    // --- And that is what the next attempt keeps: a transport header naming
+    // bravo, on the carrier both routes share.
     let (_link2, routed2, out) = alpha.connect(dest_hash, &signing_key).expect("connect");
     assert!(routed2, "the entry is still a path, so the send is routed");
     let req2 = one_link_request(&out, &dest);
     assert_eq!(
         (req2.iface, req2.header_type, req2.transport_id),
-        (Some(a_medium), HeaderType::Type1, None),
-        "TODAY: the next attempt carries no transport header"
+        (Some(a_medium), HeaderType::Type2, Some(bravo_id)),
+        "#332: the next attempt still carries the transport header"
     );
 
-    // Measured, not inferred: bravo hears that request and forwards nothing.
+    // Measured, not inferred: bravo hears that request and forwards it.
     let out = bravo.handle_packet(InterfaceId(b_to_alpha), &req2.raw);
     assert_eq!(
         link_requests(&out, &dest).len(),
-        0,
-        "TODAY: bravo is not named in the header and drops out of the route"
+        1,
+        "#332: bravo is still named in the header and stays in the route"
     );
 }
 
@@ -406,23 +423,76 @@ fn a_count_on_an_entry_without_a_next_hop_is_adopted() {
     assert_eq!(path.hops, 1, "no next hop, nothing to protect");
 }
 
-/// TODAY: a count that turns `needs_relay()` false while a next hop is still
-/// named is adopted anyway. This is the isolated form of the reproduction
-/// above and the assertion the guard flips.
+/// THE GUARD, isolated: a count that turns `needs_relay()` false while a next
+/// hop is still named is refused, and the refusal says so in the return value
+/// rather than only in a log. Before the guard this adopted, leaving
+/// `hops = 1` on an entry that still named the relay.
 #[test]
-fn a_count_that_would_strand_the_next_hop_is_adopted_today() {
+fn a_count_that_would_strand_the_next_hop_is_refused() {
     let mut node = make_endpoint();
     let _ = add_iface(&mut node, "N_medium", 1);
     let dest = [0x33; TRUNCATED_HASHBYTES];
     insert_entry(&mut node, dest, 2, true);
 
-    node.transport.rebalance_path_hops(&dest, 1);
+    assert_eq!(
+        node.transport.rebalance_path_hops(&dest, 1),
+        PathRebalance::HeldForNextHop {
+            hops: 2,
+            refused: 1
+        },
+    );
 
     let path = node.transport().path(&dest).expect("entry");
-    assert_eq!(path.hops, 1, "TODAY: adopted");
+    assert_eq!(path.hops, 2, "the entry is untouched");
     assert!(
-        !path.needs_relay(),
-        "TODAY: the entry keeps its next hop and stops routing through it"
+        path.needs_relay(),
+        "the entry keeps its next hop AND keeps routing through it"
+    );
+}
+
+/// The same refusal for a 0, which is what a local-client count would do to
+/// the same entry: `needs_relay()` is false below 2 hops, whatever the reason.
+#[test]
+fn a_zero_that_would_strand_the_next_hop_is_refused() {
+    let mut node = make_endpoint();
+    let _ = add_iface(&mut node, "N_medium", 1);
+    let dest = [0x44; TRUNCATED_HASHBYTES];
+    insert_entry(&mut node, dest, 2, true);
+
+    assert_eq!(
+        node.transport.rebalance_path_hops(&dest, 0),
+        PathRebalance::HeldForNextHop {
+            hops: 2,
+            refused: 0
+        },
+    );
+    assert_eq!(node.transport().path(&dest).expect("entry").hops, 2);
+}
+
+/// And the outcomes a caller logs for the cases that are not refusals.
+#[test]
+fn the_outcomes_a_caller_can_log() {
+    let mut node = make_endpoint();
+    let _ = add_iface(&mut node, "N_medium", 1);
+    let dest = [0x55; TRUNCATED_HASHBYTES];
+
+    assert_eq!(
+        node.transport.rebalance_path_hops(&dest, 2),
+        PathRebalance::NoEntry,
+        "nothing to rebalance before an announce installed anything"
+    );
+
+    insert_entry(&mut node, dest, 3, true);
+    assert_eq!(
+        node.transport.rebalance_path_hops(&dest, 3),
+        PathRebalance::Unchanged { hops: 3 },
+    );
+    assert_eq!(
+        node.transport.rebalance_path_hops(&dest, 2),
+        PathRebalance::Adopted {
+            before: 3,
+            after: 2
+        },
     );
 }
 
@@ -430,17 +500,20 @@ fn a_count_that_would_strand_the_next_hop_is_adopted_today() {
 // THE SAME MECHANISM ON A NODE WITH TWO CARRIERS
 // ---------------------------------------------------------------------------
 
-/// The order that asked for this mvr predicted that a two-interface alpha
-/// would send the stranded request "onto the direct interface". It does not,
-/// and the difference is worth pinning: `rebalance_path_hops` moves `hops` and
-/// nothing else, so `interface_index` still names the carrier the ANNOUNCE
-/// came in on — bravo's. The stranded request therefore leaves as a final-hop
-/// packet on the relay's carrier, where the destination is two hops away and
-/// nobody is addressed to forward it. On the emulated cell the two carriers
-/// are one and the same, which is why the field symptom is "a coin toss on the
-/// bad pair" rather than "no delivery at all".
+/// The proof arriving on a DIFFERENT carrier than the route it answered, which
+/// is where the order that asked for this mvr predicted the stranded request
+/// would leave "onto the direct interface". It would not have:
+/// `rebalance_path_hops` moves `hops` and nothing else, so `interface_index`
+/// still names the carrier the ANNOUNCE came in on — bravo's. Before the guard
+/// (measured) the request left that carrier as a final-hop packet, where the
+/// destination is two hops away and nobody is addressed to forward it. On the
+/// emulated cell the two carriers are one and the same, which is why the field
+/// symptom is "a coin toss on the bad pair" rather than "no delivery at all".
+///
+/// The guard keeps the entry a relay route here too, and the ingress carrier of
+/// the proof stays what it always was: not a route.
 #[test]
-fn on_two_carriers_the_stranded_request_leaves_on_the_relays_carrier() {
+fn a_proof_on_another_carrier_does_not_move_the_route_either() {
     let (mut charlie, dest_hash, signing_key, announce) = make_responder();
     let mut bravo = make_relay();
     let mut alpha = make_endpoint();
@@ -479,11 +552,17 @@ fn on_two_carriers_the_stranded_request_leaves_on_the_relays_carrier() {
         "the rebalance never moves the interface, whatever it does to hops"
     );
 
+    assert_eq!(
+        path.hops, 2,
+        "#332: and it never moves the count below 2 here"
+    );
+
     let (_link2, _routed2, out) = alpha.connect(dest_hash, &signing_key).expect("connect");
     let req2 = one_link_request(&out, &dest);
     assert_eq!(
         (req2.iface, req2.header_type, req2.transport_id),
-        (Some(a_relay), HeaderType::Type1, None),
-        "TODAY: a final-hop packet on the RELAY's carrier — not the direct one"
+        (Some(a_relay), HeaderType::Type2, Some(bravo_id)),
+        "#332: still relayed over bravo's carrier; before the guard this was a \
+         final-hop packet on that same carrier — not on the direct one"
     );
 }

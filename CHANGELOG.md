@@ -304,6 +304,34 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- The path re-balance of #330 no longer deletes the route it was correcting. A
+  link-request proof that comes back over a different route than the one it was
+  sent on made the terminus write that route's length into the path entry while
+  the entry's next hop still named the relay — and `PathEntry::needs_relay()` is
+  `hops > 1 && next_hop.is_some()`, the sole switch that writes a transport
+  header. A 2-hop entry over a relay, re-balanced to 1 by a proof that crossed
+  the direct pair, therefore stopped addressing the relay at all: the relay was
+  still recorded, still the only way there, and forwarded nothing ever again.
+  Periculum pass 327 measured the cost in the emulated pathchoice cells
+  (2026-09-27): `lnsd` carried 7/8, 3/8, 4/8, 8/8, 8/8 transfers at
+  L = 0.3/0.5/0.7/0.9/1.0 where `rnsd` carried 8/8 on every relayed arm, with
+  ten of ten failed attempts having sent their request over the lossy pair.
+  `rebalance_path_hops` now refuses a count that would make `needs_relay()`
+  false while a next hop is named, leaves the entry untouched, tells its caller
+  which of the two happened, and reports the refusal as
+  `PATH_REBALANCE_HELD dst= from= refused= next_hop= iface=`. Everything else
+  #330 shipped is unchanged, including the adoption into the link entry and the
+  forwarded copy's frozen count. Python 1.5.2 has the same hole and does not
+  guard it — both adoption sites write `path_entry[IDX_PT_HOPS] = packet.hops`
+  without reading the next hop (`Transport.py:2634`, `:2707`) and
+  `Transport.outbound` inserts the transport header on
+  `path_entry[IDX_PT_HOPS] > 1` alone (`:1396`) — so this is our deviation, with
+  the wire, the peer semantics and the priority-1 argument written out in
+  `docs/src/architecture-hop-counting.md`. Codeberg #332, #330, #230,
+  periculum #58.
+
+### Changed
+
 - A link-request proof whose hop count disagrees with what our tables froze is
   now believed about the route it travelled, not only tolerated. RNS 1.5.0 added
   `ALLOW_LINK_PATH_REBALANCE` (`Transport.py:150` in the 1.5.0 tag) and with it
