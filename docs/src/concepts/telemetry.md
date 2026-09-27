@@ -575,6 +575,28 @@ There is no query surface and no viewer. WAL mode is what makes the
 operator's own `sqlite3` session safe against the daemon that is still
 writing.
 
+### What `lxmf-node` does with a telemetry message
+
+`lxmf-node` (`leviculum-lxmf-node/src/telemetry.rs`) is the same
+contract without the database, because the helper is what a field host
+runs when it needs a collector today rather than a deployed `lntd`. A
+reporting message has an empty body, so the `lxmf_msg_received` line it
+has always emitted says nothing about it beyond who sent it. Every
+`FIELD_TELEMETRY` value, and every row of a `FIELD_TELEMETRY_STREAM`,
+therefore gets a second line — `EVENT lxmf_telemetry_received src= via=
+time= lat= lon= alt= speed= bearing= accuracy= fix_time= battery_pct=
+battery_charging= battery_temp_c= rssi= snr= link_q= temp_c= power_w=
+fields_hex=`, one key per sensor this build decodes, `none` where the
+sensor had no reading so the key set is the same on every message —
+and one JSON row appended to `<LXMF_STORAGE>/telemetry.jsonl`, which is
+what survives a restart of the helper and a rotation of its log. `src`
+is who measured and `via` who delivered; they differ exactly when the
+reading came out of a collector's stream. A blob that does not decode
+becomes `lxmf_telemetry_undecodable` with the same `fields_hex`, and
+both sinks carry the raw packed bytes on every reading, decoded or not,
+for the reason the section above gives: the decoder's tolerance is an
+archive's data loss.
+
 ## The extension ladder
 
 The format is fixed by implementations we do not control, so extending
