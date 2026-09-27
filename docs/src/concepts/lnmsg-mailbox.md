@@ -240,7 +240,7 @@ disappears.**
    `Conversations.py`, lines 2186-2204). The library will tell you: our own
    helper checks `core.storage().get_identity(&peer)` before composing and
    reports which call was skipped rather than timing out later
-   (`leviculum-lxmf-node/src/processor.rs:1055-1064`).
+   (`leviculum-lxmf-node/src/processor.rs:1062-1071`).
 6. **Contact status as persisted state**, columba's `ACTIVE` /
    `PENDING_IDENTITY` / `UNRESOLVED`, rather than a live lookup, so the
    list can be rendered without touching the network.
