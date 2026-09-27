@@ -936,6 +936,19 @@ check-ignored-source:
 check-just-docs:
     @python3 scripts/check-just-docs.py
 
+# `guards` is a list of names with no body and `fast` is a longer list with the
+# same names in it, so the only thing holding the two together is that somebody
+# reads them against each other. This gate is what reads them: subset, order,
+# and a written reason for every member of `fast` that `guards` leaves out.
+# 0.05 s, no build -- it runs `just --dump --dump-format json` and compares two
+# dependency closures, so it cannot drift from the grammar it is checking.
+#
+# In `guards` itself, which is the point: the pass that would have added the
+# unpaired guard is the pass that gets told.
+[doc('Check that `guards` is still a subset of `fast`, in order')]
+check-guards-subset:
+    @python3 scripts/check-guards-subset.py
+
 # The guards in .githooks/pre-push and the remedy their refusals print
 # (scripts/push-clean.sh), driven against scratch repositories (~0.3 s, no
 # build). They are cold code: they fire on the rare wrong push and nothing
@@ -1142,8 +1155,44 @@ tree-clean-selftest:
 # subset of `fast` and adds nothing to it, so a green `guards` is a cheap
 # early verdict on part of Tier 0, never a substitute for it. The land gate
 # still runs `fast` and `standard`.
+#
+# CHECKED, NOT PROMISED. All of the above was true the day it was written and
+# nothing kept it true: `check-guards-subset` (in this list, below) reads
+# `just --dump` and refuses a `guards` member `fast` never reaches, a member
+# the two lists run in different orders, and a member of `fast` that is in
+# neither `guards` nor the ledger below. The cost clause is the one thing it
+# cannot read, so the ledger is a forced decision instead: whoever puts a
+# recipe on the push path either puts it in `guards` or writes the line saying
+# why not. Reasons carry the measurement they rest on -- #316's recipe-by-
+# recipe timing of `fast`, or a standalone run after `touch
+# leviculum-core/src/lib.rs`.
+#
+# not-in-guards: check-processor-seam -- 8.2 s, under the ten, but it drives a
+#   compile-fail test target of its own (clause c)
+# not-in-guards: mvr -- 209 s (#316), the mvr suite itself
+# not-in-guards: build-integ-bins -- the integ binaries mvr runs against; the
+#   push path reaches it through mvr, nothing else does
+# not-in-guards: supervised-spawn -- a cargo test target (clause c), ~10 s; its
+#   census half check-supervised-spawns is in `guards`
+# not-in-guards: lint-nrf -- cargo clippy over three firmware feature sets
+# not-in-guards: nrf-stack-frames -- 50 s (#316), it links the firmware ELFs
+# not-in-guards: nrf-store-gap -- 0.4 s in `fast` only because nrf-stack-frames
+#   linked those ELFs first; 40.3 s standing alone (74ec30ed)
+# not-in-guards: hw-witness -- 33.5 s standing alone (measured 2026-09-27)
+# not-in-guards: fuzz-selftest -- ~16 s against a throwaway fuzz crate
+# not-in-guards: fuzz-regress -- 110 s (#316)
+# not-in-guards: notices-guard -- ~20 s over both lockfiles via cargo-about
+# not-in-guards: doc-gate -- cargo doc over the whole workspace
+# not-in-guards: core-no-tracing -- a cargo test target (clause c)
+# not-in-guards: i686-usize-gate -- 66 s (#316), the core suite on a second triple
+# not-in-guards: no-atomic64-gate -- a cargo check on a third triple, which it
+#   installs itself
+# not-in-guards: check-all-targets -- compiles every target in the workspace
+# not-in-guards: citation-guard -- a cargo test target (clause c)
+# not-in-guards: source-invariant-tests -- 18.8 s and a test runner of its own;
+#   its census half check-source-invariant-census is in `guards`
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1175,7 +1224,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
+fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

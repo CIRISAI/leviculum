@@ -67,6 +67,12 @@ it. It exists because the recipes in it are the ones a coder never ran and
 the landing gate did, which cost two landings an hour each on 2026-09-26
 (`check-supervised-spawns`, `check-source-invariant-census`).
 
+That the list really is a subset is checked and not promised:
+`check-guards-subset` (in `guards` itself) reads `just --dump` and refuses a
+`guards` member `fast` never reaches, a member the two lists run in different
+orders, and a member of `fast` that is in neither `guards` nor the ledger of
+`not-in-guards:` reasons in the Justfile.
+
 [^t2]: Tier 2 had a 12:30/18:30 timer until 2026-06-12, when it was
 retired in favour of on-demand runs (`scripts/install-ci.sh` step 9,
 which also deletes any timer a previous install left behind). This page
