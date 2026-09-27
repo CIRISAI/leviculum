@@ -77,7 +77,16 @@ fi
 
 # Optional test dependency: cargo-fuzz plus the nightly toolchain run the
 # wire-parser fuzz targets (`just fuzz`, `just fuzz-nightly`, `just
-# fuzz-regress`, scripts/run-fuzz.sh, Codeberg #290).
+# fuzz-regress`, scripts/run-fuzz.sh, Codeberg #290 and #23).
+#
+# WHERE THE TARGETS ARE: eight of them, in two crates. Seven under
+# leviculum-core/fuzz (packet_unpack, announce_from_packet, discovery_announce,
+# kiss_deframe, hdlc_deframe, ifac_verify, resource_advertisement_unpack) and
+# one under leviculum-std/fuzz (sam_parse, the I2P SAM bridge). One binary and
+# one toolchain serve both directories, so they get ONE note here: until
+# 2026-09-27 #290 and #23 each carried their own `command -v cargo-fuzz`
+# block, and a host without the tool printed the same missing dependency twice
+# with two different hints.
 #
 # WHICH TOOLCHAIN, and why it is not the pinned one: cargo-fuzz drives
 # libFuzzer through `-Z` sanitizer flags, which the repo's pinned stable
@@ -98,14 +107,22 @@ fi
 # version as a FUZZ_TOOLCHAIN line, so a nightly that moved under the corpus is
 # visible in the log instead of inferred from a build failure.
 #
-# No tier runs the fuzzing itself; `just fuzz-selftest` and `just fuzz-regress`
-# are on the push path but both skip with a named reason when these are absent,
-# so warn rather than fail.
+# No tier runs the fuzzing itself, and `just standard` never builds these --
+# the regression test for any crash they find lands in the normal unit suite.
+# `just fuzz-selftest` and `just fuzz-regress` are on the push path but both
+# skip with a named reason when these are absent, so warn rather than fail.
+# Longer form: docs/src/development-testing.md.
+#
+# The hint is `cargo install`, not apt: Debian packages no cargo-fuzz (checked
+# 2026-09-27, `apt-cache show cargo-fuzz` -> no packages found), and this bench
+# runs the crates.io build out of ~/.cargo/bin (cargo-fuzz 0.13.2).
 if ! command -v cargo-fuzz >/dev/null 2>&1; then
     echo "[install-ci] Note: optional test dependency 'cargo-fuzz' not found"
     echo "[install-ci] Hint: cargo install cargo-fuzz && rustup toolchain install nightly"
-    echo "[install-ci]       (needed for 'just fuzz'; 'just fuzz-selftest' and"
-    echo "[install-ci]        'just fuzz-regress' skip without it)"
+    echo "[install-ci]       (no Debian package; needed for 'just fuzz' over"
+    echo "[install-ci]        leviculum-core/fuzz and leviculum-std/fuzz, and"
+    echo "[install-ci]        'just fuzz-selftest' / 'just fuzz-regress' skip"
+    echo "[install-ci]        without it -- see docs/src/development-testing.md)"
 fi
 
 # Optional test dependency: nomadnet drives the on-demand lnomad acceptance
@@ -153,16 +170,6 @@ if ! command -v uhubctl >/dev/null 2>&1; then
     echo "[install-ci] Note: optional rig dependency 'uhubctl' not found"
     echo "[install-ci] Hint: sudo apt install uhubctl"
     echo "[install-ci]       (needed only to power-cycle a hung board's hub port)"
-fi
-
-# Optional test dependency: cargo-fuzz (+ nightly) drives the wire-format
-# parser fuzz harness under leviculum-core/fuzz (Codeberg #23). Not part of
-# `just standard` — the regression tests for any crash it finds live in the
-# normal unit suite — so warn rather than fail when it is absent.
-if ! command -v cargo-fuzz >/dev/null 2>&1; then
-    echo "[install-ci] Note: optional test dependency 'cargo-fuzz' not found"
-    echo "[install-ci] Hint: cargo install cargo-fuzz && rustup toolchain install nightly"
-    echo "[install-ci]       (needed only for the leviculum-core/fuzz targets; see docs/src/development-testing.md)"
 fi
 
 # 1c. Optional test dependency: btvirt hosts the periculum `ble_room_*` cells
