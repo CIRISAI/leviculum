@@ -45,10 +45,10 @@ use crate::constants::{
     ED25519_SIGNATURE_SIZE, ESTABLISHMENT_RESPONDER_BONUS_MS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS,
     KEEPALIVE_INITIATOR_BYTE, KEEPALIVE_PAYLOAD_SIZE, KEEPALIVE_RESPONDER_BYTE,
     LINK_KEEPALIVE_MAX_RTT, LINK_KEEPALIVE_MIN_SECS, LINK_KEEPALIVE_SECS,
-    LINK_KEEPALIVE_TIMEOUT_FACTOR, LINK_STALE_FACTOR, LINK_STALE_GRACE_SECS, MTU, PROOF_DATA_SIZE,
-    RTT_RETRY_INTERVAL_MULTIPLIER, RTT_RETRY_MAX_ATTEMPTS, RTT_RETRY_MIN_INTERVAL_MS,
-    SIGNALING_MODE_MASK, SIGNALING_MODE_SHIFT, SIGNALING_MTU_MASK, TRUNCATED_HASHBYTES, US_PER_MS,
-    X25519_KEY_SIZE,
+    LINK_KEEPALIVE_TIMEOUT_FACTOR, LINK_STALE_FACTOR, LINK_STALE_GRACE_SECS, MS_PER_SECOND, MTU,
+    PROOF_DATA_SIZE, RTT_RETRY_INTERVAL_MULTIPLIER, RTT_RETRY_MAX_ATTEMPTS,
+    RTT_RETRY_MIN_INTERVAL_MS, SIGNALING_MODE_MASK, SIGNALING_MODE_SHIFT, SIGNALING_MTU_MASK,
+    TRUNCATED_HASHBYTES, US_PER_MS, X25519_KEY_SIZE,
 };
 use crate::crypto::{derive_key, truncated_hash};
 use crate::destination::{DestinationHash, ProofStrategy};
@@ -1578,6 +1578,39 @@ impl Link {
     /// Get the last inbound packet timestamp in seconds
     pub fn last_inbound_secs(&self) -> u64 {
         self.last_inbound
+    }
+
+    /// Age of the last inbound packet in milliseconds, or `None` for a link
+    /// that has never recorded one.
+    ///
+    /// The `None` is the whole point (Codeberg #354): `last_inbound` is 0 until
+    /// the first inbound packet, so `now - last_inbound` on such a link is the
+    /// clock reading, not an age. A handshake that never completes is exactly
+    /// that case — the responder proves a request and then hears nothing — and
+    /// the field log printed the base's uptime (9 581 s) as the idle time of a
+    /// link that was 80 s old. `had_inbound` is what distinguishes "no inbound
+    /// yet" from a link established in the clock's first second.
+    pub fn inbound_age_ms(&self, now_ms: u64) -> Option<u64> {
+        if !self.had_inbound {
+            return None;
+        }
+        Some(now_ms.saturating_sub(self.last_inbound.saturating_mul(MS_PER_SECOND)))
+    }
+
+    /// Instant the pending handshake started, in clock milliseconds: the
+    /// request send for an initiator, the proof send (the tick the request
+    /// arrived) for a responder. `None` once the link is established.
+    ///
+    /// This is the clock `establishment_timeout_ms()` is measured against —
+    /// `check_timeouts` kills the link when `now - pending_since > threshold` —
+    /// so it is also the only age a death line may print beside that
+    /// threshold.
+    pub(crate) fn pending_since_ms(&self) -> Option<u64> {
+        match self.phase {
+            LinkPhase::PendingOutgoing { created_at_ms } => Some(created_at_ms),
+            LinkPhase::PendingIncoming { proof_sent_at_ms } => Some(proof_sent_at_ms),
+            LinkPhase::Established => None,
+        }
     }
 
     /// Set the link state

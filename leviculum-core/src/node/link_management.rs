@@ -13,6 +13,7 @@ use crate::constants::{
     TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
 };
 use crate::destination::{DestinationHash, ProofStrategy};
+use crate::event_scalar::MsOrNone;
 use crate::hex_fmt::{HexFmt, HexShort};
 use crate::link::channel::{ChannelAction, ChannelError, Message, ReceiveOutcome};
 use crate::link::{Link, LinkCloseReason, LinkError, LinkId, LinkPhase, LinkState};
@@ -3255,10 +3256,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .links
             .iter()
             .filter(|(_, link)| {
-                let started_at = match link.phase() {
-                    LinkPhase::PendingOutgoing { created_at_ms } => created_at_ms,
-                    LinkPhase::PendingIncoming { proof_sent_at_ms } => proof_sent_at_ms,
-                    LinkPhase::Established => return false,
+                let Some(started_at) = link.pending_since_ms() else {
+                    return false;
                 };
                 now_ms.saturating_sub(started_at) > link.establishment_timeout_ms()
             })
@@ -3413,11 +3412,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .map(|r| r.attempt)
                 .unwrap_or(1);
             if let Some(l) = self.links.get(&link_id) {
+                // The age beside `threshold_ms` has to be measured on the clock
+                // the threshold is measured on, and for a handshake that never
+                // completed that clock starts at the request, not at the last
+                // inbound packet: such a link HAS no inbound packet, so
+                // `now - last_inbound` is the process clock (Codeberg #354).
+                // The field log of 2026-09-27 reported 91 responder culls as
+                // `elapsed_since_activity_ms=9581430 threshold_ms=85824`; each
+                // of them was 72-90 s old, i.e. on time, and the reviewer spent
+                // a quarter of an hour on "the cull ran 2.6 h late".
+                let since_request_ms = l
+                    .pending_since_ms()
+                    .map(|started_at| now_ms.saturating_sub(started_at));
                 crate::tracing::debug!(
                     target: "leviculum_core::link",
-                    "LINK_DIED link={} reason=other detail=handshake_timeout elapsed_since_activity_ms={} threshold_ms={} attempts={} rtt_ms={} keepalives_sent={} keepalives_acked={}",
+                    "LINK_DIED link={} reason=other detail=handshake_timeout since_request_ms={} elapsed_since_activity_ms={} threshold_ms={} attempts={} rtt_ms={} keepalives_sent={} keepalives_acked={}",
                     HexShort(link_id.as_bytes()),
-                    now_ms.saturating_sub(l.last_inbound_secs().saturating_mul(MS_PER_SECOND)),
+                    MsOrNone(since_request_ms),
+                    MsOrNone(l.inbound_age_ms(now_ms)),
                     l.establishment_timeout_ms(),
                     attempts,
                     l.rtt_ms(),
@@ -3593,15 +3605,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 } else {
                     "stale"
                 };
-                let elapsed_ms = now_secs
-                    .saturating_sub(link.last_inbound_secs())
-                    .saturating_mul(MS_PER_SECOND);
+                // Same field, same rule as the handshake line above
+                // (Codeberg #354), and here it is a real age: both `is_stale()`
+                // and `should_close()` return false while `had_inbound` is
+                // false, so a link only reaches this line after it has
+                // recorded inbound traffic. `none` is therefore not expected
+                // here — it is printed rather than faked if that gate is ever
+                // dropped.
+                let elapsed_ms = link.inbound_age_ms(now_secs.saturating_mul(MS_PER_SECOND));
                 crate::tracing::debug!(
                     target: "leviculum_core::link",
                     "LINK_DIED link={} reason={} elapsed_since_activity_ms={} threshold_ms={} rtt_ms={} keepalives_sent={} keepalives_acked={}",
                     HexShort(link_id.as_bytes()),
                     reason,
-                    elapsed_ms,
+                    MsOrNone(elapsed_ms),
                     link.stale_close_timeout_secs().saturating_mul(MS_PER_SECOND),
                     link.rtt_ms(),
                     sent,
@@ -3957,14 +3974,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Pending handshake timeouts
         for link in self.links.values() {
-            match link.phase() {
-                LinkPhase::PendingOutgoing { created_at_ms } => {
-                    update(created_at_ms.saturating_add(link.establishment_timeout_ms()));
-                }
-                LinkPhase::PendingIncoming { proof_sent_at_ms } => {
-                    update(proof_sent_at_ms.saturating_add(link.establishment_timeout_ms()));
-                }
-                LinkPhase::Established => {}
+            if let Some(started_at) = link.pending_since_ms() {
+                update(started_at.saturating_add(link.establishment_timeout_ms()));
             }
         }
 

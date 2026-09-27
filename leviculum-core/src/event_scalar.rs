@@ -42,9 +42,31 @@ impl core::fmt::Display for Scalar<'_> {
     }
 }
 
+/// Display wrapper for an event field that is an age in milliseconds but may
+/// not exist: `Some(ms)` renders the number, `None` renders `none` — the
+/// `<n>|none` shape other fields already use (`iface_out=`,
+/// `old_data_silence_ms=`).
+///
+/// A missing age has to be SAID, not computed. Subtracting an unset timestamp
+/// from the clock yields the process uptime, which reads as a perfectly
+/// plausible age and is wrong by hours: the field log of 2026-09-27 printed
+/// `elapsed_since_activity_ms=9581430` against `threshold_ms=85824` for culls
+/// that were 72-90 s old, because a handshake that never completes has no last
+/// inbound packet to measure from (Codeberg #354).
+pub(crate) struct MsOrNone(pub Option<u64>);
+
+impl core::fmt::Display for MsOrNone {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(ms) => write!(f, "{ms}"),
+            None => f.write_str("none"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Scalar;
+    use super::{MsOrNone, Scalar};
     use alloc::format;
 
     #[test]
@@ -75,5 +97,15 @@ mod tests {
     #[test]
     fn a_plain_name_is_untouched() {
         assert_eq!(format!("{}", Scalar("lora0")), "lora0");
+    }
+
+    #[test]
+    fn an_age_that_exists_renders_as_digits() {
+        assert_eq!(format!("{}", MsOrNone(Some(69_961))), "69961");
+    }
+
+    #[test]
+    fn an_age_that_does_not_exist_is_said_not_computed() {
+        assert_eq!(format!("{}", MsOrNone(None)), "none");
     }
 }

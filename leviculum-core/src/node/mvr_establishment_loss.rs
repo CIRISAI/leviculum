@@ -741,8 +741,14 @@ fn line_with<'a>(logs: &'a str, marker: &str) -> Option<&'a str> {
 /// id that was sent**. The re-key on each establishment retry gives every
 /// retransmit a new link id (Codeberg #66), so `29cfc7d7` is the THIRD request
 /// of that handshake, and 40021 ms against a 13476 ms per-attempt threshold is
-/// three attempts spent, not one attempt waiting. The retransmits themselves
-/// were invisible: their diagnostics sit on `leviculum_core::node::
+/// three attempts spent, not one attempt waiting. (Only the COUNT of that
+/// reading was sound: `elapsed_since_activity_ms` was the process clock, not a
+/// span — `LINK_REQUEST_TX t_ms=201` says this process was 0.2 s old at the
+/// connect, which is the only reason 40021 resembled the handshake. Codeberg
+/// #354 replaced the field on this line with `since_request_ms`, the age of the
+/// LAST attempt, comparable to the `threshold_ms` beside it;
+/// `responder_handshake_death_reports_the_age_it_has` below pins it.) The
+/// retransmits themselves were invisible: their diagnostics sit on `leviculum_core::node::
 /// link_management`, which every field `RUST_LOG` drops to `info` — the
 /// artifact `establishment_field_zero_retransmit_log_is_filter_artifact`
 /// above characterises.
@@ -819,5 +825,116 @@ fn establishment_retransmits_are_countable_under_field_rust_log() {
         first_id, current,
         "a retried establishment dies under a re-keyed id (Codeberg #66); \
          that mismatch is the vollauf3 signature.\n--- logs ---\n{logs}"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// (#354) What age a responder's handshake death reports.
+// ----------------------------------------------------------------------------
+
+/// Drive a responder through a handshake it never completes: it receives one
+/// LinkRequest, proves it, and then hears nothing — the initiator is simply not
+/// driven any further, which is the field shape (the phone's RTT packet never
+/// arrives over the LoRa chain). Advances the RESPONDER's clock past its own
+/// `establishment_timeout_ms()` and returns whether the pending link died.
+///
+/// The responder side is where the 2026-09-27 field logs live: the two LXMF
+/// helpers on the base are the RESPONDER of every link the phone opens, and 91
+/// of their 109 requests ended here.
+fn drive_responder_handshake_to_death() -> bool {
+    let (mut responder, dest_hash, signing_key) = make_responder();
+    let mut initiator = make_initiator();
+    let r_iface = add_iface(&mut responder, "R_mesh");
+
+    let (_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
+    let request = one_packet(&out);
+
+    // Auto-accept (Stage 1): the responder proves the request and enters
+    // PendingIncoming. Nothing is fed back to it after this point, so the link
+    // never records a single inbound packet.
+    let _proof = responder.handle_packet(InterfaceId(r_iface), &request);
+
+    let link_id = *responder
+        .links
+        .keys()
+        .next()
+        .expect("responder must hold the pending incoming link");
+    let timeout_ms = responder
+        .links
+        .get(&link_id)
+        .expect("pending link")
+        .establishment_timeout_ms();
+    responder.transport().clock().advance(timeout_ms + 1);
+    has_timeout_close(&responder.handle_timeout())
+}
+
+/// Codeberg #354. The field log of 2026-09-27 (`/home/lew/feld/collector/
+/// lxmf.log`, 109 `LINK_REQUEST_RX`, 17 establishments, 91 deaths) reports
+/// every one of those deaths as
+///
+/// ```text
+/// LINK_DIED link=… reason=other detail=handshake_timeout \
+///     elapsed_since_activity_ms=9581430 threshold_ms=85824 …
+/// ```
+///
+/// The cull was on time — pairing each death with its own `LINK_REQUEST_RX`
+/// gives real ages of 72.3 to 89.9 s against an 85 s threshold — but the
+/// printed age was the PROCESS CLOCK: `now_ms - last_inbound_secs() * 1000`
+/// with `last_inbound` still at its constructor zero, because a responder link
+/// that never completes never records an inbound packet. 9 581 s read against
+/// 85 s says "the cull ran 2.6 h late", which is what it cost the reviewer.
+///
+/// The line must report the age it has. `since_request_ms` is measured from the
+/// instant the handshake started (the proof send, one tick after the request
+/// arrived) — the same clock `threshold_ms` is measured against, so the two are
+/// comparable — and `elapsed_since_activity_ms` says `none` rather than
+/// inventing an age from a timestamp the link never had.
+#[test]
+fn responder_handshake_death_reports_the_age_it_has() {
+    let (died, logs) = with_field_filtered_logs(drive_responder_handshake_to_death);
+    assert!(
+        died,
+        "a responder whose handshake gets no answer must reach the timeout \
+         death path.\n--- logs ---\n{logs}"
+    );
+
+    let died_line = line_with(&logs, "LINK_DIED").expect("field filter must keep LINK_DIED");
+    assert_eq!(
+        event_field(died_line, "detail"),
+        Some("handshake_timeout"),
+        "the responder death is a handshake timeout.\n--- logs ---\n{logs}"
+    );
+
+    let threshold_ms: u64 = event_field(died_line, "threshold_ms")
+        .expect("LINK_DIED must carry threshold_ms")
+        .parse()
+        .expect("threshold_ms must be a number");
+    let since_request_ms: u64 = event_field(died_line, "since_request_ms")
+        .expect("LINK_DIED must carry the age the link has (since_request_ms)")
+        .parse()
+        .expect("since_request_ms must be a number");
+
+    // The age is the threshold's order of magnitude, not the process clock:
+    // the cull fires at the threshold, so one threshold plus the tick that
+    // noticed bounds it. The MockClock starts at TEST_TIME_MS (1 000 000 ms),
+    // 80x the threshold here — exactly the ratio the field log showed, so a
+    // regression to `now_ms - 0` fails the upper bound loudly.
+    assert!(
+        since_request_ms >= threshold_ms && since_request_ms < 2 * threshold_ms,
+        "the reported age must be comparable to its own threshold \
+         (got {since_request_ms} ms against {threshold_ms} ms).\n--- logs ---\n{logs}"
+    );
+    assert!(
+        since_request_ms < TEST_TIME_MS,
+        "the reported age must not be the process clock ({since_request_ms} ms \
+         against a clock that started at {TEST_TIME_MS} ms).\n--- logs ---\n{logs}"
+    );
+
+    // A link that never had inbound traffic has no activity age, and says so.
+    assert_eq!(
+        event_field(died_line, "elapsed_since_activity_ms"),
+        Some("none"),
+        "a link with no recorded inbound packet must not print an activity \
+         age.\n--- logs ---\n{logs}"
     );
 }
