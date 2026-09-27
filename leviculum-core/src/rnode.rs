@@ -4313,6 +4313,154 @@ mod tests {
         assert!(!t.is_locked());
     }
 
+    /// One real minute of the Pocket V2's keyed frames, as the board logged
+    /// them: `(ms after the first frame's key-up, on-air frame length)`.
+    ///
+    /// Read off `[T114_TX_FRAME] … len=` in
+    /// `rig-run/ble-drop/feld-pocket.log`, board clock t=73568391..73627985
+    /// (2026-09-27, wall 14:20Z), the busiest minute of the 18-minute home
+    /// window in which BOTH the Pocket and the T114 were captured. 25 frames:
+    /// a 68 B link-data packet and a 103 B transported link request repeating,
+    /// plus four oversized relays. The PHY that minute was the running
+    /// `active config`: 869463000 Hz, SF8, BW 125 kHz, CR 4:5, which
+    /// [`derive_preamble_symbols`] puts at the 18-symbol floor.
+    const POCKET_MINUTE_FRAMES: [(u64, u32); 25] = [
+        (0, 68),
+        (267, 103),
+        (14901, 68),
+        (15169, 103),
+        (15528, 68),
+        (15795, 198),
+        (17206, 103),
+        (17566, 68),
+        (22544, 119),
+        (22945, 103),
+        (29950, 68),
+        (30217, 103),
+        (30576, 211),
+        (31212, 68),
+        (44345, 103),
+        (44704, 232),
+        (45391, 68),
+        (45658, 103),
+        (46017, 68),
+        (46284, 198),
+        (46879, 103),
+        (47238, 68),
+        (48939, 103),
+        (49826, 68),
+        (59594, 211),
+    ];
+
+    const POCKET_MINUTE_BW: u32 = 125_000;
+    const POCKET_MINUTE_SF: u8 = 8;
+    const POCKET_MINUTE_CR: u8 = 5;
+    const POCKET_MINUTE_PREAMBLE: u16 = 18;
+
+    /// Replay one captured Pocket minute through the tracker the way
+    /// `lora_task` drives it and check the ledger against the summed frame
+    /// cost.
+    ///
+    /// The field reading this pins down: the Pocket's long-term ledger sat at
+    /// `lt=360077` ms — the 10 % cap — the moment its capture resumed on
+    /// 2026-09-27, while the T114 in the same room was credited with far less
+    /// demodulated traffic over a comparable hour (#433, the premise). Either
+    /// the board really keys six minutes an hour or the ledger counts more
+    /// than the air carries, and only the second is a bug. Every plausible
+    /// over-count is a counting error this replay would show as an excess:
+    /// charging a frame twice (once where it is admitted, once where
+    /// `transmit()` returns), charging a frame the duty lock held and never
+    /// keyed, or charging a CSMA attempt that never reached `endPacket()`.
+    /// So the assertion is an equality, not a bound.
+    #[test]
+    fn ledger_increment_equals_summed_frame_airtime_for_a_captured_pocket_minute() {
+        let cost = |len: u32| {
+            frame_airtime_cost_ms(
+                len,
+                POCKET_MINUTE_BW,
+                POCKET_MINUTE_SF,
+                POCKET_MINUTE_CR,
+                POCKET_MINUTE_PREAMBLE,
+            )
+        };
+        let expected: u64 = POCKET_MINUTE_FRAMES.iter().map(|&(_, len)| cost(len)).sum();
+
+        let mut t = AirtimeTracker::new();
+        // The lock the board ran under: `lt_alock` 10 %, no short-term cap,
+        // which is what `firmware_default_lt_alock` yields in this sub-band.
+        t.set_lt_limit_u16(1000);
+
+        for &(at_ms, len) in POCKET_MINUTE_FRAMES.iter() {
+            // `lora_task` calls `update` once per turn while a frame is
+            // pending, before it decides to key or hold (lora.rs:1759), and
+            // charges the frame only after `radio.transmit` returned Ok
+            // (lora.rs:1028) — i.e. at TX-done, one frame's airtime later.
+            t.update(at_ms);
+            t.add_airtime(at_ms + cost(len), cost(len));
+        }
+        let last = POCKET_MINUTE_FRAMES[POCKET_MINUTE_FRAMES.len() - 1];
+        t.update(last.0 + cost(last.1));
+
+        assert_eq!(
+            t.long_term_airtime_ms() as u64,
+            expected,
+            "the hour ledger must hold exactly the airtime of the frames that were keyed"
+        );
+        // 25 frames, 8946 ms: the minute is 14.9 % of channel time on its
+        // own, which is why this board sat pinned at a 10 % hourly cap. The
+        // number is stated so a later PHY or length change has to restate it
+        // rather than quietly move the premise of #433.
+        assert_eq!(expected, 8946);
+    }
+
+    /// The precondition the replay above silently satisfies, stated as its own
+    /// red-able test: the rolling window only expires correctly while
+    /// [`AirtimeTracker::update`] is reached at least once per bin.
+    ///
+    /// `update` and `add_airtime` each zero exactly ONE bin, the one after the
+    /// current bin (`RNode_Firmware.ino:685-688`, `:693-702`). The reference
+    /// firmware gets away with that because its main loop calls
+    /// `update_airtime()` every iteration; ours calls it only while a frame is
+    /// pending (`lora.rs:1759`, inside `if let Some(frame) = pending_tx`). A
+    /// board whose queue stays empty across more than one bin therefore skips
+    /// the clearing, and an hour later those bins are still carrying the
+    /// previous hour's airtime — counted a second time. The Pocket never hit
+    /// this in the 2026-09-27 capture because its queue was never empty, but
+    /// nothing in the tracker enforces that, so the boundary is pinned here.
+    #[test]
+    fn hour_window_expires_only_while_update_is_reached_once_per_bin() {
+        // One bin's worth of airtime, keyed a full hour before "now".
+        let charge = 3000u64;
+        let an_hour = AIRTIME_LONGTERM_MS;
+
+        // Driven: `update` on every bin edge for the whole hour, the cadence a
+        // busy queue produces. The old charge expires and the ledger empties.
+        let mut driven = AirtimeTracker::new();
+        driven.add_airtime(0, charge);
+        let mut now = 0;
+        while now <= an_hour {
+            driven.update(now);
+            now += AIRTIME_BINLEN_MS;
+        }
+        driven.update(an_hour);
+        assert_eq!(
+            driven.long_term_airtime_ms(),
+            0,
+            "an hour of bin-edge updates must retire the charge"
+        );
+
+        // Idle: nothing calls `update` in between, so the bin is never
+        // cleared and the same 3000 ms is still on the books an hour later.
+        let mut idle = AirtimeTracker::new();
+        idle.add_airtime(0, charge);
+        idle.update(an_hour);
+        assert_eq!(
+            idle.long_term_airtime_ms() as u64,
+            charge,
+            "a bin nothing swept is still counted a full hour later"
+        );
+    }
+
     #[test]
     fn packet_airtime_single_vs_split() {
         // A <=254-byte payload is one frame; a larger one is two frames, and
