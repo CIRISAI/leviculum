@@ -439,6 +439,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "ingress_burst_announce",
             "lrproof_invalid",
             "lrproof_no_link",
+            "link_data_no_link",
             "link_repeat_echo",
             "forward_max_hops",
             "blackholed_announce",

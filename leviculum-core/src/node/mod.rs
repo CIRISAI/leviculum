@@ -102,6 +102,8 @@ mod mvr_link_cap;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_link_data_echo_storm;
 #[cfg(test)]
+mod mvr_link_data_no_link;
+#[cfg(test)]
 mod mvr_link_delivery_telemetry;
 #[cfg(test)]
 mod mvr_link_mtu_asymmetry;
@@ -4100,6 +4102,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             _ => packet.data.as_slice().to_vec(),
                         }
                     } else {
+                        // Link-addressed DATA lands here exactly when no local
+                        // endpoint holds the link: the `links` gate above sent
+                        // it to this branch, and a link id is never a
+                        // registered destination. The owner is gone (restarted,
+                        // or another process entirely) and until order 368 the
+                        // packet vanished with this trace line only — lane-2
+                        // order 370 measured 3 such packets per arm after a
+                        // helper restart, `lrproof_no_link=0` and `no_path=0`
+                        // throughout. Named and counted like the LRPROOF
+                        // sibling (#358).
+                        if packet.flags.dest_type == crate::destination::DestinationType::Link {
+                            self.transport.record_node_layer_drop(
+                                raw_hash.as_ref(),
+                                &packet,
+                                interface_index,
+                                crate::transport::DropReason::LinkDataNoLink,
+                            );
+                        }
                         crate::tracing::trace!(
                             dest = %HexShort(destination_hash.as_ref()),
                             "Dropped packet, no destination registered"

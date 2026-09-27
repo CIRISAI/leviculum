@@ -1494,6 +1494,7 @@ pub struct TransportStats {
     pub(crate) drops_ingress_burst_announce: u64,
     pub(crate) drops_lrproof_invalid: u64,
     pub(crate) drops_lrproof_no_link: u64,
+    pub(crate) drops_link_data_no_link: u64,
     pub(crate) drops_link_repeat_echo: u64,
     pub(crate) drops_forward_max_hops: u64,
     pub(crate) drops_blackholed_announce: u64,
@@ -1566,6 +1567,20 @@ pub enum DropReason {
     /// transport-id overhear gate never sees it). On point-to-point carriers
     /// (BLE, TCP, local clients) every count is a real late proof.
     LrproofNoLink,
+    /// Link-addressed DATA that reached this node's endpoint layer and
+    /// matched no local link: no link-table entry took it (a transport
+    /// node's relay path runs first), no registered destination, no entry
+    /// in `links`. The endpoint that owned the link id is gone — restarted,
+    /// or never this process (lane-2 measurement 2026-09-27, order 370: an
+    /// initiator keeps sending on its old link for ~10 s after the
+    /// responder's helper restarts, and every one of those packets died
+    /// here with a trace line only, `lrproof_no_link=0` and `no_path=0`
+    /// both silent). The DATA sibling of [`DropReason::LrproofNoLink`]:
+    /// that one names an establishment proof nobody was waiting for, this
+    /// one names established-link traffic nobody owns. Python drops this
+    /// silently too (`Transport.inbound` hands the packet to no one — a
+    /// link id is in no `destinations` entry — and counts nothing).
+    LinkDataNoLink,
     /// Same-interface link repeat whose hop count matches neither frozen
     /// operand — the relay's own forward echoed back on the shared medium.
     /// Routine on half-duplex shared media (same class as
@@ -1681,6 +1696,7 @@ impl DropReason {
             DropReason::IngressBurstAnnounce => "ingress-burst-announce",
             DropReason::LrproofInvalid => "lrproof-invalid",
             DropReason::LrproofNoLink => "lrproof-no-link",
+            DropReason::LinkDataNoLink => "link-data-no-link",
             DropReason::LinkRepeatEcho => "link-repeat-echo",
             DropReason::ForwardMaxHops => "forward-max-hops",
             DropReason::BlackholedAnnounce => "blackholed-announce",
@@ -1692,7 +1708,7 @@ impl DropReason {
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 19] = [
+    pub const ALL: [DropReason; 20] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -1705,6 +1721,7 @@ impl DropReason {
         DropReason::IngressBurstAnnounce,
         DropReason::LrproofInvalid,
         DropReason::LrproofNoLink,
+        DropReason::LinkDataNoLink,
         DropReason::LinkRepeatEcho,
         DropReason::ForwardMaxHops,
         DropReason::BlackholedAnnounce,
@@ -1808,6 +1825,13 @@ impl TransportStats {
         self.drops_lrproof_no_link
     }
 
+    /// Link-addressed DATA that reached the endpoint layer and matched no
+    /// local link — established-link traffic whose owner is gone (the DATA
+    /// sibling of [`Self::drops_lrproof_no_link`]).
+    pub fn drops_link_data_no_link(&self) -> u64 {
+        self.drops_link_data_no_link
+    }
+
     /// Same-interface link repeats dropped as echoes of our own forward
     /// (routine on shared media, not validation failures; Codeberg #227).
     pub fn drops_link_repeat_echo(&self) -> u64 {
@@ -1867,6 +1891,7 @@ impl TransportStats {
             + self.drops_ingress_burst_announce
             + self.drops_lrproof_invalid
             + self.drops_lrproof_no_link
+            + self.drops_link_data_no_link
             + self.drops_link_repeat_echo
             + self.drops_forward_max_hops
             + self.drops_blackholed_announce
@@ -1897,6 +1922,7 @@ impl TransportStats {
             DropReason::IngressBurstAnnounce => self.drops_ingress_burst_announce += 1,
             DropReason::LrproofInvalid => self.drops_lrproof_invalid += 1,
             DropReason::LrproofNoLink => self.drops_lrproof_no_link += 1,
+            DropReason::LinkDataNoLink => self.drops_link_data_no_link += 1,
             DropReason::LinkRepeatEcho => self.drops_link_repeat_echo += 1,
             DropReason::ForwardMaxHops => self.drops_forward_max_hops += 1,
             DropReason::BlackholedAnnounce => self.drops_blackholed_announce += 1,
@@ -4135,6 +4161,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 ingress_burst_announce = self.stats.drops_ingress_burst_announce,
                 lrproof_invalid = self.stats.drops_lrproof_invalid,
                 lrproof_no_link = self.stats.drops_lrproof_no_link,
+                link_data_no_link = self.stats.drops_link_data_no_link,
                 link_repeat_echo = self.stats.drops_link_repeat_echo,
                 forward_max_hops = self.stats.drops_forward_max_hops,
                 blackholed_announce = self.stats.drops_blackholed_announce,
@@ -4921,7 +4948,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3452. A destination with no cached
+    /// link-request path uses at transport.rs:3489. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -10251,7 +10278,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2135`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2172`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -15805,7 +15832,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6348), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6386), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
