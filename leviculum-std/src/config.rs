@@ -689,7 +689,7 @@ pub struct InterfaceConfig {
     /// open a connection to and nothing else — an unlisted peer that
     /// dials US is served exactly as before. Entries are validated when
     /// the interface is built (`InitiateAllowlist::parse`,
-    /// `leviculum-std/src/interfaces/ble/links.rs:1132`). No reference
+    /// `leviculum-std/src/interfaces/ble/links.rs:1173`). No reference
     /// key: `ble-reticulum` has none, and this changes no wire byte.
     pub initiate_only: Option<Vec<String>>,
     /// Peers whose INCOMING link this interface serves — the symmetric

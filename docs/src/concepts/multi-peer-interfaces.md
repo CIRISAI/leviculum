@@ -72,7 +72,7 @@ Reticulum interface and one broadcast domain (`BLEInterface`,
 goes through one planner that decides which links get a copy
 (`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:765`, driven
 from `send_packet`,
-`leviculum-std/src/interfaces/ble/mod.rs:872`). Since Codeberg #376 the
+`leviculum-std/src/interfaces/ble/mod.rs:945`). Since Codeberg #376 the
 core supplies the addressee: a path entry carries the identity it was
 learned from (`via_peer`, `leviculum-core/src/storage_types.rs:48`) and
 that identity rides out with the packet. With a hint the planner picks
@@ -132,7 +132,7 @@ including when the dial never connected at all (`CentralGone`,
 `leviculum-std/src/interfaces/ble/bluez.rs:290`), and the orchestrator
 restarts the strict scan phase on that event (`CentralGone`,
 `leviculum-std/src/interfaces/ble/mod.rs:702`, into `note_reset`,
-`leviculum-std/src/interfaces/ble/links.rs:1310`). The firmware restarts
+`leviculum-std/src/interfaces/ble/links.rs:1351`). The firmware restarts
 its strict phase only at a real connection event or teardown
 (`note_strict_reset`, `leviculum-nrf/src/ble/columba.rs:1584`); a dial
 that timed out records at most a dead end and leaves the clock running
@@ -321,9 +321,9 @@ parent to lean on. Measured against the tree, not assumed:
 | Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:167`) | **medium** — contention is on the air | parent |
 | Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:2431`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:2626`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
 | Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:2652`) | **medium** | parent |
-| Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:818`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1266`) | **medium** — one adapter | parent |
+| Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:880`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1307`) | **medium** — one adapter | parent |
 | IFAC | **medium** — it is a property of the configured section | parent |
-| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1373`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:319`) | child, mostly |
+| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1414`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:353`) | child, mostly |
 | Negotiated MTU and fragmentation state | **link** | child |
 | Keepalive and expiry timers | **link** | child |
 | Byte counters | **link** | child |

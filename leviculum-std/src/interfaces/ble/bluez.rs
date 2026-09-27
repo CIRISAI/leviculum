@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::links::{IdentityHash, SERVICE_UUID_U128};
 use super::{Ev, LINK_QUEUE_DEPTH};
 use crate::event_log::Scalar;
-use leviculum_ble_tx::{identity_hint, manufacturer_data_with_hint, COMPANY_ID};
+use leviculum_ble_tx::COMPANY_ID;
 
 /// The Columba GATT service and its three characteristics
 /// (BLE_PROTOCOL_v2.2 §GATT Service Structure).
@@ -63,16 +63,22 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(20);
 /// `LN-<hex8>` local name in the scan response, where it does not
 /// compete with the 31 advertisement bytes (same layout as the
 /// firmware's).
+///
+/// `free_slots` is the table's free INCOMING count (#432): the same
+/// quantity a board publishes, since lnsd now has a board's slot shape.
+/// It is a parameter rather than read here, because this function is
+/// also the only re-registration path — the caller compares what is on
+/// the air with what the table says and calls again when they differ.
 pub(crate) async fn register_advertisement(
     adapter: &Adapter,
     identity: IdentityHash,
     iface: &str,
+    free_slots: u8,
 ) -> bluer::Result<AdvertisementHandle> {
     let name = super::links::local_name(&identity);
     // The manufacturer-record payload minus the company ID: BlueZ keys
     // the record by CID and prepends it on the wire.
-    let hint = identity_hint(&identity);
-    let record = manufacturer_data_with_hint(super::links::LOCAL_CAPS, &hint)[2..].to_vec();
+    let record = super::links::capability_record(&identity, free_slots)[2..].to_vec();
 
     let advertisement = Advertisement {
         advertisement_type: AdvType::Peripheral,
@@ -85,8 +91,8 @@ pub(crate) async fn register_advertisement(
     let adv = adapter.advertise(advertisement).await?;
     tracing::info!(
         "BLE {iface}: advertising as {name} (service {SERVICE_UUID}, dual-role record present, \
-         identity hint {})",
-        super::links::hint_str(Some(hint)),
+         identity hint {}, free incoming slots {free_slots})",
+        super::links::hint_str(Some(leviculum_ble_tx::identity_hint(&identity))),
     );
     Ok(adv)
 }

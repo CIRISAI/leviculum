@@ -23,10 +23,11 @@
 //! peripheral links rather than per link.
 
 use leviculum_ble_tx::{
-    addr_value, effective_tx_gap_ms, judge_duplicate, parse_peer_advertisement, should_initiate,
-    usable_mtu, CandidateTable, ConnectDecision, DupRule, DupVerdict, Origin, ScanMode, TxGap,
-    IDENTITY_HINT_LEN, MANUFACTURER_DATA_HINT_LEN, MIN_USABLE_MTU, PERIPH_SLOTS,
-    SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    addr_value, effective_tx_gap_ms, identity_hint, judge_duplicate, manufacturer_data_with_hint,
+    parse_peer_advertisement, should_initiate, usable_mtu, with_free_slots, CandidateTable,
+    ConnectDecision, DupRule, DupVerdict, Origin, ScanMode, TxGap, IDENTITY_HINT_LEN,
+    MANUFACTURER_DATA_HINT_LEN, MIN_USABLE_MTU, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS,
+    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_INTERVAL_MS,
@@ -46,13 +47,13 @@ pub(crate) type IdentityHash = [u8; 16];
 /// pins its `LOCAL_CAPS` the same way).
 pub(crate) const LOCAL_CAPS: u8 = 0x00;
 
-// The daemon advertises no free-slot count (#375 item 3): its capacity
-// is ONE budget shared by both roles (`max_links`, configurable), not
-// the boards' three dedicated incoming slots, so a count in the boards'
-// units would be a different quantity wearing the same bits. With the
-// validity bit clear a peer reads "no slot information" and ranks lnsd
-// exactly as it did before item 3 — which is the correct answer here,
-// not a placeholder. It READS the count from peers, below.
+// Until #432 the daemon advertised no free-slot count (#375 item 3):
+// its capacity was ONE budget shared by both roles, so a count in the
+// boards' units would have been a different quantity wearing the same
+// bits, and the cleared validity bit correctly said "no slot
+// information". The asymmetric cap removed that objection — lnsd's
+// incoming slots are the boards' incoming slots — so the count goes on
+// the air, built by [`capability_record`] below.
 
 /// Default cap on simultaneous BLE links, both roles counted together.
 /// A policy bound, not a resource one: BlueZ has no SoftDevice-style hard
@@ -929,6 +930,46 @@ pub(crate) const SERVICE_UUID_LE: [u8; 16] = SERVICE_UUID_U128.to_le_bytes();
 /// so a scanner listing shows lnsd exactly like a board.
 pub(crate) fn local_name(identity: &IdentityHash) -> String {
     String::from_utf8_lossy(&leviculum_ble_tx::device_name(identity)).into_owned()
+}
+
+/// The manufacturer-data record this node puts on the air right now:
+/// [`LOCAL_CAPS`] carrying the live free-incoming-slot count (#432,
+/// #375 item 3) and this node's identity hint (#412).
+///
+/// The firmware's `capability_record` (`leviculum-nrf/src/ble/columba.rs`,
+/// bbe28a36) is the same two calls over the same shared builder, which
+/// is what this pins: the bits, the order and the hint are stated once
+/// for both stacks, so a peer cannot tell an lnsd record from a board's
+/// except by the count in it.
+///
+/// `free` is [`LinkTable::free_incoming_slots`], read at registration
+/// time rather than stored, which is what keeps the number on the air
+/// current: the driver re-registers when the count changes and computes
+/// the record from the table at that moment. The count saturates at
+/// [`PERIPH_SLOTS`] in `with_free_slots`, so a `max_connections` past
+/// the shipped default publishes "three free" — the record's bound, not
+/// the table's (`free_incoming_slots`).
+pub(crate) fn capability_record(
+    identity: &IdentityHash,
+    free: u8,
+) -> [u8; MANUFACTURER_DATA_HINT_LEN] {
+    manufacturer_data_with_hint(with_free_slots(LOCAL_CAPS, free), &identity_hint(identity))
+}
+
+/// Whether a sighting's advertised capacity is worth a dial (#432): a
+/// peer that published its last incoming slot as gone cannot accept
+/// one, so the dial can only end in a refusal or — since a full node
+/// goes dark and a dark node cannot even refuse — in the 20 s setup
+/// timeout `bluez.rs` budgets for it.
+///
+/// The one place the count GATES rather than ranks, and it gates only
+/// our spending of a dial: no link is ever refused for it
+/// ([`LinkTable::admit`] does not read it, here as on a board). Silence
+/// is not zero — a peer that published no count is dialled exactly as
+/// before, the same rule `leviculum_ble_tx::dial_preference` applies one
+/// tier up.
+pub(crate) fn peer_has_room(free_slots: Option<u8>) -> bool {
+    free_slots != Some(0)
 }
 
 /// An identity hint as the logs print it (#412): the four bytes in hex,
@@ -3470,5 +3511,116 @@ mod tests {
         }
         assert!(t.is_full(), "1 + 3 is the configured total");
         assert!(!t.should_advertise());
+    }
+
+    // -----------------------------------------------------------------
+    // #432 / #375 item 3 — the free-slot count in lnsd's own
+    // advertisement
+    // -----------------------------------------------------------------
+
+    /// lnsd's record and a board's are the same bytes for the same
+    /// count: the same two calls over the same shared builder, so the
+    /// bits, their order and the hint behind them are stated once for
+    /// both stacks (the firmware's `capability_record`,
+    /// `leviculum-nrf/src/ble/columba.rs`, bbe28a36). What a peer can
+    /// tell an lnsd record from a board's by is the count in it and
+    /// nothing else.
+    #[test]
+    fn the_advertised_record_is_the_firmwares_for_the_same_free_count() {
+        use leviculum_ble_tx::{free_slots, CAP_IDENTITY_HINT};
+        for free in 0..=PERIPH_SLOTS {
+            let ours = capability_record(&ID_A, free);
+            let firmware = manufacturer_data_with_hint(
+                with_free_slots(LOCAL_CAPS, free),
+                &identity_hint(&ID_A),
+            );
+            assert_eq!(ours, firmware, "free={free}: byte for byte");
+            assert_eq!(
+                free_slots(ours[3]),
+                Some(free),
+                "free={free}: and the count decodes back off the record"
+            );
+            assert_eq!(
+                ours[3] & CAP_IDENTITY_HINT,
+                CAP_IDENTITY_HINT,
+                "free={free}: the hint bit survived the count"
+            );
+            assert_eq!(&ours[4..], &identity_hint(&ID_A), "and so did the hint");
+        }
+        // The range the record can express is the range the shipped
+        // table can hold — the firmware asserts the same equality at
+        // compile time, and so does this module (`PERIPH_SLOTS` beside
+        // `CENTRAL_LINKS`).
+        assert_eq!(
+            table().free_incoming_slots(),
+            PERIPH_SLOTS,
+            "an empty lnsd table offers exactly what the two bits carry"
+        );
+    }
+
+    /// The count on the air is the table's, link by link — the wiring
+    /// `reconcile_advertising` performs, on the values it performs it
+    /// with.
+    #[test]
+    fn the_advertised_count_follows_the_incoming_slots() {
+        use leviculum_ble_tx::free_slots;
+        let published =
+            |t: &LinkTable| free_slots(capability_record(&OWN, t.free_incoming_slots())[3]);
+        let mut t = table();
+        assert_eq!(published(&t), Some(3));
+        t.admit(ID_A, ADDR_1, Role::Peripheral, 185, 0);
+        assert_eq!(published(&t), Some(2));
+        t.admit(ID_B, ADDR_2, Role::Peripheral, 185, 0);
+        assert_eq!(published(&t), Some(1));
+        // Our own dial is not a peer's business: it does not lower the
+        // count we offer (#432).
+        t.admit([0xC3; 16], ADDR_3, Role::Central, 185, 0);
+        assert_eq!(published(&t), Some(1), "the central link changed nothing");
+        // The third incoming link does, and takes the node dark with it.
+        t.admit([0xC4; 16], seed2_addr(9), Role::Peripheral, 185, 0);
+        assert_eq!(published(&t), Some(0));
+        assert!(!t.should_advertise(), "a published zero is a dark node");
+    }
+
+    /// A peer reading lnsd's record sees a count where it used to see
+    /// `unknown`: the `free_slots=` field of `BLE_SCAN_DECISION` is fed
+    /// from exactly this parse, so an lnsd peer now ranks by capacity
+    /// like a board. And the one thing the count decides on our side:
+    /// a peer that published its last slot as gone is not dialled.
+    #[test]
+    fn an_lnsd_peers_decision_line_carries_its_free_slot_count() {
+        let two = capability_record(&ID_A, 2);
+        // Our address is the lower one, so the strict sort says dial:
+        // whatever stops the dial below is the capacity and not the sort.
+        let d = decide_from_scan(&ADDR_1, &ADDR_2, true, Some(&two[2..]), ScanMode::Strict)
+            .expect("the sighting offers the Columba service");
+        assert!(d.caps_record, "caps_record=1");
+        assert_eq!(d.free_slots, Some(2), "free_slots=2, not unknown");
+        assert_eq!(
+            d.identity_hint,
+            Some(identity_hint(&ID_A)),
+            "and the hint is still readable beside it"
+        );
+        assert!(peer_has_room(d.free_slots), "two free slots is a dial");
+
+        let none_left = capability_record(&ID_A, 0);
+        let full = decide_from_scan(
+            &ADDR_1,
+            &ADDR_2,
+            true,
+            Some(&none_left[2..]),
+            ScanMode::Strict,
+        )
+        .expect("the sighting offers the Columba service");
+        assert_eq!(full.free_slots, Some(0));
+        assert!(
+            !peer_has_room(full.free_slots),
+            "a peer with no incoming slot left is not worth a dial"
+        );
+        assert!(
+            full.decision.initiate(),
+            "and it is the capacity that stopped it, not the sort"
+        );
+        assert!(peer_has_room(None), "silence is still not zero");
     }
 }

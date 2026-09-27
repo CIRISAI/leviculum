@@ -234,6 +234,23 @@ struct CentralPipe {
     frames: mpsc::Sender<Vec<Vec<u8>>>,
 }
 
+/// The advertisement as it currently stands: BlueZ's handle (dropping it
+/// deregisters the record) and the free-incoming-slot count the record
+/// on the air carries (#432).
+///
+/// The count is kept beside the handle because BlueZ has no in-place
+/// record update, so the only way to tell a stale count from a current
+/// one is to remember what was published. See
+/// [`BleTask::reconcile_advertising`].
+///
+/// The handle is held and never read: dropping it IS the
+/// deregistration, so its only job is to live exactly as long as the
+/// record it registered.
+struct Advertised {
+    _handle: bluer::adv::AdvertisementHandle,
+    free_slots: u8,
+}
+
 impl BleTask {
     async fn run(self, mut outgoing_rx: mpsc::Receiver<OutgoingPacket>) {
         loop {
@@ -265,11 +282,20 @@ impl BleTask {
 
         let (ev_tx, mut ev_rx) = mpsc::channel::<Ev>(64);
 
+        // The link table is built before either role, because both read
+        // it at setup: the advertisement carries the table's free
+        // incoming count (#432) from its very first registration, so
+        // there is no window in which a fresh node advertises a count it
+        // did not compute.
+        let mut table = LinkTable::new(self.identity_hash, self.opts.max_connections)
+            .with_accept_only(self.opts.accept_only.clone());
+
         // Peripheral half. The GATT application lives for the session —
         // live peripheral links keep using it — while the advertisement
-        // is gated on table occupancy below (`should_advertise`, the
-        // firmware's ADV_LOCK policy at ead0bce): deregistered when the
-        // table fills, re-registered when a slot frees. Both handles
+        // is gated on the table's INCOMING occupancy below
+        // (`should_advertise`, the firmware's ADV_LOCK policy at
+        // ead0bce): deregistered when they fill, re-registered when a
+        // slot frees or the published count goes stale. Both handles
         // deregister on drop.
         let _app = if self.opts.enable_peripheral {
             Some(bluez::serve_gatt(&adapter, self.identity_hash, ev_tx.clone()).await?)
@@ -277,7 +303,17 @@ impl BleTask {
             None
         };
         let mut adv = if self.opts.enable_peripheral {
-            Some(bluez::register_advertisement(&adapter, self.identity_hash, &self.name).await?)
+            let free_slots = table.free_incoming_slots();
+            Some(Advertised {
+                _handle: bluez::register_advertisement(
+                    &adapter,
+                    self.identity_hash,
+                    &self.name,
+                    free_slots,
+                )
+                .await?,
+                free_slots,
+            })
         } else {
             None
         };
@@ -311,8 +347,6 @@ impl BleTask {
         let start = Instant::now();
         let now_ms = |i: Instant| i.duration_since(start).as_millis() as u64;
 
-        let mut table = LinkTable::new(self.identity_hash, self.opts.max_connections)
-            .with_accept_only(self.opts.accept_only.clone());
         // The peripheral notify pipe's inter-packet gap (#376). One
         // pacer for the pipe IS per-link pacing here: a notification
         // reaches every subscribed central at once, so all peripheral
@@ -607,12 +641,20 @@ impl BleTask {
                 // The allow-list sits with the other reasons not to
                 // dial, and is checked here alone: the window's
                 // re-checks below re-ask what the WORLD may have
-                // changed (table full, backoff, an inbound link that
-                // landed meanwhile), and a policy does not change under
-                // them. Nothing enters the window that did not pass
-                // this line.
+                // changed (no outgoing slot, backoff, an inbound link
+                // that landed meanwhile), and a policy does not change
+                // under them. Nothing enters the window that did not
+                // pass this line.
+                //
+                // `peer_has_room` sits here for the same reason (#432):
+                // it is a property of THIS advertisement — the peer said
+                // its last incoming slot is gone — and a re-check later
+                // in the window would have no fresher record to read. A
+                // peer that frees a slot advertises again, with a count
+                // that passes.
                 if !decision.decision.initiate()
                     || !dial_allowed
+                    || !links::peer_has_room(decision.free_slots)
                     || rssi < self.opts.min_rssi
                     || !table.may_dial()
                     || table.knows_addr(&addr.0)
@@ -814,46 +856,77 @@ impl BleTask {
     }
 
     /// Apply the table's advertising verdict (#49 item 1, the firmware's
-    /// ADV_LOCK policy): a full table takes the advertisement off the
-    /// air — dropping the handle deregisters it from BlueZ — and a freed
-    /// slot puts it back. The GATT application is untouched either way;
-    /// live peripheral sessions keep running while dark, exactly as the
-    /// firmware keeps serving its sessions when nothing advertises.
-    /// Called after every event and on every tick, so a failed
-    /// re-registration is retried within a second.
+    /// ADV_LOCK policy): a node with no incoming slot free takes the
+    /// advertisement off the air — dropping the handle deregisters it
+    /// from BlueZ — and a freed slot puts it back. The GATT application
+    /// is untouched either way; live peripheral sessions keep running
+    /// while dark, exactly as the firmware keeps serving its sessions
+    /// when nothing advertises. Called after every event and on every
+    /// tick, so a failed re-registration is retried within a second.
+    ///
+    /// Since #432 it also keeps the PUBLISHED count honest: the record
+    /// carries the free incoming slots, and BlueZ offers no in-place
+    /// edit of a live record, so a changed count is a deregister and a
+    /// register. That costs an advertising gap exactly when a link went
+    /// up or came down — the moments the count changes and no others,
+    /// because the published value is remembered in [`Advertised`] and
+    /// compared, not re-registered per tick. A board pays the same price
+    /// by rebuilding its record at each advertising start.
+    ///
+    /// Like a board's, the count can understate and never overstate: an
+    /// incoming link is admitted before the record naming its slot comes
+    /// off the air, so the air lags behind a node that got emptier and
+    /// never behind one that got fuller.
     async fn reconcile_advertising(
         &self,
         adapter: &bluer::Adapter,
         table: &LinkTable,
-        adv: &mut Option<bluer::adv::AdvertisementHandle>,
+        adv: &mut Option<Advertised>,
     ) {
         if !self.opts.enable_peripheral {
             return;
         }
-        if table.should_advertise() {
-            if adv.is_none() {
-                match bluez::register_advertisement(adapter, self.identity_hash, &self.name).await {
-                    Ok(handle) => {
-                        *adv = Some(handle);
-                        tracing::info!(
-                            event = "BLE_ADV_GATE",
-                            iface = %Scalar(&self.name),
-                            state = "on",
-                        );
-                    }
-                    Err(e) => tracing::warn!(
-                        "BLE {}: re-registering advertisement failed ({e}); retrying",
-                        self.name
-                    ),
-                }
+        if !table.should_advertise() {
+            if adv.take().is_some() {
+                tracing::info!(
+                    event = "BLE_ADV_GATE",
+                    iface = %Scalar(&self.name),
+                    state = "off",
+                    reason = "full",
+                );
             }
-        } else if adv.take().is_some() {
-            tracing::info!(
-                event = "BLE_ADV_GATE",
-                iface = %Scalar(&self.name),
-                state = "off",
-                reason = "full",
-            );
+            return;
+        }
+        // Non-zero by the verdict above, which is a test of exactly this
+        // number.
+        let free_slots = table.free_incoming_slots();
+        if adv.as_ref().is_some_and(|a| a.free_slots == free_slots) {
+            return;
+        }
+        // Either nothing is on the air or what is on the air names the
+        // wrong count. Drop it first: two registrations of one node
+        // would put two records with two counts on the air.
+        let refresh = u8::from(adv.take().is_some());
+        match bluez::register_advertisement(adapter, self.identity_hash, &self.name, free_slots)
+            .await
+        {
+            Ok(handle) => {
+                *adv = Some(Advertised {
+                    _handle: handle,
+                    free_slots,
+                });
+                tracing::info!(
+                    event = "BLE_ADV_GATE",
+                    iface = %Scalar(&self.name),
+                    state = "on",
+                    free_slots = free_slots,
+                    refresh = refresh,
+                );
+            }
+            Err(e) => tracing::warn!(
+                "BLE {}: re-registering advertisement failed ({e}); retrying",
+                self.name
+            ),
         }
     }
 

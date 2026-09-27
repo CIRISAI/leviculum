@@ -207,15 +207,32 @@ Three properties keep it honest:
   emptier, never behind one that got fuller. No running advertisement
   is stopped to rewrite it, so no advertising interval is dropped.
 - **Silence is not zero.** A peer that advertises no count — an older
-  board, a phone, lnsd, another implementation — is ranked as if all
+  board, a phone, another implementation — is ranked as if all
   its slots were free, the same "assume full capability" the v0.3.0
   §3.2 rule applies to the capability flags, so it keeps exactly its
   pre-#375 standing. Bit 3 exists precisely so that an older record
   with only bit 0 set cannot be read as "zero slots free".
 
-lnsd reads the count but advertises none: its capacity is one budget
-shared by both roles (`max_links`), not the boards' three dedicated
-incoming slots, so the same bits would mean a different quantity.
+lnsd publishes the count too, since #432. Until the asymmetric cap it
+did not, and the reason was not modesty: its capacity was one budget
+shared by both roles, so a number in the boards' units would have been
+a different quantity wearing the same bits. With one outgoing slot and
+`max_connections - 1` incoming, lnsd's free-incoming count IS a board's
+free-incoming count, and it goes on the air from one shared builder
+(`links.rs`'s `capability_record` against the firmware's, the same two
+calls) — so a peer can tell an lnsd record from a board's by the count
+in it and by nothing else. BlueZ cannot edit a live record, so a
+changed count is a deregister and a register; the published value is
+remembered beside the handle and compared, so that pair is paid when a
+link goes up or comes down and at no other moment. lnsd understates the
+same way a board does, for the same reason: the link is admitted before
+the record naming its slot leaves the air. And it now skips a peer
+advertising zero — a peer whose last incoming slot is gone cannot
+accept our dial, so the dial could only end in a refusal or, since a
+full node goes dark and a dark node cannot even refuse, in the 20 s
+setup timeout. That is the one place the count gates instead of ranking,
+it gates only our own spending of a dial, and silence is still not
+zero.
 
 Two consequences of dialling against the sort are deliberate:
 
