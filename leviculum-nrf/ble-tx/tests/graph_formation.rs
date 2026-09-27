@@ -437,6 +437,20 @@
 //! formations, not of connectivity; `disc` is the connectivity column
 //! and it stays at 0 in a room of boards.
 //!
+//! **Flipped 2026-09-27 (#412, [`ConnectFailure`]).** That last clause is
+//! a statement about a room where every dial connects. At the measured
+//! board-to-board failure rate the same room of ten boards at the same
+//! 45 s mean splits in 508 orders of 1000 and leaves 280 boards per 1000
+//! orders with no board link at all; at twenty boards, 820 and 416. `bb`
+//! falls 13 %. The formation phase survives (10 000 links, `disc` 0 at
+//! ten boards; 20 000 and 14 at twenty), because a dial that failed is a
+//! dial the board makes again and nothing else in the room is moving. It
+//! is the steady state that does not: a death frees the slot, the re-dial
+//! lands two times in three, and each miss costs the board two to three
+//! rounds in which it is neither scanning nor linked. The rest of this
+//! section is unaffected — the direction it warns about is the one it
+//! still has.
+//!
 //!
 //! ## What this harness still cannot see
 //!
@@ -444,14 +458,16 @@
 //! worth rather than ranked, because nothing here measures which of them
 //! carries the residual:
 //!
-//! - **Every dial connects.** The captures say a board's dial usually
-//!   does not: `feld-t114` logged 758 `BLE_CENTRAL_CONNECT` and 707
-//!   `BLE_CENTRAL_FAIL`, so 93 % of its dials never came up;
-//!   `feld-pocket` 49 of 107, `t114-boot` 48 of 164. A fallback dial that cannot connect goes into the
-//!   dead-end table for two minutes (`BLE_DIAL_DEAD_END`, 50 times on
-//!   `feld-t114`), which takes the board out of the next windows and
-//!   leaves the phone. The harness only ever condemns an address after a
-//!   duplicate-identity refusal.
+//! - ~~**Every dial connects.**~~ **Closed 2026-09-27 by
+//!   [`ConnectFailure`]**, and it was the largest of the five: it was
+//!   load-bearing for the `disc` column of every table above, not for
+//!   the churn columns the section it heads is about. The last section
+//!   of these docs is the re-measurement. What the limit said is still
+//!   the measurement it was read off: `feld-t114` logged 758
+//!   `BLE_CENTRAL_CONNECT` and 707 `BLE_CENTRAL_FAIL` through
+//!   2026-09-25, `feld-pocket` 49 of 107, `t114-boot` 48 of 164, and a
+//!   fallback dial that cannot connect goes into the dead-end table for
+//!   two minutes (`BLE_DIAL_DEAD_END`).
 //! - **A dead peer is back in the next round.** Death here is
 //!   instantaneous and symmetric, and the ex-peer advertises again 5 s
 //!   later at its full free-slot count. On a board the two ends learn of
@@ -639,7 +655,25 @@
 //! board's freed slots in the rig's own three-board room, 0.04 % at ten
 //! boards and 0.00 % at twenty, and the model reproduces the capture's
 //! two eras on either side of 2026-09-25 with nothing but the order
-//! changing. 306's "the shipped order does not defend that slot" was an
+//! changing.
+//!
+//! **Weakened 2026-09-27 (#412, [`ConnectFailure`]), and the mechanism is
+//! an asymmetry this instrument could not see.** 0.32 % is measured under
+//! "every dial connects". With the captures' own rates on, the phone
+//! takes **11.60 %** of that slot in the same room and the same cell —
+//! thirty-six times more — because the peer the shipped order PREFERS
+//! carries a static address and a third of the dials to it fail, while
+//! the peer it DEMOTES carries a rotating one and, in the population that
+//! reaches a Reticulum service at all, never fails. The order is a
+//! preference and a failed dial is a retry, so the demoted peer collects
+//! the retries. The defence is still real (11.60 % against the 99.89 %
+//! the order it replaced gives) — it is not the near-exclusion 0.32 %
+//! reads as. The rig's own post-2026-09-25 ledger, 25 of 25 to the solar
+//! node, is reproduced by `off` (0.32 %) and by
+//! [`ConnectFailure::CAPTURE_STRANGERS`] (0.40 %) and NOT by
+//! [`ConnectFailure::CAPTURE`] — which is the row saying the rig's room
+//! since 2026-09-22 is the stranger room, where the phone's own dials
+//! fail too. 306's "the shipped order does not defend that slot" was an
 //! artefact of a three-board model of a four-board room, and the tier
 //! from part 1 is still worth exactly zero (0 of the offers in every cell
 //! here reach `DialPreference::CannotDialUs` — the solar node advertises
@@ -801,6 +835,222 @@
 //! load-bearing for every table above: every one of them is measured
 //! under "every dial connects", so the change is a re-measurement of the
 //! document, not of a column.
+//!
+//! # The dial that fails to connect (#412, the instrument's first limit)
+//!
+//! [`ConnectFailure`] is that re-measurement, and its own docs carry the
+//! captures it is read off, the two shapes the failure has and what the
+//! firmware does with each stage. `ConnectFailure::NONE` reproduces every
+//! row above bit for bit — not as a claim but as the 23 tests that were
+//! here before this section, every pinned cell of them unchanged.
+//!
+//! ## What the captures say about the SHAPE, before any model
+//!
+//! 3034 dials, paired `BLE_CENTRAL_CONNECT addr=A` to the
+//! `BLE_CENTRAL_FAIL addr=A` or `BLE_CENTRAL_UP` that follows it, over
+//! the three `ble-drop` logs, 2026-09-12 to 2026-09-27. The doc's own
+//! 758/707 for `feld-t114` is this data through 2026-09-25, exactly.
+//!
+//! **Per board and peer kind** (`fail%` is failures per dial,
+//! `conn%` the share of those failures at `stage=connect` — the only
+//! stage that condemns anything):
+//!
+//! | board | peer kind | dials | fail% | conn% | cost s |
+//! |-------|-----------|------:|------:|------:|-------:|
+//! | `feld-t114`   | rotating (RPA)  | 2675 | 99.3 |  7.5 | 2.28 |
+//! | `feld-t114`   | solar node      |   53 | 41.5 | 31.8 | 6.11 |
+//! | `feld-t114`   | board           |    4 | 25.0 |100.0 | 3.26 |
+//! | `t114-boot`   | board           |  134 | 31.3 | 35.7 | 6.01 |
+//! | `t114-boot`   | rotating (RPA)  |   23 | 26.1 | 33.3 | 3.46 |
+//! | `feld-pocket` | board           |  122 | 40.2 | 32.7 | 8.01 |
+//!
+//! ```text
+//! grep -E 'BLE_CENTRAL_(CONNECT|FAIL|UP)|BLE_DIAL_DEAD_END' <board>.log
+//! ```
+//!
+//! **The rotating column is not one population, and that is the finding
+//! the model turns on.** Split `feld-t114`'s 450 rotating addresses by
+//! whether any dial to them ever reached a Reticulum service:
+//!
+//! | population | addrs | dials | fail% | dials spent per address |
+//! |------------|------:|------:|------:|------------------------:|
+//! | reached the service | 20 | 20 | 0.0 | 1 |
+//! | never reached it | 430 | 2655 | 100.0 | med 6, max 13 |
+//!
+//! Not one address is mixed — and the same holds on `t114-boot` (17 of
+//! 17 and 6 of 6) and `feld-pocket`. So a rotating peer does not fail per
+//! dial: the ADDRESS is reachable or it is not, and the draw belongs to
+//! the rotation. The never-reached population fails
+//! `stage=discover err=ServiceNotFound`, which writes no dead end at any
+//! stage, which is why one dead address costs six dials instead of one.
+//!
+//! **Clustering, for the static kind, is mild and is not modelled:**
+//! `P(fail | the last dial to this address failed)` is 0.48 to 0.69
+//! against a base of 0.31 to 0.40. The draw here is memoryless, which
+//! under-states the runs.
+//!
+//! **What a failed dial costs** is not the failure but the gap to the
+//! board's next `BLE_CENTRAL_CONNECT`: median 16.35 s after a
+//! connect-stage failure and 11.56 s after a post-connect one, against
+//! [`ROUND_MS`] = 5 s. Three rounds and two, and the board is neither
+//! scanning nor linked in them.
+//!
+//! **One era note, because the doc's 93 % averages two rooms.** Through
+//! 2026-09-16 a rotating-address dial from `feld-t114` mostly worked (3
+//! of 23 failed). From 2026-09-22 not one of 2652 did. The static kind
+//! did not move across that boundary (31-44 % in both), which is what
+//! says the change is in the room and not in the board.
+//!
+//! ## 306's and 311's rows, re-measured
+//!
+//! The rig's room, three boards and one dialling phone, `none` without
+//! the solar node and `rig` with it, per 1000 orders. `off` is the row as
+//! the sections above measured it.
+//!
+//! | room | policy             | life     | failure   | fail%  | top%   | sb   | bb    | d/use | disc |
+//! |------|--------------------|----------|-----------|-------:|-------:|-----:|------:|------:|-----:|
+//! | none | eager/rotatinglast | immortal | off       |   0.00 | 100.00 |    0 |  2040 | 2.04  |    0 |
+//! | none | eager/rotatinglast | immortal | capture   |   9.96 | 100.00 |    0 |  2032 | 2.41  |    0 |
+//! | none | eager/rotatinglast | immortal | strangers |  82.95 | 100.00 |    0 |  2032 | 6.47  |    0 |
+//! | none | eager/rotatinglast | 45 s     | off       |   0.00 | 100.00 |    0 | 26790 | 1.40  |    0 |
+//! | none | eager/rotatinglast | 45 s     | capture   |  31.32 | 100.00 |    0 | 23350 | 2.04  |  238 |
+//! | none | eager/rotatinglast | 45 s     | strangers |  44.43 | 100.00 |    0 | 23422 | 2.28  |  210 |
+//! | none | eager/rotatinglast | 600 s    | off       |   0.00 | 100.00 |    0 |  3904 | 1.84  |    0 |
+//! | none | eager/rotatinglast | 600 s    | capture   |  15.35 | 100.00 |    0 |  3850 | 2.23  |   22 |
+//! | none | eager/rotatinglast | 600 s    | strangers |  75.04 | 100.00 |    0 |  3846 | 4.36  |   28 |
+//! | rig  | eager/rotatinglast | immortal | off       |   0.00 |  98.83 |  738 |  2090 | 1.07  |    0 |
+//! | rig  | eager/rotatinglast | immortal | capture   |  25.17 |  94.38 |  674 |  2140 | 1.50  |    4 |
+//! | rig  | eager/rotatinglast | immortal | strangers |  62.66 |  53.85 |  726 |  2056 | 2.71  |   58 |
+//! | rig  | eager/rotatinglast | 45 s     | off       |   0.00 |   0.32 | 4640 | 26840 | 1.27  |    0 |
+//! | rig  | eager/rotatinglast | 45 s     | capture   |  34.98 |  11.60 | 2876 | 23370 | 1.97  |  230 |
+//! | rig  | eager/rotatinglast | 45 s     | strangers |  36.39 |   0.40 | 2962 | 23294 | 2.00  |  258 |
+//! | rig  | eager/rotatinglast | 600 s    | off       |   0.00 |  50.94 | 1472 |  3976 | 1.10  |   22 |
+//! | rig  | eager/rotatinglast | 600 s    | capture   |  29.68 |  57.32 | 1306 |  3988 | 1.63  |   28 |
+//! | rig  | eager/rotatinglast | 600 s    | strangers |  50.12 |   4.55 | 1356 |  3894 | 2.08  |   42 |
+//! | rig  | eager/mostfree     | 45 s     | off       |   0.00 |  99.89 |   98 | 26734 | 1.40  |    0 |
+//! | rig  | eager/mostfree     | 45 s     | capture   |  31.13 |  99.73 |   44 | 23204 | 2.03  |  200 |
+//! | rig  | eager/mostfree     | 45 s     | strangers |  44.43 |  92.31 |   60 | 23372 | 2.29  |  222 |
+//!
+//! (`eager/mostfree` is identical to `eager/rotatinglast` in every cell
+//! of the `none` room, at every level, as it is at `off`; the test prints
+//! both.)
+//!
+//! ## #375's guarantee cell, re-measured
+//!
+//! Ten and twenty boards with nothing else in the room, and the same room
+//! with one phone, per 1000 orders. `bdls` counts boards left with no
+//! board link. The empty room holds nothing rotating, so `capture` and
+//! `strangers` are equal in every cell — asserted, and the model's own
+//! positive control that the rotating half is the only thing between the
+//! two levels.
+//!
+//! | n  | room  | policy             | life     | failure   | fail% | top%   | bb     | d/use | disc | bdls |
+//! |---:|-------|--------------------|----------|-----------|------:|-------:|-------:|------:|-----:|-----:|
+//! | 10 | empty | eager/rotatinglast | immortal | off       |  0.00 |    -   |  10000 | 1.00  |    0 |    0 |
+//! | 10 | empty | eager/rotatinglast | immortal | capture   | 35.63 |    -   |  10000 | 1.55  |    0 |    0 |
+//! | 10 | empty | eager/rotatinglast | 45 s     | off       |  0.00 |   0.00 | 122812 | 1.27  |    0 |    0 |
+//! | 10 | empty | eager/rotatinglast | 45 s     | capture   | 35.16 |   0.00 | 106730 | 1.96  |  508 |  280 |
+//! | 20 | empty | eager/rotatinglast | immortal | off       |  0.00 |    -   |  20000 | 1.00  |    0 |    0 |
+//! | 20 | empty | eager/rotatinglast | immortal | capture   | 35.54 |    -   |  20000 | 1.55  |   14 |    0 |
+//! | 20 | empty | eager/rotatinglast | 45 s     | off       |  0.00 |   0.00 | 242126 | 1.27  |    0 |    0 |
+//! | 20 | empty | eager/rotatinglast | 45 s     | capture   | 34.97 |   0.00 | 211198 | 1.95  |  820 |  416 |
+//! | 10 | phone | eager/rotatinglast | 45 s     | off       |  0.00 |  79.29 | 118040 | 1.27  |    0 |    0 |
+//! | 10 | phone | eager/rotatinglast | 45 s     | capture   | 34.56 |  68.98 | 103788 | 1.94  |  682 |  394 |
+//! | 10 | phone | eager/rotatinglast | 45 s     | strangers | 36.67 |  10.08 | 104488 | 2.00  |  636 |  362 |
+//! | 20 | phone | eager/rotatinglast | 45 s     | off       |  0.00 |  51.03 | 239166 | 1.27  |    0 |    0 |
+//! | 20 | phone | eager/rotatinglast | 45 s     | capture   | 34.91 |  21.15 | 210254 | 1.95  |  882 |  530 |
+//! | 20 | phone | eager/rotatinglast | 45 s     | strangers | 35.12 |   1.14 | 210560 | 1.96  |  874 |  520 |
+//! | 10 | phone | eager/mostfree     | 45 s     | capture   | 34.17 | 100.00 | 102548 | 1.93  |  688 |  404 |
+//! | 20 | phone | eager/mostfree     | 45 s     | capture   | 34.50 | 100.00 | 206948 | 1.93  |  902 |  578 |
+//!
+//! **The formation phase survives and the steady state does not.** With
+//! nothing else moving in the room, a dial that failed is a dial the
+//! board makes again: all 10 000 links still form, no order splits, and
+//! the whole cost is `d/use` going from 1.00 to 1.55. At twenty boards
+//! the split count stops being exactly zero (14 of 1000), which is enough
+//! to say that #375's `disc` = 0 is a cell measured under "every dial
+//! connects" rather than a property of the rule. With links that end it
+//! is not close: 508 and 820 split orders, 280 and 416 boards per 1000
+//! orders holding no board link at the snapshot, 13 % fewer links formed.
+//! That is the largest single thing this parameter changes in the
+//! document, and it is in a column nobody was watching — the churn
+//! columns barely move.
+//!
+//! ## 321's ledger rows, re-measured
+//!
+//! Three boards and a phone, shipped order, per 1000 orders.
+//!
+//! | room | ledger | life     | failure   | hold | hold% | dials | refused | bb    | d/use | disc |
+//! |------|--------|----------|-----------|-----:|------:|------:|--------:|------:|------:|-----:|
+//! | none | off    | immortal | off       |    0 |   -   |  9556 |    4746 |  2040 | 2.04  |    0 |
+//! | none | k=3    | immortal | off       | 6526 | 15.81 |  7686 |    2704 |  2040 | 1.59  |    0 |
+//! | none | k=3    | immortal | capture   | 7336 |  9.00 |  8510 |    2724 |  2032 | 1.86  |    0 |
+//! | none | k=3    | immortal | strangers |   24 |  0.00 | 14618 |     230 |  2032 | 6.47  |    0 |
+//! | none | k=3    | 45 s     | off       | 3160 |  0.00 | 30960 |    2272 | 26790 | 1.34  |    0 |
+//! | none | k=3    | 45 s     | capture   | 2602 |  0.00 | 40168 |    2136 | 23350 | 1.99  |  238 |
+//! | none | k=3    | 600 s    | off       | 7104 |  7.60 |  9314 |    2706 |  3904 | 1.46  |    0 |
+//! | none | k=3    | 600 s    | capture   | 7448 |  5.72 | 11178 |    2714 |  3850 | 1.82  |   22 |
+//! | rig  | k=3    | immortal | capture   |  328 |  0.00 |  6094 |     402 |  2136 | 1.49  |    6 |
+//! | rig  | k=3    | 45 s     | off       |   58 |  0.00 | 31588 |      32 | 26852 | 1.27  |    0 |
+//! | rig  | k=3    | 45 s     | capture   |   56 |  0.00 | 41150 |     262 | 23368 | 1.97  |  228 |
+//! | rig  | k=3    | 600 s    | off       |  482 |  2.07 |  6570 |     326 |  3964 | 1.08  |   22 |
+//! | rig  | k=3    | 600 s    | capture   |  638 |  9.40 |  9706 |     546 |  3966 | 1.61  |   32 |
+//!
+//! **321's conclusion holds, in both directions.** The ledger still costs
+//! the phone room not one board-to-board link at any level — 2032 and
+//! 23 350 and 3850 with the ledger and without it, equalities — and stays
+//! inside 321's own 1 % bound in the rig room. And the instrument's limit
+//! was UNDER-stating its work rather than over-stating it: at the capture
+//! rates the pause holds 7336 windows shut on the immortal row against
+//! 6526, because a room whose dials fail reaches more fallback windows.
+//!
+//! **The stranger level says where the immortal rows' waste came from,
+//! from the other side.** 321 found it was the duplicate refusal and not
+//! the session length, by a phase-lock argument. Make the phone
+//! unreachable and the refusals go with it — 2704 to 230 — and the ledger
+//! falls from 6526 held windows to 24. A refusal needs a live link to
+//! refuse against; a phone no dial can reach holds none. Read the row
+//! carefully, though, and this is the fourth control: the room did not
+//! get cheaper, it got emptier. Dials go from 7686 to 14 618 and `d/use`
+//! from 1.59 to 6.47.
+//!
+//! ## Does the model still reproduce the rig's 100 %? Closer in one room
+//! ## and further in the other
+//!
+//! In the room 306 read the rig's 7-of-7 in — three boards, one phone, no
+//! solar node — the top board's freed outgoing slot goes to the phone
+//! **100.00 %** of the time at every failure level and every lifetime,
+//! `off` included. The instrument's first limit was not what put that
+//! column at 100 %, and closing it moves the answer by nothing at all.
+//!
+//! In the four-node room the model moves AWAY from the rig, and that is
+//! the honest reading rather than a tuning problem. The rig's ledger
+//! after 2026-09-25 is 25 of 25 to the solar node, 0 to the phone; the
+//! model gives 0.32 % at `off`, 0.40 % at `strangers` and 11.60 % at
+//! `capture`. Under `capture` the expected count is ~3 of 25 and the
+//! observed is 0, which a 25-draw binomial puts at about 4.5 % — tension,
+//! not agreement. The reading the two rows agree on is that the rig's
+//! room SINCE 2026-09-22 is the stranger room: 2652 of 2652 of
+//! `feld-t114`'s rotating-address dials failed in it, and that is exactly
+//! the room where the model puts the phone back at 0.40 %.
+//!
+//! ## What this harness still cannot see, with one fewer entry
+//!
+//! The four bullets above lose their first. What the closing added
+//! instead, stated rather than ranked:
+//!
+//! - **The peers' own dials never fail.** The churning peer's and the
+//!   static peer's dials are measured off the BOARDS' logs, which see a
+//!   peer's successful dial arrive as a link and cannot see its failed
+//!   one at all.
+//! - **The static kind's stickiness is dropped.** `P(fail | last failed)`
+//!   is 0.48 to 0.69 against a base of 0.31 to 0.40 and the draw here is
+//!   memoryless, so the model under-states the runs.
+//! - **A stranger is modelled as the phone being unreachable**, not as a
+//!   fifth kind beside it. The rig's room from 2026-09-22 had 287
+//!   rotating addresses in two days that no dial could get a service out
+//!   of; whether any of them was the Columba is not something the boards'
+//!   logs can answer, because a failed dial never reads an identity.
 
 use leviculum_ble_tx::{
     dial_preference, free_slots, judge_duplicate, should_initiate, with_free_slots, CandidateTable,
@@ -1316,6 +1566,186 @@ impl Ledger {
     }
 }
 
+/// A dial that never becomes a link (#412, the instrument's first
+/// limit) — a parameter of the same kind as [`Churn`], [`Mortality`],
+/// [`Statics`] and [`Ledger`], and `ConnectFailure::NONE` reproduces
+/// every row measured before it bit for bit.
+///
+/// # Why it is two different shapes and not one probability
+///
+/// Measured on the same three `ble-drop` captures the rest of this file
+/// reads (`/home/lew/rig-run/ble-drop/{feld-t114,t114-boot,feld-pocket}.
+/// log`, 2026-09-12 to 2026-09-27), by pairing each
+/// `BLE_CENTRAL_CONNECT addr=A` with the `BLE_CENTRAL_FAIL addr=A` or
+/// `BLE_CENTRAL_UP` that follows it on the same board. 3034 dials.
+///
+/// The failure rate is NOT one number per board, and it is not one
+/// number per room either. It splits by the peer's address class, and
+/// the two halves have different SHAPES:
+///
+/// - **A peer with a static random address** (a board, the solar node)
+///   fails memorylessly, about a third of the time: 91 of 260 such dials
+///   failed across the three boards (35.0 %), and each of the three
+///   boards is inside 31 % to 42 % of that on its own. The same address
+///   both succeeds and fails — `P(fail | the last dial to this address
+///   failed)` is 0.48 to 0.69 against a base of 0.31 to 0.40, so there
+///   is some stickiness, but nothing like a fixed per-peer verdict.
+/// - **A peer with a rotating address** does not fail per dial at all:
+///   it is reachable or it is not, and the ADDRESS decides. Of the 471
+///   resolvable-private addresses the three boards dialled, 38 reached
+///   the Reticulum service and every single dial to those 38 came up;
+///   433 never reached it and every single dial to those failed. Not one
+///   address is mixed. So the draw belongs to the rotation, not to the
+///   dial, and that is how [`Churner::reachable`] is drawn.
+///
+/// # What the two levels are
+///
+/// The rotating population is two kinds wearing one address class, and
+/// the harness has a model for only one of them:
+///
+/// - the Android Columba this file's [`Churner`] is: 38 of 38 of the
+///   addresses that reached a Reticulum service came up on the first
+///   dial, so its measured failure rate is ZERO ([`Self::CAPTURE`]).
+/// - and a rotating advertiser that passes the scanner's filter and has
+///   no Reticulum service at all: `stage=discover err=ServiceNotFound`,
+///   430 of `feld-t114`'s 450 addresses, and 2655 of its 2675 dials.
+///   [`Self::CAPTURE_STRANGERS`] is the room it was in.
+///
+/// The second is not a worse seed of the first. It is what took
+/// `feld-t114` from the 758/707 the module docs quote to 2729/2678: from
+/// 2026-09-22 the board's rotating-address dials stopped succeeding
+/// altogether, 2652 of 2652, while its dials to the solar node kept
+/// failing at the same 42 % they always had.
+///
+/// # What the firmware does with a failure, which is not one thing
+///
+/// The stage decides, and only one of the five stages condemns anything
+/// (`columba.rs:2124`-`:2318`):
+///
+/// - `stage=connect` — `central::connect` timed out, no connection ever
+///   existed. A FALLBACK dial writes `note_dead_end(addr,
+///   "fallback_connect")`, the 120 s address skip; a strict dial writes
+///   nothing (#375 §0). `conn_link_up` never fired either, so the strict
+///   clock is NOT reset and a stranded board stays in fallback for its
+///   next pass, which is exactly what `columba.rs:2598` is for.
+/// - `stage=discover`, `identity`, `subscribe`, `handshake` — the
+///   connection came up and went down again. No dead end is written at
+///   ANY of them, and `conn_link_up` has already reset the strict clock.
+///
+/// That split is load-bearing rather than a detail: 92 % of
+/// `feld-t114`'s failures are post-connect, so 92 % of them leave the
+/// address in the pool and the board dials it again next pass. It is why
+/// a single unreachable rotating address costs six dials (median 6,
+/// max 13, over the 430) instead of one.
+///
+/// Measured per kind, as the share of failures that happen at
+/// `stage=connect`: 34 % for a static-addressed peer (39 of 114), 7.5 %
+/// for a rotating one (201 of 2661).
+///
+/// # What a failed dial costs, measured
+///
+/// Not the failure itself — `BLE_CENTRAL_CONNECT` to `BLE_CENTRAL_FAIL`
+/// is a median 4.93 s at `stage=connect` (the `CONNECT_TIMEOUT_10MS`
+/// bound) and 2.28 s at `stage=discover` — but the gap to the board's
+/// NEXT `BLE_CENTRAL_CONNECT`, which is the round the room loses. Median
+/// 16.35 s after a connect-stage failure and 11.56 s after a
+/// post-connect one, against [`ROUND_MS`] = 5 s: three rounds and two.
+/// Those are [`FAIL_CONNECT_ROUNDS`] and [`FAIL_POST_ROUNDS`], and the
+/// board neither scans nor dials while they run — its strict clock does,
+/// because the firmware's is a wall clock.
+///
+/// # What it does NOT model, stated rather than ranked
+///
+/// - The churning peer's own dials and the static peer's own dials never
+///   fail. Both are measured off the BOARDS' logs, which see a peer's
+///   successful dial (it arrives as a link) and cannot see its failed
+///   one at all.
+/// - The stickiness of the static-peer rate is dropped: the draw is
+///   memoryless, which under-states the runs.
+/// - A rotating stranger is modelled as the [`Churner`] being
+///   unreachable, so at [`Self::CAPTURE_STRANGERS`] the room has no
+///   dialable phone at all rather than a phone AND a stranger. That is
+///   the room `feld-t114` was in from 2026-09-22 on; a room with both is
+///   a fifth kind and not this parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConnectFailure {
+    /// Per mille: a dial to a peer with a STATIC random address — a
+    /// board or the solar node — that does not end in a link. Drawn per
+    /// dial, memoryless.
+    static_fail: u32,
+    /// Per mille of those failures that happen at `stage=connect`, the
+    /// only stage that condemns an address.
+    static_at_connect: u32,
+    /// Per mille: a ROTATING peer's CURRENT address is one no dial can
+    /// get a Reticulum service out of. Drawn once per address — at the
+    /// rotation, not at the dial — because that is the shape the capture
+    /// has.
+    rotating_dead: u32,
+    /// Per mille of a rotating peer's failures that happen at
+    /// `stage=connect`.
+    rotating_at_connect: u32,
+}
+
+impl ConnectFailure {
+    /// Every dial connects: the instrument as every row before this
+    /// section measured it. No draw is taken from the failure stream at
+    /// all, which is what makes it bit-identical rather than merely
+    /// equal in aggregate.
+    const NONE: Self = Self {
+        static_fail: 0,
+        static_at_connect: 0,
+        rotating_dead: 0,
+        rotating_at_connect: 0,
+    };
+
+    /// The captures' own rates for the two kinds this harness models: a
+    /// static-addressed peer fails 35.0 % of the time (91 of 260) and a
+    /// third of those failures (34.2 %, 39 of 114) never connect; the
+    /// Android Columba the [`Churner`] is fails not at all (0 of 38
+    /// addresses that reached its service).
+    const CAPTURE: Self = Self {
+        static_fail: 350,
+        static_at_connect: 342,
+        rotating_dead: 0,
+        rotating_at_connect: 76,
+    };
+
+    /// The same, plus the rotating population `feld-t114` actually had
+    /// from 2026-09-22: 430 of its 450 rotating addresses (95.6 %) never
+    /// reached a Reticulum service, and 7.5 % of the failures were at
+    /// `stage=connect`. The phone is in the room, wins the fallback and
+    /// cannot be linked.
+    const CAPTURE_STRANGERS: Self = Self {
+        static_fail: 350,
+        static_at_connect: 342,
+        rotating_dead: 956,
+        rotating_at_connect: 76,
+    };
+
+    /// Whether any dial can fail in this configuration. When false the
+    /// failure stream is never read, so [`Self::NONE`] cannot move a
+    /// single draw of the five streams above it.
+    const fn fires(self) -> bool {
+        self.static_fail > 0 || self.rotating_dead > 0
+    }
+
+    /// One draw against a per-mille rate.
+    fn hits(per_mille: u32, state: &mut u64) -> bool {
+        next_rand(state) % 1000 < u64::from(per_mille)
+    }
+}
+
+/// Rounds a dial that failed at `stage=connect` costs its board before
+/// it scans again: the measured median gap from that dial's
+/// `BLE_CENTRAL_CONNECT` to the board's next one is 16.35 s, and a round
+/// is [`ROUND_MS`].
+const FAIL_CONNECT_ROUNDS: u32 = 3;
+
+/// The same for a failure past `central::connect` — the connection came
+/// up and the discovery, identity read, subscribe or handshake did not.
+/// Measured median gap 11.56 s.
+const FAIL_POST_ROUNDS: u32 = 2;
+
 /// The ATT MTU handed to the duplicate rule for BOTH links of a
 /// duplicate pair.
 ///
@@ -1603,6 +2033,10 @@ struct Board {
     /// this board paid for and got nothing back from, and the one pause
     /// those runs arm.
     ledger: DialLedger,
+    /// The round this board may scan again, after a dial that did not
+    /// connect ([`ConnectFailure`]). Zero is a board that is not in a
+    /// backoff, which every row measured before that parameter is.
+    busy_until: u32,
 }
 
 impl Board {
@@ -1698,6 +2132,14 @@ struct Churner {
     /// Boards it has dialled since its last rotation — its own central
     /// slots, bounded by [`CHURN_CENTRAL_LINKS`].
     links: Vec<usize>,
+    /// Whether a dial to the address it currently wears can reach a
+    /// Reticulum service at all ([`ConnectFailure`]). Drawn once per
+    /// address rather than per dial, because that is the shape the
+    /// captures have: of 471 rotating addresses the boards dialled, 38
+    /// came up on every dial and 433 failed on every dial, and not one
+    /// was mixed. Always true under [`ConnectFailure::NONE`], which
+    /// takes no draw.
+    reachable: bool,
 }
 
 /// The #412 static peer: the solar node as [`Statics`] describes it —
@@ -1750,6 +2192,16 @@ struct Tally {
     /// Dials refused post-connect because the identity was already
     /// live — the rotated-address duplicate, spent by definition.
     refused: usize,
+    /// Dials that never became a link because the dial itself did not
+    /// get that far ([`ConnectFailure`]): the connect timed out, or the
+    /// service discovery, identity read, subscribe or handshake failed.
+    /// Zero under [`ConnectFailure::NONE`] by construction.
+    failed: usize,
+    /// Of those: the ones aimed at a churning peer, and the ones that
+    /// failed at `stage=connect` and therefore condemned the address for
+    /// [`DEAD_END_TTL_MS`] when the verdict was a fallback one.
+    failed_churn: usize,
+    failed_at_connect: usize,
     /// Links whose session ended below [`USEFUL_SESSION_MS`]: the dial
     /// was paid, the link carried nothing. Without [`Mortality`] only a
     /// link to a churning peer can be one.
@@ -1913,9 +2365,9 @@ fn linked(boards: &[Board], a: usize, b: usize) -> bool {
 /// their own seeded streams, so the main stream — addresses, arrival
 /// order, scan order, first-seen picks — is byte-identical to what it
 /// was.
-// Eight parameters, and each one is a room or policy knob a table varies
+// Nine parameters, and each one is a room or policy knob a table varies
 // on its own: the two sizes, the seed, the two #375 policies and the
-// three #412 models. A struct around them would move the same list one
+// four #412 models. A struct around them would move the same list one
 // indirection away without removing a call site or a parameter.
 #[allow(clippy::too_many_arguments)]
 fn run_sim(
@@ -1927,6 +2379,7 @@ fn run_sim(
     mortality: Mortality,
     statics: Statics,
     ledger: Ledger,
+    failure: ConnectFailure,
 ) -> Sim {
     let mut rng = seed | 1;
     let mut boards: Vec<Board> = Vec::with_capacity(n);
@@ -1945,6 +2398,7 @@ fn run_sim(
             strict_rounds: 0,
             dead_ends: Vec::new(),
             ledger: DialLedger::new(),
+            busy_until: 0,
         });
     }
 
@@ -1979,6 +2433,15 @@ fn run_sim(
     // `statics.peers > 0`, so `Statics::NONE` leaves all four streams
     // above exactly where they were.
     let mut static_rng = (seed ^ 0x57A7_1C00_DDE5_C11B) | 1;
+    // And the dial failures from a SIXTH, for the same reason once more
+    // (#412, the instrument's first limit): a draw is taken only while
+    // `failure.fires()`, so `ConnectFailure::NONE` leaves all five
+    // streams above exactly where they were.
+    let mut fail_rng = (seed ^ 0xFA11_ED00_C0FF_EE21) | 1;
+    // Whether a rotating peer's CURRENT address can be reached at all.
+    // One draw per address, never per dial — see [`ConnectFailure`].
+    let draw_reachable =
+        |state: &mut u64| !failure.fires() || !ConnectFailure::hits(failure.rotating_dead, state);
     let mut churners: Vec<Churner> = (0..churn.peers)
         .map(|_| {
             let addr = (next_rand(&mut churn_rng) & 0x3FFF_FFFF_FFFF) | 0x4000_0000_0000;
@@ -1987,6 +2450,7 @@ fn run_sim(
                 identity: identity_from(addr),
                 phase: (next_rand(&mut churn_rng) as u32) % rounds(CHURN_ROTATE_MS),
                 links: Vec::new(),
+                reachable: draw_reachable(&mut fail_rng),
             }
         })
         .collect();
@@ -2030,11 +2494,16 @@ fn run_sim(
     }
 
     let mut tally = Tally::default();
-    let horizon = if churn.peers == 0 && statics.peers == 0 && !mortality.kills() {
-        10_000
-    } else {
-        HORIZON_ROUNDS
-    };
+    // A room where a dial can fail is never provably quiescent either:
+    // a board in a failure backoff forms no link, so the linkless streak
+    // below would read a room that is still trying as a settled one. It
+    // goes to the horizon like every other room with a parameter in it.
+    let horizon =
+        if churn.peers == 0 && statics.peers == 0 && !mortality.kills() && !failure.fires() {
+            10_000
+        } else {
+            HORIZON_ROUNDS
+        };
     let mut linkless_streak: u32 = 0;
     for round in 0..horizon {
         if (round as usize) < n {
@@ -2049,6 +2518,9 @@ fn run_sim(
                 continue;
             }
             churner.addr = (next_rand(&mut churn_rng) & 0x3FFF_FFFF_FFFF) | 0x4000_0000_0000;
+            // A new address is a new verdict: the captures give one per
+            // address and never a mixed one.
+            churner.reachable = draw_reachable(&mut fail_rng);
             churner.links.clear();
             for board in boards.iter_mut() {
                 for link in board.outgoing.iter_mut().chain(board.incoming.iter_mut()) {
@@ -2169,6 +2641,15 @@ fn run_sim(
             if !boards[i].arrived || boards[i].outgoing.is_some() {
                 continue;
             }
+            // A board still paying for a dial that did not connect is in
+            // the connect/backoff path, not in a scan window
+            // ([`ConnectFailure`]). Its fallback clock keeps running,
+            // because the firmware's is a wall clock and nothing here
+            // reset it.
+            if round < boards[i].busy_until {
+                boards[i].strict_rounds += 1;
+                continue;
+            }
             // The quiet spec suspends the clock while ANY link is live
             // (part 2's firmware reset it on every scan pass that found
             // a live connection); an outgoing link already stopped the
@@ -2259,11 +2740,70 @@ fn run_sim(
                     elect(choice, &offers, &mut tally)
                 }
             };
-            // The dial. From here on the connection exists, so the
-            // strict phase restarts in either outcome (the firmware's
+            // The dial. The firmware logs `BLE_CENTRAL_CONNECT` here and
+            // does not yet know the outcome.
+            tally.dials += 1;
+            // The verdict this candidate was elected under: the only
+            // thing that decides whether a dial that never connects
+            // condemns its address (`columba.rs:2127`).
+            let (target_addr, decision) = candidates
+                .iter()
+                .find(|&&(peer, _, _, _)| peer == target)
+                .map(|&(_, addr, decision, _)| (addr, decision))
+                .expect("the elected candidate was one of the offers");
+            let strict_verdict = decision != ConnectDecision::InitiateFallback;
+            // #412, the instrument's first limit: the dial that does not
+            // become a link. A rotating peer's verdict belongs to its
+            // current ADDRESS and was drawn at the rotation; a static
+            // one's is drawn here, per dial.
+            let rotating = (churn_base..static_base).contains(&target);
+            let fails = failure.fires()
+                && if rotating {
+                    !churners[target - churn_base].reachable
+                } else {
+                    ConnectFailure::hits(failure.static_fail, &mut fail_rng)
+                };
+            if fails {
+                let at_connect_rate = if rotating {
+                    failure.rotating_at_connect
+                } else {
+                    failure.static_at_connect
+                };
+                let at_connect = ConnectFailure::hits(at_connect_rate, &mut fail_rng);
+                tally.failed += 1;
+                tally.failed_churn += usize::from(rotating);
+                tally.failed_at_connect += usize::from(at_connect);
+                if at_connect {
+                    // `central::connect` timed out: no connection ever
+                    // existed, so `conn_link_up` did not fire and the
+                    // strict clock keeps whatever it had — a FALLBACK
+                    // dial that fails here leaves the board stranded and
+                    // in fallback, which is what `columba.rs:2598` says
+                    // in as many words. The address is condemned only
+                    // for a fallback verdict (#375 §0).
+                    if strict_verdict {
+                        boards[i].strict_rounds = 0;
+                    } else {
+                        boards[i].note_dead_end(target_addr, round);
+                    }
+                    boards[i].busy_until = round + FAIL_CONNECT_ROUNDS;
+                } else {
+                    // Past the connect: `conn_link_up` fired and reset
+                    // the clock, and no stage past it writes a dead end
+                    // at all — which is why an unreachable address is
+                    // dialled a median six times before it rotates away.
+                    boards[i].strict_rounds = 0;
+                    boards[i].busy_until = round + FAIL_POST_ROUNDS;
+                }
+                // The ledger sees nothing: it is keyed by identity and a
+                // dial that never read the Identity characteristic has
+                // none (326's decision (i)).
+                continue;
+            }
+            // From here on the connection exists, so the strict phase
+            // restarts in either outcome (the firmware's
             // `conn_link_up`), and the identity read decides whether
             // anything was gained by it.
-            tally.dials += 1;
             boards[i].strict_rounds = 0;
             // The steady-state denominator: this board has held an
             // outgoing link before, so the slot it is spending now is
@@ -2553,6 +3093,7 @@ fn run_sim(
         if churn.peers == 0
             && statics.peers == 0
             && !mortality.kills()
+            && !failure.fires()
             && (round as usize) >= n
             && linkless_streak > FALLBACK_AFTER_ROUNDS
         {
@@ -2634,7 +3175,7 @@ fn run_sim(
     }
     assert_eq!(
         tally.dials,
-        tally.board_links + tally.churn_links + tally.static_links + tally.refused,
+        tally.board_links + tally.churn_links + tally.static_links + tally.refused + tally.failed,
         "a dial went uncounted"
     );
     Sim { boards, tally }
@@ -2695,6 +3236,13 @@ struct Outcome {
     useful: usize,
     /// Of the spent ones: refused as a live duplicate identity.
     refused: usize,
+    /// Dials that did not connect at all, summed ([`ConnectFailure`]),
+    /// the ones among them aimed at a churning peer, and the ones that
+    /// failed before the connection existed. Zero under
+    /// [`ConnectFailure::NONE`].
+    failed: usize,
+    failed_churn: usize,
+    failed_at_connect: usize,
     /// Of the spent ones: a session below the churn threshold.
     short: usize,
     /// Board-to-board links that reached their drawn lifetime, summed —
@@ -2791,6 +3339,14 @@ impl Outcome {
             .then(|| self.held_windows_solo as f64 * 100.0 / self.held_windows as f64)
     }
 
+    /// What share of every dial the room made never became a link at
+    /// all ([`ConnectFailure`]) — the column the captures read directly:
+    /// `feld-t114` 2678 of 2729, `t114-boot` 48 of 164, `feld-pocket`
+    /// 49 of 109. `None` when the room made no dial.
+    fn share_of_dials_that_failed(&self) -> Option<f64> {
+        (self.dials > 0).then(|| self.failed as f64 * 100.0 / self.dials as f64)
+    }
+
     /// Dials per board-to-board link — #412's third number read against
     /// the Leitstern instead of against link lifetime. A link to a
     /// phone is useful TO THE PHONE; it is not a link the mesh gained.
@@ -2805,6 +3361,9 @@ impl Outcome {
     }
 }
 
+// Eight, for the reason [`run_sim`]'s comment gives: this is that list
+// minus the seed, and every one of them is a column some table varies.
+#[allow(clippy::too_many_arguments)]
 fn measure(
     n: usize,
     spec: FallbackSpec,
@@ -2813,6 +3372,7 @@ fn measure(
     mortality: Mortality,
     statics: Statics,
     ledger: Ledger,
+    failure: ConnectFailure,
 ) -> Outcome {
     let mut outcome = Outcome {
         disconnected: 0,
@@ -2825,6 +3385,9 @@ fn measure(
         static_links: 0,
         useful: 0,
         refused: 0,
+        failed: 0,
+        failed_churn: 0,
+        failed_at_connect: 0,
         short: 0,
         deaths: 0,
         refill_dials: 0,
@@ -2851,6 +3414,7 @@ fn measure(
             mortality,
             statics,
             ledger,
+            failure,
         );
         let boards = &sim.boards;
         if !is_connected(boards) {
@@ -2875,6 +3439,9 @@ fn measure(
         outcome.static_links += sim.tally.static_links;
         outcome.useful += sim.tally.useful();
         outcome.refused += sim.tally.refused;
+        outcome.failed += sim.tally.failed;
+        outcome.failed_churn += sim.tally.failed_churn;
+        outcome.failed_at_connect += sim.tally.failed_at_connect;
         outcome.short += sim.tally.short;
         outcome.deaths += sim.tally.deaths;
         outcome.refill_dials += sim.tally.refill_dials;
@@ -2976,6 +3543,7 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
             Mortality::IMMORTAL,
             Statics::NONE,
             Ledger::NONE,
+            ConnectFailure::NONE,
         );
         let at20 = measure(
             20,
@@ -2985,6 +3553,7 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
             Mortality::IMMORTAL,
             Statics::NONE,
             Ledger::NONE,
+            ConnectFailure::NONE,
         );
         println!(
             "{label:<15} {:>4} / {:<4} / {:<8} {:>4} / {:<4} / {:<8}",
@@ -3161,6 +3730,7 @@ fn a_churning_peer_takes_the_fallback_dial_and_the_board_graph_pays_for_it() {
                 Mortality::IMMORTAL,
                 Statics::NONE,
                 Ledger::NONE,
+                ConnectFailure::NONE,
             );
             let at20 = measure(
                 20,
@@ -3170,6 +3740,7 @@ fn a_churning_peer_takes_the_fallback_dial_and_the_board_graph_pays_for_it() {
                 Mortality::IMMORTAL,
                 Statics::NONE,
                 Ledger::NONE,
+                ConnectFailure::NONE,
             );
             let cells = |outcome: &Outcome| {
                 format!(
@@ -3335,6 +3906,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
                 Mortality::IMMORTAL,
                 Statics::NONE,
                 Ledger::NONE,
+                ConnectFailure::NONE,
             );
             assert_eq!(sim.tally.dials, sim.tally.board_links);
             assert_eq!(
@@ -3357,6 +3929,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         Mortality::IMMORTAL,
         Statics::NONE,
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     let strict_churned = measure(
         10,
@@ -3366,6 +3939,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         Mortality::IMMORTAL,
         Statics::NONE,
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     assert_eq!(
         (strict_churned.churn_links, strict_churned.refused),
@@ -3394,6 +3968,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         Mortality::IMMORTAL,
         Statics::NONE,
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     assert!(
         eager_churned.churn_links > 0,
@@ -3420,6 +3995,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         Mortality::IMMORTAL,
         Statics::NONE,
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     let strict_dialled = measure(
         10,
@@ -3429,6 +4005,7 @@ fn control_the_churn_model_is_a_parameter_and_every_mechanism_fires() {
         Mortality::IMMORTAL,
         Statics::NONE,
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     assert!(
         strict_dialled.saturated < strict_spread.saturated,
@@ -3517,6 +4094,7 @@ fn the_steady_state_freed_slot_goes_to_the_phone_under_the_address_order() {
                     mortality,
                     Statics::NONE,
                     Ledger::NONE,
+                    ConnectFailure::NONE,
                 );
                 println!(
                     "{n:<4} {:<6} {label:<19} {life:>8} {:>7} {:>7} {:>6} {:>7} {:>6} {:>6} \
@@ -3786,6 +4364,7 @@ fn the_static_peer_takes_the_freed_slot_the_phone_was_blamed_for() {
                     mortality,
                     statics,
                     Ledger::NONE,
+                    ConnectFailure::NONE,
                 );
                 println!(
                     "{room:<8} {label:<19} {life:>8} {:>7} {:>7} {:>7} {:>6} {:>7} {:>7} \
@@ -3955,6 +4534,7 @@ fn the_two_candidate_keys_with_a_static_peer_at_ten_and_twenty_boards() {
                     mortality,
                     Statics::rig(1),
                     Ledger::NONE,
+                    ConnectFailure::NONE,
                 );
                 println!(
                     "{n:<4} {label:<19} {life:>8} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} {:>6} \
@@ -4050,6 +4630,7 @@ fn the_two_candidate_keys_cost_the_empty_room_nothing() {
                 Mortality::IMMORTAL,
                 Statics::NONE,
                 Ledger::NONE,
+                ConnectFailure::NONE,
             );
             println!(
                 "n={n} {label} empty room: disc {} boardless {} bb {} d/use {}",
@@ -4096,6 +4677,7 @@ fn the_two_candidate_keys_cost_the_empty_room_nothing() {
             Mortality::CAPTURE_SHORT_MODE,
             Statics::NONE,
             Ledger::NONE,
+            ConnectFailure::NONE,
         );
         println!(
             "n=3 {label} one phone, 45 s, no static peer: top% {} bb {} disc {} d/use {}",
@@ -4195,6 +4777,7 @@ fn the_dial_ledger_and_the_solo_window_in_the_rig_room() {
                     mortality,
                     statics,
                     ledger,
+                    ConnectFailure::NONE,
                 );
                 println!(
                     "{room:<6} {label:<14} {life:>8} {:>7} {:>7} {:>6} {:>6} {:>7} {:>6} \
@@ -4401,6 +4984,7 @@ fn ledger_rows(
                     mortality,
                     statics,
                     ledger,
+                    ConnectFailure::NONE,
                 );
                 println!(
                     "{room:<6} {label:<6} {life:>8} {:>7} {:>7} {:>7} {:>6} {:>8} {:>8} {:>6} \
@@ -4683,6 +5267,7 @@ fn control_the_dial_ledger_is_a_parameter_and_every_mechanism_fires() {
         Mortality::IMMORTAL,
         Statics::NONE,
         Ledger::after(3),
+        ConnectFailure::NONE,
     );
     assert_eq!(
         (
@@ -4705,6 +5290,7 @@ fn control_the_dial_ledger_is_a_parameter_and_every_mechanism_fires() {
         Mortality::CAPTURE_SHORT_MODE,
         Statics::NONE,
         Ledger::after(3),
+        ConnectFailure::NONE,
     );
     assert_eq!(
         advertiser_mortal.refused, 0,
@@ -4726,6 +5312,7 @@ fn control_the_dial_ledger_is_a_parameter_and_every_mechanism_fires() {
         Mortality::CAPTURE_SHORT_MODE,
         Statics::NONE,
         Ledger::after(3),
+        ConnectFailure::NONE,
     );
     assert!(
         dialling_mortal.refused > 0
@@ -4749,6 +5336,7 @@ fn control_the_dial_ledger_is_a_parameter_and_every_mechanism_fires() {
         Mortality::IMMORTAL,
         Statics::NONE,
         Ledger::with_pause(3, 0),
+        ConnectFailure::NONE,
     );
     let off = measure(
         3,
@@ -4758,6 +5346,7 @@ fn control_the_dial_ledger_is_a_parameter_and_every_mechanism_fires() {
         Mortality::IMMORTAL,
         Statics::NONE,
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     assert_eq!(
         (
@@ -4794,6 +5383,7 @@ fn control_the_static_peer_is_a_parameter_and_dials_like_the_capture() {
             mortality,
             Statics::NONE,
             Ledger::NONE,
+            ConnectFailure::NONE,
         );
         assert_eq!(
             (
@@ -4817,6 +5407,7 @@ fn control_the_static_peer_is_a_parameter_and_dials_like_the_capture() {
         Mortality::CAPTURE_SHORT_MODE,
         Statics::accepting(1),
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     assert!(
         accepting.static_links > 0,
@@ -4841,6 +5432,7 @@ fn control_the_static_peer_is_a_parameter_and_dials_like_the_capture() {
                 Mortality::CAPTURE_SHORT_MODE,
                 statics,
                 Ledger::NONE,
+                ConnectFailure::NONE,
             );
             seen |= sim
                 .boards
@@ -4866,6 +5458,7 @@ fn control_the_static_peer_is_a_parameter_and_dials_like_the_capture() {
         Mortality::CAPTURE_SHORT_MODE,
         Statics::rig(1),
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     assert!(
         no_phone.static_links > 0 && no_phone.refused == 0,
@@ -4945,6 +5538,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
                 Mortality::IMMORTAL,
                 Statics::NONE,
                 Ledger::NONE,
+                ConnectFailure::NONE,
             );
             assert_eq!(sim.tally.deaths, 0);
             assert_eq!(sim.tally.refill_dials, 0);
@@ -4971,6 +5565,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
         Mortality::CAPTURE_SHORT_MODE,
         Statics::NONE,
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     assert!(
         sim.tally.deaths > 20,
@@ -5006,6 +5601,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
         Mortality::IMMORTAL,
         Statics::NONE,
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     let mortal = measure(
         10,
@@ -5015,6 +5611,7 @@ fn control_the_mortality_model_is_a_parameter_and_frees_both_slots() {
         Mortality::CAPTURE_SHORT_MODE,
         Statics::NONE,
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     assert!(
         mortal.board_links > immortal.board_links * 5,
@@ -5070,6 +5667,7 @@ fn the_shipped_config_connects_every_order_and_strands_nobody() {
                     Mortality::IMMORTAL,
                     Statics::NONE,
                     Ledger::NONE,
+                    ConnectFailure::NONE,
                 );
                 for (i, b) in sim.boards.iter().enumerate() {
                     assert!(
@@ -5104,6 +5702,7 @@ fn control_the_strict_rule_alone_disconnects_a_fifth_of_the_orders() {
         Mortality::IMMORTAL,
         Statics::NONE,
         Ledger::NONE,
+        ConnectFailure::NONE,
     );
     assert!(
         outcome.disconnected >= 100,
@@ -5658,5 +6257,598 @@ fn the_two_candidate_keys_are_two_different_policies() {
         elect_from(BOARD_B, &[spent, silent_board], TargetChoice::SilenceIsFull),
         "board holding one incoming link",
         "the silence-is-full key still let a recordless peer deficit by zero"
+    );
+}
+
+/// The three failure levels every re-measured table below is read at.
+const FAILURES: [(ConnectFailure, &str); 3] = [
+    (ConnectFailure::NONE, "off"),
+    (ConnectFailure::CAPTURE, "capture"),
+    (ConnectFailure::CAPTURE_STRANGERS, "strangers"),
+];
+
+/// #412, the instrument's first limit: 306's steady-state rows and 311's
+/// static-peer rows re-measured with [`ConnectFailure`] on.
+///
+/// The room is the rig's — three boards and one dialling phone — with
+/// and without the solar node, under the address order the shipped one
+/// replaced and under the shipped one. Every row is measured at all
+/// three failure levels, `off` first, so the delta in `bb`, `d/use` and
+/// `disc` is read off the same line.
+#[test]
+fn the_dial_that_fails_to_connect_re_measures_the_steady_state() {
+    println!(
+        "#412 — 306's and 311's rooms with a dial that can fail, per {ORDERS} orders. \
+         `fail%` is the share of the room's dials that never became a link."
+    );
+    println!(
+        "{:<5} {:<19} {:>8} {:>10} {:>7} {:>7} {:>7} {:>7} {:>6} {:>7} {:>6} {:>5}",
+        "room",
+        "policy",
+        "life",
+        "failure",
+        "fail%",
+        "freed%",
+        "stat%",
+        "top%",
+        "sb",
+        "bb",
+        "d/use",
+        "disc"
+    );
+    let mut rows = Vec::new();
+    for (statics, room) in [(Statics::NONE, "none"), (Statics::rig(1), "rig")] {
+        for (choice, policy) in [
+            (TargetChoice::MostFreeSlots, "eager/mostfree"),
+            (TargetChoice::RotatingLast, "eager/rotatinglast"),
+        ] {
+            for (mortality, life) in LIFETIMES {
+                for (failure, level) in FAILURES {
+                    let outcome = measure(
+                        3,
+                        FallbackSpec::Eager,
+                        choice,
+                        Churn::phones(1),
+                        mortality,
+                        statics,
+                        Ledger::NONE,
+                        failure,
+                    );
+                    println!(
+                        "{room:<5} {policy:<19} {life:>8} {level:>10} {:>7} {:>7} {:>7} {:>7} \
+                         {:>6} {:>7} {:>6} {:>5}",
+                        Ratio(outcome.share_of_dials_that_failed()),
+                        Ratio(outcome.share_of_freed_slots_to_churn()),
+                        Ratio(outcome.share_of_top_freed_slots_to_static()),
+                        Ratio(outcome.share_of_top_freed_slots_to_churn()),
+                        outcome.static_links,
+                        outcome.board_links,
+                        Ratio(outcome.dials_per_useful()),
+                        outcome.disconnected,
+                    );
+                    rows.push(((room, policy, life, level), outcome));
+                }
+            }
+        }
+    }
+    let pick = |room: &str, policy: &str, life: &str, level: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rr, rp, rl, rf), _)| {
+                *rr == room && *rp == policy && *rl == life && *rf == level
+            })
+            .expect("the row was measured above")
+            .1
+    };
+
+    // The parameter is a parameter. Every `off` row is 306's and 311's
+    // row to the link, and no dial in it fails — equalities, because the
+    // failure stream is never read at `ConnectFailure::NONE`.
+    for (room, policy, life, bb, sb, disc) in [
+        ("none", "eager/mostfree", "immortal", 2040, 0, 0),
+        ("none", "eager/mostfree", "45s", 26_790, 0, 0),
+        ("none", "eager/mostfree", "600s", 3904, 0, 0),
+        ("none", "eager/rotatinglast", "45s", 26_790, 0, 0),
+        ("rig", "eager/mostfree", "45s", 26_734, 98, 0),
+        ("rig", "eager/rotatinglast", "immortal", 2090, 738, 0),
+        ("rig", "eager/rotatinglast", "45s", 26_840, 4640, 0),
+        ("rig", "eager/rotatinglast", "600s", 3976, 1472, 22),
+    ] {
+        let off = pick(room, policy, life, "off");
+        assert_eq!(
+            (
+                off.board_links,
+                off.static_links,
+                off.disconnected,
+                off.failed
+            ),
+            (bb, sb, disc, 0),
+            "{room} {policy} {life}: the failure model moved a row measured without one"
+        );
+    }
+
+    // 1. The rig's own reading — `feld-t114`'s freed outgoing slot going
+    //    to the phone 7 times out of 7 — is reproduced at EVERY failure
+    //    level in the room 306 read it in, which is the room without the
+    //    solar node. The instrument's first limit was not what put it at
+    //    100 %.
+    for policy in ["eager/mostfree", "eager/rotatinglast"] {
+        for (_, life) in LIFETIMES {
+            for (_, level) in FAILURES {
+                assert_eq!(
+                    pick("none", policy, life, level).share_of_top_freed_slots_to_churn(),
+                    Some(100.0),
+                    "none {policy} {life} {level}: the top board's freed slot left the phone"
+                );
+            }
+        }
+    }
+
+    // 2. 311's headline does NOT survive at the capture's own static
+    //    rate, and the mechanism is the asymmetry between the two kinds:
+    //    the peer the shipped order prefers has a static address and its
+    //    dials fail a third of the time, while the peer it demotes has a
+    //    rotating one and, in the population that reaches a Reticulum
+    //    service at all, never fails. The phone takes the top board's
+    //    freed slot 0.32 % of the time with every dial connecting and
+    //    11.60 % with the measured rates on.
+    let rig_short_off = pick("rig", "eager/rotatinglast", "45s", "off");
+    let rig_short_capture = pick("rig", "eager/rotatinglast", "45s", "capture");
+    let rig_short_strangers = pick("rig", "eager/rotatinglast", "45s", "strangers");
+    let to_phone = |outcome: &Outcome| {
+        (outcome
+            .share_of_top_freed_slots_to_churn()
+            .expect("the top board spent a freed slot")
+            * 100.0)
+            .round() as u32
+    };
+    assert_eq!(
+        (
+            to_phone(rig_short_off),
+            to_phone(rig_short_capture),
+            to_phone(rig_short_strangers),
+        ),
+        (32, 1160, 40),
+        "the rig room's freed slot moved off its measured shares (in hundredths of a per cent)"
+    );
+
+    // 3. And `disc` in a room with a phone in it is no longer zero at any
+    //    lifetime that ends links: 0 of 1000 orders split with every dial
+    //    connecting, 238 with the measured static rate. A death frees the
+    //    slot and the re-dial no longer always lands, so the snapshot at
+    //    the horizon catches boards mid-backoff — which is a real state a
+    //    board is in for two to three rounds, not a settling artefact:
+    //    these rows always ran to the horizon.
+    for policy in ["eager/mostfree", "eager/rotatinglast"] {
+        assert_eq!(
+            pick("none", policy, "45s", "off").disconnected,
+            0,
+            "{policy}: 306's short-mode row split without a failure model"
+        );
+        assert!(
+            pick("none", policy, "45s", "capture").disconnected >= 200,
+            "{policy}: the short-mode row stopped splitting under the measured rate"
+        );
+    }
+}
+
+/// #412: 321's ledger rows re-measured with [`ConnectFailure`] on — the
+/// column that says whether the instrument's downward bound mattered to
+/// the ledger is `hold`.
+#[test]
+fn the_dial_that_fails_to_connect_re_measures_the_ledger() {
+    println!("#412 — 321's ledger rows with a dial that can fail, per {ORDERS} orders.");
+    println!(
+        "{:<5} {:<6} {:>8} {:>10} {:>7} {:>7} {:>6} {:>7} {:>8} {:>7} {:>6} {:>5}",
+        "room",
+        "ledger",
+        "life",
+        "failure",
+        "fail%",
+        "hold",
+        "hold%",
+        "dials",
+        "refused",
+        "bb",
+        "d/use",
+        "disc"
+    );
+    let mut rows = Vec::new();
+    for (statics, room) in [(Statics::NONE, "none"), (Statics::rig(1), "rig")] {
+        for (ledger, label) in [(Ledger::NONE, "off"), (Ledger::after(3), "k=3")] {
+            for (mortality, life) in LIFETIMES {
+                for (failure, level) in FAILURES {
+                    let outcome = measure(
+                        3,
+                        FallbackSpec::Eager,
+                        TargetChoice::RotatingLast,
+                        Churn::phones(1),
+                        mortality,
+                        statics,
+                        ledger,
+                        failure,
+                    );
+                    println!(
+                        "{room:<5} {label:<6} {life:>8} {level:>10} {:>7} {:>7} {:>6} {:>7} \
+                         {:>8} {:>7} {:>6} {:>5}",
+                        Ratio(outcome.share_of_dials_that_failed()),
+                        outcome.held_windows,
+                        Ratio(outcome.share_of_held_windows_solo()),
+                        outcome.dials,
+                        outcome.refused,
+                        outcome.board_links,
+                        Ratio(outcome.dials_per_useful()),
+                        outcome.disconnected,
+                    );
+                    rows.push(((room, label, life, level), outcome));
+                }
+            }
+        }
+    }
+    let pick = |room: &str, label: &str, life: &str, level: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rr, rl, rlife, rf), _)| {
+                *rr == room && *rl == label && *rlife == life && *rf == level
+            })
+            .expect("the row was measured above")
+            .1
+    };
+
+    // The parameter is a parameter, on the ledger's own columns too.
+    for (room, label, life, hold, dials, refused) in [
+        ("none", "off", "immortal", 0, 9556, 4746),
+        ("none", "k=3", "immortal", 6526, 7686, 2704),
+        ("none", "k=3", "45s", 3160, 30_960, 2272),
+        ("none", "k=3", "600s", 7104, 9314, 2706),
+        ("rig", "k=3", "45s", 58, 31_588, 32),
+        ("rig", "k=3", "600s", 482, 6570, 326),
+    ] {
+        let off = pick(room, label, life, "off");
+        assert_eq!(
+            (off.held_windows, off.dials, off.refused, off.failed),
+            (hold, dials, refused, 0),
+            "{room} {label} {life}: the failure model moved a 321 row"
+        );
+    }
+
+    // 1. 321's own claim survives at the measured rates: the ledger costs
+    //    the room no board-to-board link it would otherwise have had. In
+    //    the phone room the two are EQUAL at every lifetime and every
+    //    level; in the rig room the bound 321 states — 1 % of the room's
+    //    links, `disc` no worse — still holds.
+    for (_, life) in LIFETIMES {
+        for (_, level) in FAILURES {
+            assert_eq!(
+                pick("none", "k=3", life, level).board_links,
+                pick("none", "off", life, level).board_links,
+                "none {life} {level}: the ledger cost the phone room a board link"
+            );
+            let with = pick("rig", "k=3", life, level);
+            let without = pick("rig", "off", life, level);
+            assert!(
+                with.board_links * 100 >= without.board_links * 99
+                    && with.disconnected <= without.disconnected + 4,
+                "rig {life} {level}: the ledger cost the room more than 321's bound"
+            );
+        }
+    }
+
+    // 2. The instrument's bound was understating the ledger's work, not
+    //    overstating it: on the immortal row the pause holds 6526 windows
+    //    shut with every dial connecting and 7336 at the measured static
+    //    rate.
+    assert!(
+        pick("none", "k=3", "immortal", "capture").held_windows
+            > pick("none", "k=3", "immortal", "off").held_windows,
+        "the measured failure rate did not give the ledger more to hold"
+    );
+
+    // 3. And its whole feed on the immortal rows really is the duplicate
+    //    refusal, which the stranger level demonstrates by removing it:
+    //    a phone no dial can reach is a phone no dial can be refused BY,
+    //    so `refused` falls from 2704 to 230 and the ledger goes from
+    //    6526 held windows to 24. 321 read that as a phase lock; this is
+    //    the same fact from the other side.
+    let strangers = pick("none", "k=3", "immortal", "strangers");
+    let off = pick("none", "k=3", "immortal", "off");
+    assert!(
+        strangers.refused * 10 < off.refused && strangers.held_windows * 100 < off.held_windows,
+        "a phone that cannot be connected to still fed the ledger"
+    );
+}
+
+/// #412: #375's own guarantee cell — the room of ten and twenty boards
+/// — read with a dial that can fail.
+///
+/// Two rooms only, and each for the reason the document reads it. The
+/// EMPTY room is the guarantee itself (`disc` = 0, `bb` = 10 000 and
+/// 20 000, `d/use` = 1.00), and it holds no rotating peer at all, so
+/// [`ConnectFailure::CAPTURE`] and [`ConnectFailure::CAPTURE_STRANGERS`]
+/// must be identical in every cell — asserted, and the model's own
+/// positive control that the rotating half is the only thing that
+/// separates them. The PHONE room is 306's ten- and twenty-board rows,
+/// at the capture's short mode, where the freed slot has a denominator.
+#[test]
+fn the_dial_that_fails_to_connect_re_measures_the_board_rooms() {
+    println!(
+        "#412 — the rooms of ten and twenty boards with a dial that can fail, \
+         per {ORDERS} orders. `bdls` counts boards left with no board link."
+    );
+    println!(
+        "{:>3} {:<5} {:<19} {:>8} {:>10} {:>7} {:>7} {:>9} {:>6} {:>5} {:>5}",
+        "n", "room", "policy", "life", "failure", "fail%", "top%", "bb", "d/use", "disc", "bdls"
+    );
+    let mut rows = Vec::new();
+    for n in [10, 20] {
+        for (churn, policy, choice, life, mortality) in [
+            (
+                Churn::NONE,
+                "eager/rotatinglast",
+                TargetChoice::RotatingLast,
+                "immortal",
+                Mortality::IMMORTAL,
+            ),
+            (
+                Churn::NONE,
+                "eager/rotatinglast",
+                TargetChoice::RotatingLast,
+                "45s",
+                Mortality::CAPTURE_SHORT_MODE,
+            ),
+            (
+                Churn::phones(1),
+                "eager/mostfree",
+                TargetChoice::MostFreeSlots,
+                "45s",
+                Mortality::CAPTURE_SHORT_MODE,
+            ),
+            (
+                Churn::phones(1),
+                "eager/rotatinglast",
+                TargetChoice::RotatingLast,
+                "45s",
+                Mortality::CAPTURE_SHORT_MODE,
+            ),
+        ] {
+            let room = if churn.peers == 0 { "empty" } else { "phone" };
+            for (failure, level) in FAILURES {
+                let outcome = measure(
+                    n,
+                    FallbackSpec::Eager,
+                    choice,
+                    churn,
+                    mortality,
+                    Statics::NONE,
+                    Ledger::NONE,
+                    failure,
+                );
+                println!(
+                    "{n:>3} {room:<5} {policy:<19} {life:>8} {level:>10} {:>7} {:>7} {:>9} \
+                     {:>6} {:>5} {:>5}",
+                    Ratio(outcome.share_of_dials_that_failed()),
+                    Ratio(outcome.share_of_top_freed_slots_to_churn()),
+                    outcome.board_links,
+                    Ratio(outcome.dials_per_useful()),
+                    outcome.disconnected,
+                    outcome.boardless,
+                );
+                rows.push(((n, room, policy, life, level), outcome));
+            }
+        }
+    }
+    let pick = |n: usize, room: &str, policy: &str, life: &str, level: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rn, rr, rp, rl, rf), _)| {
+                *rn == n && *rr == room && *rp == policy && *rl == life && *rf == level
+            })
+            .expect("the row was measured above")
+            .1
+    };
+
+    // The parameter is a parameter: #375's guarantee cell is untouched
+    // with every dial connecting.
+    for (n, bb) in [(10usize, 10_000usize), (20, 20_000)] {
+        let off = pick(n, "empty", "eager/rotatinglast", "immortal", "off");
+        assert_eq!(
+            (
+                off.board_links,
+                off.disconnected,
+                off.boardless,
+                off.failed,
+                off.dials_per_useful()
+            ),
+            (bb, 0, 0, 0, Some(1.0)),
+            "n={n}: the failure model moved #375's guarantee cell"
+        );
+    }
+
+    // 1. The empty room holds no rotating peer, so the two levels differ
+    //    in nothing it can read: every cell equal, which is the model's
+    //    own positive control that the rotating half of
+    //    [`ConnectFailure`] is the only thing between them.
+    for n in [10, 20] {
+        for life in ["immortal", "45s"] {
+            let capture = pick(n, "empty", "eager/rotatinglast", life, "capture");
+            let strangers = pick(n, "empty", "eager/rotatinglast", life, "strangers");
+            assert_eq!(
+                (
+                    capture.board_links,
+                    capture.disconnected,
+                    capture.boardless,
+                    capture.dials,
+                    capture.failed
+                ),
+                (
+                    strangers.board_links,
+                    strangers.disconnected,
+                    strangers.boardless,
+                    strangers.dials,
+                    strangers.failed
+                ),
+                "n={n} {life}: the stranger level moved a room with nothing rotating in it"
+            );
+        }
+    }
+
+    // 2. The FORMATION phase survives it, and the reason is that a dial
+    //    that failed is a dial the board makes again: at ten boards the
+    //    room still forms all 10 000 links and still splits in no order
+    //    at all, at 1.55 dials per link instead of 1.00. At twenty it
+    //    stops being exactly zero — 14 orders in 1000 — so the guarantee
+    //    cell is a cell measured under "every dial connects", not a
+    //    property of the rule.
+    let ten = pick(10, "empty", "eager/rotatinglast", "immortal", "capture");
+    let twenty = pick(20, "empty", "eager/rotatinglast", "immortal", "capture");
+    assert_eq!(
+        (
+            ten.board_links,
+            ten.disconnected,
+            twenty.board_links,
+            twenty.disconnected
+        ),
+        (10_000, 0, 20_000, 14),
+        "the formation phase moved off its measured cells"
+    );
+
+    // 3. The STEADY state does not survive it, and that is the largest
+    //    single thing this parameter changes in the document: in a room
+    //    of boards alone at the capture's short mode, `disc` goes from 0
+    //    to 508 and 820 per 1000 orders and boards left with no board
+    //    link from 0 to 280 and 416, with 13 % fewer board-to-board links
+    //    formed. "`disc` is the connectivity column and it stays at 0 in
+    //    a room of boards" is a sentence about a room where every dial
+    //    connects.
+    for (n, disc, boardless) in [(10usize, 508usize, 280usize), (20, 820, 416)] {
+        let off = pick(n, "empty", "eager/rotatinglast", "45s", "off");
+        let capture = pick(n, "empty", "eager/rotatinglast", "45s", "capture");
+        assert_eq!(
+            (off.disconnected, off.boardless),
+            (0, 0),
+            "n={n}: the short-mode empty room split without a failure model"
+        );
+        assert_eq!(
+            (capture.disconnected, capture.boardless),
+            (disc, boardless),
+            "n={n}: the short-mode empty room moved off its measured split rate"
+        );
+        assert!(
+            capture.board_links * 100 < off.board_links * 90,
+            "n={n}: the failure rate stopped costing the room links"
+        );
+    }
+}
+
+/// #412: the failure model is a parameter, and each of the three things
+/// it does is visible on its own.
+///
+/// The four controls the other parameters' control tests keep: the
+/// mechanism fires, the zero is a true zero, the two halves are
+/// separable, and a row that improves is explained rather than banked.
+#[test]
+fn control_the_connect_failure_model_is_a_parameter_and_every_mechanism_fires() {
+    // 1. The zero is a true zero. In the room with the most dials in it,
+    //    `ConnectFailure::NONE` fails not one and condemns not one
+    //    address.
+    let none = measure(
+        3,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::phones(1),
+        Mortality::CAPTURE_SHORT_MODE,
+        Statics::rig(1),
+        Ledger::NONE,
+        ConnectFailure::NONE,
+    );
+    assert_eq!(
+        (none.failed, none.failed_churn, none.failed_at_connect),
+        (0, 0, 0),
+        "a dial failed with the failure model off"
+    );
+
+    // 2. The static half fires at the rate it states, and splits between
+    //    the two stages at the share it states. A room of boards alone
+    //    has nothing but static addresses in it, so the room's own
+    //    `fail%` IS the parameter — a positive control on the draw, not
+    //    on the model.
+    let boards_only = measure(
+        10,
+        FallbackSpec::Eager,
+        TargetChoice::RotatingLast,
+        Churn::NONE,
+        Mortality::CAPTURE_SHORT_MODE,
+        Statics::NONE,
+        Ledger::NONE,
+        ConnectFailure::CAPTURE,
+    );
+    let rate = boards_only
+        .share_of_dials_that_failed()
+        .expect("the room dialled");
+    assert!(
+        (rate - 35.0).abs() < 1.0,
+        "the static rate drew {rate:.2} % against the 35.0 % it states"
+    );
+    let at_connect = boards_only.failed_at_connect as f64 * 100.0 / boards_only.failed as f64;
+    assert!(
+        (at_connect - 34.2).abs() < 1.0,
+        "the connect-stage share drew {at_connect:.2} % against the 34.2 % it states"
+    );
+
+    // 3. The rotating half is separable from it, and it is the ADDRESS
+    //    that carries the verdict: at `CAPTURE_STRANGERS` the phone is in
+    //    the room, wins the fallback and is never once linked, while the
+    //    same room at `CAPTURE` links it thousands of times. A dial still
+    //    goes there — the order still elects it — which is what makes it
+    //    a theft rather than an absence.
+    let reachable = measure(
+        3,
+        FallbackSpec::Eager,
+        TargetChoice::MostFreeSlots,
+        Churn::phones(1),
+        Mortality::CAPTURE_SHORT_MODE,
+        Statics::NONE,
+        Ledger::NONE,
+        ConnectFailure::CAPTURE,
+    );
+    let stranger = measure(
+        3,
+        FallbackSpec::Eager,
+        TargetChoice::MostFreeSlots,
+        Churn::phones(1),
+        Mortality::CAPTURE_SHORT_MODE,
+        Statics::NONE,
+        Ledger::NONE,
+        ConnectFailure::CAPTURE_STRANGERS,
+    );
+    assert!(
+        reachable.churn_links > 1000,
+        "the reachable phone took no link at all"
+    );
+    // Not zero: the stranger level is the capture's own 95.6 % of
+    // addresses, so about one rotation in twenty-three still lands on a
+    // reachable one, and the three boards can each link to it while it
+    // lasts. 148 links against 1768 — twelve times fewer, and every one
+    // of them in the 4.4 % of rotations the capture also has.
+    assert_eq!(
+        (stranger.churn_links, reachable.churn_links),
+        (148, 1768),
+        "the stranger level moved off the link count its 95.6 % implies"
+    );
+    assert!(
+        stranger.failed_churn > 1000,
+        "the unreachable phone stopped taking dials, which is not what a stranger does"
+    );
+
+    // 4. And the improving row is explained rather than banked. At
+    //    `CAPTURE_STRANGERS` the room's `refused` column collapses,
+    //    which looks like the duplicate-refusal problem solving itself.
+    //    It is not: a refusal needs a link, and a phone that cannot be
+    //    connected to holds none of ours. The dials that used to end in a
+    //    refusal end in a failure instead, and the room spends MORE of
+    //    them.
+    assert!(
+        stranger.refused * 4 < reachable.refused && stranger.dials > reachable.dials,
+        "the stranger row got cheaper instead of merely quieter"
     );
 }
