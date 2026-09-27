@@ -1252,8 +1252,32 @@ tree-clean-selftest:
 #   whole test -- but it would have to be a second implementation of the
 #   anchor rule in a script, and finder and fixer are one implementation here
 #   on purpose (docs/src/concepts/checks-and-citations.md:428)
-# not-in-guards: source-invariant-tests -- 18.8 s and a test runner of its own;
-#   its census half check-source-invariant-census is in `guards`
+# not-in-guards: source-invariant-tests -- 18.8 s and a test runner of its
+#   own; its census half check-source-invariant-census is in `guards`.
+#   RUN IT BY HAND INSTEAD, before committing, whenever a pass edits a file
+#   one of these targets reads as TEXT: the firmware sources under
+#   `leviculum-nrf/src/` (lnode_debug_log_format, rak4631_gnss_pulse_pin),
+#   the book under `docs/src/`, SECURITY.md, the board catalogue, the
+#   build scripts -- `just source-invariant-tests`. A firmware-touching
+#   pass runs it always, because the whole deferral and arming instrument
+#   lives in one of these targets.
+#   WHY, and it is the third turn of the hole `doc-touched` closed for
+#   rustdoc and `citation-guard` for citations: nothing else a coder pass
+#   runs EXECUTES these targets, and a rename that compiles everywhere
+#   turns them red. 10bffcf5 renamed the idle select's outgoing arm in
+#   leviculum-nrf/src/lora.rs `data` -> `frame`; the deferral guard finds
+#   that arm by its pattern text and failed on a tree whose invariant was
+#   intact. That pass ran `lint-nrf`, the leviculum-core tests, `guards`,
+#   `doc-touched` and `citation-guard` green -- this recipe is in none of
+#   them -- and the red arrived on the land gate with 75 commits queued
+#   behind it (#371, fixed in 242b69f6).
+#   `just fast` is not the cheap way out of naming it: measured on
+#   schneckenschreck 2026-09-27 on a warm target dir, `fast` was still
+#   inside `fuzz-regress` -- dependency 43 of 53 -- when it passed eight
+#   minutes, with i686-usize-gate, doc-gate, check-all-targets,
+#   citation-guard, this recipe and the tier's own fmt, clippy and `--lib`
+#   run all still ahead of it. The `~3.5 min` in the recipe's own doc
+#   string is older than half the dependency list.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
 guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
 
