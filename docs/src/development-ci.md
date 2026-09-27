@@ -435,15 +435,43 @@ BLE_ROOM_BTVIRT bin=/usr/local/bin/btvirt bytes=895400 origin="bluez 5.82-1.1 + 
 
 A room with no sidecar still runs and says `origin=unrecorded`, which
 is a result nobody can attribute afterwards. Verify a bench without
-installing anything with `bash scripts/install-ci.sh --check`; the same
-checker is driven against injected damage by `just btvirt-selftest`, in
-`guards` and `fast`. The build is skipped on a host that already holds
-the patched binary, and it warns rather than fails when a prerequisite
-is missing — only the bench that runs the room needs it. The four
-prerequisites beyond the binary (the `hci_vhci` module, a running
-system `bluetoothd`, no BLE MIDI GATT service, `cap_net_raw` on
-`btmon`) are listed in `scripts/install-ci.sh` at the btvirt step;
-nothing can provision them for you.
+installing anything with `bash scripts/install-ci.sh --check`. The build
+is skipped on a host that already holds the patched binary, and it warns
+rather than fails when a prerequisite is missing — only the bench that
+runs the room needs it. The four prerequisites beyond the binary (the
+`hci_vhci` module, a running system `bluetoothd`, no BLE MIDI GATT
+service, `cap_net_raw` on `btmon`) are listed in
+`scripts/install-ci.sh` at the btvirt step; nothing can provision them
+for you.
+
+The patch is applied by content, not by version number. Before touching
+the source tree the script asks `patch --dry-run` which of three states
+it is in: the fix reverse-applies cleanly (already there — leave it
+alone), it applies forward (stock — apply it), or neither (refuse,
+rather than build an emulator nobody can name). No released bluez known
+here carries the fix yet, 5.82 being the newest and the commit dated
+after it, so the first release that ships it will simply be recognised
+and need no change to this script.
+
+Both halves run with no root, no network and no compiler under `just
+btvirt-selftest` (in `guards` and `fast`, 0.12 s): the patch step
+against a bluez source tree synthesised from the vendored patch's own
+pre-image, and the provenance checker against each way the sidecar can
+lie. What the synthesised tree cannot answer is whether the patch still
+fits *Debian's* bluez — a patch and a fixture derived from it drift
+together — and that is what `patch --dry-run` answers at provisioning
+time.
+
+**Sixteen controllers is the ceiling.** `MAX_BTDEV_ENTRIES` is 16 in
+bluez's `emulator/btdev.c`, in the 5.82 this host builds from and in
+upstream master (read 2026-09-27 at bluez HEAD `8b4a4176`): `btvirt -L
+-l16` runs, `-l17` exits at once with "Failed to open Virtual HCI
+device". Sixteen is therefore the largest room this bench can host, and
+on the patched binary it is green. That is why periculum's
+`regression/ble_room_20.toml` carries an `[unsupported]` section rather
+than a red — a twenty-node room cannot be built here at all, and the
+cell skips as infra after 21 s with the kernel showing no new
+controllers. That skip is not a bug in `lnsd`.
 
 ## Concurrent test protection
 

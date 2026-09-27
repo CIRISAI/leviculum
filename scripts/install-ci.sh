@@ -183,9 +183,30 @@ fi
 # (scripts/patches/, commit 4ff7deaf8c), builds emulator/btvirt, installs it,
 # and writes the provenance sidecar the room prints as `origin=`. It is
 # idempotent and it warns rather than fails when a prerequisite (deb-src,
-# sudo, a compiler) is missing -- only the BLE bench needs any of this.
+# sudo, a compiler) is missing -- only the BLE bench needs any of this. A
+# source tree that already carries the fix is recognised and left alone, so
+# the first bluez release that ships it needs no change here.
 #
 # Re-verify later without installing anything: bash scripts/install-ci.sh --check
+# Drive the patch and sidecar logic with no root and no build, against a
+# source tree synthesised from the vendored patch: just btvirt-selftest.
+#
+# THE CEILING: SIXTEEN CONTROLLERS, AND THE CELL THAT DECLARES IT
+#
+# btvirt holds at most sixteen emulated controllers -- `MAX_BTDEV_ENTRIES`
+# is 16 in bluez's `emulator/btdev.c`, in the 5.82 this host builds from and
+# in upstream master (read 2026-09-27 at bluez HEAD 8b4a4176). Measured the
+# same day: `btvirt -L -l16` runs, `-l17` exits at once with "Failed to open
+# Virtual HCI device". So sixteen is the largest room this bench can host,
+# and it is green on the patched binary (240 of 240 ordered probes). Above
+# it nothing here can help: a second emulator instance sharing one air, a
+# patched ceiling, or real radios.
+#
+# That is why periculum's `regression/ble_room_20.toml` carries an
+# `[unsupported]` section rather than a red -- twenty nodes cannot be built
+# here at all, and the cell skips as infra after 21 s with the kernel
+# showing no new controllers. Do not read that skip as a bug in lnsd or in
+# this script. `ble_room_2`, `ble_room_10` and the rest run normally.
 #
 # Prerequisites the cells need beyond the binary (one-time provisioning):
 #   - kernel hci_vhci module, loaded at boot and group-writable:
