@@ -20,6 +20,8 @@
 
 use std::fmt::Write as _;
 
+use leviculum_lxmf::telemetry::Telemetry;
+
 /// One command line from the driver, already validated.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -39,6 +41,31 @@ pub enum Command {
         body: Vec<u8>,
         body_b64: String,
     },
+    /// `send_telemetry <hex> <telemetry_field_hex>` — **ours; the Python
+    /// helper has no twin for it**, exactly as it has none for the `pn_*`
+    /// verbs. Additive, so the byte-compatibility contract at the top of
+    /// this module still holds: a scenario that never says the word drives
+    /// either helper unchanged, and one that does says it to ours.
+    ///
+    /// Composes the shape a Sideband or Columba position report has — empty
+    /// title, empty body, one `FIELD_TELEMETRY` — and sends it the way
+    /// `send` does. Without it the only field-carrying message the suite
+    /// could observe was one it had composed in-process, so the receive
+    /// path was tested at the `RouterEvent::MessageReceived` seam and the
+    /// wire between two helpers was not tested at all.
+    ///
+    /// `telemetry` is the packed Telemeter blob, and it goes on the wire
+    /// **verbatim**, wrapped as the one msgpack bin
+    /// `Telemetry::encode_field_value` wraps it in
+    /// (`leviculum-lxmf/src/telemetry.rs`). Decoding and re-encoding
+    /// through that function would be the same bytes only for the sensors
+    /// this build has an arm for; a blob carrying one it does not would
+    /// arrive shortened, and the `fields_hex` the receiver prints would
+    /// stop being the hex the driver typed — which is the single
+    /// comparison a loopback over this verb exists to make. The blob is
+    /// still decoded once, at parse time, as a gate: see
+    /// [`SEND_TELEMETRY_USAGE`].
+    SendTelemetry { peer: [u8; 16], telemetry: Vec<u8> },
     /// `pn_enable [announce_delay_secs] [key=value …]` — run the LXMF
     /// propagation-node role on this helper (leviculum#384): the lxmd
     /// path, `enable_propagation()`, on the Python side; `lnpnd`'s engine
@@ -101,6 +128,16 @@ pub enum Command {
     Quit,
 }
 
+/// The usage line every `send_telemetry` refusal carries.
+///
+/// One string, three refusals — too few arguments, a blob that is not
+/// hexadecimal, a blob that is not a Telemeter map — so a scenario author
+/// reads the verb's shape off any of them and the reason off what follows.
+/// The blob is decoded before the message is built rather than after it is
+/// gone, because garbage on the wire arrives at the far end as silence, and
+/// silence in a delivery test reads as a lost message.
+pub const SEND_TELEMETRY_USAGE: &str = "usage: send_telemetry <hex> <telemetry_field_hex>";
+
 /// A command the helper could not act on. Becomes `EVENT lxmf_error detail=…`,
 /// which fails the step and names the reason — the same disposition Python
 /// gives an exception out of `handle_command` (`periculum/assets/scripts/lxmf_node.py:114-117`).
@@ -153,6 +190,26 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, CommandError> {
                 body,
                 body_b64: body_b64.to_string(),
             }))
+        }
+        "send_telemetry" => {
+            let (Some(hash), Some(blob_hex)) = (parts.next(), parts.next()) else {
+                return Err(CommandError::new(SEND_TELEMETRY_USAGE));
+            };
+            let peer = parse_destination_hash(hash)?;
+            let telemetry = hex_decode(blob_hex).ok_or_else(|| {
+                CommandError::new(format!(
+                    "{SEND_TELEMETRY_USAGE}; not hexadecimal: {blob_hex}"
+                ))
+            })?;
+            // The decoded reading is dropped again on purpose: the wire gets
+            // the blob as given (see [`Command::SendTelemetry`]). This call
+            // is only the gate.
+            if let Err(e) = Telemetry::decode(&telemetry) {
+                return Err(CommandError::new(format!(
+                    "{SEND_TELEMETRY_USAGE}; not a Telemeter map: {e:?}"
+                )));
+            }
+            Ok(Some(Command::SendTelemetry { peer, telemetry }))
         }
         "pn_enable" => {
             let mut announce_delay_secs = None;
@@ -503,6 +560,57 @@ mod tests {
             Ok(Some(Command::PnUnhandled { peer }))
         );
         assert!(parse_command("pn_unhandled").is_err());
+    }
+
+    /// The verb's three refusals all carry one usage line, and a blob that
+    /// decodes reaches the command with its bytes untouched — the property
+    /// the loopback's `fields_hex` assertion rests on.
+    #[test]
+    fn send_telemetry_gates_its_blob_and_keeps_it_verbatim() {
+        let hash = "0102030405060708090a0b0c0d0e0f10";
+        let peer = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let blob = Telemetry {
+            time: Some(1_790_000_000),
+            ..Telemetry::default()
+        }
+        .encode();
+        let blob_hex = hex_encode(&blob);
+
+        assert_eq!(
+            parse_command(&format!("send_telemetry {hash} {blob_hex}")),
+            Ok(Some(Command::SendTelemetry {
+                peer,
+                telemetry: blob.clone()
+            }))
+        );
+        // An empty Telemeter map is a map, so it passes the gate: the
+        // receive side reports it too (`crate::telemetry`, "One deliberate
+        // divergence from `lntd`"), and refusing it here would make the two
+        // halves disagree about what a reading is.
+        assert_eq!(
+            parse_command(&format!("send_telemetry {hash} 80")),
+            Ok(Some(Command::SendTelemetry {
+                peer,
+                telemetry: vec![0x80]
+            }))
+        );
+
+        for line in [
+            "send_telemetry".to_string(),
+            format!("send_telemetry {hash}"),
+            format!("send_telemetry {hash} nothex"),
+            format!("send_telemetry {hash} 0a1"),
+            // A msgpack string where the Telemeter map should be: hex, and
+            // not a map.
+            format!("send_telemetry {hash} a26e6f"),
+        ] {
+            let err = parse_command(&line).expect_err(&line);
+            assert!(
+                err.0.starts_with(SEND_TELEMETRY_USAGE),
+                "'{line}' must be refused with the usage line, got {}",
+                err.0
+            );
+        }
     }
 
     #[test]

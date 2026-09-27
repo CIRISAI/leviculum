@@ -48,11 +48,13 @@ use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
 use leviculum_core::{DestinationHash, Storage as _};
+use leviculum_lxmf::constants::FIELD_TELEMETRY;
+use leviculum_lxmf::msgpack;
 use leviculum_lxmf::router::{
     LxmfRouter, PropagationClientConfig, RouterConfig, RouterError, RouterEvent, RouterOutput,
 };
 use leviculum_lxmf::{
-    announce, BuiltResource, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig,
+    announce, BuiltResource, DeliveryMethod, DeliveryStampRequest, Field, LxmfNode, LxmfNodeConfig,
     PeeringConfig, PendingResourceBuild, PropagationNodeConfig, PropagationStampRequest,
     PropagationTransport, Verification,
 };
@@ -316,6 +318,75 @@ pub struct HelperConfig {
     /// Where a `pn_enable`d propagation node keeps its message store —
     /// the same `FilePropagationStore` `lnpnd` runs in production.
     pub pn_store_dir: std::path::PathBuf,
+}
+
+/// One outbound message, as the verb that asked for it shaped it.
+///
+/// A struct rather than seven parameters: the two chat verbs differ from
+/// each other in one field and from `send_telemetry` in five, so a
+/// positional call list is where the wrong `Vec::new()` ends up.
+struct SendRequest {
+    peer: [u8; 16],
+    /// The LXMF title. `test` for the chat verbs, mirroring Python's
+    /// LXMessage (`periculum/assets/scripts/lxmf_node.py:172-179`); empty
+    /// for a report, because a viewer suppresses the notification only when
+    /// title AND content are empty (`leviculum-lxmf/src/telemetry.rs`,
+    /// `build_report`), and a reading that pings the recipient's phone is
+    /// not the shape a walk sends.
+    title: Vec<u8>,
+    body: Vec<u8>,
+    /// Echoed on `lxmf_msg_sent` verbatim, never recomputed: the driver
+    /// matches it against the exact string it sent
+    /// ([`Command::Send`](crate::protocol::Command::Send)).
+    body_b64: String,
+    fields: Vec<Field>,
+    /// `fields=` on `lxmf_msg_sent`, naming what the message carries
+    /// besides its body. `None` for a message that carries nothing, so the
+    /// line every existing scenario parses is byte-identical to before.
+    fields_label: Option<&'static str>,
+    method: DeliveryMethod,
+}
+
+impl SendRequest {
+    /// `send` and `send_propagated`: a body, no fields.
+    fn chat(peer: [u8; 16], body: Vec<u8>, body_b64: String, method: DeliveryMethod) -> Self {
+        Self {
+            peer,
+            title: b"test".to_vec(),
+            body,
+            body_b64,
+            fields: Vec::new(),
+            fields_label: None,
+            method,
+        }
+    }
+
+    /// `send_telemetry`: no body, one `FIELD_TELEMETRY`.
+    ///
+    /// The field value is the given blob wrapped as one msgpack bin — the
+    /// shape `Telemetry::encode_field_value` produces and the shape the
+    /// receive path unwraps (`crate::telemetry`, `direct`) — built here
+    /// rather than by re-encoding a decoded reading, for the reason
+    /// [`Command::SendTelemetry`](crate::protocol::Command::SendTelemetry)
+    /// gives: these bytes must reach the far end unchanged.
+    ///
+    /// The delivery method is `Direct`, the same as `send`. The verb varies
+    /// what the message carries, not how it travels, so a telemetry
+    /// delivery that fails is a telemetry finding and not a second
+    /// transport under test.
+    fn telemetry(peer: [u8; 16], blob: &[u8]) -> Self {
+        let mut value = Vec::new();
+        msgpack::bin(&mut value, blob);
+        Self {
+            peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            body_b64: String::new(),
+            fields: vec![(FIELD_TELEMETRY, value)],
+            fields_label: Some("telemetry"),
+            method: DeliveryMethod::Direct,
+        }
+    }
 }
 
 /// A `wait_for_peer` the helper has not answered yet.
@@ -747,12 +818,12 @@ impl LxmfHelperProcessor {
             } => self.send(
                 ready,
                 core,
-                peer,
-                body,
-                body_b64,
+                SendRequest::chat(peer, body, body_b64, DeliveryMethod::Direct),
                 out,
-                DeliveryMethod::Direct,
             ),
+            Command::SendTelemetry { peer, telemetry } => {
+                self.send(ready, core, SendRequest::telemetry(peer, &telemetry), out)
+            }
             Command::PnEnable {
                 announce_delay_secs,
                 options,
@@ -861,11 +932,8 @@ impl LxmfHelperProcessor {
             } => self.send(
                 ready,
                 core,
-                peer,
-                body,
-                body_b64,
+                SendRequest::chat(peer, body, body_b64, DeliveryMethod::Propagated),
                 out,
-                DeliveryMethod::Propagated,
             ),
             Command::Sync => {
                 match ready
@@ -1073,17 +1141,22 @@ impl LxmfHelperProcessor {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn send(
         &mut self,
         ready: &mut Ready,
         core: &mut StdNodeCore,
-        peer: [u8; 16],
-        body: Vec<u8>,
-        body_b64: String,
+        request: SendRequest,
         out: &mut TickOutput,
-        method: DeliveryMethod,
     ) {
+        let SendRequest {
+            peer,
+            title,
+            body,
+            body_b64,
+            fields,
+            fields_label,
+            method,
+        } = request;
         // Same precondition and same wording as Python (`periculum/assets/scripts/lxmf_node.py:162-164`):
         // without the peer's identity there is nothing to encrypt to, and the
         // step should say which call was skipped rather than time out later.
@@ -1096,16 +1169,11 @@ impl LxmfHelperProcessor {
         }
         // `create_message` stamps the timestamp from the node's own emission
         // clock (Codeberg #182) — the helper has no clock of its own to get
-        // wrong. Title `test` and `Direct` mirror Python's LXMessage
-        // (`periculum/assets/scripts/lxmf_node.py:172-179`, `desired_method=DIRECT`).
-        let message = match ready.router.create_message(
-            core,
-            peer,
-            b"test".to_vec(),
-            body,
-            Vec::new(),
-            method,
-        ) {
+        // wrong.
+        let message = match ready
+            .router
+            .create_message(core, peer, title, body, fields, method)
+        {
             Ok(message) => message,
             Err(e) => {
                 self.emitter
@@ -1116,10 +1184,11 @@ impl LxmfHelperProcessor {
         match ready.router.enqueue(core, message) {
             Ok(output) => {
                 self.absorb(ready, core, output, out);
-                self.emitter.event(
-                    "lxmf_msg_sent",
-                    &[("dst", hex_encode(&peer)), ("body_b64", body_b64)],
-                );
+                let mut event = vec![("dst", hex_encode(&peer)), ("body_b64", body_b64)];
+                if let Some(label) = fields_label {
+                    event.push(("fields", label.to_string()));
+                }
+                self.emitter.event("lxmf_msg_sent", &event);
             }
             Err(e) => self
                 .emitter

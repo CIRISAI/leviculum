@@ -597,6 +597,17 @@ both sinks carry the raw packed bytes on every reading, decoded or not,
 for the reason the section above gives: the decoder's tolerance is an
 archive's data loss.
 
+It also **sends** one, which is ours alone: `send_telemetry <hex>
+<telemetry_field_hex>` puts a packed Telemeter blob on the wire as an
+empty-bodied `FIELD_TELEMETRY` message and acks it as `lxmf_msg_sent …
+fields=telemetry`. The Python helper has no twin for it, as it has none
+for the `pn_*` verbs, and the verb is additive, so a scenario that never
+says the word drives either helper unchanged. The blob is decoded once
+as a gate and then travels verbatim — re-encoding it would shorten a
+sensor this build has no arm for — which is what lets a two-helper
+loopback compare the hex a driver typed against the `fields_hex` the
+receiver prints (`leviculum-lxmf-node/tests/telemetry_loopback.rs`).
+
 ## The extension ladder
 
 The format is fixed by implementations we do not control, so extending
