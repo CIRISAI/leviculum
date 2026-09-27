@@ -38,10 +38,23 @@ to 16:42:26.675, and the collector's last `LINK_REQUEST_RX` is stamped
 
 LoRa PHY for every board: 869.463 MHz, BW 125 kHz, SF8, CR 4/5, programmed
 preamble 18 symbols (`derive_preamble_symbols`,
-`leviculum-core/src/rnode.rs:918-935`). Airtime figures below come from the
-same arithmetic the firmware charges its duty ledger with
-(`airtime_ms_with_preamble`, `rnode.rs:1081`); the port is validated against
-the value pass 358 measured on the wire, 133.6 ms for a 135 B frame.
+`leviculum-core/src/rnode.rs:918-935`). Airtime figures below are **charged by
+the firmware's own cost functions**, not by a transcription of them: a keyed
+frame by `frame_airtime_cost_ms` (`rnode.rs:1687`), the same call
+`add_airtime` is fed after a successful `transmit()`
+(`leviculum-nrf/src/lora.rs:1015-1028`), and a demodulated packet by
+`packet_airtime_ms` (`rnode.rs:1656`), which adds back the per-frame header
+byte and, above `MAX_SINGLE_PAYLOAD` (`rnode.rs:1980`), the second frame's
+whole preamble. The program that does it is in the tree —
+`cargo run -p leviculum-std --example lora_airtime_census` — so every
+millisecond in sections 1 and 5 can be re-derived from the capture by running
+it, and cannot drift from what a board would have counted.
+
+The first version of this document did transcribe the formula, lost a term in
+it, and priced every frame about three times too cheap; see the changelog at
+the end. The "133.6 ms for a 135 B frame" that version called a wire
+validation was that same broken arithmetic's own output, quoted back at
+itself — the value at SF8/BW125/CR4:5 with an 18-symbol preamble is 421 ms.
 
 **What was not captured.** The Pocket's debug capture
 (`/home/lew/rig-run/ble-drop/feld-pocket.log`) stops at 11:21:55, four seconds
@@ -179,24 +192,45 @@ at handshake timeout. Direction is irrelevant to the mechanism, because the
 frame that has to survive the Pocket's queue is the *return* leg either way:
 outbound it is the phone's proof coming back through the Pocket.
 
-**The air itself was almost idle.** The T114 in the window: 1,800 TX frames
-(233,354 B, 235.8 s of airtime, 1.33 % duty) and 1,781 RX frames (280,113 B,
-258.7 s, 1.46 %), a combined channel occupancy of 494.5 s, **2.79 % of the
-window**. Zero `holding` lines, zero `CARRIER_DROP`, zero `CARRIER_GATE` in
-the whole window; positive control on those three greps, the same capture holds
-146 `CARRIER_DROP` and 1,040 `CARRIER_GATE` lines on other days, so the
-patterns are right and the zeros are real. The base radio never came near its
-own cap. The constraint sat on the battery-powered relay, alone.
+**The air was busy, and the base was not the one being held back.** The T114
+in the window: 1,800 TX frames (233,354 B, **728.7 s** of airtime, **4.12 %**
+duty) and 1,781 RX packets (280,113 B, **893.8 s**, **5.05 %**), a combined
+channel occupancy of **1,622.6 s, 9.17 % of the window**. Counted the other
+way — every frame the modem demodulated, whether or not it reassembled into a
+packet the host saw (`[T114_SX_RX]`) — the receive side is 2,531 frames and
+960.0 s, 5.42 %. Zero `holding` lines, zero `CARRIER_DROP`, zero
+`CARRIER_GATE` in the whole window; positive control on those three greps, the
+same capture holds 146 `CARRIER_DROP` and 1,040 `CARRIER_GATE` lines on other
+days, so the patterns are right and the zeros are real. So the base never hit
+its own lock — but it was not comfortable either: over its busiest rolling
+hour it keyed **258.1 s from 12:07:04Z, 72 % of a 360 s budget**. The
+constraint that broke the test still sat on the battery-powered relay, which
+did reach its cap; the base had margin, not idleness.
 
-**One open number, for the rig.** The airtime ledger is charged TX-only, after
-a successful `transmit()` (`leviculum-nrf/src/lora.rs:967-980`). The Pocket's
-ledger stood at 360,077 ms for its trailing hour, yet the T114 demodulated only
-83.5 s of air traffic *from all sources* in the busiest hour of the window
-(12:00 UTC). A factor of about 4.3. Either the Pocket keyed up for frames the
-T114 did not receive, or its bins carried load from before the window. The
-field logs cannot separate the two; a side-by-side of the Pocket's TX ledger
-and the T114's RX ledger on the rig can, and #433 needs that measurement
-anyway.
+**Closed by 364: the ledger is right and the T114's ear cannot bound it.**
+The airtime ledger is charged TX-only, from length and PHY, after a successful
+`transmit()` (`leviculum-nrf/src/lora.rs:1015-1028`) — held, stale-dropped,
+muted and CSMA-retried frames pay nothing. The earlier reading of this
+document set the Pocket's 360,077 ms trailing-hour ledger against "83.5 s
+demodulated at the T114 in the busiest hour" and called the factor 4.3 an open
+question. Both halves of that were wrong. The 83.5 s was the mispriced
+arithmetic (the busiest UTC hour is 277.8 s of RX, and the busiest rolling
+hour 282.8 s from 12:01:15Z), and the comparison itself is not one a
+half-duplex radio admits: a receiver is deaf for every millisecond it is
+keying, and the T114 keyed 256.6 s of the very hour it is being asked to
+account for, so **its demodulated total can never bound a neighbour's keyed
+total**. Pass 364 verified the ledger directly instead, on the Pocket's own
+post-test reboot where the bins start empty and every frame is captured:
+reported `lt` against the rolling-hour sum recomputed from the logged frame
+lengths is **ratio 1.00 across 3.3 hours, twice exact to the millisecond**.
+Priced correctly, the T114's own trailing hour at the moment `lt=360077` was
+logged (13:18 to 14:18Z) is **249.4 s demodulated, 256.6 s keyed**, against
+the Pocket's 360 s. The 110.6 s that separates the two has two admissible
+sources the field logs cannot tell apart — the 256.6 s of that hour in which
+the T114 was keying and therefore deaf, and Pocket frames it simply did not
+decode — and neither is evidence against a ledger 364 checked directly.
+There is no open number here; what the lock was rationing is a link-data
+retransmission loop, which 364 measured and #433 carries.
 
 ### 1.3 `PATH_REBALANCE`, reported as its own observation
 
@@ -369,37 +403,44 @@ That is what a store-and-forward chain through a saturated relay costs a
 Lew asked over LXMF at 12:00:47: "Warum gehen so viele Pakete über LoRa durch
 die Luft? Hier ist mehr Traffic als ich erwartet habe. Ist alles sane?"
 
-**Headline: the air was 2.79 % occupied, and 16.2 % of that occupancy bought
-nothing at all.**
+**Headline: the air was 9.17 % occupied, the base keyed 72 % of its own hourly
+budget in its busiest hour, and 14.7 % of all that occupancy bought nothing at
+all.**
 
 Channel occupancy at the T114 over the 17,700 s window, by packet type (the
-type is bits 0-1 of the flags byte, `leviculum-core/src/packet.rs:15,37-46`):
+type is bits 0-1 of the flags byte, `leviculum-core/src/packet.rs:15,37-46`).
+TX rows are keyed frames priced with `frame_airtime_cost_ms`; RX rows are
+reassembled packets priced with `packet_airtime_ms`, which charges a header
+byte per frame and a second preamble above 254 B:
 
 | direction | type | frames | airtime | share of that direction |
 |---|---|---|---|---|
-| TX | DATA | 340 | 38.9 s | 16.5 % |
-| TX | ANNOUNCE | 409 | 67.1 s | 28.5 % |
-| TX | LINKREQUEST | 145 | 16.9 s | 7.2 % |
-| TX | PROOF | 906 | 112.9 s | 47.9 % |
-| RX | DATA | 1140 | 174.6 s | 67.5 % |
-| RX | ANNOUNCE | 155 | 27.1 s | 10.5 % |
-| RX | LINKREQUEST | 391 | 45.3 s | 17.5 % |
-| RX | PROOF | 95 | 11.8 s | 4.6 % |
+| TX | DATA | 340 | 109.4 s | 15.0 % |
+| TX | ANNOUNCE | 409 | 233.4 s | 32.0 % |
+| TX | LINKREQUEST | 145 | 48.0 s | 6.6 % |
+| TX | PROOF | 906 | 337.9 s | 46.4 % |
+| RX | DATA | 1140 | 629.0 s | 70.4 % |
+| RX | ANNOUNCE | 155 | 96.8 s | 10.8 % |
+| RX | LINKREQUEST | 391 | 132.1 s | 14.8 % |
+| RX | PROOF | 95 | 35.9 s | 4.0 % |
 
-TX 235.8 s, RX 258.7 s, together **494.5 s, 2.79 % of the window**. Regrouped
-by purpose:
+TX 728.7 s (4.12 % duty), RX 893.8 s (5.05 %), together **1,622.6 s, 9.17 % of
+the window**. Regrouped by purpose:
 
 | purpose | airtime | share of occupancy |
 |---|---|---|
-| link handshakes (requests both ways, link proofs, their returns) | 122.1 s | 24.7 % |
-| announces | 94.2 s | 19.1 % |
-| payload data | 213.5 s | 43.2 % |
-| per-packet receipt proofs | 64.7 s | 13.1 % |
+| link handshakes (requests both ways, link proofs, their returns) | 361.2 s | 22.3 % |
+| announces | 330.2 s | 20.3 % |
+| payload data | 738.4 s | 45.5 % |
+| per-packet receipt proofs | 190.2 s | 11.7 % |
+| ten outbound proof frames of other lengths (9 × 54 B, 1 × 230 B) | 2.5 s | 0.2 % |
 
-So the answer to Lew's question is: yes, it is sane in volume, the air is 97 %
-idle, but a quarter of everything that *is* on the air is handshake overhead,
-and most of that is waste. Splitting the 906 outbound proof frames by length
-and by whose link id they are addressed to separates the two cleanly:
+So the answer to Lew's question is: the volume is not absurd, but the air is
+**91 % idle, not 97 %**, and in the busiest rolling hour the base alone keyed
+258.1 s against the 360 s a 10 % duty cycle allows it. A fifth of everything
+that *is* on the air is handshake overhead, and most of that is waste.
+Splitting the 906 outbound proof frames by length and by whose link id they
+are addressed to separates the two cleanly:
 
 * **382 frames of 119 B**, one per distinct link id, 382 distinct ids. Packet
   length 118 = 1 flags + 1 hops + 16 destination + 1 context + 99
@@ -410,24 +451,29 @@ and by whose link id they are addressed to separates the two cleanly:
   *did* establish, up to 19 for a single link. These are per-packet receipt
   proofs on working links: productive traffic.
 
-Costing the dead handshakes at SF8/BW125/CR5: 331 requests at 116 ms plus 331
-link proofs at 126 ms is **80.1 s, 16.2 % of all channel occupancy in the
-window**, and it delivered nothing. That is the airtime price of #433 as the
-field measured it, and it is a lower bound, because it counts only the frames
-the T114 saw.
+Costing the dead handshakes at SF8/BW125/CR5 with an 18-symbol preamble: 331
+requests at **339 ms** (a 102 B packet, 103 B on the air — 381 of the 391
+inbound requests are exactly that length) plus 331 link proofs at **380 ms**
+is **238.0 s, 14.7 % of all channel occupancy in the window**, and it
+delivered nothing. That is the airtime price of #433 as the field measured it,
+and it is a lower bound, because it counts only the frames the T114 saw.
 
 What the rest is:
 
-* **Payload.** The inbound 259 B frames, 562 of them, are 111.3 s, 63.7 % of
-  all RX DATA airtime and 22.5 % of total occupancy. That is the phone's LXMF
-  and telemetry: the largest single honest consumer, as it should be.
-* **Announces.** 19.1 % of occupancy. The base received **131 announces from
+* **Payload.** The inbound 259 B packets, 562 of them, are 455.8 s, 72.5 % of
+  all RX DATA airtime and 28.1 % of total occupancy. Each one is over the
+  254 B single-frame limit, so it is two frames and two preambles on the air:
+  728 ms for the 255 B first frame and 83 ms for the 6 B remainder. That is
+  the phone's LXMF and telemetry: the largest single honest consumer, as it
+  should be.
+* **Announces.** 20.3 % of occupancy. The base received **131 announces from
   the phone alone** in the window, one every 135 s, next to 28 and 26 from two
   board destinations and 3 to 10 each from six more. Columba's announce
   cadence, not ours, is the driver here, and it is worth a look next to the
   cadence question in `project_announce_cadence_and_use_cases`.
 * **Per-medium split.** The T114's `rx=` counter rose by 4,472 over the window
-  while its LoRa RX was 1,781 frames and its BLE RX 914, so `rx=` counts every
+  while its LoRa RX was 1,781 packets (2,531 demodulated frames) and its BLE
+  RX 914, so `rx=` counts every
   medium plus the host serial side. With no per-carrier byte counters on this
   firmware (section 0) a byte-exact split is not available from this capture;
   `ab319b6f` on the boards will give it directly next time.
@@ -435,16 +481,20 @@ What the rest is:
 Per UTC hour, so the ramp is visible:
 
 ```
-09:00  TX   11 /  1.8 s   RX   11 /  1.8 s
-10:00  TX  214 / 27.2 s   RX  198 / 33.3 s
-11:00  TX  222 / 26.3 s   RX  211 / 34.6 s
-12:00  TX  562 / 75.4 s   RX  609 / 83.5 s
-13:00  TX  529 / 70.3 s   RX  511 / 70.1 s
-14:00  TX  262 / 34.7 s   RX  241 / 35.4 s
+09:00  TX   11 /   6.2 s (0.17 %)   RX   11 /   6.1 s (0.17 %)
+10:00  TX  214 /  82.6 s (2.30 %)   RX  198 / 125.6 s (3.49 %)
+11:00  TX  222 /  75.9 s (2.11 %)   RX  211 / 128.9 s (3.58 %)
+12:00  TX  562 / 236.7 s (6.57 %)   RX  609 / 277.8 s (7.72 %)
+13:00  TX  529 / 219.4 s (6.09 %)   RX  511 / 233.1 s (6.47 %)
+14:00  TX  262 / 108.0 s (3.00 %)   RX  241 / 122.4 s (3.40 %)
 ```
 
-The busiest hour on the air, 12:00 UTC, is 83.5 s of RX, 2.3 % duty. The knee
-in section 1 sits inside it.
+(The 09:00 and 14:00 buckets are partial: the window opens at 09:20 and closes
+at 14:15.) The busiest clock hour on the air is 12:00 UTC with 277.8 s of RX
+and 236.7 s of TX; the busiest *rolling* hour is 282.8 s of RX from 12:01:15Z,
+258.1 s of TX from 12:07:04Z, and 534.7 s of the two together from 12:01:37Z,
+14.9 % of the channel — with the base's own keying at 72 % of what its duty
+cycle permits. The knee in section 1 sits inside it.
 
 ## 6. What this means for the Leitstern
 
@@ -578,13 +628,53 @@ histogram and the `received_at` minus `message_timestamp` distribution from a
 python pass over the jsonl with `received_at`/`message_timestamp` in
 UTC+02:00.
 
-**Section 5.** One python pass over `t114-win.log` matching
-`\[T114_TX_FRAME\] first8=([0-9a-f]{16}) len=(\d+)` and
-`\[LORA\] RX (\d+) bytes.*flags=0x([0-9a-f]{2})`, taking the packet type from
-the low two bits of the flags byte, the header type from bit 6 (which decides
-whether the first address is a transport id or the destination), and charging
-each frame with the `airtime_ms_with_preamble` arithmetic at
-125000/8/5/preamble 18. Proof-frame attribution intersects those addresses
-with the link ids from `LINK_REQUEST_RX` and `LINK_ESTAB` in the two window
-slices. Announce counts: `grep -a ANN_RX` and `ANN_TX` over the events slice
-bounded by `t=` in `[41076000, 58776000]`.
+**Sections 1 and 5, every airtime figure.** One command, and it is in the
+tree so it can be re-run:
+
+```sh
+cargo run -p leviculum-std --example lora_airtime_census -- \
+    /home/lew/rig-run/ble-drop/feld-t114.log 2026-09-27 09:20:00 14:15:00
+```
+
+It reads `[T114_TX_FRAME] first8=<16 hex> len=<n>` (a keyed frame, `len` is
+the full on-air length), `[LORA] RX <n> bytes ... flags=0x<hh>` (a
+REASSEMBLED packet, so `n` is short of the on-air length by a header byte and,
+above 254 B, by a second frame's whole preamble) and `[T114_SX_RX] len=<n>`
+(every frame the modem demodulated, reassembled or not), takes the packet type
+from the low two bits of the flags byte, and charges each frame with
+`frame_airtime_cost_ms` and each packet with `packet_airtime_ms` at
+125000/8/5/preamble 18. It prints the by-type table, the by-length table, the
+per-hour block and the busiest rolling hour. The trailing-hour figures in
+section 1.2 are the same command with `13:18:00 14:18:00`; a different PHY is
+`--sf/--bw/--cr/--preamble`.
+
+The two numbers the census does not produce: proof-frame attribution
+intersects the `dst=` addresses with the link ids from `LINK_REQUEST_RX` and
+`LINK_ESTAB` in the two window slices; announce counts are `grep -a ANN_RX`
+and `ANN_TX` over the events slice bounded by `t=` in
+`[41076000, 58776000]`.
+
+## Changelog
+
+**2026-09-27, second revision (#433, correction of the first).** Every airtime
+figure in sections 1 and 5 was recomputed, and the frame census was not
+touched. The first revision charged each frame with a hand-written
+transcription of the Semtech payload-symbol formula that dropped the `+4` of
+the coding-rate factor `(CR-4)+4` (`rnode.rs:1109,1116`): each group of coded
+bits cost one symbol instead of five, so a 119 B link proof was priced 126 ms
+where the firmware's own `frame_airtime_cost_ms` charges 380 ms, a factor 3.0
+on everything but the preamble. Receive-side packets were additionally priced
+as if they were frames, which loses a header byte per frame and a whole second
+preamble on every packet above 254 B — and 562 of the inbound packets are
+259 B. Consequences: channel occupancy 2.79 % becomes 9.17 %, the "97 % idle"
+headline goes, the dead-handshake bill 80.1 s becomes 238.0 s, and the base
+radio turns out to have keyed 72 % of its lawful hourly budget in its busiest
+hour rather than never coming near it. Section 1's "one open number for the
+rig" is closed rather than restated: pass 364 verified the Pocket's ledger
+directly at ratio 1.00 over 3.3 hours, and the factor 4.3 it was built on was
+both mispriced and structurally unavailable, because a half-duplex receiver's
+demodulated total cannot bound a neighbour's keyed total. The numbers now come
+from the firmware's functions through a committed program
+(`leviculum-std/examples/lora_airtime_census.rs`) rather than from a second
+copy of the arithmetic, which is the whole reason the first revision could be
+wrong while looking self-consistent.
