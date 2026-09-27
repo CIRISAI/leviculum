@@ -411,6 +411,40 @@ Run one scenario by hand:
 periculum run ../periculum/hardware/lora_link_rust.toml
 ```
 
+### The BLE room needs a patched btvirt
+
+The `ble_room_*` cells put N virtual LE controllers on one emulated air
+so that N `lnsd` daemons can prove BLE mesh formation with no boards.
+The emulator is bluez's `btvirt`, which Debian does not package, and
+which **cannot be a stock build**: bluez 5.82 and older report the
+central's connection handle to the peripheral and forward ACL data
+under the sender's handle, so every room stalls from the second
+concurrent link (N >= 3) and the emulator's bug is measured as a mesh
+finding. Upstream commit `4ff7deaf8c` fixes it; with it the ladder is
+green to N = 16, which is the emulator's own `MAX_BTDEV_ENTRIES`
+ceiling. `just install-ci` therefore builds btvirt itself
+(`scripts/install-btvirt.sh`): it fetches the bluez source matching this
+host, applies the vendored patch from `scripts/patches/`, and installs
+the binary together with a provenance sidecar,
+`/usr/local/bin/btvirt.provenance`, whose first non-comment line every
+room prints as `origin=`:
+
+```
+BLE_ROOM_BTVIRT bin=/usr/local/bin/btvirt bytes=895400 origin="bluez 5.82-1.1 + upstream 4ff7deaf8c (emulator: use the handle of the receiving side); built 2026-09-27, md5 11f1de0c2b097787824cd6335ef676bc"
+```
+
+A room with no sidecar still runs and says `origin=unrecorded`, which
+is a result nobody can attribute afterwards. Verify a bench without
+installing anything with `bash scripts/install-ci.sh --check`; the same
+checker is driven against injected damage by `just btvirt-selftest`, in
+`guards` and `fast`. The build is skipped on a host that already holds
+the patched binary, and it warns rather than fails when a prerequisite
+is missing — only the bench that runs the room needs it. The four
+prerequisites beyond the binary (the `hci_vhci` module, a running
+system `bluetoothd`, no BLE MIDI GATT service, `cap_net_raw` on
+`btmon`) are listed in `scripts/install-ci.sh` at the btvirt step;
+nothing can provision them for you.
+
 ## Concurrent test protection
 
 Two scenario runs on the same machine fight over Docker container names

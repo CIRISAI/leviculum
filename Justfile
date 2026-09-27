@@ -294,7 +294,7 @@ nrf-shellcheck:
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh scripts/lnflash-bundle.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
-        scripts/install-esptool.sh \
+        scripts/install-esptool.sh scripts/install-btvirt.sh \
         scripts/run-fuzz.sh scripts/test-run-fuzz.sh \
         scripts/check-tree-clean.sh scripts/test-tree-clean.sh \
         scripts/test-just-sweep.sh \
@@ -1192,7 +1192,7 @@ tree-clean-selftest:
 # not-in-guards: source-invariant-tests -- 18.8 s and a test runner of its own;
 #   its census half check-source-invariant-census is in `guards`
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1224,7 +1224,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
+fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -1685,6 +1685,20 @@ sweep budget="30GB" fw_budget="4GB": _require-cargo-sweep
 [doc('Drive the sweep recipe against a stub cargo, deleting nothing')]
 sweep-selftest:
     @bash scripts/test-just-sweep.sh
+
+# The provenance half of scripts/install-btvirt.sh (periculum #49). The
+# ble_room cells run on an emulator whose BUILD decides their verdict --
+# bluez <= 5.82 stalls every room from the third node -- so each run prints
+# the sidecar beside the binary as `origin=`, and that sidecar is a file a
+# human can write, copy or leave behind after a reinstall. The checker that
+# refuses those is only worth having if somebody has watched it refuse, so
+# --self-test injects each case (no sidecar, no origin line, an origin that
+# does not name the patch, one older than the binary, one recording another
+# md5) and asserts the verdict. Nothing is built, fetched or installed: it
+# runs against a scratch pair in /tmp. 0.06 s (measured 2026-09-27).
+[doc('Drive the btvirt provenance check against injected damage')]
+btvirt-selftest:
+    @bash scripts/install-btvirt.sh --self-test
 
 # Touch-free; double-tap RESET only if the runner prompts for a crashed
 # device. Details: leviculum-nrf/README.md §Build and flash.
