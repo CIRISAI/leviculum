@@ -133,13 +133,13 @@ fn verbosity_flag(arg: &str) -> Option<(u8, u8)> {
 ///
 /// Info, not debug, for the same reason `lnsd` defaults there: `warn!` — the
 /// level of the one line that says this terminus adopted a proof's hop count
-/// (`node/link_management.rs:1148`) — must be visible without being asked
+/// (`node/link_management.rs:1167`) — must be visible without being asked
 /// for, while the `event=` debug lines are volume and are asked for. Asking
 /// is what every periculum node already does, twice over: the rendered config
 /// carries `[logging] loglevel = 5` (`periculum/src/topology.rs:9186`) and the
 /// container environment carries `RUST_LOG=debug`
 /// (`periculum/src/compose.rs:291-294`), so a scenario gets `PATH_REBALANCE`
-/// (`transport.rs:8634`) without touching the argv.
+/// (`transport.rs:8667`) without touching the argv.
 const DEFAULT_LOGLEVEL: u8 = 4;
 
 /// Map an RNS log level (0-7) to a tracing env-filter directive.

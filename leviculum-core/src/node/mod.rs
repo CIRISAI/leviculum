@@ -76,6 +76,8 @@ mod mvr_default_announce_app_data;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
 #[cfg(test)]
+mod mvr_duty_held_lrproof;
+#[cfg(test)]
 mod mvr_embedded_same_iface_relay;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_establishment_loss;
@@ -3999,7 +4001,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     }
 
                     let now_ms = self.transport.clock().now_ms();
-                    self.process_link_packet(&packet, &raw, now_ms, interface_index);
+                    self.process_link_packet(
+                        &packet,
+                        &raw,
+                        raw_hash.as_ref(),
+                        now_ms,
+                        interface_index,
+                    );
                 } else {
                     // Regular packet: decrypt per destination type (Single via
                     // identity/ratchets, Group via the shared token, Plain

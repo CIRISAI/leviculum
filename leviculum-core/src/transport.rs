@@ -1493,6 +1493,7 @@ pub struct TransportStats {
     pub(crate) drops_announce_rate_limited: u64,
     pub(crate) drops_ingress_burst_announce: u64,
     pub(crate) drops_lrproof_invalid: u64,
+    pub(crate) drops_lrproof_no_link: u64,
     pub(crate) drops_link_repeat_echo: u64,
     pub(crate) drops_forward_max_hops: u64,
     pub(crate) drops_blackholed_announce: u64,
@@ -1545,6 +1546,26 @@ pub enum DropReason {
     /// LRPROOF dropped during validation (bad size, bad signature, bad key,
     /// or a cross-interface hop asymmetry in strict reference mode).
     LrproofInvalid,
+    /// Establishment proof (LRPROOF) that reached this node but matched
+    /// nothing: no link-table entry (a relay's entry dies at its proof
+    /// deadline, `(hops + path_hops + 2) * 6 s`), no local link. The reverse
+    /// table cannot catch it by construction — its key is the request's full
+    /// packet hash while the link id strips the request's signalling bytes
+    /// (`link/mod.rs::calculate_link_id`). Kept apart from
+    /// [`DropReason::LrproofInvalid`]: that one names a proof that FAILED a
+    /// check, this one names a valid-looking proof that arrived too late for
+    /// anyone to want it — the signature of a slow first hop (#358: a duty-
+    /// locked LoRa interface held relayed link requests ~145 s, the proofs
+    /// returned to expired entries and vanished with no counter, field
+    /// measurement 2026-09-27). Python drops this silently too (the LRPROOF
+    /// falls off Transport.py:2174's link_table check and is never counted).
+    ///
+    /// On a SHARED medium this counter also ticks for proofs overheard from a
+    /// neighbouring relay's exchange — the bytes are identical and there is
+    /// nothing local to tell them apart by (an LRPROOF is HEADER_1, so the
+    /// transport-id overhear gate never sees it). On point-to-point carriers
+    /// (BLE, TCP, local clients) every count is a real late proof.
+    LrproofNoLink,
     /// Same-interface link repeat whose hop count matches neither frozen
     /// operand — the relay's own forward echoed back on the shared medium.
     /// Routine on half-duplex shared media (same class as
@@ -1659,6 +1680,7 @@ impl DropReason {
             DropReason::AnnounceRateLimited => "announce-rate-limited",
             DropReason::IngressBurstAnnounce => "ingress-burst-announce",
             DropReason::LrproofInvalid => "lrproof-invalid",
+            DropReason::LrproofNoLink => "lrproof-no-link",
             DropReason::LinkRepeatEcho => "link-repeat-echo",
             DropReason::ForwardMaxHops => "forward-max-hops",
             DropReason::BlackholedAnnounce => "blackholed-announce",
@@ -1670,7 +1692,7 @@ impl DropReason {
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 18] = [
+    pub const ALL: [DropReason; 19] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -1682,6 +1704,7 @@ impl DropReason {
         DropReason::AnnounceRateLimited,
         DropReason::IngressBurstAnnounce,
         DropReason::LrproofInvalid,
+        DropReason::LrproofNoLink,
         DropReason::LinkRepeatEcho,
         DropReason::ForwardMaxHops,
         DropReason::BlackholedAnnounce,
@@ -1778,6 +1801,13 @@ impl TransportStats {
         self.drops_lrproof_invalid
     }
 
+    /// Establishment proofs that arrived with no link-table entry and no
+    /// local link left to claim them — a valid-looking proof that came back
+    /// too late, the signature of a slow first hop (#358).
+    pub fn drops_lrproof_no_link(&self) -> u64 {
+        self.drops_lrproof_no_link
+    }
+
     /// Same-interface link repeats dropped as echoes of our own forward
     /// (routine on shared media, not validation failures; Codeberg #227).
     pub fn drops_link_repeat_echo(&self) -> u64 {
@@ -1836,6 +1866,7 @@ impl TransportStats {
             + self.drops_announce_rate_limited
             + self.drops_ingress_burst_announce
             + self.drops_lrproof_invalid
+            + self.drops_lrproof_no_link
             + self.drops_link_repeat_echo
             + self.drops_forward_max_hops
             + self.drops_blackholed_announce
@@ -1865,6 +1896,7 @@ impl TransportStats {
             DropReason::AnnounceRateLimited => self.drops_announce_rate_limited += 1,
             DropReason::IngressBurstAnnounce => self.drops_ingress_burst_announce += 1,
             DropReason::LrproofInvalid => self.drops_lrproof_invalid += 1,
+            DropReason::LrproofNoLink => self.drops_lrproof_no_link += 1,
             DropReason::LinkRepeatEcho => self.drops_link_repeat_echo += 1,
             DropReason::ForwardMaxHops => self.drops_forward_max_hops += 1,
             DropReason::BlackholedAnnounce => self.drops_blackholed_announce += 1,
@@ -4102,6 +4134,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 announce_rate_limited = self.stats.drops_announce_rate_limited,
                 ingress_burst_announce = self.stats.drops_ingress_burst_announce,
                 lrproof_invalid = self.stats.drops_lrproof_invalid,
+                lrproof_no_link = self.stats.drops_lrproof_no_link,
                 link_repeat_echo = self.stats.drops_link_repeat_echo,
                 forward_max_hops = self.stats.drops_forward_max_hops,
                 blackholed_announce = self.stats.drops_blackholed_announce,
@@ -4888,7 +4921,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3420. A destination with no cached
+    /// link-request path uses at transport.rs:3452. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -10218,7 +10251,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2103`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2135`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -15772,7 +15805,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6315), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6348), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

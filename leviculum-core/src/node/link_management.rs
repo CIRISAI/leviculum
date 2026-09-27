@@ -855,6 +855,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         &mut self,
         packet: &Packet,
         raw_packet: &[u8],
+        raw_hash: Option<&[u8; 32]>,
         now_ms: u64,
         interface_index: usize,
     ) {
@@ -863,7 +864,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.handle_link_request(packet, raw_packet, interface_index);
             }
             PacketType::Proof => {
-                self.handle_link_proof(packet, now_ms, interface_index);
+                self.handle_link_proof(packet, raw_hash, now_ms, interface_index);
             }
             PacketType::Data => {
                 self.handle_link_data(packet, raw_packet, now_ms);
@@ -1030,7 +1031,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Handle an incoming PROOF packet (link establishment or data proof)
-    fn handle_link_proof(&mut self, packet: &Packet, now_ms: u64, interface_index: usize) {
+    fn handle_link_proof(
+        &mut self,
+        packet: &Packet,
+        raw_hash: Option<&[u8; 32]>,
+        now_ms: u64,
+        interface_index: usize,
+    ) {
         let link_id = LinkId::new(packet.destination_hash);
         let proof_data = packet.data.as_slice();
 
@@ -1071,6 +1078,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let acquisition_ms = self.transport.interface_acquisition_ms(interface_index);
 
         let Some(link) = self.links.get_mut(&link_id) else {
+            // The end of the line for an establishment proof: transport found
+            // no link-table entry (a relay's entry dies at its proof
+            // deadline), the reverse table cannot match a link id by
+            // construction, and no local link is waiting. Count it — this
+            // exact silence hid the duty-hold failure of #358, where every
+            // late proof of a field day vanished without moving a counter.
+            self.transport.record_node_layer_drop(
+                raw_hash,
+                packet,
+                interface_index,
+                crate::transport::DropReason::LrproofNoLink,
+            );
             crate::tracing::debug!(
                 "handle_link_proof: link <{}> not found in self.links ({} links tracked)",
                 HexShort(link_id.as_bytes()),
