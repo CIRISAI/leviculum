@@ -4320,7 +4320,11 @@ mod tests {
     /// `rig-run/ble-drop/feld-pocket.log`, board clock t=73568391..73627985
     /// (2026-09-27, wall 14:20Z), the busiest minute of the 18-minute home
     /// window in which BOTH the Pocket and the T114 were captured. 25 frames:
-    /// a 68 B link-data packet and a 103 B transported link request repeating,
+    /// a 68 B path request and a 103 B transported link request repeating
+    /// (the 68 B frame's `first8=08006b9f66014d98` was first read as link
+    /// data on one link; `6b9f66014d9853faab220fba47d02761` is in fact the
+    /// well-known `rnstransport.path.request` PLAIN destination hash and
+    /// flags 0x08 decode as dest PLAIN, not LINK — order 368),
     /// plus four oversized relays. The PHY that minute was the running
     /// `active config`: 869463000 Hz, SF8, BW 125 kHz, CR 4:5, which
     /// [`derive_preamble_symbols`] puts at the 18-symbol floor.

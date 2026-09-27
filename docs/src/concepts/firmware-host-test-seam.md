@@ -182,9 +182,9 @@ test can recompute and a comment cannot.
 
 **6. The `[TRANSPORT]` ticker.** The re-arm deliberately drops missed
 periods so a busy loop does not then emit a burst of catch-up lines
-(`poll`, `leviculum-nrf/src/transport_stats.rs:97`), and the line is
+(`poll`, `leviculum-nrf/src/transport_stats.rs:106`), and the line is
 byte-exact because capture consumers grep it (`log`,
-`leviculum-nrf/src/transport_stats.rs:105`). `leviculum-log-line` already
+`leviculum-nrf/src/transport_stats.rs:114`). `leviculum-log-line` already
 exists for the second half.
 
 See also: [Checks that are actually
