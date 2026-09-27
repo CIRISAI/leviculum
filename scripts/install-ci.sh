@@ -10,17 +10,32 @@ cd "$REPO_DIR"
 # needs the hooks to be live.  A worktree-scoped marker file is
 # written so the tier-runners know to perform a `git fetch + checkout
 # --force origin/master` at the head of every scheduled run.
+#
+# --check installs nothing. It verifies the provisioning this script is
+# responsible for that can rot without anyone noticing -- today exactly one
+# thing, the patched btvirt and its provenance sidecar (step 1c), because that
+# one decides the verdict of the periculum ble_room cells rather than just
+# their ability to start. Everything else this script installs announces its
+# own absence the moment it is used.
 VM_MODE=0
+CHECK_MODE=0
 for arg in "$@"; do
     case "$arg" in
         --vm-mode) VM_MODE=1 ;;
+        --check) CHECK_MODE=1 ;;
         *)
             echo "ERROR: unknown flag '$arg'" >&2
-            echo "Usage: $0 [--vm-mode]" >&2
+            echo "Usage: $0 [--vm-mode] [--check]" >&2
             exit 1
             ;;
     esac
 done
+
+if [[ "$CHECK_MODE" -eq 1 ]]; then
+    echo "[install-ci] --check: verifying installed provisioning, installing nothing"
+    bash scripts/install-btvirt.sh --check
+    exit $?
+fi
 
 echo "[install-ci] Installing CI pipeline in $REPO_DIR (vm-mode=$VM_MODE)"
 
@@ -162,19 +177,20 @@ if ! command -v cargo-fuzz >/dev/null 2>&1; then
     echo "[install-ci]       (needed only for the leviculum-core/fuzz targets; see docs/src/development-testing.md)"
 fi
 
-# Optional test dependency: btvirt hosts the periculum `ble_room_*` cells
+# 1c. Optional test dependency: btvirt hosts the periculum `ble_room_*` cells
 # (periculum #49): N virtual LE controllers on one emulated air, so N lnsd
-# daemons can prove BLE mesh formation with no boards. Debian does not
-# package it; it is built from the bluez source tree MATCHING the installed
-# bluez (mismatched daemon/emulator versions are their own bug class):
+# daemons can prove BLE mesh formation with no boards. Debian packages no
+# btvirt, and a STOCK build of it is not good enough either -- bluez <= 5.82's
+# emulator hands the peripheral the central's connection handle, which stalls
+# every room from the second concurrent link (N >= 3). So the build is not a
+# hint in a comment any more: scripts/install-btvirt.sh fetches the bluez
+# source matching this host, applies the vendored upstream fix
+# (scripts/patches/, commit 4ff7deaf8c), builds emulator/btvirt, installs it,
+# and writes the provenance sidecar the room prints as `origin=`. It is
+# idempotent and it warns rather than fails when a prerequisite (deb-src,
+# sudo, a compiler) is missing -- only the BLE bench needs any of this.
 #
-#   apt-get source bluez            # needs a deb-src line; 5.82 as of 2026-09
-#   sudo apt install libreadline-dev python3-docutils
-#   cd bluez-*/ && ./configure --enable-testing --disable-systemd \
-#       --disable-cups --disable-obex --disable-hid2hci --disable-mesh \
-#       --disable-udev
-#   make -j"$(nproc)" emulator/btvirt
-#   sudo install -m 755 emulator/btvirt /usr/local/bin/btvirt
+# Re-verify later without installing anything: bash scripts/install-ci.sh --check
 #
 # Prerequisites the cells need beyond the binary (one-time provisioning):
 #   - kernel hci_vhci module, loaded at boot and group-writable:
@@ -198,11 +214,11 @@ fi
 #     capture (PERICULUM_BLE_ROOM_BTMON): the monitor channel needs
 #     CAP_NET_RAW, granted once with
 #       sudo setcap cap_net_raw+ep /usr/bin/btmon
-# Warn-only: only the bench that runs the BLE room needs any of it.
-if ! command -v btvirt >/dev/null 2>&1 && [ ! -x /usr/local/bin/btvirt ]; then
-    echo "[install-ci] Note: optional test dependency 'btvirt' not found"
-    echo "[install-ci] Hint: build from the matching bluez source tree (see comment above"
-    echo "[install-ci]       this check); needed only for the periculum ble_room cells"
+# Warn-only: only the bench that runs the BLE room needs any of it, and none
+# of the four is something this script can do for you.
+if ! bash scripts/install-btvirt.sh; then
+    echo "[install-ci] WARNING: btvirt install failed; the periculum ble_room cells"
+    echo "[install-ci]          will not run here. See the output above."
 fi
 
 # 2. Activate git hooks (developer-machine mode only)
