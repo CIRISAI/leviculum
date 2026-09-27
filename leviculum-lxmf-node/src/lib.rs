@@ -35,6 +35,7 @@
 pub mod identity;
 pub mod processor;
 pub mod protocol;
+pub mod telemetry;
 
 pub use identity::{load_or_create, IdentityError, Provenance, IDENTITY_FILE};
 pub use processor::{
@@ -42,3 +43,4 @@ pub use processor::{
     StampJob,
 };
 pub use protocol::{parse_command, Command, CommandError};
+pub use telemetry::TelemetryLog;

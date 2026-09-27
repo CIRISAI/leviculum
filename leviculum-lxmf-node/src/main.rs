@@ -25,6 +25,11 @@
 //! base was restarted and announced `8f35c8d5…` where its operator had been
 //! given `4c64d723…` (#322).
 //!
+//! The same directory is where a received telemetry reading is filed:
+//! `telemetry.jsonl`, one JSON row per reading
+//! ([`leviculum_lxmf_node::telemetry`]). That, too, is a reason a deployment
+//! must not leave `LXMF_STORAGE` on `/tmp`.
+//!
 //! Stderr carries two kinds of line: this helper's own `[lxmf-node] …`
 //! diagnostics, written by the emitter thread, and the `tracing` output of
 //! `leviculum-core` / `leviculum-std` underneath it, written by the global
@@ -55,6 +60,7 @@ use leviculum_lxmf_node::processor::{
     run_build_worker, BuildJob, Emitter, HelperConfig, Input, LxmfHelperProcessor, Out, Shutdown,
     StampJob,
 };
+use leviculum_lxmf_node::telemetry::TelemetryLog;
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::Config;
 
@@ -294,9 +300,12 @@ async fn run(args: Args) -> Result<(), String> {
     let identity_path = storage_dir.join(IDENTITY_FILE);
     let (identity, provenance) = load_or_create(&identity_path).map_err(|e| e.to_string())?;
 
-    // The writer thread owns both output streams. Everything upstream of it —
-    // including the hooks, which run under the core mutex — only pushes onto
-    // an unbounded queue, so no line of output can ever block the node.
+    // The writer thread owns both output streams and the telemetry log.
+    // Everything upstream of it — including the hooks, which run under the
+    // core mutex — only pushes onto an unbounded queue, so neither a line of
+    // output nor an fsync can ever block the node.
+    let telemetry_log = TelemetryLog::new(&storage_dir);
+    let telemetry_log_path = telemetry_log.path().to_path_buf();
     let (lines_tx, lines_rx) = mpsc::channel::<Out>();
     let writer = thread::spawn(move || {
         let stdout = std::io::stdout();
@@ -310,6 +319,18 @@ async fn run(args: Args) -> Result<(), String> {
                     let _ = handle.flush();
                 }
                 Out::Log(text) => eprintln!("{text}"),
+                Out::Telemetry(row) => {
+                    // A reading that cannot be filed still went out as an
+                    // `EVENT` line, so the failure is named rather than
+                    // fatal: a full or read-only storage directory must not
+                    // take the helper off the mesh.
+                    if let Err(e) = telemetry_log.append(&row) {
+                        eprintln!(
+                            "[lxmf-node] could not append to {}: {e}",
+                            telemetry_log.path().display()
+                        );
+                    }
+                }
             }
         }
     });
@@ -325,6 +346,12 @@ async fn run(args: Args) -> Result<(), String> {
         "[lxmf-node] starting display_name={} storage={} instance={instance}",
         args.display_name,
         storage_dir.display()
+    ));
+    // Named at startup so an operator collecting positions knows where they
+    // land without reading this file.
+    emitter.log(format!(
+        "[lxmf-node] telemetry rows are appended to {}",
+        telemetry_log_path.display()
     ));
     // Which of the two happened is the operator's one chance to notice that a
     // deployment is minting where it should have loaded — the symptom of #322

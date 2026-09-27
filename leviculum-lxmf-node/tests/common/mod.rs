@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use leviculum_lxmf_node::processor::{
     run_build_worker, BuildJob, Emitter, HelperConfig, Input, LxmfHelperProcessor, Out,
 };
+use leviculum_lxmf_node::telemetry::TelemetryLog;
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 
 /// Everything a single helper needs to be driven and observed.
@@ -39,6 +40,10 @@ pub struct Helper {
     pub builds: Option<Receiver<BuildJob>>,
     /// `lxmf_ready`'s hash, once it has arrived.
     pub delivery_hash: Option<String>,
+    /// This helper's `telemetry.jsonl`, under its storage directory. The
+    /// harness plays the role `main.rs`'s writer thread plays in the real
+    /// binary: it owns the file, and [`Helper::drain`] appends to it.
+    pub telemetry: TelemetryLog,
     _storage: tempfile::TempDir,
 }
 
@@ -233,6 +238,7 @@ impl Helper {
             logs: Vec::new(),
             builds,
             delivery_hash: None,
+            telemetry: TelemetryLog::new(storage.path()),
             _storage: storage,
         }
     }
@@ -270,7 +276,22 @@ impl Helper {
                     eprintln!("{line}");
                     self.logs.push(line);
                 }
+                Out::Telemetry(row) => {
+                    // Exactly what the writer thread does in `main.rs`; the
+                    // append itself is the shipped code, so a test reading
+                    // the file back is reading the real sink.
+                    self.telemetry.append(&row).expect("telemetry.jsonl append");
+                }
             }
+        }
+    }
+
+    /// Every row filed to this helper's `telemetry.jsonl` so far.
+    pub fn telemetry_rows(&self) -> Vec<String> {
+        match std::fs::read_to_string(self.telemetry.path()) {
+            Ok(text) => text.lines().map(str::to_string).collect(),
+            // No reading has arrived yet, so the file does not exist.
+            Err(_) => Vec::new(),
         }
     }
 

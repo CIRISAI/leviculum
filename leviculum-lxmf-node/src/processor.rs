@@ -61,6 +61,7 @@ use leviculum_std::FilePropagationStore;
 use lnpnd::engine::{Engine as PnEngine, EngineConfig as PnEngineConfig, EngineEvent as PnEvent};
 
 use crate::protocol::{self, b64_encode, hex_encode, Command};
+use crate::telemetry;
 
 /// How soon the helper asks the driver to come back.
 ///
@@ -96,6 +97,11 @@ pub enum Out {
     /// Human-readable diagnostics for stderr. `periculum/assets/scripts/lxmf_node.py:60-61` puts the
     /// same category there, and the driver tees it to a `.stderr.log`.
     Log(String),
+    /// One JSON row for `<LXMF_STORAGE>/telemetry.jsonl`, appended by
+    /// [`TelemetryLog`](crate::telemetry::TelemetryLog). A durable sink
+    /// rather than a stream: stdout belongs to whoever spawned the helper,
+    /// the file survives a restart and a log rotation.
+    Telemetry(String),
 }
 
 /// Non-blocking, cloneable line emitter.
@@ -137,6 +143,13 @@ impl Emitter {
     /// Emit a stderr diagnostic.
     pub fn log(&self, message: impl Into<String>) {
         let _ = self.lines.send(Out::Log(message.into()));
+    }
+
+    /// Queue one `telemetry.jsonl` row. Same non-blocking queue as every
+    /// other side effect the helper has; the file is opened and appended to
+    /// on the far side, off the core lock.
+    pub fn telemetry(&self, row: String) {
+        let _ = self.lines.send(Out::Telemetry(row));
     }
 }
 
@@ -506,6 +519,18 @@ impl LxmfHelperProcessor {
                         ),
                     ],
                 );
+                // A telemetry message is an LXMF message with an empty body,
+                // so the line above says nothing about it beyond who sent it.
+                // Every reading it carries gets its own line and its own row
+                // (`crate::telemetry`); an ordinary message carries none and
+                // this loop does not run.
+                let received_at = telemetry::unix_now();
+                for report in telemetry::reports(&message) {
+                    self.emitter
+                        .event(report.event_name(), &report.event_fields());
+                    self.emitter
+                        .telemetry(report.json_row(received_at, message.timestamp));
+                }
             }
             RouterEvent::StampPending(request) => {
                 // Off the lock: mining is unbounded work and the generator is
@@ -1349,7 +1374,7 @@ mod tests {
         let ready = std::iter::from_fn(|| lines.try_recv().ok())
             .filter_map(|line| match line {
                 Out::Event(line) => Some(line),
-                Out::Log(_) => None,
+                Out::Log(_) | Out::Telemetry(_) => None,
             })
             .find(|line| line.contains("lxmf_ready"))
             .expect("registering against a real core emits lxmf_ready");
@@ -1394,8 +1419,118 @@ mod tests {
                 Out::Event(line) => {
                     panic!("a commit refusal must not emit an EVENT line: {line}")
                 }
+                Out::Telemetry(row) => {
+                    panic!("a commit refusal must not file a telemetry row: {row}")
+                }
             }
         }
         assert_eq!(logs, 2, "each refusal must leave one diagnostic");
+    }
+
+    /// The received path, end to end for a telemetry message: the router
+    /// event the helper is handed produces the plain `lxmf_msg_received`
+    /// line it always did, one `lxmf_telemetry_received` line beside it, and
+    /// one row in the file the real writer thread appends to.
+    ///
+    /// `RouterEvent::MessageReceived` is the seam on purpose. That the
+    /// router raises it for a message carrying `FIELD_TELEMETRY`, with the
+    /// field intact across the wire encoding, is the router's own subject
+    /// and is asserted in `leviculum-lxmf/tests/telemetry_report.rs`
+    /// (`a_report_survives_the_wire_and_still_decodes_to_the_fixture_values`).
+    /// What is new here — and what a field walk depends on — is everything
+    /// downstream of it, so that is what this drives, on a message that was
+    /// packed and unpacked exactly as one off the air.
+    #[test]
+    fn a_telemetry_message_says_where_the_phone_is_and_is_filed() {
+        use leviculum_lxmf::telemetry::{build_report, Battery, Location, Telemetry};
+        use leviculum_lxmf::Message;
+
+        let reading = Telemetry {
+            time: Some(1_790_000_000),
+            location: Some(Location {
+                latitude_e6: 52_520_008,
+                longitude_e6: 13_404_954,
+                altitude_e2: 3_412,
+                speed_e2: 137,
+                bearing_e2: 9_150,
+                accuracy_e2: 480,
+                last_update: 1_789_999_995,
+            }),
+            battery: Some(Battery {
+                charge_percent: leviculum_lxmf::msgpack::Number::Int(87),
+                charging: Some(false),
+                temperature: None,
+            }),
+            ..Telemetry::default()
+        };
+        let phone = Identity::generate(&mut rand_core::OsRng);
+        let destination = [0x11u8; 16];
+        let report = build_report(destination, [0x22; 16], &phone, 1_790_000_001.5, &reading)
+            .expect("a reading with sensors builds a report");
+        // Through the wire encoding and back: what the helper reports on is
+        // a message it decoded, not the one it composed.
+        let received = Message::unpack(
+            &report.on_air().expect("a signed report packs"),
+            Some(destination),
+            Some(&phone),
+            DeliveryMethod::Opportunistic,
+        )
+        .expect("the report unpacks");
+
+        let (processor, lines_rx) = helper("telemetry-test");
+        processor.report(RouterEvent::MessageReceived(Box::new(received)));
+
+        let storage = tempfile::tempdir().expect("tempdir");
+        let log = crate::telemetry::TelemetryLog::new(storage.path());
+        let mut events = Vec::new();
+        while let Ok(out) = lines_rx.try_recv() {
+            match out {
+                Out::Event(line) => events.push(line),
+                Out::Log(_) => {}
+                // Exactly what `main.rs`'s writer thread does with it.
+                Out::Telemetry(row) => log.append(&row).expect("append"),
+            }
+        }
+
+        assert_eq!(
+            events.len(),
+            2,
+            "the plain line stays, and the reading gets its own: {events:?}"
+        );
+        assert!(
+            events[0].starts_with("EVENT lxmf_msg_received "),
+            "the existing line must come first and be unchanged: {}",
+            events[0]
+        );
+        let line = &events[1];
+        for token in [
+            "EVENT lxmf_telemetry_received",
+            &format!("src={}", hex_encode(&[0x22u8; 16])),
+            "time=1790000000",
+            "lat=52.520008",
+            "lon=13.404954",
+            "alt=34.12",
+            "speed=1.37",
+            "bearing=91.50",
+            "accuracy=4.80",
+            "battery_pct=87",
+            "battery_charging=false",
+            &format!("fields_hex={}", hex_encode(&reading.encode())),
+        ] {
+            assert!(line.contains(token), "no {token} in {line}");
+        }
+
+        let rows = std::fs::read_to_string(log.path()).expect("the row was filed");
+        assert_eq!(rows.lines().count(), 1, "one reading, one row: {rows}");
+        let row = rows.trim_end();
+        for token in [
+            "\"src\":\"22222222222222222222222222222222\"",
+            "\"message_timestamp\":1790000001.5",
+            "\"status\":\"ok\"",
+            "\"lat\":52.520008",
+            "\"battery_pct\":87",
+        ] {
+            assert!(row.contains(token), "no {token} in {row}");
+        }
     }
 }
