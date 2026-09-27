@@ -328,7 +328,7 @@ impl NorFlash for SimNor {
     /// and this is how that is modelled: the words the erase had already
     /// reached read `0xFF`, the word it stopped in reads its old content
     /// with some of its bits lifted and some not
-    /// ([`SimNor::half_erased`]), and the words it never reached still hold
+    /// (`SimNor::half_erased`), and the words it never reached still hold
     /// what they held. The page is then flagged torn, and a program into a
     /// torn page returns [`SimError::TornPage`] until the page has been
     /// erased end to end again — because a cell whose erase pulse was cut

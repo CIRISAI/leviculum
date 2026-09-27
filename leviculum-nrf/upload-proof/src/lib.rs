@@ -8,8 +8,8 @@
 //! link packet and holds a packet receipt whose deadline is
 //! `max(rtt * TRAFFIC_TIMEOUT_FACTOR, floor)` — Python
 //! `reference/Reticulum/RNS/Packet.py:431`, ours
-//! [`leviculum_core::constants::TRAFFIC_TIMEOUT_FACTOR`] over
-//! [`leviculum_core::constants::RAW_RECEIPT_TIMEOUT_FLOOR_MS`]. When that
+//! `leviculum_core::constants::TRAFFIC_TIMEOUT_FACTOR` over
+//! `leviculum_core::constants::RAW_RECEIPT_TIMEOUT_FLOOR_MS`. When that
 //! deadline passes LXMF tears the link down from under the transfer
 //! (`reference/LXMF/LXMF/LXMessage.py:616-620`), so a proof sent afterwards
 //! lands on a closed link and the client retries the same message.
@@ -17,7 +17,7 @@
 //! Until this crate the board sent that proof only after the upload's
 //! propagation stamp had been judged and the record flushed. The judgement is
 //! the 1000-round PN workblock, 3655-3727 ms on an nRF52840
-//! ([`leviculum_settle_budget::WORKBLOCK_US_NRF52840`]). Over BLE the measured
+//! (`leviculum_settle_budget::WORKBLOCK_US_NRF52840`). Over BLE the measured
 //! round trip is 295-484 ms, so the window is 1770-2904 ms — always shorter
 //! than the walk, and no upload from a host has ever concluded. Over LoRa the
 //! same code looks healthy only because seconds of round trip buy a window
@@ -80,12 +80,12 @@ pub type PacketHash = [u8; 32];
 /// Python `RNS.Link.TRAFFIC_TIMEOUT_FACTOR`
 /// (`reference/Reticulum/RNS/Packet.py:431`), restated so this crate stays
 /// dependency-free for the firmware. `tests/window.rs` asserts it against
-/// [`leviculum_core::constants::TRAFFIC_TIMEOUT_FACTOR`], which is the copy
+/// `leviculum_core::constants::TRAFFIC_TIMEOUT_FACTOR`, which is the copy
 /// the uploader actually computes with.
 pub const TRAFFIC_TIMEOUT_FACTOR: u64 = 6;
 
 /// The enforced floor under a raw link receipt, milliseconds — our
-/// [`leviculum_core::constants::RAW_RECEIPT_TIMEOUT_FLOOR_MS`]. Python's
+/// `leviculum_core::constants::RAW_RECEIPT_TIMEOUT_FLOOR_MS`. Python's
 /// literal floor is 5 ms, but it checks receipts once a second
 /// (`Transport.receipts_check_interval`), so a second is the honest floor on
 /// either stack. Asserted against the constant in `tests/window.rs`.

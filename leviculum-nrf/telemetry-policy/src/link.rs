@@ -32,12 +32,12 @@
 //!
 //! A board that has heard nothing recently reports **no physical-link
 //! sensor at all**, rather than the last thing it heard an hour ago.
-//! [`FRESH_MS`] is that line, and [`reading`] is where it is drawn.
+//! `FRESH_MS` is that line, and `reading` is where it is drawn.
 //!
 //! # Quality
 //!
 //! `q` is emitted because there is a definition to emit, not because the
-//! field exists: [`quality_percent`] is Reticulum's own SNR-to-quality
+//! field exists: `quality_percent` is Reticulum's own SNR-to-quality
 //! map (`RNodeInterface.py:882-890`), the number `rnstatus` prints for
 //! an RNode. Inventing a second scale under the same name would make our
 //! `q` and a Python peer's `q` two different quantities with one label.
@@ -47,7 +47,7 @@ use crate::PolicyParams;
 /// One reception, as the radio's packet status measured it.
 ///
 /// The spreading factor travels with the frame rather than being read at
-/// report time: [`quality_percent`] is a function of the PHY as well as
+/// report time: `quality_percent` is a function of the PHY as well as
 /// the snr, and a board reconfigured between the reception and the report
 /// would otherwise restate an old frame's quality on the new PHY's scale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +68,7 @@ pub struct Reception {
 pub struct Reading {
     pub rssi_dbm: i16,
     pub snr_db: i16,
-    /// Link quality, 0-100, per [`quality_percent`].
+    /// Link quality, 0-100, per `quality_percent`.
     pub quality_percent: Option<u8>,
 }
 

@@ -1021,7 +1021,7 @@ where
 /// before the clear, and it is what the deferral decision is taken from and
 /// what the teardown line carries. No read is taken here, on either path.
 ///
-/// The one read this does take is [`wait_out`]'s second-stage one, and it asks
+/// The one read this does take is `wait_out`'s second-stage one, and it asks
 /// a different question: *has a header decoded since the clear?* A header that
 /// had already decoded before the clear is in `latch` already, which makes the
 /// reason `Header` and skips that stage entirely — so the post-clear read is

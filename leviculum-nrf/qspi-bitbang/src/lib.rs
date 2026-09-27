@@ -63,8 +63,8 @@
 //! (three for `90h`, none for the rest), then the clocks of reading. The
 //! part launches the first answer bit on the falling edge that ends the
 //! last byte the master sent, so the first *sample* is the rising edge
-//! after it, and [`transfer`] gets that ordering by construction:
-//! [`write_bit`] ends on a falling edge, [`read_bit`] starts on a rising
+//! after it, and `transfer` gets that ordering by construction:
+//! `write_bit` ends on a falling edge, `read_bit` starts on a rising
 //! one.
 //!
 //! IO2 and IO3 are the part's WP# and HOLD#; they must be held high for
@@ -81,7 +81,7 @@
 //! program, no status-register write — and no `06h` WREN either, so
 //! nothing here can even arm a part for a write.
 //!
-//! That is enforced by shape and not by intent: [`transfer`], the only
+//! That is enforced by shape and not by intent: `transfer`, the only
 //! function that puts an opcode on the wire, is private, and every public
 //! function in this file hands it a constant. A caller cannot choose an
 //! opcode, so there is no path from outside this crate to one that

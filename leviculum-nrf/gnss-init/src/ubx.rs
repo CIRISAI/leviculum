@@ -267,7 +267,7 @@ impl Step {
 
     /// The frame this step transmits. `&'static` — the bytes live in
     /// flash; a driver with DMA constraints (nRF EasyDMA reads RAM
-    /// only) must stage them into a RAM buffer of [`MAX_FRAME`] bytes.
+    /// only) must stage them into a RAM buffer of `MAX_FRAME` bytes.
     pub fn frame(self) -> &'static [u8] {
         match self {
             Step::FactoryClear => &FACTORY_CLEAR_FRAME,

@@ -1,6 +1,6 @@
 //! The board's propagation-node store adapters (Codeberg #384, part 3).
 //!
-//! Two adapters over one region of [`leviculum-record-log`]-formatted
+//! Two adapters over one region of `leviculum-record-log`-formatted
 //! flash: [`PnStore`] implements
 //! [`leviculum_lxmf::PropagationStore`] for message records, and
 //! [`PnPeerStore`] implements [`leviculum_lxmf::peering::PeerStore`] for

@@ -22,7 +22,7 @@
 //!   to be findable. Gated by [`PeriodicAnnounce`], whose interval is no
 //!   longer a constant: #401 made it follow the board's own observation
 //!   of whether it moves. That rule, both its halves and the duty budget
-//!   that bounds them, lives in [`cadence`].
+//!   that bounds them, lives in `cadence`.
 //!
 //! Both gates share the clock rule: **without a plausible wall clock,
 //! nothing is announced.** The emission timestamp inside an announce is
