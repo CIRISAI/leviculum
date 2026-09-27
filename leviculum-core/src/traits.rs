@@ -733,6 +733,15 @@ pub trait Storage {
     /// Return all known destination hashes (callers build BTreeSet locally if needed).
     fn local_client_known_dest_hashes(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]>;
 
+    /// True when `dest_hash` was announced by a local client within the
+    /// tracking window (`LOCAL_CLIENT_DEST_EXPIRY_MS`). Implementations with
+    /// an indexed map should override the default linear probe.
+    fn has_local_client_known_dest(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        self.local_client_known_dest_hashes()
+            .iter()
+            .any(|h| h == dest_hash)
+    }
+
     /// Remove entries older than `expiry_ms`. Returns count removed.
     fn expire_local_client_known_dests(&mut self, now_ms: u64, expiry_ms: u64) -> usize;
 

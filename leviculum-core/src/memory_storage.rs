@@ -1503,6 +1503,10 @@ impl Storage for MemoryStorage {
         self.local_client_known_dests.keys().copied().collect()
     }
 
+    fn has_local_client_known_dest(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        self.local_client_known_dests.contains_key(dest_hash)
+    }
+
     fn expire_local_client_known_dests(&mut self, now_ms: u64, expiry_ms: u64) -> usize {
         let before = self.local_client_known_dests.len();
         self.local_client_known_dests

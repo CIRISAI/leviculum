@@ -1071,6 +1071,9 @@ impl leviculum_core::traits::Storage for Storage {
     fn local_client_known_dest_hashes(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
         self.inner.local_client_known_dest_hashes()
     }
+    fn has_local_client_known_dest(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        leviculum_core::traits::Storage::has_local_client_known_dest(&self.inner, dest_hash)
+    }
     fn expire_local_client_known_dests(&mut self, now_ms: u64, expiry_ms: u64) -> usize {
         self.inner
             .expire_local_client_known_dests(now_ms, expiry_ms)

@@ -447,7 +447,11 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "group_decrypt_fail",
             "unknown_context",
             "no_such_interface",
+            "next_hop_is_requestor",
             "total",
+            // Not a drop reason and outside `total` (#374): link requests
+            // for a local client's destination redirected to the clients.
+            "lr_local_client_redirect",
         ],
     },
     // RNode CMD_READY flow control under the firmware duty lock.
@@ -738,6 +742,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "LINK_ENTRY_SET",
         required_keys: &["dst", "remaining_hops", "packet_hops", "recv", "next_hop"],
+    },
+    // A link request for a local client's destination handed to the
+    // connected clients instead of the mesh (#374): the daemon's path table
+    // held nothing, `local_client_known_dests` still named the destination.
+    // `iface_in` and `client` are interface names.
+    EventSchema {
+        name: "LR_LOCAL_REDIRECT",
+        required_keys: &["dst", "iface_in", "client"],
     },
     // Remaining `leviculum-core` transport events.
     EventSchema {

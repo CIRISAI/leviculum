@@ -1503,6 +1503,13 @@ pub struct TransportStats {
     pub(crate) drops_group_decrypt_fail: u64,
     pub(crate) drops_unknown_context: u64,
     pub(crate) drops_no_such_interface: u64,
+    pub(crate) drops_next_hop_is_requestor: u64,
+    // NOT a drop counter and deliberately outside `packets_dropped`: link
+    // requests for a local client's destination that arrived while the path
+    // table held nothing for it, and were handed to the connected clients
+    // instead of the mesh (#374). Non-zero says a client came back without
+    // announcing and the daemon covered for it.
+    pub(crate) lr_local_client_redirect: u64,
 }
 
 /// Classified reason for a dropped packet (OBS-2b).
@@ -1640,6 +1647,17 @@ pub enum DropReason {
     /// and the two must not share a counter or a rising `no-path` on a board
     /// would be read as a mesh problem.
     NoSuchInterface,
+    /// A path request refused because our next hop toward the destination IS
+    /// the requesting transport instance: answering would advertise a route
+    /// that leads straight back through the asker (Python
+    /// Transport.py:2958-2965 refuses the same way, with the same TODO about
+    /// a missing invalidation signal). The request dies here — nothing else
+    /// answers it on this node — and until #374 it died with a debug line
+    /// only, which is how a daemon refusing to answer for its OWN returned
+    /// client's destination stayed off every counter (periculum 370: three
+    /// refusals, all silent). A rising count names a routing loop between
+    /// two neighbours: each believes the destination is behind the other.
+    NextHopIsRequestor,
 }
 
 /// Dedicated tracing target for the per-packet journey contract
@@ -1705,11 +1723,12 @@ impl DropReason {
             DropReason::GroupDecryptFail => "group-decrypt-fail",
             DropReason::UnknownContext => "unknown-context",
             DropReason::NoSuchInterface => "no-such-interface",
+            DropReason::NextHopIsRequestor => "next-hop-is-requestor",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 20] = [
+    pub const ALL: [DropReason; 21] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -1730,6 +1749,7 @@ impl DropReason {
         DropReason::GroupDecryptFail,
         DropReason::UnknownContext,
         DropReason::NoSuchInterface,
+        DropReason::NextHopIsRequestor,
     ];
 }
 
@@ -1887,6 +1907,21 @@ impl TransportStats {
         self.drops_no_such_interface
     }
 
+    /// Path requests refused because the next hop toward the destination is
+    /// the requesting transport instance itself — a neighbour pair each
+    /// believing the destination is behind the other (#374).
+    pub fn drops_next_hop_is_requestor(&self) -> u64 {
+        self.drops_next_hop_is_requestor
+    }
+
+    /// Link requests for a local client's destination that arrived with an
+    /// empty path table and were handed to the connected clients instead of
+    /// dying as overheard/no-path (#374). Not a drop; not part of
+    /// [`Self::packets_dropped`].
+    pub fn lr_local_client_redirects(&self) -> u64 {
+        self.lr_local_client_redirect
+    }
+
     /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
     /// by construction (see `record_drop`).
     pub fn drops_reason_sum(&self) -> u64 {
@@ -1910,6 +1945,7 @@ impl TransportStats {
             + self.drops_group_decrypt_fail
             + self.drops_unknown_context
             + self.drops_no_such_interface
+            + self.drops_next_hop_is_requestor
     }
 
     /// Single choke point for every packet drop (OBS-2b).
@@ -1941,6 +1977,7 @@ impl TransportStats {
             DropReason::GroupDecryptFail => self.drops_group_decrypt_fail += 1,
             DropReason::UnknownContext => self.drops_unknown_context += 1,
             DropReason::NoSuchInterface => self.drops_no_such_interface += 1,
+            DropReason::NextHopIsRequestor => self.drops_next_hop_is_requestor += 1,
         }
         debug_assert_eq!(
             self.packets_dropped,
@@ -4180,7 +4217,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 group_decrypt_fail = self.stats.drops_group_decrypt_fail,
                 unknown_context = self.stats.drops_unknown_context,
                 no_such_interface = self.stats.drops_no_such_interface,
+                next_hop_is_requestor = self.stats.drops_next_hop_is_requestor,
                 total = self.stats.packets_dropped,
+                // Outside `total` on purpose: a redirect is a delivery, not
+                // a drop (#374); it rides this line because the operators
+                // grepping the anomaly grep here.
+                lr_local_client_redirect = self.stats.lr_local_client_redirect,
             );
         }
     }
@@ -4959,7 +5001,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3500. A destination with no cached
+    /// link-request path uses at transport.rs:3537. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -5938,6 +5980,40 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 }
             }
         } else {
+            // #374: an announce from the network for a destination a LOCAL
+            // CLIENT registered, carrying no news. When the client's IPC
+            // connection drops, its path entry is culled and the random-blob
+            // replay memory dies with it — the next copy of our OWN
+            // rebroadcast, echoed back off the air by a neighbour (or served
+            // by one as a path response from its cache), then re-enters as
+            // `new_destination` and installs a multi-hop radio route for a
+            // destination that lives behind this daemon. Link requests for
+            // the client are routed to the mesh from then on (periculum 370:
+            // 0 of 100 messages, charlie relearned its own helper at hops=2).
+            // The replay memory survives in the announce cache, which
+            // `clean_path_states` preserves for exactly these destinations:
+            // an emission not newer than the one we last cached from the
+            // client is necessarily stale news about ourselves. A client
+            // that genuinely moved announces a NEWER emission and installs
+            // its remote path unhindered. Python has the same hole (its
+            // random_blobs die with the culled entry too,
+            // Transport.py:784-787 + :1830-1832); refusing our own stale
+            // emission is wire-invisible and recovers delivery (deviation
+            // rule, P1).
+            let stale_own_echo = !from_local
+                && self.storage.has_local_client_known_dest(&dest_hash)
+                && self
+                    .cached_announce_emission(&dest_hash)
+                    .is_some_and(|cached| cached >= emission_from_random_hash(&random_hash));
+            if stale_own_echo {
+                crate::tracing::debug!(
+                    dest = %HexShort(&dest_hash),
+                    iface = %self.iface_name(interface_index),
+                    "Dropped announce for a local client's destination, not newer than our own cached emission (replay)"
+                );
+                self.stats.record_drop(DropReason::AnnounceReplay);
+                return Ok(());
+            }
             Some("new_destination")
         };
         let should_update = accept_reason.is_some();
@@ -6451,7 +6527,33 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // accounted the same way: a counter, no per-packet tracing event, and
         // the `PacketDropped` a board renders as a rate-limited `[DROP]`.
         let designated_hop = packet.transport_id == Some(*self.identity.hash());
-        if !(designated_hop || from_local || for_local) {
+
+        // #374: a link request for a destination a LOCAL CLIENT registered,
+        // arriving while the path table holds nothing for it. The healthy
+        // route is the `for_local` arm (a hops=0 path at the client's
+        // interface), but that entry dies with the client's IPC connection,
+        // and a reconnected client that has not announced yet leaves the
+        // table empty — the request then dies as `overheard-transport-id`
+        // (its Type1 final-hop form carries no transport id) or `no-path`,
+        // 14 of 15 relayed requests in periculum 370. The daemon still
+        // KNOWS the destination is one of its clients'
+        // (`local_client_known_dests` deliberately survives the disconnect)
+        // and the IPC hop is free, so hand the request to the connected
+        // clients: the owner answers, the others ignore it. Scoped to an
+        // EMPTY table on purpose — a live remote path means a genuinely
+        // newer announce placed the destination elsewhere (the client
+        // moved), and that must keep winning. Python delivers nothing here
+        // (`for_local_client` is path-table-gated, Transport.py:1513, and a
+        // Type1 request without a table entry falls through
+        // Transport.inbound unhandled).
+        let returned_client_delivery = !from_local
+            && !for_local
+            && !designated_hop
+            && self.has_local_clients()
+            && self.storage.get_path(&dest_hash).is_none()
+            && self.storage.has_local_client_known_dest(&dest_hash);
+
+        if !(designated_hop || from_local || for_local || returned_client_delivery) {
             crate::tracing::trace!(
                 "Ignoring overheard link request for <{}> on {}, not the designated hop",
                 HexShort(&dest_hash),
@@ -6467,10 +6569,30 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             return Ok(());
         }
 
-        if self.config.enable_transport || from_local || for_local {
+        if self.config.enable_transport || from_local || for_local || returned_client_delivery {
             // Read path data into locals (releases immutable borrow)
             let (target_iface, path_hops, needs_relay, next_hop, via_peer) =
-                if let Some(path) = self.storage.get_path(&dest_hash) {
+                if returned_client_delivery {
+                    self.stats.lr_local_client_redirect += 1;
+                    // The entry anchor: core interface indices grow
+                    // monotonically (`register_interface`), so the highest
+                    // local-client index is the most recent connection — in
+                    // the reconnect scenario, the returned client. A proof
+                    // from a DIFFERENT client interface is still accepted:
+                    // the proof direction check treats the local-client set
+                    // as one domain (see `handle_proof`).
+                    let client_iface = match self.local_client_interfaces.iter().next_back() {
+                        Some(&iface) => iface,
+                        None => return Ok(()), // has_local_clients() guarded above
+                    };
+                    crate::tracing::debug!(
+                        event = "LR_LOCAL_REDIRECT",
+                        dst = %HexShort(&dest_hash),
+                        iface_in = %self.iface_name(interface_index),
+                        client = %self.iface_name(client_iface),
+                    );
+                    (client_iface, 0u8, false, None, None)
+                } else if let Some(path) = self.storage.get_path(&dest_hash) {
                     (
                         path.interface_index,
                         path.hops,
@@ -6634,6 +6756,23 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.iface_name(target_iface),
                 path_hops
             );
+            if returned_client_delivery {
+                // Every connected client gets the request — only the owner
+                // can answer it, and which client owns the destination is
+                // unknowable until it speaks (#374).
+                let clients: Vec<usize> = self.local_client_interfaces.iter().copied().collect();
+                let mut result = Ok(());
+                for client_iface in clients {
+                    result = self.forward_on_interface_from(
+                        client_iface,
+                        Some(interface_index),
+                        &mut forwarded,
+                        ph8(&truncated_hash),
+                        None,
+                    );
+                }
+                return result;
+            }
             return self.forward_on_interface_from(
                 target_iface,
                 Some(interface_index),
@@ -6846,7 +6985,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         return Ok(());
                     }
                     link_entry.next_hop_interface_index
-                } else if interface_index == link_entry.next_hop_interface_index {
+                } else if interface_index == link_entry.next_hop_interface_index
+                    || (self.is_local_client(interface_index)
+                        && self.is_local_client(link_entry.next_hop_interface_index))
+                {
+                    // The local-client OR-arm (#374): an entry anchored at
+                    // one client interface must accept the proof from
+                    // another — a redirected link request goes to every
+                    // connected client because the owner is unknowable until
+                    // it proves, and each IPC connection is its own
+                    // interface index. Within the local-client set the
+                    // interface identity carries no route information, only
+                    // the direction does, and a proof from ANY client is the
+                    // destination-side leg.
                     // From destination side. The proof travelled destination ->
                     // this relay -> initiator; the operand that direction expects
                     // is `remaining_hops`. This maps to:
@@ -7178,9 +7329,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
                 // Mark link as validated on first proof
                 if !link_entry.validated {
+                    let now = self.clock.now_ms();
+                    let reanchor = interface_index != link_entry.next_hop_interface_index
+                        && self.is_local_client(interface_index)
+                        && self.is_local_client(link_entry.next_hop_interface_index);
                     if let Some(entry) = self.storage.get_link_entry_mut(&dest_hash) {
                         entry.validated = true;
-                        entry.timestamp_ms = self.clock.now_ms();
+                        entry.timestamp_ms = now;
+                        // #374: a redirected link request anchored the entry
+                        // at ONE client interface while every client got a
+                        // copy; the proof names the owner, and link traffic
+                        // from here on must go to the interface it proved
+                        // from, not the guessed anchor.
+                        if reanchor {
+                            entry.next_hop_interface_index = interface_index;
+                        }
                     }
                 }
 
@@ -8910,6 +9073,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.storage.local_client_known_dest_hashes()
     }
 
+    /// Emission timestamp of the announce we hold in the cache for
+    /// `dest_hash`, read from its random hash — the replay memory that
+    /// survives a culled path entry (#374). `None` when nothing is cached or
+    /// the cached bytes do not parse as an announce.
+    fn cached_announce_emission(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<u64> {
+        let raw = self.storage.get_announce_cache(dest_hash)?;
+        let packet = Packet::unpack(raw).ok()?;
+        let announce = ReceivedAnnounce::from_packet(&packet).ok()?;
+        Some(emission_from_random_hash(announce.random_hash()))
+    }
+
     /// Get the ratchet public key for a destination, if known (owned copy).
     pub(crate) fn get_ratchet(&self, dest_hash: &DestinationHash) -> Option<[u8; RATCHET_SIZE]> {
         self.storage.get_known_ratchet(dest_hash.as_bytes())
@@ -10190,6 +10364,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 HexShort(&requested_hash),
                 self.iface_name(interface_index)
             );
+            // The request ends here — no other arm of this handler answers
+            // it — so it is a counted drop (#374: three of these refusals
+            // were the only trace of a daemon refusing to answer for its own
+            // returned client's destination).
+            Self::push_packet_drop(
+                &mut self.events,
+                &packet,
+                interface_index,
+                DropReason::NextHopIsRequestor,
+            );
+            self.stats.record_drop(DropReason::NextHopIsRequestor);
             return Ok(());
         }
 
@@ -10298,7 +10483,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2183`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2220`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -14742,6 +14927,7 @@ mod tests {
                 assert_eq!(s.drops_link_repeat_echo, 1);
                 assert_eq!(s.drops_forward_max_hops, 1);
                 assert_eq!(s.drops_blackholed_announce, 1);
+                assert_eq!(s.drops_next_hop_is_requestor, 1);
             }
 
             // OBS-2b: the invariant also holds end-to-end across genuinely
@@ -15852,7 +16038,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6386), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6462), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
