@@ -426,6 +426,36 @@ fuzz-regress:
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
+# The same gate over the crates this branch touched, cheap enough to run by
+# hand (Codeberg #359). `doc-gate` is the only recipe on the push path that
+# runs rustdoc and it costs ~21 s over the workspace, so it is excused from
+# `guards` -- and a coder pass therefore has no gate that reads a doc comment
+# at all. Pass 344 wrote two links to private items into
+# leviculum-lxmf-node/src/telemetry.rs, ran fmt, clippy, `cargo test` and
+# `just guards` green, and the red arrived a day later on the land gate with
+# sixty-three commits queued behind it.
+#
+# MEASURED, 2026-09-27, standalone after `touch <crate>/src/lib.rs`:
+# leviculum-core 1.9 s, leviculum-lxmf-node 2.2 s, leviculum-lxmf 2.8 s,
+# leviculum-std 7.6 s -- so a pass that touched one or two crates pays
+# seconds. This recipe docs the union over `origin/master...HEAD` plus the
+# working tree, which on a lane with sixty-nine unpushed commits is six
+# crates: 0.3 s with nothing dirty, 9.9/11.5/11.8 s in three runs after
+# `touch leviculum-core/src/lib.rs`. Over the ten, and it checks host
+# workspace crates besides, so it is out of `guards` on both clauses and
+# CLAUDE.md's per-batch line names it by hand instead.
+#
+# Inside `fast` its coverage is a subset of `doc-gate`'s; it sits here to
+# fail the tier at the cheap end first, and so that the recipe a coder pass
+# is told to run is one the push path exercises rather than a script only
+# people run. It costs `fast` +12 s in the touch-core case (12.3 s, and
+# `doc-gate` behind it still paid 24.9 s against 26.1 s alone: the two
+# select different packages, so cargo unifies features differently and
+# neither warms the other) and nothing measurable otherwise.
+[doc('Rustdoc over the crates this branch touched (the cheap half of doc-gate)')]
+doc-touched:
+    @python3 scripts/doc-touched.py
+
 # Codeberg #287: the changelog's version headings and its link definitions are
 # two lists of the same versions, and Markdown only renders a heading as a link
 # while both hold it. Nothing about writing `## [0.9.0]` produces the matching
@@ -1190,6 +1220,9 @@ tree-clean-selftest:
 # not-in-guards: fuzz-regress -- 110 s (#316)
 # not-in-guards: notices-guard -- ~20 s over both lockfiles via cargo-about
 # not-in-guards: doc-gate -- cargo doc over the whole workspace
+# not-in-guards: doc-touched -- 9.9-11.8 s standing alone after `touch
+#   leviculum-core/src/lib.rs` with this lane's six touched crates
+#   (measured 2026-09-27), and it checks host workspace crates
 # not-in-guards: core-no-tracing -- a cargo test target (clause c)
 # not-in-guards: i686-usize-gate -- 66 s (#316), the core suite on a second triple
 # not-in-guards: no-atomic64-gate -- a cargo check on a third triple, which it
@@ -1231,7 +1264,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
+fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
