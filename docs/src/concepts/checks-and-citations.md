@@ -600,13 +600,16 @@ everything alone.
 ### 7a. The fixer runs once, and it runs last
 
 Once per pass, after the last edit to any file it cites into, and
-immediately before the gates. The mode cannot notice that it is
-repairing its own earlier output, and what it does when handed that
-output is not to give up: it applies the same displacement a second
-time and prints `repaired by the line map`.
+immediately before the gates. The mode could not notice that it was
+repairing its own earlier output, and what it did when handed that
+output was not to give up: it applied the same displacement a second
+time and printed `repaired by the line map`. It refuses that case now,
+by the premise test at the end of this section — but the rule stays,
+because a refusal still leaves the citation red and a reader has to
+unpick it.
 
 Step 4 above, read from the other side, is the mechanism. The proof is
-`Placed::Proved` (`leviculum-std/tests/doc_citations.rs:3099`) — the
+`Placed::Proved` (`leviculum-std/tests/doc_citations.rs:3135`) — the
 mapped line's text *now* against the text the *cited number* held in
 the base. The premise of the whole map is therefore that every number
 in the corpus is one the base was right about, and a citation an
@@ -687,23 +690,37 @@ three logs with that rule, the enclosing-block fallback aside: 0 of the
 83 doc repairs the single clean run made would have been refused, and 2
 of 2 in each double run.
 
-It would print a refusal in place of `repaired by the line map`, not a
+So it prints a refusal in place of `repaired by the line map`, not a
 hint: *left red — line 1474 does not resolve `rank` at 2242a470
 either, so this citation was never right about the base and the line
 map cannot carry it. If an earlier fix run rewrote it, revert the
 rewrites and run once.*
 
-One order, not ten, and not a one-liner. The proximity test lives
-inline in the checker, closed over the current file's lines —
-`resolved` (`leviculum-std/tests/doc_citations.rs:955`) — so it has
-to come out as a function over a `&[String]` before `place_citation`
-can call it with the base's copy: extraction, one call, one message,
-one fixture beside the three already in the guard's tests. What the
-order costs is a real refusal. A citation already stale *at* the base
-— the twenty `Justfile` numbers 339 found — would stop being
-repaired by the map pass. Correctly so: a map against that base says
-nothing about drift older than it, and the bare pass is what repaired
-those.
+Built 2026-09-27. The proximity test had lived inline in the checker,
+closed over the current file's lines; it is now `ident_resolves`
+(`leviculum-std/tests/doc_citations.rs:665`), a function over the lines
+it is handed, and `place_citation` asks it a second time against the
+base copy of the file (`leviculum-std/tests/doc_citations.rs:3347`). A
+map repair is emitted only where both halves hold: the map proves the
+move, *and* the base resolved the citation's own identifier at the
+citation's own number. The refusal above is the other branch.
+
+What it costs is a real refusal, paid knowingly. A citation already
+stale *at* the base — the twenty `Justfile` numbers 339 found — is no
+longer repaired by the map pass. Correctly so: a map against that base
+says nothing about drift older than it. The bare pass still repairs
+those where it can, from the tree's own history, which is what repaired
+them in 339.
+
+The fixture is the fourth verdict of
+`a_repair_follows_the_line_map_and_not_the_nearest_name`, beside the
+three the guard already had: a citation written nineteen lines above
+the `twice_shifted` it names, displaced by the same insertion as the
+others. Its move is *proved* by the line map — asserted directly, so
+that a case 4 which passed because the map had broken for some
+unrelated reason would fail — and it is refused all the same, with the
+message above. The clean single-run repair in the same tree is the
+control, and is still made.
 
 ### 8. A green guard has to say how much of the corpus it read
 

@@ -602,16 +602,72 @@ fn span_distance(line: usize, span: (usize, usize)) -> usize {
 /// difference between "the citation is somewhere in the named item" and
 /// "the citation is somewhere in the file", which is what the existence
 /// check already was.
-fn encloses(lines: &[&str], hit: usize, span_start: usize) -> bool {
+///
+/// Generic over the line type for the reason [`ident_hits`] gives: the
+/// checker holds the working copy as `&[&str]` and the fixer holds the base
+/// copy as `&[String]`, and both ask this same question.
+fn encloses<S: AsRef<str>>(lines: &[S], hit: usize, span_start: usize) -> bool {
     if hit >= span_start || hit == 0 || span_start > lines.len() {
         return false;
     }
-    let indent = |l: &&str| l.len() - l.trim_start().len();
-    let base = indent(&lines[hit - 1]);
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let base = indent(lines[hit - 1].as_ref());
     lines[hit..span_start]
         .iter()
+        .map(S::as_ref)
         .filter(|l| !l.trim().is_empty())
         .all(|l| indent(l) > base)
+}
+
+/// The segment of a cited identifier that a source line carries.
+///
+/// `Type::method` / `module.attr` cite the item; the line holds the last
+/// segment.
+fn ident_needle(ident: &str) -> &str {
+    ident.rsplit([':', '.']).next().unwrap_or(ident)
+}
+
+/// Whether a path is a Justfile, whose definitions are not substrings: see
+/// [`defines_recipe`].
+fn is_justfile(path: &str) -> bool {
+    Path::new(path).file_name().is_some_and(|f| f == "Justfile")
+}
+
+/// Every line of `lines` that can be where `needle` is defined, 1-based.
+///
+/// Taken out of [`check`], where it was closed over the working copy's
+/// lines, so that the fixer can ask the same question of the BASE copy of a
+/// file — which is `&[String]` from `cat-file`, not the `&[&str]` the
+/// checker borrows out of one `read_to_string`. Hence `AsRef<str>`: one
+/// rule, two callers, no conversion at either call site.
+fn ident_hits<S: AsRef<str>>(lines: &[S], needle: &str, is_justfile: bool) -> Vec<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            if is_justfile {
+                defines_recipe(l.as_ref(), needle)
+            } else {
+                l.as_ref().contains(needle)
+            }
+        })
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+/// Whether any of `hits` answers for `spans`: within [`WINDOW`] lines of one
+/// of them, or enclosing it.
+///
+/// This is the drift rule itself. [`check`] asks it of the file as it stands;
+/// [`place_citation`] asks it of the file as the base held it, which is how a
+/// citation that was never right about the base is told apart from one the
+/// base was right about.
+fn ident_resolves<S: AsRef<str>>(lines: &[S], hits: &[usize], spans: &[(usize, usize)]) -> bool {
+    hits.iter().any(|&h| {
+        spans
+            .iter()
+            .any(|&span| span_distance(h, span) <= WINDOW || encloses(lines, h, span.0))
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -934,32 +990,12 @@ fn check<'a>(root: &Path, citations: &'a [Citation]) -> (Counts, Vec<Failure>, V
                 passed = true;
                 break;
             };
-            // `Type::method` / `module.attr` cite the item; the source
-            // line contains the last segment.
-            let needle = ident.rsplit(&[':', '.'][..]).next().unwrap();
-            // A Justfile has one kind of definition and it is not a
-            // substring: see [`defines_recipe`].
-            let is_justfile = Path::new(cand).file_name().is_some_and(|f| f == "Justfile");
-            let hits: Vec<usize> = lines
-                .iter()
-                .enumerate()
-                .filter(|(_, l)| {
-                    if is_justfile {
-                        defines_recipe(l, needle)
-                    } else {
-                        l.contains(needle)
-                    }
-                })
-                .map(|(i, _)| i + 1)
-                .collect();
-            let resolved = hits.iter().any(|&h| {
-                c.spans
-                    .iter()
-                    .any(|&span| span_distance(h, span) <= WINDOW || encloses(&lines, h, span.0))
-            });
-            if resolved {
-                // `resolved` implies at least one hit, and every citation
-                // carries at least one span.
+            let needle = ident_needle(ident);
+            let is_justfile = is_justfile(cand);
+            let hits = ident_hits(&lines, needle, is_justfile);
+            if ident_resolves(&lines, &hits, &c.spans) {
+                // A true [`ident_resolves`] implies at least one hit, and
+                // every citation carries at least one span.
                 let (nearest, dist) = hits
                     .iter()
                     .map(|&h| {
@@ -3296,6 +3332,28 @@ fn place_citation(
              is not the state it was right about (or this is not the file that moved)"
         ));
     }
+    // The map carries the author's offset forward, which it can only do if
+    // the offset was right about the base. A citation an earlier fix run
+    // already moved is not: its number names a line in the post-edit tree,
+    // and a pure insertion leaves whatever unrelated line held that number in
+    // the base exactly as far below, so [`place_by_diff`] proves the move a
+    // second time and the citation walks another displacement away from its
+    // subject (concepts/checks-and-citations.md section 7a). The premise is
+    // what is testable, not the result: ask the checker's own rule of the
+    // base copy.
+    if let Some(ident) = &c.ident {
+        let needle = ident_needle(ident);
+        let hits = ident_hits(base_lines, needle, is_justfile(&cand.path));
+        if !ident_resolves(base_lines, &hits, &c.spans) {
+            return Err(format!(
+                "left red -- line {} does not resolve `{needle}` at {base} either, so \
+                 this citation was never right about the base and the line map cannot \
+                 carry it. If an earlier fix run rewrote it, revert the rewrites and \
+                 run once.",
+                c.spans[0].0
+            ));
+        }
+    }
     if fixed.iter().any(|&(a, b)| a > b) {
         return Err("following the line map would invert the range".to_string());
     }
@@ -3563,9 +3621,12 @@ fn bare_citations_still_point_at_the_text_they_cited() {
 /// points three lines ABOVE the item it names, and an insertion above it that
 /// moves both. Following the guard's report would put the citation on its
 /// identifier and the author's three-line offset would be gone, silently,
-/// because the result is green. All three verdicts of the mode are asserted
-/// on one tree, since two of them are "leave it alone", and a fixer that has
-/// stopped repairing anything at all leaves everything alone.
+/// because the result is green. All four verdicts of the mode are asserted
+/// on one tree, since three of them are "leave it alone", and a fixer that
+/// has stopped repairing anything at all leaves everything alone. The fourth
+/// is the double-run shape of section 7a: a citation whose number the base
+/// was never right about, which the map would displace once more on every
+/// run.
 #[test]
 fn a_repair_follows_the_line_map_and_not_the_nearest_name() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -3597,12 +3658,14 @@ fn a_repair_follows_the_line_map_and_not_the_nearest_name() {
     let docs = root.join("docs/src/concepts");
     fs::create_dir_all(&docs).unwrap();
 
-    // Two subjects, each cited three lines above itself.
+    // Two subjects, each cited three lines above itself, and a third that is
+    // cited nineteen lines above itself -- which no base ever made right.
     let mut body: Vec<String> = (1..=30).map(|n| format!("// filler {n}")).collect();
     body[9] = "// the frame the budget prices".into();
     body[12] = "pub fn priced_frame() {}".into();
     body[19] = "// the band the sender never waits in".into();
     body[22] = "pub fn replaced_band() {}".into();
+    body[27] = "pub fn twice_shifted() {}".into();
     let code = src.join("line_map.rs");
     fs::write(&code, body.join("\n") + "\n").unwrap();
 
@@ -3611,18 +3674,22 @@ fn a_repair_follows_the_line_map_and_not_the_nearest_name() {
     let cited = |line: usize| format!("`line_map.rs:{line}`");
     let late_cited = |line: usize| format!("`late_map.rs:{line}`");
     let doc = docs.join("line_map.md");
-    let write_doc = |first: String, second: String, third: String| {
+    let write_doc = |first: String, second: String, third: String, fourth: String| {
         fs::write(
             &doc,
             format!(
                 "The budget (`priced_frame`, {first}) prices one frame.\n\
                  The band (`replaced_band`, {second}) is re-entered.\n\
-                 The arrival (`late_arrival`, {third}) landed after the base.\n"
+                 The arrival (`late_arrival`, {third}) landed after the base.\n\
+                 The shift (`twice_shifted`, {fourth}) was moved by an earlier run.\n"
             ),
         )
         .unwrap();
     };
-    write_doc(cited(10), cited(20), late_cited(5));
+    // Line 9 holds filler: nineteen lines above `twice_shifted`, which is what
+    // a citation looks like after a run has displaced it once. The base does
+    // not resolve it either, and that is the only thing that says so.
+    write_doc(cited(10), cited(20), late_cited(5), cited(9));
 
     git_in(&["init", "-q"]);
     git_in(&["add", "-A"]);
@@ -3635,6 +3702,7 @@ fn a_repair_follows_the_line_map_and_not_the_nearest_name() {
     // The insertion, uncommitted: sixteen lines land above both cited lines,
     // and the second cited line is ALSO rewritten where it stands -- one
     // commit routinely does both.
+    let base_body = body.clone();
     body.splice(5..5, (1..=16).map(|n| format!("// inserted {n}")));
     let replaced = body
         .iter()
@@ -3669,8 +3737,8 @@ fn a_repair_follows_the_line_map_and_not_the_nearest_name() {
     let citations = scan(root, std::slice::from_ref(&doc), Corpus::Book);
     assert_eq!(
         citations.len(),
-        3,
-        "FIXTURE: the three citations were not all parsed"
+        4,
+        "FIXTURE: the four citations were not all parsed"
     );
     assert!(
         citations.iter().all(|c| c.ident.is_some()),
@@ -3680,8 +3748,8 @@ fn a_repair_follows_the_line_map_and_not_the_nearest_name() {
     let (_, _, drifted) = check(root, &citations);
     assert_eq!(
         drifted.len(),
-        3,
-        "FIXTURE: expected all three citations red before the repair, got {}",
+        4,
+        "FIXTURE: expected all four citations red before the repair, got {}",
         drifted.len()
     );
 
@@ -3744,6 +3812,48 @@ fn a_repair_follows_the_line_map_and_not_the_nearest_name() {
         late_note.contains("no copy of this file at HEAD"),
         "FIXTURE: a citation the base has no text for was left red for some other \
          reason than the one that is true:\n{late_note}"
+    );
+
+    // 4. The double-run shape: a citation the base was never right about is
+    //    refused, and the refusal says so rather than displacing it again.
+    assert!(
+        text.contains(&cited(9)),
+        "FIXTURE: a citation the base does not resolve either was displaced again -- \
+         the 7a defect: every run walks it another 16 lines from `twice_shifted`:\n{text}"
+    );
+    let shift_note = notes
+        .iter()
+        .find(|n| n.contains(&cited(9)))
+        .expect("FIXTURE: the doubly-displaced citation was not reported");
+    assert!(
+        shift_note.contains("does not resolve `twice_shifted` at HEAD either")
+            && shift_note.contains("never right about the base"),
+        "FIXTURE: the refusal did not name the identifier, the base and the reason. A \
+         reader who is told only `left red` will run the fixer again:\n{shift_note}"
+    );
+    assert!(
+        shift_note.contains("revert the rewrites and run once"),
+        "FIXTURE: the refusal did not name the recovery, which is the one thing the \
+         reader has to do differently:\n{shift_note}"
+    );
+    // And the map itself DOES prove that move: line 9 held `// filler 9` at
+    // the base and line 25 holds it now. So the result cannot be the test, and
+    // this assertion is what says the premise is doing the refusing -- not a
+    // line map that happened to fail for some unrelated reason.
+    let hunks = diff_hunks(
+        root,
+        &hunk_regex(),
+        "HEAD",
+        "leviculum-core/src/line_map.rs",
+    )
+    .expect("FIXTURE: git diff parses");
+    assert!(
+        matches!(
+            place_by_diff(&base_body, &body, &hunks, 9),
+            Placed::Proved(25)
+        ),
+        "FIXTURE: the line map no longer proves the move it must not be trusted with, \
+         so case 4 would pass for the wrong reason"
     );
 
     // The proof step on its own. Hand-built hunks, because a correctly parsed
