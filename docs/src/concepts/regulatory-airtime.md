@@ -28,8 +28,10 @@ Our LNode firmware enforces the same way: `AirtimeTracker`
 (`leviculum-core/src/rnode.rs:1832`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
-`leviculum-nrf/src/lora.rs:1701-1735`), continuing to listen so RX is
-not starved.
+`leviculum-nrf/src/lora.rs:1766-1844`), continuing to listen so RX is
+not starved — until the frame has waited so long that keying it would
+be pointless, which is
+[the age rule below](#a-hold-ages-traffic-it-does-not-thin-it).
 
 The host-side airtime credit bucket
 (`leviculum-std/src/interfaces/airtime.rs`, see
@@ -57,7 +59,7 @@ firmware reads as unlimited.
 firmware states the settings it applied and the limits it loaded into
 the tracker on the boot-critical log path — the one that bypasses the
 debug port's runtime drain gate (`airtime_limits`,
-`leviculum-nrf/log-line/src/facts.rs:354`) — and states them again on
+`leviculum-nrf/log-line/src/facts.rs:421`) — and states them again on
 every runtime reconfiguration. Until 2026-08 both were ordinary
 runtime lines: a board that came up before a reader attached dropped
 them with everything else, so the two facts a compliance question is
@@ -223,6 +225,67 @@ The general lesson is not radio-specific: **a diagnostic must not
 disturb what it measures**, and a diagnostic that can must be checked
 for it before its numbers are believed. See
 [Evidence and Honesty in Testing](evidence-and-honesty.md).
+
+## A hold ages traffic; it does not thin it
+
+The gate above holds the frame at the head of the queue and re-checks.
+That is FIFO under a hold, and the consequence is worth stating
+plainly for anyone reading a LoRa capture: **a duty-cycle hold does
+not thin traffic, it ages it.** Each dip of the ledger below the cap
+admits exactly one frame, which re-pins the lock, so under sustained
+load the queue drains at the cap's rate with its order intact and the
+frames that reach the air are as old as the standing backlog. Nothing
+is lost and the airtime stays lawful — but what the lawful airtime
+carries is history.
+
+Measured on the WisMesh Pocket V2 during the field test of
+2026-09-27 (`docs/measurements/2026-09-27-field-test-lora-chain-columba.md`,
+outside the book because it is a measurement record, not a rule):
+pinned at a 10 % long-term cap, one frame left every 10–15 s and the
+three relayed link requests in the window were keyed 145.6 s, 137.7 s
+and 144.0 s after the stack handed them over. A forwarded link
+request is routable only until the relay's link-table entry expires,
+`(hops + path_hops + 2) × 6 s` — 30 s in that topology — so every
+proof came back to an entry that had died about 115 s earlier.
+
+So the interface drops what it has held too long, at the point where
+it waited (Codeberg #433):
+
+- **The rule.** At dequeue, while `AirtimeTracker::is_locked` is true,
+  a frame whose age since the interface accepted it exceeds
+  `leviculum_queue_budget::HOLD_MAX_AGE_MS` (20 s) is thrown away
+  instead of keyed. The 20 s is derived, and the derivation is in that
+  constant's own doc comment: above the 15 s short-term airtime window,
+  so a lock that engaged on short-term airtime alone never loses a
+  frame it was about to release; below the measured field topology's
+  30 s entry deadline minus the measured 1.0 s return leg, so a frame
+  that does air can still be proved.
+- **Only under the lock.** A frame that waited for CSMA, for an
+  acquisition-jitter draw or behind a burst gap is not stale in this
+  sense, whatever its age: those waits are the interface's own and end
+  by themselves. Only the regulatory lock holds a frame for minutes.
+- **Type-blind.** The interface reads the age and never the packet, so
+  a link request, an announce and a resource chunk of the same age get
+  the same verdict ([Interface
+  Isolation](interface-isolation.md)). What makes the drop acceptable
+  is not a judgement about the packet but the cadences above it: a link
+  request is reissued every 6 s per hop, an announce on its own
+  cadence, LXMF at its own layer — a frame older than 20 s behind a
+  lock has been superseded or written off by its sender already.
+- **Counted, never silent.** Every drop raises
+  `LORA_QUEUE_DROP reason=stale age_ms=<n> bytes=<n> total=<n>` under
+  the `[LORA] ` prefix, rate-limited like the core's `[DROP]` lines
+  with a `LORA_QUEUE_DROP suppressed=<n> window_ms=<n>` line for what
+  a clipped window held back, and the running total is the
+  `lora_stale=` field on the periodic `[TRANSPORT]` line. The counter
+  is how the fix is read on the air: `lrproof_no_link` on a relay
+  should fall toward zero for through-traffic as `lora_stale` rises.
+
+What this does **not** do is create airtime. The cap spends the same
+milliseconds it spent before; the change is that they carry current
+traffic instead of fossils. A board that is permanently over its cap
+is still a board with too much to say, and the honest reading of a
+climbing `lora_stale=` is a load problem, not a solved one.
 
 ## The firmware ledger is not a cross-session account
 

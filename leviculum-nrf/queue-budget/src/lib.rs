@@ -206,5 +206,120 @@ impl QueueBudget {
     }
 }
 
+/// How long an outbound frame may have waited when the airtime lock is the
+/// thing holding it, before the interface throws it away instead of keying it
+/// (Codeberg #433, option (a)).
+///
+/// # What the lock does to a queue
+///
+/// A duty-cycle lock does not thin traffic, it **ages** it. While
+/// `AirtimeTracker::is_locked` is true the LoRa task holds the frame at the
+/// head of the queue and re-checks; each dip of the ledger below the cap
+/// admits exactly one frame, which re-pins it. Under sustained load the queue
+/// therefore drains at the cap's rate with FIFO order intact, and the age of
+/// whatever reaches the air grows to the standing backlog. Measured on the
+/// Pocket V2 on 2026-09-27 (field test, #255): three relayed link requests
+/// keyed 145.6 s, 137.7 s and 144.0 s after they were handed to the
+/// interface, one frame leaving every 10-15 s.
+///
+/// # Where 20 s comes from
+///
+/// Two bounds, and the value is the round number between them.
+///
+/// **Upper bound — the relay entry the frame is trying to reach, 29 s.** A
+/// forwarded link request is routable only until the relay's link-table entry
+/// expires: `proof_timeout_ms = now + (hops + path_hops + 2) *
+/// DEFAULT_PER_HOP_TIMEOUT`, 6 s per hop
+/// (`leviculum-core/src/transport.rs:6503-6506`,
+/// `leviculum-core/src/constants.rs:113`), which is 30 s in the measured field
+/// topology (hops 1, path_hops 2) and starts at forward time — i.e. when the
+/// frame is enqueued here. The measured return leg after key-up was 1.0 s
+/// (key-up 14:24:24.009 UTC, proof back at this board 14:24:25.015), so a
+/// frame keyed later than 29 s after enqueue produces a proof that arrives
+/// after the entry it needs is gone. That is exactly the field failure, and it
+/// is why 60 s — the figure the analysis in report 358 §3 floated — would not
+/// have fixed it: with the cap in force the aired frames' age saturates just
+/// under the cap, so a 60 s cap still keys frames at twice the entry's life.
+///
+/// **Lower bound — the short-term airtime window, 15 s.** The short-term
+/// ledger is the sum of two 7.5 s histogram bins
+/// (`leviculum-core/src/rnode.rs:1460`, `:1909-1910`), so a lock that engaged
+/// on short-term airtime alone releases within 15 s as those bins roll off.
+/// A cap at or below that would throw away frames the lock was about to
+/// release anyway, turning a legal pause into a loss. 20 s leaves a frame the
+/// whole roll-off plus 5 s.
+///
+/// **The cadences agree.** An initiator reissues a link request every
+/// `ESTABLISHMENT_TIMEOUT_PER_HOP_MS × hops` — 18 s by our constant at 3
+/// hops, 16 s observed at the phone — so a frame older than 20 s has already
+/// been superseded by a fresher copy from the same sender, and the sender has
+/// written the first attempt off. Announces are reissued on their own cadence
+/// (300 s mobile, ~1 h stationary) and LXMF retries at its own layer, so
+/// neither loses a message to this rule; both gain, because the airtime the
+/// cap does allow now carries current traffic instead of fossils.
+///
+/// **What it cannot fix.** The arithmetic floor of the entry deadline is
+/// (0 + 0 + 2) × 6 s = 18 s, below this cap. On a topology that short a frame
+/// keyed at 19 s still outlives its entry. No cap can serve both that floor
+/// and the 15 s short-term roll-off, so the rule is sized for the topology
+/// that was measured; it makes no topology worse than the FIFO hold it
+/// replaces, which aired at 145 s.
+pub const HOLD_MAX_AGE_MS: u32 = 20_000;
+
+/// What the age rule says about the frame the transmitter is holding.
+///
+/// Derived from the frame's age and the state of the airtime lock, and from
+/// nothing else: the interface never looks at the packet. A link request, an
+/// announce and a resource chunk of the same age get the same verdict, which
+/// is what keeps this rule on the interface side of the isolation boundary
+/// (CLAUDE.md, "Architecture: interface isolation").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldVerdict {
+    /// The airtime lock is not engaged: key the frame, whatever its age.
+    ///
+    /// A frame that waited for CSMA, for an acquisition jitter draw or for a
+    /// burst gap is not stale in this sense — those waits are milliseconds to
+    /// seconds and end by themselves. Only the regulatory lock holds a frame
+    /// for minutes, and only its hold is what this rule is about.
+    Key,
+    /// Locked, and the frame is still young enough to be worth its airtime.
+    /// The caller holds it and re-checks on its next turn.
+    Hold {
+        /// How long the frame has waited, for the caller's diagnostics.
+        age_ms: u32,
+    },
+    /// Locked, and the frame has waited longer than [`HOLD_MAX_AGE_MS`].
+    /// The caller drops it, counts it, and takes the next one.
+    DropStale {
+        /// How long the frame waited before it was thrown away. Goes on the
+        /// `LORA_QUEUE_DROP reason=stale` line, so a capture can show the
+        /// distribution rather than just the count.
+        age_ms: u32,
+    },
+}
+
+/// Apply the age rule to one frame.
+///
+/// `enqueued_ms` and `now_ms` are the board's uptime in milliseconds,
+/// truncated to `u32`. The difference is taken with `wrapping_sub`, which is
+/// correct for every age shorter than the 49.7-day wrap and therefore for
+/// every age a queued frame can have; the alternative, a saturating
+/// subtraction, would make the frames enqueued in the 20 s before a wrap look
+/// eternally fresh instead of costing one wrongly-dropped frame every seven
+/// weeks. The truncation is deliberate: a `u32` stamp per queued frame is
+/// 4 bytes of `.bss` against the 12 a `u64` would cost once alignment is
+/// paid, and `.bss` is stack margin under flip-link.
+pub fn hold_verdict(enqueued_ms: u32, now_ms: u32, locked: bool) -> HoldVerdict {
+    if !locked {
+        return HoldVerdict::Key;
+    }
+    let age_ms = now_ms.wrapping_sub(enqueued_ms);
+    if age_ms > HOLD_MAX_AGE_MS {
+        HoldVerdict::DropStale { age_ms }
+    } else {
+        HoldVerdict::Hold { age_ms }
+    }
+}
+
 #[cfg(test)]
 mod tests;

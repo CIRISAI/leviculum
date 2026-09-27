@@ -17,9 +17,20 @@
 //! allocation, and no hashing.
 //!
 //! ```text
-//! [TRANSPORT] fwd=<n> rx=<n> tx=<n> nopath=<n> dup=<n> overheard=<n> maxhops=<n> paths=<n>
+//! [TRANSPORT] fwd=<n> rx=<n> tx=<n> nopath=<n> dup=<n> overheard=<n> maxhops=<n> paths=<n> lora_stale=<n>
 //! [TRANSPORT] iface=<name> rxb=<n> txb=<n>
 //! ```
+//!
+//! `lora_stale=` is the one field on the line that does not come from the
+//! core, and it cannot: it counts frames the LoRa interface threw away after
+//! holding them too long behind the regulatory airtime lock (Codeberg #433),
+//! and the hold is invisible above the interface boundary by design
+//! (CLAUDE.md, "Architecture: interface isolation"). It is on this line rather
+//! than a line of its own because the question it answers is the same question
+//! `nopath` and `dup` answer — where did the packets go — and a reader
+//! correlating an interface-level loss against the core's drops should not have
+//! to align two cadences to do it. Source:
+//! [`crate::lora::LORA_STALE_DROP_COUNT`].
 //!
 //! `paths=` is on the same line on purpose: `nopath` against a populated path
 //! table and `nopath` against an empty one are different diagnoses, and one
@@ -124,7 +135,7 @@ where
     crate::log::log_fmt(
         "[TRANSPORT] ",
         format_args!(
-            "fwd={} rx={} tx={} nopath={} dup={} overheard={} maxhops={} paths={}",
+            "fwd={} rx={} tx={} nopath={} dup={} overheard={} maxhops={} paths={} lora_stale={}",
             stats.packets_forwarded(),
             stats.packets_received(),
             stats.packets_sent(),
@@ -133,6 +144,7 @@ where
             stats.drops_overheard_transport_id(),
             stats.drops_forward_max_hops(),
             node.path_count(),
+            crate::lora::LORA_STALE_DROP_COUNT.load(core::sync::atomic::Ordering::Relaxed),
         ),
     );
     for (id, name) in crate::iface_bytes::NAMES.iter().enumerate() {

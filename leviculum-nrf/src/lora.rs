@@ -17,7 +17,7 @@ use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use leviculum_core::traits::{Interface, InterfaceError};
 use leviculum_core::InterfaceId;
-use leviculum_queue_budget::{QueueBudget, LORA_QUEUE_BYTES, LORA_QUEUE_SLOTS};
+use leviculum_queue_budget::{HoldVerdict, QueueBudget, LORA_QUEUE_BYTES, LORA_QUEUE_SLOTS};
 use static_cell::StaticCell;
 
 use crate::sx1262::Sx1262;
@@ -104,7 +104,8 @@ pub type Radio = Sx1262<Spi>;
 // — which is what the receive-path audit accompanying this batch is about, and
 // the wrong end to change before that map is read.
 static LORA_INCOMING: Channel<CriticalSectionRawMutex, Vec<u8>, 4> = Channel::new();
-static LORA_OUTGOING: Channel<CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS> = Channel::new();
+static LORA_OUTGOING: Channel<CriticalSectionRawMutex, QueuedFrame, LORA_QUEUE_SLOTS> =
+    Channel::new();
 static LORA_CONFIG: Channel<CriticalSectionRawMutex, RadioConfig, 1> = Channel::new();
 
 /// On-air transmit spacing in ms, set from the host (#345,
@@ -126,6 +127,47 @@ pub fn deliver_tx_spacing(spacing_ms: u16) -> bool {
     LORA_TX_SPACING.try_send(spacing_ms).is_ok()
 }
 
+/// One frame in the outbound queue, with the instant the interface accepted
+/// it.
+///
+/// The stamp is what makes the age rule possible (Codeberg #433): a frame that
+/// has waited too long behind the regulatory airtime lock is dropped where it
+/// waited rather than keyed, and "too long" can only be measured from the
+/// moment the frame entered the queue. Stamping at dequeue instead would reset
+/// the clock on every frame promoted to the head, so a backlog of fossils
+/// would drain one `HOLD_MAX_AGE_MS` at a time instead of in one sweep.
+///
+/// `u32` milliseconds, not the `u64` the rest of the firmware passes around.
+/// A slot costs its size whether or not a packet is in it, 64 times over, and
+/// `.bss` is stack margin under flip-link: the `u64` would align the struct to
+/// 8 and cost 12 bytes a slot where this costs 4. The wrap at 49.7 days of
+/// uptime is handled by `leviculum_queue_budget::hold_verdict`, which
+/// subtracts wrappingly.
+pub struct QueuedFrame {
+    /// The packet as the core handed it over, unframed.
+    pub data: Vec<u8>,
+    /// Board uptime in milliseconds when [`LoRaInterface::try_send`] accepted
+    /// it, truncated to `u32`.
+    pub enqueued_ms: u32,
+}
+
+/// The board's uptime in the unit [`QueuedFrame::enqueued_ms`] is kept in.
+fn now_ms32() -> u32 {
+    embassy_time::Instant::now().as_millis() as u32
+}
+
+/// Cumulative count of outbound frames thrown away because they waited longer
+/// than `leviculum_queue_budget::HOLD_MAX_AGE_MS` behind an engaged airtime
+/// lock (Codeberg #433).
+///
+/// An interface-level loss, so the core cannot count it — the interface
+/// isolation rule is what keeps the hold, and therefore the drop, invisible to
+/// `transport.rs`. That is why the periodic `[TRANSPORT]` line reads this
+/// atomic directly instead of a `TransportStats` accessor: a drop nothing
+/// counts is the failure mode #410 and #346 were both about.
+pub static LORA_STALE_DROP_COUNT: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
 /// Occupancy of `LORA_OUTGOING`, in slots and in bytes.
 ///
 /// The channel's own slot bound cannot see bytes, so a queue of twelve MTU
@@ -146,12 +188,12 @@ static OUTGOING_BUDGET: QueueBudget = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QU
 /// until the queue refused everything forever, so there is exactly one
 /// non-obvious place to get this right and it is spelled once.
 fn take_outgoing(
-    outgoing_rx: &Receiver<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
-) -> Option<Vec<u8>> {
+    outgoing_rx: &Receiver<'static, CriticalSectionRawMutex, QueuedFrame, LORA_QUEUE_SLOTS>,
+) -> Option<QueuedFrame> {
     match outgoing_rx.try_receive() {
-        Ok(data) => {
-            OUTGOING_BUDGET.release(data.len());
-            Some(data)
+        Ok(frame) => {
+            OUTGOING_BUDGET.release(frame.data.len());
+            Some(frame)
         }
         Err(_) => None,
     }
@@ -159,7 +201,7 @@ fn take_outgoing(
 
 pub struct LoRaChannels {
     pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
-    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
+    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, QueuedFrame, LORA_QUEUE_SLOTS>,
 }
 
 pub fn channels() -> LoRaChannels {
@@ -201,7 +243,7 @@ pub const IFACE_INDEX: usize = 1;
 
 // LoRaInterface for NodeCore dispatch
 pub struct LoRaInterface {
-    sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
+    sender: Sender<'static, CriticalSectionRawMutex, QueuedFrame, LORA_QUEUE_SLOTS>,
     /// What this interface has thrown away since its carrier went down,
     /// so the drops are logged as a run and not as one line per packet
     /// (see `try_send`).
@@ -210,7 +252,7 @@ pub struct LoRaInterface {
 
 impl LoRaInterface {
     pub fn new(
-        sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
+        sender: Sender<'static, CriticalSectionRawMutex, QueuedFrame, LORA_QUEUE_SLOTS>,
     ) -> Self {
         Self {
             sender,
@@ -284,7 +326,13 @@ impl Interface for LoRaInterface {
         }
         let bytes = data.len();
         self.sender
-            .try_send(data.to_vec())
+            // Stamped here and not at dequeue: this is the instant the frame
+            // became the interface's problem, and the age rule at the other
+            // end of the queue measures from it (Codeberg #433).
+            .try_send(QueuedFrame {
+                data: data.to_vec(),
+                enqueued_ms: now_ms32(),
+            })
             // Counted here and not at key-up: the reference counts the
             // unframed packet as the interface accepts it
             // (`RNodeInterface.py:725`), so split-frame headers and the
@@ -1464,15 +1512,15 @@ async fn apply_runtime_config(
 /// `media::log_tx_drop`'s is and for the same reason: every line also writes
 /// the 2 KiB post-crash tail, and a muted board drops a frame per announce.
 fn admit_for_transmit(
-    data: Vec<u8>,
+    frame: QueuedFrame,
     lease: &leviculum_mute_lease::MuteLease,
     now_ms: u64,
     muted: &mut leviculum_media_state::DropRun,
-    pending_tx: &mut Option<Vec<u8>>,
+    pending_tx: &mut Option<QueuedFrame>,
     access: &mut leviculum_channel_access::ChannelAccess,
 ) -> bool {
     if lease.is_muted(now_ms) {
-        if let Some(run) = muted.dropped(data.len()) {
+        if let Some(run) = muted.dropped(frame.data.len()) {
             leviculum_log_line::facts::lora_tx_muted(
                 &mut FirmwareLog,
                 &leviculum_log_line::facts::MuteRun {
@@ -1492,7 +1540,7 @@ fn admit_for_transmit(
             },
         );
     }
-    *pending_tx = Some(data);
+    *pending_tx = Some(frame);
     access.begin_packet();
     true
 }
@@ -1579,7 +1627,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     let mut access = leviculum_channel_access::ChannelAccess::new(channel_seed);
     access.set_phy(config.bw_hz, config.sf, config.cr_denom);
 
-    let mut pending_tx: Option<Vec<u8>> = None;
+    let mut pending_tx: Option<QueuedFrame> = None;
     // Frames the host's mute has swallowed since it was set (#410), so the
     // suppression is logged as a run and not as one line per frame. See
     // `admit_for_transmit`.
@@ -1604,6 +1652,12 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     // before the knob existed.
     let mut spacer =
         leviculum_tx_spacing::TxSpacer::new(leviculum_tx_spacing::DEFAULT_TX_SPACING_MS);
+
+    // Rate limit for the `LORA_QUEUE_DROP reason=stale` lines (#433), the same
+    // policy the core's `[DROP]` lines run under. A task-local and not a static
+    // like `crate::events`' one: this task is the only producer of these lines,
+    // so there is nothing to share it with and no critical section to pay.
+    let mut stale_lines = leviculum_drop_budget::DropBudget::new();
 
     loop {
         // Take a new on-air spacing before anything is keyed this
@@ -1646,6 +1700,16 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
         // deadline by that much; it carries the deadline, not the moment it
         // was noticed.
         let now_ms = embassy_time::Instant::now().as_millis();
+        // Close a rate-limit window that expired without a further drop to
+        // close it: the silence AFTER a purge is exactly the reading the
+        // summary is for. One `Instant` comparison on a board dropping nothing.
+        if let Some(suppressed) = stale_lines.flush(now_ms) {
+            leviculum_log_line::facts::lora_queue_drop_suppressed(
+                &mut FirmwareLog,
+                suppressed.lines,
+                suppressed.window_ms,
+            );
+        }
         if mute_lease.expired_at(now_ms).is_some() {
             // The run's exact total, and it closes the run: the expiry IS
             // the end of the mute, so there is no `LORA_TX_UNMUTED` left to
@@ -1685,7 +1749,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             }
         }
 
-        if let Some(data) = pending_tx.as_ref() {
+        if let Some(frame) = pending_tx.as_ref() {
             // Regulatory airtime lock: recompute short/long-term airtime and, if
             // over the configured limit, hold this queued frame instead of
             // keying the radio (mirrors the RNode firmware's
@@ -1693,36 +1757,93 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // listening during the hold so RX is not starved, then retry.
             let now_ms = embassy_time::Instant::now().as_millis();
             airtime.update(now_ms);
-            if airtime.is_locked() {
-                // Integer milliseconds, not the fractions: the tracker's own
-                // ledger unit, and the only float formatting on the LoRa
-                // path — printing the f32 fractions here was what linked
-                // core's flt2dec into the image.
-                crate::log::log_fmt(
-                    "[LORA_AIRTIME_LOCK] ",
-                    format_args!(
-                        "st={} lt={} holding",
-                        airtime.short_term_airtime_ms(),
-                        airtime.long_term_airtime_ms()
-                    ),
-                );
-                let hold_ms = post_tx_rx_window_ms(&config);
-                reassembler.check_timeout(rx_timeout_count, 10);
-                if rx_window(
-                    &mut radio,
-                    &mut rx_buf,
-                    (hold_ms, leviculum_core::sx126x::RxSite::Hold),
-                    &mut reassembler,
-                    &incoming_tx,
-                    &mut rx_timeout_count,
-                    &config_rx,
-                )
-                .await
-                {
-                    consecutive_empty_acks = 0;
+            // The one decision, taken in `leviculum_queue_budget`: the lock's
+            // state and the frame's age in, hold / key / drop out. The
+            // interface never looks at the packet — a link request, an
+            // announce and a resource chunk of the same age get the same
+            // answer — which is what keeps the rule on this side of the
+            // isolation boundary.
+            match leviculum_queue_budget::hold_verdict(
+                frame.enqueued_ms,
+                now_ms as u32,
+                airtime.is_locked(),
+            ) {
+                HoldVerdict::DropStale { age_ms } => {
+                    // A duty lock does not thin traffic, it ages it (#433): at
+                    // the cap the queue drains one frame per budget dip with
+                    // FIFO order intact, so under sustained load everything
+                    // reaching the air is minutes old — measured at 145.6 s on
+                    // the Pocket V2, against a relay link-table entry that
+                    // lives 30 s. Dropping here converts a doomed transmission
+                    // into budget for live traffic, and the cap's airtime is
+                    // spent either way.
+                    let bytes = frame.data.len() as u32;
+                    let total = LORA_STALE_DROP_COUNT
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                        .saturating_add(1);
+                    let decision = stale_lines.admit(now_ms);
+                    // The closed window's summary first, so the capture reads
+                    // in the order the events happened — same shape as the
+                    // core's `[DROP]` budget in `crate::events`.
+                    if let Some(suppressed) = decision.summary {
+                        leviculum_log_line::facts::lora_queue_drop_suppressed(
+                            &mut FirmwareLog,
+                            suppressed.lines,
+                            suppressed.window_ms,
+                        );
+                    }
+                    if decision.emit {
+                        leviculum_log_line::facts::lora_queue_drop_stale(
+                            &mut FirmwareLog,
+                            &leviculum_log_line::facts::StaleDrop {
+                                age_ms,
+                                bytes,
+                                total,
+                            },
+                        );
+                    }
+                    // The next turn picks the following frame up, so a whole
+                    // backlog of fossils is swept in consecutive turns rather
+                    // than one age per frame.
+                    pending_tx = None;
+                    continue;
                 }
-                continue;
+                HoldVerdict::Hold { .. } => {
+                    // Integer milliseconds, not the fractions: the tracker's own
+                    // ledger unit, and the only float formatting on the LoRa
+                    // path — printing the f32 fractions here was what linked
+                    // core's flt2dec into the image.
+                    crate::log::log_fmt(
+                        "[LORA_AIRTIME_LOCK] ",
+                        format_args!(
+                            "st={} lt={} holding",
+                            airtime.short_term_airtime_ms(),
+                            airtime.long_term_airtime_ms()
+                        ),
+                    );
+                    let hold_ms = post_tx_rx_window_ms(&config);
+                    reassembler.check_timeout(rx_timeout_count, 10);
+                    if rx_window(
+                        &mut radio,
+                        &mut rx_buf,
+                        (hold_ms, leviculum_core::sx126x::RxSite::Hold),
+                        &mut reassembler,
+                        &incoming_tx,
+                        &mut rx_timeout_count,
+                        &config_rx,
+                    )
+                    .await
+                    {
+                        consecutive_empty_acks = 0;
+                    }
+                    continue;
+                }
+                // Not locked: key it, whatever its age. A frame that waited
+                // for CSMA, for an acquisition draw or behind a burst is not
+                // stale in this sense — those waits end by themselves.
+                HoldVerdict::Key => {}
             }
+            let data = &frame.data;
 
             // Whole-packet on-air cost (all split frames) for the burst
             // airtime bound, computed while the packet is still borrowed.
@@ -2103,11 +2224,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // the wait is conditional on a measured reception and on nothing
             // else, which is what keeps this from being a spacing delay.
             // radio_silent still drops outgoing instead of transmitting.
-            Either::Second(data) => {
+            Either::Second(frame) => {
                 // The one dequeue that does not go through `take_outgoing`:
                 // `receive()` is the awaited form, and the budget it held is
                 // released here for the same reason and at the same moment.
-                OUTGOING_BUDGET.release(data.len());
+                OUTGOING_BUDGET.release(frame.data.len());
                 // The same sink `rx_window` builds, so a frame the deferral
                 // catches reaches the core indistinguishably from any other.
                 // `rx_start` is taken here, before the wait, so the
@@ -2128,7 +2249,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     )
                     .await;
                 admit_for_transmit(
-                    data,
+                    frame,
                     &mute_lease,
                     // Fresh for the burst continuation's reason: this arm is
                     // reached out of a receive window that may have stood

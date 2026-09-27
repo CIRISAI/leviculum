@@ -266,6 +266,73 @@ pub fn lora_mute_expired<S: LineSink>(sink: &mut S, expiry: &MuteExpiry) {
     );
 }
 
+/// One outbound frame the regulatory airtime lock held until it was no longer
+/// worth its airtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleDrop {
+    /// How long the frame waited between being handed to the interface and
+    /// being thrown away, in milliseconds. The diagnostic value of the line:
+    /// a distribution of ages says whether the board is barely over the cap
+    /// or minutes behind it, which pass/fail counting cannot.
+    pub age_ms: u32,
+    /// The frame's payload length, so the airtime the drop reclaimed can be
+    /// worked out from the line alone.
+    pub bytes: u32,
+    /// Stale drops since boot, including this one. Carried on every printed
+    /// line so a rate-limited capture can still place the line in the run.
+    pub total: u32,
+}
+
+/// `[LORA] LORA_QUEUE_DROP reason=stale …` — a frame the airtime lock aged out
+/// instead of keying (Codeberg #433).
+///
+/// A duty-cycle lock does not thin traffic, it ages it: FIFO under a hold
+/// means the queue drains at the cap's rate with its order intact, so under
+/// sustained load the frames reaching the air are minutes old. Measured on the
+/// Pocket V2 on 2026-09-27 (#255): three relayed link requests keyed 145.6 s,
+/// 137.7 s and 144.0 s after they were handed over, against a relay link-table
+/// entry that lives 30 s. The interface now drops what it has held longer than
+/// `leviculum_queue_budget::HOLD_MAX_AGE_MS`, and this is the line that says it
+/// did.
+///
+/// Type-blind by construction: the body carries an age and a length and names
+/// no packet kind, because the interface reads neither.
+///
+/// Rate-limited through `leviculum_drop_budget`, like the core's `[DROP]`
+/// lines and for the same reason — a board that has fallen a backlog behind
+/// its cap purges that backlog in one sweep, and an unbounded line per frame
+/// would evict the `[STACK]`, `[TRANSPORT]` and panic lines the capture was
+/// taken for. What the limiter holds back is stated by
+/// [`lora_queue_drop_suppressed`], and the running total is on every line
+/// here anyway.
+///
+/// Gated, like the mute lines it sits beside: it describes running traffic,
+/// not the board's bring-up.
+pub fn lora_queue_drop_stale<S: LineSink>(sink: &mut S, drop: &StaleDrop) {
+    sink.line(
+        Route::Gated,
+        "[LORA] ",
+        format_args!(
+            "LORA_QUEUE_DROP reason=stale age_ms={} bytes={} total={}",
+            drop.age_ms, drop.bytes, drop.total
+        ),
+    );
+}
+
+/// `[LORA] LORA_QUEUE_DROP suppressed=… window_ms=…` — what one rate-limit
+/// window of [`lora_queue_drop_stale`] held back.
+///
+/// Emitted only for a window that refused something. Without it a purge and a
+/// trickle read identically on a capture, since both show
+/// `leviculum_drop_budget::LINES_PER_WINDOW` lines per second.
+pub fn lora_queue_drop_suppressed<S: LineSink>(sink: &mut S, suppressed: u32, window_ms: u32) {
+    sink.line(
+        Route::Gated,
+        "[LORA] ",
+        format_args!("LORA_QUEUE_DROP suppressed={suppressed} window_ms={window_ms}"),
+    );
+}
+
 /// Who chose a limit the airtime tracker is enforcing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitSource {
@@ -910,6 +977,47 @@ mod tests {
             [(
                 Route::Gated,
                 String::from("[LORA] LORA_TX_UNMUTED packets=37 bytes=2479 t=191\r\n")
+            )]
+        );
+    }
+
+    /// Codeberg #433: the frame the duty lock aged out. The body carries the
+    /// age, the length and the running total and names no packet kind — the
+    /// interface reads none, and a line that did would be the type-awareness
+    /// the isolation rule forbids.
+    #[test]
+    fn a_stale_frame_drop_states_its_age_its_size_and_the_running_total() {
+        let mut sink = Recorder::default();
+        lora_queue_drop_stale(
+            &mut sink,
+            &StaleDrop {
+                age_ms: 145_600,
+                bytes: 102,
+                total: 12,
+            },
+        );
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Gated,
+                String::from(
+                    "[LORA] LORA_QUEUE_DROP reason=stale age_ms=145600 bytes=102 total=12 t=191\r\n"
+                )
+            )]
+        );
+    }
+
+    /// And the window that held lines back says so, so a purge and a trickle
+    /// do not read the same.
+    #[test]
+    fn a_clipped_stale_drop_window_names_what_it_refused() {
+        let mut sink = Recorder::default();
+        lora_queue_drop_suppressed(&mut sink, 9, 1_000);
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Gated,
+                String::from("[LORA] LORA_QUEUE_DROP suppressed=9 window_ms=1000 t=191\r\n")
             )]
         );
     }
