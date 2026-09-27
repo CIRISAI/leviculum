@@ -49,6 +49,16 @@
 //! it. Should a host be configured with an `ip_local_port_range` that spans
 //! the band, the probe bind still skips whatever is already taken.
 //!
+//! 4000 numbers is headroom, not a tight fit. A full `cargo test --workspace`
+//! draws 1632 of them (measured 2026-09-27), so the counter laps the band
+//! only every second or third workspace run, and it is the *lap*, not the
+//! run, that could hand out a number still in use. It cannot: at the peak of
+//! that run only 46 TCP and 57 UDP ports were bound at once, so all but a
+//! hundred-odd of the band are free at any instant, and a number from the
+//! previous lap has had thousands of allocations' worth of time to be
+//! released. A test that needs its own band does not need one — it draws
+//! from this counter like everything else.
+//!
 //! A single counter also removes the reason the suites used to carry
 //! *disjoint* bases (61000/61500/62500/63500): those existed only so that
 //! several independent counters inside one test binary would not walk into
@@ -67,8 +77,8 @@ pub const PORT_RANGE_END: u16 = 65000;
 
 /// Numbers reserved from the shared counter per file access.
 ///
-/// A full `rnsd_interop` run draws on the order of 2000 ports, so 64 costs
-/// ~30 lock/rewrite round trips per run — negligible — while keeping a
+/// A full `rnsd_interop` run draws 890 ports (measured 2026-09-27), so 64
+/// costs ~14 lock/rewrite round trips per run — negligible — while keeping a
 /// crashed or short-lived process from stranding much of the band.
 pub const CHUNK: u16 = 64;
 
