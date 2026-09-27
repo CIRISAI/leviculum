@@ -3,7 +3,9 @@
 The reference facts behind the #376 desk measurement (a board's announce
 reaches Columba only through the other board, never on the direct BLE
 link). Four questions, answered strictly from the vendored
-`reference/Reticulum` tree (Python-RNS 1.3.5), with citations. This page
+`reference/Reticulum` tree (Python-RNS 1.3.5), with citations, plus a
+fifth section (added for Codeberg #231) on what 1.5.2 — the version a
+periculum `rnsd` arm pins — does differently in the same arm. This page
 states what the reference does; it decides nothing.
 
 Sibling pages: [Hop counting](../architecture-hop-counting.md),
@@ -168,4 +170,67 @@ value, are:
 * **The §3 replacement conditions**, in particular the strict
   emission-timestamp comparison.
 
-Recorded 2026-09-09 against `reference/Reticulum` as vendored (1.3.5).
+Sections 1 to 4 recorded 2026-09-09 against `reference/Reticulum` as
+vendored (1.3.5).
+
+## 5. 1.5.2's same-emission arm: gravity, not hops
+
+§3 answers for 1.3.5, the vendored tree. It is not the whole answer for
+the Python a comparison run actually faces: periculum's `rnsd` arm pins
+1.5.2 (`rns_pin` in every `pathchoice_*_rnsd.json`), and 1.5.2 has an
+acceptance path on EQUAL emission that 1.3.5 does not. Codeberg #231's
+readings 308 and 309 disagreed because each had read one of the two
+versions, so both are recorded here.
+
+**The line references in this section are deliberately NOT written in
+the `path:line` citation form.** 1.5.2 is not vendored — the tree read
+was `~/coding/Reticulum` at `_version.py` 1.5.2 — so the citation guard
+would resolve a `Transport.py` line citation written here against the
+1.3.5 copy and pass it on existence alone, a green that means nothing
+(docs/src/concepts/checks-and-citations.md §"could not be checked").
+Prose line numbers are checkable by a reader and by nothing else, which
+is the truth about them.
+
+The outer gate is unchanged — `packet.hops <=` the known hop count — and
+the first test inside it is the 1.3.5 one, verbatim: 1.5.2
+`Transport.py` lines 2237-2238, against
+`reference/Reticulum/RNS/Transport.py:1771-1772` here. What 1.5.2 adds
+is the `else`, at 1.5.2 `Transport.py` lines 2245-2252:
+
+```python
+# If the same announce is received later on an interface
+# with higher gravity, allow updating the path table to
+# use this interface instead.
+if   announce_emitted != path_timebase: should_add = False
+elif announce_gravity == None or current_gravity == None: should_add = False
+else:
+    if announce_gravity <= current_gravity: should_add = False
+    else:
+        ... should_add = True
+```
+
+Three facts follow:
+
+* **Hop count is not in the acceptance test, in either version.** It
+  appears only in the `packet.hops <=` gate above. A second copy of an
+  emission already installed does not replace the path for having taken
+  fewer hops in 1.3.5 or in 1.5.2.
+* **What 1.5.2 does accept on equal emission is a higher-`gravity`
+  interface.** `gravity` is an operator-configured per-interface
+  preference — 1.5.2 `Reticulum.py` lines 798-799 read it out of the
+  interface stanza, and `_add_interface` (lines 1134-1136) fills the
+  `default_gravity` when the stanza names none. It is a configured
+  ranking, not a measurement.
+* **On a default config 1.5.2 behaves exactly like 1.3.5 here.**
+  1.5.2 `Interfaces/Interface.py` line 75 sets `DEFAULT_GRAVITY = 0`, so
+  `announce_gravity <= current_gravity` holds and the arm rejects. An
+  `rnsd` arm that sets no `gravity` anywhere is measuring the strict
+  1.3.5 rule — and that is every `pathchoice_*` cell: no `gravity` key
+  appears anywhere under periculum's `emulated/`, `conformance/` or
+  `periculum/adapters/`, and each node in those cells has exactly one
+  interface to begin with.
+
+Recorded 2026-09-27 against `~/coding/Reticulum` at 1.5.2. The nearest
+thing we have to this arm is our own same-emission clause
+(`transport.rs`, `SameEmissionRule`, Codeberg #231), which ranks by hop
+count rather than by a configured preference.
