@@ -597,6 +597,114 @@ injected-drift control, because two of the three verdicts are "leave it
 alone", and a fixer that has stopped repairing anything leaves
 everything alone.
 
+### 7a. The fixer runs once, and it runs last
+
+Once per pass, after the last edit to any file it cites into, and
+immediately before the gates. The mode cannot notice that it is
+repairing its own earlier output, and what it does when handed that
+output is not to give up: it applies the same displacement a second
+time and prints `repaired by the line map`.
+
+Step 4 above, read from the other side, is the mechanism. The proof is
+`Placed::Proved` (`leviculum-std/tests/doc_citations.rs:3099`) — the
+mapped line's text *now* against the text the *cited number* held in
+the base. The premise of the whole map is therefore that every number
+in the corpus is one the base was right about, and a citation an
+earlier run rewrote is not. Its number names a line in the post-edit
+tree, so the base text it is compared against is whatever unrelated
+line sat at that number before the insertion; a pure insertion
+displaces every line below it by the same amount, so that unrelated
+line is still exactly that far down, the comparison passes, and the
+citation moves a second time.
+
+Measured on this tree 2026-09-27 by replaying order 339's shape: HEAD
+`2242a470`, 85 lines inserted at line 191 of
+`leviculum-core/src/transport.rs`, the fixer, then three more lines at
+the same place, which is 339's "off by three". The citation under test
+sits at line 327 of `docs/src/concepts/time-and-clocks.md`, written
+seven lines above the `rank` it names. None of the numbers in the table
+is in the citation form, for the reason section 5 gives: they record
+where a citation *was*, and a later fix run would helpfully rewrite
+them.
+
+| Run | the citation reads | correct | lines to `rank` |
+|---|---|---|---|
+| before | 1389 | 1389 | 7 |
+| 1, after the 85-line insertion | 1474 | 1474 | 7 |
+| 2, after three further lines | 1562 | 1477 | 78 |
+| 3, no further edit | 1650 | 1477 | 166 |
+| revert the rewrites, insert 88, run once | 1477 | 1477 | 7 |
+
+Runs 2 and 3 each reported `2 red citation(s), 2 repaired by the line
+map, 0 left for a reader`. It neither converges nor warns. The verdict
+run afterwards is still red, so nothing lands on a lie — but every
+attempt to help moves the citation another 88 lines from its subject,
+which is why 339 could not repair its two survivors and reverted
+instead. That pass recorded the mechanism as "the map pass leaves a
+rewritten citation alone"; the measurement says the opposite, and the
+opposite is the worse of the two.
+
+The bare pass does not double-apply. It goes quiet instead: its anchor
+is read from the tree's own history, and a doc line the fixer has just
+rewritten is uncommitted, so there is no commit at which to ask what
+that line said when it was written. Run 1 reported 21 doc and 13 source
+citations moved and rewrote 31 of them; run 2, with those same
+citations now three lines stale, reported 0 moved and its undecidable
+counts up from 79 to 98 and from 17 to 29 — 19 and 12, which is the
+31 it had repaired. Undecidable is not a failure, so for the bare half
+a second run turns red into silence.
+
+Recovery is the one 339 used: revert the rewrites, rebuild the tree as
+the base commit plus the source edits, run the fixer once. Saving the
+source hunks and `git checkout -- .` is enough. No base revision
+repairs a doubly-rewritten citation, because the state its number was
+right about is a working tree nobody committed.
+
+Committing the rewrites is the other way out, and the same statement.
+With run 1's output committed, a run after three further lines moved
+1477 to 1480 and the bare pass was back to 21 moved and 31 rewritten.
+So the rule is not really "run it last": it is *the citations must be
+right about a commit*, and running the fixer last is the cheap way to
+be sure they are.
+
+**Could it detect its own earlier run?** Not by the test that suggests
+itself. "The mapped line does not hold the base text, but the line at
+the cited number does" fires on neither measured case. At `2242a470`
+line 1474 of `transport.rs` is `pub(crate) packets_sent: u64,`; the
+mapped line 1562 holds exactly that, which is *why* the repair was
+applied again; and line 1474 of the working tree holds the `age_secs`
+doc comment instead. Both halves are false, and the half that would
+have to be true is the one the code already proves. It is unsound in
+the other direction too: wherever trimmed lines repeat — `}`, a
+blank, a bare `///` — the two texts match by coincidence.
+
+The test that does fire is the premise rather than the result: the
+cited line must resolve its own identifier in the base. At `2242a470`
+nothing within eight lines of 1474 contains `rank`, and nothing within
+eight lines of the second survivor's 478 contains `TickOutput`, while
+their pre-run numbers 1389 and 393 both resolve. Replayed over the
+three logs with that rule, the enclosing-block fallback aside: 0 of the
+83 doc repairs the single clean run made would have been refused, and 2
+of 2 in each double run.
+
+It would print a refusal in place of `repaired by the line map`, not a
+hint: *left red — line 1474 does not resolve `rank` at 2242a470
+either, so this citation was never right about the base and the line
+map cannot carry it. If an earlier fix run rewrote it, revert the
+rewrites and run once.*
+
+One order, not ten, and not a one-liner. The proximity test lives
+inline in the checker, closed over the current file's lines —
+`resolved` (`leviculum-std/tests/doc_citations.rs:955`) — so it has
+to come out as a function over a `&[String]` before `place_citation`
+can call it with the base's copy: extraction, one call, one message,
+one fixture beside the three already in the guard's tests. What the
+order costs is a real refusal. A citation already stale *at* the base
+— the twenty `Justfile` numbers 339 found — would stop being
+repaired by the map pass. Correctly so: a map against that base says
+nothing about drift older than it, and the bare pass is what repaired
+those.
+
 ### 8. A green guard has to say how much of the corpus it read
 
 Sections 5-7 made the guard see more. What it still did not do was say
@@ -1125,7 +1233,8 @@ writing: C covers `docs/src/**`, the Rust sources of `leviculum-core`,
 submodule check runs first in `just fast`; its bump path is unbuilt.
 Both halves of it repair since 2026-09-25: the bare class against the
 tree's own history, the identifier-anchored classes against the line map
-of a named base (section 7).
+of a named base (section 7), and both only when run exactly once, after
+the last source edit of the pass (section 7a).
 
 Two shapes it refused to see until 2026-09-23, both found by reading
 rather than by a red gate. A **backwards line spec** (`a-b` with `a > b`)
