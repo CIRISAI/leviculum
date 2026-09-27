@@ -148,6 +148,12 @@ SUMMARY_LINE = re.compile(
     r"\s*(?P<ignored>\d+) ignored;\s*(?P<measured>\d+) measured;"
     r"\s*(?P<filtered>\d+) filtered out"
 )
+# libtest's per-failure capture header: `---- <name> stdout ----`. Everything
+# between one of these and the next section is what the failing test printed
+# (stdout, stderr, the panic message, and -- for tests wired through
+# test_support::event_log -- the `=== EVENT LOG DUMP` the handle emits on a
+# panicking Drop).
+FAILURE_BLOCK = re.compile(r"^---- (?P<name>.+?) (?P<stream>stdout|stderr) ----$")
 # cargo, on stderr: `     Running unittests src/lib.rs (target/.../deps/x-hash)`
 CARGO_RUNNING = re.compile(r"^\s*Running (?P<desc>.+?) \((?P<exe>[^()]+)\)$")
 # cargo, on stderr: `   Doc-tests leviculum_micron`
@@ -299,12 +305,170 @@ def target_index() -> tuple[dict[tuple[str, str], str], dict[str, str]]:
     return by_src, by_crate
 
 
+# What counts as a co-tenant worth naming when a test fails: another test
+# binary (cargo puts them under .../deps/), cargo itself, or one of the
+# daemons the suites spawn. Everything else on the host is noise.
+COTENANT_SHAPE = re.compile(
+    r"/deps/|\bcargo\b|\brnsd\b|\blnsd\b|test_daemon|periculum|\blnpnd\b|\blxmd\b"
+)
+
+
+class FailureCollector:
+    """Per-FAILED-test artefacts, streamed to disk as the run prints them.
+
+    Codeberg #221's rotating victim fails only with co-tenants, and its last
+    data point (2026-09-08) lost its failure output because the caller was
+    killed at a 10 minute ceiling several suites later. The gate log keeps the
+    whole run, but "the whole run" is exactly what a killed caller never gets
+    to read back. So every FAILED test additionally gets, the moment its
+    result line streams past:
+
+      <state>/leviculum-ci/test-failures/<run>/<test>.log
+          header at the FAILED instant, then the test's captured
+          `---- <name> stdout/stderr ----` block as it streams past
+          (which carries the event-log dump for tests wired through
+          test_support::event_log -- the handle dumps its buffer to
+          captured stderr on a panicking Drop);
+      <state>/leviculum-ci/test-failures/<run>/<test>.cotenants.txt
+          what else was alive at the FAILED instant: the gate's own
+          process group, and every test-shaped process elsewhere on
+          the host (a concurrent suite in another invocation).
+
+    Every write is append+flush, so a run killed later keeps everything up to
+    the kill. Collection must never break the gate: filesystem trouble becomes
+    a warning, not an exit.
+    """
+
+    def __init__(self, base: Path, run_name: str, gate: str, snapshot=None):
+        self.base = base
+        self.run_name = run_name
+        self.gate = gate
+        self.snapshot = snapshot  # injectable for the canary; None = proc_snapshot
+        self.pgid: int | None = None
+        self.dir: Path | None = None  # created on the first failure, never before
+        self.block: Path | None = None  # file currently receiving a ---- block
+        self.tests: set[str] = set()
+        self.warnings: list[str] = []
+
+    def set_pgid(self, pgid: int) -> None:
+        self.pgid = pgid
+
+    def _ensure_dir(self) -> Path | None:
+        if self.dir is None:
+            candidate = self.base / self.run_name
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+            except OSError as err:
+                self._warn_once(f"cannot create {candidate}: {err}")
+                return None
+            self.dir = candidate
+        return self.dir
+
+    def _warn_once(self, msg: str) -> None:
+        if msg not in self.warnings:
+            self.warnings.append(msg)
+
+    def _path(self, name: str) -> Path | None:
+        out = self._ensure_dir()
+        if out is None:
+            return None
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:200]
+        return out / f"{safe}.log"
+
+    def _append(self, path: Path, text: str) -> None:
+        try:
+            with open(path, "a", errors="replace") as fh:
+                fh.write(text)
+                fh.flush()
+        except OSError as err:
+            self._warn_once(f"cannot write {path}: {err}")
+
+    def _cotenant_lines(self) -> list[str]:
+        rows = (self.snapshot or proc_snapshot)()
+        mine, elsewhere = [], []
+        for pid, pgid, state, cmd in rows:
+            if self.pgid is not None and pgid == self.pgid:
+                mine.append(f"  PID {pid} [{state}]: {cmd}")
+            elif COTENANT_SHAPE.search(cmd):
+                elsewhere.append(f"  PID {pid} [{state}]: {cmd}")
+        lines = [f"in this gate's process group (pgid {self.pgid}):"]
+        lines += mine or ["  (none visible)"]
+        lines.append("test-shaped processes elsewhere on the host:")
+        lines += elsewhere or ["  (none)"]
+        return lines
+
+    def on_failed(self, selector: str, name: str) -> None:
+        """The FAILED instant: header and co-tenant snapshot, immediately.
+
+        The captured output block arrives later (end of the unit) and may
+        never arrive at all if the run is killed first; the snapshot of who
+        was running cannot be reconstructed afterwards, so it is taken now.
+        """
+        path = self._path(name)
+        if path is None:
+            return
+        first = name not in self.tests
+        self.tests.add(name)
+        now = datetime.now(timezone.utc).isoformat()
+        if first:
+            self._append(
+                path,
+                f"# gate {self.gate}, unit `{selector}`\n# FAILED at {now}\n",
+            )
+        cot = path.with_name(path.stem + ".cotenants.txt")
+        self._append(cot, f"# at the FAILED instant, {now}\n")
+        for line in self._cotenant_lines():
+            self._append(cot, line + "\n")
+
+    def feed_line(self, line: str) -> bool:
+        """Route `---- <name> ---- ` capture blocks to their test's file.
+
+        Returns True when the line was capture content the parser must not
+        see (a failing test's output can contain anything, including lines
+        that look like results); False hands the line back to the parser.
+        """
+        m = FAILURE_BLOCK.match(line)
+        if m:
+            # A block for a test never seen to fail still gets kept: this is
+            # evidence preservation, not bookkeeping.
+            name = m.group("name")
+            self.tests.add(name)
+            path = self._path(name)
+            self.block = path
+            if path is not None:
+                self._append(path, line + "\n")
+            return True
+        if self.block is None:
+            return False
+        # A block ends at the trailing `failures:` list, the unit's summary,
+        # or the next unit's header -- NOT at anything result-shaped: a
+        # failing test's captured output may itself contain `test x ... ok`
+        # lines (a test that runs cargo), and handing those to the parser
+        # would corrupt the manifest the reconciler checks.
+        if (
+            line == "failures:"
+            or SUMMARY_LINE.match(line)
+            or CARGO_RUNNING.match(line)
+            or CARGO_DOCTESTS.match(line)
+        ):
+            self.block = None
+            return False
+        self._append(self.block, line + "\n")
+        return True
+
+
 class Parser:
     """Streaming libtest/cargo output parser. One instance per run."""
 
-    def __init__(self, by_src: dict[tuple[str, str], str], by_crate: dict[str, str]):
+    def __init__(
+        self,
+        by_src: dict[tuple[str, str], str],
+        by_crate: dict[str, str],
+        collector: FailureCollector | None = None,
+    ):
         self.by_src = by_src
         self.by_crate = by_crate
+        self.collector = collector
         self.units: list[Unit] = []
         self.current: Unit | None = None
         self.pending: str | None = None
@@ -328,8 +492,18 @@ class Parser:
             )
         self._unit(selector, desc)
 
+    def _record(self, name: str, status: str) -> None:
+        self.current.record(name, status)
+        if status == "failed" and self.collector is not None:
+            self.collector.on_failed(self.current.selector, name)
+
     def feed(self, raw: str) -> None:
         line = ANSI.sub("", raw).rstrip("\n")
+
+        # Capture-block routing first: a failing test's output can contain
+        # anything, including lines that would otherwise parse as results.
+        if self.collector is not None and self.collector.feed_line(line):
+            return
 
         m = CARGO_RUNNING.match(line)
         if m:
@@ -376,7 +550,7 @@ class Parser:
             if status is None:
                 self.pending = name
             else:
-                self.current.record(name, status)
+                self._record(name, status)
             return
 
         self._resolve_pending(line)
@@ -391,7 +565,7 @@ class Parser:
             return
         status = classify(line)
         if status is not None:
-            self.current.record(self.pending, status)
+            self._record(self.pending, status)
             self.pending = None
 
     def finish(self) -> None:
@@ -1102,7 +1276,136 @@ def reaping_canary() -> bool:
     return True
 
 
+# --- standing canary: the failure collector ---------------------------------
+#
+# Same contract as the other two: runs on every invocation, before the real
+# command. A collector that silently stops writing is the 2026-09-08 data
+# point forever -- a FAILED test whose output nobody can read back -- and
+# nothing else would notice, because the gate's verdict does not depend on it.
+
+CANARY_FAILURE_LINES = [
+    "     Running tests/canary.rs (target/debug/deps/canary-0123456789abcdef)",
+    "",
+    "running 2 tests",
+    "test canary::stays_green ... ok",
+    "test canary::goes_red ... FAILED",
+    "",
+    "failures:",
+    "",
+    "---- canary::goes_red stdout ----",
+    "EVENT proof_deadline_missed t=4999",
+    "test impostor::printed_by_the_failing_test ... ok",
+    "thread 'canary::goes_red' panicked at tests/canary.rs:1:1:",
+    "",
+    "failures:",
+    "    canary::goes_red",
+    "",
+    "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered "
+    "out; finished in 0.01s",
+]
+
+CANARY_COTENANT_ROWS = [
+    (4243, 4242, "S", "target/debug/deps/mvr-0123456789abcdef --test-threads=8"),
+    (9001, 9000, "S", "target/debug/deps/rnsd_interop-cafef00dcafef00d"),
+    (9002, 9000, "S", "sshd: unrelated process that must not be listed"),
+]
+
+
+def failure_canary() -> bool:
+    """True if a FAILED test still leaves its artefacts on disk."""
+
+    def fail(msg: str) -> bool:
+        sys.stderr.write(f"[manifest] FAILURE-COLLECTOR CANARY FAILED -- {msg}\n")
+        sys.stderr.write(
+            "[manifest]   A FAILED test's output must survive the run (Codeberg\n"
+            "[manifest]   #221: a victim's failure output was lost to a caller's\n"
+            "[manifest]   10 minute kill). Fix FailureCollector in\n"
+            "[manifest]   scripts/run-with-manifest.py; do not skip this check.\n"
+        )
+        return False
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="leviculum-failure-canary-") as td:
+        base = Path(td)
+        collector = FailureCollector(
+            base, "run", "canary", snapshot=lambda: list(CANARY_COTENANT_ROWS)
+        )
+        collector.set_pgid(4242)
+        parser = Parser(
+            {("tests/canary.rs", "canary"): "-p canary --test canary"}, {}, collector
+        )
+        for line in CANARY_FAILURE_LINES:
+            parser.feed(line)
+        parser.finish()
+
+        log = base / "run" / "canary__goes_red.log"
+        if not log.is_file():
+            return fail(f"no per-test log for the FAILED test at {log}")
+        text = log.read_text()
+        if "EVENT proof_deadline_missed" not in text:
+            return fail("the captured stdout block did not reach the per-test log")
+        if "---- canary::goes_red stdout ----" not in text:
+            return fail("the block header did not reach the per-test log")
+        cot = base / "run" / "canary__goes_red.cotenants.txt"
+        if not cot.is_file():
+            return fail(f"no co-tenant snapshot beside the log at {cot}")
+        cot_text = cot.read_text()
+        if "deps/mvr" not in cot_text:
+            return fail("a process in the gate's own group was not listed")
+        if "rnsd_interop" not in cot_text:
+            return fail("a test-shaped process outside the group was not listed")
+        if "sshd" in cot_text:
+            return fail(
+                "an unrelated process was listed as a co-tenant; a list full of "
+                "noise is how the real co-tenant goes unread"
+            )
+        if (base / "run" / "canary__stays_green.log").exists():
+            return fail("a passing test got a failure artefact")
+        unit = parser.units[0]
+        if "impostor::printed_by_the_failing_test" in unit.ok:
+            return fail(
+                "a result-shaped line INSIDE a capture block was parsed as a "
+                "result; block content must not reach the parser"
+            )
+        if unit.failed != ["canary::goes_red"] or unit.ok != ["canary::stays_green"]:
+            return fail(
+                f"collection changed what the parser recorded: ok={unit.ok}, "
+                f"failed={unit.failed}"
+            )
+        if (problem := unit.reconcile()) is not None:
+            return fail(f"the reconciler no longer accepts the run: {problem}")
+
+        # Negative control: a green run must create nothing at all.
+        collector2 = FailureCollector(base, "run2", "canary", snapshot=lambda: [])
+        parser2 = Parser(
+            {("tests/canary.rs", "canary"): "-p canary --test canary"}, {}, collector2
+        )
+        for line in CANARY_FAILURE_LINES:
+            if "FAILED" in line or "----" in line or line.startswith(("EVENT", "thread")):
+                continue
+            parser2.feed(line)
+        parser2.finish()
+        if (base / "run2").exists():
+            return fail("a run with no failures still created a run directory")
+    return True
+
+
 # --- manifest ---------------------------------------------------------------
+
+
+def failures_dir() -> Path:
+    """Base directory for per-FAILED-test artefacts (see FailureCollector).
+
+    Deliberately NOT slugged per checkout the way manifest_dir() is: a
+    failure investigation reads across runs and hosts' checkouts, and the
+    run directory name already carries gate + timestamp + pid.
+    """
+    override = os.environ.get("LEVICULUM_FAILURE_DIR")
+    if override:
+        return Path(override)
+    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(state) / "leviculum-ci" / "test-failures"
 
 
 def manifest_dir() -> Path:
@@ -1177,9 +1480,15 @@ def main() -> int:
         return 1
     if not reaping_canary():
         return 1
+    if not failure_canary():
+        return 1
 
     by_src, by_crate = target_index()
-    parser = Parser(by_src, by_crate)
+    run_name = (
+        f"{args.gate}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+    )
+    collector = FailureCollector(failures_dir(), run_name, args.gate)
+    parser = Parser(by_src, by_crate, collector)
 
     env = dict(os.environ)
     if sys.stdout.isatty():
@@ -1223,11 +1532,19 @@ def main() -> int:
             env=env,
             on_line=on_line,
             timeout_s=timeout_s,
+            # The co-tenant snapshot separates "in this gate's own group"
+            # from "elsewhere on the host", and the group is the child's.
+            on_spawn=lambda proc: collector.set_pgid(proc.pid),
         )
         # How the run ended goes into the log as well as onto stderr. A nightly
         # keeps the log and throws the terminal away, and "which gate gave up,
         # after how long, with what still alive" is the part it must keep.
         report = outcome_report(args.gate, outcome)
+        if collector.dir is not None:
+            report.append(
+                f"[manifest] PER-TEST FAILURE ARTIFACTS ({len(collector.tests)} "
+                f"test(s)): {collector.dir}"
+            )
         for line in report:
             sys.stderr.write(line + "\n")
             log.write(line + "\n")
@@ -1253,7 +1570,7 @@ def main() -> int:
         failed_log_path.write_text(log_path.read_text(errors="replace"), errors="replace")
 
     executed = sum(len(u.ok) + len(u.failed) for u in parser.units)
-    for warning in parser.warnings:
+    for warning in parser.warnings + collector.warnings:
         sys.stderr.write(f"[manifest] WARNING: {warning}\n")
 
     payload = {
@@ -1278,6 +1595,7 @@ def main() -> int:
         "executed": executed,
         "log": str(log_path),
         "failed_log": str(failed_log_path) if rc != 0 else None,
+        "failure_artifacts": str(collector.dir) if collector.dir is not None else None,
         "units": [u.as_json() for u in parser.units],
     }
 
