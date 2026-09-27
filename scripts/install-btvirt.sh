@@ -31,13 +31,18 @@
 #
 # Idempotent: a host whose installed binary already carries the patch -- by
 # md5 against the recorded one, or by the sidecar naming the commit -- is left
-# untouched, so `just install-ci` stays a one-command re-run.
+# untouched, so `just install-ci` stays a one-command re-run. So is a source
+# tree that already has the fix, which is how a future bluez shipping it is
+# handled: see patch_state below.
 #
 # Usage:
 #   bash scripts/install-btvirt.sh             build + install if needed
 #   bash scripts/install-btvirt.sh --check     verify only, build nothing
-#   bash scripts/install-btvirt.sh --self-test drive --check against injected
-#                                              damage (no network, no build)
+#   bash scripts/install-btvirt.sh --self-test drive the patch step and the
+#                                              sidecar against a synthesised
+#                                              source tree and injected
+#                                              damage (no root, no network,
+#                                              no build)
 #
 # Exit 0 = the patched binary is in place (or, in install mode, a prerequisite
 # this script may not conjure is missing and it said which). Exit 1 = --check
@@ -142,6 +147,130 @@ check() {
 
 # Everything below is the install half.
 
+# Which of the three states is a bluez source tree in? Answered by patch(1)
+# in --dry-run, and deliberately not by `git apply --check`: an `apt-get
+# source` tree is no git tree, and the matcher that judges has to be the
+# matcher that applies, or the preflight can disagree with the real run in
+# both directions. It would here -- measured 2026-09-27 on this host's two
+# bluez-5.82 trees, all fourteen hunks land 1083 lines off the line numbers
+# the upstream commit carries, an offset patch(1) absorbs without a word.
+#
+#   applied    the fix is in already: the patch reverse-applies cleanly.
+#              Nothing to do. This is also the future-bluez case. No RELEASED
+#              bluez known to this host carries it -- 5.82 is the newest
+#              (the last entry in the ChangeLog of the source `apt-get source
+#              bluez` fetches on trixie) and the commit is dated 2026-09-15,
+#              after it -- so there is no version number to compare against
+#              and none is invented here. The test is the file's content, and
+#              the first release that ships the fix needs no edit in this
+#              script.
+#   appliable  a stock tree the patch fits.
+#   no         neither. Refuse: building an unknown emulator is the failure
+#              this whole script exists to prevent.
+patch_state() {
+    local srcdir="$1" logdir="$2"
+    if (cd "$srcdir" && patch -p1 --reverse --forward --dry-run \
+            <"$PATCH_FILE" >"$logdir/patch-reverse.log" 2>&1); then
+        echo applied
+        return 0
+    fi
+    if (cd "$srcdir" && patch -p1 --forward --dry-run \
+            <"$PATCH_FILE" >"$logdir/patch-forward.log" 2>&1); then
+        echo appliable
+        return 0
+    fi
+    echo no
+    return 0
+}
+
+# Put the fix into $srcdir, or say why it cannot be. Returns 0 exactly when
+# the tree carries the patch afterwards -- freshly applied or already there.
+apply_patch() {
+    local srcdir="$1" logdir="$2" state
+    state=$(patch_state "$srcdir" "$logdir")
+    case "$state" in
+        applied)
+            say "$PATCH_SHORT is already in this source tree; leaving it alone"
+            return 0
+            ;;
+        appliable)
+            say "applying $PATCH_SHORT ($PATCH_SUBJECT)"
+            if ! (cd "$srcdir" && patch -p1 --forward <"$PATCH_FILE" \
+                    >"$logdir/patch.log" 2>&1); then
+                say "ERROR: the patch passed its dry-run and then failed"
+                sed 's/^/[install-btvirt]   /' "$logdir/patch.log"
+                return 1
+            fi
+            sed 's/^/[install-btvirt]   /' "$logdir/patch.log"
+            return 0
+            ;;
+        *)
+            say "ERROR: $PATCH_SHORT neither applies here nor is applied already"
+            sed 's/^/[install-btvirt]   /' "$logdir/patch-forward.log"
+            say "       refresh scripts/patches/ against this bluez, or pin the source"
+            return 1
+            ;;
+    esac
+}
+
+# A bluez source tree the patch step can be measured against, synthesised
+# from the vendored patch itself: every hunk's pre-image (its context and
+# deletion lines) written at the line number the hunk declares, the gaps
+# between hunks filled. It does not compile and is not meant to -- it is
+# exactly and only what patch(1) reads, it lives in this repo rather than on
+# one bench, and it moves with the patch file, so a refresh that breaks the
+# hunks fails in `just guards` instead of on somebody's provisioning run.
+#
+# What it can therefore catch: the step's own logic, and a refresh that
+# changes what the patch DOES (its post-image lines are asserted). What it
+# cannot: whether the patch still fits Debian's bluez -- the fixture is the
+# patch's own pre-image, so a patch and a fixture drift together. That
+# question needs the real source and is answered by patch_state at
+# provisioning time; it was answered by hand on 2026-09-27 against this
+# bench's two bluez-5.82 trees, stock (appliable) and 325's (applied).
+make_fixture() {
+    local dest="$1"
+    mkdir -p "$dest/emulator" || return 1
+    awk '
+        /^--- a\/emulator\/btdev\.c$/ { seen = 1; next }
+        !seen { next }
+        /^@@ / {
+            split($2, range, ",")          # $2 is "-1589,9"
+            lineno = substr(range[1], 2) + 0
+            remain = (range[2] == "" ? 1 : range[2] + 0)
+            next
+        }
+        remain <= 0 { next }               # between hunks: header, +++ , trailer
+        /^\+/ { next }                     # post-image only
+        /^\\/ { next }                     # "\ No newline at end of file"
+        {
+            pre[lineno] = substr($0, 2)
+            if (lineno > max)
+                max = lineno
+            lineno++
+            remain--
+        }
+        END {
+            for (i = 1; i <= max; i++)
+                print (i in pre) ? pre[i] : "\t/* not part of any hunk */"
+        }
+    ' "$PATCH_FILE" >"$dest/emulator/btdev.c" || return 1
+    [ -s "$dest/emulator/btdev.c" ]
+}
+
+# The sidecar, exactly as it lands on disk: stdout here is the file there.
+# A function so that the self-test can read what a real install would write
+# without being root, and so the writer and the checker above cannot drift
+# apart unnoticed. The third line is the one periculum quotes; it stays
+# inside the runner's 160-character window as long as it keeps this shape.
+provenance_text() {
+    local version="$1" md5="$2" today="$3"
+    printf '%s\n%s\n%s\n' \
+        "# written by scripts/install-btvirt.sh on $today" \
+        "# source: apt-get source bluez ($version), patch -p1 < $(basename "$PATCH_FILE") ($PATCH_SHA)" \
+        "bluez $version + upstream $PATCH_SHORT ($PATCH_SUBJECT); built $today, md5 $md5"
+}
+
 SUDO=""
 need_sudo() {
     if [ "$(id -u)" -eq 0 ]; then
@@ -220,14 +349,10 @@ install_btvirt() {
     DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y \
         libreadline-dev python3-docutils >"$workdir/apt-install.log" 2>&1 || true
 
-    say "applying $PATCH_SHORT ($PATCH_SUBJECT)"
-    if ! (cd "$srcdir" && patch -p1 --forward <"$PATCH_FILE" >"$workdir/patch.log" 2>&1); then
-        say "ERROR: the vendored patch does not apply to bluez $version"
-        sed 's/^/[install-btvirt]   /' "$workdir/patch.log"
-        say "       refresh scripts/patches/ against this bluez, or pin the source"
+    if ! apply_patch "$srcdir" "$workdir"; then
+        say "       the source above is bluez $version"
         return 1
     fi
-    sed 's/^/[install-btvirt]   /' "$workdir/patch.log"
 
     # Only emulator/btvirt is wanted, so everything that pulls in a daemon,
     # a udev rule or a D-Bus service is configured out.
@@ -258,12 +383,7 @@ install_btvirt() {
     local md5 today
     md5=$(installed_md5)
     today=$(date +%Y-%m-%d)
-    # The second line is the one periculum quotes. It stays inside the
-    # runner's 160-character window as long as it keeps this shape.
-    printf '%s\n%s\n%s\n' \
-        "# written by scripts/install-btvirt.sh on $today" \
-        "# source: apt-get source bluez ($version), patch -p1 < $(basename "$PATCH_FILE") ($PATCH_SHA)" \
-        "bluez $version + upstream $PATCH_SHORT ($PATCH_SUBJECT); built $today, md5 $md5" \
+    provenance_text "$version" "$md5" "$today" \
         | $SUDO tee "$PROVENANCE" >/dev/null || return 1
     $SUDO chmod 644 "$PROVENANCE"
 
@@ -271,10 +391,21 @@ install_btvirt() {
     check
 }
 
-# --self-test: every way the sidecar can lie, injected, with --check asked for
-# a verdict on each. A checker nobody has ever made fail is a checker nobody
-# knows is wired up -- and this one guards a file a human writes by hand on a
-# bench, which is exactly where the lies come from.
+# --self-test: the whole step without root, a network or a compiler. Two
+# halves.
+#
+# The PATCH half runs patch_state/apply_patch against a synthesised bluez
+# tree and asserts all three verdicts -- a stock tree takes the fix, the
+# patched tree is recognised and left alone, a tree the hunks do not fit is
+# refused. That half of the step is otherwise only ever exercised by a real
+# provisioning run on a bench with deb-src and a compiler, which is to say
+# rarely, and it is the half that decides what gets built.
+#
+# The SIDECAR half injects every way the note can lie and asks --check for a
+# verdict on each, plus the round trip: what provenance_text writes, check
+# accepts. A checker nobody has ever made fail is a checker nobody knows is
+# wired up -- and this one guards a file a human writes by hand on a bench,
+# which is exactly where the lies come from.
 self_test() {
     local scratch fails=0
     scratch=$(mktemp -d /tmp/install-btvirt-selftest.XXXXXX) || return 1
@@ -303,6 +434,113 @@ self_test() {
         printf '# a comment the reader must skip\n\nbluez 5.82-1.1 + upstream %s (%s); built 2026-09-27, md5 %s\n' \
             "$PATCH_SHORT" "$PATCH_SUBJECT" "$(md5sum "$bin" | cut -d' ' -f1)" >"$note"
     }
+
+    ok() { say "  ok   $1"; }
+    bad() { say "  FAIL $1"; fails=$((fails + 1)); }
+    is() {  # is <want> <got> <case name>
+        if [ "$1" = "$2" ]; then
+            ok "$3"
+        else
+            bad "$3: got '$2', wanted '$1'"
+        fi
+    }
+
+    # ---- the patch half -------------------------------------------------
+    say "self-test: the patch step against a synthesised bluez source tree"
+
+    if ! command -v patch >/dev/null 2>&1; then
+        bad "patch(1) is not installed, so the patch step cannot be tested"
+        say "       sudo apt install patch"
+    else
+        local src="$scratch/src" logs="$scratch/logs"
+        mkdir -p "$logs"
+        if ! make_fixture "$src"; then
+            bad "could not synthesise a source tree from $PATCH_FILE"
+        else
+            local state
+            state=$(patch_state "$src" "$logs")
+            is appliable "$state" "stock tree reads as appliable"
+
+            if apply_patch "$src" "$logs" >/dev/null 2>&1; then
+                ok "the patch applies"
+            else
+                bad "the patch does not apply to its own pre-image"
+            fi
+
+            # The three mechanisms the fix changes, by their post-image
+            # lines: the connection-complete event, the ACL data path, and
+            # the CIS of a CIG. And the line it replaces, which must be gone.
+            local want
+            for want in \
+                    'cc.handle = cpu_to_le16(conn->link->handle);' \
+                    'hdr.handle = acl_handle_pack(conn->link->handle, flags);' \
+                    'evt.cis_handle = cpu_to_le16(iso->link->handle);'; do
+                if grep -qF "$want" "$src/emulator/btdev.c"; then
+                    ok "patched tree carries: $want"
+                else
+                    bad "patched tree lacks: $want"
+                fi
+            done
+            if grep -qF 'hdr.handle = acl_handle_pack(conn->handle, ACL_START);' \
+                    "$src/emulator/btdev.c"; then
+                bad "patched tree still sends ACL under the sender's handle"
+            else
+                ok "the sender-handle ACL line is gone"
+            fi
+
+            # Second run over the same tree: the bluez-that-already-ships-it
+            # case. Recognised, left alone, and NOT applied twice.
+            local before after
+            before=$(md5sum "$src/emulator/btdev.c" | cut -d' ' -f1)
+            state=$(patch_state "$src" "$logs")
+            is applied "$state" "patched tree reads as applied"
+            if apply_patch "$src" "$logs" >/dev/null 2>&1; then
+                ok "a tree that already has the fix is accepted"
+            else
+                bad "a tree that already has the fix is rejected"
+            fi
+            after=$(md5sum "$src/emulator/btdev.c" | cut -d' ' -f1)
+            is "$before" "$after" "and left byte-identical"
+
+            # A tree the hunks do not fit: neither state, so refuse rather
+            # than build an emulator nobody can name.
+            local trimmed="$scratch/trimmed"
+            mkdir -p "$trimmed/emulator"
+            head -600 "$src/emulator/btdev.c" >"$trimmed/emulator/btdev.c"
+            state=$(patch_state "$trimmed" "$logs")
+            is no "$state" "an unrelated tree reads as no"
+            if apply_patch "$trimmed" "$logs" >/dev/null 2>&1; then
+                bad "an unrelated tree was accepted"
+            else
+                ok "an unrelated tree is refused"
+            fi
+        fi
+    fi
+
+    # ---- the sidecar half -----------------------------------------------
+    # What the writer produces has to be what the checker takes, and what
+    # periculum can quote: the runner cuts the line at 160 characters.
+    local text origin
+    text=$(provenance_text "5.82-1.1" "$(printf %032d 0)" "2026-09-27")
+    is 3 "$(echo "$text" | wc -l)" "sidecar is three lines"
+    if echo "$text" | sed -n 2p | grep -qF "$PATCH_SHA"; then
+        ok "sidecar comment names the full sha"
+    else
+        bad "sidecar comment does not name $PATCH_SHA"
+    fi
+    origin=$(echo "$text" | sed -n 3p)
+    if echo "$origin" | grep -qE \
+        "^bluez 5\.82-1\.1 \+ upstream $PATCH_SHORT \(.*\); built 2026-09-27, md5 [0-9a-f]{32}$"
+    then
+        ok "origin line has the shape periculum reads"
+    else
+        bad "origin line has the wrong shape: $origin"
+    fi
+    if [ "${#origin}" -le 160 ]; then
+        ok "origin line fits the 160-char window (${#origin})"
+    else
+        bad "origin line is ${#origin} characters, the runner quotes 160"
+    fi
 
     say "self-test: injecting each way the sidecar can lie"
 
@@ -334,6 +572,13 @@ self_test() {
 
     write_good_note
     expect 0 "rewritten sidecar after the reinstall"
+
+    # The round trip: the writer's own output, for this very binary, is what
+    # --check accepts. The two shapes in this file -- the one a human wrote
+    # on the bench 2026-09-27 (above) and this generated one -- both pass.
+    provenance_text "5.82-1.1" "$(md5sum "$bin" | cut -d' ' -f1)" \
+        "$(date +%Y-%m-%d)" >"$note"
+    expect 0 "sidecar as provenance_text writes it"
 
     if [ "$fails" -ne 0 ]; then
         say "self-test: $fails case(s) failed"

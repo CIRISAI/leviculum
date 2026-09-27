@@ -1693,17 +1693,20 @@ sweep budget="30GB" fw_budget="4GB": _require-cargo-sweep
 sweep-selftest:
     @bash scripts/test-just-sweep.sh
 
-# The provenance half of scripts/install-btvirt.sh (periculum #49). The
-# ble_room cells run on an emulator whose BUILD decides their verdict --
-# bluez <= 5.82 stalls every room from the third node -- so each run prints
-# the sidecar beside the binary as `origin=`, and that sidecar is a file a
-# human can write, copy or leave behind after a reinstall. The checker that
-# refuses those is only worth having if somebody has watched it refuse, so
-# --self-test injects each case (no sidecar, no origin line, an origin that
-# does not name the patch, one older than the binary, one recording another
-# md5) and asserts the verdict. Nothing is built, fetched or installed: it
-# runs against a scratch pair in /tmp. 0.06 s (measured 2026-09-27).
-[doc('Drive the btvirt provenance check against injected damage')]
+# scripts/install-btvirt.sh without root, a network or a compiler (periculum
+# #49). The ble_room cells run on an emulator whose BUILD decides their
+# verdict -- bluez <= 5.82 stalls every room from the third node -- so that
+# script patches bluez before building it and writes a sidecar each run
+# prints as `origin=`. Both halves are otherwise only exercised by a real
+# provisioning run on a bench with deb-src and a compiler, which is to say
+# rarely. So --self-test drives the patch step against a source tree
+# synthesised from the vendored patch (stock tree takes it, patched tree is
+# left alone, unrelated tree refused, and the three post-image lines the fix
+# turns on are asserted), and injects each way the sidecar can lie (none, no
+# origin line, an origin not naming the patch, one older than the binary,
+# one recording another md5) for the checker to refuse. Nothing is built,
+# fetched or installed: /tmp scratch only. 0.12 s (measured 2026-09-27).
+[doc('Drive the btvirt patch step and provenance check against injected damage')]
 btvirt-selftest:
     @bash scripts/install-btvirt.sh --self-test
 
