@@ -6852,3 +6852,309 @@ fn control_the_connect_failure_model_is_a_parameter_and_every_mechanism_fires() 
         "the stranger row got cheaper instead of merely quieter"
     );
 }
+
+// ---------------------------------------------------------------------
+// #353 — seed 2 of the rig's ble_room_10 cell: the lowest address
+// arrives ninth and finds nine full tables
+// ---------------------------------------------------------------------
+
+/// Node `i`'s adapter address in the rig's seed-2 room
+/// (`periculum run regression/ble_room_10.toml --seed 2`, saved log
+/// `ble_room_10_2026-09-27T13-10-50Z.log`): btvirt hands out
+/// `00:AA:01:0i:00:0(i+1)`, so the address order IS the node index
+/// order and node 0 holds the room's lowest address — the one the v2.2
+/// sort says must dial everyone and, strictly, is dialled by nobody.
+/// Seed 2 shuffles the arrivals to `4,8,5,1,7,6,3,2,0,9`: node 0
+/// arrives ninth, 4.0 s after the first board, into a room that is
+/// busy saturating itself.
+const fn seed2_addr(node: usize) -> u64 {
+    0x00AA_0100_0000 + ((node as u64) << 16) + node as u64 + 1
+}
+
+/// The eighteen links the nine early arrivals formed, in formation
+/// order: `(dialler, target, when)` with `when` in milliseconds after
+/// 13:08:00Z, the central side's `BLE_LINK_UP` stamp from the saved
+/// log. Every one is a strict sort win (asserted in the replay), none
+/// ever went down (zero `BLE_LINK_DOWN` in 150 s), and node 0 is in
+/// none of them. Node 1 — the lowest address among the nine — holds
+/// FOUR central links: the strict sort makes the low addresses spend
+/// the dials, which is what tells the two table shapes apart below.
+const SEED2_DIALS: [(usize, usize, u32); 18] = [
+    (4, 5, 16_501),
+    (1, 2, 18_787),
+    (7, 8, 19_073),
+    (6, 7, 19_742),
+    (5, 6, 19_884),
+    (2, 4, 20_796),
+    (3, 4, 22_563),
+    (4, 6, 24_183),
+    (8, 9, 25_277),
+    (5, 7, 25_704),
+    (1, 3, 25_861),
+    (7, 9, 26_562),
+    (3, 5, 26_806),
+    (6, 8, 27_139),
+    (2, 3, 28_426),
+    (1, 8, 33_263),
+    (2, 9, 35_052),
+    (1, 9, 39_144),
+];
+
+/// The two link-table shapes a Columba room can be built of.
+///
+/// `Board` is the firmware's, and the one every `run_sim` claim in this
+/// file — including "0 of 1000 disconnected at ten boards" — is about:
+/// one central slot, [`PERIPH_SLOTS`] peripheral ones
+/// ([`Board::outgoing`] / [`Board::incoming`] above). `CombinedFour`
+/// is lnsd's: one cap over both roles (`links.rs:63
+/// DEFAULT_MAX_LINKS = 4`, `is_full` at `links.rs:346`), any mix of
+/// roles fills it.
+///
+/// Both stacks take a full table off the air (lnsd:
+/// `should_advertise = !is_full`, `links.rs:359`; the firmware:
+/// ADV_LOCK) and both refuse a surplus dial only AFTER a connection
+/// exists — lnsd's `Admission::RejectFull` sits behind connect,
+/// identity read and handshake. A dark peer sends no connectable
+/// advertising PDU, so a dial at it can only run out its setup budget
+/// (`bluez.rs:45 SETUP_TIMEOUT`, 20 s). The admission a dialler
+/// actually meets is therefore the advertising rule: a dial lands iff
+/// the target is on the air.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RoomTable {
+    CombinedFour,
+    Board,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RoomSlots {
+    outgoing: usize,
+    incoming: usize,
+}
+
+impl RoomTable {
+    /// Whether a node with these slots is on the air.
+    fn advertises(self, s: RoomSlots) -> bool {
+        match self {
+            RoomTable::CombinedFour => s.outgoing + s.incoming < 4,
+            RoomTable::Board => s.incoming < PERIPH_SLOTS,
+        }
+    }
+
+    /// Whether a node with these slots may open a dial. lnsd gates
+    /// both the scan path and the dial pump on `is_full()`
+    /// (`ble/mod.rs:617`, `:793`); a board's central task needs its
+    /// one outgoing slot (a dark board may still dial — advertising
+    /// reads the peripheral slots, dialling the central one).
+    fn may_dial(self, s: RoomSlots) -> bool {
+        match self {
+            RoomTable::CombinedFour => s.outgoing + s.incoming < 4,
+            RoomTable::Board => s.outgoing < 1,
+        }
+    }
+}
+
+/// Replay [`SEED2_DIALS`] against one table shape: a dial lands iff
+/// the dialler may still dial and the target is still on the air, and
+/// a landed dial spends the dialler's outgoing and the target's
+/// incoming slot. Returns the final slots and which dials landed.
+fn replay_seed2(table: RoomTable) -> ([RoomSlots; 10], [bool; 18]) {
+    let mut slots = [RoomSlots::default(); 10];
+    let mut landed = [false; 18];
+    for (k, &(dialler, target, _)) in SEED2_DIALS.iter().enumerate() {
+        assert_eq!(
+            should_initiate(
+                0,
+                seed2_addr(dialler),
+                Some(0),
+                seed2_addr(target),
+                ScanMode::Strict,
+            ),
+            ConnectDecision::InitiateLowerAddress,
+            "the rig logged every one of these as a strict sort win"
+        );
+        if table.may_dial(slots[dialler]) && table.advertises(slots[target]) {
+            slots[dialler].outgoing += 1;
+            slots[target].incoming += 1;
+            landed[k] = true;
+        }
+    }
+    (slots, landed)
+}
+
+/// #353, first replay: seed 2's room on lnsd's combined table. All
+/// eighteen dials are admissible and saturate the nine early arrivals
+/// completely — 4-regular on nine vertices spends every one of their
+/// 36 slot-instances — and the end state is ABSORBING: only node 0 is
+/// on the air, so its window can never hold a candidate; the nine each
+/// have the #375 escape verdict on node 0's advertisement (the rig
+/// logged one `initiate_fallback` per node at 13:09:02–22) and every
+/// one dies on the full-table gate; and no link ever dies to free a
+/// slot. Node 0 is unreachable by rule, not by chance — which is what
+/// the KNOWN-REDS attribution of this seed says.
+///
+/// This is the question the suite had never asked: every `run_sim`
+/// claim above is about [`RoomTable::Board`], under which this room
+/// cannot even be built (the test below). Whether lnsd keeps the
+/// combined table, splits it like a board's, advertises its slot
+/// count, or sheds a link for a linkless dialler is a design decision
+/// (#353); until it lands, this test pins the mechanism.
+#[test]
+fn lnsds_combined_table_lets_seed_2s_nine_saturate_and_absorb_node_0() {
+    let (slots, landed) = replay_seed2(RoomTable::CombinedFour);
+    assert!(
+        landed.iter().all(|&l| l),
+        "the rig's room formed all eighteen links under the combined cap"
+    );
+    assert_eq!(
+        (slots[0].outgoing, slots[0].incoming),
+        (0, 0),
+        "node 0 ended linkless (BLE_ROOM_LINKS node=0 links=0)"
+    );
+    for (i, s) in slots.iter().enumerate().skip(1) {
+        assert_eq!(
+            s.outgoing + s.incoming,
+            4,
+            "node {i} ended full (BLE_ROOM_LINKS links=4)"
+        );
+    }
+
+    // The absorption, piece by piece. First: node 0 is the only node
+    // on the air, and a scanner never sights itself, so node 0's
+    // window is empty in EITHER mode — its last logged window was
+    // 13:08:33, before the ninth adv gate closed.
+    let on_air: Vec<usize> = (0..slots.len())
+        .filter(|&i| RoomTable::CombinedFour.advertises(slots[i]))
+        .collect();
+    assert_eq!(on_air, [0], "after saturation only node 0 advertises");
+
+    // Second: the nine are not even stuck for lack of a verdict. In
+    // strict mode they wait (the run's 99 `wait_peer_lower_address`
+    // lines about node 0), in fallback mode the #375 escape tells
+    // them to dial node 0 — and the full-table gate (`ble/mod.rs:617`)
+    // eats the dial. The escape hatch exists and is disabled by the
+    // very saturation it would relieve.
+    for (i, s) in slots.iter().enumerate().skip(1) {
+        assert_eq!(
+            should_initiate(0, seed2_addr(i), Some(0), seed2_addr(0), ScanMode::Strict),
+            ConnectDecision::WaitPeerHasLowerAddress,
+        );
+        let escape = should_initiate(0, seed2_addr(i), Some(0), seed2_addr(0), ScanMode::Fallback);
+        assert_eq!(escape, ConnectDecision::InitiateFallback);
+        assert!(
+            escape.initiate() && !RoomTable::CombinedFour.may_dial(*s),
+            "node {i}: the fallback verdict fired and the full table gated it"
+        );
+    }
+
+    // Third: node 0's own three dials against this timeline. The rig's
+    // queue serialises one 20 s setup at a time, so the pop times lag
+    // the elections by up to 30 s — and the room darkens meanwhile.
+    let links_at = |node: usize, t: u32| {
+        SEED2_DIALS
+            .iter()
+            .filter(|&&(d, g, when)| (d == node || g == node) && when <= t)
+            .count()
+    };
+    // Dial 1 popped at 13:08:21.56 toward node 4, which was ON the air
+    // with two free slots and stayed connectable until 13:08:24.18:
+    // this dial lost a live 2.6 s race at the emulator/BlueZ layer,
+    // not a structural one — the structure only guarantees the loss
+    // from the adv gate onward.
+    assert_eq!(links_at(4, 21_560), 2, "dial 1's target was not yet full");
+    // Dials 2 and 3 popped at 13:08:42.38 and 13:09:04.37, and their
+    // targets were full — and therefore dark, unable to refuse — from
+    // 13:08:39: twenty seconds of silence each was the only possible
+    // outcome.
+    assert_eq!(links_at(1, 42_375), 4, "dial 2 popped against a dark peer");
+    assert_eq!(links_at(9, 64_374), 4, "dial 3 popped against a dark peer");
+}
+
+/// #353, second replay: the same eighteen dials on the board table.
+/// The room cannot be built — the first dial the one-outgoing-slot
+/// shape refuses is node 4's SECOND central dial, at 13:08:24.18, the
+/// moment the rig's room left everything this file's simulation had
+/// ever measured — and the saturation trap does not exist: before the
+/// tenth node holds a link, the nine others can spend at most eight
+/// strict dials (upward) plus the top board's one fallback dial
+/// (downward), nine incoming slots against a supply of 27, which
+/// darkens at most two boards. Node 0 always has a candidate on the
+/// air, and its first rig dial (toward node 4) simply lands.
+#[test]
+fn the_board_table_cannot_build_seed_2s_room_and_node_0s_first_dial_lands() {
+    let (slots, landed) = replay_seed2(RoomTable::Board);
+    let first_refused = landed
+        .iter()
+        .position(|&l| !l)
+        .expect("the board table refuses the room");
+    assert_eq!(
+        (SEED2_DIALS[first_refused].0, SEED2_DIALS[first_refused].1),
+        (4, 6),
+        "the first refusal is node 4's second central dial"
+    );
+    assert_eq!(
+        landed.iter().filter(|&&l| l).count(),
+        8,
+        "one outgoing each: eight of the eighteen dials came first"
+    );
+    for (i, s) in slots.iter().enumerate().skip(1) {
+        assert!(s.outgoing <= 1, "node {i} kept the one-central shape");
+        assert!(
+            RoomTable::Board.advertises(*s),
+            "node {i} is still on the air"
+        );
+    }
+    // Node 0's first rig dial — the one that spent 20 s blind on the
+    // combined table — finds its target advertising a free peripheral
+    // slot and forms.
+    assert!(
+        RoomTable::Board.may_dial(slots[0]) && RoomTable::Board.advertises(slots[4]),
+        "node 0 dials node 4 and node 4 can take it"
+    );
+
+    // And the worst case, constructed: an adversary spending every
+    // outgoing slot the nine have on making boards dark reaches two
+    // dark boards, not three — 3 incoming darken one board, the strict
+    // sort only dials upward, and the top board's own dial is a
+    // fallback dial downward, out of any dark set. Seven boards stay
+    // on the air for the linkless tenth.
+    let mut adv = [RoomSlots::default(); 10];
+    let packing: [(usize, usize, ScanMode); 9] = [
+        (1, 7, ScanMode::Strict),
+        (2, 7, ScanMode::Strict),
+        (3, 7, ScanMode::Strict),
+        (4, 8, ScanMode::Strict),
+        (5, 8, ScanMode::Strict),
+        (6, 8, ScanMode::Strict),
+        (7, 9, ScanMode::Strict),
+        (8, 9, ScanMode::Strict),
+        (9, 1, ScanMode::Fallback),
+    ];
+    for (dialler, target, mode) in packing {
+        assert!(
+            should_initiate(0, seed2_addr(dialler), Some(0), seed2_addr(target), mode).initiate(),
+            "the packing only uses dials the rule grants"
+        );
+        assert!(
+            RoomTable::Board.may_dial(adv[dialler]) && RoomTable::Board.advertises(adv[target]),
+            "the packing only uses dials the tables admit"
+        );
+        adv[dialler].outgoing += 1;
+        adv[target].incoming += 1;
+    }
+    let dark: Vec<usize> = (1..adv.len())
+        .filter(|&i| !RoomTable::Board.advertises(adv[i]))
+        .collect();
+    assert_eq!(
+        dark,
+        [7, 8],
+        "nine outgoing slots darken at most two boards"
+    );
+    assert!(
+        (1..adv.len()).any(|i| {
+            RoomTable::Board.advertises(adv[i])
+                && should_initiate(0, seed2_addr(0), Some(0), seed2_addr(i), ScanMode::Strict)
+                    .initiate()
+        }),
+        "the linkless lowest address still has a strict candidate on the air"
+    );
+}
