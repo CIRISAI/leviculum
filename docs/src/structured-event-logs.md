@@ -412,6 +412,27 @@ The line is written through `log_fmt`, so a board with nothing
 attached to the debug CDC (`RUNTIME_DRAIN_OPEN == false`) never
 formats it.
 
+### Reading a `LINK_DIED` age
+
+`LINK_DIED` comes from the core (`link_management.rs`, target
+`leviculum_core::link`) and carries its age in milliseconds, to be
+read against the `threshold_ms` on the same line:
+
+- `elapsed_since_activity_ms` is the time since the link's last
+  inbound packet, and reads `none` for a link that never had one —
+  every handshake that did not complete.  There the expected number
+  does not exist, and the raw subtraction would print the process
+  uptime in its place: the field base of 2026-09-27 reported 91
+  responder culls as `elapsed_since_activity_ms=9581430` beside
+  `threshold_ms=85824`, for culls that were 72 to 90 s old and
+  therefore on time (#354).
+- `since_request_ms` appears on `detail=handshake_timeout` and is the
+  age of the handshake itself, measured from the request — the
+  initiator's send, the responder's proof.  That is the clock
+  `establishment_timeout_ms()` and hence `threshold_ms` is measured
+  on, so those two are the pair to compare: a handshake culled on
+  time shows a difference of one tick.
+
 ## Validation behaviour
 
 Two violation classes, both non-blocking — the original event
