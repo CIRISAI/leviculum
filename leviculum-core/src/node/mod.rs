@@ -150,6 +150,8 @@ mod mvr_peer_up_pull;
 #[cfg(test)]
 mod mvr_pending_local_path_requests;
 #[cfg(test)]
+mod mvr_pending_path_request_reorigination;
+#[cfg(test)]
 mod mvr_pn_sync_resource_census;
 #[cfg(test)]
 mod mvr_probe_announce_phase;

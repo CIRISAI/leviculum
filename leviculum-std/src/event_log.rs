@@ -452,6 +452,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             // Not a drop reason and outside `total` (#374): link requests
             // for a local client's destination redirected to the clients.
             "lr_local_client_redirect",
+            // Not a drop reason and outside `total` (#433): path requests
+            // batched onto a discovery already pending for the same
+            // destination instead of being re-originated.
+            "path_request_pending_suppressed",
         ],
     },
     // RNode CMD_READY flow control under the firmware duty lock.
@@ -775,6 +779,18 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "PR_REORIG",
         required_keys: &["dst", "iface_in", "iface_out", "peers"],
+    },
+    // A path request batched onto a discovery this node already had pending
+    // for the same destination, instead of being re-originated (Codeberg
+    // #433, emitted by `transport.rs::handle_path_request`). Not a drop: the
+    // pending discovery's answer is owed to `requesters` interfaces, this
+    // one included. `dst` is the destination prefix the requester asked for,
+    // `iface_in` the interface it asked on. A count rising fast against
+    // `PR_REORIG` naming the same `dst` is a requester retrying faster than
+    // the mesh can answer — the 2026-09-27 field day's amplifier.
+    EventSchema {
+        name: "PR_PENDING_SUPPRESSED",
+        required_keys: &["dst", "iface_in", "requesters"],
     },
     // The management destination's own announce (`node/mod.rs`); `iface` is
     // the literal `all`, since it goes out on every interface at once.

@@ -1510,6 +1510,17 @@ pub struct TransportStats {
     // instead of the mesh (#374). Non-zero says a client came back without
     // announcing and the daemon covered for it.
     pub(crate) lr_local_client_redirect: u64,
+    // NOT a drop counter and deliberately outside `packets_dropped`: path
+    // requests that arrived while a discovery for the same destination was
+    // already pending here, and were batched onto it instead of being
+    // re-originated (#433). Nothing was discarded — the tag is recorded, the
+    // requester is remembered, and the pending discovery's answer serves it.
+    // What was withheld is a rebroadcast, which is why this must not join the
+    // drop taxonomy: `packets_dropped == drops_reason_sum()` is an invariant
+    // about LOSS, and a suppression that saves airtime is the opposite of
+    // loss. Non-zero says a requester is retrying faster than the mesh can
+    // answer; a rising count is the amplifier this stack no longer feeds.
+    pub(crate) path_request_pending_suppressed: u64,
 }
 
 /// Classified reason for a dropped packet (OBS-2b).
@@ -1920,6 +1931,16 @@ impl TransportStats {
     /// [`Self::packets_dropped`].
     pub fn lr_local_client_redirects(&self) -> u64 {
         self.lr_local_client_redirect
+    }
+
+    /// Incoming path requests batched onto a discovery this node already had
+    /// pending for the same destination, instead of being re-originated
+    /// (#433). Not a drop; not part of [`Self::packets_dropped`]. This is the
+    /// counter that would have named the 2026-09-27 field day's amplifier:
+    /// one requester's ~1.2 retries a second, each with a fresh tag, re-keyed
+    /// by every relay in range.
+    pub fn path_request_pending_suppressions(&self) -> u64 {
+        self.path_request_pending_suppressed
     }
 
     /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
@@ -2561,6 +2582,29 @@ pub struct Transport<C: Clock, S: Storage> {
     /// broadcast medium.
     discovery_request_peers: BTreeMap<[u8; TRUNCATED_HASHBYTES], [u8; TRUNCATED_HASHBYTES]>,
 
+    /// Interfaces that asked for a destination while a discovery for it
+    /// was already pending, beside the one the storage entry names
+    /// (Codeberg #433).
+    ///
+    /// 1.5.2 keeps this list ON the pending entry
+    /// (`discovery_path_requests[dh]["requesting_interfaces"]`,
+    /// Transport.py:1871-1876) and sends one targeted PATH_RESPONSE per
+    /// member when the answer lands (:2432-2456). Our storage entry is
+    /// 1.3.5-shaped — a single `requesting_interface` (:3031) — and
+    /// widening it would rewrite the trait, both backends and the
+    /// embedded map's value type for a property that is, like
+    /// [`Self::discovery_request_peers`] beside it, purely a property of
+    /// the live discovery and never persisted.
+    ///
+    /// A flat set of `(destination, interface)` pairs rather than a map
+    /// to a `Vec`: dedup is then free (the reference's `if not
+    /// attached_interface in existing_requesting_interfaces`), the heap
+    /// census stays one `btree_set_bytes` call, and the bound is the
+    /// same product the map-of-Vec would have had — pending discoveries
+    /// times interfaces, pruned against the discovery table on every
+    /// retry cycle and cleared with the entry when the response fires.
+    discovery_extra_requesters: BTreeSet<([u8; TRUNCATED_HASHBYTES], usize)>,
+
     /// The peer link the packet currently being processed arrived
     /// through, as reported by a multi-peer interface (Codeberg #365).
     /// Set for the duration of one `process_incoming_from_peer` call
@@ -2826,6 +2870,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_peer_counts: BTreeMap::new(),
             peer_link_reoriginations: BTreeSet::new(),
             discovery_request_peers: BTreeMap::new(),
+            discovery_extra_requesters: BTreeSet::new(),
             ingress_peer: None,
             interface_modes: BTreeMap::new(),
             interface_kinds: BTreeMap::new(),
@@ -4223,6 +4268,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // a drop (#374); it rides this line because the operators
                 // grepping the anomaly grep here.
                 lr_local_client_redirect = self.stats.lr_local_client_redirect,
+                // Outside `total` for the same reason (#433): a request
+                // batched onto a pending discovery is airtime saved, not a
+                // packet lost. It rides this line because the operator
+                // watching a path-request storm greps here.
+                path_request_pending_suppressed = self.stats.path_request_pending_suppressed,
             );
         }
     }
@@ -4425,6 +4475,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             + hc::btree_map_bytes(&self.interface_peer_counts)
             + hc::btree_set_bytes(&self.peer_link_reoriginations)
             + hc::btree_map_bytes(&self.discovery_request_peers)
+            + hc::btree_set_bytes(&self.discovery_extra_requesters)
             + hc::btree_map_bytes(&self.interface_modes)
             + hc::btree_map_bytes(&self.interface_kinds)
             + hc::btree_map_bytes(&self.interface_ingress_control)
@@ -5001,7 +5052,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3537. A destination with no cached
+    /// link-request path uses at transport.rs:3582. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -10483,7 +10534,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2220`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2241`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -10646,34 +10697,93 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let active_discovery =
                     (discovers || has_cached_announce_no_path) && !pr_burst_limited;
                 let has_locals = self.has_local_clients();
-                if active_discovery || has_locals {
+
+                // Codeberg #433: while a discovery for this destination is
+                // already pending HERE, an incoming request for it is not
+                // rebroadcast. Both reference lines suppress it outright —
+                // 1.3.5 on the presence of the `discovery_path_requests`
+                // entry alone (Transport.py:3015-3017, the rebroadcast loop
+                // at :3033-3040 sits in the `else` arm), 1.5.2 on the entry
+                // plus its `engaged` flag (:3541). Until now we logged the
+                // same sentence and rebroadcast anyway: only the table
+                // insert was skipped.
+                //
+                // The cost of that was measured, not argued. Every retry an
+                // initiator sends carries a FRESH random tag
+                // (`Transport.request_path` draws one per call), so the tag
+                // dedup above never bites, and each retry was re-keyed by
+                // every discovering relay in range. On 2026-09-27 the
+                // Columba phone's ~1.2 requests a second became 96.8 % of
+                // the occupied air that engaged the Pocket's duty lock
+                // (order 364 §4) and 4 359 frames off the base T114 in
+                // three hours (order 368 §1). The #87 PR ingress burst
+                // limiter cannot contain it: its threshold on a young
+                // interface is `IC_PR_BURST_FREQ_NEW_HZ` = 3 Hz and 1.2 Hz
+                // sits under it by design.
+                //
+                // Removing the rebroadcast is wire-format neutral (a
+                // rebroadcast withheld puts no new bytes on the air) and
+                // semantically neutral for the requester, because the
+                // pending discovery is already waiting for exactly the
+                // answer it asked for and that answer is routed back to
+                // every requester in the window (below). It is a
+                // Priority-1 improvement by direct measurement, so it
+                // satisfies the deviation rule three times over — though
+                // here it does not even deviate: it MOVES US ONTO the
+                // reference's behaviour.
+                //
+                // The window is a window, not a mute. At its expiry
+                // (`DISCOVERY_TIMEOUT_MS`, culled by
+                // `clean_path_states`) the table is empty again and the
+                // next retry re-originates once more, which is exactly
+                // what the reference does (1.3.5 culls at
+                // Transport.py:2967-2972, 1.5.2 at :1005-1011).
+                let pending_suppressed = active_discovery
+                    && self
+                        .storage
+                        .get_discovery_path_request(&requested_hash)
+                        .is_some();
+
+                if pending_suppressed {
+                    // The later requester still gets served. 1.5.2 keeps a
+                    // LIST of `requesting_interfaces` on the pending entry,
+                    // appends every requester that arrives inside the window
+                    // (Transport.py:1871-1876) and sends one targeted
+                    // PATH_RESPONSE per entry when the answer lands
+                    // (:2432-2456). Our storage entry is 1.3.5-shaped (one
+                    // `requesting_interface`, :3031), so the additional
+                    // requesters ride a side table with the same semantics —
+                    // matched behaviour, not matched code. The tag was
+                    // already recorded by the dedup above, so a genuine
+                    // duplicate of this retry still dies there.
+                    self.remember_extra_discovery_requester(&requested_hash, interface_index);
+                    self.stats.path_request_pending_suppressed += 1;
+                    crate::tracing::debug!(
+                        event = "PR_PENDING_SUPPRESSED",
+                        dst = %HexShort(&requested_hash),
+                        iface_in = %self.iface_name(interface_index),
+                        requesters = self.discovery_requester_count(&requested_hash),
+                    );
+                } else if active_discovery || has_locals {
                     if active_discovery {
+                        // No entry can exist here: `pending_suppressed`
+                        // above took that case, so this is the first
+                        // request of a window.
                         let now = self.clock.now_ms();
-                        if self
-                            .storage
-                            .get_discovery_path_request(&requested_hash)
-                            .is_some()
-                        {
-                            crate::tracing::debug!(
-                                "Already have a pending discovery path request for <{}>",
-                                HexShort(&requested_hash)
-                            );
-                        } else {
-                            self.storage.set_discovery_path_request(
-                                requested_hash,
-                                interface_index,
-                                now + DISCOVERY_TIMEOUT_MS,
-                            );
-                            // The link the request came in on, so the
-                            // retries exclude what the first pass
-                            // excluded (Codeberg #422).
-                            match self.ingress_peer {
-                                Some(peer) => {
-                                    self.discovery_request_peers.insert(requested_hash, peer);
-                                }
-                                None => {
-                                    self.discovery_request_peers.remove(&requested_hash);
-                                }
+                        self.storage.set_discovery_path_request(
+                            requested_hash,
+                            interface_index,
+                            now + DISCOVERY_TIMEOUT_MS,
+                        );
+                        // The link the request came in on, so the
+                        // retries exclude what the first pass
+                        // excluded (Codeberg #422).
+                        match self.ingress_peer {
+                            Some(peer) => {
+                                self.discovery_request_peers.insert(requested_hash, peer);
+                            }
+                            None => {
+                                self.discovery_request_peers.remove(&requested_hash);
                             }
                         }
                         crate::tracing::debug!(
@@ -10761,7 +10871,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
                 // Codeberg #365: a request we cannot answer is re-originated
                 // toward live peer links. Skipped when the recursive
-                // discovery above already covered every other interface.
+                // discovery above already covered every other interface —
+                // and, by the same `active_discovery` test, when #433
+                // suppressed it because a discovery is already pending: the
+                // peer links were asked when the window opened and
+                // `reoriginate_toward_peer_links` declines a pending
+                // destination on its own account anyway.
                 if !active_discovery {
                     self.reoriginate_toward_peer_links(&requested_hash, interface_index)?;
                 }
@@ -11735,11 +11850,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let Self {
             peer_link_reoriginations,
             discovery_request_peers,
+            discovery_extra_requesters,
             storage,
             ..
         } = self;
         peer_link_reoriginations.retain(|d| storage.get_discovery_path_request(d).is_some());
         discovery_request_peers.retain(|d, _| storage.get_discovery_path_request(d).is_some());
+        discovery_extra_requesters.retain(|(d, _)| storage.get_discovery_path_request(d).is_some());
 
         let dest_hashes = self.storage.discovery_path_request_dest_hashes();
         if dest_hashes.is_empty() {
@@ -11831,12 +11948,81 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.last_discovery_retry_ms = now;
     }
 
+    /// Remember an interface that asked for `dest_hash` while a discovery for
+    /// it was already pending (Codeberg #433).
+    ///
+    /// The reference's `requesting_interfaces.append` under the same
+    /// condition (1.5.2 Transport.py:1871-1876). The interface the storage
+    /// entry already names is not stored twice: it is read back beside this
+    /// set in [`Self::send_discovery_path_response`].
+    fn remember_extra_discovery_requester(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        interface_index: usize,
+    ) {
+        let owner = self
+            .storage
+            .get_discovery_path_request(dest_hash)
+            .map(|(iface, _)| iface);
+        if owner == Some(interface_index) {
+            return;
+        }
+        self.discovery_extra_requesters
+            .insert((*dest_hash, interface_index));
+    }
+
+    /// How many interfaces a pending discovery will answer: the entry's own
+    /// plus every extra requester batched onto it. The `requesters` field of
+    /// `PR_PENDING_SUPPRESSED`, and the positive control the mvr reads.
+    fn discovery_requester_count(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> usize {
+        let own = usize::from(self.storage.get_discovery_path_request(dest_hash).is_some());
+        own + self
+            .discovery_extra_requesters
+            .iter()
+            .filter(|(d, _)| d == dest_hash)
+            .count()
+    }
+
+    /// Every interface a pending discovery's answer is owed to, the entry's
+    /// own first, deduplicated.
+    fn discovery_requester_ifaces(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        requesting_iface: usize,
+    ) -> Vec<usize> {
+        let mut ifaces = alloc::vec![requesting_iface];
+        for (_, iface) in self
+            .discovery_extra_requesters
+            .iter()
+            .filter(|(d, _)| d == dest_hash)
+        {
+            if !ifaces.contains(iface) {
+                ifaces.push(*iface);
+            }
+        }
+        ifaces
+    }
+
+    /// Drop every live-discovery side record for `dest_hash`, in one place so
+    /// no caller can forget one of the three.
+    fn forget_discovery_requesters(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) {
+        self.storage.remove_discovery_path_request(dest_hash);
+        self.peer_link_reoriginations.remove(dest_hash);
+        self.discovery_request_peers.remove(dest_hash);
+        self.discovery_extra_requesters
+            .retain(|(d, _)| d != dest_hash);
+    }
+
     /// If a discovery path request is pending for this destination, send a
-    /// targeted PATH_RESPONSE to the requesting interface.
+    /// targeted PATH_RESPONSE to every interface that asked for it.
     ///
     /// Called from `handle_announce()` when `should_update` is true and the path
     /// table has been refreshed. This is the Rust equivalent of Python
-    /// Transport.py:1983-2010.
+    /// Transport.py:1983-2010; the loop over requesters is the 1.5.2 shape of
+    /// the same answer (`for attached_interface in
+    /// discovery_pr_entry["requesting_interfaces"]`, Transport.py:2439-2456),
+    /// which is what makes the #433 suppression free: a requester batched onto
+    /// a pending window is answered here instead of having its retry re-keyed.
     fn send_discovery_path_response(
         &mut self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
@@ -11851,17 +12037,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         if now >= timeout {
             // Expired, clean up
-            self.storage.remove_discovery_path_request(dest_hash);
-            self.peer_link_reoriginations.remove(dest_hash);
-            self.discovery_request_peers.remove(dest_hash);
+            self.forget_discovery_requesters(dest_hash);
             return;
         }
-
-        crate::tracing::debug!(
-            "Answering discovery path request for <{}> on {}",
-            HexShort(dest_hash),
-            self.iface_name(requesting_iface)
-        );
 
         if let Ok(mut response) = Packet::unpack(raw) {
             response.hops = hops;
@@ -11874,13 +12052,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let size = response.packed_size();
             let mut buf = alloc::vec![0u8; size];
             if let Ok(len) = response.pack(&mut buf) {
-                let _ = self.send_on_interface(requesting_iface, &buf[..len]);
+                for iface in self.discovery_requester_ifaces(dest_hash, requesting_iface) {
+                    crate::tracing::debug!(
+                        "Answering discovery path request for <{}> on {}",
+                        HexShort(dest_hash),
+                        self.iface_name(iface)
+                    );
+                    let _ = self.send_on_interface(iface, &buf[..len]);
+                }
             }
         }
 
-        self.storage.remove_discovery_path_request(dest_hash);
-        self.peer_link_reoriginations.remove(dest_hash);
-        self.discovery_request_peers.remove(dest_hash);
+        self.forget_discovery_requesters(dest_hash);
         // Deliberate deviation from Python: Python lets entries expire after
         // 15s (no removal on delivery), which can cause duplicate PATH_RESPONSE
         // packets if a second matching announce arrives within the timeout.
@@ -16038,7 +16221,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6462), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6513), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
