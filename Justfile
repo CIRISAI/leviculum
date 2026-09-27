@@ -1228,7 +1228,30 @@ tree-clean-selftest:
 # not-in-guards: no-atomic64-gate -- a cargo check on a third triple, which it
 #   installs itself
 # not-in-guards: check-all-targets -- compiles every target in the workspace
-# not-in-guards: citation-guard -- a cargo test target (clause c)
+# not-in-guards: citation-guard -- a cargo test target (clause c), and over the
+#   ten besides: 18.65 s for the bare-anchor test alone and 20.0 s for the
+#   recipe (measured 2026-09-27; the other thirteen tests in the binary run
+#   beside it and cost nothing extra). So it fails both clauses and there is no
+#   subset to buy out with -- selecting only the two tests that catch the drift
+#   still pays the 18.65 s one. RUN IT BY HAND INSTEAD, before committing,
+#   whenever a pass edits this Justfile, anything under `scripts/`, or any
+#   other file the corpus cites: `just citation-guard`, or the fixer
+#   (`LEVICULUM_CITATION_FIX=1 LEVICULUM_CITATION_FIX_BASE=HEAD cargo test -p
+#   leviculum-std --test doc_citations`) once and last, then the guard for the
+#   verdict (docs/src/concepts/checks-and-citations.md:600).
+#   WHY, and it is the same hole `doc-touched` above was added to close for
+#   rustdoc: inserting a line into this file displaces every cited span below
+#   it, and nothing else a coder pass runs reads a citation. 50b609fd added
+#   three lines to the flash recipes and left seventeen citations behind
+#   (c06112af); 2f78fc5b added `doc-touched` thirty-three lines above this one
+#   and left twenty (47992075). Both passes ran fmt, clippy, `cargo test` and
+#   `just guards` green, and both reds arrived on the land gate with the lane
+#   queued behind them. Scoping the anchor pass to `git diff --name-only` would
+#   be cheap enough -- 2.0 s of `git blame` over the 67 citing files that hold
+#   a citation into this lane's 153 changed files, against 18.65 s for the
+#   whole test -- but it would have to be a second implementation of the
+#   anchor rule in a script, and finder and fixer are one implementation here
+#   on purpose (docs/src/concepts/checks-and-citations.md:428)
 # not-in-guards: source-invariant-tests -- 18.8 s and a test runner of its own;
 #   its census half check-source-invariant-census is in `guards`
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
