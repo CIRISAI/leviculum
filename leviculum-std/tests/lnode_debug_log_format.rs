@@ -1162,7 +1162,7 @@ fn the_transmit_deferral_is_spent_once_per_externally_paced_event() {
          queue, paced by the host's traffic. {DEFERRAL_HAND_CHECK}"
     );
     let idle_arm = idle
-        .find("Either::Second(data) =>")
+        .find("Either::Second(frame) =>")
         .expect("the idle select has no outgoing arm to defer in");
     assert!(
         idle_arm
