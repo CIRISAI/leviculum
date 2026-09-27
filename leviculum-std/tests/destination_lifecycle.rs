@@ -24,28 +24,26 @@
 //!   `LinkId`. Deregistering the destination must not tear down a link
 //!   already carrying data.
 
-use std::net::{SocketAddr, TcpListener as StdTcpListener};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 use leviculum_std::{EventReceiver, NodeEvent};
 
-/// Port band disjoint from the bench (61000+) and scoped-transit (59000+).
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(58000);
+/// Host-wide listener-port allocator, shared with the `mvr` and
+/// `rnsd_interop` suites.
+#[path = "support/port_alloc.rs"]
+#[allow(dead_code)]
+mod port_alloc;
 
+/// This file used to draw from a private counter over 58000-58900 — inside
+/// the default `ip_local_port_range` (32768-60999), where an OS-assigned
+/// `bind(0)` anywhere on the host can take a number between this test's probe
+/// and the node's bind. The shared band sits above that ceiling; see
+/// `port_alloc`.
 fn next_port() -> u16 {
-    loop {
-        let candidate = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if candidate >= 58900 {
-            PORT_COUNTER.store(58000, Ordering::Relaxed);
-            continue;
-        }
-        if StdTcpListener::bind(("127.0.0.1", candidate)).is_ok() {
-            return candidate;
-        }
-    }
+    port_alloc::free_tcp_port()
 }
 
 struct TestNode {
