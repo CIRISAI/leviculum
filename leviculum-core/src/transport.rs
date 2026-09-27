@@ -1474,6 +1474,7 @@ pub struct TransportStats {
     pub(crate) packets_sent: u64,
     pub(crate) packets_received: u64,
     pub(crate) packets_forwarded: u64,
+    pub(crate) packets_forwarded_link: u64,
     pub(crate) announces_processed: u64,
     pub(crate) packets_dropped: u64,
     // Per-reason drop counters (OBS-2 / OBS-2b). Always on, cheap. The taxonomy
@@ -1746,6 +1747,16 @@ impl TransportStats {
     /// Packets forwarded (transport mode)
     pub fn packets_forwarded(&self) -> u64 {
         self.packets_forwarded
+    }
+
+    /// The link-addressed share of [`Self::packets_forwarded`]: packets
+    /// repeated because a link-table (or LRPROOF/reverse) lookup named the
+    /// next interface — dest type LINK, never the node's own link (own links
+    /// deliver locally). On a relay this is the volume it keys for other
+    /// people's links; the field day of 2026-09-27 had no way to read that
+    /// share off a capture (order 368).
+    pub fn packets_forwarded_link(&self) -> u64 {
+        self.packets_forwarded_link
     }
 
     /// Announces processed
@@ -7968,6 +7979,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // claims only forwards that were really handed to an interface.
         self.push_relay_decision(packet, &ph, RelayOutcome::Forwarded, Some(target_iface));
         self.stats.packets_forwarded += 1;
+        // Split out the link-addressed share of the forwards (order 368):
+        // dest type LINK reaches this function only through a link-table or
+        // LRPROOF/reverse lookup (link ids are never in the path table, and a
+        // node's own links deliver locally instead of forwarding), so this
+        // gate counts exactly the packets a relay keys for OTHER people's
+        // links. Type-blind — a count at the transport, no policy attached.
+        if packet.flags.dest_type == DestinationType::Link {
+            self.stats.packets_forwarded_link += 1;
+        }
         self.send_packet_on_interface(target_iface, packet, Some(ph), peer)
     }
 

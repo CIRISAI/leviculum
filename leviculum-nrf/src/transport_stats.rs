@@ -17,9 +17,18 @@
 //! allocation, and no hashing.
 //!
 //! ```text
-//! [TRANSPORT] fwd=<n> rx=<n> tx=<n> nopath=<n> dup=<n> overheard=<n> maxhops=<n> paths=<n> lora_stale=<n>
+//! [TRANSPORT] fwd=<n> link_fwd=<n> rx=<n> tx=<n> nopath=<n> dup=<n> overheard=<n> maxhops=<n> paths=<n> lora_stale=<n>
 //! [TRANSPORT] iface=<name> rxb=<n> txb=<n>
 //! ```
+//!
+//! `link_fwd=` is the link-addressed share of `fwd=`: packets repeated by a
+//! link-table lookup (dest type LINK, never the node's own link). A relay's
+//! capture can then say how much of what it keys is somebody else's link
+//! traffic — the question the field day of 2026-09-27 could not answer,
+//! where the airtime that engaged the Pocket's duty lock had to be
+//! attributed frame prefix by frame prefix (order 368). Type-blind: the
+//! counter sits at the transport's central forward site and carries no
+//! policy.
 //!
 //! `lora_stale=` is the one field on the line that does not come from the
 //! core, and it cannot: it counts frames the LoRa interface threw away after
@@ -135,8 +144,9 @@ where
     crate::log::log_fmt(
         "[TRANSPORT] ",
         format_args!(
-            "fwd={} rx={} tx={} nopath={} dup={} overheard={} maxhops={} paths={} lora_stale={}",
+            "fwd={} link_fwd={} rx={} tx={} nopath={} dup={} overheard={} maxhops={} paths={} lora_stale={}",
             stats.packets_forwarded(),
+            stats.packets_forwarded_link(),
             stats.packets_received(),
             stats.packets_sent(),
             stats.drops_no_path(),

@@ -228,4 +228,10 @@ fn relayed_link_data_is_not_counted() {
         0,
         "a relayed link is not an unheld link — the counter must not tick"
     );
+    assert_eq!(
+        relay.transport().stats().packets_forwarded_link(),
+        1,
+        "the repeat must show up as the link-addressed share of the forwards \
+         (the firmware's `link_fwd=` field, order 368)"
+    );
 }
