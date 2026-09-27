@@ -171,6 +171,8 @@ mod mvr_resource_strategy_branches;
 mod mvr_resource_window;
 #[cfg(test)]
 mod mvr_response_resource;
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_same_emission_fewer_hops;
 #[cfg(all(test, feature = "compression"))]
 mod mvr_segment_advance_failure;
 #[cfg(all(test, feature = "compression"))]

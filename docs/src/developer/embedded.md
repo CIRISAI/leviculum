@@ -30,7 +30,7 @@ your own allocator. The reference firmware `leviculum-nrf` targets
 ## The sans-IO contract
 
 The core is a state machine with exactly three ways in, and one way out. The way
-out is always a `TickOutput` (`leviculum-core/src/transport.rs:305`), carrying
+out is always a `TickOutput` (`leviculum-core/src/transport.rs:393`), carrying
 `actions` to perform, `events` that occurred, and `next_deadline_ms`, the time at
 which you must next tick the timer. It is `#[must_use]`: dropping it loses
 outbound packets and events.
@@ -49,7 +49,7 @@ The three entry points (signatures in the
 - `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1034`. Feed one
   received frame, tagged with the [`InterfaceId`](rust-api-spec.md#core-tickoutput-and-action)
   it arrived on.
-- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1322`. Run periodic
+- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1324`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
 - `next_deadline()` (`leviculum-core/src/node/mod.rs:2500`). The earliest timer
@@ -125,7 +125,7 @@ Three things to notice:
    broadcast-exclusion stay consistent.
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice to
-   `dispatch_actions` (`leviculum-core/src/transport.rs:469`). Broadcast
+   `dispatch_actions` (`leviculum-core/src/transport.rs:557`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free. Bind what it returns: the `DispatchResult` is
    `#[must_use]` because dropping it discards the retries the core asked for,

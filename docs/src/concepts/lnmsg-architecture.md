@@ -196,9 +196,9 @@ Every router method that can produce work returns this. There is no
 callback and no channel. The library never drops an event, but it never
 retains one either: if the application drops a `RouterOutput`, those events
 are gone. `#[must_use]` on both `RouterOutput` and `TickOutput`
-(`leviculum-core/src/transport.rs:308`) is the only safety net, and
+(`leviculum-core/src/transport.rs:396`) is the only safety net, and
 `TickOutput`'s own doc says dropping it "silently loses outbound packets
-and application events" (`leviculum-core/src/transport.rs:272-274`).
+and application events" (`leviculum-core/src/transport.rs:360-362`).
 
 There is a re-entrancy obligation that is easy to miss and fatal to get
 wrong: `RouterOutput.core.events` contains `NodeEvent`s that must be fed
@@ -484,7 +484,7 @@ carries hard obligations:
   enforced. Message packing costs about 0.8 ms and unpacking with signature
   verification about 3.2 ms for 1 MiB, per
   [The core lock budget](core-lock-budget.md). `NodeCore::send_resource`
-  (`leviculum-core/src/node/mod.rs:1699`) must not be called from a hook:
+  (`leviculum-core/src/node/mod.rs:1701`) must not be called from a hook:
   141 ms under the lock for 1 MiB.
 - The processor needs its own periodic slot to drain its command queue,
   because an event tap can never initiate anything. `leviculum-lxmf-node`

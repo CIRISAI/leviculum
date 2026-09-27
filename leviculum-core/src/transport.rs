@@ -188,6 +188,94 @@ pub fn resolve_announce_rate(
     (target, penalty, grace)
 }
 
+// ---------------------------------------------------------------------------
+// #231: who wins when the SAME emission arrives twice
+// ---------------------------------------------------------------------------
+
+/// One copy of an announce, as the same-emission arm sees it: the hop count
+/// it arrived with and the interface it arrived on.
+///
+/// Two of these — the installed path and the copy that just arrived — are
+/// everything the three candidate rules of Codeberg #231 look at. The
+/// emission comparison itself is NOT in here: the caller has already
+/// established that both copies carry the same emission timebase, which is
+/// the only situation in which this decision exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SameEmissionCopy {
+    pub hops: u8,
+    pub interface_index: usize,
+}
+
+/// The candidate rules for a second copy of an emission already installed
+/// (Codeberg #231). Exactly one is live — [`SAME_EMISSION_RULE`] — and
+/// switching the decision is that one line.
+///
+/// Kept as an enum rather than a `cfg` so all three are compiled, testable
+/// and comparable in one test run: the point of #231 is to decide between
+/// them on evidence, and a rule that only exists inside a disabled `cfg`
+/// cannot be measured against the live one.
+///
+/// The two variants nothing constructs outside the tests are the POINT of the
+/// type, so the lint is silenced rather than obeyed: they cost no firmware
+/// bytes (the `match` below folds against a const in a release build), and a
+/// candidate rule hidden behind a disabled `cfg` could not be asserted against
+/// the live one in the same test run, which is exactly what #231 needs.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SameEmissionRule {
+    /// What we do today, and the deviation #231 is about: a copy of an
+    /// emission we already hold replaces the installed path whenever it
+    /// took strictly fewer hops, wherever it came from.
+    FewerHopsWins,
+    /// Python's rule, in both versions that matter to us. The vendored
+    /// reference/Reticulum/RNS/Transport.py:1772 (1.3.5) requires an unseen
+    /// random blob AND `announce_emitted > path_timebase`, so a second copy
+    /// of one emission never displaces the path, however few hops it saved.
+    /// The version periculum's `rnsd` arm actually pins, 1.5.2 (`rns_pin` in
+    /// every `pathchoice_*_rnsd.json`), splits the `else` further — but only
+    /// on `gravity`: on `announce_emitted == path_timebase` it accepts iff
+    /// the receiving interface's operator-configured `gravity` is STRICTLY
+    /// GREATER than the installed path's interface's, and `DEFAULT_GRAVITY`
+    /// is 0, so on any default config 1.5.2 rejects as well. Hop count
+    /// appears in neither version's same-emission test, only in the
+    /// `packet.hops <= known hops` gate above it. 1.5.2 line numbers are
+    /// spelled out in prose in
+    /// docs/src/protocol-notes/announce-dedup-and-path-replacement.md §5
+    /// rather than cited here: 1.5.2 is not vendored, so a `path:line`
+    /// citation to it would be resolved against the 1.3.5 copy and pass on
+    /// existence alone.
+    StrictlyNewerOnly,
+    /// The case the deviation was presumably written for: fewer hops count
+    /// only when the shorter copy came in over a DIFFERENT interface, i.e.
+    /// a genuinely second route rather than a retry of the same one. The
+    /// hop-count-ranked cousin of 1.5.2's gravity arm.
+    FewerHopsOnOtherInterface,
+}
+
+/// The live rule. `FewerHopsWins` is today's behaviour; #231 is the
+/// decision to change it or keep it.
+pub(crate) const SAME_EMISSION_RULE: SameEmissionRule = SameEmissionRule::FewerHopsWins;
+
+/// Does `incoming` — a second copy of the emission `existing` was installed
+/// from — replace the installed path under `rule`?
+///
+/// Pure, so the three rules of Codeberg #231 can be asserted against each
+/// other without a node, a clock or an interface
+/// (`mvr_same_emission_fewer_hops`).
+pub(crate) fn accept_same_emission(
+    rule: SameEmissionRule,
+    existing: SameEmissionCopy,
+    incoming: SameEmissionCopy,
+) -> bool {
+    match rule {
+        SameEmissionRule::StrictlyNewerOnly => false,
+        SameEmissionRule::FewerHopsWins => incoming.hops < existing.hops,
+        SameEmissionRule::FewerHopsOnOtherInterface => {
+            incoming.hops < existing.hops && incoming.interface_index != existing.interface_index
+        }
+    }
+}
+
 // Sans-I/O Types
 /// Opaque interface identifier
 ///
@@ -4800,7 +4888,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3332. A destination with no cached
+    /// link-request path uses at transport.rs:3420. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -5595,7 +5683,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1275 ran in the
+        // Gate on the already-incremented hops (transport.rs:1363 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -5731,10 +5819,27 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // is the weaker of the two. Neither has been measured
                 // (Codeberg #231) — count `reason="same_emission_fewer_hops"`
                 // per stack arm before changing or keeping this.
+                //
+                // The rule itself lives in `accept_same_emission` beside
+                // `SAME_EMISSION_RULE`, which is `FewerHopsWins`: this is
+                // the same predicate as the `packet.hops < existing.hops`
+                // it replaced, byte for byte at runtime, and the whole of
+                // #231's decision is that one const.
+                let same_emission_wins = accept_same_emission(
+                    SAME_EMISSION_RULE,
+                    SameEmissionCopy {
+                        hops: existing.hops,
+                        interface_index: existing.interface_index,
+                    },
+                    SameEmissionCopy {
+                        hops: packet.hops,
+                        interface_index,
+                    },
+                );
                 if announce_emitted > path_timebase {
                     self.mark_path_unknown_state(&dest_hash);
                     Some("newer_emission")
-                } else if announce_emitted == path_timebase && packet.hops < existing.hops {
+                } else if announce_emitted == path_timebase && same_emission_wins {
                     self.mark_path_unknown_state(&dest_hash);
                     Some("same_emission_fewer_hops")
                 } else {
@@ -10113,7 +10218,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2015`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2103`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -15667,7 +15772,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6210), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6315), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -21371,7 +21476,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1275) before
+        // The inbound path increments hops once (transport.rs:1363) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
