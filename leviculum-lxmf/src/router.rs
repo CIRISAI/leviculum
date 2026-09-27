@@ -1644,15 +1644,39 @@ impl LxmfRouter {
         // with the next semantic checkpoint change. Advancing it alone must
         // not force an idle host to write storage every processing interval.
         self.next_job_ms = now_ms.saturating_add(PROCESSING_INTERVAL_MS);
-        let due: Vec<[u8; 32]> = self
+        // Oldest message first. `outbound` is keyed by the message ID, which is
+        // `SHA-256(destination || source || payload)` (`message.rs:127-132`), so
+        // its `BTreeMap` order is a content hash — unrelated to the order the
+        // messages were written. Without this sort, a batch that waited for a
+        // path and then came due together is handed to the link in hash order,
+        // and the recipient sees a permutation of the conversation: with n
+        // messages waiting, the write order survives with probability 1/n!.
+        // Observed in the field on 2026-09-27, when three status messages left
+        // in one tick 17 µs apart after the Link came up (Codeberg #255).
+        //
+        // The key is the LXMF timestamp rather than a queue sequence number:
+        // it is set from the emission clock when the message is created
+        // (`create_message`), it is the write time the recipient itself sorts
+        // by, and it is already persisted — a sequence number would be a new
+        // snapshot field that a restore could only guess at. Python holds
+        // `pending_outbound` as a list and iterates it in append order
+        // (`reference/LXMF/LXMF/LXMRouter.py:108,2685`), which for one sender is
+        // the same order. The message ID breaks ties so the release order stays
+        // total and deterministic when a coarse clock stamps two messages alike.
+        let mut due: Vec<(f64, [u8; 32])> = self
             .outbound
             .iter()
             .filter_map(|(id, e)| {
                 (e.message().method != DeliveryMethod::Propagated && e.next_attempt_ms <= now_ms)
-                    .then_some(*id)
+                    .then_some((e.message().timestamp, *id))
             })
             .collect();
-        for id in due {
+        due.sort_by(|(left_time, left_id), (right_time, right_id)| {
+            left_time
+                .total_cmp(right_time)
+                .then_with(|| left_id.cmp(right_id))
+        });
+        for (_, id) in due {
             let Some(mut entry) = self.outbound.remove(&id) else {
                 continue;
             };
@@ -3385,6 +3409,99 @@ mod persistence_tests {
             .actions
             .iter()
             .any(|action| matches!(action, Action::Broadcast { .. })));
+    }
+
+    /// Minimal reproduction of the 2026-09-27 field test: Lew's Columba was out
+    /// of BLE range, three status messages piled up at the base, and when the
+    /// route came back they arrived with older ones after newer ones.
+    ///
+    /// The queue is a `BTreeMap` keyed by the message ID, which is a content
+    /// hash, so a batch that comes due in one tick used to be released in hash
+    /// order. Red before the sort in `tick`: with the sort reduced to the
+    /// message ID these three bodies leave as `[third, first, second]`.
+    #[test]
+    fn messages_that_waited_are_released_in_the_order_they_were_written() {
+        let (mut router, mut node) = router_and_node(RouterConfig::default());
+        let destination = announced_peer(&mut router, &mut node, 0x9a);
+        // Out of range: the path the announce installed is gone, so nothing
+        // can be handed out on the first tick.
+        assert!(node.remove_path(destination.as_bytes()));
+
+        let source = identity_from(0x9b);
+        let written: Vec<Message> = ["first", "second", "third"]
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                Message::create(
+                    destination.into_bytes(),
+                    *source.hash(),
+                    &source,
+                    // One second apart, as the base's ten-minute status cadence
+                    // is: the write order is in the LXMF timestamps.
+                    wall(index as f64),
+                    b"status".to_vec(),
+                    body.as_bytes().to_vec(),
+                    Vec::new(),
+                    DeliveryMethod::Opportunistic,
+                )
+                .expect("status message")
+            })
+            .collect();
+        let write_order: Vec<[u8; 32]> = written.iter().map(|m| m.message_id).collect();
+        // The mechanism this test guards only exists while the content hashes
+        // disagree with the write order. If a payload encoding change ever makes
+        // them agree, the assertion below passes for the wrong reason — pick
+        // different bodies then rather than deleting this check.
+        let mut hash_order = write_order.clone();
+        hash_order.sort_unstable();
+        assert_ne!(
+            hash_order, write_order,
+            "these bodies no longer hash out of write order, so the test is vacuous"
+        );
+
+        for message in written {
+            let _ = router.enqueue(&node, message).expect("enqueue");
+        }
+        let held = router
+            .tick(&mut node)
+            .expect("first tick requests the path");
+        assert!(
+            !held.events.iter().any(|event| matches!(
+                event,
+                RouterEvent::MessageState {
+                    state: MessageState::Sending,
+                    ..
+                }
+            )),
+            "an unreachable destination releases nothing: {:?}",
+            held.events
+        );
+
+        // Back in range: the destination announces again and the path returns.
+        let returned = announced_peer(&mut router, &mut node, 0x9a);
+        assert_eq!(returned, destination);
+        assert!(node.has_path(&destination), "the path is back");
+
+        // Every waiting message comes due in one tick, which is what
+        // `wake_direct_outbound` does the moment the Link is established.
+        router.next_job_ms = 1_000;
+        for entry in router.outbound.values_mut() {
+            entry.next_attempt_ms = 1_000;
+        }
+        let released = router.tick(&mut node).expect("release the waiting batch");
+
+        let release_order: Vec<[u8; 32]> = released
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                RouterEvent::MessageState {
+                    message_id,
+                    state: MessageState::Sending,
+                } => Some(*message_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(release_order, write_order);
     }
 
     #[test]
