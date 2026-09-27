@@ -28,6 +28,17 @@ line by line (a killed run keeps what it printed), and a run that exits non-zero
 copies it to <gate>.failed.log, which nothing but the NEXT failure overwrites.
 Green runs cannot clobber the last red one, which is the case that mattered.
 
+PER-TEST TIMES BESIDE THE MANIFEST
+----------------------------------
+<gate>.times.tsv holds one row per recorded result: the instant its result
+line streamed past (end_s, relative to the run's first line), the start
+instant where the harness prints one (split-line mode, `--test-threads=1
+--nocapture`), and libtest's own duration where `--report-time` decorated
+the line. Codeberg #221 (deadline compression under co-tenants) is a
+per-test wall-time question, and libtest's summary hides everything below
+the unit. Under `--test-threads=1` -- the standing mvr gate -- consecutive
+end_s deltas are per-test wall times with no flag at all.
+
 WHY RUN OUTPUT AND NOT `cargo test --list`
 ------------------------------------------
 A list records intent. `cargo test -- --exact <typo>` matches nothing, runs
@@ -163,6 +174,27 @@ ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # `ignored` may carry a reason (`ignored, needs hardware`); `ok` may carry a
 # time with --report-time. Prefix match, so both are covered.
 STATUSES = (("ok", "ok"), ("FAILED", "failed"), ("ignored", "ignored"), ("bench", "ok"))
+
+# libtest's own per-test duration, printed as `ok <0.123s>` under
+# `--report-time`. Stable cargo refuses the flag (`-Z` is nightly-only), but
+# the prebuilt test BINARY accepts it with RUSTC_BOOTSTRAP=1 in its
+# environment, no cargo and no rustc involved -- which is how the #221
+# measurement runs get exact durations. The standing gates pass no flag and
+# get line-arrival instants only (see Parser.times).
+TIME_SUFFIX = re.compile(r"<(?P<secs>\d+(?:\.\d+)?)s>$")
+
+
+def split_reported_time(rest: str) -> tuple[str, float | None]:
+    """Split libtest's `--report-time` suffix off a result tail.
+
+    `ok <0.123s>` -> (`ok`, 0.123). Without the split, a glued status
+    (`...outputok <0.123s>`) would stop classifying: the endswith reading
+    checks the token at the very end of the line.
+    """
+    m = TIME_SUFFIX.search(rest.strip())
+    if m is None:
+        return rest, None
+    return rest.strip()[: m.start()], float(m.group("secs"))
 
 
 def classify(rest: str, glued: bool = False) -> str | None:
@@ -465,14 +497,28 @@ class Parser:
         by_src: dict[tuple[str, str], str],
         by_crate: dict[str, str],
         collector: FailureCollector | None = None,
+        clock=time.monotonic,
     ):
         self.by_src = by_src
         self.by_crate = by_crate
         self.collector = collector
+        self.clock = clock
         self.units: list[Unit] = []
         self.current: Unit | None = None
         self.pending: str | None = None
         self.warnings: list[str] = []
+        # Per-test timing (Codeberg #221, deadline compression): one row per
+        # recorded result. `end_s` is the instant the result line streamed
+        # past, relative to the first line of the run -- under
+        # `--test-threads=1` (the standing mvr gate) consecutive deltas ARE
+        # per-test wall times, which is what libtest hides. `start_s` is only
+        # known in split-line mode (`--test-threads=1 --nocapture`), where the
+        # `test <name> ... ` half arrives before the test runs. `reported_s`
+        # is libtest's own measurement when `--report-time` decorated the line.
+        self.t0: float | None = None
+        self.pending_t: float | None = None
+        self.now_s = 0.0
+        self.times: list[dict] = []
 
     def _unit(self, selector: str, descriptor: str) -> None:
         self.current = Unit(selector, descriptor)
@@ -492,12 +538,33 @@ class Parser:
             )
         self._unit(selector, desc)
 
-    def _record(self, name: str, status: str) -> None:
+    def _record(
+        self,
+        name: str,
+        status: str,
+        end_s: float | None = None,
+        start_s: float | None = None,
+        reported_s: float | None = None,
+    ) -> None:
         self.current.record(name, status)
+        self.times.append(
+            {
+                "selector": self.current.selector,
+                "test": name,
+                "status": status,
+                "start_s": start_s,
+                "end_s": end_s,
+                "reported_s": reported_s,
+            }
+        )
         if status == "failed" and self.collector is not None:
             self.collector.on_failed(self.current.selector, name)
 
     def feed(self, raw: str) -> None:
+        now = self.clock()
+        if self.t0 is None:
+            self.t0 = now
+        self.now_s = now - self.t0
         line = ANSI.sub("", raw).rstrip("\n")
 
         # Capture-block routing first: a failing test's output can contain
@@ -541,7 +608,7 @@ class Parser:
         m = RESULT_LINE.match(line)
         if m:
             name = DECORATION.sub("", m.group("name"))
-            rest = m.group("rest")
+            rest, reported = split_reported_time(m.group("rest"))
             if self.pending is not None:
                 # The previous test's status never arrived on its own line.
                 self.current.unresolved.append(self.pending)
@@ -549,8 +616,9 @@ class Parser:
             status = classify(rest, glued=True)
             if status is None:
                 self.pending = name
+                self.pending_t = self.now_s
             else:
-                self._record(name, status)
+                self._record(name, status, end_s=self.now_s, reported_s=reported)
             return
 
         self._resolve_pending(line)
@@ -563,10 +631,18 @@ class Parser:
         """
         if self.pending is None or self.current is None:
             return
-        status = classify(line)
+        rest, reported = split_reported_time(line)
+        status = classify(rest)
         if status is not None:
-            self._record(self.pending, status)
+            self._record(
+                self.pending,
+                status,
+                end_s=self.now_s,
+                start_s=self.pending_t,
+                reported_s=reported,
+            )
             self.pending = None
+            self.pending_t = None
 
     def finish(self) -> None:
         if self.pending is not None and self.current is not None:
@@ -922,10 +998,11 @@ def outcome_report(gate: str, outcome: Outcome) -> list[str]:
 CANARY_LINES = [
     "     Running tests/canary.rs (target/debug/deps/canary-0123456789abcdef)",
     "",
-    "running 5 tests",
+    "running 6 tests",
     "test canary::must_appear_ok ... ok",
     "test canary::must_appear_should_panic - should panic ... ok",
     "test canary::must_appear_failed ... FAILED",
+    "test canary::must_appear_timed ... ok <0.123s>",
     "test canary::must_never_appear_ignored ... ignored, no hardware on this bench",
     "    test canary::must_never_appear_indented ... ok",
     "note: test canary::must_never_appear_prose ... ok",
@@ -942,6 +1019,7 @@ CANARY_LINES = [
 CANARY_MUST_APPEAR = {
     "canary::must_appear_ok",
     "canary::must_appear_split",
+    "canary::must_appear_timed",
     # Under its `--list` name, not libtest's decorated one.
     "canary::must_appear_should_panic",
 }
@@ -952,7 +1030,7 @@ CANARY_MUST_NOT_APPEAR = {
     "canary::must_never_appear_prose",
 }
 CANARY_TRUE_SUMMARY = {
-    "passed": 3,
+    "passed": 4,
     "failed": 1,
     "ignored": 1,
     "measured": 0,
@@ -962,7 +1040,13 @@ CANARY_TRUE_SUMMARY = {
 
 def canary() -> bool:
     """True if the parser still sees what it exists to see."""
-    parser = Parser({("tests/canary.rs", "canary"): "-p canary --test canary"}, {})
+    # One tick per fed line, so the timing assertions below are exact.
+    ticks = iter(range(len(CANARY_LINES)))
+    parser = Parser(
+        {("tests/canary.rs", "canary"): "-p canary --test canary"},
+        {},
+        clock=lambda: float(next(ticks)),
+    )
     for line in CANARY_LINES:
         parser.feed(line)
     parser.finish()
@@ -999,6 +1083,31 @@ def canary() -> bool:
         return fail(f"tests that must never be recorded were: {sorted(present)}")
     if "canary::must_never_appear_ignored" not in unit.ignored:
         return fail("an ignored test was not recorded as ignored")
+
+    # The timing record (Codeberg #221). Three shapes: a one-line result has
+    # an arrival instant and nothing else; a `--report-time` decoration
+    # carries libtest's own duration; a split-line result has both halves'
+    # instants, whose difference is the test's wall time.
+    rows = {row["test"]: row for row in parser.times}
+    plain = rows.get("canary::must_appear_ok")
+    if plain is None or plain["end_s"] is None:
+        return fail("a result line left no arrival instant in the timing record")
+    if plain["reported_s"] is not None or plain["start_s"] is not None:
+        return fail("an undecorated one-line result invented a duration")
+    timed = rows.get("canary::must_appear_timed")
+    if timed is None or timed["reported_s"] != 0.123:
+        return fail(
+            "a `--report-time` decorated result did not carry libtest's "
+            f"duration: {timed}"
+        )
+    split = rows.get("canary::must_appear_split")
+    if split is None or split["start_s"] is None or split["end_s"] is None:
+        return fail(f"a split-line result did not record both instants: {split}")
+    if split["end_s"] - split["start_s"] != 2.0:
+        return fail(
+            "a split-line result's wall time is not the distance between its "
+            f"halves: {split}"
+        )
 
     # The reconciler is the other half of the guarantee: it is what makes "the
     # manifest matches what actually ran" mechanical rather than asserted. The
@@ -1552,6 +1661,40 @@ def main() -> int:
     parser.finish()
     finished = time.time()
 
+    # Per-test timing, beside the manifest (Codeberg #221: deadline
+    # compression under co-tenants is a per-test wall-time question, and
+    # libtest's summary hides everything below the unit). Written before the
+    # verdict logic so a red run keeps its timings too.
+    times_path = out_dir / f"{args.gate}.times.tsv"
+    times_tmp = out_dir / f"{args.gate}.times.tsv.{os.getpid()}.tmp"
+
+    def cell(v: float | None) -> str:
+        return "" if v is None else f"{v:.3f}"
+
+    with open(times_tmp, "w") as fh:
+        fh.write("selector\ttest\tstatus\tstart_s\tend_s\twall_s\treported_s\n")
+        for row in parser.times:
+            wall = (
+                row["end_s"] - row["start_s"]
+                if row["start_s"] is not None and row["end_s"] is not None
+                else None
+            )
+            fh.write(
+                "\t".join(
+                    [
+                        row["selector"],
+                        row["test"],
+                        row["status"],
+                        cell(row["start_s"]),
+                        cell(row["end_s"]),
+                        cell(wall),
+                        cell(row["reported_s"]),
+                    ]
+                )
+                + "\n"
+            )
+    os.replace(times_tmp, times_path)
+
     if outcome.timed_out:
         rc = TIMEOUT_EXIT
     elif outcome.rc is None:
@@ -1596,6 +1739,7 @@ def main() -> int:
         "log": str(log_path),
         "failed_log": str(failed_log_path) if rc != 0 else None,
         "failure_artifacts": str(collector.dir) if collector.dir is not None else None,
+        "times": str(times_path),
         "units": [u.as_json() for u in parser.units],
     }
 
@@ -1615,6 +1759,7 @@ def main() -> int:
         f"{len(parser.units)} unit(s) -> {out}"
     )
     print(f"[manifest] full output: {log_path}")
+    print(f"[manifest] per-test times: {times_path}")
 
     if rc != 0:
         # The gate failed on its own terms. The manifest of a failed run is
