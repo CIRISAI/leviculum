@@ -61,23 +61,19 @@ fi
 # in-process mock SAM bridge, so i2pd is not required to go green; it only gates
 # the `#[ignore]`d live tests in leviculum-std (interfaces::i2p::i2pd_live). Warn
 # rather than fail when it is absent.
-for cmd in i2pd; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "[install-ci] Note: optional test dependency '$cmd' not found"
-        echo "[install-ci] Hint: sudo apt install $cmd (needed only for the ignored I2P live tests)"
-    fi
-done
+if ! command -v i2pd >/dev/null 2>&1; then
+    echo "[install-ci] Note: optional test dependency 'i2pd' not found"
+    echo "[install-ci] Hint: sudo apt install i2pd (needed only for the ignored I2P live tests)"
+fi
 
 # Optional test dependency: lintian is the Debian-policy authority
 # scripts/verify-deb-packaging.sh defers to. `just verify-deb` presupposes a
 # build-deb run and is not part of any tier, so warn rather than fail — but a
 # verify run without it skips the policy checks entirely.
-for cmd in lintian; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "[install-ci] Note: optional test dependency '$cmd' not found"
-        echo "[install-ci] Hint: sudo apt install $cmd (needed for the just verify-deb policy checks)"
-    fi
-done
+if ! command -v lintian >/dev/null 2>&1; then
+    echo "[install-ci] Note: optional test dependency 'lintian' not found"
+    echo "[install-ci] Hint: sudo apt install lintian (needed for the just verify-deb policy checks)"
+fi
 
 # Optional test dependency: cargo-fuzz plus the nightly toolchain run the
 # wire-parser fuzz targets (`just fuzz`, `just fuzz-nightly`, `just
@@ -105,24 +101,20 @@ done
 # No tier runs the fuzzing itself; `just fuzz-selftest` and `just fuzz-regress`
 # are on the push path but both skip with a named reason when these are absent,
 # so warn rather than fail.
-for cmd in cargo-fuzz; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "[install-ci] Note: optional test dependency '$cmd' not found"
-        echo "[install-ci] Hint: cargo install cargo-fuzz && rustup toolchain install nightly"
-        echo "[install-ci]       (needed for 'just fuzz'; 'just fuzz-selftest' and"
-        echo "[install-ci]        'just fuzz-regress' skip without it)"
-    fi
-done
+if ! command -v cargo-fuzz >/dev/null 2>&1; then
+    echo "[install-ci] Note: optional test dependency 'cargo-fuzz' not found"
+    echo "[install-ci] Hint: cargo install cargo-fuzz && rustup toolchain install nightly"
+    echo "[install-ci]       (needed for 'just fuzz'; 'just fuzz-selftest' and"
+    echo "[install-ci]        'just fuzz-regress' skip without it)"
+fi
 
 # Optional test dependency: nomadnet drives the on-demand lnomad acceptance
 # (scripts/lnomad_nomadnet_acceptance.sh). Not part of any tier, so warn rather
 # than fail when it is absent.
-for cmd in nomadnet; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "[install-ci] Note: optional test dependency '$cmd' not found"
-        echo "[install-ci] Hint: pip install nomadnet (needed only for the lnomad acceptance)"
-    fi
-done
+if ! command -v nomadnet >/dev/null 2>&1; then
+    echo "[install-ci] Note: optional test dependency 'nomadnet' not found"
+    echo "[install-ci] Hint: pip install nomadnet (needed only for the lnomad acceptance)"
+fi
 
 # Optional test dependency: valgrind's massif is the only instrument that says
 # WHICH CALL SITE the live heap belongs to — the counting allocator in
@@ -131,14 +123,12 @@ done
 # malloc by symbol, and the musl-static default has nothing to interpose on:
 # it records mem_heap_B=0). No tier runs it; it is reached by hand during a
 # heap investigation, so warn rather than fail.
-for cmd in valgrind; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "[install-ci] Note: optional test dependency '$cmd' not found"
-        echo "[install-ci] Hint: sudo apt install valgrind"
-        echo "[install-ci]       (massif call-site attribution for heap-gap-bench;"
-        echo "[install-ci]        see the binary's module docs for the --alloc-fn list)"
-    fi
-done
+if ! command -v valgrind >/dev/null 2>&1; then
+    echo "[install-ci] Note: optional test dependency 'valgrind' not found"
+    echo "[install-ci] Hint: sudo apt install valgrind"
+    echo "[install-ci]       (massif call-site attribution for heap-gap-bench;"
+    echo "[install-ci]        see the binary's module docs for the --alloc-fn list)"
+fi
 
 # Optional test dependency: the other half of the same investigation. massif
 # and the counting allocator both say what the PROGRAM asked for; neither can
@@ -146,14 +136,12 @@ done
 # that in symbols a musl-static binary carries, and scripts/mallocng-census.gdb
 # reads them out of a running heap-gap-bench without instrumenting our code.
 # Reached by hand during a heap investigation, so warn rather than fail.
-for cmd in gdb; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "[install-ci] Note: optional test dependency '$cmd' not found"
-        echo "[install-ci] Hint: sudo apt install gdb"
-        echo "[install-ci]       (scripts/mallocng-census.gdb, the per-size-class"
-        echo "[install-ci]        census behind heap-gap-bench's ratio)"
-    fi
-done
+if ! command -v gdb >/dev/null 2>&1; then
+    echo "[install-ci] Note: optional test dependency 'gdb' not found"
+    echo "[install-ci] Hint: sudo apt install gdb"
+    echo "[install-ci]       (scripts/mallocng-census.gdb, the per-size-class"
+    echo "[install-ci]        census behind heap-gap-bench's ratio)"
+fi
 
 # Optional rig dependency: uhubctl cuts and restores power on a single USB
 # hub port, which is how a board that stopped enumerating gets recovered

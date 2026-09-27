@@ -258,6 +258,12 @@ rnode-chip-offsets:
 # 2026-09-25 against the recipes; check-nrf-stack-frames.sh was the one the #46
 # pass tripped over, and it brought four more in with it.
 #
+# scripts/install-ci.sh joined on 2026-09-27, the last shell script no gate
+# linted. It was held out because six single-item `for cmd in <tool>; do` loops
+# around its optional-dependency notes raised SC2043. Those are plain `if`
+# blocks now -- the shape that same file already used for uhubctl -- so the
+# entry carries no `disable` directive to stay green.
+#
 # Must run from the repo root: the `source=` directives in these scripts name
 # repo-relative paths, which is what lets shellcheck resolve a `.` through
 # $SCRIPT_DIR. -x is what the ticket asks for and covers a future `source`
@@ -294,6 +300,7 @@ nrf-shellcheck:
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh scripts/lnflash-bundle.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
+        scripts/install-ci.sh \
         scripts/install-esptool.sh scripts/install-btvirt.sh \
         scripts/run-fuzz.sh scripts/test-run-fuzz.sh \
         scripts/check-tree-clean.sh scripts/test-tree-clean.sh \
