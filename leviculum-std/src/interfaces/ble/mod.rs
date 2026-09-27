@@ -614,7 +614,7 @@ impl BleTask {
                 if !decision.decision.initiate()
                     || !dial_allowed
                     || rssi < self.opts.min_rssi
-                    || table.is_full()
+                    || !table.may_dial()
                     || table.knows_addr(&addr.0)
                     || table.knows_identity_hint(decision.identity_hint)
                     || dial_queue.knows(&addr.0)
@@ -750,10 +750,10 @@ impl BleTask {
         now: u64,
     ) {
         if let Some((addr, decision, seen)) = scheduler.poll(now) {
-            if !(table.is_full()
-                || table.knows_addr(&addr)
-                || dial_queue.knows(&addr)
-                || backoff_until.get(&addr).is_some_and(|until| *until > now))
+            if table.may_dial()
+                && !(table.knows_addr(&addr)
+                    || dial_queue.knows(&addr)
+                    || backoff_until.get(&addr).is_some_and(|until| *until > now))
             {
                 tracing::info!(
                     event = "BLE_SCAN_WINDOW",
@@ -790,7 +790,7 @@ impl BleTask {
         now: u64,
     ) {
         while let Some((addr, _decision)) = dial_queue.pop_ready(now) {
-            if table.is_full()
+            if !table.may_dial()
                 || table.knows_addr(&addr)
                 || backoff_until.get(&addr).is_some_and(|until| *until > now)
             {

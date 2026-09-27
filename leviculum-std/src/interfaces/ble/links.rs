@@ -25,8 +25,8 @@
 use leviculum_ble_tx::{
     addr_value, effective_tx_gap_ms, judge_duplicate, parse_peer_advertisement, should_initiate,
     usable_mtu, CandidateTable, ConnectDecision, DupRule, DupVerdict, Origin, ScanMode, TxGap,
-    IDENTITY_HINT_LEN, MANUFACTURER_DATA_HINT_LEN, MIN_USABLE_MTU, SCAN_FALLBACK_AFTER_MS,
-    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    IDENTITY_HINT_LEN, MANUFACTURER_DATA_HINT_LEN, MIN_USABLE_MTU, PERIPH_SLOTS,
+    SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_INTERVAL_MS,
@@ -61,6 +61,31 @@ pub(crate) const LOCAL_CAPS: u8 = 0x00;
 /// `docs/src/concepts/bluetooth-interfaces.md`). Matches the firmware's
 /// `MAX_LINKS`.
 pub(crate) const DEFAULT_MAX_LINKS: usize = 4;
+
+/// Outgoing (central-role) links this node opens, the firmware's
+/// `CENTRAL_LINKS` (`leviculum-nrf/src/ble/mod.rs:119`): one. A node
+/// dials at most one neighbour at a time — which the dial queue's
+/// one-setup-in-flight rule (#49 part 3) already arranged in time; this
+/// is the same bound held in the table, where it survives a setup that
+/// completed.
+///
+/// A cap per ROLE, not a share of [`DEFAULT_MAX_LINKS`] (#432): the
+/// total stays what the operator configured (`max_connections`) and the
+/// incoming side gets the rest of it, `max_links - CENTRAL_LINKS`. What
+/// the split buys is the room the rig could not get out of — nine
+/// boards that spent an eighteen-dial combined budget on each other and
+/// all went dark, leaving the tenth with nothing on the air to dial
+/// (#353; `the_asymmetric_cap_keeps_seed_2s_room_open_for_the_linkless_tenth`
+/// replays it). With one outgoing slot each those nine can land eight
+/// dials, not eighteen, and every one of them is still advertising when
+/// the tenth arrives.
+pub(crate) const CENTRAL_LINKS: usize = 1;
+
+// The advertised free-slot count and this table's incoming budget are
+// the same quantity, as they are on a board
+// (`columba.rs`'s `PERIPH_LINKS == PERIPH_SLOTS`): at the shipped
+// default the record can express every count the table can hold.
+const _: () = assert!(DEFAULT_MAX_LINKS - CENTRAL_LINKS == PERIPH_SLOTS as usize);
 
 /// A link whose peer has been silent this long is torn down. Three missed
 /// keepalives at the protocol's 15 s cadence: one lost keepalive must not
@@ -191,7 +216,8 @@ pub(crate) enum Admission {
         old_usable_mtu: u16,
         new_usable_mtu: u16,
     },
-    /// `max_links` reached.
+    /// No slot for this link: the role's cap is spent (one outgoing,
+    /// `max_links - 1` incoming since #432) or `max_links` is reached.
     RejectFull,
     /// The peer is not named by `accept_only`, so its incoming link is
     /// not served. Distinct from every other rejection because nothing
@@ -294,6 +320,12 @@ pub(crate) struct KeepalivePlan {
 pub(crate) struct LinkTable {
     own_identity: IdentityHash,
     max_links: usize,
+    /// Incoming (peripheral-role) links admitted at once: the
+    /// configured total minus the one outgoing slot ([`CENTRAL_LINKS`],
+    /// #432). Floored at one so that a deliberately tiny
+    /// `max_connections = 1` still serves a peer that dials us — there
+    /// the total below is what binds, not this.
+    incoming_cap: usize,
     links: Vec<Link>,
     pending: Vec<Pending>,
     /// Reassemblies a link discarded before completion, queued for the
@@ -315,9 +347,11 @@ pub(crate) struct LinkTable {
 
 impl LinkTable {
     pub(crate) fn new(own_identity: IdentityHash, max_links: usize) -> Self {
+        let max_links = max_links.max(1);
         Self {
             own_identity,
-            max_links: max_links.max(1),
+            max_links,
+            incoming_cap: max_links.saturating_sub(CENTRAL_LINKS).max(1),
             links: Vec::new(),
             pending: Vec::new(),
             abandon_reports: Vec::new(),
@@ -343,21 +377,67 @@ impl LinkTable {
         self.links.len()
     }
 
+    /// Whether the configured total is spent. The outer bound of both
+    /// role budgets: it binds only where they do not sum to it
+    /// (`max_connections = 1`), and is the reason a configured total is
+    /// never exceeded whatever the roles ask for.
     pub(crate) fn is_full(&self) -> bool {
         self.links.len() >= self.max_links
     }
 
-    /// Whether the advertisement belongs on the air: a full table must
-    /// not advertise. The firmware's `ADV_LOCK` policy (columba.rs,
-    /// ead0bce): with every slot in a session nothing advertises — a
-    /// full node is honestly silent rather than accepting a connection
-    /// it would immediately refuse. The driver deregisters the
-    /// advertisement when this flips false and re-registers it when a
-    /// slot frees; the GATT application stays up throughout, because
-    /// live peripheral sessions keep using it (as the firmware keeps
-    /// serving its sessions while dark).
+    fn role_count(&self, role: Role) -> usize {
+        self.links.iter().filter(|l| l.role == role).count()
+    }
+
+    /// Whether an outgoing slot is free, the scan path's and the dial
+    /// pump's gate (`ble/mod.rs:617`, `:793`).
+    ///
+    /// Half of what was one occupancy predicate before #432. It reads
+    /// the CENTRAL links only, so a node with a lively GATT server
+    /// keeps its one dial: the seed-2 room's nine early arrivals were
+    /// not blocked from dialling by their own incoming links, they were
+    /// blocked by having spent a shared budget on them.
+    pub(crate) fn may_dial(&self) -> bool {
+        self.role_count(Role::Central) < CENTRAL_LINKS && !self.is_full()
+    }
+
+    /// Incoming slots still free, the number that goes on the air
+    /// (#432 / #375 item 3) and the quantity [`Self::should_advertise`]
+    /// is a test of.
+    ///
+    /// Bounded by the total as well as by the incoming cap, so a node
+    /// whose remaining capacity is spoken for by another role never
+    /// advertises a slot it cannot honour. The wire record saturates at
+    /// [`PERIPH_SLOTS`] (`with_free_slots`); a `max_connections` past
+    /// the shipped default therefore advertises "three or more free"
+    /// rather than a bigger number, which is the encoding's bound, not
+    /// this table's.
+    pub(crate) fn free_incoming_slots(&self) -> u8 {
+        let by_role = self
+            .incoming_cap
+            .saturating_sub(self.role_count(Role::Peripheral));
+        let by_total = self.max_links.saturating_sub(self.links.len());
+        u8::try_from(by_role.min(by_total)).unwrap_or(u8::MAX)
+    }
+
+    /// Whether the advertisement belongs on the air: a node with no
+    /// incoming slot free must not advertise. The firmware's `ADV_LOCK`
+    /// policy (columba.rs, ead0bce): with every peripheral slot in a
+    /// session nothing advertises — a full node is honestly silent
+    /// rather than accepting a connection it would immediately refuse.
+    /// The driver deregisters the advertisement when this flips false
+    /// and re-registers it when a slot frees; the GATT application
+    /// stays up throughout, because live peripheral sessions keep using
+    /// it (as the firmware keeps serving its sessions while dark).
+    ///
+    /// Since #432 it reads the INCOMING slots alone, exactly as the
+    /// firmware's ADV_LOCK does: our own dial is not a peer's business,
+    /// and a node that went dark for having dialled somebody was the
+    /// mechanism that left the rig's seed-2 room with one unreachable
+    /// board (#353). What it does NOT do is widen admission — `admit`
+    /// refuses a surplus incoming link by role either way.
     pub(crate) fn should_advertise(&self) -> bool {
-        !self.is_full()
+        self.free_incoming_slots() > 0
     }
 
     pub(crate) fn link_by_addr(&self, addr: &Addr) -> Option<&Link> {
@@ -531,7 +611,15 @@ impl LinkTable {
                 new_usable_mtu,
             });
         }
-        if self.links.len() >= self.max_links {
+        // Per-role caps since #432: one outgoing ([`CENTRAL_LINKS`]),
+        // `max_links - 1` incoming, the total behind both. A
+        // displacement above already freed its row, so the counts here
+        // are the ones this link would actually join.
+        let cap = match role {
+            Role::Central => CENTRAL_LINKS,
+            Role::Peripheral => self.incoming_cap,
+        };
+        if self.role_count(role) >= cap || self.links.len() >= self.max_links {
             return (Admission::RejectFull, displaced);
         }
         self.links.push(Link {
@@ -2266,21 +2354,30 @@ mod tests {
     }
 
     /// The firmware's full-is-dark policy (`ADV_LOCK`, columba.rs at
-    /// ead0bce), lnsd edition (#49 item 1): a full table must not
+    /// ead0bce), lnsd edition (#49 item 1) — retargeted at the INCOMING
+    /// slots by #432: a node with no incoming slot left must not
     /// advertise, and a freed slot puts the advertisement back on the
-    /// air. Both roles count — `admit` refuses any newcomer once
-    /// `max_links` is reached, so advertising while full would only
-    /// invite connections that end in `RejectFull`.
+    /// air. Advertising while the incoming side is full would only
+    /// invite connections that end in `RejectFull`; our own outgoing
+    /// link is not part of that question
+    /// (`a_node_whose_outgoing_slot_is_spent_still_advertises`).
+    ///
+    /// `max_links = 3` is two incoming slots and one outgoing, so the
+    /// boundary this walks is the incoming cap and not the total.
     #[test]
-    fn a_full_table_goes_dark_and_a_freed_slot_re_advertises() {
-        let mut t = LinkTable::new(OWN, 2);
+    fn an_incoming_full_table_goes_dark_and_a_freed_slot_re_advertises() {
+        let mut t = LinkTable::new(OWN, 3);
         assert!(t.should_advertise(), "empty table advertises");
         t.admit(ID_A, ADDR_1, Role::Peripheral, 185, 0);
-        assert!(t.should_advertise(), "one free slot still advertises");
-        t.admit(ID_B, ADDR_2, Role::Central, 185, 0);
+        assert!(t.should_advertise(), "one incoming slot still advertises");
+        t.admit(ID_B, ADDR_2, Role::Peripheral, 185, 0);
         assert!(
             !t.should_advertise(),
-            "full table is dark, both roles counted"
+            "both incoming slots spent: honestly silent"
+        );
+        assert!(
+            !t.is_full(),
+            "and the total still has the outgoing slot in it"
         );
 
         // A slot freed by disconnect re-advertises…
@@ -2288,7 +2385,7 @@ mod tests {
         assert!(t.should_advertise(), "a freed slot goes back on the air");
 
         // …and so does one freed by expiry.
-        t.admit(ID_B, ADDR_2, Role::Central, 185, 0);
+        t.admit(ID_B, ADDR_2, Role::Peripheral, 185, 0);
         assert!(!t.should_advertise());
         let expired = t.expire(LINK_TIMEOUT_MS);
         assert_eq!(expired.links.len(), 2);
@@ -3120,5 +3217,258 @@ mod tests {
         assert!(!err.contains("initiate_only"), "{err}");
         let err = PeerAllowlist::parse("initiate_only", &["LN-b2b2b2b2"]).expect_err("refused");
         assert!(err.contains("initiate_only"), "{err}");
+    }
+
+    // -----------------------------------------------------------------
+    // #432 — the asymmetric cap: one outgoing slot, `max_links - 1`
+    // incoming
+    // -----------------------------------------------------------------
+
+    /// Node `i`'s adapter address in the rig's seed-2 room
+    /// (`periculum run regression/ble_room_10.toml --seed 2`, saved log
+    /// `ble_room_10_2026-09-27T13-10-50Z.log`): btvirt hands out
+    /// `00:AA:01:0i:00:0(i+1)` in display order, so the address order IS
+    /// the node-index order and node 0 holds the room's lowest address —
+    /// the one the v2.2 sort says dials everyone and is dialled by
+    /// nobody.
+    const fn seed2_addr(node: usize) -> Addr {
+        [0x00, 0xAA, 0x01, node as u8, 0x00, node as u8 + 1]
+    }
+
+    /// Node `i`'s identity. Distinct per node and distinct from every
+    /// other node's, which is all the table asks of it: the room's
+    /// question is capacity, not arbitration.
+    const fn seed2_id(node: usize) -> IdentityHash {
+        [0x10 + node as u8; 16]
+    }
+
+    /// The eighteen links seed 2's nine early arrivals formed against
+    /// the COMBINED table, in formation order: `(dialler, target, ms
+    /// after 13:08:00Z)`, the central side's `BLE_LINK_UP` stamps from
+    /// the saved log. Every one is a strict sort win (asserted in the
+    /// replay), none ever went down (zero `BLE_LINK_DOWN` in 150 s),
+    /// and node 0 — which arrived ninth, 4.0 s after the first board —
+    /// is in none of them.
+    ///
+    /// The same array drives `#353`'s two replays in
+    /// `leviculum-nrf/ble-tx/tests/graph_formation.rs`, which measured
+    /// the two table SHAPES against each other on paper. This is the
+    /// same arrangement run through the real [`LinkTable`], so what is
+    /// asserted below is lnsd's own admission code rather than a model
+    /// of it.
+    const SEED2_DIALS: [(usize, usize, u32); 18] = [
+        (4, 5, 16_501),
+        (1, 2, 18_787),
+        (7, 8, 19_073),
+        (6, 7, 19_742),
+        (5, 6, 19_884),
+        (2, 4, 20_796),
+        (3, 4, 22_563),
+        (4, 6, 24_183),
+        (8, 9, 25_277),
+        (5, 7, 25_704),
+        (1, 3, 25_861),
+        (7, 9, 26_562),
+        (3, 5, 26_806),
+        (6, 8, 27_139),
+        (2, 3, 28_426),
+        (1, 8, 33_263),
+        (2, 9, 35_052),
+        (1, 9, 39_144),
+    ];
+
+    /// Ten nodes, each with its own table at the shipped default.
+    fn seed2_room() -> Vec<LinkTable> {
+        (0..10)
+            .map(|i| LinkTable::new(seed2_id(i), DEFAULT_MAX_LINKS))
+            .collect()
+    }
+
+    /// One dial in the room, gated exactly as the driver gates it: the
+    /// dialler needs an outgoing slot (`may_dial`, `ble/mod.rs:617` and
+    /// the pump at `:793`) and the target must be on the air
+    /// (`should_advertise` — a dark peer sends no connectable PDU, so a
+    /// dial at it can only run out `bluez.rs`'s 20 s setup budget).
+    /// A landed dial is admitted on both sides, which is where the role
+    /// caps are really enforced.
+    fn seed2_dial(room: &mut [LinkTable], dialler: usize, target: usize, now: u64) -> bool {
+        assert_eq!(
+            should_initiate(
+                LOCAL_CAPS,
+                addr_value_display(&seed2_addr(dialler)),
+                Some(LOCAL_CAPS),
+                addr_value_display(&seed2_addr(target)),
+                ScanMode::Strict,
+            ),
+            ConnectDecision::InitiateLowerAddress,
+            "the rig logged every one of these as a strict sort win"
+        );
+        if !room[dialler].may_dial() || !room[target].should_advertise() {
+            return false;
+        }
+        assert_eq!(
+            room[dialler]
+                .admit(
+                    seed2_id(target),
+                    seed2_addr(target),
+                    Role::Central,
+                    185,
+                    now
+                )
+                .0,
+            Admission::Accept,
+            "node {dialler}'s outgoing slot was free"
+        );
+        assert_eq!(
+            room[target]
+                .admit(
+                    seed2_id(dialler),
+                    seed2_addr(dialler),
+                    Role::Peripheral,
+                    185,
+                    now
+                )
+                .0,
+            Admission::Accept,
+            "node {target} was on the air, so it has an incoming slot"
+        );
+        true
+    }
+
+    /// The room #353 could not get out of, replayed against the table
+    /// #432 gives it. Under the combined cap the nine early arrivals
+    /// spent all eighteen dials, ended 4-regular, and every one of them
+    /// went dark — node 0 then had no advertiser to dial and no dial to
+    /// answer, an ABSORBING state: no link ever died to free a slot,
+    /// and the #375 fallback verdict the nine each held on node 0's
+    /// advertisement died on their own full-table gate.
+    ///
+    /// One outgoing slot each turns eighteen admissible dials into
+    /// eight. Every early arrival keeps at least one incoming slot, so
+    /// the room the tenth node arrives into is still lit, and its first
+    /// rig dial — toward node 4, the one that spent 20 s blind against
+    /// a dark peer — simply lands.
+    #[test]
+    fn the_asymmetric_cap_keeps_seed_2s_room_open_for_the_linkless_tenth() {
+        let mut room = seed2_room();
+        let landed: Vec<bool> = SEED2_DIALS
+            .iter()
+            .map(|&(d, t, when)| seed2_dial(&mut room, d, t, u64::from(when)))
+            .collect();
+
+        assert_eq!(
+            landed.iter().filter(|&&l| l).count(),
+            8,
+            "one outgoing slot each: eight of the eighteen dials came first"
+        );
+        assert!(
+            !landed[SEED2_DIALS
+                .iter()
+                .position(|&(d, t, _)| (d, t) == (4, 6))
+                .expect("node 4's second dial is in the log")],
+            "the first refusal is node 4's second central dial (13:08:24.18)"
+        );
+
+        // Somebody is on the air for node 0 — in fact everybody is.
+        for (i, t) in room.iter().enumerate().skip(1) {
+            assert!(
+                t.should_advertise(),
+                "node {i} still has an incoming slot free"
+            );
+            assert!(
+                t.free_incoming_slots() > 0,
+                "node {i} says so in its advertisement"
+            );
+        }
+        assert_eq!(room[0].link_count(), 0, "node 0 arrived last and linkless");
+
+        // And node 0 links. `dial_window_choice` would elect node 1
+        // (lowest address); the rig's first dial went to node 4, and
+        // both land — the point is that the room has a target at all.
+        assert!(room[0].may_dial(), "the newcomer's outgoing slot is free");
+        assert!(
+            seed2_dial(&mut room, 0, 4, 40_000),
+            "node 0's first rig dial lands instead of timing out blind"
+        );
+        assert_eq!(room[0].link_count(), 1, "node 0 is a linked node");
+        assert_eq!(
+            room[4].free_incoming_slots(),
+            0,
+            "and node 4 spent its third incoming slot on it"
+        );
+    }
+
+    /// The incoming cap, at the boundary: three dials land, the fourth
+    /// is refused BY ROLE, and the node is on the air for exactly as
+    /// long as it has room — the firmware's `PERIPH_LINKS` shape
+    /// (`leviculum-nrf/src/ble/mod.rs:112`) on a host.
+    #[test]
+    fn a_fourth_incoming_dial_is_refused_and_the_third_takes_the_node_dark() {
+        const ADDR_4: Addr = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x04];
+        let mut t = table();
+        assert_eq!(
+            t.free_incoming_slots(),
+            3,
+            "an empty table offers every incoming slot"
+        );
+        for (n, addr, left) in [(1u8, ADDR_1, 2), (2, ADDR_2, 1), (3, ADDR_3, 0)] {
+            assert_eq!(
+                t.admit([n; 16], addr, Role::Peripheral, 185, 0).0,
+                Admission::Accept,
+                "incoming dial {n} of three"
+            );
+            assert_eq!(t.free_incoming_slots(), left);
+            assert_eq!(
+                t.should_advertise(),
+                left > 0,
+                "on the air while a slot is free, dark once it is not"
+            );
+        }
+        assert_eq!(
+            t.admit([4; 16], ADDR_4, Role::Peripheral, 185, 0).0,
+            Admission::RejectFull,
+            "the fourth incoming dial is refused by the incoming cap"
+        );
+        // …and the outgoing slot was never part of that budget.
+        assert!(t.may_dial(), "three incoming links do not spend the dial");
+        assert!(!t.is_full(), "nor the total");
+    }
+
+    /// The asymmetry, from the other side: a node that has spent its one
+    /// outgoing slot is NOT dark. Advertising follows the incoming slots
+    /// alone (#432), so a full central slot costs the node nothing it
+    /// can offer a peer — and the second dial it must not make is
+    /// refused by `admit`, not by the total, which still has room.
+    #[test]
+    fn a_node_whose_outgoing_slot_is_spent_still_advertises() {
+        let mut t = table();
+        assert_eq!(
+            t.admit(ID_A, ADDR_1, Role::Central, 185, 0).0,
+            Admission::Accept
+        );
+        assert!(!t.may_dial(), "one outgoing link is the cap");
+        assert!(
+            t.should_advertise(),
+            "a spent central slot does not take a node off the air"
+        );
+        assert_eq!(t.free_incoming_slots(), 3, "it offers all three");
+        assert_eq!(
+            t.admit(ID_B, ADDR_2, Role::Central, 185, 0).0,
+            Admission::RejectFull,
+            "a second outgoing link is refused by role"
+        );
+        assert!(!t.is_full(), "the total had room; the ROLE cap refused it");
+
+        // The three incoming slots are all still there, and the total
+        // cap is what the fourth link meets.
+        for (n, addr) in [(1u8, ADDR_2), (2, ADDR_3), (3, seed2_addr(9))] {
+            assert_eq!(
+                t.admit([n; 16], addr, Role::Peripheral, 185, 0).0,
+                Admission::Accept,
+                "incoming dial {n} still fits beside the outgoing link"
+            );
+        }
+        assert!(t.is_full(), "1 + 3 is the configured total");
+        assert!(!t.should_advertise());
     }
 }

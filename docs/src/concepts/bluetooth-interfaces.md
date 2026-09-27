@@ -90,8 +90,26 @@ does not scale to a dense mesh, which is the motivation for `ble-leviculum`.
 ### Incoming link slots and the slot-contention policy
 
 An LNode accepts three incoming (peripheral-role) links and initiates
-one outgoing (central-role) link (#372); lnsd bounds both roles
-together at `max_links = 4`. Three incoming slots dissolve the
+one outgoing (central-role) link (#372), and since #432 lnsd has the
+same shape: `max_connections` (default 4) still means the total, and
+inside it one slot is this node's own dial and `max_connections - 1`
+are incoming. Before #432 the budget was undivided, and a node that
+filled it in either direction both stopped advertising and stopped
+dialling. That is how the rig's `regression/ble_room_10 --seed 2` room
+ended ABSORBING: nine boards formed eighteen links among themselves,
+all nine went dark, and the tenth — holding the room's lowest address,
+so the sort said it must dial everyone and nobody may dial it —
+arrived 4 s late to a room with nothing on the air. No link ever died
+to free a slot, and the #375 fallback verdict each of the nine held on
+its advertisement died on their own full-table gate. The split makes
+the two questions independent: may-dial reads the OUTGOING slot (an
+lnsd with three incoming links still dials), on-air reads the INCOMING
+slots (an lnsd that has spent its dial still advertises and still
+accepts). Those same nine boards then land eight dials instead of
+eighteen and every one of them is still advertising when the tenth
+arrives. Admission does not widen for it: `admit` refuses a surplus
+link by role, so nothing on the air is over-promised. Three incoming
+slots dissolve the
 single-slot field failure where two boards beside a phone paired with
 each other first and the phone could only reach the board whose one
 slot was still free: with slots to spare, a neighbour board and a
