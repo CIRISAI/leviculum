@@ -776,17 +776,31 @@
 //! mortality on in the same room and the session-length feed appears on
 //! its own, with `refused` still zero.
 //!
-//! ## What part 2 does not answer
+//! ## What part 3 wired, and what part 2 still does not answer
 //!
-//! The firmware wiring is the next order, with its boot proof: nothing in
-//! `src/ble/columba.rs` reads [`leviculum_ble_tx::DialLedger`] yet, and
-//! the two sites that would feed it (`columba.rs:867` and `:2050`, the
-//! duplicate refusals) still write only the 120 s address skip. And the
-//! harness still holds the four limits stated under "What this harness
-//! still cannot see" — above all that every dial connects, where the
-//! captures say 93 % of `feld-t114`'s did not. A ledger fed by failed
-//! CONNECTS as well as by refusals and short sessions would have more to
-//! remember than this instrument can show it.
+//! The firmware reads [`leviculum_ble_tx::DialLedger`] since #412 part 3
+//! (`leviculum-nrf/src/ble/columba.rs:1768`, the board-global instance).
+//! Three outcomes feed it — the two duplicate refusals that used to write
+//! only the 120 s address skip (`columba.rs:878` incoming, `:2233`
+//! outgoing) and the central teardown's session length (`:2265`) — and
+//! one site reads it, the fallback branch of the scanner's eligibility
+//! filter (`:2061`).
+//!
+//! The dial that never CONNECTS still does not feed it, and that is a
+//! decision rather than an omission. It has no identity — nothing
+//! connected — so the only table it could join is one keyed by address,
+//! and the firmware already has that table: a fallback dial that cannot
+//! connect condemns its address for `DEAD_END_TTL`, 120 s, against a
+//! rotation period the captures put at 48 s ([`CHURN_ROTATE_MS`]). A
+//! per-address run of failed connects would therefore need a second
+//! failure at an address the first failure has already made unreachable
+//! for longer than the address lives. It cannot reach two, let alone
+//! [`LedgerPolicy::WASTED_RUN`]. Measuring it here would mean teaching
+//! this harness that a dial can fail to connect, which is the first of
+//! the four limits under "What this harness still cannot see" and is
+//! load-bearing for every table above: every one of them is measured
+//! under "every dial connects", so the change is a re-measurement of the
+//! document, not of a column.
 
 use leviculum_ble_tx::{
     dial_preference, free_slots, judge_duplicate, should_initiate, with_free_slots, CandidateTable,

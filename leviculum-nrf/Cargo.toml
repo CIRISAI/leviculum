@@ -244,6 +244,16 @@ ignored = ["cortex-m-rt", "nrf-softdevice"]
 [features]
 default = []
 
+# The A/B control for the dial ledger (#412 part 2/3). OFF by default in
+# the sense that enabling this feature turns the LEDGER off: the shipped
+# image runs `LedgerPolicy::MEASURED`, and this switch compiles
+# `LedgerPolicy::OFF` in its place so the rig can flash the same source
+# twice and attribute a capture difference to the ledger alone. Not a
+# runtime knob on purpose — a knob would leave the ledger's code and
+# state in the control image, and the control has to be the board that
+# never had one.
+ble-dial-ledger-off = []
+
 # BSP selection — exactly one must be enabled. Mutex enforced via
 # `compile_error!` in `lib.rs`. Both go through `softdevice` below and
 # therefore share one critical-section impl, the SoftDevice-aware one

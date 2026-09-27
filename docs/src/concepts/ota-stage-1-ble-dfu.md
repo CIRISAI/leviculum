@@ -126,7 +126,7 @@ least often.
 
 While the bootloader is in OTA mode, our firmware is not running. Our
 BLE identity is gone, the Columba service is gone
-(`leviculum-nrf/src/ble/columba.rs:119`), the LoRa interface is gone,
+(`leviculum-nrf/src/ble/columba.rs:120`), the LoRa interface is gone,
 the board is off the mesh. To a phone it is a different device with a
 different name, and to the mesh it has vanished. That is not a
 side-effect to be engineered away; it is what DFU *is*, and it is the

@@ -245,6 +245,18 @@ impl DialLedger {
         self.held_until_ms.is_some_and(|until| now_ms < until)
     }
 
+    /// The deadline [`Self::fallback_held`] compares against, for the log
+    /// line that says why a dial was not made. `None` is a board that has
+    /// never had a run reach the bound; a deadline in the past is a pause
+    /// that has expired and is reported as such rather than cleared —
+    /// nothing in the rule depends on the difference, and a reader of a
+    /// capture can tell "never held" from "held until then" only if the
+    /// second one survives its own expiry.
+    #[must_use]
+    pub const fn held_until_ms(&self) -> Option<u64> {
+        self.held_until_ms
+    }
+
     /// The run this identity is on, for a log line or a test. Zero for an
     /// identity the table has never had to write down.
     #[must_use]
@@ -405,8 +417,9 @@ mod tests {
 
     /// A dial refused post-connect is wasted whatever the threshold says,
     /// because there was no session to measure: that is the outcome #412
-    /// part 3 feeds this table with, and today it only reaches the
-    /// address-keyed one.
+    /// part 3 feeds this table with, at both of the firmware's refusal
+    /// sites, beside the address-keyed skip that used to be the only
+    /// thing they wrote.
     #[test]
     fn a_refused_dial_is_wasted_at_every_threshold() {
         let generous = LedgerPolicy {
@@ -473,6 +486,30 @@ mod tests {
                 "the overflow took more than one entry"
             );
         }
+    }
+
+    /// The deadline the firmware's `BLE_DIAL_LEDGER held` line prints is
+    /// the one the rule itself compares against, and it outlives its own
+    /// expiry: a capture has to be able to read "held until then" off a
+    /// board whose pause has since run out.
+    #[test]
+    fn the_held_deadline_is_the_one_the_rule_compares_against() {
+        let mut ledger = DialLedger::new();
+        assert_eq!(ledger.held_until_ms(), None, "nothing armed it yet");
+        let phone = identity(8);
+        for dial in 0..POLICY.wasted_run {
+            ledger.note(POLICY, &phone, None, u64::from(dial) * 1000);
+        }
+        let armed_at = u64::from(POLICY.wasted_run - 1) * 1000;
+        let until = armed_at + POLICY.pause_ms;
+        assert_eq!(ledger.held_until_ms(), Some(until));
+        assert!(ledger.fallback_held(until - 1));
+        assert!(!ledger.fallback_held(until));
+        assert_eq!(
+            ledger.held_until_ms(),
+            Some(until),
+            "an expired pause still says when it ended"
+        );
     }
 
     /// The zero: a policy that keeps no ledger records nothing and holds

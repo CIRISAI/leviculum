@@ -33,10 +33,11 @@ use leviculum_ble_tx::{
     addr_value, dial_preference, identity_hint, judge_supervision_timeout,
     manufacturer_data_with_hint, parse_peer_advertisement, should_initiate, with_free_slots,
     CandidateTable, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine,
-    ConnectDecision, GattBytes, LinkPhase, LinkRole, LinkUp, Origin, OversizeFrom, OversizeLine,
-    PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, GATT_VALUE_MAX,
-    IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS, MANUFACTURER_DATA_HINT_LEN,
-    PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    ConnectDecision, DialLedger, GattBytes, LedgerPolicy, LinkPhase, LinkRole, LinkUp, Origin,
+    OversizeFrom, OversizeLine, PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY,
+    GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
+    MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
+    WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -863,8 +864,18 @@ async fn gatt_events(
                         // `gatt_server::run` and takes this session
                         // with it. The address is backed off too — the
                         // scanner must not turn round and dial the peer
-                        // whose duplicate we just sent away.
+                        // whose duplicate we just sent away. The
+                        // identity is condemned too (#412 part 3): the
+                        // address dies at the peer's next rotation and
+                        // the identity does not, and a peer producing
+                        // duplicates is one our own fallback dial will
+                        // buy a refusal from as well. The connection
+                        // was the peer's to pay for, not ours — what
+                        // the ledger takes from it is not the cost but
+                        // the evidence that this identity already
+                        // holds a live link with us.
                         note_dead_end(peer_value, "dup_refused");
+                        note_dial_outcome(&peer_id, None, "dup_refused_incoming");
                         let _ = conn.disconnect();
                         return;
                     }
@@ -1733,6 +1744,146 @@ fn note_dead_end(addr: u64, reason: &str) {
     );
 }
 
+/// What the board remembers about the dials it has already paid for
+/// (#412 part 2), keyed by IDENTITY where [`DEAD_ENDS`] is keyed by
+/// address.
+///
+/// The two are not alternatives and neither replaces the other. The
+/// address table stops the board re-dialling ONE address for
+/// [`DEAD_END_TTL`]; a Columba was seen under five addresses in four
+/// minutes, so for exactly the peer #412 is about every entry is a
+/// first offence forever. This table survives the rotation, and what it
+/// decides is not a candidate but a CLASS: while a run of wasted dials
+/// to one identity stands, the board spends no FALLBACK dial at all and
+/// leaves its one outgoing slot free rather than buying another refusal
+/// with it. A strict verdict is never held — the address sort is #375's
+/// guarantee and this table has no business in it.
+///
+/// The rule itself is [`leviculum_ble_tx::DialLedger`], measured on
+/// `ble-tx/tests/graph_formation.rs`; this is only its board-global
+/// instance. A `Cell`, not a `RefCell`, because [`DialLedger`] is
+/// `Copy` and the whole table is 8 × 28 bytes; locked like
+/// [`FALLBACK_CLOCK`], because a peripheral session writes it while the
+/// central task's scan callback reads it.
+static DIAL_LEDGER: BlockingMutex<CriticalSectionRawMutex, Cell<DialLedger>> =
+    BlockingMutex::new(Cell::new(DialLedger::new()));
+
+/// The policy [`DIAL_LEDGER`] runs, and the A/B switch for it.
+///
+/// [`LedgerPolicy::MEASURED`] is the default and the one every table in
+/// `graph_formation` is measured at. The `ble-dial-ledger-off` feature
+/// compiles [`LedgerPolicy::OFF`] in instead, which records nothing and
+/// holds nothing — bit-identical to a board with no ledger, not merely
+/// equal in aggregate — so the rig can run the same image twice and
+/// attribute a difference to this feature and nothing else.
+#[cfg(not(feature = "ble-dial-ledger-off"))]
+const LEDGER_POLICY: LedgerPolicy = LedgerPolicy::MEASURED;
+#[cfg(feature = "ble-dial-ledger-off")]
+const LEDGER_POLICY: LedgerPolicy = LedgerPolicy::OFF;
+
+/// The `held_until_ms` of the last pause a suppressed dial was logged
+/// for, so the `BLE_DIAL_LEDGER held` line is emitted once per PAUSE and
+/// not once per advertising report.
+///
+/// The rate limit is keyed by the deadline rather than by a timer,
+/// because the thing being reported is the pause itself: a board with
+/// nothing but fallback candidates re-enters the scan callback several
+/// times a second and would otherwise flood the debug CDC exactly as
+/// the `[DROP]` storm #346 budgets against. Keying by the deadline also
+/// means a RE-armed pause (a new deadline) gets its own line, which is
+/// the event a capture needs to see.
+static HELD_LOGGED_FOR: BlockingMutex<CriticalSectionRawMutex, Cell<Option<u64>>> =
+    BlockingMutex::new(Cell::new(None));
+
+/// Record one dial outcome against the identity the dial reached, and
+/// say on one line when it armed the pause.
+///
+/// `session_ms` is `None` for a dial refused post-connect — no session
+/// existed — and `Some(ms)` for one whose link has ended. A link still
+/// standing has no outcome and must not be recorded.
+///
+/// Only the ARMING is logged, not every note: a wasted dial already
+/// leaves its own line (`BLE_LINK_DUP … action=refuse`,
+/// `BLE_CENTRAL_DOWN`), and the one thing those lines cannot say is
+/// that the run has now closed the fallback class.
+fn note_dial_outcome(peer_id: &[u8; 16], session_ms: Option<u64>, reason: &str) {
+    let now_ms = Instant::now().as_millis();
+    let noted = DIAL_LEDGER.lock(|cell| {
+        let mut ledger = cell.get();
+        let noted = ledger.note(LEDGER_POLICY, peer_id, session_ms, now_ms);
+        cell.set(ledger);
+        noted
+    });
+    if noted.armed {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!(
+                "BLE_DIAL_LEDGER armed identity={:02x}{:02x}{:02x}{:02x} run={} reason={} \
+                 session_ms={} pause_ms={}",
+                peer_id[0],
+                peer_id[1],
+                peer_id[2],
+                peer_id[3],
+                noted.run,
+                reason,
+                SessionLen(session_ms),
+                LEDGER_POLICY.pause_ms,
+            ),
+        );
+    }
+}
+
+/// Whether a FALLBACK dial is held right now, logging the reason once
+/// per pause (see [`HELD_LOGGED_FOR`]).
+///
+/// Called from the scan callback and only for a fallback verdict, so a
+/// strict candidate costs nothing here — not even the critical section.
+fn fallback_dial_held() -> bool {
+    let now_ms = Instant::now().as_millis();
+    let until = DIAL_LEDGER.lock(|cell| {
+        let ledger = cell.get();
+        ledger.fallback_held(now_ms).then(|| ledger.held_until_ms())
+    });
+    let Some(until_ms) = until.flatten() else {
+        return false;
+    };
+    let fresh = HELD_LOGGED_FOR.lock(|cell| {
+        if cell.get() == Some(until_ms) {
+            return false;
+        }
+        cell.set(Some(until_ms));
+        true
+    });
+    if fresh {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!(
+                "BLE_DIAL_LEDGER held run={} until_ms={} now_ms={}",
+                LEDGER_POLICY.wasted_run, until_ms, now_ms
+            ),
+        );
+    }
+    true
+}
+
+/// A dial outcome's session length as the `BLE_DIAL_LEDGER` line prints
+/// it: the milliseconds, or `refused` when there was no session at all.
+///
+/// Its own token rather than a zero, for the same reason [`FreeSlots`]
+/// has one: a zero-length session and a refusal are different outcomes
+/// — the threshold judges the first and cannot judge the second — and a
+/// capture must not have to guess which one a `0` meant.
+struct SessionLen(Option<u64>);
+
+impl core::fmt::Display for SessionLen {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(ms) => write!(f, "{ms}"),
+            None => f.write_str("refused"),
+        }
+    }
+}
+
 /// A peer's advertised free-slot count as the `BLE_SCAN_DECISION` line
 /// prints it: the number, or `unknown` when the peer said nothing.
 ///
@@ -1895,10 +2046,19 @@ async fn find_peer_to_initiate(
         // peer that rotated its address is the one the address filter
         // structurally cannot see, and on a board with one central slot
         // that dial is the whole outgoing capacity.
+        // The fifth is the dial ledger (#412 part 2): not a property of
+        // this candidate at all, but of what the board's last dials
+        // bought. It can only ever close the FALLBACK class, so it is
+        // evaluated last and only for a fallback verdict — a strict
+        // candidate never pays even the critical section. A window that
+        // holds nothing but held fallback verdicts opens no candidate
+        // and the outgoing slot stays free, which is the whole point:
+        // in the solo window there is no better peer to send it to.
         if !decision.initiate()
             || dead_end(peer_value)
             || addr_already_linked(peer_value)
             || hint_already_linked(parsed.identity_hint)
+            || (decision == ConnectDecision::InitiateFallback && fallback_dial_held())
         {
             return false;
         }
@@ -2065,12 +2225,24 @@ async fn central_link(
         // peer. Nothing was registered, so the teardown is
         // silent — release what this dial did claim and back the
         // address off, or the scanner re-offers it within seconds.
+        // This is the outcome the ledger was built for (#412 part 2):
+        // a connect, a discovery and an identity read paid in full to
+        // be told the identity was already live. Wasted at every
+        // threshold, because there is no session to measure.
         note_dead_end(peer_value, "dup_refused");
+        note_dial_outcome(&peer_id, None, "dup_refused_outgoing");
         let _ = conn.disconnect();
         conn_link_down(slot_index);
         HVN_DRAIN.release(conn_handle);
         return;
     }
+
+    // The session clock the ledger judges this dial by. Started where
+    // the link becomes real — the registry accepted it — rather than at
+    // `central::connect`, because the connect, the discovery and the
+    // identity read are the dial's PRICE and what the ledger measures
+    // is what the dial BOUGHT.
+    let session_from = Instant::now();
 
     run_central_session(
         &conn,
@@ -2083,11 +2255,20 @@ async fn central_link(
     )
     .await;
 
+    // This dial's outcome, against the identity it turned out to have
+    // (#412 part 2). Only the CENTRAL teardown feeds the ledger: an
+    // incoming session is a dial the peer paid for, and its length says
+    // nothing about the price of ours. A session that reached
+    // `useful_session_ms` clears the identity's run — the table
+    // remembers a run of waste, never a total.
+    let session_ms = session_from.elapsed().as_millis();
+    note_dial_outcome(&peer_id, Some(session_ms), "session_end");
+
     crate::log::log_fmt(
         "[BLE ] ",
         format_args!(
-            "BLE_CENTRAL_DOWN peer={:02x}{:02x}{:02x}{:02x} slot={}",
-            peer_id[0], peer_id[1], peer_id[2], peer_id[3], slot_index
+            "BLE_CENTRAL_DOWN peer={:02x}{:02x}{:02x}{:02x} slot={} session_ms={}",
+            peer_id[0], peer_id[1], peer_id[2], peer_id[3], slot_index, session_ms
         ),
     );
     peer_link_down(slot_index);
