@@ -230,7 +230,7 @@ entirely the client's job**, from raw `NodeEvent::AnnounceReceived`.
 
 `Sending` does arrive, on the event every verdict travels on:
 `RouterEvent::MessageState`, from all three sites that enter the state —
-the composed send (`leviculum-lxmf/src/router.rs:1808-1813`), the
+the composed send (`leviculum-lxmf/src/router.rs:1832-1837`), the
 built-transfer commit (`leviculum-lxmf/src/router.rs:1033-1038`) and the
 upload the transport reports through `UploadSubmitted`
 (`leviculum-lxmf/src/router/propagation_runtime.rs:354-366`) — and on the
@@ -386,12 +386,12 @@ crate is `no_std`.
 The router writes exactly one key, `b"lxmf/router-state"`
 (`ROUTER_STATE_KEY`, `leviculum-lxmf/src/router.rs:64`), holding the
 outbound queue, delivered and processed ID windows, stamp costs, tickets
-and the ignore set (`leviculum-lxmf/src/router.rs:2045-2062`). A client
+and the ignore set (`leviculum-lxmf/src/router.rs:2069-2086`). A client
 should stay off the `lxmf/` prefix and is otherwise free.
 
 Restore resets every queued message to `Outbound` with
 `next_attempt_ms = 0` and `progress = 0.01`
-(`leviculum-lxmf/src/router.rs:2030-2033`), because in-flight correlation
+(`leviculum-lxmf/src/router.rs:2054-2057`), because in-flight correlation
 is expressed in a process-local monotonic clock that does not survive a
 restart. A UI therefore cannot show a stable "sending" progress across
 restarts, and must not pretend to.
@@ -617,7 +617,7 @@ Three specific things `lnomad` does that must change:
    (`lnomad/src/tui.rs:6157`). A messenger has relative timestamps, a sync
    schedule and retry deadlines. A one-second tick when there is anything
    pending, and a slower one otherwise, driven by `next_deadline()`
-   (`leviculum-lxmf/src/router.rs:1973`).
+   (`leviculum-lxmf/src/router.rs:2000`).
 
 Things to carry over unchanged: the generation counter for stale-result
 rejection (`spawn_fetch`, `lnomad/src/tui.rs:5305-5346`), the tick-counted
@@ -762,7 +762,7 @@ not a list of open work.
    correct for a sans-IO crate, but it means every client invents its own
    policy.
 5. **Known propagation nodes and the selection are not in the snapshot**
-   (`leviculum-lxmf/src/router.rs:2045-2062`), so every client writes its
+   (`leviculum-lxmf/src/router.rs:2069-2086`), so every client writes its
    own persistence and replay.
 6. **No stamp cancellation or deadline.** `generate` loops until success
    (`leviculum-lxmf/src/stamp.rs:356-367`) and `StampError::Cancelled` is

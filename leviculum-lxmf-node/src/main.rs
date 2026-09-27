@@ -133,7 +133,7 @@ fn verbosity_flag(arg: &str) -> Option<(u8, u8)> {
 ///
 /// Info, not debug, for the same reason `lnsd` defaults there: `warn!` — the
 /// level of the one line that says this terminus adopted a proof's hop count
-/// (`node/link_management.rs:1147`) — must be visible without being asked
+/// (`node/link_management.rs:1148`) — must be visible without being asked
 /// for, while the `event=` debug lines are volume and are asked for. Asking
 /// is what every periculum node already does, twice over: the rendered config
 /// carries `[logging] loglevel = 5` (`periculum/src/topology.rs:9186`) and the
