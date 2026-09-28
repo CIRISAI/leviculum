@@ -71,7 +71,7 @@ lnflash-bundle:
 # switch on from rotting (Codeberg #233).
 # First run compiles the embedded deps into leviculum-nrf/target
 # (minutes); warm runs are seconds.
-[doc('Lint and host-test the embedded firmware workspace')]
+[doc('Lint, doc and host-test the embedded firmware workspace')]
 lint-nrf:
     cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-t114 -- -D warnings
@@ -99,6 +99,28 @@ lint-nrf:
     # there would pull in test/bench harnesses that do not link for thumbv7em.
     cd leviculum-nrf && cargo clippy --workspace --exclude leviculum-nrf --target $(rustc -vV | sed -n 's/host: //p') --all-targets -- -D warnings
     cd leviculum-nrf && cargo test --workspace --exclude leviculum-nrf --target $(rustc -vV | sed -n 's/host: //p')
+    #
+    # Rustdoc, for the same reason the clippy lines above exist: the root
+    # `doc-gate` runs `cargo doc --workspace`, which by construction stops at
+    # this workspace's boundary. Until 2026-09-28 `scripts/doc-touched.py`
+    # excused leviculum-nrf on the stated grounds that `lint-nrf` carried its
+    # own rustdoc gate -- a claim with no line behind it, so `just doc-touched`
+    # was green on a batch it could not see. The bill when 362 finally
+    # measured it: 18 broken intra-doc links across the host members (cleared
+    # in d6a4b620) and 50 across 11 modules of the firmware crate (Codeberg
+    # #367). `build-esp32` has carried the line since it was written.
+    #
+    # Host members first -- all 27, one `--target` host run, 1.7 s warm.
+    cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude leviculum-nrf --no-deps --target $(rustc -vV | sed -n 's/host: //p')
+    # Then the firmware crate once per BUNDLE feature set, 2.3 s each warm.
+    # Not one run for all three: a feature set decides which modules exist at
+    # all (`st7789` is bsp-t114 only), so a link inside a module the t114 set
+    # does not compile is gated by nothing unless the other sets doc too --
+    # the same argument as the three clippy lines. `--no-deps` because the
+    # thumbv7em dependency tree is not ours to document.
+    cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc -p leviculum-nrf --no-deps --features bsp-rak4631,rak-baseboard
+    cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc -p leviculum-nrf --no-deps --features bsp-t114
+    cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc -p leviculum-nrf --no-deps --features bsp-solarnode
 
 # Build the ESP32-class firmware (Heltec WiFi LoRa 32 V4) and package the
 # flash image.
@@ -1211,7 +1233,9 @@ tree-clean-selftest:
 #   push path reaches it through mvr, nothing else does
 # not-in-guards: supervised-spawn -- a cargo test target (clause c), ~10 s; its
 #   census half check-supervised-spawns is in `guards`
-# not-in-guards: lint-nrf -- cargo clippy over three firmware feature sets
+# not-in-guards: lint-nrf -- cargo clippy over three firmware feature sets,
+#   plus the host members' clippy/test and the rustdoc gate for both halves
+#   (#367): minutes cold, and the embedded toolchain is a precondition
 # not-in-guards: nrf-stack-frames -- 50 s (#316), it links the firmware ELFs
 # not-in-guards: nrf-store-gap -- 0.4 s in `fast` only because nrf-stack-frames
 #   linked those ELFs first; 40.3 s standing alone (74ec30ed)

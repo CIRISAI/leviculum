@@ -29,10 +29,24 @@ With no `origin/master` (a plain clone, a detached CI checkout) the first
 source is skipped rather than fatal; the other two still apply.
 
 WHAT IT SKIPS. Paths outside every workspace member -- docs/, scripts/, the
-Justfile -- and leviculum-nrf and leviculum-esp, which are their own
-workspaces and carry their own rustdoc gate inside `lint-nrf` and
-`build-esp-image`. Nothing touched inside the workspace is a pass, not an
-error: there is no documentation to break.
+Justfile. Nothing touched inside the workspace is a pass, not an error: there
+is no documentation to break.
+
+leviculum-nrf and leviculum-esp are their own cargo workspaces, so
+`cargo metadata` here does not list them and `cargo doc -p` from this root
+cannot reach them. This recipe therefore cannot document them, and until
+2026-09-28 the paragraph above said it did not have to, because `lint-nrf`
+and `build-esp-image` carried their own rustdoc gate. Half of that was
+false: `build-esp32` (the recipe's real name) has always run
+`RUSTDOCFLAGS="-D warnings" cargo doc`, `lint-nrf` never did. `just
+doc-touched` was green on a batch it could not see, and when 362 measured
+the gap it was 18 broken intra-doc links across the nrf host members and 50
+across 11 modules of the firmware crate (Codeberg #367). `lint-nrf` now
+carries the line for both halves of its workspace, per bundle feature set.
+
+So the skip stands -- and is now announced. A branch that touched either
+foreign workspace gets a line naming the recipe that docs it, because the
+cost of the hole was not the skip but its silence.
 
 Usage:
   python3 scripts/doc-touched.py
@@ -105,13 +119,38 @@ def touched_crates(member_list, paths):
     return sorted(hit)
 
 
+# The foreign cargo workspaces this recipe cannot document, and the recipe that
+# does. `cargo doc -p <crate>` from this root fails for both: they are not
+# members here, so `cargo metadata --no-deps` never names them.
+FOREIGN_WORKSPACES = {
+    "leviculum-nrf/": "just lint-nrf",
+    "leviculum-esp/": "just build-esp32",
+}
+
+
+def foreign_notes(paths):
+    """[(workspace prefix, recipe)] for the foreign workspaces this branch touched."""
+    return sorted(
+        (prefix, recipe)
+        for prefix, recipe in FOREIGN_WORKSPACES.items()
+        if any(path.startswith(prefix) for path in paths)
+    )
+
+
 def main():
-    crates = touched_crates(members(), changed_paths())
+    paths = changed_paths()
+    for prefix, recipe in foreign_notes(paths):
+        print(
+            f"doc-touched: {prefix.rstrip('/')} is its own workspace and is not "
+            f"documented here; `{recipe}` carries its rustdoc gate.",
+            flush=True,
+        )
+    crates = touched_crates(members(), paths)
     if not crates:
         print("doc-touched: no workspace crate touched; nothing to document.")
         return 0
 
-    print(f"doc-touched: {' '.join(crates)}")
+    print(f"doc-touched: {' '.join(crates)}", flush=True)
     args = []
     for crate in crates:
         args += ["-p", crate]

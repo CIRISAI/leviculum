@@ -133,7 +133,7 @@ the copier touches the application window:
 | Field | Why it is there |
 | --- | --- |
 | magic + format version | A staging region holding a foreign or half-written thing reads as foreign, the same argument the boot record makes for its own magic (`leviculum-nrf/src/boot_count.rs`) |
-| board family | An image for another pinout family bricks this board. The flash runner already refuses a wrong-SoftDevice board and a wrong UF2 volume before writing (`nrf-sd-guard`, `Justfile:209`); this is the same refusal, without an operator to read it |
+| board family | An image for another pinout family bricks this board. The flash runner already refuses a wrong-SoftDevice board and a wrong UF2 volume before writing (`nrf-sd-guard`, `Justfile:231`); this is the same refusal, without an operator to read it |
 | image length | Bounds the copy, and is what "the transfer is complete" is decided against |
 | version | What the board says it is running, and what a rollback is a rollback *from* |
 | hash over the image | Catches the interrupted transfer and the bad sector |
