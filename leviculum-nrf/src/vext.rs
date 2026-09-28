@@ -12,20 +12,23 @@
 //!
 //! So the rail is raised once by the binary, before any task that needs
 //! it is spawned, and the consumers wait for it with
-//! [`wait_ready`]. The `Output` is leaked into a `StaticCell`
+//! [`wait_ready`](crate::vext::wait_ready). The `Output` is leaked into a
+//! `StaticCell`
 //! deliberately: dropping it would return the pin to its reset state and
 //! cut power to both peripherals, so the rail stays up for the life of
 //! the board.
 //!
 //! Warmup is the reference's too: `PERIPHERAL_WARMUP_MS 1000`
 //! (`variants/nrf52840/heltec_mesh_node_t114/variant.h:167`), mirrored
-//! by [`crate::boards::t114::VEXT_WARMUP_MS`]. [`wait_ready`] sleeps
+//! by [`crate::boards::t114::VEXT_WARMUP_MS`].
+//! [`wait_ready`](crate::vext::wait_ready) sleeps
 //! only the part of it that is still outstanding, so a task spawned late
 //! pays nothing for a rail that came up long ago.
 //!
 //! On a board with no such rail — the WisMesh Pocket V2, whose 3V3
 //! peripheral switch is a different pin its binary raises itself —
-//! [`raise`] is never called and [`wait_ready`] returns immediately.
+//! [`raise`](crate::vext::raise) is never called and
+//! [`wait_ready`](crate::vext::wait_ready) returns immediately.
 //! That is what lets the shared GNSS driver await it unconditionally.
 
 use core::sync::atomic::{AtomicU32, Ordering};

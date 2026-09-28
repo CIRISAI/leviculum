@@ -456,7 +456,7 @@ pub fn stack_min_free() -> usize {
 /// use when the paint ran and can never read back as free.
 static STACK_PAINTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// Paint the unused stack with [`STACK_CANARY`]. Call once at the start
+/// Paint the unused stack with `STACK_CANARY`. Call once at the start
 /// of main, before any heavy work.
 ///
 /// Paints `[_stack_end, SP - SP_MARGIN)` — everything below the live
@@ -528,7 +528,7 @@ unsafe fn paint_below_sp(margin: usize) {
 /// (`usb::debug_reader_task`), alongside the `p` post-mortem query.
 ///
 /// # Safety
-/// Everything below `SP - `[`RESET_SP_MARGIN`] must be dead. That holds
+/// Everything below `SP - RESET_SP_MARGIN` must be dead. That holds
 /// for the embassy executor — task futures live in their own storage and
 /// are polled on this one stack, so at any instant only the frames at or
 /// above the current SP are live — and the margin covers an interrupt
@@ -790,7 +790,7 @@ unsafe fn read_panic_pm(p: *const PanicPmRaw) -> PanicPostMortem {
 /// Read the panic message captured before the last soft-reset and mark
 /// it seen. Returns `Some(_)` exactly once after a panic, `None`
 /// otherwise — but the record itself stays in `.uninit` (downgraded to
-/// [`PANIC_PM_MAGIC_SEEN`]) so [`peek_panic_postmortem`] can re-read it.
+/// `PANIC_PM_MAGIC_SEEN`) so [`peek_panic_postmortem`] can re-read it.
 pub fn take_panic_postmortem() -> Option<PanicPostMortem> {
     unsafe {
         let p = core::ptr::addr_of_mut!(PANIC_PM).cast::<PanicPmRaw>();

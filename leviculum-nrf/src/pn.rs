@@ -10,15 +10,18 @@
 //!
 //! Three entry points, all called from the loop that owns the node:
 //!
-//! * [`Engine::on_events`] — synchronous. Reads one dispatch's
-//!   [`NodeEvent`]s, updates peer/link state, and **queues** everything
-//!   that needs flash or stamp work as a [`Work`] item. Nothing here
+//! * [`Engine::on_events`](crate::pn::Engine::on_events) — synchronous.
+//!   Reads one dispatch's
+//!   [`NodeEvent`](leviculum_core::node::NodeEvent)s, updates peer/link
+//!   state, and **queues** everything
+//!   that needs flash or stamp work as a `Work` item. Nothing here
 //!   validates a stamp or touches the async flash.
-//! * [`Engine::settle`] — asynchronous, and the only place the engine
+//! * [`Engine::settle`](crate::pn::Engine::settle) — asynchronous, and the
+//!   only place the engine
 //!   awaits. Runs the due periodic jobs (announce, maintenance, sync
 //!   scheduling, stats), processes **at most one** queued work item —
 //!   and, when that item is gated by a propagation stamp, at most one
-//!   [`GRIND_SLICE_ROUNDS`]-round SLICE of its workblock, which is what
+//!   `GRIND_SLICE_ROUNDS`-round SLICE of its workblock, which is what
 //!   bounds how long the main loop is away from its channels — and
 //!   flushes the store adapters' queued writes through
 //!   [`crate::record_store::pn_execute`], one channel round trip per op.
@@ -27,7 +30,8 @@
 //!   before you prove" holds at this boundary. The client upload's packet
 //!   proof is NOT one of those actions and never was one — see §"What
 //!   those seconds cost on a fast carrier" below.
-//! * [`Engine::next_deadline_ms`] — what the loop folds into its sleep,
+//! * [`Engine::next_deadline_ms`](crate::pn::Engine::next_deadline_ms) — what
+//!   the loop folds into its sleep,
 //!   so queued work resumes promptly without the loop polling.
 //!
 //! # Stamp validation on this core
@@ -48,7 +52,7 @@
 //! finished the moment its resource is proven — it moves the ids to
 //! handled and tears the link down in the same block
 //! (`reference/LXMF/LXMF/LXMPeer.py:499-503`), which is what
-//! [`Engine::conclude_round`] does too — while the batch here still has
+//! `Engine::conclude_round` does too — while the batch here still has
 //! about 3.7 s of workblock per message ahead of it. The messages are
 //! resident and decoded by then, so the close decides nothing about
 //! them: the rule is [`leviculum_sync_batch::SyncBatch::after_close`],
@@ -198,7 +202,8 @@
 //! wired), a connected phone — the timestamp of the first upload
 //! envelope it sends us — or a peer's announce timebase; both of the
 //! latter seed through the transport's sanity window as
-//! [`TimeSource::Overheard`], logged as `TIME_SEED source=overheard`.
+//! [`TimeSource::Overheard`](leviculum_core::transport::TimeSource::Overheard),
+//! logged as `TIME_SEED source=overheard`.
 //! What degrades when none of them ever arrives: expiry ages are
 //! uptime-relative (harmless within one boot), peer `last_heard` starts
 //! near zero (the 14-day cull simply never fires), and the announce is
@@ -518,7 +523,7 @@ pub const SERVE_PEAK_BYTES: usize =
 ///   [`BOARD_TRANSFER_LIMIT_KB`], two phones (the #388 field scenario);
 /// * 5 KiB — everything structural: the peer table (§5's `104·16` plus
 ///   the 64 B of public keys each peer now keeps (#388 pass 3, ~1 KiB
-///   at [`BOARD_MAX_PEERS`] — grown from the previous 4 KiB term
+///   at `BOARD_MAX_PEERS` — grown from the previous 4 KiB term
 ///   because the keys did not fit its slack), the offer plan
 ///   (`pn_out`), the per-link maps, the role's duplicate cache and the
 ///   store adapters' queued writes (`pn_flush`).
@@ -2318,7 +2323,7 @@ impl Engine {
     }
 
     /// Announce the role NOW, on every interface, because a host asked
-    /// (`TYPE_ANNOUNCE`). Same announce [`Self::tick_announce`] sends on
+    /// (`TYPE_ANNOUNCE`). Same announce `Self::tick_announce` sends on
     /// the cadence — same destination, same app data, same store gate —
     /// so what a listener hears is what it would have heard at the next
     /// interval, only sooner.

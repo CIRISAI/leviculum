@@ -41,14 +41,14 @@
 //! [`leviculum_announce_policy::AnnounceCadence`]; this module holds the
 //! board's single instance of it in [`with_cadence`], because the
 //! board's own announce and the propagation role
-//! ([`crate::pn::Engine::tick_announce`]) must be decided together. A
+//! (`crate::pn::Engine::tick_announce`) must be decided together. A
 //! board whose own announce is withheld is unreachable as a recipient
 //! while still usable as a mailbox, and two cadences would hide that
 //! asymmetry.
 //!
 //! What this module owes the cadence, on the board's side of the seam:
 //!
-//! * the position samples ([`sample_movement`], every
+//! * the position samples (`Announcer::sample_movement`, every
 //!   [`MOVEMENT_SAMPLE_INTERVAL_MS`] off the periodic arm's own wake),
 //! * the new-neighbour trigger ([`note_announce_heard`], from the event
 //!   pass),

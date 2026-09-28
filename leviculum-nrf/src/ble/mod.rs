@@ -51,7 +51,7 @@
 //!
 //! # Architecture notes (carried over from the trouble-host migration)
 //!
-//! - One task per link: each of the [`PERIPH_LINKS`] peripheral tasks'
+//! - One task per link: each of the `PERIPH_LINKS` peripheral tasks'
 //!   `peripheral::advertise_connectable` produces a Connection (the
 //!   tasks serialize on one advertising lock — the SoftDevice runs a
 //!   single advertising set — so exactly one free task advertises at a
@@ -64,7 +64,7 @@
 //!   same shape with the GATT roles mirrored. Concurrent inbound +
 //!   outbound is via embassy_futures::select inside the connection
 //!   lifetime; each task carries at most one connection, which is what
-//!   holds `conn_count` = [`CONN_COUNT`] structurally.
+//!   holds `conn_count` = `CONN_COUNT` structurally.
 //! - SoftDevice owns RADIO/TIMER0/RTC0/etc.; we don't bind those.
 //!   USB VBUS detect goes via `SoftwareVbusDetect` fed by SoC events.
 //!
@@ -127,7 +127,7 @@ const CONN_COUNT: u8 = (PERIPH_LINKS + CENTRAL_LINKS) as u8;
 /// Slots in the per-connection HVN drain table ([`HVN_DRAIN`]).
 ///
 /// The #255 design headroom of 4 that this table was pre-sized to is
-/// now spent: #372 raised [`CONN_COUNT`] to meet it, so every slot is
+/// now spent: #372 raised `CONN_COUNT` to meet it, so every slot is
 /// claimable. Growing further means growing both together (and paying
 /// the `memory.x` bill first).
 pub const MAX_LINKS: usize = 4;
@@ -225,7 +225,7 @@ pub(crate) fn incoming_held_add(bytes: usize) {
 }
 
 /// The main loop consumed one inbound packet of `bytes` — the receive
-/// side of [`incoming_held_add`], called by the binaries.
+/// side of `incoming_held_add`, called by the binaries.
 pub fn incoming_held_sub(bytes: usize) {
     INCOMING_HELD.sub(bytes);
 }
@@ -239,7 +239,7 @@ const QUEUE_DEPTH: usize = 4;
 pub const INTERFACE_MTU: usize = 564;
 
 /// Worst-case heap bytes ONE BLE session pins (#388, the `per_link=`
-/// slice of the boot `HEAP_BUDGET`): its private [`LINK_OUT`] queue
+/// slice of the boot `HEAP_BUDGET`): its private `LINK_OUT` queue
 /// full, the packet its pump currently holds plus that packet's
 /// fragment copies, and one full reassembly in its defragmenter. The
 /// running actuals are the census's `ble_s<slot>=` and `ble_defrag=`
@@ -248,8 +248,8 @@ pub const SESSION_BUDGET_BYTES: usize = QUEUE_DEPTH * INTERFACE_MTU // LINK_OUT 
     + 2 * INTERFACE_MTU // pump: the packet + its fragment copies
     + INTERFACE_MTU; // defragmenter: one in-progress reassembly
 
-/// Worst case of the two node-facing channels ([`BLE_INCOMING`] /
-/// [`BLE_OUTGOING`]) — shared across links, so the budget counts it
+/// Worst case of the two node-facing channels (`BLE_INCOMING` /
+/// `BLE_OUTGOING`) — shared across links, so the budget counts it
 /// once, in its reserve term.
 pub const CHANNEL_BUDGET_BYTES: usize = 2 * QUEUE_DEPTH * INTERFACE_MTU;
 
@@ -632,11 +632,11 @@ pub static BLE_TX_ROUTE_MISSES: core::sync::atomic::AtomicU32 =
 pub struct BleChannels {
     pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
     /// The outbound side carries the core's link statement alongside
-    /// the bytes; see [`OutboundQueue`].
+    /// the bytes; see `OutboundQueue`.
     pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), 4>,
     /// Peer transitions (Codeberg #365); the main loop feeds `Lost` to
     /// `handle_interface_peer_lost` and `Up` to
-    /// `handle_interface_peer_up`. See [`BLE_PEER_EVENTS`] for why both
+    /// `handle_interface_peer_up`. See `BLE_PEER_EVENTS` for why both
     /// ride one ordered channel.
     pub peer_event_rx: Receiver<'static, CriticalSectionRawMutex, PeerEvent, 8>,
 }
@@ -700,7 +700,7 @@ impl Interface for BleInterface {
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
         self.queue(TxAim::Flood, data)
     }
-    /// The #376 delivery hint, carried to [`tx_fanout_task`]: this
+    /// The #376 delivery hint, carried to `tx_fanout_task`: this
     /// interface holds several point-to-point links, so a routed packet
     /// belongs on the addressed peer's link alone. `None` keeps the
     /// broadcast fan-out.

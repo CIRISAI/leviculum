@@ -3,7 +3,8 @@
 //!
 //! Two producers write records today: the propagation role
 //! ([`crate::pn`], part 3 — message and peer records through the
-//! [`PnOp`] channel below) and the `--store-storm` bench instrument
+//! [`PnOp`](crate::record_store::PnOp) channel below) and the `--store-storm`
+//! bench instrument
 //! (synthetic records, so the erase storm can be measured under BLE and
 //! LoRa load). This module owns the region, the mount, and the one task
 //! allowed to hold an append; everything else reaches the log by
@@ -13,7 +14,8 @@
 //!
 //! Not from a constant here. `memory.x` carves `STORE` out of the top of the
 //! application window and exports `__srecord_store` / `__erecord_store`;
-//! [`region`] reads those two symbols and nothing else in the tree knows the
+//! [`region`](crate::record_store::region) reads those two symbols and nothing
+//! else in the tree knows the
 //! addresses. Moving or resizing the store is one edit in one file, and an
 //! image that grows into it is a link error rather than a store quietly
 //! sitting underneath the firmware (the `ASSERT`s in `memory.x`, plus
@@ -30,12 +32,13 @@
 //! append — a `select!` with a timeout, a connection task that goes away — is
 //! therefore a caller that could panic the board. Nothing that can be
 //! cancelled may hold an append, so the log is owned by a task that does
-//! nothing else and requests arrive on [`REQUESTS`]; the sender never waits
+//! nothing else and requests arrive on `REQUESTS`; the sender never waits
 //! for the flash.
 //!
 //! The second: `Flash::take` is a singleton and the radio config (#349) and
 //! the telemetry target (#236) already write through it. All three go through
-//! the one [`crate::flash::SharedFlash`] mutex, which [`Device`] below takes
+//! the one [`crate::flash::SharedFlash`] mutex, which
+//! [`Device`](crate::record_store::Device) below takes
 //! for the duration of a single flash operation — not for a whole append. A
 //! store that held the lock across an append would stall a radio-config save
 //! behind its erases, and an append that waited for the whole log would be an
@@ -104,7 +107,7 @@ const _: () = assert!(
 );
 
 /// What the bench instrument may ask the store task to do. The message
-/// producer — the propagation engine — has its own channel ([`PN_OPS`])
+/// producer — the propagation engine — has its own channel (`PN_OPS`)
 /// because its ops carry heap bodies and demand a per-op reply; neither
 /// is another owner of the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

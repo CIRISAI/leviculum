@@ -45,7 +45,7 @@
 //!   So both BLE surfaces read the name at boot, together, and the
 //!   control frame's report says plainly that they are one reset behind.
 //!
-//! That difference is what [`report_flags`] publishes as
+//! That difference is what [`report`] publishes as
 //! `NODE_NAME_FLAG_BLE_PENDING`, and it is decided here rather than by
 //! the host: only the board knows what its advertisement was built with,
 //! and only the board knows that `LN-<hex8>` is a *different* default

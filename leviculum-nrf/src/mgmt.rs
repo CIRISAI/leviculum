@@ -16,14 +16,17 @@
 //! test of its own, and a decision written inside it is a decision nobody
 //! has checked):
 //!
-//! * the record's bytes ([`decode_mgmt_allow`], and its torn-write
+//! * the record's bytes
+//!   ([`decode_mgmt_allow`](leviculum_core::mgmt_allow_store::decode_mgmt_allow),
+//!   and its torn-write
 //!   refusals),
 //! * the bound on how many identities a board may carry
-//!   ([`MGMT_ALLOW_MAX_IDENTITIES`], argued there against the flash slot
+//!   ([`MGMT_ALLOW_MAX_IDENTITIES`](leviculum_core::mgmt_allow_store::MGMT_ALLOW_MAX_IDENTITIES),
+//!   argued there against the flash slot
 //!   and the #388 heap budget),
 //! * and the rule this feature turns on: **an absent or empty list
 //!   registers nothing**
-//!   ([`remote_mgmt_decision`]).
+//!   ([`remote_mgmt_decision`](leviculum_core::mgmt_allow_store::remote_mgmt_decision)).
 //!
 //! That last one is a deliberate divergence from the daemon. `lnsd` and
 //! Python's `rnsd` register the handler even with an empty
@@ -191,7 +194,7 @@ pub fn stored() -> Option<StoredMgmtAllow> {
 /// Runs on the serial task rather than being handed to the main loop, like
 /// [`crate::name::apply`]: the whole apply is one guarded store and a
 /// non-blocking save request, and nothing here needs the node. The list is
-/// already inside [`MAX_IDENTITIES`] and free of duplicates — the envelope
+/// already inside [`MGMT_ALLOW_MAX_IDENTITIES`] and free of duplicates — the envelope
 /// classifier refused anything else.
 ///
 /// The returned [`crate::telemetry::PendingSave`] is the other half of the
@@ -214,7 +217,8 @@ pub fn apply(list: StoredMgmtAllow) -> crate::telemetry::PendingSave {
 /// Required, not tidiness: the frame is answered `REFUSE_PERSIST` and
 /// nothing is claimed, but the published value would go on describing a
 /// list no reset will bring up, and the next
-/// [`crate::envelope::TYPE_MGMT_ALLOW_QUERY`] would report it as stored.
+/// [`leviculum_core::envelope::TYPE_MGMT_ALLOW_QUERY`] would report it as
+/// stored.
 /// For an access-control list that is the worst possible lie — an operator
 /// reading back the identity they just added would believe it is on the
 /// board. The caller passes what [`stored`] answered BEFORE its

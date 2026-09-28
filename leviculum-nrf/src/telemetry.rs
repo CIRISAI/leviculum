@@ -125,7 +125,7 @@ static POSITION_SOURCES: core::sync::atomic::AtomicU8 = core::sync::atomic::Atom
 /// A user-set fixed position is stored ([`Reporter::apply_fixed_position`]).
 pub const POSITION_SOURCE_FIXED: u8 = 0x01;
 /// A GNSS receiver is built into this firmware and not switched off
-/// ([`declare_gnss_source`]).
+/// ([`declare_position_sources`]).
 pub const POSITION_SOURCE_GNSS: u8 = 0x02;
 
 /// Declare which position sources this node boots with. Call beside
@@ -416,7 +416,7 @@ const PERSIST_CONFIRM_WITHIN: embassy_time::Duration = embassy_time::Duration::f
 ///
 /// It does block the calling task for the duration, which for the serial
 /// task means it stops servicing the transport CDC — typically ~200 ms,
-/// [`PERSIST_CONFIRM_WITHIN`] at worst. Stated rather than hidden, with
+/// `PERSIST_CONFIRM_WITHIN` at worst. Stated rather than hidden, with
 /// the reasons it is the right trade: the frame being answered is an
 /// explicit reconfiguration and the host that sent it is doing nothing
 /// but waiting for the answer; the same task already awaits the main loop

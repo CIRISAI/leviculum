@@ -42,10 +42,12 @@
 //! walked. A growing `other` means the census is missing an owner, not
 //! that the heap is fine.
 //!
-//! Cadence: every [`PERIOD`] (4× the `[HEAP]` line's 30 s), riding the
+//! Cadence: every [`PERIOD`](crate::heap_census::PERIOD) (4× the `[HEAP]`
+//! line's 30 s), riding the
 //! main loop the way `[TRANSPORT]` does — the census walks state only
 //! the loop owns. On demand: the byte `c` on the debug CDC port
-//! ([`request`]) makes the next loop wake-up emit one, which the
+//! ([`request`](crate::heap_census::request)) makes the next loop wake-up
+//! emit one, which the
 //! `[TRANSPORT]`-clamped select reaches within 30 s.
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -345,7 +347,7 @@ pub fn live_serve_cap(boot_cap: usize, free: usize, largest: usize) -> usize {
 ///   budgeted whether or not the role is enabled this boot, because a
 ///   budget that only fits with the role off is a config refusal
 ///   deferred to `--set-pn on`;
-/// * `reserve` — [`FRAG_RESERVE_BYTES`] + the shared node-facing BLE
+/// * `reserve` — `FRAG_RESERVE_BYTES` + the shared node-facing BLE
 ///   channels + one incoming resource at the binaries' cap;
 /// * `slack` — [`budget_slack`], what the sum leaves unclaimed;
 /// * `serve` — [`crate::pn::SERVE_PEAK_BYTES`], the peak transient one

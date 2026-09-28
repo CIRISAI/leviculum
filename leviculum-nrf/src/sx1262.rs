@@ -1082,7 +1082,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// already latched.** On an adopted window that IRQ can have fired while
     /// nobody was waiting, and DIO1 will not rise a second time for it.
     /// [`leviculum_rx_arming::await_window`] is what keeps that case away from
-    /// here, by asking [`take_latched_frame`](Self::take_latched_frame) first.
+    /// here, by asking `take_latched_frame` first.
     pub async fn await_rx(&mut self, buf: &mut [u8]) -> Result<(u8, RxStatus), Error> {
         let Some(&ArmedWindow { timeout_ms, .. }) = self.rx_state.window() else {
             return Err(Error::NotArmed);
@@ -1502,7 +1502,7 @@ impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxWindowProbe for Sx1262<SPI> {
 
     /// Forwards to `sx126x::tx_defer_ms` against the modulation the last
     /// `configure_lora` programmed — the same three cached fields
-    /// [`finish_rx`](Sx1262::finish_rx) sizes its RX extension from, because
+    /// `finish_rx` sizes its RX extension from, because
     /// it is the same question. `rx_ext_bw_hz` is 0 before the radio is
     /// configured, which is the one state in which no airtime exists and the
     /// answer is "do not wait".

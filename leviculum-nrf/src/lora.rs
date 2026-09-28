@@ -526,7 +526,7 @@ impl RadioConfig {
 
     /// The wire form of this config, for the radio report (#349).
     ///
-    /// Every field of [`RadioConfigWire`] survives
+    /// Every field of [`RadioConfigWire`](leviculum_core::rnode::RadioConfigWire) survives
     /// [`from_wire_config`](Self::from_wire_config), so this is the exact
     /// inverse rather than a reconstruction with gaps: the register codes
     /// `bw` and `cr` are derived from `bw_hz` and `cr_denom`, which are both
@@ -597,13 +597,13 @@ static PENDING_CONFIG: embassy_sync::blocking_mutex::Mutex<
 > = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(None));
 
 /// Record a config as handed to the LoRa task's channel. See
-/// [`PENDING_CONFIG`] for why the serial task is the only caller.
+/// `PENDING_CONFIG` for why the serial task is the only caller.
 pub fn note_config_delivered(wire: &leviculum_core::rnode::RadioConfigWire) {
     PENDING_CONFIG.lock(|slot| slot.set(Some(*wire)));
 }
 
 /// The last config handed to the channel — which, whenever the channel is
-/// full, is the one occupying the slot. See [`PENDING_CONFIG`].
+/// full, is the one occupying the slot. See `PENDING_CONFIG`.
 pub fn pending_config() -> Option<leviculum_core::rnode::RadioConfigWire> {
     PENDING_CONFIG.lock(|slot| slot.get())
 }
