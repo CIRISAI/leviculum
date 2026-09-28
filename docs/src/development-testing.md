@@ -269,7 +269,13 @@ just install-ci
 ```
 
 Idempotent. Installs git hooks, systemd user units, state dirs,
-separate cargo target dir. Safe to re-run after pulling.
+separate cargo target dir, and the pinned tools that live in venvs the
+runner owns — `esptool`, and the Python Reticulum periculum's host
+`type = "python"` nodes run
+(`~/.local/state/leviculum-ci/rns-<pin>`, built by
+`../periculum/scripts/install-python-runtime.sh`; without it those
+cells skip with `reason=image_runtime_missing`). Safe to re-run after
+pulling.
 
 ## The lnomad acceptance
 

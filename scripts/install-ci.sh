@@ -412,6 +412,57 @@ echo "[install-ci]   xtensa builds need: . ~/export-esp.sh"
 bash scripts/install-esptool.sh
 echo "[install-ci] RNode flashing: esptool 5.4.0 (just flash-rnode-*)"
 
+# 6e. The Python Reticulum a HOST `type = "python"` periculum node runs
+#     (periculum 376, eb4bee0). Same shape as the esptool step above -- a
+#     pinned tool in a venv the runner owns -- and installed for the same
+#     reason it is: a python node in a CONTAINER imports what the image
+#     installs last, the pinned `rns==<pin>` wheel, but a python node run as
+#     a HOST process (every `emulated/` cell, and a BLE node) has no image
+#     to import from. Until this venv exists such a cell does not quietly
+#     run the older vendored tree either -- it SKIPS, as SKIPPED_INFRA with
+#     `reason=image_runtime_missing`, naming the script below.
+#
+#     WHERE IT LANDS: `~/.local/state/leviculum-ci/rns-<pin>`, beside the CI
+#     state directory step 4 creates, one directory per pin. The pin is read
+#     out of periculum's `periculum/assets/Dockerfile` rather than written
+#     down a second time, so the venv and the containers carry the same
+#     string by construction; and because the pin is in the directory NAME, a
+#     pin bump is a venv that does not exist yet (a loud named skip) instead
+#     of an existing venv serving the version before the bump.
+#     $PERICULUM_PYTHON_RUNTIME_DIR overrides the parent directory; the
+#     runner reads the same variable.
+#
+#     WHY IT IS GUARDED and warn-only rather than a hard dependency: the
+#     script lives in periculum because periculum's runner is what resolves a
+#     node onto the venv, so a host without the sibling checkout has no
+#     corpus to run and needs no runtime -- it gets a note naming the skip
+#     token, not a failure. Warn-only on failure for the btvirt step's
+#     reason: only the bench that runs the emulated cells needs this, and an
+#     installer that stops here helps no other host.
+#
+#     Idempotent, and cheap when it has nothing to do: a venv that already
+#     answers with the pin and imports LXMF is left alone at the cost of one
+#     interpreter start, printing the `already carries RNS <pin>` line.
+PERICULUM_ROOT="${PERICULUM_ROOT:-$REPO_DIR/../periculum}"
+PYTHON_RUNTIME_INSTALLER="$PERICULUM_ROOT/scripts/install-python-runtime.sh"
+if [ -f "$PYTHON_RUNTIME_INSTALLER" ]; then
+    if bash "$PYTHON_RUNTIME_INSTALLER"; then
+        echo "[install-ci] host python runtime: RNS venv under" \
+             "${PERICULUM_PYTHON_RUNTIME_DIR:-~/.local/state/leviculum-ci}" \
+             "(periculum host 'type = \"python\"' cells)"
+    else
+        echo "[install-ci] WARNING: host python runtime install failed; periculum's host"
+        echo "[install-ci]          python cells will skip with reason=image_runtime_missing."
+        echo "[install-ci]          See the output above."
+    fi
+else
+    echo "[install-ci] Note: no periculum checkout at $PERICULUM_ROOT, so the host"
+    echo "[install-ci]       python runtime (~/.local/state/leviculum-ci/rns-<pin>) is"
+    echo "[install-ci]       not provisioned. periculum's host 'type = \"python\"' cells"
+    echo "[install-ci]       skip with reason=image_runtime_missing until it is; set"
+    echo "[install-ci]       PERICULUM_ROOT or clone the sibling, then re-run this script."
+fi
+
 # 7. Install systemd user units, patching the hardcoded
 #    %h/coding/libreticulum literal to point at the worktree this
 #    installer was actually run from.  Lets a `git worktree`-based

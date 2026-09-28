@@ -192,8 +192,11 @@ just install-ci
 
 It installs `git` hooks (via `core.hooksPath = .githooks`), runner
 scripts, systemd user units, the separate cargo target dir, the
-build-directory sweeper `just sweep` needs, and the state dir.
-Re-running is safe.
+build-directory sweeper `just sweep` needs, the state dir, and the two
+pinned tools that live in venvs the runner owns — `esptool` for RNode
+flashing, and the Python Reticulum periculum's host `type = "python"`
+nodes run (`~/.local/state/leviculum-ci/rns-<pin>`, see "Host python
+cells need the image's Reticulum" below). Re-running is safe.
 
 The installer detects the worktree it was run from and patches the
 systemd-unit `ExecStart` paths to match — so a `git worktree`-based
@@ -410,6 +413,41 @@ Run one scenario by hand:
 ```
 periculum run ../periculum/hardware/lora_link_rust.toml
 ```
+
+### Host python cells need the image's Reticulum
+
+A periculum node with `type = "python"` runs one of two Python
+Reticulums. In a CONTAINER it runs the image's: `assets/Dockerfile`
+installs the pinned `rns==<pin>` wheel last, where no resolver step can
+move it. Run as a HOST process — every `emulated/` cell, and a BLE node
+— there is no image, so the runner resolves it onto a venv carrying the
+same two packages the image carries, in the same order:
+
+```
+~/.local/state/leviculum-ci/rns-<pin>   # $PERICULUM_PYTHON_RUNTIME_DIR overrides the parent
+```
+
+`just install-ci` provisions it, the way it provisions the other pinned
+tool in a venv: one guarded call out to
+`../periculum/scripts/install-python-runtime.sh`, which reads the pin
+out of periculum's `assets/Dockerfile` rather than writing it down a
+second time, installs the vendored LXMF first and the pinned wheel
+last, and asserts the version before leaving the venv on disk. It is
+idempotent — an already-provisioned venv costs one interpreter start —
+and both the guard and a failure are warn-only: a host with no sibling
+periculum checkout has no corpus to run and gets a note, not a failed
+install.
+
+Until it exists, a host python cell **skips** — `SKIPPED_INFRA` with
+`reason=image_runtime_missing`, naming the script that builds it.
+Nothing falls back to the vendored citation trees
+(`reference/Reticulum`, 1.3.5), because a figure produced against a
+stack nobody deploys is worse than a skip; a cell that wants the
+sources our comments quote asks for them per node with
+`python_runtime = "reference"`. The pin is in the directory NAME for
+the same reason: a pin bump is then a venv that does not exist yet, so
+it reads as that named skip rather than as a run quietly served by the
+version before the bump.
 
 ### The BLE room needs a patched btvirt
 
