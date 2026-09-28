@@ -162,13 +162,13 @@ const PROJECTION_GAPS: &[Unprojected] = &[
         why: "moved here from INTENTIONALLY_UNPROJECTED, whose reason no longer \
           holds: it argued that every variant means re-request and that \
           lev_event_t has nowhere to put a discriminant. Neither is true. \
-          ResourceError has 17 variants and they do not share a recovery — \
+          ResourceError has 22 variants and they do not share a recovery — \
           Cancelled is deliberate, LinkClosed needs a new link first, \
           ResourceTooLarge needs a limit raised, CompressionUnsupported needs a \
           different sender — and lev_event_t now carries two discriminants \
           (close_reason, delivery_error), so the mechanism exists. Needs \
           lev_event_resource_error plus LEV_RESOURCE_ERR_* constants; not done \
-          in this batch because naming a recovery for each of 17 variants is a \
+          in this batch because naming a recovery for each of 22 variants is a \
           reference-checked audit, not a mechanical mapping, and a wrong \
           recovery in a doc comment is worse than no accessor",
     },

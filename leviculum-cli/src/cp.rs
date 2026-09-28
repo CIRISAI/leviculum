@@ -264,8 +264,14 @@ pub async fn run_send(
                         if error == leviculum_core::resource::ResourceError::RejectedByRemote {
                             return Err(err("The transfer failed: the remote rejected the transfer"));
                         }
+                        // Both the variant and the sentence: the variant is
+                        // what the hardware corpus and KNOWN-REDS quote, the
+                        // sentence is what says WHICH timer ran out. Codeberg
+                        // #388 was diagnosed from a killed process because
+                        // "Timeout" alone did not distinguish the sender's
+                        // part-request watchdog from its proof watchdog.
                         return Err(err(format!(
-                            "The transfer failed: {:?}", error)));
+                            "The transfer failed: {error:?} ({error})")));
                     }
                     Some(NodeEvent::LinkClosed { .. }) => {
                         return Err(err("The transfer failed (link closed)"));
@@ -573,12 +579,12 @@ pub async fn run_listen(
                     Some(NodeEvent::ResourceFailed { is_sender: true, link_id, error, .. }) => {
                         fetch_responder.forget(&link_id);
                         if verbose > 0 {
-                            eprintln!("Transfer failed: {:?}", error);
+                            eprintln!("Transfer failed: {error:?} ({error})");
                         }
                     }
                     Some(NodeEvent::ResourceFailed { error, .. })
                         if verbose > 0 => {
-                            eprintln!("Transfer failed: {:?}", error);
+                            eprintln!("Transfer failed: {error:?} ({error})");
                         }
                     Some(NodeEvent::LinkClosed { link_id, .. }) => {
                         // Client tore down (rncp does this on success), so stop
@@ -902,7 +908,7 @@ pub async fn run_fetch(
                         }
                     }
                     Some(NodeEvent::ResourceFailed { error, .. }) => {
-                        return Err(err(format!("Fetch transfer failed: {:?}", error)));
+                        return Err(err(format!("Fetch transfer failed: {error:?} ({error})")));
                     }
                     Some(NodeEvent::LinkClosed { .. }) => {
                         if got_response {
