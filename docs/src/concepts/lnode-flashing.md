@@ -843,11 +843,49 @@ creates, and only accepts what comes after it
 - **Only a complete line counts.** A half-read `git_sha=daa8b8e` parses
   as `daa8` and would be reported as a *different* build — a failure
   manufactured out of a partial read.
+- **A line the firmware is quoting is not a line the firmware claims.**
+  At boot our images re-emit the last ~2 KiB of the *previous* boot's
+  log out of retained RAM, each line wrapped in `[PERSISTENT_LOG]`
+  (`leviculum-nrf/src/bin/t114.rs`, the `persistent_log` block). That
+  replay includes the previous firmware's own `[FW_BUILD]` banner, so a
+  board that has just booted into a new image says the old image's sha
+  within milliseconds of the port opening — after the reset, after the
+  flush, and still not about itself. The wrapper is what disqualifies
+  such a line; its arrival time is not consulted.
+- **A banner that is not the one we wrote does not end the read.** The
+  read is told which sha it is waiting for: a matching banner is an
+  answer and stops it, anything else is kept as evidence while the read
+  goes on. The board repeats its banner every five seconds, so the
+  expected build gets another chance for as long as the budget lasts,
+  and a stale line — from the replay or from anywhere else — gets
+  exactly one. Only the last non-matching line, once the budget is
+  gone, is reported as "the write did not take". A genuinely failed
+  flash therefore costs the whole 15 s budget; the alternative is
+  believing the first line on the port, which is what #372 did.
 - **The budget is three banner periods, 15 s.** The firmware emits one
   every 5 s, so a healthy board answers inside the first; the margin
   covers a board whose banner task ticks just before the port opens and
   a line the flush cut in half. A board still silent after that is
   silent, and silence is `unknown`.
+
+This is the second false negative of the same shape and the reason the
+rules above are structural rather than temporal. On 2026-09-27 the rig
+flashed a T114 and a RAK from one bundle
+(`/home/lew/rig-run/boot-proof-flash.log`, section `=== flash 01eb398b
+2026-09-27T20:37:14`):
+
+```
+3-2.3.4.4: back as leviculum T114 [1209:0001]
+3-2.3.4.4: the board reports git_sha=abaea121f, not 01eb398b7, read as a
+     [FW_BUILD] banner line on …_T114_183004F712B4A7FE-if00
+     (/dev/ttyACM0), 0.0 s after that port was flushed.
+     The write did not take.
+lnflash rc=1, 1 of 2 board(s) confirmed
+```
+
+The board's own capture has `[FW_BUILD] git_sha=01eb398b7 … t=7448`
+92 seconds later: the write had taken. What lnflash read was the new
+firmware quoting the old one (Codeberg #372).
 
 The exit code carries the same three-way split, because "not confirmed"
 and "failed" need different things done about them:
@@ -886,17 +924,24 @@ verdict prints it:
 ```
 1-1: running git_sha=de6e74ed, read as a [FW_BUILD] banner line on
      /dev/serial/by-id/usb-leviculum_RAK4631_DEC9947DAD9D2869-if00
-     (/dev/ttyACM3), 4.2 s after that port was flushed. Done.
+     (/dev/ttyACM3), 4.2 s after that port was flushed, the line
+     stamped t=7448 ms of board uptime. Done.
 ```
 
-Three facts, each answering a question the bare sha left open: which
+Four facts, each answering a question the bare sha left open: which
 mechanism decided it (the banner read after the reset — the control
 envelope carries no build query, so there is only one), which path was
-opened and which node the fd was proved against, and how long after the
-flush the line arrived. The delay is the load-bearing number: a banner
-from a board that has just booted arrives seconds in, so a sha
-delivered in the first milliseconds was already in flight and the claim
-deserves that doubt.
+opened and which node the fd was proved against, how long after the
+flush the line arrived, and the ` t=<ms>` the line stamped itself with.
+The delay is the load-bearing number: a banner from a board that has
+just booted arrives seconds in, so a sha delivered in the first
+milliseconds was already in flight and the claim deserves that doubt.
+The uptime stamp is what separates the two ways that can happen — a
+fresh boot stamps its first periodic banner near 5000 ms, while a line
+quoted out of retained RAM carries the stamp of a session that had been
+up for hours (#372). Both are reported, neither is judged: a rule that
+refused a line for its stamp would be guessing at how fast a board
+boots.
 
 
 `just nrf-shellcheck` (Codeberg #345) is the static half of the same
