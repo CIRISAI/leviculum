@@ -1827,6 +1827,34 @@ enum TargetChoice {
     /// of boards, or one with a static peer and no phone in it) this row
     /// is the shipped row bit for bit, which the control asserts.
     SilenceIsFull,
+    /// Candidate (a) of #434: the shipped key with the strict class's
+    /// LAST term reversed — most free incoming slots, then the HIGHEST
+    /// address. Under lowest-address the whole room agrees on one
+    /// preference order, so every searcher's first dial aims at the
+    /// lowest advertiser above it and the natural formation chains
+    /// k→k+1 into a path (363 §4, and seed 6 of the 2026-09-27 sweep
+    /// walked into exactly that); highest-address spreads the early
+    /// dials toward the top of the room instead.
+    ///
+    /// Harness-side, through the real table: the offers' addresses are
+    /// complemented within their 48 bits before they enter the window,
+    /// so "lowest key wins" reads them highest-first, and the fallback
+    /// class uses [`FallbackOrder::Address`] on the same complemented
+    /// key. On the board shape this measures — an empty room of static
+    /// addresses — the shipped fallback order's rotating group is empty,
+    /// so the two fallback orders are the same order there.
+    HighestAddress,
+    /// Candidate (b) of #434: the strict class's last term is a
+    /// deterministic hash of (own address, peer address) instead of the
+    /// peer's address alone. Each searcher gets a private preference
+    /// order over the same candidates, so the room stops agreeing on a
+    /// single chain without giving up determinism — the same pair ranks
+    /// the same way on every rescan.
+    ///
+    /// Harness-side like [`Self::HighestAddress`]: the offers enter the
+    /// window keyed by [`pair_hash`] of the two addresses, fallback
+    /// class on [`FallbackOrder::Address`] over the same key.
+    PairHash,
 }
 
 impl TargetChoice {
@@ -1840,6 +1868,8 @@ impl TargetChoice {
                 | Self::RotatingLast
                 | Self::GroupAboveDeficit
                 | Self::SilenceIsFull
+                | Self::HighestAddress
+                | Self::PairHash
         )
     }
 
@@ -1895,11 +1925,29 @@ fn in_rotating_group(addr: u64, decision: ConnectDecision, free: Option<u8>) -> 
         .expect("an initiate verdict is a candidate")
 }
 
+/// The #434 candidate (b) key: one deterministic draw per ordered
+/// (own, peer) address pair. xorshift-style mixing so that near-equal
+/// addresses (a room's boards often share an OUI) still land far
+/// apart; any fixed mixer would do — the property the candidate needs
+/// is only that the room's searchers stop sharing one preference
+/// order while each searcher keeps its own across rescans.
+fn pair_hash(own: u64, peer: u64) -> u64 {
+    let mut x = own ^ peer.rotate_left(24) ^ 0x9E37_79B9_7F4A_7C15;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+}
+
 /// One collected window's election under `choice`, through the real
 /// [`CandidateTable`] in every case — including the two policies #412
 /// steady state 2 measures, which are re-offers and not a second key
 /// (see [`TargetChoice::GroupAboveDeficit`] and
-/// [`TargetChoice::SilenceIsFull`]).
+/// [`TargetChoice::SilenceIsFull`]), and #434's two candidate
+/// tie-breaks, which transform the ADDRESS KEY the offers enter the
+/// table under and change nothing else (see
+/// [`TargetChoice::HighestAddress`] and [`TargetChoice::PairHash`];
+/// `own_addr` is the dialling board's own address, read only there).
 ///
 /// `offers` is `(peer index, address, verdict, advertised free slots)`
 /// in the order the advertising PDUs arrived. The tier census happens
@@ -1907,10 +1955,16 @@ fn in_rotating_group(addr: u64, decision: ConnectDecision, free: Option<u8>) -> 
 /// afterwards.
 fn elect(
     choice: TargetChoice,
+    own_addr: u64,
     offers: &[(usize, u64, ConnectDecision, Option<u8>)],
     tally: &mut Tally,
 ) -> usize {
     let silence_is_full = choice == TargetChoice::SilenceIsFull;
+    let table_key = |addr: u64| match choice {
+        TargetChoice::HighestAddress => addr ^ 0xFFFF_FFFF_FFFF,
+        TargetChoice::PairHash => pair_hash(own_addr, addr),
+        _ => addr,
+    };
     let read_slots = |free: Option<u8>| {
         if silence_is_full {
             free.or(Some(0))
@@ -1934,7 +1988,7 @@ fn elect(
             if group.is_some_and(|want| in_rotating_group(addr, decision, free) != want) {
                 continue;
             }
-            window.offer(addr, decision, free, p);
+            window.offer(table_key(addr), decision, free, p);
         }
         window.into_best().map(|(_, _, p)| p)
     };
@@ -2265,6 +2319,16 @@ struct Tally {
     /// `feld-t114`'s.
     held_windows_top: usize,
     held_windows_top_solo: usize,
+    /// The first round at the end of which the board graph was ONE
+    /// component (#434), or `None` when it never was. Checked only when
+    /// a board-to-board link forms, so under [`Mortality::IMMORTAL`]
+    /// this is exactly the round the last connecting edge landed. Rounds
+    /// are worth [`ROUND_MS`], so this is also a clock over the race
+    /// that decided seed 6 of the 2026-09-27 sweep: an announce ladder
+    /// dies ~25 s after its destination boots, and an edge that
+    /// completes the room later than that is a bridge no
+    /// already-emitted announce ever crosses.
+    connected_at_round: Option<u32>,
 }
 
 impl Tally {
@@ -2737,7 +2801,7 @@ fn run_sim(
                             offers.swap(i, (next_rand(&mut offer_rng) as usize) % (i + 1));
                         }
                     }
-                    elect(choice, &offers, &mut tally)
+                    elect(choice, boards[i].addr, &offers, &mut tally)
                 }
             };
             // The dial. The firmware logs `BLE_CENTRAL_CONNECT` here and
@@ -2888,6 +2952,9 @@ fn run_sim(
                 boards[target].strict_rounds = 0;
                 boards[i].held_outgoing = true;
                 tally.board_links += 1;
+                if tally.connected_at_round.is_none() && is_connected(&boards) {
+                    tally.connected_at_round = Some(round);
+                }
                 any_link = true;
                 continue;
             }
@@ -3060,7 +3127,7 @@ fn run_sim(
             // pay for them — so the tier census must not count them
             // either; the window it opens is its own.
             let mut side_ledger = Tally::default();
-            let b = elect(choice, &offers, &mut side_ledger);
+            let b = elect(choice, own_addr, &offers, &mut side_ledger);
             let dies_at = mortality
                 .kills()
                 .then(|| round + mortality.draw_lifetime(&mut death_rng));
@@ -3182,6 +3249,48 @@ fn run_sim(
 }
 
 /// Connectivity over the undirected board-to-board link graph.
+/// The final board graph's diameter and mean shortest-path length over
+/// its unordered pairs (#434), by BFS from every board over [`linked`].
+/// `None` for a split graph: the diameter of a room some pair cannot
+/// cross is not a large number, it is not a number.
+///
+/// Why the harness measures this at all: the probes of `ble_room_10`
+/// ride paths of this length, and every relay generation an announce
+/// needs is one hop of it. Seed 6 of the 2026-09-27 sweep formed a
+/// diameter-7 room whose 7-hop probes answered in under 3 s — the
+/// length itself is affordable — but the CHAIN SHAPE also serialises
+/// formation, and the announce that missed its one late bridge is what
+/// went red. Lower diameter is therefore a margin statistic, not a
+/// pass/fail one.
+fn diameter_and_mean(boards: &[Board]) -> Option<(usize, f64)> {
+    let n = boards.len();
+    let mut diameter = 0usize;
+    let mut sum = 0usize;
+    for start in 0..n {
+        let mut dist = vec![usize::MAX; n];
+        let mut queue = std::collections::VecDeque::from([start]);
+        dist[start] = 0;
+        while let Some(at) = queue.pop_front() {
+            for next in 0..n {
+                if dist[next] == usize::MAX && linked(boards, at, next) {
+                    dist[next] = dist[at] + 1;
+                    queue.push_back(next);
+                }
+            }
+        }
+        for &d in &dist {
+            if d == usize::MAX {
+                return None;
+            }
+            diameter = diameter.max(d);
+            sum += d;
+        }
+    }
+    // Every ordered pair counted once, so the mean over unordered pairs
+    // is the same number.
+    Some((diameter, sum as f64 / (n * (n - 1)) as f64))
+}
+
 fn is_connected(boards: &[Board]) -> bool {
     let n = boards.len();
     let mut seen = vec![false; n];
@@ -5687,6 +5796,190 @@ fn the_shipped_config_connects_every_order_and_strands_nobody() {
     }
 }
 
+/// #434's instrument: the strict class's tie-break against the shape of
+/// the room it builds. Under the shipped key every searcher prefers the
+/// same lowest advertiser, so early dials chain k→k+1 and the room
+/// tends toward a path (363 §4); seed 6 of the 2026-09-27 sweep formed
+/// a diameter-7 room that way and lost 5 of 90 probes — not to the
+/// path's length (its 7-hop probes answered in under 3 s against a 20 s
+/// timeout) but to the race the shape runs: the room's last connecting
+/// edge landed at t+54 s, after node 6's announce ladder and its one
+/// relay had already died, so five nodes never had a route at all.
+///
+/// The table this prints (`--nocapture`) is diameter distribution, mean
+/// path length, when the last connecting edge lands, split/linkless
+/// orders and dark (saturated) boards, per candidate tie-break, on the
+/// board shape: 1 outgoing + [`PERIPH_SLOTS`] incoming, empty room.
+///
+/// Measured 2026-09-28, and the verdict is (c), leave it:
+///
+/// | tie-break        |  n | diam p50/p90/max | conn p50/90/max | split | dark |
+/// |------------------|---:|------------------|-----------------|------:|-----:|
+/// | lowest (shipped) | 10 | 6 / 7 / 8        | 9 / 9 / 16      |     0 |  498 |
+/// | (a) highest      | 10 | 6 / 7 / 8        | 9 / 10 / 16     |     0 |  726 |
+/// | (b) pair-hash    | 10 | 6 / 7 / 8        | 9 / 9 / 16      |     6 |  604 |
+/// | lowest (shipped) | 20 | 10 / 13 / 16     | 19 / 25 / 26    |     0 |  914 |
+/// | (a) highest      | 20 | 8 / 10 / 12      | 19 / 24 / 26    |    90 | 1582 |
+/// | (b) pair-hash    | 20 | 9 / 11 / 14      | 19 / 25 / 26    |    62 | 1188 |
+///
+/// Three findings, each pinned below:
+///
+/// - **At ten boards the tie-break does not move the shape at all**:
+///   the three diameter distributions are the same three percentiles,
+///   because with one outgoing link per board the room's ten edges are
+///   an arrival-order artefact far more than a preference one. Seed
+///   6's diameter-7 room is this distribution's own top decile, not a
+///   pathology of the lowest-address rule.
+/// - **Both candidates split rooms the shipped key never splits** (6
+///   and 62/1000 for the hash at the two sizes, 90/1000 for
+///   highest-at-20). The room-wide agreement on ONE preference order
+///   is what closed the saturated-cycle lock (#375, the module docs'
+///   table), and it does not matter WHICH order the room agrees on —
+///   (a) trades diameter for splits and saturation, (b) removes the
+///   agreement outright, the same trade `FallbackOrder::FirstHeard`
+///   measured and was not shipped for.
+/// - **No tie-break touches the number seed 6 actually lost on**: the
+///   connect-round column is flat across all three. The last
+///   connecting edge lands when the last-arrived boards' slots let it,
+///   ~45 s in the median and up to ~80 s ([`ROUND_MS`] per round), and
+///   an announce ladder that dies ~25 s after its destination boots
+///   loses that race under every dial order. The fix for the red cell
+///   is announce-side (re-offer known paths when a link comes up), not
+///   dial-side.
+#[test]
+fn the_strict_tie_break_decides_the_room_diameter() {
+    struct Row {
+        label: &'static str,
+        diameters: std::collections::BTreeMap<usize, usize>,
+        mean_path_sum: f64,
+        split: usize,
+        linkless: usize,
+        saturated: usize,
+        connect_rounds: Vec<u32>,
+    }
+    let mut rows: Vec<(usize, Row)> = Vec::new();
+    for n in [10usize, 20] {
+        for (choice, label) in [
+            (TargetChoice::RotatingLast, "lowest (shipped)"),
+            (TargetChoice::HighestAddress, "(a) highest"),
+            (TargetChoice::PairHash, "(b) pair-hash"),
+        ] {
+            let mut row = Row {
+                label,
+                diameters: std::collections::BTreeMap::new(),
+                mean_path_sum: 0.0,
+                split: 0,
+                linkless: 0,
+                saturated: 0,
+                connect_rounds: Vec::new(),
+            };
+            for seed in 0..ORDERS {
+                let sim = run_sim(
+                    n,
+                    0xB1E5_0000 + seed,
+                    FallbackSpec::Eager,
+                    choice,
+                    Churn::NONE,
+                    Mortality::IMMORTAL,
+                    Statics::NONE,
+                    Ledger::NONE,
+                    ConnectFailure::NONE,
+                );
+                match diameter_and_mean(&sim.boards) {
+                    Some((diameter, mean)) => {
+                        *row.diameters.entry(diameter).or_insert(0) += 1;
+                        row.mean_path_sum += mean;
+                    }
+                    None => row.split += 1,
+                }
+                if sim
+                    .boards
+                    .iter()
+                    .any(|b| b.outgoing.is_none() && b.incoming.is_empty())
+                {
+                    row.linkless += 1;
+                }
+                row.saturated += sim
+                    .boards
+                    .iter()
+                    .filter(|b| b.incoming.len() >= PERIPH_SLOTS)
+                    .count();
+                if let Some(round) = sim.tally.connected_at_round {
+                    row.connect_rounds.push(round);
+                }
+            }
+            row.connect_rounds.sort_unstable();
+            rows.push((n, row));
+        }
+    }
+    println!("tie-break                 n  diam p50/p90/max  mean-path  connect-round p50/p90/max  split linkless dark");
+    let mut cells = Vec::new();
+    for (n, row) in &rows {
+        let connected = ORDERS as usize - row.split;
+        let dias: Vec<usize> = row
+            .diameters
+            .iter()
+            .flat_map(|(&d, &count)| std::iter::repeat_n(d, count))
+            .collect();
+        let pct = |v: &[usize], p: usize| v[(v.len() - 1) * p / 100];
+        let rct = |v: &[u32], p: usize| v[(v.len() - 1) * p / 100] as usize;
+        println!(
+            "{:<24} {:>3}  {:>2} / {:>2} / {:>2}     {:>5.2}      {:>2} / {:>2} / {:>2}              {:>4} {:>7} {:>5}",
+            row.label,
+            n,
+            pct(&dias, 50),
+            pct(&dias, 90),
+            pct(&dias, 100),
+            row.mean_path_sum / connected as f64,
+            rct(&row.connect_rounds, 50),
+            rct(&row.connect_rounds, 90),
+            rct(&row.connect_rounds, 100),
+            row.split,
+            row.linkless,
+            row.saturated,
+        );
+        println!("    diameter histogram: {:?}", row.diameters);
+        cells.push((
+            row.label,
+            *n,
+            [pct(&dias, 50), pct(&dias, 90), pct(&dias, 100)],
+            [
+                rct(&row.connect_rounds, 50),
+                rct(&row.connect_rounds, 90),
+                rct(&row.connect_rounds, 100),
+            ],
+            row.split,
+            row.linkless,
+            row.saturated,
+        ));
+    }
+    // The doc table, pinned: the seed stream is fixed, so equality. A
+    // moved cell means the instrument moved, exactly like the module
+    // docs' calibration cells — including the shipped row's dark
+    // columns, which must equal the eager/mostfree cells of the #375
+    // item 3 table (498 and 914), because on an empty room of static
+    // addresses the shipped key IS that key.
+    assert_eq!(
+        cells,
+        [
+            ("lowest (shipped)", 10, [6, 7, 8], [9, 9, 16], 0, 0, 498),
+            ("(a) highest", 10, [6, 7, 8], [9, 10, 16], 0, 0, 726),
+            ("(b) pair-hash", 10, [6, 7, 8], [9, 9, 16], 6, 0, 604),
+            (
+                "lowest (shipped)",
+                20,
+                [10, 13, 16],
+                [19, 25, 26],
+                0,
+                0,
+                914
+            ),
+            ("(a) highest", 20, [8, 10, 12], [19, 24, 26], 90, 0, 1582),
+            ("(b) pair-hash", 20, [9, 11, 14], [19, 25, 26], 62, 0, 1188),
+        ]
+    );
+}
+
 /// The control: identical harness, identical seeds, fallback off — the
 /// strict sort alone must strand boards for a large share of orders, or
 /// the fallback tests above prove nothing about the fallback. The
@@ -6178,7 +6471,7 @@ fn elect_from(own_addr: u64, room: &[Advertiser], choice: TargetChoice) -> &'sta
         })
         .collect();
     let mut side_ledger = Tally::default();
-    room[elect(choice, &offers, &mut side_ledger)].label
+    room[elect(choice, own_addr, &offers, &mut side_ledger)].label
 }
 
 /// The two candidate keys ARE two different policies, which the Monte
