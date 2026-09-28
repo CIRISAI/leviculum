@@ -157,6 +157,24 @@ pub const PATHFINDER_MAX_WIRE_HOPS: u8 = PATHFINDER_MAX_HOPS - 1;
 pub const PATHFINDER_RETRIES: u8 = 1;
 pub const PATHFINDER_EXPIRY_SECS: u64 = 60 * 60 * 24 * 7; // 7 days
 
+/// How long a known destination the application has USED keeps its cached
+/// announce after its path is gone.
+///
+/// The reference's known-destination sweep spares three kinds of pathless
+/// entry: a retained one, a never-used one whose announce is younger than
+/// `UNUSED_DESTINATION_LINGER` (6 min), and a used one whose last use is
+/// younger than `DESTINATION_TIMEOUT * 1.25`
+/// (`reference/Reticulum/RNS/Identity.py:349-352`, the timeouts at
+/// `Transport.py:91-92`). This constant is the third of those, in
+/// milliseconds: 7 days times 1.25, 8.75 days.
+///
+/// Only the third arm is ours today. The first we already had (the retain
+/// pin); the second needs a per-entry announce timestamp the announce cache
+/// does not carry, so a pathless never-used entry still goes on the next
+/// sweep rather than lingering six minutes — a deviation, noted at
+/// `MemoryStorage::clean_announce_cache`.
+pub const KNOWN_DEST_USED_LINGER_MS: u64 = 60 * 60 * 24 * 7 * 1_000 * 5 / 4;
+
 /// Path expiry for destinations learned through an `AccessPoint`-mode
 /// interface (Python `Transport.AP_PATH_TIME`, Transport.py:72 = 1 day).
 pub const AP_PATH_TIME_SECS: u64 = 60 * 60 * 24; // 1 day

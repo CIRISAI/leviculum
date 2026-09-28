@@ -25,9 +25,9 @@ anything with the same profile:
 
 | phase | lock | code |
 | --- | --- | --- |
-| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1391` |
+| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1393` |
 | `resource::prepare_resource_send` | **none** | `leviculum-core/src/resource/outgoing.rs:89` |
-| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1426` |
+| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1428` |
 
 Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
@@ -36,7 +36,7 @@ the caller rebuilds once. The std driver calls the three phases itself
 (`leviculum-std/src/driver/mod.rs:3587`).
 
 `NodeCore::send_resource` still exists as the composed single call
-(`leviculum-core/src/node/mod.rs:1517`) because no_std and FFI callers
+(`leviculum-core/src/node/mod.rs:1519`) because no_std and FFI callers
 have no lock to hold and no second thread to starve. It is the
 composed form that is dangerous behind the driver, not the code it
 composes.
@@ -284,7 +284,7 @@ offering one.
 ### The one call the seam hands out that this page forbids
 
 `NodeCore::send_resource` is `pub`
-(`leviculum-core/src/node/mod.rs:1713`) and therefore reachable on the
+(`leviculum-core/src/node/mod.rs:1715`) and therefore reachable on the
 `&mut StdNodeCore` a processor hook holds. It is the 141 ms composed
 call this page opens with — one line, in consumer code, behind the
 driver and under the lock. `PROCESSOR_TICK_BUDGET` reports it 141 ms

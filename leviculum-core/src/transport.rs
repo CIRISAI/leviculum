@@ -11850,7 +11850,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         for hash in self.storage.local_client_known_dest_hashes() {
             preserved.insert(hash);
         }
-        self.storage.clean_announce_cache(&preserved);
+        self.storage.clean_announce_cache(&preserved, now);
     }
 
     /// Re-send path requests for pending discovery entries.
@@ -32273,6 +32273,7 @@ mod blackhole_tests {
 #[cfg(test)]
 mod blackhole_enforcement_tests {
     use super::*;
+    use crate::constants::KNOWN_DEST_USED_LINGER_MS;
     use crate::destination::{Destination, DestinationType, Direction};
     use crate::identity::Identity;
     use crate::memory_storage::MemoryStorage;
@@ -32658,16 +32659,24 @@ mod blackhole_enforcement_tests {
         // Drop the path so only the pin can protect the cached announce, then
         // apply cache pressure (nothing local).
         t.storage.remove_path(&dest_hash);
-        t.storage.clean_announce_cache(&BTreeSet::new());
+        let now = t.clock.now_ms();
+        t.storage.clean_announce_cache(&BTreeSet::new(), now);
         assert!(
             t.storage.get_announce_cache(&dest_hash).is_some(),
             "retained destination survives cache pressure"
         );
 
-        // Unretain, then the same pressure evicts it.
+        // Unretain leaves a recency stamp (Identity.py:286-292), so the
+        // destination is evicted only once the used linger has run out.
         assert!(t.unretain_destination_data(&dest_hash));
         assert!(!t.storage.is_known_dest_retained(&dest_hash));
-        t.storage.clean_announce_cache(&BTreeSet::new());
+        t.storage.clean_announce_cache(&BTreeSet::new(), now);
+        assert!(
+            t.storage.get_announce_cache(&dest_hash).is_some(),
+            "the unretain's own use stamp still protects it"
+        );
+        t.storage
+            .clean_announce_cache(&BTreeSet::new(), now + KNOWN_DEST_USED_LINGER_MS + 1);
         assert!(
             t.storage.get_announce_cache(&dest_hash).is_none(),
             "after unretain the destination is evicted normally"
@@ -32706,7 +32715,8 @@ mod blackhole_enforcement_tests {
         // Under pressure with no paths, only the pinned destination survives.
         t.storage.remove_path(&dest_t);
         t.storage.remove_path(&dest_b);
-        t.storage.clean_announce_cache(&BTreeSet::new());
+        let now = t.clock.now_ms();
+        t.storage.clean_announce_cache(&BTreeSet::new(), now);
         assert!(
             t.storage.get_announce_cache(&dest_t).is_some(),
             "target's retained destination survives"
@@ -32716,10 +32726,12 @@ mod blackhole_enforcement_tests {
             "bystander destination is evicted (negative guard)"
         );
 
-        // unretain_identity_data lifts the pin; the destination is evictable.
+        // unretain_identity_data lifts the pin; the destination then ages out
+        // against the used linger like any recency-stamped entry.
         assert!(t.unretain_identity_data(target.hash()));
         assert!(!t.storage.is_known_dest_retained(&dest_t));
-        t.storage.clean_announce_cache(&BTreeSet::new());
+        t.storage
+            .clean_announce_cache(&BTreeSet::new(), now + KNOWN_DEST_USED_LINGER_MS + 1);
         assert!(
             t.storage.get_announce_cache(&dest_t).is_none(),
             "after identity unretain the destination is evicted"

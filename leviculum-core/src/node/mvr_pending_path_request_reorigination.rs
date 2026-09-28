@@ -44,7 +44,7 @@
 //! Ours logged the same sentence and rebroadcast anyway
 //! (`transport.rs::handle_path_request`, the `active_discovery` arm).
 //! Our pending window is `DISCOVERY_TIMEOUT_MS` = 30 s
-//! (`constants.rs:214`), deliberately twice the reference's 15 s so the
+//! (`constants.rs:232`), deliberately twice the reference's 15 s so the
 //! retry cadence has room on slow links; the suppression therefore
 //! covers twice as long a window, which is strictly more airtime saved
 //! for the same semantics.

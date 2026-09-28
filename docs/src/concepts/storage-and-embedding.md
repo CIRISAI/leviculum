@@ -24,7 +24,7 @@ driver:
   subject of [Time and Clocks](time-and-clocks.md).
 - **`Storage`** (`traits.rs:500`) — supplies persistence and lookup
   for every collection the protocol maintains. `flush()` defaults to a
-  no-op (`traits.rs:849`) so a RAM-only backend needs to implement
+  no-op (`traits.rs:856`) so a RAM-only backend needs to implement
   nothing extra.
 - **`Interface`** (`traits.rs:242`) — supplies framing and the wire (see
   [Interface Isolation](interface-isolation.md) and the
@@ -53,7 +53,7 @@ page before changing the trait surface.
 
 The same `NodeCore` is parameterised over its `Storage`
 implementation, so embedding is a matter of choosing a backend
-(`leviculum-core/src/node/mod.rs:399`,
+(`leviculum-core/src/node/mod.rs:401`,
 `NodeCore<R: CryptoRngCore, C: Clock, S: Storage>`):
 
 | Backend | Where | Behaviour |

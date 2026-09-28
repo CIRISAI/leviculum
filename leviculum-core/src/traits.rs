@@ -823,9 +823,16 @@ pub trait Storage {
     /// Remove path_states and announce_rate entries for destinations no longer in path_table
     fn clean_stale_path_metadata(&mut self);
 
-    /// Remove announce_cache entries for destinations that have no path and are not local.
-    /// Called from Transport which knows the local destination set.
-    fn clean_announce_cache(&mut self, local_destinations: &BTreeSet<[u8; TRUNCATED_HASHBYTES]>);
+    /// Remove announce_cache entries for destinations that have no path, are
+    /// not local, and carry no live use-state.
+    /// Called from Transport which knows the local destination set; `now_ms`
+    /// is the monotonic clock the use-state stamps are measured against
+    /// (`KNOWN_DEST_USED_LINGER_MS`).
+    fn clean_announce_cache(
+        &mut self,
+        local_destinations: &BTreeSet<[u8; TRUNCATED_HASHBYTES]>,
+        now_ms: u64,
+    );
 
     /// Remove link table entries that reference a specific interface (for interface-down cleanup)
     fn remove_link_entries_for_interface(
@@ -1141,7 +1148,8 @@ impl Storage for NoStorage {
         Vec::new()
     }
     fn clean_stale_path_metadata(&mut self) {}
-    fn clean_announce_cache(&mut self, _local: &BTreeSet<[u8; TRUNCATED_HASHBYTES]>) {}
+    fn clean_announce_cache(&mut self, _local: &BTreeSet<[u8; TRUNCATED_HASHBYTES]>, _now_ms: u64) {
+    }
     fn remove_link_entries_for_interface(
         &mut self,
         _iface_index: usize,

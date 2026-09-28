@@ -860,8 +860,9 @@ impl leviculum_core::traits::Storage for Storage {
     fn clean_announce_cache(
         &mut self,
         local_destinations: &std::collections::BTreeSet<[u8; TRUNCATED_HASHBYTES]>,
+        now_ms: u64,
     ) {
-        self.inner.clean_announce_cache(local_destinations)
+        self.inner.clean_announce_cache(local_destinations, now_ms)
     }
     fn remove_link_entries_for_interface(
         &mut self,

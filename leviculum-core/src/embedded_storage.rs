@@ -1095,7 +1095,16 @@ impl Storage for EmbeddedStorage {
         }
     }
 
-    fn clean_announce_cache(&mut self, local_destinations: &BTreeSet<[u8; TRUNCATED_HASHBYTES]>) {
+    /// No use-state arm here, unlike `MemoryStorage`: this target does not
+    /// track one at all (`used_known_dest` is the `false` stub below), so
+    /// `now_ms` has nothing to measure against and every pathless non-local
+    /// entry is stale. A board is the one target where that is the right
+    /// trade — 16 slots, and nothing on it drives the retain RPC.
+    fn clean_announce_cache(
+        &mut self,
+        local_destinations: &BTreeSet<[u8; TRUNCATED_HASHBYTES]>,
+        _now_ms: u64,
+    ) {
         let stale: heapless::Vec<[u8; TRUNCATED_HASHBYTES], 16> = self
             .announce_cache
             .keys()
@@ -1795,7 +1804,7 @@ mod tests {
         s.set_announce_cache(key_th(2), alloc::vec![8u8; 4]);
         s.set_path(key_th(1), mk_path(0));
 
-        s.clean_announce_cache(&BTreeSet::new());
+        s.clean_announce_cache(&BTreeSet::new(), 0);
 
         assert!(
             s.get_announce_cache(&key_th(1)).is_some(),

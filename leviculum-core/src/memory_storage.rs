@@ -28,8 +28,8 @@ use alloc::vec::Vec;
 
 use crate::bounded_map::BoundedMap;
 use crate::constants::{
-    HASHLIST_MAXSIZE, MAX_PATH_REQUEST_TAGS, RATCHET_SIZE, RECEIPT_RETENTION_MS,
-    TRUNCATED_HASHBYTES,
+    HASHLIST_MAXSIZE, KNOWN_DEST_USED_LINGER_MS, MAX_PATH_REQUEST_TAGS, RATCHET_SIZE,
+    RECEIPT_RETENTION_MS, TRUNCATED_HASHBYTES,
 };
 use crate::identity::Identity;
 use crate::storage_census::CollectionCount;
@@ -1198,12 +1198,47 @@ impl Storage for MemoryStorage {
             .retain(|hash, _| self.path_table.contains_key(hash));
     }
 
-    fn clean_announce_cache(&mut self, local_destinations: &BTreeSet<[u8; TRUNCATED_HASHBYTES]>) {
+    /// The reference's `Identity.clean_known_destinations`
+    /// (`reference/Reticulum/RNS/Identity.py:310-354`) spares a pathless entry
+    /// on three grounds, and this is where ours does the same:
+    ///
+    /// - retained (the `-1` sentinel, Identity.py:344-346) — kept forever;
+    /// - used within `DESTINATION_TIMEOUT * 1.25` (Identity.py:350-352) —
+    ///   kept for [`KNOWN_DEST_USED_LINGER_MS`];
+    /// - never used but announced within `UNUSED_DESTINATION_LINGER`
+    ///   (6 min, Identity.py:349) — **not ours**: the announce cache stores
+    ///   the raw announce, not when we heard it, so a pathless never-used
+    ///   entry goes on the next sweep instead of lingering six minutes. That
+    ///   arm only ever protects a destination nothing has asked about, so
+    ///   dropping it early costs a path request, not a fact.
+    ///
+    /// The middle arm is the one #389 was about. Without it a recency stamp
+    /// bought an entry nothing at all: a peer this node had used minutes
+    /// before lost its cached announce on the first sweep after its path
+    /// expired, and with it everything the cache is the recall source for —
+    /// `Transport::recall_identity_hash`, `NodeCore::recall_app_data`, and
+    /// the `destination_data` / `identity_data` RPC ops, which all report
+    /// "unknown" for a destination that is not in this map. A shared-instance
+    /// client feels it first, because our sweep runs on every `poll()`
+    /// (`Transport::clean_path_states`) rather than on the reference's 300 s
+    /// jobs cadence (`Transport.py:1170-1176`), so "the path is momentarily
+    /// gone" and "the sweep instant" are the same instant here.
+    fn clean_announce_cache(
+        &mut self,
+        local_destinations: &BTreeSet<[u8; TRUNCATED_HASHBYTES]>,
+        now_ms: u64,
+    ) {
         let known_dest_use = &self.known_dest_use;
         self.announce_cache.retain(|hash, _| {
             self.path_table.contains_key(hash)
                 || local_destinations.contains(hash)
-                || matches!(known_dest_use.get(hash), Some(KnownDestUse::Retained))
+                || match known_dest_use.get(hash) {
+                    Some(KnownDestUse::Retained) => true,
+                    Some(KnownDestUse::Used(last_used_ms)) => {
+                        now_ms.saturating_sub(*last_used_ms) <= KNOWN_DEST_USED_LINGER_MS
+                    }
+                    None => false,
+                }
         });
         // Drop lifecycle state for destinations whose cached announce was
         // evicted (retained ones survive above, so this only reaps stale
@@ -2093,7 +2128,7 @@ mod tests {
         s.set_announce_cache(h3, vec![0xCC; 20]);
         let mut local = BTreeSet::new();
         local.insert(h2); // h2 is "local" — no path but should survive
-        s.clean_announce_cache(&local);
+        s.clean_announce_cache(&local, 0);
         assert!(s.get_announce_cache(&h1).is_some(), "has path → kept");
         assert!(s.get_announce_cache(&h2).is_some(), "local dest → kept");
         assert!(
@@ -2124,28 +2159,37 @@ mod tests {
         );
         assert!(s.is_known_dest_retained(&pinned));
 
-        // Neither has a path nor is local: only the pinned one survives.
+        // Neither has a path nor is local, and neither has ever been used:
+        // only the pinned one survives.
         let empty = BTreeSet::new();
-        s.clean_announce_cache(&empty);
+        s.clean_announce_cache(&empty, 0);
         assert!(
             s.get_announce_cache(&pinned).is_some(),
             "retained → survives cache pressure"
         );
         assert!(
             s.get_announce_cache(&plain).is_none(),
-            "non-retained, no path, not local → evicted (negative guard)"
+            "non-retained, never used, no path, not local → evicted (negative guard)"
         );
         // Use-state for the evicted entry is reaped; the pin persists.
         assert!(s.is_known_dest_retained(&pinned));
 
-        // Unretain lifts the pin; the entry can then be evicted.
+        // Unretain lifts the pin and leaves a recency stamp behind, exactly
+        // as Python's `_unretain_destination_data` writes `time.time()`
+        // (Identity.py:286-292). The entry is therefore not evicted next
+        // sweep — it ages out against the used linger.
         assert!(s.unretain_known_dest(&pinned, 5_000));
         assert!(!s.is_known_dest_retained(&pinned));
         assert_eq!(s.known_dest_last_used(&pinned), Some(5_000));
-        s.clean_announce_cache(&empty);
+        s.clean_announce_cache(&empty, 5_000);
+        assert!(
+            s.get_announce_cache(&pinned).is_some(),
+            "unretain leaves a fresh use stamp → still kept"
+        );
+        s.clean_announce_cache(&empty, 5_000 + KNOWN_DEST_USED_LINGER_MS + 1);
         assert!(
             s.get_announce_cache(&pinned).is_none(),
-            "after unretain → evicted normally"
+            "past the used linger → evicted normally"
         );
     }
 
@@ -2191,12 +2235,24 @@ mod tests {
         s.retain_known_dest(&b);
         s.used_known_dest(&c, 100); // touched but not pinned
 
-        s.clean_announce_cache(&BTreeSet::new());
+        s.clean_announce_cache(&BTreeSet::new(), 100);
         assert!(s.get_announce_cache(&a).is_none(), "never used → evicted");
         assert!(s.get_announce_cache(&b).is_some(), "retained → kept");
         assert!(
+            s.get_announce_cache(&c).is_some(),
+            "recency-touched inside the linger → kept (Identity.py:350-352)"
+        );
+
+        // The touched entry is kept, not pinned: past the linger it goes, and
+        // the pinned one still does not (Identity.py:344-346).
+        s.clean_announce_cache(&BTreeSet::new(), 100 + KNOWN_DEST_USED_LINGER_MS + 1);
+        assert!(
+            s.get_announce_cache(&b).is_some(),
+            "retained → kept forever"
+        );
+        assert!(
             s.get_announce_cache(&c).is_none(),
-            "recency-touched but not pinned → still evicted"
+            "recency-touched past the linger → evicted"
         );
     }
 
