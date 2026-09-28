@@ -2789,10 +2789,12 @@ fn verify_boot(
         app.id
     ));
 
-    let verdict = verify::judge(
-        running_build(sysfs, &app, opts),
-        confirmed.payloads().app.git_sha.as_deref(),
-    );
+    // The sha the read is directed at, and the sha the verdict is judged
+    // against: the same one, because a read that does not know what it is
+    // looking for has to conclude on the first banner it sees, and on
+    // 2026-09-27 that was the previous firmware's, replayed (#372).
+    let expected = confirmed.payloads().app.git_sha.as_deref();
+    let verdict = verify::judge(running_build(sysfs, &app, expected, opts), expected);
     match &verdict {
         Verdict::Confirmed { git_sha, source } => ui.say(&format!(
             "{port}: running git_sha={git_sha}, {}. Done.",
@@ -2840,42 +2842,68 @@ const REOPEN_PAUSE: Duration = Duration::from_millis(200);
 /// * It opens through [`open_debug`], which proves after the open that the
 ///   fd is bound to *this* board before a byte is read.
 /// * It asks [`verify::fresh_banner`] for a line emitted after the reset,
-///   not for the last line in a window.
+///   not for the last line in a window, and tells it which build it is
+///   waiting for: a banner naming anything else is kept as evidence while
+///   the read goes on, because the board repeats its banner and a stale
+///   line does not (#372).
 ///
 /// The budget covers the whole attempt, reopens included: a port that
 /// vanishes mid-read (a board that resets once more on its way up) is
-/// retried rather than reported, for as long as the budget lasts.
-fn running_build(sysfs: &Sysfs, app: &Device, opts: &Options) -> Result<verify::Reading, String> {
+/// retried rather than reported, for as long as the budget lasts. A
+/// non-matching banner heard on one attempt survives into the next, so a
+/// board that says the old sha and then loses its port is still reported as
+/// having said it.
+fn running_build(
+    sysfs: &Sysfs,
+    app: &Device,
+    expected: Option<&str>,
+    opts: &Options,
+) -> Result<verify::Reading, String> {
     let deadline = Instant::now() + opts.banner_budget;
     let mut why = format!(
         "no [FW_BUILD] line arrived on the debug port (if{:02}) in the {} s after the reset",
         crate::watch::DEBUG_INTERFACE,
         opts.banner_budget.as_secs()
     );
+    // The best a previous attempt could show: a banner that named some other
+    // build. Not an answer while there is budget left to hear the expected
+    // one, and the answer once there is not.
+    let mut other: Option<verify::Reading> = None;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(why);
+            return other.ok_or(why);
         }
         match entry::wait_for_interface_tty(sysfs, app, crate::watch::DEBUG_INTERFACE, remaining) {
-            Ok(Some(tty)) => match open_debug_proven(sysfs, app, &tty).and_then(|(fd, node)| {
-                // Timed around the call that flushes the queue and waits, so
-                // the delay a claim carries is measured from that flush and
-                // says whether the line was already in flight (#378).
-                let asked = Instant::now();
-                verify::fresh_banner(&fd, deadline).map(|seen| {
-                    seen.map(|build| verify::Reading {
-                        build,
+            Ok(Some(tty)) => match open_debug_proven(sysfs, app, &tty)
+                .and_then(|(fd, node)| Ok((verify::fresh_banner(&fd, expected, deadline)?, node)))
+            {
+                // The delay a claim carries is measured from the flush by
+                // the read itself, so it says whether the line was already
+                // in flight (#378) even when several lines were read.
+                Ok((heard, node)) => {
+                    let reading = |banner: verify::Banner| verify::Reading {
                         source: verify::Source {
                             port: tty.clone(),
                             node,
-                            after: asked.elapsed(),
+                            after: banner.after,
+                            board_uptime_ms: banner.uptime_ms,
                         },
-                    })
-                })
-            }) {
-                Ok(Some(reading)) => return Ok(reading),
-                Ok(None) => {}
+                        build: banner.build,
+                    };
+                    match heard {
+                        verify::Heard::Expected(banner) => return Ok(reading(banner)),
+                        // With no expected sha there is nothing left to wait
+                        // for, so the one banner heard is the answer; with
+                        // one, this is a best-so-far that a later attempt
+                        // may still improve on.
+                        verify::Heard::Other(banner) if expected.is_none() => {
+                            return Ok(reading(banner));
+                        }
+                        verify::Heard::Other(banner) => other = Some(reading(banner)),
+                        verify::Heard::Silence => {}
+                    }
+                }
                 Err(err) => why = format!("the debug port could not be read ({err})"),
             },
             Ok(None) => {
@@ -2887,7 +2915,7 @@ fn running_build(sysfs: &Sysfs, app: &Device, opts: &Options) -> Result<verify::
             Err(err) => why = format!("the debug port could not be resolved ({err})"),
         }
         if Instant::now() >= deadline {
-            return Err(why);
+            return other.ok_or(why);
         }
         std::thread::sleep(REOPEN_PAUSE);
     }
@@ -3629,10 +3657,10 @@ convert = "hex-to-uf2"
                     pty.wait_until_queue(verify::FRESH_BANNER_BUDGET, |queued| queued == 0),
                     "the read never flushed the port's input queue"
                 );
-                pty.write_raw(b"[FW_BUILD] git_sha=bb7c4f64 dirty=false\r\n");
+                pty.write_raw(b"[FW_BUILD] git_sha=bb7c4f64 dirty=false t=7448\r\n");
             });
-            let reading =
-                running_build(&sysfs, &t114, &Options::default()).expect("the board spoke");
+            let reading = running_build(&sysfs, &t114, Some("bb7c4f64"), &Options::default())
+                .expect("the board spoke");
             // The banner emitted after the flush, never the one that was
             // already in flight: that is what makes the claim the board's
             // current build rather than its previous one.
@@ -3643,6 +3671,9 @@ convert = "hex-to-uf2"
             // from the tool's output alone.
             assert_eq!(reading.source.port, link);
             assert_eq!(reading.source.node, dev.path().join("ttyACM1"));
+            // The board's own stamp on the line, carried into the claim so
+            // a false negative is diagnosable from the log (#372).
+            assert_eq!(reading.source.board_uptime_ms, Some(7448));
             // Information, not an assertion. How long after the flush the
             // line arrived is a property of the machine the test runs on:
             // the lower bound that used to stand here measured 139 ms on a
@@ -3669,6 +3700,52 @@ convert = "hex-to-uf2"
             let line = verdict.describe();
             assert!(line.contains("usb-leviculum_T114"), "{line}");
             assert!(line.contains("ttyACM1"), "{line}");
+            assert!(line.contains("t=7448 ms"), "{line}");
+        });
+    }
+
+    #[test]
+    fn a_boot_time_replay_of_the_old_banner_does_not_fail_the_flash() {
+        // Codeberg #372 end to end, as the rig hit it on 2026-09-27
+        // (`/home/lew/rig-run/boot-proof-flash.log`, section `=== flash
+        // 01eb398b 2026-09-27T20:37:14`): the board had come back on the
+        // new image, and the first `[FW_BUILD]`-bearing line on its port
+        // after the flush was the new firmware quoting the OLD firmware's
+        // banner out of retained RAM. The run reported "the write did not
+        // take", exited 1, and stopped the script chained on it — on a
+        // board whose own capture shows `git_sha=01eb398b7` seconds later.
+        let pty = crate::sys::testpty::Pty::open();
+        let dev = dev_tree(&[("ttyACM1", &pty.slave_path)]);
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
+        let t114 = sysfs
+            .devices()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.name == "3-2.3.1")
+            .unwrap();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // Both lines arrive AFTER the flush, in the order the board
+                // sends them: the replay block first, the new firmware's own
+                // banner once its banner task ticks.
+                assert!(
+                    pty.wait_until_queue(verify::FRESH_BANNER_BUDGET, |queued| queued == 0),
+                    "the read never flushed the port's input queue"
+                );
+                pty.write_raw(
+                    b"[INFO!] [PERSISTENT_LOG] [INFO!] [FW_BUILD] git_sha=abaea121f                       dirty=false t=2023783 t=11
+",
+                );
+                std::thread::sleep(Duration::from_millis(100));
+                pty.write_raw(b"[INFO!] [FW_BUILD] git_sha=01eb398b7 dirty=false t=7448
+");
+            });
+            let reading = running_build(&sysfs, &t114, Some("01eb398b7"), &Options::default())
+                .expect("the board spoke");
+            assert_eq!(reading.build.git_sha, "01eb398b7");
+            assert_eq!(reading.source.board_uptime_ms, Some(7448));
+            assert!(verify::judge(Ok(reading), Some("01eb398b7")).is_confirmed());
         });
     }
 

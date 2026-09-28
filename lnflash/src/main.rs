@@ -1026,6 +1026,7 @@ mod tests {
             port: PathBuf::from("/dev/serial/by-id/usb-leviculum_RAK4631_DEC9947DAD9D2869-if00"),
             node: PathBuf::from("/dev/ttyACM3"),
             after: std::time::Duration::from_millis(2400),
+            board_uptime_ms: Some(7448),
         }
     }
 

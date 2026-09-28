@@ -24,6 +24,31 @@
 //! waits for a line to arrive, so the answer is about the firmware running
 //! now or there is no answer at all.
 //!
+//! **A line the firmware replays is not a line the firmware claims**
+//! (Codeberg #372). At boot our firmware re-emits the last ~2 KiB of the
+//! previous boot's log out of retained RAM, each line wrapped in
+//! `[PERSISTENT_LOG]` (`leviculum-nrf/src/bin/t114.rs:163`,
+//! `rak4631.rs:185`, `solarnode.rs:190`). Those lines include the *previous*
+//! firmware's own `[FW_BUILD]` banner, so a board that has just booted into
+//! a new image says the old image's sha within milliseconds of the port
+//! opening — after the reset, after the flush, and still not about itself.
+//! On 2026-09-27 that read the 2026-09-27 T114 flash as a failed one while
+//! the board was running the new build
+//! (`/home/lew/rig-run/boot-proof-flash.log`, section `=== flash 01eb398b
+//! 2026-09-27T20:37:14`, against `ble-drop/feld-t114.log` 18:38:20Z). The
+//! marker is what disqualifies such a line, not its timing.
+//!
+//! **The read is directed at the build we wrote**, rather than concluding on
+//! whichever banner lands first (#372). A banner naming the expected sha is
+//! an answer and ends the read; a banner naming anything else is kept as
+//! evidence and the read goes on, because the board repeats its banner every
+//! five seconds and a stale line cannot repeat. Only when the budget is gone
+//! is the last of those lines reported as "did not take". That costs a
+//! genuinely failed flash the whole budget, and buys a correct verdict
+//! against every source of a stale line, including the ones nobody has
+//! enumerated yet — no line's arrival time is judged, so there is no timing
+//! to guess wrong.
+//!
 //! **A build claim carries its provenance** ([`Source`]). A verdict that
 //! names a sha and nothing else cannot be checked: the #378 recurrence of
 //! 2026-09-11 printed `the board reports git_sha=b9b4a9c3` and settling
@@ -67,6 +92,14 @@ const READ_STEP: Duration = Duration::from_millis(200);
 /// holds no answer.
 const CARRY_MAX: usize = 16 * 1024;
 
+/// The prefix our firmware puts on every line it replays out of retained
+/// RAM at boot (`leviculum-nrf/src/bin/t114.rs:163`). A line carrying it is
+/// output from the boot *before* this one, quoted verbatim — including a
+/// `[FW_BUILD]` banner, which is then the sha of the image that was
+/// replaced. Structural, not temporal: this is the firmware saying "this is
+/// a quotation", which no arrival time can tell us (#372).
+const REPLAY_MARKER: &str = "[PERSISTENT_LOG]";
+
 /// A parsed `[FW_BUILD]` line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FwBuild {
@@ -95,8 +128,18 @@ impl FwBuild {
 
 /// Pull `[FW_BUILD]` out of a line of debug output. `None` for every other
 /// line, of which there are many.
+///
+/// A line that carries the replay marker `[PERSISTENT_LOG]` ahead of the
+/// token is one the firmware is quoting from its previous boot, so it is not
+/// a banner at all and parses as `None` (#372). The marker has to sit
+/// *before* the token to disqualify: that is where the replay wrapper puts
+/// it, and a payload that merely mentions the word after its own banner is
+/// still a banner.
 pub fn parse_fw_build(line: &str) -> Option<FwBuild> {
-    let rest = line.split_once("[FW_BUILD]")?.1;
+    let (before, rest) = line.split_once("[FW_BUILD]")?;
+    if before.contains(REPLAY_MARKER) {
+        return None;
+    }
     let mut git_sha = None;
     let mut dirty = None;
     for field in rest.split_whitespace() {
@@ -110,11 +153,59 @@ pub fn parse_fw_build(line: &str) -> Option<FwBuild> {
     Some(FwBuild { git_sha, dirty })
 }
 
-/// The first `[FW_BUILD]` the board emits **after** this call, or `None` if
-/// it says nothing before `deadline`.
+/// The ` t=<ms>` stamp every firmware log line ends with
+/// (`leviculum-nrf/log-line/src/lib.rs`, `finish`): milliseconds of board
+/// uptime at the moment of the log call.
 ///
-/// Three rules, and each of them is a way the old "last banner in a window"
-/// read was wrong (#378):
+/// The *last* `t=` on the line is the emitting firmware's own stamp, which
+/// matters because a replayed line carries two — the quoted one and the
+/// replay's. Those lines are refused as banners ([`parse_fw_build`]), so in
+/// practice there is one; taking the last is what keeps this honest if a
+/// future wrapper quotes a line some other way.
+pub fn parse_uptime_ms(line: &str) -> Option<u64> {
+    line.split_whitespace()
+        .rev()
+        .find_map(|field| field.strip_prefix("t="))
+        .and_then(|value| value.parse().ok())
+}
+
+/// One `[FW_BUILD]` line the board emitted after the flush, with the two
+/// numbers that make it checkable: when it reached us, and what the board's
+/// own clock said when it was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Banner {
+    pub build: FwBuild,
+    /// The line's own ` t=<ms>`: board uptime in milliseconds. A fresh boot
+    /// stamps its first periodic banner around 5000, the boot line in the
+    /// low hundreds; a line stamped in the millions was written by a session
+    /// that had been up for hours. `None` if the line carried no stamp,
+    /// which our firmware's lines always do but a foreign image's need not.
+    pub uptime_ms: Option<u64>,
+    /// How long after the port's input queue was flushed it arrived.
+    pub after: Duration,
+}
+
+/// What one read of a board's debug port heard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Heard {
+    /// A banner naming the build we wrote. The read stops at the first one:
+    /// there is nothing a later line could add.
+    Expected(Banner),
+    /// The most recent banner naming something else, after the budget ran
+    /// out (or the port went away) without the expected build ever showing
+    /// up. This is the evidence for "the write did not take" — and when the
+    /// manifest names no expected build, it is simply the first banner,
+    /// because then there is nothing to wait for.
+    Other(Banner),
+    /// No banner at all.
+    Silence,
+}
+
+/// Read `[FW_BUILD]` lines the board emits **after** this call until one
+/// names `expected`, or `deadline` passes.
+///
+/// Four rules, and each of them is a way a simpler read was wrong on the rig
+/// (#378, #372):
 ///
 /// 1. **The input queue is flushed first.** Everything in it was said
 ///    before we asked, so it cannot answer a question about the image we
@@ -127,32 +218,54 @@ pub fn parse_fw_build(line: &str) -> Option<FwBuild> {
 ///    read. What survives a tear is the tail of a line, and a tail that
 ///    still carries the `[FW_BUILD]` token carries everything after it
 ///    intact, so a torn line is either unparseable or right.
-/// 3. **The first answer wins, and there is no second window.** The board
-///    repeats the banner; the first one that arrives after the flush is by
-///    construction from the session running now, and waiting longer to
-///    prefer a later one only invites a reset mid-wait to be read as an
-///    answer.
+/// 3. **A quoted line is not a claim.** A `[PERSISTENT_LOG]` line is the
+///    firmware replaying its previous boot, banner and all
+///    ([`parse_fw_build`]).
+/// 4. **A non-matching banner does not end the read.** The board repeats
+///    its banner every five seconds, so the expected build gets another
+///    chance for as long as the budget lasts; a stale line, from the replay
+///    or from anywhere else, gets exactly one. Only the last non-matching
+///    line, once the budget is gone, is an answer — and then it is
+///    [`Heard::Other`], the evidence for a write that did not take.
 ///
-/// A port that goes away mid-wait ends the read with `None`: the caller
-/// still holds the budget and can reopen. Silence is `None`, and `None` is
-/// "unknown" — it is never turned into a build.
-pub fn fresh_banner(fd: &Fd, deadline: Instant) -> io::Result<Option<FwBuild>> {
+/// A port that goes away mid-wait ends the read with whatever it has: the
+/// caller still holds the budget and can reopen, and a [`Heard::Other`] it
+/// gets back that way is a best-so-far, not a verdict.
+pub fn fresh_banner(fd: &Fd, expected: Option<&str>, deadline: Instant) -> io::Result<Heard> {
     fd.drain_input()?;
+    let flushed = Instant::now();
     let mut carry: Vec<u8> = Vec::new();
+    let mut other: Option<Banner> = None;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Ok(None);
+            return Ok(other.map_or(Heard::Silence, Heard::Other));
         }
         let Some(bytes) = fd.read_available(READ_STEP.min(remaining))? else {
             // EOF: this fd is bound to a driver instance that is gone.
-            return Ok(None);
+            return Ok(other.map_or(Heard::Silence, Heard::Other));
         };
         carry.extend_from_slice(&bytes);
         while let Some(pos) = carry.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = carry.drain(..=pos).collect();
-            if let Some(build) = parse_fw_build(&String::from_utf8_lossy(&line)) {
-                return Ok(Some(build));
+            let raw: Vec<u8> = carry.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&raw);
+            let Some(build) = parse_fw_build(&line) else {
+                continue;
+            };
+            let banner = Banner {
+                build,
+                uptime_ms: parse_uptime_ms(&line),
+                after: flushed.elapsed(),
+            };
+            match expected {
+                // Nothing to match against: the first banner is everything
+                // this read can learn, and waiting out the budget would
+                // only delay saying so.
+                None => return Ok(Heard::Other(banner)),
+                Some(want) if banner.build.matches(want) => {
+                    return Ok(Heard::Expected(banner));
+                }
+                Some(_) => other = Some(banner),
             }
         }
         if carry.len() > CARRY_MAX {
@@ -182,6 +295,14 @@ pub struct Source {
     pub node: PathBuf,
     /// How long after the port's input queue was flushed the line arrived.
     pub after: Duration,
+    /// The board uptime the accepted line stamped itself with
+    /// ([`Banner::uptime_ms`]). Reported, never judged: #372 was a false
+    /// negative nobody could place from the log, and the one number that
+    /// separates a fresh boot's banner from a quoted older one was missing
+    /// from it. A rule that refused a line for its stamp would be guessing
+    /// at how fast a board boots, which is why the decision is made
+    /// elsewhere and this is only evidence.
+    pub board_uptime_ms: Option<u64>,
 }
 
 impl Source {
@@ -194,8 +315,13 @@ impl Source {
         } else {
             format!("{} ({})", self.port.display(), self.node.display())
         };
+        let stamp = match self.board_uptime_ms {
+            Some(ms) => format!(", the line stamped t={ms} ms of board uptime"),
+            None => ", and the line carried no uptime stamp".to_string(),
+        };
         format!(
-            "read as a [FW_BUILD] banner line on {where_}, {:.1} s after that port was flushed",
+            "read as a [FW_BUILD] banner line on {where_}, {:.1} s after that port was \
+             flushed{stamp}",
             self.after.as_secs_f32()
         )
     }
@@ -331,6 +457,7 @@ mod tests {
             port: PathBuf::from(BY_ID),
             node: PathBuf::from(NODE),
             after: Duration::from_millis(2400),
+            board_uptime_ms: Some(7448),
         }
     }
 
@@ -489,6 +616,7 @@ mod tests {
             port: PathBuf::from(NODE),
             node: PathBuf::from(NODE),
             after: Duration::from_millis(500),
+            board_uptime_ms: Some(5001),
         };
         let text = bare.describe();
         assert_eq!(text.matches(NODE).count(), 1, "{text}");
@@ -516,13 +644,16 @@ mod tests {
                 thread::sleep(Duration::from_millis(200));
                 pty.write_raw(banner(NEW).as_bytes());
             });
-            let seen = fresh_banner(&fd, Instant::now() + TEST_BUDGET)
-                .expect("reading the stub board")
-                .expect("the board spoke after the reset");
-            assert_eq!(seen.git_sha, NEW);
+            let Heard::Expected(banner) =
+                fresh_banner(&fd, Some(NEW), Instant::now() + TEST_BUDGET)
+                    .expect("reading the stub board")
+            else {
+                panic!("the board spoke after the reset and was not heard");
+            };
+            assert_eq!(banner.build.git_sha, NEW);
             assert!(judge(
                 Ok(Reading {
-                    build: seen,
+                    build: banner.build,
                     source: source()
                 }),
                 Some(NEW)
@@ -540,16 +671,22 @@ mod tests {
         let pty = Pty::open();
         pty.write_raw(banner(OLD).as_bytes());
         let fd = debug_port(&pty);
-        let seen = fresh_banner(&fd, Instant::now() + Duration::from_millis(600))
+        let seen = fresh_banner(&fd, Some(NEW), Instant::now() + Duration::from_millis(600))
             .expect("reading the stub board");
-        assert_eq!(seen, None, "a line from the previous life is not an answer");
+        assert_eq!(
+            seen,
+            Heard::Silence,
+            "a line from the previous life is not an answer"
+        );
 
         let verdict = judge(
-            seen.map(|build| Reading {
-                build,
-                source: source(),
-            })
-            .ok_or_else(|| "no [FW_BUILD] line arrived".to_string()),
+            match seen {
+                Heard::Expected(banner) | Heard::Other(banner) => Ok(Reading {
+                    build: banner.build,
+                    source: source(),
+                }),
+                Heard::Silence => Err("no [FW_BUILD] line arrived".to_string()),
+            },
             Some(NEW),
         );
         assert!(
@@ -563,21 +700,30 @@ mod tests {
     fn a_board_that_keeps_saying_the_old_sha_after_the_reset_is_still_caught() {
         // The freshness rule must not blunt the check it protects: a board
         // that answers, after the flush, with the build it was already
-        // running is a flash that did not take.
+        // running is a flash that did not take. Directing the read at the
+        // expected sha (#372) must not blunt it either — the budget runs
+        // out, and then the line the board did send is the answer.
         let pty = Pty::open();
         let fd = debug_port(&pty);
+        let budget = Duration::from_millis(800);
         thread::scope(|scope| {
             scope.spawn(|| {
                 thread::sleep(Duration::from_millis(200));
                 pty.write_raw(banner(OLD).as_bytes());
             });
-            let seen = fresh_banner(&fd, Instant::now() + TEST_BUDGET)
+            let started = Instant::now();
+            let Heard::Other(heard) = fresh_banner(&fd, Some(NEW), Instant::now() + budget)
                 .expect("reading the stub board")
-                .expect("the board spoke");
+            else {
+                panic!("the board said the old sha and the read did not keep it");
+            };
+            // It waited: a line that does not match is not an answer while
+            // there is budget left for one that does.
+            assert!(started.elapsed() >= budget, "{:?}", started.elapsed());
             assert_eq!(
                 judge(
                     Ok(Reading {
-                        build: seen,
+                        build: heard.build,
                         source: source()
                     }),
                     Some(NEW)
@@ -605,10 +751,13 @@ mod tests {
                 thread::sleep(Duration::from_millis(300));
                 pty.write_raw(b"b8e dirty=false\r\n");
             });
-            let seen = fresh_banner(&fd, Instant::now() + TEST_BUDGET)
-                .expect("reading the stub board")
-                .expect("the line completed");
-            assert_eq!(seen.git_sha, NEW);
+            let Heard::Expected(banner) =
+                fresh_banner(&fd, Some(NEW), Instant::now() + TEST_BUDGET)
+                    .expect("reading the stub board")
+            else {
+                panic!("the completed line was not heard");
+            };
+            assert_eq!(banner.build.git_sha, NEW);
         });
     }
 
@@ -625,11 +774,184 @@ mod tests {
                 thread::sleep(Duration::from_millis(200));
                 pty.write_raw(banner(NEW).as_bytes());
             });
-            let seen = fresh_banner(&fd, Instant::now() + TEST_BUDGET)
-                .expect("reading the stub board")
-                .expect("the banner came after the chatter");
-            assert_eq!(seen.git_sha, NEW);
+            let Heard::Expected(banner) =
+                fresh_banner(&fd, Some(NEW), Instant::now() + TEST_BUDGET)
+                    .expect("reading the stub board")
+            else {
+                panic!("the banner came after the chatter and was not heard");
+            };
+            assert_eq!(banner.build.git_sha, NEW);
         });
+    }
+
+    /// The 2026-09-27 rig run, verbatim from
+    /// `/home/lew/rig-run/boot-proof-flash.log`, section
+    /// `=== flash 01eb398b 2026-09-27T20:37:14`: the sha the T114 had been
+    /// running, and the one lnflash had just written to it.
+    const FIELD_OLD: &str = "abaea121f";
+    const FIELD_NEW: &str = "01eb398b7";
+
+    /// A line of the new firmware's boot-time persistent-log replay, byte
+    /// for byte as the board emits it: `leviculum-nrf/src/bin/t114.rs:163`
+    /// wraps a retained line from the PREVIOUS boot in `[PERSISTENT_LOG]`,
+    /// so the line carries two stamps — the quoted boot's, and this one's.
+    fn replayed_banner(sha: &str) -> String {
+        format!(
+            "[INFO!] [PERSISTENT_LOG] [INFO!] [FW_BUILD] git_sha={sha} dirty=false \
+             t=2023783 t=11\r\n"
+        )
+    }
+
+    /// A banner the firmware emits about itself, with the ` t=<uptime_ms>`
+    /// stamp every log line ends with (`leviculum-nrf/log-line/src/lib.rs`,
+    /// `finish`).
+    fn stamped_banner(sha: &str, uptime_ms: u64) -> String {
+        format!("[INFO!] [FW_BUILD] git_sha={sha} dirty=false t={uptime_ms}\r\n")
+    }
+
+    #[test]
+    fn a_replayed_line_from_the_previous_boot_is_not_a_banner() {
+        // What the new firmware prints at boot about the OLD one: the last
+        // ~2 KiB of retained log, each line re-emitted verbatim behind
+        // `[PERSISTENT_LOG]`. It is output from a life that ended, not a
+        // claim about the image running now, and on 2026-09-27 it was read
+        // as one.
+        assert_eq!(parse_fw_build(&replayed_banner(FIELD_OLD)), None);
+        // The wrapper is what disqualifies it. The same bytes without it
+        // are an ordinary banner, so this is not a rule about old shas.
+        assert_eq!(
+            parse_fw_build(&stamped_banner(FIELD_OLD, 2023783))
+                .expect("a banner without the replay wrapper")
+                .git_sha,
+            FIELD_OLD
+        );
+    }
+
+    #[test]
+    fn the_banners_own_uptime_stamp_is_read_off_the_line() {
+        // The last `t=` is the emitting firmware's own stamp. A fresh boot
+        // is in the thousands, a session that has been up for half an hour
+        // in the millions — which is the number #372 needed and did not
+        // have.
+        assert_eq!(
+            parse_uptime_ms(&stamped_banner(FIELD_NEW, 7448)),
+            Some(7448)
+        );
+        assert_eq!(
+            parse_uptime_ms("[FW_BUILD] git_sha=deadbeef dirty=false"),
+            None
+        );
+        assert_eq!(parse_uptime_ms("[FW_BUILD] git_sha=deadbeef t=nope"), None);
+    }
+
+    #[test]
+    fn a_replayed_old_banner_does_not_make_a_good_flash_a_failed_one() {
+        // Codeberg #372, the 2026-09-27 T114: the write DID take (the
+        // board's own capture, `/home/lew/rig-run/ble-drop/feld-t114.log`,
+        // has `[FW_BUILD] git_sha=01eb398b7 ... t=7448` at 18:38:20Z), but
+        // the first `[FW_BUILD]`-bearing line to reach lnflash after the
+        // flush was the new firmware replaying the OLD firmware's banner
+        // out of retained RAM. The run reported "the write did not take"
+        // and exited 1 on a board that was fine.
+        let pty = Pty::open();
+        let fd = debug_port(&pty);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(100));
+                pty.write_raw(replayed_banner(FIELD_OLD).as_bytes());
+                thread::sleep(Duration::from_millis(200));
+                pty.write_raw(stamped_banner(FIELD_NEW, 7448).as_bytes());
+            });
+            let heard = fresh_banner(&fd, Some(FIELD_NEW), Instant::now() + TEST_BUDGET)
+                .expect("reading the stub board");
+            let Heard::Expected(banner) = heard else {
+                panic!("the board's own banner was not the answer: {heard:?}");
+            };
+            assert_eq!(banner.build.git_sha, FIELD_NEW);
+            assert_eq!(banner.uptime_ms, Some(7448));
+        });
+    }
+
+    #[test]
+    fn a_stale_old_sha_after_the_flush_does_not_end_the_read() {
+        // The same false negative with its marker stripped: whatever else
+        // can put a line naming the previous build on the port after the
+        // flush — a driver buffer handed over late, another reader's
+        // leftovers, a cause nobody has enumerated — the read keeps going
+        // until the build we wrote shows up or the budget is gone. No
+        // line's timing is judged for this, which is why it holds for
+        // causes that are not the replay.
+        let pty = Pty::open();
+        let fd = debug_port(&pty);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(100));
+                pty.write_raw(stamped_banner(FIELD_OLD, 2023783).as_bytes());
+                thread::sleep(Duration::from_millis(200));
+                pty.write_raw(stamped_banner(FIELD_NEW, 7448).as_bytes());
+            });
+            let heard = fresh_banner(&fd, Some(FIELD_NEW), Instant::now() + TEST_BUDGET)
+                .expect("reading the stub board");
+            let Heard::Expected(banner) = heard else {
+                panic!("the expected build was on the port and was not returned: {heard:?}");
+            };
+            assert_eq!(banner.build.git_sha, FIELD_NEW);
+        });
+    }
+
+    #[test]
+    fn with_no_expected_build_the_first_banner_ends_the_read() {
+        // A bundle that records no sha gives the read nothing to wait for,
+        // so it must not spend the budget learning that. The verdict is
+        // `Unconfirmed` either way, and it should arrive at once.
+        let pty = Pty::open();
+        let fd = debug_port(&pty);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(100));
+                pty.write_raw(stamped_banner(FIELD_OLD, 2023783).as_bytes());
+            });
+            let started = Instant::now();
+            let Heard::Other(banner) = fresh_banner(&fd, None, Instant::now() + TEST_BUDGET)
+                .expect("reading the stub board")
+            else {
+                panic!("the only banner on the port was not returned");
+            };
+            assert_eq!(banner.build.git_sha, FIELD_OLD);
+            assert!(started.elapsed() < TEST_BUDGET, "{:?}", started.elapsed());
+        });
+    }
+
+    #[test]
+    fn the_claim_states_the_uptime_the_line_carried() {
+        // #372 item 3: the next false negative has to be diagnosable from
+        // the log alone. A banner stamped in the thousands comes from a
+        // board that has just booted; one stamped in the millions comes
+        // from a session that had been running for half an hour, which is
+        // what a replayed line looks like.
+        let claimed = Source {
+            board_uptime_ms: Some(7448),
+            ..source()
+        };
+        assert!(
+            claimed.describe().contains("t=7448 ms"),
+            "{}",
+            claimed.describe()
+        );
+        let unstamped = Source {
+            board_uptime_ms: None,
+            ..source()
+        };
+        assert!(
+            !unstamped.describe().contains("t="),
+            "{}",
+            unstamped.describe()
+        );
+        assert!(
+            unstamped.describe().contains("no uptime stamp"),
+            "{}",
+            unstamped.describe()
+        );
     }
 
     #[test]
@@ -638,8 +960,8 @@ mod tests {
         let fd = debug_port(&pty);
         let started = Instant::now();
         assert_eq!(
-            fresh_banner(&fd, Instant::now() + Duration::from_millis(400)).unwrap(),
-            None
+            fresh_banner(&fd, Some(NEW), Instant::now() + Duration::from_millis(400)).unwrap(),
+            Heard::Silence
         );
         assert!(started.elapsed() >= Duration::from_millis(400));
         assert!(started.elapsed() < Duration::from_secs(3));
