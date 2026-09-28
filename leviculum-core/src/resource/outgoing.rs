@@ -10,7 +10,7 @@ use rand_core::CryptoRngCore;
 
 #[cfg(feature = "compression")]
 use crate::constants::RESOURCE_AUTO_COMPRESS_MAX;
-use crate::constants::{RESOURCE_HASHMAP_LEN, RESOURCE_WINDOW_MAX_FAST};
+use crate::constants::{RESOURCE_HASHMAP_LEN, RESOURCE_WINDOW_MAX_FAST, TRAFFIC_TIMEOUT_FACTOR};
 use crate::crypto::{full_hash_parts, token_len, StreamHasher, TokenEncryptor, TokenSink};
 use crate::hex_fmt::HexFmt;
 use crate::link::Link;
@@ -20,9 +20,9 @@ use crate::resource::hashmap::map_hash;
 use crate::resource::source::{ResourceSource, SourceError};
 use crate::resource::{
     resource_sdu, ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus,
-    COLLISION_GUARD_SIZE, HASHMAP_IS_EXHAUSTED, HASHMAP_MAX_LEN, PART_TIMEOUT_FACTOR_AFTER_RTT,
-    PART_TIMEOUT_FACTOR_INITIAL, PER_RETRY_DELAY_MS, PROCESSING_GRACE_MS, PROOF_TIMEOUT_FACTOR,
-    RESOURCE_MAX_ADV_RETRIES, RESOURCE_MAX_EFFICIENT_SIZE, RESOURCE_MAX_RETRIES,
+    COLLISION_GUARD_SIZE, HASHMAP_IS_EXHAUSTED, HASHMAP_MAX_LEN, PER_RETRY_DELAY_MS,
+    PROCESSING_GRACE_MS, PROOF_TIMEOUT_FACTOR, RESOURCE_MAX_ADV_RETRIES,
+    RESOURCE_MAX_EFFICIENT_SIZE, RESOURCE_MAX_PROOF_RETRIES, RESOURCE_MAX_RETRIES,
     RESOURCE_RANDOM_HASH_SIZE, SENDER_GRACE_TIME_MS,
 };
 
@@ -286,6 +286,52 @@ fn read_all(
     Ok(())
 }
 
+/// How long the sender waits for the receiver's next part request before it
+/// declares the transfer failed, in ms.
+///
+/// The reference's global sender budget, `Resource.py:631-632`:
+///
+/// ```text
+/// max_extra_wait = sum((r+1) * PER_RETRY_DELAY for r in range(MAX_RETRIES))
+/// max_wait = rtt * timeout_factor * max_retries + sender_grace_time + max_extra_wait
+/// ```
+///
+/// `timeout_factor` here is the *link's* `TRAFFIC_TIMEOUT_FACTOR` (6), the
+/// value `Resource.__init__` puts in `self.timeout_factor`
+/// (`Resource.py:344`); `PART_TIMEOUT_FACTOR` is the receiver's, and using it
+/// on this side was the arithmetic error behind Codeberg #388's sibling
+/// half — it is smaller, but it was being charged sixteen times over,
+/// together with sixteen `SENDER_GRACE_TIME`s, for 242 s at a 701 ms RTT
+/// where the reference waits 145 s.
+pub(crate) fn sender_part_budget_ms(rtt_ms: u64) -> u64 {
+    // sum((r+1) * PER_RETRY_DELAY_MS for r in 0..RESOURCE_MAX_RETRIES)
+    let max_extra_wait =
+        (RESOURCE_MAX_RETRIES as u64 * (RESOURCE_MAX_RETRIES as u64 + 1) / 2) * PER_RETRY_DELAY_MS;
+    rtt_ms
+        .saturating_mul(TRAFFIC_TIMEOUT_FACTOR)
+        .saturating_mul(RESOURCE_MAX_RETRIES as u64)
+        .saturating_add(SENDER_GRACE_TIME_MS)
+        .saturating_add(max_extra_wait)
+}
+
+/// One round of the sender's proof watchdog, in ms (`Resource.py:644`).
+pub(crate) fn proof_round_ms(rtt_ms: u64) -> u64 {
+    rtt_ms
+        .saturating_mul(PROOF_TIMEOUT_FACTOR)
+        .saturating_add(SENDER_GRACE_TIME_MS)
+}
+
+/// The whole wait a sender spends in `AwaitingProof` before giving up, in ms:
+/// [`RESOURCE_MAX_PROOF_RETRIES`] cache requests plus the round that finds the
+/// budget spent. Stated once so a caller (and a test) can quote the bound
+/// instead of re-deriving it.
+// Stated for readers and tests; the state machine only ever needs one round at
+// a time, so nothing in the library calls it.
+#[allow(dead_code)]
+pub(crate) fn sender_proof_budget_ms(rtt_ms: u64) -> u64 {
+    proof_round_ms(rtt_ms).saturating_mul(RESOURCE_MAX_PROOF_RETRIES as u64 + 1)
+}
+
 /// Result of polling an outgoing resource for timeout.
 #[derive(Debug)]
 pub(crate) enum ResourcePollResult {
@@ -296,8 +342,10 @@ pub(crate) enum ResourcePollResult {
     /// Send CacheRequest for the expected proof.
     /// Contains proof_data: [resource_hash:32][expected_proof:32].
     RequestProof { proof_data: Vec<u8> },
-    /// Transfer has timed out, should be failed.
-    TimedOut,
+    /// Transfer has timed out, should be failed. Carries the watchdog that
+    /// ran out, so the event the node emits — and the message `lncp` prints —
+    /// names the timer rather than just the fact (Codeberg #388).
+    TimedOut(ResourceError),
 }
 
 /// Outgoing resource transfer state machine.
@@ -1173,57 +1221,44 @@ impl OutgoingResource {
                             retries = self.retries,
                             adv_retries = self.adv_retries,
                         );
-                        ResourcePollResult::TimedOut
+                        ResourcePollResult::TimedOut(ResourceError::Timeout)
                     }
                 } else {
                     ResourcePollResult::Nothing
                 }
             }
             ResourceStatus::Transferring => {
-                // Sender watchdog: wait for receiver's REQ. The receiver drives
-                // retransmission, so the sender should be patient.
-                // Python sender uses global budget (Resource.py:631-637).
-                let timeout_factor = if self.req_received {
-                    PART_TIMEOUT_FACTOR_AFTER_RTT // 2: link characteristics known
-                } else {
-                    PART_TIMEOUT_FACTOR_INITIAL // 4: initial, generous
-                };
-                let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
-                let timeout =
-                    rtt_ms.saturating_mul(timeout_factor) + SENDER_GRACE_TIME_MS + per_retry_extra;
-
-                if now_ms.saturating_sub(self.last_activity_ms) >= timeout {
-                    self.retries += 1;
-                    self.last_activity_ms = now_ms;
+                // Sender watchdog: wait for the receiver's next REQ. The
+                // receiver drives retransmission, so the sender only has to
+                // decide when to stop waiting — it retransmits nothing here.
+                // That is why the reference spends ONE global budget
+                // (Resource.py:629-637) instead of a per-retry loop, and why
+                // this is a one-shot check: there is no intermediate action a
+                // retry slot could carry.
+                //
+                // Every inbound REQ refreshes `last_activity_ms`
+                // (`handle_request`), so a slow-but-alive transfer restarts
+                // the budget on every window, exactly as
+                // `Resource.request()` does.
+                if now_ms.saturating_sub(self.last_activity_ms) >= sender_part_budget_ms(rtt_ms) {
+                    self.status = ResourceStatus::Failed;
                     crate::tracing::debug!(
                         event = "RESOURCE_TX_STATE",
                         rh = %HexFmt(&self.resource_hash[..4]),
                         status = ?self.status,
                         retries = self.retries,
                     );
-                    if self.retries >= RESOURCE_MAX_RETRIES {
-                        self.status = ResourceStatus::Failed;
-                        crate::tracing::debug!(
-                            event = "RESOURCE_TX_STATE",
-                            rh = %HexFmt(&self.resource_hash[..4]),
-                            status = ?self.status,
-                            retries = self.retries,
-                        );
-                        ResourcePollResult::TimedOut
-                    } else {
-                        // Just wait for another REQ
-                        ResourcePollResult::Nothing
-                    }
+                    ResourcePollResult::TimedOut(ResourceError::PartRequestTimeout)
                 } else {
                     ResourcePollResult::Nothing
                 }
             }
             ResourceStatus::AwaitingProof => {
-                // Python Resource.py:642-644: PROOF_TIMEOUT_FACTOR * RTT + SENDER_GRACE_TIME
-                let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
-                let timeout = rtt_ms.saturating_mul(PROOF_TIMEOUT_FACTOR)
-                    + SENDER_GRACE_TIME_MS
-                    + per_retry_extra;
+                // Python Resource.py:642-644: PROOF_TIMEOUT_FACTOR * RTT +
+                // SENDER_GRACE_TIME, with NO per-retry extra — the reference
+                // adds `PER_RETRY_DELAY` only where a retry costs the peer
+                // more work, and a cache request costs it one small packet.
+                let timeout = proof_round_ms(rtt_ms);
                 if now_ms.saturating_sub(self.last_activity_ms) >= timeout {
                     self.retries += 1;
                     self.last_activity_ms = now_ms;
@@ -1233,7 +1268,11 @@ impl OutgoingResource {
                         status = ?self.status,
                         retries = self.retries,
                     );
-                    if self.retries >= RESOURCE_MAX_RETRIES {
+                    // The reference spends `retries_left` cache requests and
+                    // cancels on the expiry AFTER the last one
+                    // (Resource.py:645-657), so the wait is
+                    // RESOURCE_MAX_PROOF_RETRIES + 1 rounds long.
+                    if self.retries > RESOURCE_MAX_PROOF_RETRIES {
                         self.status = ResourceStatus::Failed;
                         crate::tracing::debug!(
                             event = "RESOURCE_TX_STATE",
@@ -1241,7 +1280,7 @@ impl OutgoingResource {
                             status = ?self.status,
                             retries = self.retries,
                         );
-                        ResourcePollResult::TimedOut
+                        ResourcePollResult::TimedOut(ResourceError::ProofTimeout)
                     } else {
                         // Send CacheRequest so receiver re-sends the proof
                         let mut proof_data = Vec::with_capacity(64);
@@ -1268,23 +1307,12 @@ impl OutgoingResource {
                         .saturating_add(PROCESSING_GRACE_MS),
                 ),
             ),
-            ResourceStatus::Transferring => {
-                let timeout_factor = if self.req_received {
-                    PART_TIMEOUT_FACTOR_AFTER_RTT
-                } else {
-                    PART_TIMEOUT_FACTOR_INITIAL
-                };
-                let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
-                let timeout =
-                    rtt_ms.saturating_mul(timeout_factor) + SENDER_GRACE_TIME_MS + per_retry_extra;
-                Some(self.last_activity_ms.saturating_add(timeout))
-            }
+            ResourceStatus::Transferring => Some(
+                self.last_activity_ms
+                    .saturating_add(sender_part_budget_ms(rtt_ms)),
+            ),
             ResourceStatus::AwaitingProof => {
-                let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
-                let timeout = rtt_ms.saturating_mul(PROOF_TIMEOUT_FACTOR)
-                    + SENDER_GRACE_TIME_MS
-                    + per_retry_extra;
-                Some(self.last_activity_ms.saturating_add(timeout))
+                Some(self.last_activity_ms.saturating_add(proof_round_ms(rtt_ms)))
             }
             _ => None,
         }
@@ -1934,8 +1962,13 @@ mod tests {
         assert_eq!(res.status(), ResourceStatus::Failed);
     }
 
+    /// The sender's part-request watchdog is ONE budget measured from the last
+    /// REQ, not a ladder of retry slots (Resource.py:629-637). Codeberg #388:
+    /// the ladder re-charged `SENDER_GRACE_TIME` on every rung, which made the
+    /// sender 1.7x more patient than the reference and put its verdict beyond
+    /// the caller's own deadline.
     #[test]
-    fn test_transferring_retries_spaced_by_timeout() {
+    fn test_transferring_budget_is_one_shot_from_the_last_request() {
         let (link, _) = make_test_link();
         let mut rng = rand_core::OsRng;
         // Large enough for multiple parts. With the `compression` feature
@@ -1967,45 +2000,81 @@ mod tests {
         let _ = res.handle_request(&req, &link, &mut rng, 2000);
         assert_eq!(res.status(), ResourceStatus::Transferring);
 
-        // Use rtt_ms = 1000. After handle_request, req_received=true, so
-        // timeout_factor = PART_TIMEOUT_FACTOR_AFTER_RTT (2).
-        // Sender timeout = rtt * 2 + SENDER_GRACE_TIME_MS(10000) + retries*500
-        // = 2000 + 10000 = 12000ms (0 retries)
         let rtt_ms = 1000;
+        let budget = sender_part_budget_ms(rtt_ms);
+        assert_eq!(budget, 174_000, "rtt*6*16 + 10_000 + 68_000");
 
-        // First poll just after the REQ, should NOT time out.
-        let result = res.poll(2500, rtt_ms);
-        assert!(matches!(result, ResourcePollResult::Nothing));
+        // The deadline the resource advertises is the budget from the REQ.
+        assert_eq!(res.next_deadline(rtt_ms), Some(2000 + budget));
 
-        // Fire first timeout (12000ms after last activity at t=2000 → t=14000).
-        let result = res.poll(14001, rtt_ms);
-        assert!(matches!(result, ResourcePollResult::Nothing)); // retry incremented, returns Nothing
-        assert_eq!(res.retries, 1);
-
-        // Immediately polling again should NOT fire another retry because
-        // last_activity_ms was reset.
-        let result = res.poll(14002, rtt_ms);
-        assert!(matches!(result, ResourcePollResult::Nothing));
-        assert_eq!(
-            res.retries, 1,
-            "retry must not increment without waiting full timeout"
-        );
-
-        // After another full timeout period (now 12500ms = 12000 + 500 backoff), retry fires.
-        let result = res.poll(14001 + 12501, rtt_ms);
-        assert!(matches!(result, ResourcePollResult::Nothing));
-        assert_eq!(res.retries, 2);
-
-        // Verify we don't immediately hit max retries (16) from rapid polling.
-        for _ in 0..20 {
-            res.poll(14001 + 12501 + 1, rtt_ms);
+        // Anywhere inside the budget: nothing happens, however often it is
+        // polled. Rapid polling must not eat the budget (the old ladder could).
+        for t in [2500, 14_001, 100_000, 2000 + budget - 1] {
+            assert!(matches!(res.poll(t, rtt_ms), ResourcePollResult::Nothing));
+            assert_eq!(res.status(), ResourceStatus::Transferring);
         }
-        assert!(
-            res.retries < RESOURCE_MAX_RETRIES,
-            "retries should not exhaust from rapid polling: got {}",
-            res.retries
-        );
+        for _ in 0..20 {
+            let _ = res.poll(2000 + budget - 1, rtt_ms);
+        }
         assert_eq!(res.status(), ResourceStatus::Transferring);
+
+        // At the budget: one verdict, naming the watchdog.
+        assert!(matches!(
+            res.poll(2000 + budget, rtt_ms),
+            ResourcePollResult::TimedOut(ResourceError::PartRequestTimeout)
+        ));
+        assert_eq!(res.status(), ResourceStatus::Failed);
+    }
+
+    /// A second REQ restarts the budget: `handle_request` refreshes
+    /// `last_activity_ms`, as `Resource.request()` does.
+    #[test]
+    fn test_transferring_budget_restarts_on_every_request() {
+        let (link, _) = make_test_link();
+        let mut rng = rand_core::OsRng;
+        use rand_core::{OsRng, RngCore};
+        let mut data = vec![0u8; 2000];
+        OsRng.fill_bytes(&mut data);
+
+        let mut res = OutgoingResource::new(
+            &data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
+        assert!(res.parts.len() >= 2, "need multi-part resource");
+
+        let mut req = Vec::new();
+        req.push(0x00);
+        req.extend_from_slice(&res.resource_hash);
+        req.extend_from_slice(&res.hashmap[0]);
+        let _ = res.handle_request(&req, &link, &mut rng, 2000);
+
+        let rtt_ms = 1000;
+        let budget = sender_part_budget_ms(rtt_ms);
+
+        // One step short of the budget, the peer asks again.
+        assert!(matches!(
+            res.poll(2000 + budget - 1, rtt_ms),
+            ResourcePollResult::Nothing
+        ));
+        let second_req_ms = 2000 + budget - 1;
+        let _ = res.handle_request(&req, &link, &mut rng, second_req_ms);
+        assert_eq!(res.status(), ResourceStatus::Transferring);
+
+        // The old deadline passes without a verdict; the new one produces it.
+        assert!(matches!(
+            res.poll(2000 + budget, rtt_ms),
+            ResourcePollResult::Nothing
+        ));
+        assert!(matches!(
+            res.poll(second_req_ms + budget, rtt_ms),
+            ResourcePollResult::TimedOut(ResourceError::PartRequestTimeout)
+        ));
     }
 
     #[test]
@@ -2038,44 +2107,62 @@ mod tests {
         assert_eq!(res.status(), ResourceStatus::AwaitingProof);
 
         let rtt_ms = 1000;
-        // AwaitingProof timeout = PROOF_TIMEOUT_FACTOR * rtt + SENDER_GRACE_TIME_MS + retries*500
-        // = 3 * 1000 + 10000 + 0 = 13000ms (0 retries)
+        // One round = PROOF_TIMEOUT_FACTOR * rtt + SENDER_GRACE_TIME_MS
+        // = 3 * 1000 + 10000 = 13000 ms, constant: the reference adds no
+        // per-retry extra here (Resource.py:644).
+        let round = proof_round_ms(rtt_ms);
+        assert_eq!(round, 13_000);
 
         // Not timed out yet
         let result = res.poll(14999, rtt_ms);
         assert!(matches!(result, ResourcePollResult::Nothing));
 
-        // First timeout fires at 2000 + 13000 = 15000, sends CacheRequest
-        let result = res.poll(15001, rtt_ms);
+        // First round expires at 2000 + 13000 = 15000, sends CacheRequest
+        let result = res.poll(15000, rtt_ms);
         assert!(matches!(result, ResourcePollResult::RequestProof { .. }));
         assert_eq!(res.retries, 1);
         assert_eq!(res.status(), ResourceStatus::AwaitingProof);
 
-        // Second timeout at 15001 + 13500 (13000 + 500 backoff) = 28501
-        let result = res.poll(28502, rtt_ms);
+        // Second round: the same 13000 ms from the first expiry, no backoff.
+        let result = res.poll(15000 + round, rtt_ms);
         assert!(matches!(result, ResourcePollResult::RequestProof { .. }));
         assert_eq!(res.retries, 2);
         assert_eq!(res.status(), ResourceStatus::AwaitingProof);
 
-        // Rapid polling should not exhaust retries
+        // Rapid polling must not eat the budget.
         for _ in 0..20 {
-            res.poll(28503, rtt_ms);
+            res.poll(15001 + round, rtt_ms);
         }
-        assert!(
-            res.retries < RESOURCE_MAX_RETRIES,
-            "retries should not exhaust from rapid polling: got {}",
-            res.retries
-        );
+        assert_eq!(res.retries, 2);
         assert_eq!(res.status(), ResourceStatus::AwaitingProof);
 
-        // Exhaust all retries
-        for _ in res.retries..RESOURCE_MAX_RETRIES {
-            // Each retry adds 500ms more: timeout grows with retries
-            let timeout = 13000 + res.retries as u64 * PER_RETRY_DELAY_MS;
-            let t = res.last_activity_ms + timeout + 1;
-            res.poll(t, rtt_ms);
+        // RESOURCE_MAX_PROOF_RETRIES cache requests, then the round that finds
+        // the budget spent (Resource.py:1067-1068 + :645-657).
+        let mut cache_requests = 2;
+        loop {
+            let t = res.last_activity_ms + round;
+            match res.poll(t, rtt_ms) {
+                ResourcePollResult::RequestProof { .. } => cache_requests += 1,
+                ResourcePollResult::TimedOut(error) => {
+                    assert_eq!(error, ResourceError::ProofTimeout);
+                    break;
+                }
+                other => panic!("unexpected poll result: {other:?}"),
+            }
+            assert!(
+                cache_requests <= RESOURCE_MAX_PROOF_RETRIES,
+                "the sender sent {cache_requests} cache requests, more than the \
+                 reference's RESOURCE_MAX_PROOF_RETRIES"
+            );
         }
+        assert_eq!(cache_requests, RESOURCE_MAX_PROOF_RETRIES);
         assert_eq!(res.status(), ResourceStatus::Failed);
+        // The whole wait, end to end.
+        assert_eq!(
+            res.last_activity_ms - 2000,
+            sender_proof_budget_ms(rtt_ms),
+            "4 rounds of 13 s, not 16 with a growing backoff"
+        );
     }
 
     /// Codeberg #85: retransmissions must not count toward completion. A lossy

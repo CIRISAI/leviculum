@@ -107,6 +107,22 @@ pub const RESOURCE_MAX_RETRIES: usize = 16;
 /// Maximum number of retries for advertisement.
 pub const RESOURCE_MAX_ADV_RETRIES: usize = 4;
 
+/// Cache requests the sender spends waiting for a proof before it gives up on
+/// a transfer whose every part has already gone out.
+///
+/// The reference does NOT reuse
+/// [`RESOURCE_MAX_RETRIES`] here: `Resource.py:1067-1068` sets
+/// `retries_left = 3` at the instant the sender enters `AWAITING_PROOF`,
+/// a budget a fifth the size of the one the part phase gets. The reason is
+/// in what the two phases are waiting for — the part phase waits on a peer
+/// that is still working, the proof phase on a single small packet from a
+/// peer that has already finished — and the cost of confusing them is a
+/// sender that sits in `AwaitingProof` for minutes after the transfer is
+/// decided. Codeberg #388: at the link RTT of 701 ms measured in
+/// `emulated/pathchoice_loss50_lnsd`, 16 retries is a 253 s wait, and the
+/// cell's own 189 s budget killed the sender before its watchdog spoke.
+pub const RESOURCE_MAX_PROOF_RETRIES: usize = 3;
+
 /// Maximum window size for very slow links (LoRa-class).
 pub const RESOURCE_WINDOW_MAX_VERY_SLOW: usize = 4;
 
@@ -340,7 +356,29 @@ pub enum ResourceError {
     /// Data hash does not match expected value.
     HashMismatch,
     /// Transfer timed out.
+    ///
+    /// The advertisement watchdog (no part request ever arrived) and the
+    /// receiver's part watchdog both report this. The two sender-side
+    /// watchdogs that run *after* a transfer is under way name themselves
+    /// instead, because "timed out" alone does not say which timer the
+    /// operator should be looking at: see
+    /// [`PartRequestTimeout`](Self::PartRequestTimeout) and
+    /// [`ProofTimeout`](Self::ProofTimeout).
     Timeout,
+    /// The sender's global part-request budget expired: the peer asked for
+    /// parts at least once and then stopped, leaving parts outstanding.
+    ///
+    /// Reference: `Resource.py:629-637` — one budget for the whole phase,
+    /// `rtt * TRAFFIC_TIMEOUT_FACTOR * MAX_RETRIES + SENDER_GRACE_TIME +
+    /// max_extra_wait`, then `cancel()`.
+    PartRequestTimeout,
+    /// Every part was sent, and no resource proof arrived within the proof
+    /// watchdog's budget (Codeberg #388).
+    ///
+    /// Reference: `Resource.py:642-657` — `PROOF_TIMEOUT_FACTOR * rtt +
+    /// SENDER_GRACE_TIME` per round, [`RESOURCE_MAX_PROOF_RETRIES`] cache
+    /// requests, then `cancel()`.
+    ProofTimeout,
     /// Transfer was cancelled locally, or by the sender's own cancel (ICL).
     Cancelled,
     /// The receiving peer sent a resource cancel (RCL) for a transfer we were
@@ -402,6 +440,14 @@ impl core::fmt::Display for ResourceError {
             Self::InvalidHashmap => write!(f, "invalid resource hashmap"),
             Self::HashMismatch => write!(f, "resource hash mismatch"),
             Self::Timeout => write!(f, "resource transfer timed out"),
+            Self::PartRequestTimeout => write!(
+                f,
+                "the peer stopped requesting parts (sender part-request watchdog)"
+            ),
+            Self::ProofTimeout => write!(
+                f,
+                "all parts sent, no resource proof arrived (sender proof watchdog)"
+            ),
             Self::Cancelled => write!(f, "resource transfer cancelled"),
             Self::RejectedByRemote => write!(f, "remote rejected the resource transfer"),
             Self::MaxRetriesExceeded => write!(f, "resource max retries exceeded"),

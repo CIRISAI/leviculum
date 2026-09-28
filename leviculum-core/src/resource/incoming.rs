@@ -805,7 +805,11 @@ impl IncomingResource {
                     );
                     if self.retries >= RESOURCE_MAX_RETRIES {
                         self.status = ResourceStatus::Failed;
-                        ResourcePollResult::TimedOut
+                        // The receiver's part watchdog keeps the plain
+                        // `Timeout`: it is the only timer on this side, so
+                        // naming it would add no information (Codeberg #388
+                        // named the two sender-side ones, which co-exist).
+                        ResourcePollResult::TimedOut(ResourceError::Timeout)
                     } else {
                         // Policy hook (Codeberg #85): Current is a no-op, the
                         // historical logic never touches the window on timeout.

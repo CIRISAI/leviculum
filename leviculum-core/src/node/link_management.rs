@@ -3835,7 +3835,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             self.route_link_packet(&link_id, &pkt);
                         }
                     }
-                    ResourcePollResult::TimedOut => {
+                    ResourcePollResult::TimedOut(error) => {
                         let resource_hash = self
                             .links
                             .get(&link_id)
@@ -3870,7 +3870,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             self.events.push(NodeEvent::ResourceFailed {
                                 link_id,
                                 resource_hash,
-                                error: crate::resource::ResourceError::Timeout,
+                                error,
                                 is_sender: true,
                             });
                         }
@@ -3952,7 +3952,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             self.route_link_packet(&link_id, &pkt);
                         }
                     }
-                    ResourcePollResult::TimedOut => {
+                    ResourcePollResult::TimedOut(error) => {
                         let resource_hash = self
                             .links
                             .get(&link_id)
@@ -3965,7 +3965,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             self.events.push(NodeEvent::ResourceFailed {
                                 link_id,
                                 resource_hash,
-                                error: crate::resource::ResourceError::Timeout,
+                                error,
                                 is_sender: false,
                             });
                         }
