@@ -54,7 +54,13 @@ wrong value, and it fails silently — see
   same. The RPC control channel that backs `rnstatus`/`rnpath`/
   `rnprobe` is implemented in `leviculum-std/src/rpc/` (it speaks
   Python's `multiprocessing.connection` framing with pickle payloads,
-  see `rpc/connection.rs` and `rpc/pickle.rs`).
+  see `rpc/connection.rs` and `rpc/pickle.rs`). A client on that socket
+  — `lxmf-node`, `lnmsg`, `lnomad`, every `ln*` tool — keeps its own
+  known-destination table rather than delegating it, so a peer it has
+  used stays recallable for `KNOWN_DEST_USED_LINGER_MS`
+  (`leviculum-core/src/constants.rs:176`) after the daemon stops
+  offering a path to it, instead of being forgotten on the next sweep
+  (Codeberg #389).
 - **The config-file format.** `lnsd` parses the same INI-style config
   that `rnsd` uses (`leviculum-std/src/config.rs`,
   `leviculum-std/src/ini_config.rs`). Even keys Leviculum does not act
@@ -103,6 +109,23 @@ deliberate deviation that satisfies this rule.
 A deviation that is not written down is indistinguishable from a bug.
 Each one is pinned here with the reference line it departs from, so
 the next reader can check the claim instead of re-deriving it.
+
+### Pinned deviation: a pathless never-used destination does not linger
+
+The reference's known-destination sweep spares a pathless entry on three
+grounds: an application pinned it, it was used within
+`DESTINATION_TIMEOUT * 1.25`, or it was never used but announced within
+`UNUSED_DESTINATION_LINGER` — 6 minutes
+(`reference/Reticulum/RNS/Identity.py:349-352`, the two timeouts at
+`Transport.py:91-92`). We implement the first two and not the third
+(`leviculum-core/src/memory_storage.rs:1226`): our announce cache stores
+the raw announce, not the moment we heard it, so there is no age to
+compare against. The third arm only ever protects a destination nothing
+has asked about, so dropping it a few minutes early costs a path request
+rather than a fact, and clause 3 of the rule is satisfied by the smaller
+resident set. `EmbeddedStorage` goes one further and implements only the
+first (`leviculum-core/src/embedded_storage.rs:1103`), because a board
+tracks no use-state at all.
 
 ### Pinned deviation: ingress-control default on dial-out links
 
