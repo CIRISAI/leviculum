@@ -86,6 +86,8 @@ mod mvr_explicit_hash_no_announce;
 #[cfg(test)]
 mod mvr_first_path_request;
 #[cfg(test)]
+mod mvr_full_mode_window_retry;
+#[cfg(test)]
 mod mvr_generated_field_pins;
 #[cfg(test)]
 mod mvr_group_decrypt_delivery;

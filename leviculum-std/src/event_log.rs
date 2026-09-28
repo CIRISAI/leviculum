@@ -456,6 +456,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             // batched onto a discovery already pending for the same
             // destination instead of being re-originated.
             "path_request_pending_suppressed",
+            // Not a drop reason and outside `total` (#433): retry ticks of
+            // a pending discovery withheld because the window's requesting
+            // interface is not in a DISCOVER_PATHS_FOR mode.
+            "path_request_retry_withheld",
         ],
     },
     // RNode CMD_READY flow control under the firmware duty lock.
@@ -791,6 +795,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "PR_PENDING_SUPPRESSED",
         required_keys: &["dst", "iface_in", "requesters"],
+    },
+    // A retry tick of a pending discovery withheld because the window's
+    // requesting interface (`iface_req`) is not in a DISCOVER_PATHS_FOR
+    // mode (`transport.rs::retry_pending_discoveries`, #433 order 385).
+    // Sustained repetition for one `dst` says a requester is holding a
+    // Full-mode window open for a destination the mesh cannot answer.
+    EventSchema {
+        name: "PR_RETRY_WITHHELD",
+        required_keys: &["dst", "iface_req"],
     },
     // The management destination's own announce (`node/mod.rs`); `iface` is
     // the literal `all`, since it goes out on every interface at once.

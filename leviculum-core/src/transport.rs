@@ -1521,6 +1521,17 @@ pub struct TransportStats {
     // loss. Non-zero says a requester is retrying faster than the mesh can
     // answer; a rising count is the amplifier this stack no longer feeds.
     pub(crate) path_request_pending_suppressed: u64,
+    // NOT a drop counter and deliberately outside `packets_dropped`, for the
+    // same reason as its sibling above: retry ticks of a pending discovery
+    // window withheld because the window's requesting interface is not in a
+    // DISCOVER_PATHS_FOR mode (#433, order 385). A Full-mode window — the
+    // #117 cached-announce-no-path arm's — gets its single re-origination at
+    // open and no retry cadence; the reference retries nothing at all (1.3.5
+    // Transport.py:3031 inserts, :905-907 culls, nothing re-sends). Non-zero
+    // says a requester is holding a window open for a destination the mesh
+    // cannot answer — the 2026-09-28 live capture's two dead helpers, 0.4
+    // fresh-tag frames a second onto LoRa and serial, for hours.
+    pub(crate) path_request_retry_withheld: u64,
 }
 
 /// Classified reason for a dropped packet (OBS-2b).
@@ -1941,6 +1952,15 @@ impl TransportStats {
     /// by every relay in range.
     pub fn path_request_pending_suppressions(&self) -> u64 {
         self.path_request_pending_suppressed
+    }
+
+    /// Retry ticks of a pending discovery withheld because the window's
+    /// requesting interface does not discover paths (#433, order 385). Not a
+    /// drop; not part of [`Self::packets_dropped`]. This is the counter that
+    /// names a requester holding Full-mode windows open for destinations the
+    /// mesh cannot answer.
+    pub fn path_request_retry_withholds(&self) -> u64 {
+        self.path_request_retry_withheld
     }
 
     /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
@@ -4273,6 +4293,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // packet lost. It rides this line because the operator
                 // watching a path-request storm greps here.
                 path_request_pending_suppressed = self.stats.path_request_pending_suppressed,
+                // Outside `total` likewise (#433): a withheld retry of a
+                // Full-mode discovery window is airtime saved, not a packet
+                // lost, and it rides this line for the same operator.
+                path_request_retry_withheld = self.stats.path_request_retry_withheld,
             );
         }
     }
@@ -5052,7 +5076,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3582. A destination with no cached
+    /// link-request path uses at transport.rs:3602. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -10534,7 +10558,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2241`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2261`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -11881,6 +11905,39 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
             if now >= timeout_ms {
                 continue; // expired, will be cleaned up by expire_discovery_path_requests
+            }
+
+            // A window whose requesting interface does not discover paths
+            // gets its single re-origination at open and NO retry cadence
+            // (Codeberg #433, order 385). Such windows exist only through
+            // the #117 cached-announce-no-path arm of `handle_path_request`
+            // — the reference opens nothing on a Full interface
+            // (DISCOVER_PATHS_FOR gate, 1.3.5 Transport.py:2912-2918) and
+            // retries nothing anywhere (the entry is inserted at :3031,
+            // read by the answer at :1984 and culled at :905-907; 1.5.2
+            // culls at :1005-1011). The #117 deviation argued for one
+            // re-origination in place of silence, not for a cadence:
+            // measured on 2026-09-28 (base T114 if02, order 385), the
+            // 5-second fresh-tag retries of two Full-mode windows held open
+            // by a phone retrying two dead destinations were 30 of the 34
+            // path-request frames in 90 s, sustained for hours, each
+            // re-keyed by every neighbour in range because a fresh tag
+            // defeats their dedup. A DISCOVER_PATHS_FOR window keeps the
+            // cadence: the operator opted into active discovery there, and
+            // the retries are the deliberate lossy-medium deviation this
+            // function documents. Withheld ticks are counted
+            // (`path_request_retry_withheld`), and the window still serves:
+            // the pending entry keeps routing the answer back, keeps
+            // batching later requesters (#433), and the requester's next
+            // retry after expiry opens a fresh window with a fresh one-shot.
+            if !self.interface_mode(requesting_iface).discovers_paths() {
+                self.stats.path_request_retry_withheld += 1;
+                crate::tracing::debug!(
+                    event = "PR_RETRY_WITHHELD",
+                    dst = %HexShort(&dest_hash),
+                    iface_req = %self.iface_name(requesting_iface),
+                );
+                continue;
             }
 
             // Generate new random tag to avoid dedup at receiver
@@ -16221,7 +16278,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6513), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6537), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -30801,6 +30858,13 @@ mod tests {
                 Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
             transport.set_interface_name(IFACE_A, "iface_a".into());
             transport.set_interface_name(IFACE_B, "iface_b".into());
+            // The retry cadence under test exists only for windows whose
+            // requesting interface discovers paths (#433, order 385): a
+            // Full-mode window gets its one-shot at open and no retries,
+            // pinned in `node::mvr_full_mode_window_retry`. These tests
+            // pin the cadence itself, so they open their windows on a
+            // discovering interface.
+            transport.set_interface_mode(IFACE_A, InterfaceMode::Gateway);
             transport
         }
 
@@ -30854,6 +30918,47 @@ mod tests {
                     .get_discovery_path_request(&dest_hash)
                     .is_some(),
                 "Discovery entry should remain pending after retry"
+            );
+        }
+
+        #[test]
+        fn test_discovery_retry_withheld_for_non_discovering_window() {
+            // #433 (order 385): a window whose requesting interface is
+            // Full-mode is never retried — the tick is counted as withheld
+            // and the entry stays pending so the answer still routes back.
+            let mut transport = make_transport();
+            transport.set_interface_mode(IFACE_A, InterfaceMode::Full);
+            let dest_hash = [0xCB; TRUNCATED_HASHBYTES];
+            let now = transport.clock.now_ms();
+
+            transport.storage.set_discovery_path_request(
+                dest_hash,
+                IFACE_A,
+                now + DISCOVERY_TIMEOUT_MS,
+            );
+            transport.drain_actions();
+
+            transport.clock.advance(DISCOVERY_RETRY_INTERVAL_MS + 1);
+            transport.retry_pending_discoveries(&mut OsRng);
+
+            let actions = transport.drain_actions();
+            assert!(
+                !actions
+                    .iter()
+                    .any(|a| matches!(a, Action::Broadcast { .. })),
+                "a Full-mode window must not be retried"
+            );
+            assert_eq!(
+                transport.stats().path_request_retry_withholds(),
+                1,
+                "the withheld tick is counted"
+            );
+            assert!(
+                transport
+                    .storage
+                    .get_discovery_path_request(&dest_hash)
+                    .is_some(),
+                "the window stays pending: the answer still routes back"
             );
         }
 
