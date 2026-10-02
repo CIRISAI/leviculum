@@ -149,10 +149,9 @@ leviculum-battery-scale = { path = "battery-scale" }
 leviculum-persist-ack = { path = "persist-ack" }
 # The arithmetic of the SolarNode external-flash self-test (OTA stage 2):
 # the address-derived pattern, the comparator, the census, the
-# status-register protection rule and the verdict, host-tested. Only the
-# `qspi-selftest` instrument below names it; no firmware image links any of
-# it.
-leviculum-qspi-selftest = { path = "qspi-selftest" }
+# status-register protection rule and the verdict, host-tested. Optional,
+# and only the `qspi-selftest` feature below pulls it; see there for why.
+leviculum-qspi-selftest = { path = "qspi-selftest", optional = true }
 
 # Embassy async runtime
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
@@ -356,6 +355,13 @@ gnss = [
 ]
 battery = []
 rak-baseboard = ["display", "gnss", "battery"]
+# The `qspi-selftest` instrument's crate, and nothing else. Not a plain
+# dependency, because a plain one changes this package's `-C metadata` hash
+# for EVERY bin, and with it the mangled symbol names, their order under LTO
+# and the machine outliner's choices: measured +32 bytes of `.text` on an
+# unchanged `solarnode` image, same path, same toolchain. As a feature it
+# is off in every firmware build, so the firmware bins are byte-identical.
+qspi-selftest = ["dep:leviculum-qspi-selftest"]
 
 # Codeberg #384 size harness. Throwaway, mutually exclusive, never default:
 # each drags one candidate store's code into both firmware bins so its
@@ -404,7 +410,7 @@ path = "src/bin/sd-ram-probe.rs"
 [[bin]]
 name = "qspi-selftest"
 path = "src/bin/qspi-selftest.rs"
-required-features = ["bsp-solarnode"]
+required-features = ["bsp-solarnode", "qspi-selftest"]
 
 # Vendored nmea0183 with the float parse replaced by a fixed-point one
 # (Codeberg #386). Upstream parses every decimal field through

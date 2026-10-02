@@ -76,6 +76,9 @@ lint-nrf:
     cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-t114 -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-solarnode -- -D warnings
+    # The QSPI self-test instrument sits behind its own feature (Cargo.toml,
+    # `qspi-selftest`, for why), so the line above no longer builds it.
+    cd leviculum-nrf && cargo clippy --features bsp-solarnode,qspi-selftest --bin qspi-selftest -- -D warnings
     # Every other member of the leviculum-nrf workspace is a pure,
     # host-testable crate: clippy + tests run on the host triple, because the
     # workspace's own `.cargo/config.toml` defaults `build.target` to
@@ -1895,7 +1898,7 @@ flash-solarnode-one PORT:
 # firmware back.
 [doc('Measurement tool: ERASES all SolarNode external flash, tests it')]
 flash-solarnode-qspi-selftest:
-    cd leviculum-nrf && {{solarnode_env}} cargo run --release --bin qspi-selftest --features bsp-solarnode
+    cd leviculum-nrf && {{solarnode_env}} cargo run --release --bin qspi-selftest --features bsp-solarnode,qspi-selftest
 
 # Trigger Adafruit-UF2-bootloader on a stock-Meshtastic WisMesh Pocket V2.
 # Stock Meshtastic has no 1200-bps-touch handler and the device has no
