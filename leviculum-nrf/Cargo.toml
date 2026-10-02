@@ -147,6 +147,12 @@ leviculum-battery-scale = { path = "battery-scale" }
 # tests — so the gate, and the slow-flash reproduction of the old
 # ordering, live here where they can be asserted.
 leviculum-persist-ack = { path = "persist-ack" }
+# The arithmetic of the SolarNode external-flash self-test (OTA stage 2):
+# the address-derived pattern, the comparator, the census, the
+# status-register protection rule and the verdict, host-tested. Only the
+# `qspi-selftest` instrument below names it; no firmware image links any of
+# it.
+leviculum-qspi-selftest = { path = "qspi-selftest" }
 
 # Embassy async runtime
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
@@ -390,6 +396,15 @@ path = "src/bin/solarnode.rs"
 [[bin]]
 name = "sd-ram-probe"
 path = "src/bin/sd-ram-probe.rs"
+
+# Measurement instrument, not firmware, and a destructive one: ERASES the
+# whole external flash of a SolarNode, programs two patterns over it, reads
+# them back and leaves the part erased (OTA stage 2). Flashed only by
+# `just flash-solarnode-qspi-selftest`; in no bundle and no lnflash entry.
+[[bin]]
+name = "qspi-selftest"
+path = "src/bin/qspi-selftest.rs"
+required-features = ["bsp-solarnode"]
 
 # Vendored nmea0183 with the float parse replaced by a fixed-point one
 # (Codeberg #386). Upstream parses every decimal field through

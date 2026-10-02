@@ -1885,6 +1885,18 @@ flash-solarnode:
 flash-solarnode-one PORT:
     cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{solarnode_env}} cargo run --release --bin solarnode --features bsp-solarnode
 
+# A measurement instrument for OTA stage 2, not firmware. It ERASES the whole
+# 2 MiB external flash, programs two patterns over it, reads them back, and
+# leaves the part erased; it repeats all of that on every boot until a
+# firmware image replaces it. Results are `[QSPI-TEST]` lines on the debug
+# port (`leviculum-nrf/src/bin/qspi-selftest.rs`). In no bundle, no guard and
+# no nightly on purpose: flashing it is a deliberate act. Same runner and
+# environment as flash-solarnode, so `just flash-solarnode` puts the
+# firmware back.
+[doc('Measurement tool: ERASES all SolarNode external flash, tests it')]
+flash-solarnode-qspi-selftest:
+    cd leviculum-nrf && {{solarnode_env}} cargo run --release --bin qspi-selftest --features bsp-solarnode
+
 # Trigger Adafruit-UF2-bootloader on a stock-Meshtastic WisMesh Pocket V2.
 # Stock Meshtastic has no 1200-bps-touch handler and the device has no
 # externally accessible RESET pin, so the firmware-side admin command is the

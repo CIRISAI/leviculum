@@ -1038,6 +1038,7 @@ dependencies = [
  "leviculum-persist-ack",
  "leviculum-pn-store",
  "leviculum-qspi-bitbang",
+ "leviculum-qspi-selftest",
  "leviculum-queue-budget",
  "leviculum-record-log",
  "leviculum-rx-arming",

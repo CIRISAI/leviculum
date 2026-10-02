@@ -221,7 +221,7 @@ recipes below keeps you safe. The release profile is size-optimized
 is kept in the `.elf` (`strip = "none"`, `debug = true`) for HardFault
 post-mortem analysis, but the UF2 only carries loadable sections, so the
 debug info does not bloat what lands on the device.
-(`leviculum-nrf/Cargo.toml:362-372`)
+(`leviculum-nrf/Cargo.toml:368-378`)
 
 ### The build/flash workflow
 
@@ -267,7 +267,7 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:1847-1849`, `Justfile:1887-1896`. See
+automatically. (`Justfile:1847-1849`, `Justfile:1899-1908`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
@@ -352,7 +352,7 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
 ```
 
 (`Justfile:1860-1866`; `rak-baseboard` aggregate
-`leviculum-nrf/Cargo.toml:352`)
+`leviculum-nrf/Cargo.toml:358`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
 
@@ -374,7 +374,7 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:1887-1896`)
+(`Justfile:1899-1908`)
 
 ## A note on disconnecting consumers
 
