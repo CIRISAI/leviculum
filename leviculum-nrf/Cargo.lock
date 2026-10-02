@@ -1075,6 +1075,10 @@ name = "leviculum-qspi-bitbang"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-qspi-selftest"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-queue-budget"
 version = "0.1.0"
 
