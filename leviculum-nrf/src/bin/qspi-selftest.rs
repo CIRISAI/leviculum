@@ -23,17 +23,32 @@
 //!    (`qspi::QuadEnable`), so the bus stays single-line, and every
 //!    throughput number below is a floor, not the part's ceiling.
 //! 4. `CENSUS` × 32: what the part held before the first erase.
-//! 5. `ERASE pass=1`, `WRITE`/`READ pass=1` pattern A, `ERASE pass=2`,
-//!    `WRITE`/`READ pass=2` pattern B (A's complement), `ERASE pass=3`.
-//!    The third erase is what leaves the part blank, so a later
+//! 5. The plan (`st::PLAN`), every line of it under the same bus clock the
+//!    line names:
+//!    `ERASE pass=1`; `WRITE pass=1` pattern A at 32 MHz; `READSET set=1`,
+//!    five reads at 32 MHz; `BUS` (now 8 MHz); `READSET set=2`, five reads
+//!    of the SAME data at 8 MHz; `ERASE pass=2`; `WRITE pass=2` pattern B
+//!    (A's complement) at 8 MHz; `READSET set=3` at 8 MHz; `BUS` (back to
+//!    32 MHz); `READSET set=4` at 32 MHz; `ERASE pass=3`. Each read set is
+//!    followed by its `MISS` lines (the first 64 mismatched bytes, each
+//!    with all five reads), and each written image by its `DIAG` line,
+//!    which says whether its errors are on the read side or the program
+//!    side. The third erase is what leaves the part blank, so a later
 //!    `qspi::log_store` mount reports `STORE state=unformatted` and not
 //!    our pattern.
 //! 6. `RESULT`.
 //!
-//! Then the whole report again, behind a `REPORT n=<k>` header, every
-//! 60 s: the log ring is 8 KiB and the flash runner's own read-back drains
-//! the first seconds of output to a host that is not capturing, so the
-//! census would otherwise be gone by the time a person attaches.
+//! The run starts [`START_HOLD_S`] after boot and not at once, and the
+//! whole report is printed again behind a `REPORT n=<k>` header every
+//! [`REPORT_PERIOD_S`]. Both for the same reason: `just
+//! flash-solarnode-qspi-selftest` ends in the flash runner's read-back
+//! (`tools/fw-readback.sh`, `fw_read_banner`), which holds the debug port
+//! open for `FW_READ_WINDOW` = 8 s and consumes every byte that arrives in
+//! that window. A capture reader attached at the same time shares the tty
+//! with it and gets only what it wins. On 2026-10-02 that took the 32
+//! `CENSUS` lines and the `[FW_BUILD]` of t=5002 (the one the runner then
+//! confirmed the flash with), and the first 60 s re-print was due after
+//! the capture had already stopped.
 //!
 //! Every decision — the pattern, the comparison, the census, the
 //! protection rule, the verdict, the line shapes — is in
@@ -51,37 +66,89 @@ use embassy_futures::select::{select, Either};
 use embassy_nrf::qspi::{self, Qspi};
 use embassy_time::{Duration, Instant, Timer};
 use embedded_storage_async::nor_flash::{NorFlash, ReadNorFlash};
-use static_cell::StaticCell;
+use static_cell::ConstStaticCell;
 
 use leviculum_nrf::boards::solarnode;
 use leviculum_nrf::log_critical;
 use leviculum_qspi_selftest as st;
 use st::{
-    Cause, Census, CensusLine, ErasePass, Failure, Op, Pattern, ReadPass, Run, Status, Tally,
-    WritePass,
+    Bus, BusClock, Cause, Census, CensusLine, Compare, ErasePass, Failure, MissLine, Op, Pattern,
+    ReadSet, Run, Status, Tally, WritePass,
 };
 
 /// One read operation's worth. A multiple of 4, as the peripheral's
 /// EasyDMA demands, and a divisor of a census window.
 const CHUNK: usize = st::READ_CHUNK_BYTES as usize;
 
-/// The DMA buffer. Static so EasyDMA reads into RAM and the main future
+/// One DMA buffer. Static so EasyDMA reads into RAM and the main future
 /// stays small; 4-byte aligned because `Qspi` asserts it.
 #[repr(align(4))]
 struct Buf([u8; CHUNK]);
 
-static BUF: StaticCell<Buf> = StaticCell::new();
+/// One buffer per read of a read set, 20 KiB: the five reads of a chunk
+/// are held side by side and compared with each other. Everything else
+/// uses the first.
+static BUFS: ConstStaticCell<[Buf; st::READS]> =
+    ConstStaticCell::new([const { Buf([0u8; CHUNK]) }; st::READS]);
 
 /// The nRF52840 WDT's RUNSTATUS register (base 0x4001_0000, offset 0x400,
 /// `nrf-pac` `wdt::Wdt::runstatus`). Read raw because `embassy-nrf`
 /// exports its PAC only under `unstable-pac`.
 const WDT_RUNSTATUS: *const u32 = 0x4001_0400 as *const u32;
 
-/// Seconds between re-prints of the whole report.
-const REPORT_PERIOD_S: u64 = 60;
+/// The QSPI `IFCONFIG1` register (base 0x4002_9000, offset 0x600,
+/// `nrf-pac` `qspi::Qspi::ifconfig1`): SCKFREQ in 31:28.
+const QSPI_IFCONFIG1: *mut u32 = 0x4002_9600 as *mut u32;
+/// The QSPI `IFTIMING` register (offset 0x640): RXDELAY in 10:8.
+const QSPI_IFTIMING: *const u32 = 0x4002_9640 as *const u32;
+
+/// Seconds between re-prints of the whole report. Short enough that a
+/// capture which outlives the run by a quarter minute holds one.
+const REPORT_PERIOD_S: u64 = 15;
+
+/// Seconds after boot before the run starts: past the flash runner's 8 s
+/// read-back window (module docs), with margin for its re-enumeration.
+const START_HOLD_S: u64 = 12;
 
 fn line(args: core::fmt::Arguments) {
     leviculum_nrf::log::log_fmt_critical("[QSPI-TEST] ", args);
+}
+
+/// Let the debug writer drain before the next burst of lines. The writer
+/// only runs when this task yields, and a report of several hundred lines
+/// written without a yield would lap the 8 KiB ring itself.
+async fn pace() {
+    Timer::after_millis(2).await;
+}
+
+/// The bus timing registers, raw.
+fn bus() -> Bus {
+    // SAFETY: reads of two always-mapped QSPI registers.
+    unsafe {
+        Bus {
+            ifconfig1: core::ptr::read_volatile(QSPI_IFCONFIG1),
+            iftiming: core::ptr::read_volatile(QSPI_IFTIMING),
+        }
+    }
+}
+
+/// Set the QSPI clock to `clock` and return the registers as they read
+/// back.
+///
+/// Only `IFCONFIG1.SCKFREQ` moves. The `&mut Qspi` is the proof that no
+/// operation is in flight: every one of them is awaited to READY before
+/// its borrow ends, and a leaked one (`guarded`) ends the run. The
+/// `READSET` line after a switch carries `ms`/`kib_s`, which is where a
+/// switch that did not take would show: 2 MiB five times is about 2.7 s
+/// at 32 MHz and 10.5 s at 8.
+fn set_clock(_flash: &mut Qspi<'static>, clock: BusClock) -> Bus {
+    // SAFETY: a read-modify-write of an always-mapped QSPI register while
+    // the peripheral is idle (see above).
+    unsafe {
+        let v = core::ptr::read_volatile(QSPI_IFCONFIG1);
+        core::ptr::write_volatile(QSPI_IFCONFIG1, Bus::with_clock(v, clock));
+    }
+    bus()
 }
 
 fn us_since(start: Instant) -> u64 {
@@ -204,6 +271,7 @@ async fn write_pass(
     buf: &mut Buf,
     pass: u8,
     pattern: Pattern,
+    clock: BusClock,
 ) -> Result<WritePass, Failure> {
     let page = st::PAGE_BYTES as usize;
     let mut us = 0u64;
@@ -218,22 +286,56 @@ async fn write_pass(
         )
         .await?;
     }
-    Ok(WritePass { pass, pattern, us })
+    Ok(WritePass {
+        pass,
+        pattern,
+        clock,
+        us,
+    })
 }
 
-/// Read the whole part back against `pattern`.
-async fn read_pass(
+/// Read the whole part [`st::READS`] times against `plan.pattern`, chunk
+/// by chunk: each chunk is read five times back to back into five
+/// buffers, and the five are compared with the pattern and with each
+/// other.
+async fn read_set(
     flash: &mut Qspi<'static>,
-    buf: &mut Buf,
-    pass: u8,
-    pattern: Pattern,
-) -> Result<ReadPass, Failure> {
-    let mut tally = Tally::default();
-    let us = read_all(flash, buf, |addr, got| {
-        tally.check_pattern(pattern, addr, got)
-    })
-    .await?;
-    Ok(ReadPass { pass, us, tally })
+    bufs: &mut [Buf; st::READS],
+    set: u8,
+    plan: st::SetPlan,
+) -> Result<ReadSet, Failure> {
+    let mut cmp = Compare::default();
+    let mut us = 0u64;
+    for addr in (0..st::PART_BYTES).step_by(CHUNK) {
+        for buf in bufs.iter_mut() {
+            us += guarded(
+                ReadNorFlash::read(flash, addr, &mut buf.0),
+                st::READ_TIMEOUT_MS,
+                Op::Read,
+                addr,
+            )
+            .await?;
+        }
+        let reads: [&[u8]; st::READS] = core::array::from_fn(|r| &bufs[r].0[..]);
+        cmp.check(plan.pattern, addr, reads);
+    }
+    Ok(ReadSet { set, plan, us, cmp })
+}
+
+/// A read set's line and its `MISS` lines.
+async fn print_set(r: &ReadSet) {
+    line(format_args!("{r}"));
+    for (n, miss) in r.cmp.misses().iter().enumerate() {
+        line(format_args!(
+            "{}",
+            MissLine {
+                set: r.set,
+                n,
+                miss: *miss
+            }
+        ));
+        pace().await;
+    }
 }
 
 /// Status register 1, 2 and the configure register, read-only. A refused
@@ -260,7 +362,11 @@ fn read_status(flash: &mut Qspi<'static>) -> Result<Status, Failure> {
 
 /// The test proper, from status read to final erase. Fills `run` as it
 /// goes, so a failure leaves everything before it on the report.
-async fn test(flash: &mut Qspi<'static>, buf: &mut Buf, run: &mut Run) -> Result<(), Failure> {
+async fn test(
+    flash: &mut Qspi<'static>,
+    bufs: &mut [Buf; st::READS],
+    run: &mut Run,
+) -> Result<(), Failure> {
     let status = read_status(flash)?;
     run.status = Some(status);
     line(format_args!("{status}"));
@@ -269,7 +375,7 @@ async fn test(flash: &mut Qspi<'static>, buf: &mut Buf, run: &mut Run) -> Result
     }
 
     let mut census = Census::new();
-    read_all(flash, buf, |addr, got| census.feed(addr, got)).await?;
+    read_all(flash, &mut bufs[0], |addr, got| census.feed(addr, got)).await?;
     run.census = Some(census);
     for (win, window) in census.windows().iter().enumerate() {
         line(format_args!(
@@ -279,30 +385,47 @@ async fn test(flash: &mut Qspi<'static>, buf: &mut Buf, run: &mut Run) -> Result
                 window: *window
             }
         ));
+        pace().await;
     }
 
     run.erase_issued = true;
     for (i, pattern) in [Pattern::A, Pattern::B].into_iter().enumerate() {
         let pass = i as u8 + 1;
-        let erase = erase_pass(flash, buf, pass).await?;
+        let erase = erase_pass(flash, &mut bufs[0], pass).await?;
         run.erases[i] = Some(erase);
         line(format_args!("{erase}"));
-        let write = write_pass(flash, buf, pass, pattern).await?;
+        let clock = st::PLAN[2 * i].write;
+        if bus().sckfreq() != clock.sckfreq() {
+            line(format_args!("{}", set_clock(flash, clock)));
+        }
+        let write = write_pass(flash, &mut bufs[0], pass, pattern, clock).await?;
         run.writes[i] = Some(write);
         line(format_args!("{write}"));
-        let read = read_pass(flash, buf, pass, pattern).await?;
-        run.reads[i] = Some(read);
-        line(format_args!("{read}"));
+        for k in [2 * i, 2 * i + 1] {
+            let plan = st::PLAN[k];
+            if bus().sckfreq() != plan.read.sckfreq() {
+                line(format_args!("{}", set_clock(flash, plan.read)));
+            }
+            let set = read_set(flash, bufs, k as u8 + 1, plan).await?;
+            run.reads[k] = Some(set);
+            print_set(&set).await;
+        }
+        if let Some(diag) = run.diags()[i] {
+            line(format_args!("{diag}"));
+        }
     }
     let last = st::ERASE_PASSES - 1;
-    let erase = erase_pass(flash, buf, st::ERASE_PASSES as u8).await?;
+    let erase = erase_pass(flash, &mut bufs[0], st::ERASE_PASSES as u8).await?;
     run.erases[last] = Some(erase);
     line(format_args!("{erase}"));
     Ok(())
 }
 
-/// Every line the run produced, in its order.
-fn print_report(run: &Run) {
+/// Every line the run produced, in its order, paced.
+async fn print_report(run: &Run) {
+    if let Some(bus) = run.bus {
+        line(format_args!("{bus}"));
+    }
     if let Some(status) = run.status {
         line(format_args!("{status}"));
     }
@@ -315,8 +438,10 @@ fn print_report(run: &Run) {
                     window: *window
                 }
             ));
+            pace().await;
         }
     }
+    let diags = run.diags();
     for i in 0..st::ERASE_PASSES {
         if let Some(e) = run.erases[i] {
             line(format_args!("{e}"));
@@ -324,9 +449,15 @@ fn print_report(run: &Run) {
         if let Some(w) = run.writes.get(i).copied().flatten() {
             line(format_args!("{w}"));
         }
-        if let Some(r) = run.reads.get(i).copied().flatten() {
-            line(format_args!("{r}"));
+        for k in [2 * i, 2 * i + 1] {
+            if let Some(r) = run.reads.get(k).copied().flatten() {
+                print_set(&r).await;
+            }
         }
+        if let Some(d) = diags.get(i).copied().flatten() {
+            line(format_args!("{d}"));
+        }
+        pace().await;
     }
     if let Some(f) = run.failure {
         line(format_args!("{f}"));
@@ -359,6 +490,8 @@ async fn main(spawner: Spawner) {
         st::worst_case_ms(),
         st::timeout_bound_ms(),
     ));
+    line(format_args!("HOLD s={START_HOLD_S}"));
+    Timer::after_secs(START_HOLD_S).await;
 
     let start = Instant::now();
     let mut run = Run::default();
@@ -380,8 +513,11 @@ async fn main(spawner: Spawner) {
     let mut flash = flash;
     match flash.as_mut() {
         Some(flash) => {
-            let buf = BUF.init(Buf([0u8; CHUNK]));
-            if let Err(failure) = test(flash, buf, &mut run).await {
+            let bus = bus();
+            run.bus = Some(bus);
+            line(format_args!("{bus}"));
+            let bufs = BUFS.take();
+            if let Err(failure) = test(flash, bufs, &mut run).await {
                 run.failure = Some(failure);
                 line(format_args!("{failure}"));
             }
@@ -396,6 +532,6 @@ async fn main(spawner: Spawner) {
         Timer::after_secs(REPORT_PERIOD_S).await;
         n = n.wrapping_add(1);
         line(format_args!("REPORT n={n}"));
-        print_report(&run);
+        print_report(&run).await;
     }
 }
