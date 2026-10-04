@@ -847,6 +847,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "RESOURCE_REQ_DROP",
         required_keys: &["reason", "link", "state"],
     },
+    // The receiver re-sending its request for a resource the sender
+    // advertised again before any part arrived (Codeberg #404).
+    EventSchema {
+        name: "RESOURCE_REQ_AGAIN",
+        required_keys: &["rh", "link"],
+    },
     EventSchema {
         name: "RESOURCE_PART_RX",
         required_keys: &["rh", "idx", "outstanding", "consecutive"],
