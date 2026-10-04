@@ -125,6 +125,10 @@ tempfile = "3"
 # time so they assert the collapsing rule without wall-clock waits.
 tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
+# The end-to-end node test routes three transports through one process;
+# when it breaks, the only observation surface is the merged trace of all
+# of them (#392 was diagnosed from exactly that file).
+tracing-subscriber.workspace = true
 
 [lib]
 name = "lblogd"

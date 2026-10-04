@@ -1935,6 +1935,7 @@ dependencies = [
  "tokio",
  "toml",
  "tower",
+ "tracing-subscriber",
 ]
 
 [[package]]

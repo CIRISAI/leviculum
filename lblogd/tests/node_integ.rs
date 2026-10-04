@@ -54,6 +54,23 @@ fn write_fixture_posts(dir: &Path) {
 
 #[tokio::test]
 async fn blog_node_serves_pages_end_to_end() {
+    // Diagnostic surface: all three transports (daemon, blog node, lnomad
+    // session) run in this one process, so a single subscriber writing to
+    // the path in LBLOGD_TRACE_FILE yields the merged timeline. Off unless
+    // the env var is set; RUST_LOG picks the filter.
+    if let Ok(path) = std::env::var("LBLOGD_TRACE_FILE") {
+        let file = std::fs::File::create(path).expect("create trace file");
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::from_default_env())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false),
+            )
+            .init();
+    }
     // The daemon: a transport node sharing its instance over IPC, standing in
     // for a production lnsd.
     // `:0`: the kernel assigns the port at bind and nothing dials this
