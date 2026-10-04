@@ -17,59 +17,26 @@
 #    23 bin unittest targets        234 tests     0.1 s
 #    16 doctest units                33 tests     1.1 s
 #
-# Less the three exclusions below (359 tests, 182 s of it the interop suite),
+# Less the exclusions below (359 tests, 182 s of it the interop suite),
 # that is 1278 tests the push path had no opinion on, on a gate whose whole
 # point is to have one before a stranger's commit lands.
 #
-# THE THREE EXCLUSIONS, ONE REASON BETWEEN THEM: they read a `reference/`
-# submodule at run time, and both pipelines clone with `submodules: false` on
-# purpose — a plain clone must build (#300) and github.com stays out of the
-# release path's dependency set. They do not skip when it is absent, they
-# FAIL, which is deliberate (see scripts/check-plain-clone.sh's header) and is
-# exactly why they cannot be left in:
+# THE EXCLUSIONS, ONE REASON BETWEEN THEM: three targets (rnsd_interop,
+# reference_lock, python_interop) and seven tests inside the mvr target read a
+# `reference/` submodule at run time, and both pipelines clone with
+# `submodules: false` on purpose — a plain clone must build (#300) and
+# github.com stays out of the release path's dependency set. They do not skip
+# when it is absent, they FAIL, which is deliberate (see
+# scripts/check-plain-clone.sh's header) and is exactly why they cannot be
+# left in. Which ones, and why each, is declared once in
+# scripts/integ-prerequisites.txt, which `just standard` reads too; this
+# script excludes exactly the entries whose prerequisite is absent HERE, so on
+# a host that has the submodules it runs them. The interop suite is a third
+# of the integration runtime (353 tests, ~190 s).
 #
-#   leviculum-std   rnsd_interop    spawns the vendored Python RNS.
-#                                   tests/rnsd_interop/harness.rs:104 resolves
-#                                   reference/Reticulum and :117 runs `git
-#                                   submodule update --init` on it. 353 tests,
-#                                   182 s — a third of the suite's runtime,
-#                                   and the one suite that measures whether we
-#                                   still interoperate with a Python-RNS peer.
-#   leviculum-lxmf  reference_lock  tests/reference_lock.rs:50-58 requires
-#                                   reference/LXMF and panics naming the
-#                                   submodule when it is not checked out.
-#   lnmsg           python_interop   drives scripts/test_daemon.py, which
-#                                   imports RNS and LXMF out of reference/
-#                                   (test_daemon.py:59, :87) and tells the
-#                                   caller to init the submodule (:108).
-#                                   PythonPeer::start asserts the daemon says
-#                                   READY; there is no skip guard.
-#
-# SEVEN MORE, BY TEST NAME, SAME REASON. The rnsd_interop harness is not only
-# reached through the rnsd_interop target: leviculum-std/tests/mvr/main.rs:17
-# includes it with `#[path = "../rnsd_interop/harness.rs"]`, so the harness's
-# own `mod tests` (harness.rs:3220 onwards) runs as part of the `mvr` target,
-# and so do the mvr files that spawn a Python peer through it. Excluding the
-# target would take ~90 other mvr tests off the push path with them, so these
-# are skipped by exact name inside it (EXCLUDED_TESTS below). Measured on a
-# clone without submodules whose submodule URLs point nowhere, 2026-10-04:
-# these seven, and only these, fail in the whole selection there, with the
-# harness's SubmoduleInitFailed. The URLs matter: the harness runs `git
-# submodule update --init` itself, and where that reaches github.com the
-# first test to win the race fetches the reference and every later one
-# passes, which is how a first measurement found six:
-#
-#   client_wait_for_path_request_fallback::wait_for_path_installs_via_request_when_never_announced
-#   harness::tests::test_daemon_restart
-#   harness::tests::test_daemon_starts_and_responds
-#   harness::tests::test_register_destination
-#   rust_client_path_install_from_python::rust_client_installs_path_from_python_announce
-#   rust_client_path_install_via_relay::rust_client_installs_path_via_relay_hops2
-#   rust_client_path_install_with_own_echo::rust_client_installs_peer_path_while_own_echoes
-#
-# Each name is checked against the target's own `--list` before the run, so a
-# renamed test is a red gate naming the line, never a skip that matches
-# nothing while the line's reason outlives the test it described.
+# Each excluded test name is checked against the target's own `--list` before
+# the run, so a renamed test is a red gate naming the line, never a skip that
+# matches nothing while the line's reason outlives the test it described.
 #
 # WHAT COVERS THEM INSTEAD, because "nothing" would be the #312 bug one layer
 # down: the tier-2 nightly runs `just complete` — `cargo test --workspace
@@ -87,12 +54,12 @@
 # green while the new suite runs nowhere, which is #312's own shape. So the
 # targets are enumerated from the tree by cargo's own autodiscovery rule
 # (`tests/*.rs`, and `tests/<dir>/main.rs` as target `<dir>`), and only the
-# exclusions are written. The failure direction is therefore loud: a new suite
-# that needs a submodule turns this gate red on the push that adds it, and the
-# remedy is one line in EXCLUDED with its reason.
+# prerequisites are written. The failure direction is therefore loud: a new
+# suite that needs a submodule turns this gate red on the push that adds it,
+# and the remedy is one line in scripts/integ-prerequisites.txt with its reason.
 #
 # Exit 0 = everything selected passed. Exit 1 = a test failed, or the
-# enumeration and the exclusion list disagree.
+# enumeration and the prerequisite file disagree.
 #
 # Usage:
 #   bash scripts/ci-gate-integ.sh
@@ -102,25 +69,14 @@ set -uo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR" || exit 1
 
-# `<member dir>/<target name>`, one per line. The reason each one is out is in
-# the header above; keep the two together.
-EXCLUDED="
-leviculum-std/rnsd_interop
-leviculum-lxmf/reference_lock
-lnmsg/python_interop
-"
+# shellcheck source=scripts/integ-targets.sh
+. scripts/integ-targets.sh
 
-# `<member dir>/<target name> <exact test name>`, one per line: tests inside a
-# selected target that read a `reference/` submodule. Reason in the header.
-EXCLUDED_TESTS="
-leviculum-std/mvr client_wait_for_path_request_fallback::wait_for_path_installs_via_request_when_never_announced
-leviculum-std/mvr harness::tests::test_daemon_restart
-leviculum-std/mvr harness::tests::test_daemon_starts_and_responds
-leviculum-std/mvr harness::tests::test_register_destination
-leviculum-std/mvr rust_client_path_install_from_python::rust_client_installs_path_from_python_announce
-leviculum-std/mvr rust_client_path_install_via_relay::rust_client_installs_path_via_relay_hops2
-leviculum-std/mvr rust_client_path_install_with_own_echo::rust_client_installs_peer_path_while_own_echoes
-"
+# The prerequisites this host lacks, split into whole targets and single tests
+# inside a target. Reasons: scripts/integ-prerequisites.txt.
+UNMET="$(integ_unmet_prerequisites)"
+EXCLUDED="$(printf '%s\n' "$UNMET" | awk -F'\t' '$2 == "-" { print $1 }' | sort -u)"
+EXCLUDED_TESTS="$(printf '%s\n' "$UNMET" | awk -F'\t' '$2 != "-" { print $1 " " $2 }' | sort -u)"
 
 say() { echo "[ci-gate-integ] $*" >&2; }
 
@@ -129,48 +85,17 @@ die() {
     echo "ci-gate-integ: FAILED — $*" >&2
     echo "" >&2
     echo "The list of test targets is computed from the tree and only the" >&2
-    echo "exclusions are written down (scripts/ci-gate-integ.sh, EXCLUDED)." >&2
+    echo "prerequisites are written down (scripts/integ-prerequisites.txt)." >&2
     echo "Fix whichever of the two moved; do not silence this by dropping a" >&2
     echo "target from the run." >&2
     exit 1
 }
 
-# The workspace members, as paths, out of the root manifest's `members = [...]`
-# array. Read rather than asked of `cargo metadata` because this also runs in
-# the forge container, where jq is absent and the answer is one sed away.
-members() {
-    sed -n '/^members = \[/,/^]/p' Cargo.toml |
-        sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p'
-}
-
-# Every integration-test target in the workspace as `<dir>/<name>`, by cargo's
-# own autodiscovery rule for `tests/`: each `*.rs` file is a target, and each
-# subdirectory holding a `main.rs` is a target named after the directory (that
-# is how `tests/mvr/main.rs` becomes the target `mvr`). No member sets
-# `autotests = false`, which is what makes the rule complete here.
-enumerate() {
-    local m f d
-    while read -r m; do
-        [ -n "$m" ] || continue
-        [ -d "$m/tests" ] || continue
-        for f in "$m"/tests/*.rs; do
-            [ -f "$f" ] || continue
-            echo "$m/$(basename "$f" .rs)"
-        done
-        for d in "$m"/tests/*/; do
-            [ -f "${d}main.rs" ] || continue
-            echo "$m/$(basename "$d")"
-        done
-    done <<EOF
-$(members)
-EOF
-}
-
-ALL="$(enumerate | sort)"
+ALL="$(integ_enumerate | sort)"
 [ -n "$ALL" ] || die "the enumeration found no integration-test target at all.
 A gate that measures nothing reads green forever, so this is a refusal
 rather than an empty run: either the repo root moved or 'members = [...]'
-in Cargo.toml is no longer parsable by the sed above."
+in Cargo.toml is no longer parsable by the sed in scripts/integ-targets.sh."
 
 EXCLUDED_LIST="$(printf '%s\n' "$EXCLUDED" | sed '/^[[:space:]]*$/d')"
 
@@ -180,7 +105,7 @@ EXCLUDED_LIST="$(printf '%s\n' "$EXCLUDED" | sed '/^[[:space:]]*$/d')"
 while read -r entry; do
     [ -n "$entry" ] || continue
     printf '%s\n' "$ALL" | grep -qxF "$entry" ||
-        die "EXCLUDED names '$entry', which is not a test target in this tree.
+        die "scripts/integ-prerequisites.txt names '$entry', which is not a test target in this tree.
 Either the target was renamed or removed — drop the line — or the path is
 wrong, in which case a suite everyone believes is excluded is being run."
     # Selection below is BY NAME (`cargo test --test <name>`), which is
@@ -206,7 +131,7 @@ say "$(printf '%s\n' "$ALL" | wc -l) integration-test targets in the tree"
 say "$(printf '%s\n' "$SELECTED" | wc -l) selected, via $(printf '%s\n' "$NAMES" | wc -l) target name(s)"
 while read -r entry; do
     [ -n "$entry" ] || continue
-    say "excluded: $entry (needs a reference/ submodule — see this script's header)"
+    say "excluded: $entry ($(printf '%s\n' "$UNMET" | awk -F'\t' -v t="$entry" '$1 == t && $2 == "-" { print $3 }' | paste -sd' ') absent, scripts/integ-prerequisites.txt)"
 done <<EOF
 $EXCLUDED_LIST
 EOF
@@ -235,7 +160,7 @@ declare -A LISTING=()
 while read -r target test; do
     [ -n "$target" ] || continue
     printf '%s\n' "$SELECTED" | grep -qxF "$target" ||
-        die "EXCLUDED_TESTS names '$test' in '$target', which is not a selected
+        die "scripts/integ-prerequisites.txt names '$test' in '$target', which is not a selected
 test target in this tree. Fix the target path, or drop the line if the
 target itself went onto EXCLUDED."
     name="${target##*/}"
@@ -247,9 +172,9 @@ target itself went onto EXCLUDED."
             die "could not list the tests of target '$name'."
     fi
     printf '%s\n' "${LISTING[$name]}" | grep -qxF "$test: test" ||
-        die "EXCLUDED_TESTS names '$test', which target '$name' no longer has.
+        die "scripts/integ-prerequisites.txt names '$test', which target '$name' no longer has.
 It was renamed or removed: follow the rename, or drop the line."
-    say "excluded test: $target $test (needs a reference/ submodule, see this script's header)"
+    say "excluded test: $target $test (a prerequisite is absent, scripts/integ-prerequisites.txt)"
     SKIP_ARGS+=(--skip "$test")
 done <<EOF
 $EXCLUDED_TESTS_LIST

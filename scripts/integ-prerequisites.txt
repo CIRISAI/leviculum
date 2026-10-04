@@ -1,0 +1,56 @@
+# Integration tests that need something at RUN time which a clone does not
+# carry by itself, declared once for every runner that selects tests from the
+# tree (scripts/ci-gate-integ.sh on the forge, scripts/standard-integ.sh in
+# `just standard`).
+#
+# One line per prerequisite:
+#
+#   <path that must exist> <member dir>/<target> [<exact test name>]
+#
+# Without a test name the line covers the whole target. A target or test with
+# several prerequisites gets several lines, and is skipped when ANY of them is
+# absent. A runner that finds a path absent leaves the target or test out of
+# its run and prints this line's target and the missing path; a runner that
+# finds every path present runs it like any other test. The tests themselves
+# do not skip: run directly without the prerequisite, they FAIL, which is
+# deliberate (scripts/check-plain-clone.sh's header). A skip inside a test
+# reports `ok`, and scripts/nightly-green-ref.sh would sign a commit whose
+# interop suite measured nothing.
+#
+# The path is a file INSIDE the submodule, not its directory: a clone made
+# without submodules has every submodule directory, empty.
+#
+# Checked by scripts/check-standard-integ.py (every target named here exists).
+# The test names are checked against their target's own `--list` by
+# scripts/ci-gate-integ.sh, which on the forge is where they are absent.
+
+# leviculum-std rnsd_interop spawns the vendored Python RNS:
+# tests/rnsd_interop/harness.rs resolves reference/Reticulum and runs
+# `git submodule update --init` on it. 353 tests, ~190 s, and the one suite
+# that measures whether we still interoperate with a Python-RNS peer.
+reference/Reticulum/RNS/__init__.py leviculum-std/rnsd_interop
+
+# The same harness is compiled into the mvr target too
+# (leviculum-std/tests/mvr/main.rs includes it by `#[path]`), so its own
+# `mod tests` and the mvr files that spawn a Python peer through it need the
+# reference as well. Excluding the whole mvr target would take ~90 other tests
+# with them, so these go by exact name. Measured on a clone without
+# submodules whose submodule URLs point nowhere, 2026-10-04: these seven, and
+# only these, fail in the whole selection there.
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr client_wait_for_path_request_fallback::wait_for_path_installs_via_request_when_never_announced
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_daemon_restart
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_daemon_starts_and_responds
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_register_destination
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_from_python::rust_client_installs_path_from_python_announce
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_via_relay::rust_client_installs_path_via_relay_hops2
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_with_own_echo::rust_client_installs_peer_path_while_own_echoes
+
+# leviculum-lxmf reference_lock pins hashes of the vendored Python LXMF and
+# panics naming the submodule when it is not checked out.
+reference/LXMF/LXMF/__init__.py leviculum-lxmf/reference_lock
+
+# lnmsg python_interop drives scripts/test_daemon.py, which imports RNS and
+# LXMF out of reference/ and tells the caller to init the submodule.
+# PythonPeer::start asserts the daemon says READY; there is no skip guard.
+reference/Reticulum/RNS/__init__.py lnmsg/python_interop
+reference/LXMF/LXMF/__init__.py lnmsg/python_interop
