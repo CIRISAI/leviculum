@@ -72,10 +72,10 @@ target the tree has, every bin unittest target and the doctests. Out
 of that it leaves exactly what needs a `reference/` submodule at run
 time, because those fail rather than skip without it: three whole
 targets (`rnsd_interop`, `leviculum-lxmf`'s `reference_lock`,
-`lnmsg`'s `python_interop`) and six tests by exact name inside `mvr`,
+`lnmsg`'s `python_interop`) and seven tests by exact name inside `mvr`,
 which includes the rnsd_interop harness by `#[path]` and so runs the
-harness's own tests and the three `rust_client_path_install_*` tests
-that spawn a Python peer through it. The script's header holds the
+harness's own tests and the four tests that spawn a Python peer
+through it. The script's header holds the
 list, one written reason per entry, and checks every entry against the
 tree so a stale one is a red gate. The citation guard runs in full but
 skips the citations into the absent references and prints how many
@@ -85,7 +85,7 @@ submodules present, which is what the publish gate reads.
 ## What may be published
 
 The forge gate runs `fmt`, `clippy` and every test in the workspace
-except three suites and six submodule-bound tests inside `mvr`, and
+except three suites and seven submodule-bound tests inside `mvr`, and
 `rnsd_interop` — the suite that measures
 whether we still interoperate with a Python-RNS peer, which is half of
 Priority 1 — is the largest of the three. It runs in neither forge

@@ -45,16 +45,21 @@
 #                                   PythonPeer::start asserts the daemon says
 #                                   READY; there is no skip guard.
 #
-# SIX MORE, BY TEST NAME, SAME REASON. The rnsd_interop harness is not only
+# SEVEN MORE, BY TEST NAME, SAME REASON. The rnsd_interop harness is not only
 # reached through the rnsd_interop target: leviculum-std/tests/mvr/main.rs:17
 # includes it with `#[path = "../rnsd_interop/harness.rs"]`, so the harness's
 # own `mod tests` (harness.rs:3220 onwards) runs as part of the `mvr` target,
 # and so do the mvr files that spawn a Python peer through it. Excluding the
 # target would take ~90 other mvr tests off the push path with them, so these
 # are skipped by exact name inside it (EXCLUDED_TESTS below). Measured on a
-# clone without submodules, 2026-10-04: these six, and only these, fail in
-# `mvr` there, with the harness's SubmoduleInitFailed:
+# clone without submodules whose submodule URLs point nowhere, 2026-10-04:
+# these seven, and only these, fail in the whole selection there, with the
+# harness's SubmoduleInitFailed. The URLs matter: the harness runs `git
+# submodule update --init` itself, and where that reaches github.com the
+# first test to win the race fetches the reference and every later one
+# passes, which is how a first measurement found six:
 #
+#   client_wait_for_path_request_fallback::wait_for_path_installs_via_request_when_never_announced
 #   harness::tests::test_daemon_restart
 #   harness::tests::test_daemon_starts_and_responds
 #   harness::tests::test_register_destination
@@ -108,6 +113,7 @@ lnmsg/python_interop
 # `<member dir>/<target name> <exact test name>`, one per line: tests inside a
 # selected target that read a `reference/` submodule. Reason in the header.
 EXCLUDED_TESTS="
+leviculum-std/mvr client_wait_for_path_request_fallback::wait_for_path_installs_via_request_when_never_announced
 leviculum-std/mvr harness::tests::test_daemon_restart
 leviculum-std/mvr harness::tests::test_daemon_starts_and_responds
 leviculum-std/mvr harness::tests::test_register_destination
