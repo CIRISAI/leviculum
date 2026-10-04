@@ -1055,16 +1055,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
 
-        // Establishment packet-level instrumentation (initiator proof RX).
-        crate::tracing::debug!(
-            target: "leviculum_core::link",
-            "LINK_PROOF_RX link={} t_ms={} proof_len={} iface={}",
-            HexShort(link_id.as_bytes()),
-            now_ms,
-            proof_data.len(),
-            interface_index,
-        );
-
         if packet.context == PacketContext::ResourcePrf {
             self.handle_resource_proof(link_id, proof_data, now_ms);
             return;
@@ -1097,6 +1087,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
             return;
         };
+
+        // Establishment packet-level instrumentation (initiator proof RX).
+        // Behind the lookup: on a shared medium every node hears every
+        // pair's proof, and one emitted before it named a link the node does
+        // not hold as if it did (#407).
+        crate::tracing::debug!(
+            target: "leviculum_core::link",
+            "LINK_PROOF_RX link={} t_ms={} proof_len={} iface={}",
+            HexShort(link_id.as_bytes()),
+            now_ms,
+            proof_data.len(),
+            interface_index,
+        );
 
         // Must be a pending outgoing link
         if !matches!(link.phase(), LinkPhase::PendingOutgoing { .. }) {

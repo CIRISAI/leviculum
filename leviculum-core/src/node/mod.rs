@@ -87,6 +87,8 @@ mod mvr_establishment_loss;
 mod mvr_explicit_hash_no_announce;
 #[cfg(test)]
 mod mvr_first_path_request;
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_foreign_link_proof;
 #[cfg(test)]
 mod mvr_full_mode_window_retry;
 #[cfg(test)]

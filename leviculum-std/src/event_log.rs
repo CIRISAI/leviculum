@@ -223,6 +223,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PATH_REBALANCE_HELD",
         required_keys: &["dst", "from", "refused", "next_hop", "iface"],
     },
+    // A data packet handed to local delivery. `matched=true`: a registered
+    // local destination (a destination, or a link this node holds) claims
+    // it. `matched=false`: a link-addressed packet no local destination
+    // claims, passed to the node layer, which drops it as
+    // `link-data-no-link` (#407: on a shared medium that is every overheard
+    // packet of another pair's link).
     EventSchema {
         name: "PKT_LOCAL",
         required_keys: &["dst", "iface", "matched"],

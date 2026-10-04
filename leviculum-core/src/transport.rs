@@ -7984,20 +7984,27 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
 
-        // Deliver link-addressed Data packets to local links (Python Transport.py:2124-2150).
+        // Hand link-addressed Data packets to the node layer, which looks
+        // the id up among its links (Python Transport.py:2124-2150).
         // On non-transport nodes, link_table routing is skipped entirely.
         // On transport nodes, relayed links are handled via link_table above;
-        // only packets for our own local links reach this point.
+        // what reaches this point is held by no link-table entry and no
+        // local destination.
         if packet.flags.dest_type == DestinationType::Link {
-            // OBS-3 (Codeberg #114): local delivery of a link-addressed data
-            // packet to one of our own links whose id is not in
-            // local_destinations (edge of the branch above). Same endpoint
-            // observability as the registered-destination delivery.
+            // OBS-3 (Codeberg #114): the hand-off of a link-addressed data
+            // packet that no local destination claimed. Every link this node
+            // holds, initiator or responder, registers its id as a local
+            // destination and is delivered by the `matched=true` branch
+            // above, so this one is reached by links nobody here holds: a
+            // relay's overheard copy of another pair's link, or a link whose
+            // owner is gone. The node layer drops it as `link-data-no-link`.
+            // Two daemons claimed a foreign link with a hard-coded
+            // `matched=true` here (#407).
             crate::tracing::debug!(
                 event = "PKT_LOCAL",
                 dst = %HexShort(&dest_hash),
                 iface = %self.iface_name(interface_index),
-                matched = true,
+                matched = false,
             );
             self.storage.add_packet_hash(full_packet_hash);
             self.events.push(TransportEvent::PacketReceived {
