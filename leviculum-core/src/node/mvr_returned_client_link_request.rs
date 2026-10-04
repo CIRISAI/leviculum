@@ -124,6 +124,41 @@ fn echoed_via(raw: &[u8], via: [u8; TRUNCATED_HASHBYTES]) -> Vec<u8> {
     buf[..len].to_vec()
 }
 
+/// The echo in the shape a neighbour answers a path request with: the same
+/// relayed bytes, context PATH_RESPONSE. What a Python transport node
+/// serves from its announce cache when our daemon forwards a sibling
+/// client's path request for a departed client's destination (#401).
+fn as_path_response(raw: &[u8]) -> Vec<u8> {
+    let mut p = Packet::unpack(raw).unwrap();
+    p.context = PacketContext::PathResponse;
+    let mut buf = [0u8; MTU];
+    let len = p.pack(&mut buf).unwrap();
+    buf[..len].to_vec()
+}
+
+/// Announces for `dest` sent to `iface` in this output.
+fn announces_to(out: &TickOutput, iface: usize, dest: &[u8; TRUNCATED_HASHBYTES]) -> usize {
+    out.actions
+        .iter()
+        .filter(|a| match a {
+            Action::SendPacket {
+                iface: target,
+                data,
+                ..
+            } => {
+                *target == InterfaceId(iface)
+                    && Packet::unpack(data)
+                        .map(|p| {
+                            p.flags.packet_type == PacketType::Announce
+                                && &p.destination_hash == dest
+                        })
+                        .unwrap_or(false)
+            }
+            Action::Broadcast { .. } => false,
+        })
+        .count()
+}
+
 /// A final-hop (Type1, no transport id) link request for `dest`, the form
 /// bravo puts on the air for a destination it believes is one hop away.
 fn final_hop_link_request(dest: &crate::DestinationHash) -> Vec<u8> {
@@ -257,6 +292,47 @@ fn a_link_request_reaches_the_returned_client() {
         .expect("the redirected request anchors a link entry");
     assert_eq!(entry.next_hop_interface_index, client2);
     assert_eq!(entry.remaining_hops, 0);
+}
+
+/// #401: refusing the stale echo as a PATH must not withhold it from the
+/// connected clients. A sibling client that wants to write to the departed
+/// one (a propagated send needs only the recipient's identity) asks for a
+/// path; the daemon has none and forwards the request; the neighbour's
+/// path response is our own emission and installs nothing, but it is the
+/// only way the asking client learns the identity. RED on 1fb5f4d4: the
+/// echo returned before the local-client hand-off, the sibling never heard
+/// the announce, and `lnmsg send --via propagated` timed out after 60 s
+/// against a Python propagation node (`lnmsg/tests/python_interop.rs`).
+#[test]
+fn a_stale_echo_still_reaches_a_sibling_client() {
+    let (mut node, serial, client) = make_daemon();
+    let mut helper = make_helper();
+    let bravo = *Identity::generate(&mut OsRng).hash();
+
+    let registration = register_and_disconnect(&mut node, client, &mut helper);
+
+    let sibling = node
+        .transport
+        .register_interface(Box::new(MockInterface::new("sibling", 2)));
+    node.set_interface_name(sibling, String::from("Local[rns/default]/1"));
+    node.transport.set_local_client(sibling, true);
+
+    let out = node.handle_packet(
+        InterfaceId(serial),
+        &as_path_response(&echoed_via(&registration, bravo)),
+    );
+    assert_eq!(
+        announces_to(&out, sibling, helper.dest_hash.as_bytes()),
+        1,
+        "the path response carries the departed client's identity and the \
+         connected clients must get it"
+    );
+    assert!(
+        node.transport
+            .get_path_clone(helper.dest_hash.as_bytes())
+            .is_none(),
+        "handing the echo to the clients must not install it as a path (#374)"
+    );
 }
 
 /// CONTROL: a client that genuinely moved announces a NEWER emission from

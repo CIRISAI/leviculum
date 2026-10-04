@@ -6163,6 +6163,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     "Dropped announce for a local client's destination, not newer than our own cached emission (replay)"
                 );
                 self.stats.record_drop(DropReason::AnnounceReplay);
+                // #401: refused as a ROUTE, not as news. The connected
+                // clients still get the announce: a sibling client that
+                // asked for the departed client's path (a propagated send
+                // needs only its identity) has no other way to learn it,
+                // because this daemon holds no path to answer from and the
+                // neighbour's path response IS this echo. What the clients
+                // install points at this daemon, where a link request for
+                // the destination meets the redirect below, so nothing in
+                // their view routes around us.
+                self.hand_announce_to_local_clients(raw, packet.hops, interface_index);
                 return Ok(());
             }
             Some("new_destination")
@@ -6489,55 +6499,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // requests for destinations announced before the client connected.
             self.storage.set_announce_cache(dest_hash, raw.to_vec());
 
-            // Forward announce to local client interfaces (Python Transport.py:1933-1978).
-            // Convert to Header2 with the daemon's own transport_id and receipt-incremented
-            // hops. The client uses transport_id to construct outbound Header2 packets.            // if we forward raw network bytes, the client sets the relay's transport_id
-            // instead of ours, and our transport_id filter rejects the client's packets.
-            // `hop_ceiling()` guards this hand-off as it guards the mesh
-            // forwards: the shared-instance socket carries the same hop byte,
-            // and a 1.5.x client on the other end of it raises on 128 exactly
-            // as a 1.5.x neighbour on the air does (1.5.2 `Packet.py:248`).
-            // The drop is not counted — the mesh forward of the same announce
-            // accounts it, and counting both would double one event.
-            if self.has_local_clients() && packet.hops <= self.hop_ceiling() {
-                if let Ok(mut local_announce) = Packet::unpack(raw) {
-                    local_announce.hops = packet.hops;
-                    local_announce.flags.header_type = HeaderType::Type2;
-                    local_announce.flags.transport_type = TransportType::Transport;
-                    local_announce.transport_id = Some(*self.identity.hash());
-
-                    let size = local_announce.packed_size();
-                    let mut buf = alloc::vec![0u8; size];
-                    if let Ok(len) = local_announce.pack(&mut buf) {
-                        let ph = self.pkt_ph_lazy(&buf[..len]);
-                        for &client_iface in &self.local_client_interfaces {
-                            if client_iface != interface_index {
-                                if let Some(ph) = &ph {
-                                    crate::tracing::debug!(
-                                        target: PKT_EVENT_TARGET,
-                                        event = "PKT_TX",
-                                        ph = %HexShort(ph),
-                                        iface = %self.iface_name(client_iface),
-                                        hops = wire_hops(&buf[..len]),
-                                        len = len,
-                                    );
-                                }
-                                self.pending_actions.push(Action::SendPacket {
-                                    iface: InterfaceId(client_iface),
-                                    data: buf[..len].to_vec(),
-                                    // A relayed announce toward a local IPC
-                                    // client: no addressee, no #376 hint.
-                                    // Genuinely absent, not merely unstored
-                                    // — a shared-instance socket carries one
-                                    // client, and an announce is a broadcast
-                                    // twice over.
-                                    peer: None,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+            self.hand_announce_to_local_clients(raw, packet.hops, interface_index);
 
             // The third route, and the one that leaves no trace when it is
             // not taken. An announce that
@@ -9225,6 +9187,62 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.storage.local_client_known_dest_hashes()
     }
 
+    /// Forward announce to local client interfaces (Python Transport.py:1933-1978).
+    /// Convert to Header2 with the daemon's own transport_id and receipt-incremented
+    /// hops. The client uses transport_id to construct outbound Header2 packets:
+    /// if we forward raw network bytes, the client sets the relay's transport_id
+    /// instead of ours, and our transport_id filter rejects the client's packets.
+    /// `hop_ceiling()` guards this hand-off as it guards the mesh
+    /// forwards: the shared-instance socket carries the same hop byte,
+    /// and a 1.5.x client on the other end of it raises on 128 exactly
+    /// as a 1.5.x neighbour on the air does (1.5.2 `Packet.py:248`).
+    /// The drop is not counted — the mesh forward of the same announce
+    /// accounts it, and counting both would double one event.
+    ///
+    /// Also called for an announce whose path install was refused as our own
+    /// stale echo (#374): refusing it as a route must not withhold the
+    /// identity it carries from the clients (#401).
+    fn hand_announce_to_local_clients(&mut self, raw: &[u8], hops: u8, interface_index: usize) {
+        if self.has_local_clients() && hops <= self.hop_ceiling() {
+            if let Ok(mut local_announce) = Packet::unpack(raw) {
+                local_announce.hops = hops;
+                local_announce.flags.header_type = HeaderType::Type2;
+                local_announce.flags.transport_type = TransportType::Transport;
+                local_announce.transport_id = Some(*self.identity.hash());
+
+                let size = local_announce.packed_size();
+                let mut buf = alloc::vec![0u8; size];
+                if let Ok(len) = local_announce.pack(&mut buf) {
+                    let ph = self.pkt_ph_lazy(&buf[..len]);
+                    for &client_iface in &self.local_client_interfaces {
+                        if client_iface != interface_index {
+                            if let Some(ph) = &ph {
+                                crate::tracing::debug!(
+                                    target: PKT_EVENT_TARGET,
+                                    event = "PKT_TX",
+                                    ph = %HexShort(ph),
+                                    iface = %self.iface_name(client_iface),
+                                    hops = wire_hops(&buf[..len]),
+                                    len = len,
+                                );
+                            }
+                            self.pending_actions.push(Action::SendPacket {
+                                iface: InterfaceId(client_iface),
+                                data: buf[..len].to_vec(),
+                                // A relayed announce toward a local IPC
+                                // client: no addressee, no #376 hint.
+                                // Genuinely absent, not merely unstored
+                                // — a shared-instance socket carries one
+                                // client, and an announce is a broadcast
+                                // twice over.
+                                peer: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
     /// Emission timestamp of the announce we hold in the cache for
     /// `dest_hash`, read from its random hash — the replay memory that
     /// survives a culled path entry (#374). `None` when nothing is cached or
@@ -16355,7 +16373,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6613), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6575), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
