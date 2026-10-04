@@ -2007,6 +2007,40 @@ fn abandon_send_queue(
     );
 }
 
+/// Refuse a frame whose bytes equal one already in the send queue, and
+/// count the refusal. Returns `true` when the caller must not enqueue.
+///
+/// The sender's core rebuilds whatever a peer asks for with no memory of
+/// what still waits here: 394 measured one re-requested resource window
+/// costing four keyed copies of parts the queue already held (98 frames for
+/// a 22-part file, 65 of them rejected by the receiver as
+/// `no_matching_hash`). Only this queue knows what is queued and not yet
+/// keyed, so the memory lives here. Bytes equal is the whole rule: two
+/// identical frames are the same frame on the air, whatever packet type
+/// they carry, and the copy already queued delivers it.
+///
+/// `queued` holds only frames NOT yet handed to the modem. A frame that was
+/// handed over (pending in the airtime ledger, [`settle_handovers`]) has
+/// left the queue and does not suppress a later copy: a frame on the air
+/// can still be lost, and a retry of it has to go out.
+fn refuse_queued_duplicate<'a>(
+    name: &str,
+    counters: &InterfaceCounters,
+    depth: usize,
+    mut queued: impl Iterator<Item = &'a [u8]>,
+    frame: &[u8],
+    payload_len: usize,
+) -> bool {
+    if !queued.any(|q| q == frame) {
+        return false;
+    }
+    counters
+        .tx_queue_dedup
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tracing::info!("LORA_TX_DEDUP iface={name} len={payload_len} queued={depth}");
+    true
+}
+
 /// [`abandon_send_queue`] for the multi-vport loop, whose shared queue is
 /// just as task-local.
 ///
@@ -2457,6 +2491,21 @@ where
                     Some(pkt) => {
                         let frame = rnode::build_data_frame(&pkt.data);
                         let high_priority = pkt.high_priority;
+                        // Before the cap: a copy of a queued frame must not
+                        // shed an older, different one to make room. Skipping
+                        // the rest of the iteration is sound because the
+                        // queue is unchanged: the gate tracking and the send
+                        // attempt below already ran on exactly this state.
+                        if refuse_queued_duplicate(
+                            &name,
+                            &counters,
+                            send_queue.len(),
+                            send_queue.iter().map(|f| f.data.as_slice()),
+                            &frame,
+                            pkt.data.len(),
+                        ) {
+                            continue;
+                        }
                         if send_queue.len() >= FLOW_CONTROL_QUEUE_LIMIT {
                             if let Some(dropped) = send_queue.pop_front() {
                                 // A dropped frame must be loud —
@@ -3851,6 +3900,22 @@ async fn rnode_multi_io_task<S>(
                                 "{}: dropping TX on deregistered vport {}",
                                 name, vports[tagged.subint].vport
                             );
+                            continue;
+                        }
+                        // Same bytes on another vport are another radio's
+                        // frame, so only this vport's entries count.
+                        let subint = tagged.subint;
+                        if refuse_queued_duplicate(
+                            name,
+                            &vports[subint].counters,
+                            send_queue.len(),
+                            send_queue
+                                .iter()
+                                .filter(|(queued, _)| *queued == subint)
+                                .map(|(_, data)| data.as_slice()),
+                            &tagged.packet.data,
+                            tagged.packet.data.len(),
+                        ) {
                             continue;
                         }
                         if send_queue.len() >= FLOW_CONTROL_QUEUE_LIMIT {
@@ -8733,6 +8798,35 @@ mod tests {
             .await;
     }
 
+    /// 403 on the shared multi-vport queue: a frame already queued for a
+    /// vport is not queued twice for it, while the same bytes for the other
+    /// vport are a different frame (another radio) and still enter. After
+    /// the drain hands the frame over, a fresh copy goes out again.
+    #[tokio::test(start_paused = true)]
+    async fn test_multi_vport_queued_duplicate_frame_is_refused() {
+        let mut h = spawn_multi_flow_harness(true, 0).await;
+        h.push(0, b"seed").await;
+        h.expect_frame(0, b"seed", "cold-start frame ships ungated")
+            .await;
+
+        h.push(0, b"dup").await;
+        h.push(0, b"dup").await;
+        h.push(1, b"dup").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        h.resume_tx.send(1000).await.expect("stub alive");
+        h.expect_frame(0, b"dup", "the queued frame airs once")
+            .await;
+        h.expect_frame(1, b"dup", "the other vport's copy is its own frame")
+            .await;
+        h.expect_silence(Duration::from_secs(3), "the refused copy never airs")
+            .await;
+
+        h.push(0, b"dup").await;
+        h.expect_frame(0, b"dup", "a handed-over frame does not suppress a retry")
+            .await;
+    }
+
     /// One firmware queue, one poll cadence — and it must be priced at the
     /// SLOWEST vport's packet airtime, the conservative bound on how fast
     /// the shared queue can drain. Vport 1 (SF8/500 kHz) is the faster
@@ -9179,6 +9273,76 @@ mod tests {
         h.resume_tx.send(1).await.expect("stub alive");
         h.expect_frame(b"second", "the next poll after the drain re-opens the gate")
             .await;
+    }
+
+    /// 403, a frame already queued is not queued twice: the gate holds frame
+    /// A host-side, A is offered again and refused (counted once, one
+    /// `LORA_TX_DEDUP` line naming the depth it met), a different frame B
+    /// still enters, and the drain airs A once and B once. Once A has been
+    /// handed over it has left the queue, so a fresh copy of A goes out
+    /// again: a frame on the air can be lost, and its retry must fly.
+    #[tokio::test(start_paused = true)]
+    async fn test_queued_duplicate_frame_is_refused_until_handed_over() {
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(true, 0);
+        let dedup = |h: &DutyLockHarness| {
+            h.counters
+                .tx_queue_dedup
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        h.push(b"bootstrap").await;
+        h.expect_frame(b"bootstrap", "bootstrap frame ships ungated")
+            .await;
+
+        // The gate is now closed: A waits in the host-side queue.
+        h.push(b"frame-a").await;
+        h.push(b"frame-a").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(dedup(&h), 1, "the second copy of a queued A is refused");
+
+        h.push(b"frame-b").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(dedup(&h), 1, "a different frame B still enters");
+
+        h.resume_tx.send(1000).await.expect("stub alive");
+        h.expect_frame(b"frame-a", "A airs once").await;
+        h.expect_frame(b"frame-b", "B airs after A, no second A between")
+            .await;
+        h.expect_silence(Duration::from_secs(3), "the refused copy never airs")
+            .await;
+
+        h.push(b"frame-a").await;
+        h.expect_frame(b"frame-a", "A was handed over, so a new copy goes out")
+            .await;
+        assert_eq!(
+            dedup(&h),
+            1,
+            "a handed-over frame does not suppress a retry"
+        );
+        assert_eq!(
+            h.counters
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a refused duplicate is not a drop"
+        );
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        let lines: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("LORA_TX_DEDUP"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "one event per refusal\n--- logs ---\n{logs}"
+        );
+        assert!(
+            lines[0].contains("LORA_TX_DEDUP iface=test_rnode_duty len=7 queued=1"),
+            "the event names the payload length and the depth it met: {}",
+            lines[0]
+        );
     }
 
     /// Behaviour 3, host-queue overflow is loud: with the gate
