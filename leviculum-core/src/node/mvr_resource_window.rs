@@ -156,6 +156,8 @@ struct TransferResult {
     final_window_max: usize,
     /// Receiver-side timeouts that re-sent a REQ.
     receiver_timeouts: usize,
+    /// Every REQ that reached the sender, the first one included.
+    requests: usize,
     /// Receiver window immediately (before, after) each such timeout.
     timeout_window_pairs: Vec<(usize, usize)>,
     /// Distinct parts the sender had emitted (transmitted or queued) at the
@@ -194,8 +196,22 @@ struct PacedDelivery {
     trajectory: Vec<(usize, usize, usize)>,
     last_rounds: usize,
     receiver_timeouts: usize,
+    requests: usize,
     timeout_window_pairs: Vec<(usize, usize)>,
     awaiting_proof_flip_unique: Option<usize>,
+}
+
+/// What the receiver's own interface tells its link about the carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiverCarrier {
+    /// The receiver sits on the radio itself and its interface states the
+    /// per-frame turnaround, as an RNode interface in the daemon does.
+    Stated,
+    /// The receiver's link runs over an interface that states nothing: a
+    /// shared-instance client such as `lncp`, whose link the daemon carries
+    /// over `LocalClient` (`leviculum-std/src/interfaces/local.rs`, which
+    /// sets `frame_turnaround_ms: None`).
+    Unstated,
 }
 
 impl PacedDelivery {
@@ -205,6 +221,7 @@ impl PacedDelivery {
         turnaround_ms: u64,
         frame_contention_ms: u64,
         drop_every: Option<usize>,
+        receiver_carrier: ReceiverCarrier,
     ) -> (Self, crate::DestinationHash, [u8; 32]) {
         assert!(rate_bps > 0, "rate_bps must be positive");
         if let Some(k) = drop_every {
@@ -212,12 +229,17 @@ impl PacedDelivery {
         }
         let (mut sender, dest_hash, signing_key) = make_sender();
         let mut receiver = make_receiver(policy);
-        // Both ends run on the same carrier and both state what it charges a
-        // full-size frame; the receiver's link learns the figure from the
-        // interface the link proof arrives on.
+        // Both ends run on the same carrier and the sender states what it
+        // charges a full-size frame; the receiver's link learns the figure
+        // from the interface the link proof arrives on, if that interface
+        // states one (see `ReceiverCarrier`).
         let hold = modelled_turnaround_ms(rate_bps, frame_contention_ms);
         let tx_iface = add_iface_with_turnaround(&mut sender, "S_mesh", hold);
-        let rx_iface = add_iface_with_turnaround(&mut receiver, "R_mesh", hold);
+        let rx_hold = match receiver_carrier {
+            ReceiverCarrier::Stated => hold,
+            ReceiverCarrier::Unstated => 0,
+        };
+        let rx_iface = add_iface_with_turnaround(&mut receiver, "R_mesh", rx_hold);
         (
             Self {
                 receiver,
@@ -241,6 +263,7 @@ impl PacedDelivery {
                 trajectory: Vec::new(),
                 last_rounds: 0,
                 receiver_timeouts: 0,
+                requests: 0,
                 timeout_window_pairs: Vec::new(),
                 awaiting_proof_flip_unique: None,
             },
@@ -381,6 +404,9 @@ impl PacedDelivery {
             if let Some(k) = self.drop_every {
                 dropped = self.data_parts_seen.is_multiple_of(k);
             }
+        }
+        if dir == Dir::ToSender && packet_context(&pkt) == Some(PacketContext::ResourceReq) {
+            self.requests += 1;
         }
         if dropped {
             // The frame was on the air (airtime elapsed above) but arrives
@@ -569,12 +595,34 @@ fn run_transfer_held(
     frame_contention_ms: u64,
     drop_every: Option<usize>,
 ) -> TransferResult {
+    run_transfer_on(
+        policy,
+        size_bytes,
+        rate_bps,
+        turnaround_ms,
+        frame_contention_ms,
+        drop_every,
+        ReceiverCarrier::Stated,
+    )
+}
+
+/// As [`run_transfer_held`], with the receiver's carrier statement chosen.
+fn run_transfer_on(
+    policy: WindowPolicy,
+    size_bytes: usize,
+    rate_bps: u64,
+    turnaround_ms: u64,
+    frame_contention_ms: u64,
+    drop_every: Option<usize>,
+    receiver_carrier: ReceiverCarrier,
+) -> TransferResult {
     let (mut h, dest_hash, signing_key) = PacedDelivery::new(
         policy,
         rate_bps,
         turnaround_ms,
         frame_contention_ms,
         drop_every,
+        receiver_carrier,
     );
     h.establish(dest_hash, &signing_key);
 
@@ -616,6 +664,7 @@ fn run_transfer_held(
         final_window,
         final_window_max,
         receiver_timeouts: h.receiver_timeouts,
+        requests: h.requests,
         timeout_window_pairs: h.timeout_window_pairs,
         awaiting_proof_flip_unique: h.awaiting_proof_flip_unique,
     }
@@ -948,6 +997,62 @@ fn pythonlike_grows_its_window_on_a_slow_sender() {
         "no round may sit at the window floor: {:?}",
         r.window_trajectory
     );
+}
+
+// ----------------------------------------------------------------------------
+// The same slow sender, seen from a receiver whose interface states nothing
+// (Codeberg #394). `lora_4node_contention_rust` on fa63994e, 2026-10-02: the
+// receiver was `lncp`, a shared-instance client, so its link ran over
+// `LocalClient`, which states neither a turnaround nor an acquisition. The
+// interface-derived floor above was therefore zero and the RTT-derived policy
+// term ran alone: 3.2 s at retry 1, while one 491 B part cost the sender a
+// median of 2712 ms and a window of four about 11 s. Every timeout re-asked
+// for the window and the sender queued the same parts again behind the ones
+// still waiting: 98 part frames for 22 parts, 65 of them rejected as
+// duplicates, 20 of 22 parts in 316 s.
+// ----------------------------------------------------------------------------
+
+/// The 394 sender: the 184 carrier's airtime with the contention draw the run
+/// measured (`LORA_TX_HOLD held_ms` median 2712 against the 1506 ms airtime).
+const CONTENTION_MS_394: u64 = 1_206;
+
+/// A receiver that cannot know its sender's carrier still has to wait for
+/// the window at the pace the parts actually arrive: on a lossless link
+/// every window is asked for exactly once.
+///
+/// Red before the receiver learned the pace it observes: the parts arrive
+/// steadily, slower than the RTT-derived timeout, so the receiver re-asks
+/// for the same window inside it and the sender queues duplicates.
+#[test]
+fn a_receiver_with_an_unstated_carrier_asks_for_each_window_once() {
+    for policy in [WindowPolicy::Current, WindowPolicy::PythonLike] {
+        let r = run_transfer_on(
+            policy,
+            10240,
+            RATE_BPS_184,
+            TURNAROUND_MS,
+            CONTENTION_MS_394,
+            None,
+            ReceiverCarrier::Unstated,
+        );
+        assert_eq!(
+            r.receiver_timeouts, 0,
+            "{policy:?}: nothing was lost, so no window may be asked for again \
+             while its parts are still arriving (window pairs: {:?})",
+            r.timeout_window_pairs
+        );
+        assert_eq!(
+            r.requests, r.rounds,
+            "{policy:?}: one request per window, {} requests for {} rounds",
+            r.requests, r.rounds
+        );
+        assert_eq!(
+            r.retransmits, 0,
+            "{policy:?}: a lossless link must send each part exactly once, \
+             sent {} frames for {} parts",
+            r.parts_transmitted, r.unique_parts
+        );
+    }
 }
 
 // ----------------------------------------------------------------------------

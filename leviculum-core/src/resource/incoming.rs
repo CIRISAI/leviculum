@@ -21,7 +21,18 @@ use crate::resource::{
     RETRY_GRACE_TIME_MS,
 };
 
-use super::outgoing::ResourcePollResult;
+use super::outgoing::{sender_part_budget_ms, ResourcePollResult};
+
+/// How many gaps between accepted parts the receiver keeps to learn its
+/// sender's pace (Codeberg #394). Four is the window a slow link runs at
+/// (`RESOURCE_WINDOW_MAX_VERY_SLOW`), the link the floor exists for; a wider
+/// window reads the latest four, which is pace enough on a link fast enough
+/// to have grown one.
+///
+/// Kept inline and small on purpose: every `Link` carries an
+/// `Option<IncomingResource>`, and the firmware's link budget is priced in
+/// `size_of::<Link>()` (`leviculum-nrf/src/heap_census.rs`).
+const PART_GAP_SAMPLES: usize = 4;
 
 /// Where a hashmap-update segment starts in the local hashmap, or `None`
 /// when the peer's segment number cannot name a position on this side.
@@ -80,6 +91,16 @@ pub(crate) struct IncomingResource {
     // Timing
     last_activity_ms: u64,
     req_sent_ms: Option<u64>,
+    // The sender's pace as this side sees it (Codeberg #394): when the last
+    // accepted part arrived (the clock's low 32 bits, read with wrapping
+    // arithmetic and only once `data_received`), and a ring of the gaps
+    // between consecutive accepted parts in ms, saturating at u16::MAX.
+    // `part_gaps_recorded` counts them to PART_GAP_SAMPLES and then cycles
+    // through PART_GAP_SAMPLES..2*PART_GAP_SAMPLES, so `% PART_GAP_SAMPLES`
+    // is the next slot and `min(.., PART_GAP_SAMPLES)` the samples held.
+    last_part_ms: u32,
+    part_gaps: [u16; PART_GAP_SAMPLES],
+    part_gaps_recorded: u8,
     // Transfer metrics
     eifr: u64,
     data_received: bool,
@@ -90,14 +111,12 @@ pub(crate) struct IncomingResource {
     // For proof computation: the digest `build_proof` needs, not the bytes
     // it is taken over (see `assemble`, step 5).
     proof_hash: Option<[u8; 32]>,
-    // Last REQ payload (for retransmission on timeout)
-    last_req: Option<Vec<u8>>,
 }
 
 impl IncomingResource {
     /// Estimated heap bytes this in-flight reassembly pins (#388
-    /// census): part spines and payloads, the hashmap, and the staged
-    /// assembly/REQ buffers.
+    /// census): part spines and payloads, the hashmap, and the request id
+    /// of a response.
     pub(crate) fn heap_bytes(&self) -> usize {
         use core::mem::size_of;
         let mut bytes = self.parts.capacity() * size_of::<Option<Vec<u8>>>()
@@ -108,8 +127,8 @@ impl IncomingResource {
         // No term for the assembled data: since 2026-09-23 a concluded
         // reassembly pins its 32-byte proof digest and not a copy of the
         // transfer (`assemble`, step 5).
-        for buf in [&self.request_id, &self.last_req].into_iter().flatten() {
-            bytes += buf.capacity();
+        if let Some(request_id) = &self.request_id {
+            bytes += request_id.capacity();
         }
         bytes
     }
@@ -209,6 +228,9 @@ impl IncomingResource {
             outstanding_parts: 0,
             last_activity_ms: now_ms,
             req_sent_ms: None,
+            last_part_ms: 0,
+            part_gaps: [0; PART_GAP_SAMPLES],
+            part_gaps_recorded: 0,
             eifr: 0,
             data_received: false,
             retries: 0,
@@ -216,7 +238,6 @@ impl IncomingResource {
             link_mdu,
             sdu,
             proof_hash: None,
-            last_req: None,
         };
 
         // Build first request
@@ -306,7 +327,6 @@ impl IncomingResource {
         req.extend_from_slice(&requested_hashes);
 
         self.window_state.start_round();
-        self.last_req = Some(req.clone());
         req
     }
 
@@ -369,6 +389,10 @@ impl IncomingResource {
         self.outstanding_parts = self.outstanding_parts.saturating_sub(1);
         self.window_state.record_part(part_data.len());
         self.last_activity_ms = now_ms;
+        if self.data_received {
+            self.record_part_gap((now_ms as u32).wrapping_sub(self.last_part_ms));
+        }
+        self.last_part_ms = now_ms as u32;
         self.data_received = true;
         self.retries = 0;
 
@@ -704,6 +728,55 @@ impl IncomingResource {
         Ok(proof_data)
     }
 
+    /// A gap past 65 535 ms is kept as 65 535: a sender that slow between
+    /// two parts is not pacing. The floor four such gaps set, 262 s, is
+    /// already past the sender's own patience (`sender_part_budget_ms`,
+    /// 96 x rtt + 78 s) at any RTT under 1.9 s.
+    fn record_part_gap(&mut self, gap_ms: u32) {
+        let recorded = self.part_gaps_recorded as usize;
+        self.part_gaps[recorded % PART_GAP_SAMPLES] = u16::try_from(gap_ms).unwrap_or(u16::MAX);
+        self.part_gaps_recorded = if recorded + 1 < 2 * PART_GAP_SAMPLES {
+            (recorded + 1) as u8
+        } else {
+            PART_GAP_SAMPLES as u8
+        };
+    }
+
+    /// The gap this side observes between consecutive parts, in ms: the
+    /// lower median of the latest `window` gaps (at most
+    /// [`PART_GAP_SAMPLES`]), or `None` before the second part arrived.
+    /// The lower median of a window of four is its second-shortest gap.
+    ///
+    /// Only accepted parts count: a duplicate the sender queued behind the
+    /// parts still owed costs airtime but delivers nothing, and the pace that
+    /// matters is the pace at which the window fills.
+    ///
+    /// The median, not the maximum: a gap that spans a lost part contains a
+    /// whole timeout and the round trip of the retry that recovered it. Under
+    /// the maximum that one gap would set the floor, the next loss would then
+    /// wait `window` times as long, and the floor would grow geometrically
+    /// with every loss. The median moves only when most of the recent gaps
+    /// are long, which is what a slow sender looks like and a lost part does
+    /// not. The lower of the two middles for the same reason, on the even
+    /// counts a window of four produces.
+    fn observed_part_gap_ms(&self) -> Option<u64> {
+        let recorded = self.part_gaps_recorded as usize;
+        let n = core::cmp::min(
+            core::cmp::min(recorded, PART_GAP_SAMPLES),
+            core::cmp::max(self.window_state.window(), 1),
+        );
+        if n == 0 {
+            return None;
+        }
+        let mut latest = [0u16; PART_GAP_SAMPLES];
+        for (age, slot) in latest.iter_mut().take(n).enumerate() {
+            *slot = self.part_gaps[(recorded + PART_GAP_SAMPLES - 1 - age) % PART_GAP_SAMPLES];
+        }
+        let latest = &mut latest[..n];
+        latest.sort_unstable();
+        Some(u64::from(latest[(n - 1) / 2]))
+    }
+
     /// The retry timeout for the parts this resource is waiting on, in ms.
     ///
     /// Named and separate because it is the formula, and both callers — the
@@ -716,7 +789,8 @@ impl IncomingResource {
     /// a medium with no post-TX wait), and `acquisition_ms` what the frame
     /// that takes that carrier pays before it may go at all
     /// (`Interface::acquisition_max_ms`, 0 for the same media). See the
-    /// floor at the end.
+    /// floors at the end: the one those two figures set, and the one the
+    /// parts that did arrive set when the link's interface states neither.
     pub(crate) fn part_timeout_ms(
         &self,
         rtt_ms: u64,
@@ -778,7 +852,33 @@ impl IncomingResource {
             .saturating_mul(turnaround_ms)
             .saturating_add(acquisition_ms)
             .saturating_add(rtt_ms);
-        core::cmp::max(policy_timeout, sender_pace)
+
+        // The second floor: the pace the parts actually arrive at. The one
+        // above needs the link's interface to state its carrier, and a
+        // shared-instance client's link runs over `LocalClient`, which
+        // cannot: the daemon's radio sits behind it, and neither `lnsd` nor
+        // `rnsd` tells the client what that radio charges. So `lncp` ran on
+        // the policy term alone, 3.2 s against a window that cost its sender
+        // 11.6 s, sent 32 requests where 6 windows needed 6, and the sender
+        // queued the same parts again behind the ones still owed
+        // (`lora_4node_contention_rust`, 2026-10-02, Codeberg #394).
+        //
+        // `window` gaps: the same reach as the floor above, so a sender
+        // whose queue still holds a window's worth of frames ahead of the
+        // part owed next is waited for. It follows the carrier as it is,
+        // contention included, wherever the link runs: behind a relay, a
+        // daemon, or a medium that states nothing.
+        //
+        // Bounded by the sender's own patience (`sender_part_budget_ms`):
+        // past it the sender has given up on the next request, so a longer
+        // wait here could only find a failed transfer later.
+        let observed_pace = self.observed_part_gap_ms().map_or(0, |gap_ms| {
+            core::cmp::min(
+                (self.window_state.window() as u64).saturating_mul(gap_ms),
+                sender_part_budget_ms(rtt_ms),
+            )
+        });
+        core::cmp::max(core::cmp::max(policy_timeout, sender_pace), observed_pace)
     }
 
     /// Poll for timeout.
@@ -1257,6 +1357,12 @@ mod tests {
     /// The timeout has to be at least as long as the sender needs to put the
     /// window it was asked for on the air.
     fn timeout_state_of_184(policy: WindowPolicy) -> IncomingResource {
+        timeout_state_paced(policy, TURNAROUND_MS_184, TURNAROUND_MS_184)
+    }
+
+    /// The 184 state with the arrivals chosen: the first part `first_ms`
+    /// after the REQ, the next two `gap_ms` apart.
+    fn timeout_state_paced(policy: WindowPolicy, first_ms: u64, gap_ms: u64) -> IncomingResource {
         const NUM_PARTS: usize = 8;
         const SDU: usize = 464;
         let random_hash = [0xBB; RESOURCE_RANDOM_HASH_SIZE];
@@ -1279,10 +1385,11 @@ mod tests {
             "the run's window: RESOURCE_WINDOW_INITIAL"
         );
 
-        // Three of the four requested parts arrive, each one turnaround
-        // behind the last, which is the pace the sender's interface allows.
-        for part in parts.iter().take(3) {
-            now += TURNAROUND_MS_184;
+        // Three of the four requested parts arrive; in the 184 state each
+        // one turnaround behind the last, which is the pace the sender's
+        // interface allows.
+        for (i, part) in parts.iter().take(3).enumerate() {
+            now += if i == 0 { first_ms } else { gap_ms };
             assert!(
                 !matches!(
                     incoming.receive_part(part, now, RTT_MS_184),
@@ -1356,20 +1463,20 @@ mod tests {
         for policy in [WindowPolicy::Current, WindowPolicy::PythonLike] {
             let incoming = timeout_state_of_184(policy);
 
-            // The RTT-derived term is the term it is: on a carrier with no
-            // post-TX wait the timeout is unchanged, and it is exactly the
-            // 2596 ms the run measured.
+            // With no carrier figure stated, the parts that did arrive set
+            // the pace: a window of the gap they arrived at, where the run
+            // measured the RTT-derived 2596 ms (Codeberg #394).
+            let window = incoming.window_state().window() as u64;
+            assert_eq!(window, 4);
             assert_eq!(
                 incoming.part_timeout_ms(RTT_MS_184, 0, 0),
-                2_596,
-                "{policy:?}: rtt 1173 x factor 2 + 250 grace, the run's figure"
+                window * TURNAROUND_MS_184,
+                "{policy:?}: 4 x the observed 2586 ms gap, not rtt 1173 x 2 + 250"
             );
 
             // With the sender's pace known, the timeout covers the whole
             // window the receiver asked for, plus one round trip for the REQ
             // that asked for it.
-            let window = incoming.window_state().window() as u64;
-            assert_eq!(window, 4);
             assert_eq!(
                 incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184, 0),
                 window * TURNAROUND_MS_184 + RTT_MS_184,
@@ -1386,14 +1493,47 @@ mod tests {
     /// for longer than the sender needs, the policy's figure stands.
     #[test]
     fn part_timeout_keeps_the_policy_term_when_it_is_the_longer_one() {
-        let incoming = timeout_state_of_184(WindowPolicy::PythonLike);
+        // The first part as late as on 184, so the policy term is the run's
+        // 2596 ms, then parts 100 ms apart: the observed pace is 4 x 100.
+        let incoming = timeout_state_paced(WindowPolicy::PythonLike, TURNAROUND_MS_184, 100);
         // A carrier a thousand times faster than the link 184 ran on: the
         // whole window costs less than the RTT-derived term.
         let quick = 1u64;
         assert_eq!(
             incoming.part_timeout_ms(RTT_MS_184, quick, 0),
             2_596,
-            "floor 4 x 1 + 1173 is below the policy term, which therefore wins"
+            "floors 4 x 1 + 1173 and 4 x 100 are below the policy term, \
+             which therefore wins"
+        );
+    }
+
+    /// The observed pace is the lower median of the latest window of gaps:
+    /// one gap that spans a lost part (a whole timeout plus the retry's round
+    /// trip) does not set the floor, or the next loss would wait `window`
+    /// times as long and the floor would grow with every loss (#394).
+    #[test]
+    fn one_long_gap_does_not_set_the_observed_pace() {
+        let mut incoming = timeout_state_paced(WindowPolicy::Current, 500, 2_000);
+        assert_eq!(incoming.observed_part_gap_ms(), Some(2_000));
+        incoming.record_part_gap(30_000);
+        incoming.record_part_gap(2_100);
+        // Latest four: 2000, 2000, 30000, 2100 -> lower median 2000.
+        assert_eq!(incoming.observed_part_gap_ms(), Some(2_000));
+        // Once most of the window is slow, the pace is slow.
+        incoming.record_part_gap(9_000);
+        incoming.record_part_gap(9_500);
+        // Latest four: 30000, 2100, 9000, 9500 -> lower median 9000.
+        assert_eq!(incoming.observed_part_gap_ms(), Some(9_000));
+    }
+
+    /// The observed floor never outwaits the sender: past
+    /// `sender_part_budget_ms` the sender has given up on the next request.
+    #[test]
+    fn the_observed_pace_is_bounded_by_the_senders_patience() {
+        let incoming = timeout_state_paced(WindowPolicy::Current, 500, 3_600_000);
+        assert_eq!(
+            incoming.part_timeout_ms(RTT_MS_184, 0, 0),
+            sender_part_budget_ms(RTT_MS_184),
         );
     }
 
