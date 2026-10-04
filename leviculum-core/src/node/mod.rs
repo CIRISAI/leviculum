@@ -178,6 +178,8 @@ mod mvr_request_response_pins;
 #[cfg(test)]
 mod mvr_resource_offlock_phases;
 #[cfg(test)]
+mod mvr_resource_readvertise;
+#[cfg(test)]
 mod mvr_resource_sender_deadline;
 #[cfg(test)]
 mod mvr_resource_strategy_branches;

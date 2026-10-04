@@ -2487,8 +2487,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         link.record_inbound(now_secs);
 
-        // Already have an incoming resource or pending ADV, ignore
-        if link.has_incoming_resource() || link.has_pending_resource() {
+        // An ADV parked for the application is decided there, ignore
+        if link.has_pending_resource() {
             crate::tracing::debug!("Resource ADV on link with active resource, ignoring");
             return;
         }
@@ -2513,6 +2513,44 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 return;
             }
         };
+
+        // A link carries one incoming Resource. A repeated advertisement of
+        // that one, before any part of it arrived, means the sender never
+        // heard our request: it leaves `Advertised` on the first REQ and
+        // re-advertises only until then. Send the request again instead of
+        // letting both sides wait out their timers (Codeberg #404: the lost
+        // REQ stranded a 10 KB transfer for the sender's whole 48 s
+        // advertisement budget). Python ignores the repeat
+        // (`Resource.py:223-236`); a REQ is what its sender waits for, so the
+        // answer is plain wire. Everything else on a busy link is ignored.
+        if link.has_incoming_resource() {
+            let again = link
+                .incoming_resource_mut()
+                .and_then(|res| res.request_again_for_readvertisement(&adv.resource_hash, now_ms));
+            let Some(req_payload) = again else {
+                crate::tracing::debug!("Resource ADV on link with active resource, ignoring");
+                return;
+            };
+            match link.build_data_packet_with_context(
+                &req_payload,
+                PacketContext::ResourceReq,
+                &mut self.rng,
+            ) {
+                Ok(pkt) => {
+                    crate::tracing::debug!(
+                        event = "RESOURCE_REQ_AGAIN",
+                        rh = %HexFmt(&adv.resource_hash[..4]),
+                        link = %HexShort(link_id.as_bytes()),
+                    );
+                    link.record_outbound(now_secs);
+                    self.route_link_packet(&link_id, &pkt);
+                }
+                Err(e) => {
+                    crate::tracing::debug!("Failed to build REQ packet: {e}");
+                }
+            }
+            return;
+        }
 
         // Python can split large request and response Resources, but the
         // request-correlation path here currently represents one transfer.

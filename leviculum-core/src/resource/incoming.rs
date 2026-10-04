@@ -248,6 +248,32 @@ impl IncomingResource {
         Ok((incoming, req))
     }
 
+    /// Answer a repeated advertisement of this resource (Codeberg #404).
+    ///
+    /// A sender re-advertises only while it has heard no request, so a
+    /// repeat with no part arrived yet means our request was lost. Returns
+    /// the request again and restarts the first-part wait from it; the
+    /// window and the retry count stay as they are, because no timeout of
+    /// ours was spent. Returns `None` for another resource, or once a part
+    /// has arrived: the sender has a request then, and the repeat is a late
+    /// duplicate.
+    pub(crate) fn request_again_for_readvertisement(
+        &mut self,
+        resource_hash: &[u8; 32],
+        now_ms: u64,
+    ) -> Option<Vec<u8>> {
+        if self.status != ResourceStatus::Transferring
+            || self.data_received
+            || *resource_hash != self.resource_hash
+        {
+            return None;
+        }
+        let req = self.build_request();
+        self.last_activity_ms = now_ms;
+        self.req_sent_ms = Some(now_ms);
+        Some(req)
+    }
+
     /// Build a REQ packet payload for the next window of parts.
     ///
     /// Wire format: `[1:exhausted_flag][4?:last_map_hash][32:resource_hash][N*4:requested_hashes]`

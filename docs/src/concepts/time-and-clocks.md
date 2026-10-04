@@ -107,7 +107,7 @@ unix-seconds value for wire fields that peers compare across our
 process lifetimes: announce emission timestamps, built by
 `generate_random_hash` (`leviculum-core/src/announce.rs:156`), and
 request timestamps
-(`leviculum-core/src/node/mod.rs:1455`, `:1154`, Codeberg #164). Any
+(`leviculum-core/src/node/mod.rs:1457`, `:1154`, Codeberg #164). Any
 new wire field with cross-lifetime semantics draws from it too —
 never from the monotonic `Clock::now_ms`, which is a timer, not a
 calendar.
@@ -343,10 +343,10 @@ costs, when it is unavailable, what it guarantees.
 > **Rustdoc debt, paid in #247.** Two doc comments in the tree stated
 > a different order and were corrected by the issue that implemented
 > this ranking: the rustdoc of `set_wall_time_unix_secs`
-> (`leviculum-core/src/node/mod.rs:930`, and on the transport at
+> (`leviculum-core/src/node/mod.rs:932`, and on the transport at
 > `transport.rs:4038`) said a platform wall clock always takes
 > precedence over an injection — the reverse of arms 2 and 3 — and its
-> `NodeCore::emission_secs` (`leviculum-core/src/node/mod.rs:3546`) rustdoc
+> `NodeCore::emission_secs` (`leviculum-core/src/node/mod.rs:3548`) rustdoc
 > listed the chain as
 > "platform wall clock, learned announce timebase, host injection,
 > uptime". This page is the spec; both now say so, and both name the
@@ -376,7 +376,7 @@ carries UTC date and time in every fix.
 
 ### Arm 2: Host injection
 
-`Node::set_wall_time_unix_secs` (`leviculum-core/src/node/mod.rs:926`
+`Node::set_wall_time_unix_secs` (`leviculum-core/src/node/mod.rs:928`
 → `leviculum-core/src/transport.rs:4781`), for deployments where a clockless node has a
 host that does know wall time — e.g. a control frame on the LNode
 serial channel (the radio-config envelope of
@@ -865,7 +865,7 @@ and an unattributed jump is indistinguishable from a bug. The core
 answers the first half: `Transport::time_source`
 (`leviculum-core/src/transport.rs:4791`) names the arm — including
 the platform clock, which answers for itself — and
-`NodeCore::anchor_rank` (`leviculum-core/src/node/mod.rs:3578`) is
+`NodeCore::anchor_rank` (`leviculum-core/src/node/mod.rs:3580`) is
 the number the predicates use. The rest — which neighbour, when, and
 the cohort behind a median re-anchor — is still only the
 once-per-process implausible-own-clock warning
