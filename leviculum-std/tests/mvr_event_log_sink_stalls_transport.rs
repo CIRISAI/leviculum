@@ -328,21 +328,44 @@ fn a_blocking_event_log_write_stalls_announce_handling() {
     );
 }
 
-/// Rounds for the overflow arm. Each announce emits a handful of events, so
-/// this is comfortably more than the sink's 8192-line queue plus whatever the
-/// pipe swallows before the writer thread blocks.
-const OVERFLOW_ROUNDS: usize = 3000;
-/// How long the reader refuses to take anything at all.
-const FREEZE: Duration = Duration::from_millis(1500);
+/// Rounds for the overflow arm, three event lines each (`PKT_RX`, `ANN_RX`,
+/// `PATH_ADD`).
+///
+/// What has to be exceeded is everything that can hold a line while the
+/// reader takes nothing, and that is more than the queue: the writer thread
+/// lifts up to `SINK_QUEUE_CAPACITY` (8192) lines out of the queue into one
+/// `write_all` batch, blocks on the full pipe holding them, and only then does
+/// the queue refill to its own 8192. With the pipe's default 64 KiB at ~128
+/// bytes a line, ~17 000 lines can survive without a single drop. 3000 rounds
+/// (9000 lines) sat under that bound, so the loss this test asserts depended
+/// on the writer's batch happening to be small when it blocked, which it is on
+/// an idle 10-core host and is not on a loaded forge runner (Codeberg
+/// pipelines 476-486: "9001 lines came through"). 7000 rounds is 21 000 lines,
+/// ~4000 over the bound.
+const OVERFLOW_ROUNDS: usize = 7000;
+/// Upper bound on how long the reader waits for the probe to finish emitting
+/// before it drains anyway, so a probe that dies cannot wedge the suite.
+const FREEZE_CAP: Duration = Duration::from_secs(120);
 
-/// Open the FIFO and read nothing for `FREEZE`, then drain at full speed.
-fn drain_after_freeze(path: PathBuf) -> std::thread::JoinHandle<Vec<String>> {
+/// Open the FIFO and read nothing until the probe has written `report`, which
+/// it does after its last round, then drain at full speed.
+///
+/// Gated on the probe's progress rather than on a fixed sleep: the freeze has
+/// to cover the whole emission or the reader frees the sink halfway and
+/// nothing is lost. A 1.5 s sleep did cover it on this host (~550 ms of
+/// emission) and did not on the forge runner, where the same debug probe
+/// writes its debug tracing to a CI log and shares the cores with the rest of
+/// the suite.
+fn drain_after_freeze(path: PathBuf, report: PathBuf) -> std::thread::JoinHandle<Vec<String>> {
     std::thread::spawn(move || {
         let c = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path");
         let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
         assert!(fd >= 0, "open fifo for read: {}", last_os_error());
         let mut file = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
-        std::thread::sleep(FREEZE);
+        let deadline = Instant::now() + FREEZE_CAP;
+        while !report.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let mut text = String::new();
         let mut buf = [0u8; 8192];
         loop {
@@ -369,7 +392,7 @@ fn an_overrun_queue_says_how_much_it_lost() {
     let dir = tempfile::tempdir().expect("tempdir");
     let fifo = Fifo::new(dir.path(), "events.fifo");
     let report = dir.path().join("rx.txt");
-    let reader = drain_after_freeze(fifo.path.clone());
+    let reader = drain_after_freeze(fifo.path.clone(), report.clone());
 
     let status = Command::new(probe_bin())
         .arg(OVERFLOW_ROUNDS.to_string())
