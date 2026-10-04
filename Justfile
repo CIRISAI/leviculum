@@ -1011,6 +1011,16 @@ check-just-docs:
 check-guards-subset:
     @python3 scripts/check-guards-subset.py
 
+# #408: `standard` runs every integration-test target in the tree, most of
+# them through scripts/standard-integ.sh's computed selection. This holds the
+# three things that selection stands on: the enumeration agrees with `cargo
+# metadata`, every target the script leaves to another line of `standard`
+# (scripts/standard-integ-elsewhere.txt) is still on that line, and `standard`
+# still calls the script. ~0.2 s, no build, its own fixtures first.
+[doc('Check that `standard` runs every integration-test target')]
+check-standard-integ:
+    @python3 scripts/check-standard-integ.py
+
 # The guards in .githooks/pre-push and the remedy their refusals print
 # (scripts/push-clean.sh), driven against scratch repositories (~0.3 s, no
 # build). They are cold code: they fire on the rare wrong push and nothing
@@ -1306,7 +1316,7 @@ tree-clean-selftest:
 #   run all still ahead of it. The `~3.5 min` in the recipe's own doc
 #   string is older than half the dependency list.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1338,7 +1348,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
+fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -1459,10 +1469,14 @@ ci-gate:
 # + proxy + rnsd_interop + the TCP-hub endurance smoke soak.
 #
 # Note on `--tests` targets: Tier 0 runs `--lib` only, so a crate's
-# tests/ directory is covered here or nowhere. lblogd was in the "nowhere"
-# bucket until 2026-07-27 (its node_integ end-to-end test never ran in CI).
-# lnomad/tests/ and leviculum-micron/tests/ are still uncovered, as are
-# several leviculum-std suites beyond the three named below.
+# tests/ directory is covered here or nowhere. Until #408 this recipe named
+# its suites one at a time and 94 of 139 targets were in no line of it;
+# lnmsg's python_interop was red on master for eight commits while two land
+# gates passed it (401). The lines below are the suites that need a flag, a
+# `-p` feature set or a manifest of their own; scripts/standard-integ.sh runs
+# every other target in the tree, computed rather than named, and
+# scripts/standard-integ-elsewhere.txt is the list of what it leaves to these
+# lines. check-standard-integ (in `guards`) keeps that list honest.
 [doc('Tier 1 (~15 min): fast plus the integration suites')]
 standard: fast test-ffi verify-packaging
     {{manifest}} core-tests -- cargo test -p leviculum-core --tests
@@ -1483,6 +1497,11 @@ standard: fast test-ffi verify-packaging
     # evidence that does not need the rig, and Tier 0 runs `--lib` only, so a
     # crate's tests/ directory is covered here or nowhere.
     {{manifest}} lxmf-node -- cargo test -p leviculum-lxmf-node --test two_node_loopback
+    # #408: every integration target no line above or in `fast` runs, the
+    # reference/-bound suites included on a host that has the submodules
+    # (scripts/integ-prerequisites.txt). Measured cost is in the script's
+    # header.
+    bash scripts/standard-integ.sh
     # Endurance gate (#101): builds lnsd, boots it as a hub, asserts 100%
     # delivery + RSS plateau + no fd leak. ~15 s smoke; `--full` is on demand.
     bash scripts/run-soak.sh

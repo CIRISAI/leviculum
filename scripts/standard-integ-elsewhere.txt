@@ -1,0 +1,34 @@
+# Integration-test targets `just standard` runs by a line of their own, so
+# scripts/standard-integ.sh leaves them out of its computed run. Everything
+# NOT named here is run there, selected from the tree, which is why a new
+# `tests/*.rs` cannot be left out of `standard` by forgetting to name it
+# (#194; 401 found lnmsg's python_interop red for eight commits that way).
+#
+# One line per claim:
+#
+#   <member dir>/<target, or * for all of the member's targets> <recipe> <text>
+#
+# <recipe> is the recipe holding that line; it must be `standard` or a recipe
+# `standard` reaches. <text> is the rest of the line and must occur in that
+# recipe's body. scripts/check-standard-integ.py checks both, so removing the
+# line a claim stands for turns `just guards` red instead of quietly dropping
+# the target out of `standard`.
+
+# Per-package runs: `-p` resolves features for that package alone, a
+# different build from the workspace-wide one the computed run makes.
+leviculum-core/* standard cargo test -p leviculum-core --tests
+lblogd/* standard cargo test -p lblogd --tests
+leviculum-proxy/* standard cargo test -p leviculum-proxy
+# The C API's suites run against the glibc target (`cargo test-ffi`), which is
+# what the shipped library is built for.
+leviculum-ffi/* test-ffi cargo test-ffi
+# Single targets with their own manifest gate or their own flags.
+leviculum-std/rnsd_interop standard cargo test -p leviculum-std --test rnsd_interop
+leviculum-std/event_log_subscriber standard cargo test -p leviculum-std --test event_log_subscriber
+leviculum-std/event_log_multiprocess standard cargo test -p leviculum-std --test event_log_multiprocess
+leviculum-std/lnode_debug_log_format standard cargo test -p leviculum-std --test lnode_debug_log_format
+leviculum-lxmf-node/two_node_loopback standard cargo test -p leviculum-lxmf-node --test two_node_loopback
+# Run by `fast`, which `standard` depends on.
+leviculum-std/mvr mvr cargo test -p leviculum-std --test mvr
+leviculum-std/doc_citations citation-guard cargo test -p leviculum-std --test doc_citations
+leviculum-std/supervised_spawn supervised-spawn cargo test -p leviculum-std --test supervised_spawn
