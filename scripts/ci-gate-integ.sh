@@ -45,6 +45,27 @@
 #                                   PythonPeer::start asserts the daemon says
 #                                   READY; there is no skip guard.
 #
+# SIX MORE, BY TEST NAME, SAME REASON. The rnsd_interop harness is not only
+# reached through the rnsd_interop target: leviculum-std/tests/mvr/main.rs:17
+# includes it with `#[path = "../rnsd_interop/harness.rs"]`, so the harness's
+# own `mod tests` (harness.rs:3220 onwards) runs as part of the `mvr` target,
+# and so do the mvr files that spawn a Python peer through it. Excluding the
+# target would take ~90 other mvr tests off the push path with them, so these
+# are skipped by exact name inside it (EXCLUDED_TESTS below). Measured on a
+# clone without submodules, 2026-10-04: these six, and only these, fail in
+# `mvr` there, with the harness's SubmoduleInitFailed:
+#
+#   harness::tests::test_daemon_restart
+#   harness::tests::test_daemon_starts_and_responds
+#   harness::tests::test_register_destination
+#   rust_client_path_install_from_python::rust_client_installs_path_from_python_announce
+#   rust_client_path_install_via_relay::rust_client_installs_path_via_relay_hops2
+#   rust_client_path_install_with_own_echo::rust_client_installs_peer_path_while_own_echoes
+#
+# Each name is checked against the target's own `--list` before the run, so a
+# renamed test is a red gate naming the line, never a skip that matches
+# nothing while the line's reason outlives the test it described.
+#
 # WHAT COVERS THEM INSTEAD, because "nothing" would be the #312 bug one layer
 # down: the tier-2 nightly runs `just complete` — `cargo test --workspace
 # --all-targets` with the submodules present — `scripts/nightly-green-ref.sh`
@@ -82,6 +103,17 @@ EXCLUDED="
 leviculum-std/rnsd_interop
 leviculum-lxmf/reference_lock
 lnmsg/python_interop
+"
+
+# `<member dir>/<target name> <exact test name>`, one per line: tests inside a
+# selected target that read a `reference/` submodule. Reason in the header.
+EXCLUDED_TESTS="
+leviculum-std/mvr harness::tests::test_daemon_restart
+leviculum-std/mvr harness::tests::test_daemon_starts_and_responds
+leviculum-std/mvr harness::tests::test_register_destination
+leviculum-std/mvr rust_client_path_install_from_python::rust_client_installs_path_from_python_announce
+leviculum-std/mvr rust_client_path_install_via_relay::rust_client_installs_path_via_relay_hops2
+leviculum-std/mvr rust_client_path_install_with_own_echo::rust_client_installs_peer_path_while_own_echoes
 "
 
 say() { echo "[ci-gate-integ] $*" >&2; }
@@ -181,10 +213,41 @@ done <<EOF
 $NAMES
 EOF
 
+EXCLUDED_TESTS_LIST="$(printf '%s\n' "$EXCLUDED_TESTS" | sed '/^[[:space:]]*$/d')"
+
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "$NAMES"
     exit 0
 fi
+
+# Every excluded test must be a test of a target this run selects, by its
+# exact name in that target's own listing. Same two directions as EXCLUDED: a
+# line naming nothing is a reason describing nothing, and a skip that silently
+# stopped matching puts the test back on a gate that cannot run it.
+SKIP_ARGS=()
+declare -A LISTING=()
+while read -r target test; do
+    [ -n "$target" ] || continue
+    printf '%s\n' "$SELECTED" | grep -qxF "$target" ||
+        die "EXCLUDED_TESTS names '$test' in '$target', which is not a selected
+test target in this tree. Fix the target path, or drop the line if the
+target itself went onto EXCLUDED."
+    name="${target##*/}"
+    if [ -z "${LISTING[$name]+set}" ]; then
+        say "listing target $name to check its excluded tests"
+        # Same `--workspace` as the run below, so the listing compiles what
+        # the run reuses rather than a second feature resolution.
+        LISTING[$name]="$(cargo test --workspace --test "$name" -- --list)" ||
+            die "could not list the tests of target '$name'."
+    fi
+    printf '%s\n' "${LISTING[$name]}" | grep -qxF "$test: test" ||
+        die "EXCLUDED_TESTS names '$test', which target '$name' no longer has.
+It was renamed or removed: follow the rename, or drop the line."
+    say "excluded test: $target $test (needs a reference/ submodule, see this script's header)"
+    SKIP_ARGS+=(--skip "$test")
+done <<EOF
+$EXCLUDED_TESTS_LIST
+EOF
 
 # `--bins` rides along: those 23 targets hold 234 unit tests that `--lib`
 # never selected either, 169 of them in leviculum-cli's seven client
@@ -198,9 +261,11 @@ fi
 # one: the manifest is what makes "the gate was green" unable to mean "the
 # suite never ran" (Guarantee B), and it is also what keeps the full output of
 # a red run on disk instead of in a scrollback.
-say "running cargo test --workspace --bins with ${#ARGS[@]} target flags"
+# `--exact` makes each `--skip` a whole test name rather than a substring, so
+# an excluded name cannot take a longer one in another binary with it.
+say "running cargo test --workspace --bins with ${#ARGS[@]} target flags, skipping $((${#SKIP_ARGS[@]} / 2)) test(s)"
 python3 scripts/run-with-manifest.py --gate ci-gate-integ -- \
-    cargo test --workspace --bins "${ARGS[@]}" --no-fail-fast
+    cargo test --workspace --bins "${ARGS[@]}" --no-fail-fast -- --exact "${SKIP_ARGS[@]}"
 rc=$?
 
 # Doctests are their own invocation because cargo DROPS them when any other

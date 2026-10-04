@@ -34,7 +34,7 @@ Three Woodpecker workflows on `ci.codeberg.org`, all in
 
 | File | Fires on | Runs |
 |------|----------|------|
-| `ci.yml` | every push, every pull request, manual | `just ci-gate` — fmt, clippy over all targets, and every workspace test except the three submodule-bound suites named in `scripts/ci-gate-integ.sh` (Codeberg #312) |
+| `ci.yml` | every push, every pull request, manual | `just ci-gate` — fmt, clippy over all targets, and every workspace test except the submodule-bound suites and tests named in `scripts/ci-gate-integ.sh` (Codeberg #312) |
 | `commit-trailers.yml` | every push, every pull request, manual | `scripts/check-commit-trailers.sh` over the pushed range |
 | `nightly.yml` | cron, plus pushes touching the packaging paths | the same gate, then the .deb + tarball build; the cron run also publishes |
 
@@ -57,18 +57,36 @@ recipe's comment lists what a submodule-less host-target container
 cannot prove (the firmware workspace, the cross-compiles, the
 submodule pins), and those stay on the local push path, which has
 the targets. Measured cost, cold, of the version that ran `--lib`
-only: 3m23s including provisioning. What Codeberg #312 added to it is
-~280 s of test execution measured on the coder host (10 cores,
-2026-09-26: `cargo test --workspace` is 596 s, of which the interop
-suite this gate does not run is 182 s) plus the link of the ~150 test
-binaries clippy had only compiled to metadata, which no measurement
-here can price honestly — the first cold run on the runner is the
-number that belongs in this line.
+only: 3m23s including provisioning. With Codeberg #312's widening the
+runner's own step timing is 965-1185 s (cron pipelines 476-486, push
+488, provisioning included), before the release build of the
+integration binaries that four `mvr` tests need was added to it.
+
+What the gate runs, and what it leaves out. The forge container is a
+stock `rust:bookworm` with `musl-tools`, `socat` and `iproute2` added
+by `scripts/ci-gate.sh`, and a clone without submodules (#300). In it
+`just ci-gate` runs fmt, clippy over every target, the workspace lib
+tests, `just build-integ-bins` (the release binaries the `mvr` tests
+spawn), and then `scripts/ci-gate-integ.sh`: every integration-test
+target the tree has, every bin unittest target and the doctests. Out
+of that it leaves exactly what needs a `reference/` submodule at run
+time, because those fail rather than skip without it: three whole
+targets (`rnsd_interop`, `leviculum-lxmf`'s `reference_lock`,
+`lnmsg`'s `python_interop`) and six tests by exact name inside `mvr`,
+which includes the rnsd_interop harness by `#[path]` and so runs the
+harness's own tests and the three `rust_client_path_install_*` tests
+that spawn a Python peer through it. The script's header holds the
+list, one written reason per entry, and checks every entry against the
+tree so a stale one is a red gate. The citation guard runs in full but
+skips the citations into the absent references and prints how many
+(about 2600). Everything left out runs on the tier-2 nightly with the
+submodules present, which is what the publish gate reads.
 
 ## What may be published
 
 The forge gate runs `fmt`, `clippy` and every test in the workspace
-except three suites, and `rnsd_interop` — the suite that measures
+except three suites and six submodule-bound tests inside `mvr`, and
+`rnsd_interop` — the suite that measures
 whether we still interoperate with a Python-RNS peer, which is half of
 Priority 1 — is the largest of the three. It runs in neither forge
 pipeline and cannot: it needs the `reference/Reticulum` submodule and a

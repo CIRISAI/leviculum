@@ -2,11 +2,13 @@ Fixture bodies for the standing canary in `leviculum-std/tests/doc_citations.rs`
 
 They are the guard's own input, not part of the corpus it guards, and are
 excluded from the source scan by path component. `canary_citations.rs.in`
-holds twelve citations into `canary_target.rs.in`, on ten lines:
+holds thirteen citations into `canary_target.rs.in`, on eleven lines:
 
 - in the paren spelling ``ident` (`path:line`)`: one correct, one drifted
   past the identifier window, one to a file that does not exist, and one
   into a `reference/` submodule that is absent from the fixture tree;
+- one bare `.py` citation that names no submodule and resolves to no file,
+  the way most citations into the Python reference are written;
 - in the comma spelling `(`ident`, `path:line`)`: one correct and one
   drifted, so that a spelling admitted to the guard cannot later stop
   being seen while the corpus keeps writing it;
@@ -17,9 +19,10 @@ holds twelve citations into `canary_target.rs.in`, on ten lines:
   one drifted, plus a row carrying two citations, where the signature is
   the subject of the first one only and the second stays bare.
 
-The guard must report exactly five failures: the three drifts, the missing
-file, and the absent submodule — the last classified as absent rather than
-drifted. Nine of the twelve citations must be counted as naming a subject.
+The guard must report exactly four failures: the three drifts and the
+missing file. The two citations into the absent reference are not failures:
+they are skipped, counted, and named on the status line. Nine of the
+thirteen citations must be counted as naming a subject.
 
 `canary_figures.rs.in` and `canary_budget.md.in` are the pair for the
 figure-attribution check (Codeberg #200). The Rust file holds three

@@ -1419,16 +1419,35 @@ fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-in
 # on the runner is the number to write down, and it goes in this comment.
 # Budgeting it against the runner's own limit is the point: a gate under ten
 # minutes is cheaper than a red master nobody sees until the next nightly.
+# THE RUNNER'S NUMBER, read off the Woodpecker API for the step `gate`:
+# 965-1185 s cold over the cron pipelines 476-486 and 1174 s on push 488
+# (2026-09-26 to 10-04), provisioning included. All of those were red runs,
+# but they ran the whole selection to the end (`--no-fail-fast`), so they
+# price the work; what they do not include is the release build below, which
+# they never did. So the gate went from 3m23s to ~19 min cold, not to "under
+# ten", and push 477 ended in exit 124 at 2388 s.
+#
+# `build-integ-bins` is a line here, not a dependency, so fmt and clippy still
+# answer first. Four mvr tests (`lncp_fetch_rust_responder`,
+# `unparsable_config_must_not_start_a_daemon`,
+# `resource_consecutive_push_window_policy`, `media_silence_restore_signal`)
+# spawn the RELEASE binaries periculum mounts, not the debug ones cargo test
+# builds, and resolve them under the target dir (`release_bin` in each file).
+# Without the build they failed on the forge naming the recipe (pipelines
+# 476-488). It is the one list of those binaries (`check-integ-bin-list`), and
+# the release profile is a second compile of the dependency graph, which is
+# what it costs.
 #
 # `clippy --all-targets` and no separate `cargo check`: clippy compiles what
 # check compiles, so the check line was a second pass over the same targets.
 # The lint findings that kept clippy off test code until 2026-08-18 are fixed.
-[doc('Forge gate: fmt, clippy, all workspace tests but three interop suites')]
+[doc('Forge gate: fmt, clippy, every workspace test not bound to a submodule')]
 ci-gate:
     @bash scripts/check-plain-clone.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} ci-gate-workspace-lib -- cargo test --workspace --lib
+    {{just_executable()}} build-integ-bins
     bash scripts/ci-gate-integ.sh
 
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Nothing triggers this

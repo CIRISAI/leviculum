@@ -85,12 +85,17 @@
 //! one: a scheme that needs every citation rewritten by hand is a
 //! migration, and gets done never.
 //!
-//! A citation into a `reference/` submodule that is not checked out is a
-//! *different* failure from a drifted one, and says so: nothing is wrong
-//! with the citation, the reference is simply absent. Whether a checked-out
-//! reference is at the commit this tree pins is not checkable from here —
-//! that is `scripts/check-submodule-pins.sh`, in a gate rather than in a
-//! test. See `docs/src/concepts/checks-and-citations.md`.
+//! A citation into a `reference/` submodule that is not checked out is not
+//! a failure at all: nothing is wrong with the citation, the reference is
+//! simply absent, so it is skipped and counted, and the status line says
+//! how many. That is the forge gate's normal case, which clones without
+//! submodules on purpose (#300), and reporting ~2600 such citations as
+//! drift there buried every real one (pipelines 476-486). Wherever the
+//! references are checked out — the nightly, every developer tree — they
+//! are checked as before. Whether a checked-out reference is at the commit
+//! this tree pins is not checkable from here — that is
+//! `scripts/check-submodule-pins.sh`, in a gate rather than in a test. See
+//! `docs/src/concepts/checks-and-citations.md`.
 //!
 //! **2. A prose attribution to a document — checked for figures only.** A
 //! Rust doc-comment paragraph that names a document under `docs/` and
@@ -146,8 +151,26 @@ const EXTERNAL_PREFIXES: &[&str] = &[
 ];
 
 /// The vendored references. A citation into one of these that is not
-/// checked out fails differently from a citation that has drifted.
+/// checked out is skipped and counted rather than checked.
 const SUBMODULES: &[&str] = &["Reticulum", "LXMF", "LXST", "RNode_Firmware"];
+
+/// The file types each reference is cited by. Most citations into a
+/// reference are bare (`Transport.py:2176`, not `reference/Reticulum/RNS/
+/// Transport.py:2176`), so with the submodule absent the path names nothing
+/// and only its extension says where it pointed. Measured on a clone without
+/// submodules, 2026-10-04: every one of the 2273 citations that resolved to
+/// no file had one of these extensions, and none of them was a file of this
+/// tree.
+///
+/// The price is that a citation to one of this tree's own `.py` scripts that
+/// was deleted reads as skipped on a host without the references, and is
+/// caught on the first host that has them.
+const SUBMODULE_EXTENSIONS: &[(&str, &[&str])] = &[
+    ("Reticulum", &["py", "rst"]),
+    ("LXMF", &["py"]),
+    ("LXST", &["py"]),
+    ("RNode_Firmware", &["cpp", "h", "ino", "c"]),
+];
 
 /// Crate roots whose Rust sources carry citations. Whole crate directories,
 /// not `src/` alone: `tests/`, `examples/` and `benches/` cite the reference
@@ -315,7 +338,7 @@ fn ident_regexes() -> [Regex; 4] {
 }
 
 /// A backticked token that is itself a citation: `Destination.py:322`,
-/// `Justfile:1518`. Tables list these next to each other, so without this
+/// `Justfile:1537`. Tables list these next to each other, so without this
 /// the second citation of a row would take the first as its subject.
 fn citation_shaped() -> Regex {
     Regex::new(r"(?:\.[A-Za-z]+|^Justfile):\d").unwrap()
@@ -674,9 +697,6 @@ fn ident_resolves<S: AsRef<str>>(lines: &[S], hits: &[usize], spans: &[(usize, u
 enum FailureKind {
     /// Nothing in the tree matches the cited path.
     Missing,
-    /// The path names a `reference/` submodule that is not checked out.
-    /// Not the citation's fault, and not fixable by editing it.
-    SubmoduleAbsent,
     /// The file is there and long enough, but the cited identifier is not
     /// near the cited line.
     Drift,
@@ -738,6 +758,13 @@ struct Counts {
     holds: usize,
     bare: usize,
     external: usize,
+    /// Citations into a `reference/` submodule that is not checked out,
+    /// skipped rather than checked. Already counted in `with_ident` or
+    /// `bare`, which are what the parser saw; this is what the check could
+    /// not reach.
+    absent: usize,
+    /// Of `absent`, the ones that name an identifier.
+    absent_ident: usize,
     /// One entry per identifier citation that resolved by adjacency.
     /// Citations that resolve only by enclosure carry no meaningful
     /// offset (they point at statements inside the named item) and are
@@ -760,7 +787,7 @@ impl Counts {
     /// it was not lying: it had checked what it could check. What it never
     /// said was that this was 912 of 1188 citations.
     fn unchecked(&self) -> usize {
-        self.bare + self.external
+        self.bare + self.external + self.absent_ident
     }
 }
 
@@ -782,18 +809,32 @@ impl Counts {
 /// backstop for that class, via the tree's own history rather than via a
 /// name.
 fn coverage_lines(label: &str, counts: &Counts) -> Vec<String> {
-    let not_holding = counts.with_ident.saturating_sub(counts.holds);
+    let not_holding = counts
+        .with_ident
+        .saturating_sub(counts.holds + counts.absent_ident);
+    let bare_present = counts
+        .bare
+        .saturating_sub(counts.absent - counts.absent_ident);
     let mut out = vec![format!(
         "{label} citations: {} total; {} checked against the symbol they name \
          and holding; {not_holding} named but not holding (reported below); \
-         {} could not be checked ({} bare: existence and length only, {} \
-         external: not in this workspace)",
+         {} could not be checked ({bare_present} bare: existence and length \
+         only, {} external: not in this workspace, {} skipped: into a \
+         reference/ submodule that is not checked out)",
         counts.total(),
         counts.holds,
         counts.unchecked(),
-        counts.bare,
         counts.external,
+        counts.absent,
     )];
+    if counts.absent > 0 {
+        out.push(format!(
+            "{label} citations: SKIPPED {} citation(s) into reference/ submodules \
+             that are not checked out here. They are not drift and were not \
+             checked; `git submodule update --init` to check them.",
+            counts.absent,
+        ));
+    }
     if counts.unchecked() * 2 > counts.total() {
         let pct = counts.unchecked() * 100 / counts.total().max(1);
         out.push(format!(
@@ -877,9 +918,17 @@ fn check<'a>(root: &Path, citations: &'a [Citation]) -> (Counts, Vec<Failure>, V
     };
 
     let absent = absent_submodules(root);
+    // A bare `LXMRouter.py:123` that resolves to nothing while a reference
+    // cited by that file type is absent: see `SUBMODULE_EXTENSIONS`.
+    let cites_absent_reference = |path: &str| -> bool {
+        let Some((_, ext)) = path.rsplit_once('.') else {
+            return false;
+        };
+        SUBMODULE_EXTENSIONS
+            .iter()
+            .any(|(sub, exts)| absent.contains(sub) && exts.contains(&ext))
+    };
     // A citation spelled `reference/LXMF/...` names its submodule outright.
-    // A bare `LXMRouter.py:123` does not, so an absent submodule can only be
-    // offered as a caveat on the missing-file failure.
     let named_submodule = |path: &str| -> Option<&'static str> {
         let rest = path.strip_prefix("reference/")?;
         SUBMODULES
@@ -923,23 +972,22 @@ fn check<'a>(root: &Path, citations: &'a [Citation]) -> (Counts, Vec<Failure>, V
             continue;
         }
 
-        if let Some(sub) = named_submodule(&c.path) {
-            if absent.contains(sub) {
-                failures.push(Failure {
-                    kind: FailureKind::SubmoduleAbsent,
-                    message: format!(
-                        "{where_}\n    reference/{sub} is not checked out, so this citation \
-                         cannot be verified.\n    This is NOT a drifted citation -- do not edit \
-                         it. Check the reference out:\n        git submodule update --init \
-                         reference/{sub}\n    (that the checkout matches the gitlink is a \
-                         separate check: scripts/check-submodule-pins.sh)"
-                    ),
-                });
-                continue;
+        let skip_absent = |counts: &mut Counts| {
+            counts.absent += 1;
+            if c.ident.is_some() {
+                counts.absent_ident += 1;
             }
+        };
+        if named_submodule(&c.path).is_some_and(|sub| absent.contains(sub)) {
+            skip_absent(&mut counts);
+            continue;
         }
 
         let candidates = resolve(&c.path);
+        if candidates.is_empty() && cites_absent_reference(&c.path) {
+            skip_absent(&mut counts);
+            continue;
+        }
         if candidates.is_empty() {
             let hint = if absent.is_empty() {
                 String::new()
@@ -1455,14 +1503,14 @@ fn run_canary() {
     );
     assert_eq!(
         citations.len(),
-        12,
-        "CANARY: the parser found {} of 12 fixture citations. It has stopped \
+        13,
+        "CANARY: the parser found {} of 13 fixture citations. It has stopped \
          matching; every green run since it broke means nothing.",
         citations.len()
     );
 
     let (counts, failures, _) = check(root, &citations);
-    // Nine of the twelve name what they point at: four in the paren
+    // Nine of the thirteen name what they point at: four in the paren
     // spelling, two in the comma spelling, three in the table spelling. The
     // three that do not are the second citation of the not-an-identifier
     // line, whose leading backticked token is itself a citation, and the
@@ -1481,9 +1529,8 @@ fn run_canary() {
     let kinds: Vec<&FailureKind> = failures.iter().map(|f| &f.kind).collect();
     assert_eq!(
         kinds.len(),
-        5,
-        "CANARY: expected exactly 5 failures (three drifts, missing, absent \
-         submodule); got {}:\n{}",
+        4,
+        "CANARY: expected exactly 4 failures (three drifts, missing); got {}:\n{}",
         kinds.len(),
         failures
             .iter()
@@ -1530,15 +1577,25 @@ fn run_canary() {
     // Absent-submodule and drift must stay distinguishable: sending a reader
     // to `git submodule update --init` for a drifted citation, or to the
     // prose for an absent reference, is how the LXMF incident stayed open.
-    let absent = failures
-        .iter()
-        .find(|f| f.kind == FailureKind::SubmoduleAbsent)
-        .expect("CANARY: a citation into an unchecked-out submodule was not classified as absent");
+    // Both spellings into the absent reference are skipped and counted, and
+    // neither is a failure: the forge gate clones without submodules, and
+    // ~2600 of them reported as drift there buried every real failure.
+    assert_eq!(
+        (counts.absent, counts.absent_ident),
+        (2, 1),
+        "CANARY: expected the two citations into the absent reference (one \
+         spelled reference/Reticulum/..., one bare .py) to be skipped and \
+         counted, one of them naming an identifier; got absent={} \
+         absent_ident={}",
+        counts.absent,
+        counts.absent_ident
+    );
     assert!(
-        absent.message.contains("NOT a drifted citation"),
-        "CANARY: the absent-submodule message no longer distinguishes itself \
-         from a drift: {}",
-        absent.message
+        coverage_lines("canary", &counts)
+            .iter()
+            .any(|l| l.contains("SKIPPED 2 citation(s)")),
+        "CANARY: the status line does not say how many citations it skipped: {:?}",
+        coverage_lines("canary", &counts)
     );
     assert!(
         failures
@@ -1885,7 +1942,7 @@ fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
         "`Transport.outbound()` is the loop, and (",
         // A citation next to a citation, the shape a comparison table has.
         "| Self-announce one-shot | `Destination.py:322`, ",
-        "the recipe moved (`Justfile:1518`, ",
+        "the recipe moved (`Justfile:1537`, ",
         // A token with no letter in its last segment cannot be searched
         // for as an identifier.
         "the VID:PID `1209:0001` (",
@@ -2027,6 +2084,8 @@ fn the_status_line_names_what_it_could_not_check() {
         holds: 9,
         bare: 2,
         external: 0,
+        absent: 0,
+        absent_ident: 0,
         offsets: Vec::new(),
     };
     let lines = coverage_lines("doc", &good);
@@ -2055,6 +2114,8 @@ fn the_status_line_names_what_it_could_not_check() {
         holds: 4,
         bare: 8,
         external: 1,
+        absent: 0,
+        absent_ident: 0,
         offsets: Vec::new(),
     };
     let lines = coverage_lines("source", &blind);
