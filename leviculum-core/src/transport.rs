@@ -4448,6 +4448,71 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // local_client + known_ratchets collections are now in Storage
         // and accounted for in Storage::diagnostic_dump()
 
+        // tunnels: BTreeMap<[u8; 32], TunnelEntry>, each holding its own
+        // BTreeMap of path snapshots with a cloned random-blob window
+        // (Codeberg #399: the miauhaus census said 158 MB while the process
+        // held 1080 MB, and this table was not a line in it). Priced like
+        // path_table: blob windows by CAPACITY, 3x for the BTree nodes.
+        let n_tunnels = self.tunnels.len();
+        let mut n_tunnel_paths = 0usize;
+        let mut raw_tn = 0u64;
+        for entry in self.tunnels.values() {
+            n_tunnel_paths += entry.paths.len();
+            raw_tn += (TUNNEL_ID_LEN + core::mem::size_of::<TunnelEntry>()) as u64;
+            for path in entry.paths.values() {
+                raw_tn += (TRUNCATED_HASHBYTES
+                    + core::mem::size_of::<TunnelPathEntry>()
+                    + path.random_blobs.capacity() * crate::constants::RANDOM_HASHBYTES)
+                    as u64;
+            }
+        }
+        let est_tn = raw_tn * 3;
+        total += est_tn;
+        let _ = writeln!(
+            s,
+            "tunnels: {} tunnels, {} paths, raw {} bytes, estimated {} bytes (BTreeMap 3x)",
+            n_tunnels, n_tunnel_paths, raw_tn, est_tn
+        );
+
+        // held_announces: the ingress burst limiter's per-interface holds
+        // plus the hold-and-release entries, each pinning a raw packet.
+        let mut n_held = 0usize;
+        let mut raw_held = 0u64;
+        for held in self.interface_held_announces.values() {
+            n_held += held.len();
+            for announce in held.values() {
+                raw_held += announce.raw.capacity() as u64;
+            }
+        }
+        n_held += self.held_announce_entries.len();
+        for entry in self.held_announce_entries.values() {
+            raw_held += entry.raw_packet.capacity() as u64;
+        }
+        let est_held = raw_held * 3 / 2;
+        total += est_held;
+        let _ = writeln!(
+            s,
+            "held_announces: {} entries, raw {} bytes, estimated {} bytes (BTreeMap 1.5x)",
+            n_held, raw_held, est_held
+        );
+
+        // pending_actions: queued outbound packets not yet handed to the
+        // driver. Normally near zero; a census taken mid-burst says so.
+        let n_pa = self.pending_actions.len();
+        let mut raw_pa = 0u64;
+        for action in &self.pending_actions {
+            raw_pa += match action {
+                Action::SendPacket { data, .. } => data.capacity() as u64,
+                Action::Broadcast { data, .. } => data.capacity() as u64,
+            };
+        }
+        total += raw_pa;
+        let _ = writeln!(
+            s,
+            "pending_actions: {} entries, raw {} bytes, estimated {} bytes (Vec 1x)",
+            n_pa, raw_pa, raw_pa
+        );
+
         (s, total)
     }
 
@@ -4515,6 +4580,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             + hc::btree_map_bytes(&self.ifac_configs)
             + hc::btree_map_bytes(&self.blackholed_identities)
             + hc::btree_map_bytes(&self.tunnels)
+            + self
+                .tunnels
+                .values()
+                .map(|t| {
+                    hc::btree_map_bytes(&t.paths)
+                        + t.paths
+                            .values()
+                            .map(|p| p.random_blobs.capacity() * crate::constants::RANDOM_HASHBYTES)
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
             + hc::btree_map_bytes(&self.interface_tunnel_ids)
             + hc::btree_map_bytes(&self.interface_ingress_burst);
         for windows in [
@@ -16279,7 +16355,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6537), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6613), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -33154,6 +33230,43 @@ mod tunnel_restore_tests {
         assert_eq!(tunnels[0].paths[0].hash, dest);
         assert_eq!(tunnels[0].paths[0].next_hop, Some(next_hop));
         assert_eq!(tunnels[0].paths[0].hops, learned.hops);
+    }
+
+    /// Codeberg #399: the miauhaus census said 158 MB while the process held
+    /// 1080 MB, and the tunnel table — path snapshots with cloned blob
+    /// windows, one set per reconnectable peer — was not a line in the dump
+    /// at all. The dump must name the table and price its snapshots into
+    /// the total.
+    #[test]
+    fn diagnostic_dump_counts_tunnel_path_snapshots() {
+        let mut t = enabled_transport();
+        let if_a = t.register_interface(Box::new(MockInterface::new("tcp[a]", 1)));
+        t.set_interface_name(if_a, "tcp[a]".into());
+
+        let (dump_before, total_before) = t.diagnostic_dump();
+        assert!(
+            dump_before.contains("tunnels: 0 tunnels, 0 paths"),
+            "empty tunnel table is a visible zero line: {dump_before}"
+        );
+
+        let peer = Identity::generate(&mut OsRng);
+        let if_hash = [0x7u8; SYNTH_IFHASH_LEN];
+        let rand_hash = [0x9u8; SYNTH_RANDHASH_LEN];
+        let payload = build_synthesize_payload(&peer, &if_hash, &rand_hash).unwrap();
+        t.process_incoming(if_a, &synthesize_packet_raw(&payload))
+            .unwrap();
+        let (ann, _dest) = announce_raw(3, [0x33u8; TRUNCATED_HASHBYTES]);
+        t.process_incoming(if_a, &ann).unwrap();
+
+        let (dump, total) = t.diagnostic_dump();
+        assert!(
+            dump.contains("tunnels: 1 tunnels, 1 paths"),
+            "the learned path's snapshot is counted: {dump}"
+        );
+        assert!(
+            total > total_before,
+            "snapshot bytes reach the transport total ({total_before} -> {total})"
+        );
     }
 
     #[test]

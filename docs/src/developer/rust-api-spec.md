@@ -32,7 +32,7 @@ when you assemble interfaces in code.
 | `async fn stop(&mut self) -> Result<()>` — `reticulum.rs:82` | Stop and persist |
 | `fn is_running(&self) -> bool` — `reticulum.rs:89` | Whether the loop is running |
 | `fn config(&self) -> &Config` — `reticulum.rs:94` | Borrow the active config |
-| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `reticulum.rs:119` | Take the event stream, once |
+| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `reticulum.rs:148` | Take the event stream, once |
 
 ### `ReticulumNodeBuilder`
 

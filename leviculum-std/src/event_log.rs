@@ -1472,6 +1472,29 @@ pub fn flush_event_log(timeout: Duration) {
     }
 }
 
+/// Queue depth and loss of the file sink, for the memory census
+/// (Codeberg #399): `(pending_lines, dropped_lines)`.
+///
+/// `None` when no event log is configured, or when the blocking mode is
+/// in force — nothing is ever pending there, the write happened on the
+/// emitting thread. The pending count is bounded by
+/// `SINK_QUEUE_CAPACITY` (8192 lines); a census that reads thousands
+/// here has caught the writer mid-stall, not a leak.
+pub fn sink_status() -> Option<(u64, u64)> {
+    let Some(Some(sink)) = FILE_SINK.get() else {
+        return None;
+    };
+    let SinkMode::Queued { counters, .. } = &sink.mode else {
+        return None;
+    };
+    let enqueued = counters.enqueued.load(Ordering::Acquire);
+    let flushed = counters.flushed.load(Ordering::Acquire);
+    Some((
+        enqueued.saturating_sub(flushed),
+        counters.dropped.load(Ordering::Relaxed),
+    ))
+}
+
 /// Read every input file as text, parse the trailing `t=<n>` token of
 /// each non-empty line, and return all lines sorted by parsed `n`
 /// (stable on tie).  Lines that fail `t=` parsing sort to the end

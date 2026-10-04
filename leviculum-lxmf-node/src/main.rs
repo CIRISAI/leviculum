@@ -139,7 +139,7 @@ fn verbosity_flag(arg: &str) -> Option<(u8, u8)> {
 /// carries `[logging] loglevel = 5` (`periculum/src/topology.rs:9186`) and the
 /// container environment carries `RUST_LOG=debug`
 /// (`periculum/src/compose.rs:291-294`), so a scenario gets `PATH_REBALANCE`
-/// (`transport.rs:8953`) without touching the argv.
+/// (`transport.rs:9029`) without touching the argv.
 const DEFAULT_LOGLEVEL: u8 = 4;
 
 /// Map an RNS log level (0-7) to a tracing env-filter directive.
