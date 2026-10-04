@@ -48,7 +48,8 @@ const HANDSHAKE_LEG_MS: u64 = 925;
 const STEP_MS: u64 = 250;
 
 /// Simulated horizon: past the sender's whole advertisement budget
-/// (4 windows of `6 * rtt + 1 s`, 48.4 s at the field RTT).
+/// (`sender_advertisement_budget_ms`, 6 windows of `6 * rtt + 1 s` or
+/// 72.6 s at the field RTT).
 const HORIZON_MS: u64 = 90_000;
 
 fn add_iface(node: &mut EndpointNode, name: &'static str) -> usize {
@@ -220,8 +221,33 @@ fn readvertisement_before_any_part_is_answered_with_a_request() {
 /// advertisement budget runs out.
 #[test]
 fn lost_first_request_does_not_strand_the_transfer() {
+    complete_despite_lost_requests(&[]);
+}
+
+/// The same chain with the sender's first re-advertisement lost as well
+/// (Codeberg #406): a later one still draws the request.
+#[test]
+fn lost_first_request_and_first_readvertisement_do_not_strand_the_transfer() {
+    complete_despite_lost_requests(&[1]);
+}
+
+/// The first three re-advertisements lost too: the whole count the reference
+/// spends. The sender's budget reaches past the receiver's second request
+/// retry (`sender_advertisement_budget_ms`), which at the field RTT is a
+/// fourth re-advertisement, and that one draws the request. Red while the
+/// sender stopped after three.
+#[test]
+fn transfer_survives_three_lost_readvertisements() {
+    complete_despite_lost_requests(&[1, 2, 3]);
+}
+
+/// Drive the transfer with every request the receiver's timeout produces
+/// lost, and the sender's re-advertisements at the 1-based ordinals in
+/// `lost_readvertisements` lost as well; assert it completes.
+fn complete_despite_lost_requests(lost_readvertisements: &[usize]) {
     let mut pair = establish();
     advertise_and_lose_the_request(&mut pair);
+    let mut readvertisements = 0usize;
 
     let mut sender_done = None;
     let mut receiver_done = None;
@@ -242,7 +268,16 @@ fn lost_first_request_does_not_strand_the_transfer() {
         }
         let s_tick = pair.sender.handle_timeout();
         let mut events = s_tick.events.clone();
-        let mut to_receiver = action_data(&s_tick);
+        let mut to_receiver = Vec::new();
+        for pkt in action_data(&s_tick) {
+            if is_context(&pkt, PacketContext::ResourceAdv) {
+                readvertisements += 1;
+                if lost_readvertisements.contains(&readvertisements) {
+                    continue;
+                }
+            }
+            to_receiver.push(pkt);
+        }
 
         // Everything else crosses the link instantly and in full.
         for _ in 0..64 {
@@ -290,7 +325,9 @@ fn lost_first_request_does_not_strand_the_transfer() {
     assert_eq!(
         sender_failed, None,
         "the sender gave up (at ms, error) with the receiver holding an \
-         unanswered advertisement; receiver timeout REQs dropped: {dropped_timeout_reqs}"
+         unanswered advertisement; receiver timeout REQs dropped: \
+         {dropped_timeout_reqs}, re-advertisements sent: {readvertisements}, \
+         lost: {lost_readvertisements:?}"
     );
     assert!(sender_done.is_some(), "the sender saw its transfer proven");
     assert_eq!(

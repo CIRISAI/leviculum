@@ -19,11 +19,11 @@ use crate::packet::PacketContext;
 use crate::resource::hashmap::map_hash;
 use crate::resource::source::{ResourceSource, SourceError};
 use crate::resource::{
-    resource_sdu, ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus,
-    COLLISION_GUARD_SIZE, HASHMAP_IS_EXHAUSTED, HASHMAP_MAX_LEN, PER_RETRY_DELAY_MS,
-    PROCESSING_GRACE_MS, PROOF_TIMEOUT_FACTOR, RESOURCE_MAX_ADV_RETRIES,
-    RESOURCE_MAX_EFFICIENT_SIZE, RESOURCE_MAX_PROOF_RETRIES, RESOURCE_MAX_RETRIES,
-    RESOURCE_RANDOM_HASH_SIZE, SENDER_GRACE_TIME_MS,
+    part_policy_wait_ms, resource_sdu, ResourceAdvertisement, ResourceError, ResourceFlags,
+    ResourceStatus, COLLISION_GUARD_SIZE, HASHMAP_IS_EXHAUSTED, HASHMAP_MAX_LEN,
+    PART_TIMEOUT_FACTOR_INITIAL, PER_RETRY_DELAY_MS, PROCESSING_GRACE_MS, PROOF_TIMEOUT_FACTOR,
+    RESOURCE_MAX_ADV_RETRIES, RESOURCE_MAX_EFFICIENT_SIZE, RESOURCE_MAX_PROOF_RETRIES,
+    RESOURCE_MAX_RETRIES, RESOURCE_RANDOM_HASH_SIZE, SENDER_GRACE_TIME_MS,
 };
 
 /// Per-segment parameters for a (possibly multi-segment) outgoing resource.
@@ -312,6 +312,39 @@ pub(crate) fn sender_part_budget_ms(rtt_ms: u64) -> u64 {
         .saturating_mul(RESOURCE_MAX_RETRIES as u64)
         .saturating_add(SENDER_GRACE_TIME_MS)
         .saturating_add(max_extra_wait)
+}
+
+/// How long a sender keeps advertising before it gives up on hearing a
+/// request, in ms from its first advertisement (Codeberg #404).
+///
+/// The receiver answers an advertisement with a request for its first
+/// window and, if no part comes, retries that request on its own timeout.
+/// The budget is the time until the receiver's SECOND such retry reaches
+/// the sender, built from the receiver's own wait
+/// ([`part_policy_wait_ms`]) on the inputs both sides share:
+///
+/// ```text
+/// rtt                                  advertisement out, request back
+/// + wait(rtt, window, INITIAL, 0)      first part wait, then retry 1
+/// + wait(rtt, window, INITIAL, 1)      second part wait, then retry 2
+/// ```
+///
+/// `rtt` stands in for the receiver's time of flight per part, which it
+/// caps at the RTT, so the sum never falls short of the receiver's policy
+/// wait. `window` is the receiver's first request: its initial window, or
+/// fewer when the resource has fewer parts. A sender that stopped sooner
+/// would refuse the request a receiver is still entitled to send; the
+/// count of re-advertisements follows from this budget and the
+/// `6 * rtt + PROCESSING_GRACE` window between them, never below the
+/// reference's [`RESOURCE_MAX_ADV_RETRIES`] windows.
+pub(crate) fn sender_advertisement_budget_ms(rtt_ms: u64, num_parts: u32) -> u64 {
+    let rtt_ms = core::cmp::max(rtt_ms, 1);
+    let window = core::cmp::min(
+        crate::constants::RESOURCE_WINDOW_INITIAL,
+        core::cmp::max(num_parts, 1) as usize,
+    );
+    let wait = |retries| part_policy_wait_ms(rtt_ms, window, PART_TIMEOUT_FACTOR_INITIAL, retries);
+    rtt_ms.saturating_add(wait(0)).saturating_add(wait(1))
 }
 
 /// One round of the sender's proof watchdog, in ms (`Resource.py:644`).
@@ -1195,11 +1228,7 @@ impl OutgoingResource {
 
         match self.status {
             ResourceStatus::Advertised => {
-                // Python Resource.py:574: timeout + PROCESSING_GRACE
-                let timeout = self
-                    .advertisement_timeout_ms
-                    .unwrap_or_else(|| rtt_ms.saturating_mul(6))
-                    .saturating_add(PROCESSING_GRACE_MS);
+                let timeout = self.advertisement_window_ms(rtt_ms);
                 if now_ms.saturating_sub(self.last_activity_ms) >= timeout {
                     self.adv_retries += 1;
                     crate::tracing::debug!(
@@ -1209,7 +1238,7 @@ impl OutgoingResource {
                         retries = self.retries,
                         adv_retries = self.adv_retries,
                     );
-                    if self.adv_retries < RESOURCE_MAX_ADV_RETRIES {
+                    if self.adv_retries < self.advertisement_windows(rtt_ms) {
                         self.last_activity_ms = now_ms;
                         ResourcePollResult::RetransmitAdv(self.adv_packet.clone())
                     } else {
@@ -1296,16 +1325,32 @@ impl OutgoingResource {
         }
     }
 
+    /// One advertisement window, in ms: how long the sender waits for a
+    /// request before it advertises again. Python Resource.py:574,
+    /// timeout + PROCESSING_GRACE.
+    fn advertisement_window_ms(&self, rtt_ms: u64) -> u64 {
+        self.advertisement_timeout_ms
+            .unwrap_or_else(|| rtt_ms.saturating_mul(6))
+            .saturating_add(PROCESSING_GRACE_MS)
+    }
+
+    /// How many advertisement windows the sender spends before it gives up:
+    /// enough to cover [`sender_advertisement_budget_ms`], and never fewer
+    /// than the reference's [`RESOURCE_MAX_ADV_RETRIES`]. The last window
+    /// ends in failure, so the count of re-advertisements is one less.
+    fn advertisement_windows(&self, rtt_ms: u64) -> usize {
+        let budget = sender_advertisement_budget_ms(rtt_ms, self.num_parts);
+        let windows = budget.div_ceil(core::cmp::max(self.advertisement_window_ms(rtt_ms), 1));
+        core::cmp::max(RESOURCE_MAX_ADV_RETRIES, windows as usize)
+    }
+
     /// Compute the next deadline (absolute ms) for this resource.
     pub(crate) fn next_deadline(&self, rtt_ms: u64) -> Option<u64> {
         let rtt_ms = core::cmp::max(rtt_ms, 1);
         match self.status {
             ResourceStatus::Advertised => Some(
-                self.last_activity_ms.saturating_add(
-                    self.advertisement_timeout_ms
-                        .unwrap_or_else(|| rtt_ms.saturating_mul(6))
-                        .saturating_add(PROCESSING_GRACE_MS),
-                ),
+                self.last_activity_ms
+                    .saturating_add(self.advertisement_window_ms(rtt_ms)),
             ),
             ResourceStatus::Transferring => Some(
                 self.last_activity_ms
@@ -1960,6 +2005,104 @@ mod tests {
             res.poll(res.last_activity_ms + 1601, 100);
         }
         assert_eq!(res.status(), ResourceStatus::Failed);
+    }
+
+    /// Codeberg #404: the sender is still advertising when the receiver's
+    /// SECOND first-part retry reaches it, for every RTT from 100 ms to 10 s.
+    ///
+    /// The receiver here is the real one: its retry times come from
+    /// `IncomingResource::poll` on the sender's own advertisement, not from a
+    /// copy of the formula, so the test goes red if either side's timer moves
+    /// without the other. Its first request and its first retry are lost; the
+    /// second retry must find a sender that has not given up. The count of
+    /// re-advertisements this budget yields is pinned as well: 3 (the
+    /// reference's floor) up to an RTT of 333 ms, 5 at most, because the
+    /// budget grows by `33 * rtt` and each window by `6 * rtt`.
+    #[test]
+    fn sender_advertises_until_the_receivers_second_request_retry() {
+        use crate::resource::incoming::IncomingResource;
+        use crate::resource::window::WindowPolicy;
+
+        let (link, _) = make_test_link();
+        let mut rng = rand_core::OsRng;
+        let data: Vec<u8> = (0..3000usize).map(|i| ((i * 31 + 7) % 251) as u8).collect();
+        let t0 = 1_000u64;
+        let (mut fewest, mut most) = (usize::MAX, 0usize);
+
+        for rtt_ms in 100..=10_000u64 {
+            let mut res = OutgoingResource::new(
+                &data,
+                None,
+                None,
+                &link.resource_crypt_params(),
+                false,
+                &mut rng,
+                t0,
+            )
+            .unwrap();
+            let adv = ResourceAdvertisement::unpack(res.adv_packet()).unwrap();
+            assert!(
+                adv.num_parts >= 4,
+                "the receiver asks for a full first window"
+            );
+
+            // The advertisement reaches the receiver half an RTT later; it
+            // answers with a request that is lost, then retries on its own
+            // timeout. The first retry is lost too.
+            let (mut rx, _lost_req) = IncomingResource::from_advertisement(
+                &adv,
+                link.mdu(),
+                res.sdu(),
+                t0 + rtt_ms / 2,
+                usize::MAX,
+                WindowPolicy::Current,
+            )
+            .unwrap();
+            let mut retry_at = 0;
+            for _ in 0..2 {
+                retry_at = rx.next_deadline(rtt_ms, 0, 0).unwrap();
+                assert!(matches!(
+                    rx.poll(retry_at, rtt_ms, 0, 0),
+                    ResourcePollResult::RetransmitAdv(_)
+                ));
+            }
+            let second_retry_arrives = retry_at + rtt_ms - rtt_ms / 2;
+
+            let mut retransmits = 0usize;
+            let failed_at = loop {
+                let deadline = res.next_deadline(rtt_ms).unwrap();
+                match res.poll(deadline, rtt_ms) {
+                    ResourcePollResult::RetransmitAdv(_) => retransmits += 1,
+                    ResourcePollResult::TimedOut(ResourceError::Timeout) => break deadline,
+                    other => panic!("rtt {rtt_ms} ms: unexpected {other:?}"),
+                }
+            };
+            assert!(
+                failed_at > second_retry_arrives,
+                "rtt {rtt_ms} ms: the sender gave up at {failed_at} ms, before \
+                 the receiver's second retry arrived at {second_retry_arrives} ms"
+            );
+            // Not more patient than it has to be: it stops at the first
+            // window that ends past the budget or the reference's count.
+            let window = rtt_ms * 6 + PROCESSING_GRACE_MS;
+            let bound = core::cmp::max(
+                sender_advertisement_budget_ms(rtt_ms, adv.num_parts),
+                RESOURCE_MAX_ADV_RETRIES as u64 * window,
+            );
+            assert!(
+                failed_at - t0 < bound + window,
+                "rtt {rtt_ms} ms: gave up {} ms after advertising, budget {bound} ms",
+                failed_at - t0
+            );
+            fewest = fewest.min(retransmits);
+            most = most.max(retransmits);
+        }
+        assert_eq!(
+            fewest,
+            RESOURCE_MAX_ADV_RETRIES - 1,
+            "never below the reference"
+        );
+        assert_eq!(most, 5, "33 rtt of budget over 6 rtt windows");
     }
 
     /// The sender's part-request watchdog is ONE budget measured from the last

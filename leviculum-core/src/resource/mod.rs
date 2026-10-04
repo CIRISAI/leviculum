@@ -104,7 +104,10 @@ pub const RESOURCE_METADATA_MAX_SIZE: usize = 16 * 1024 * 1024 - 1;
 /// Maximum number of retries for sending a resource part.
 pub const RESOURCE_MAX_RETRIES: usize = 16;
 
-/// Maximum number of retries for advertisement.
+/// Advertisement windows a sender spends at least before it gives up on
+/// hearing a request (the reference's `MAX_ADV_RETRIES`). A floor, not the
+/// limit: the sender keeps advertising while the receiver's second request
+/// retry could still be on its way (`outgoing::sender_advertisement_budget_ms`).
 pub const RESOURCE_MAX_ADV_RETRIES: usize = 4;
 
 /// Cache requests the sender spends waiting for a proof before it gives up on
@@ -158,6 +161,29 @@ pub const PROOF_TIMEOUT_FACTOR: u64 = 3;
 
 /// Processing grace for advertisement retransmit (Python Resource.py:132 PROCESSING_GRACE = 1.0).
 pub const PROCESSING_GRACE_MS: u64 = 1_000;
+
+/// The receiver's policy wait for a window of parts, in ms (Python
+/// `Resource.py:597`): the expected time of flight of the parts it asked
+/// for, scaled by the timeout factor, plus the retry grace and one
+/// `PER_RETRY_DELAY` for every retry already spent.
+///
+/// One function for both sides: the receiver's part timeout is built on it,
+/// and the sender's advertisement budget
+/// ([`outgoing::sender_advertisement_budget_ms`]) adds up the receiver's
+/// first waits with it, so the two cannot drift apart when either is
+/// sharpened (Codeberg #404 found them unrelated).
+pub(crate) fn part_policy_wait_ms(
+    per_part_tof_ms: u64,
+    outstanding: usize,
+    timeout_factor: u64,
+    retries: usize,
+) -> u64 {
+    per_part_tof_ms
+        .saturating_mul(core::cmp::max(outstanding, 1) as u64)
+        .saturating_mul(timeout_factor)
+        .saturating_add(RETRY_GRACE_TIME_MS)
+        .saturating_add((retries as u64).saturating_mul(PER_RETRY_DELAY_MS))
+}
 
 /// Hashmap not exhausted flag in REQ packets.
 pub const HASHMAP_IS_NOT_EXHAUSTED: u8 = 0x00;

@@ -14,11 +14,10 @@ use crate::msgpack;
 use crate::resource::hashmap::map_hash;
 use crate::resource::window::{RateSample, WindowPolicy, WindowState};
 use crate::resource::{
-    ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus, HASHMAP_IS_EXHAUSTED,
-    HASHMAP_IS_NOT_EXHAUSTED, HASHMAP_MAX_LEN, PART_TIMEOUT_FACTOR_AFTER_RTT,
-    PART_TIMEOUT_FACTOR_INITIAL, PER_RETRY_DELAY_MS, RESOURCE_MAX_EFFICIENT_SIZE,
-    RESOURCE_MAX_RETRIES, RESOURCE_RANDOM_HASH_SIZE, RESOURCE_WINDOW_FLEXIBILITY,
-    RETRY_GRACE_TIME_MS,
+    part_policy_wait_ms, ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus,
+    HASHMAP_IS_EXHAUSTED, HASHMAP_IS_NOT_EXHAUSTED, HASHMAP_MAX_LEN, PART_TIMEOUT_FACTOR_AFTER_RTT,
+    PART_TIMEOUT_FACTOR_INITIAL, RESOURCE_MAX_EFFICIENT_SIZE, RESOURCE_MAX_RETRIES,
+    RESOURCE_RANDOM_HASH_SIZE, RESOURCE_WINDOW_FLEXIBILITY,
 };
 
 use super::outgoing::{sender_part_budget_ms, ResourcePollResult};
@@ -846,10 +845,13 @@ impl IncomingResource {
             rtt_ms
         };
         let per_part_tof = core::cmp::min(eifr_tof, rtt_ms);
-        let base = per_part_tof * core::cmp::max(self.outstanding_parts, 1) as u64;
-        // Per-retry progressive delay (Python Resource.py:597).
-        let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
-        let policy_timeout = base * timeout_factor + RETRY_GRACE_TIME_MS + per_retry_extra;
+        // Per-retry progressive delay included (Python Resource.py:597).
+        let policy_timeout = part_policy_wait_ms(
+            per_part_tof,
+            self.outstanding_parts,
+            timeout_factor,
+            self.retries,
+        );
 
         // The floor: never expect the window we asked for sooner than the
         // sender can put it on the air. `turnaround_ms` is what one frame
