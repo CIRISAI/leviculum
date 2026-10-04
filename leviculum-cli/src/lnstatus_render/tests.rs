@@ -360,6 +360,54 @@ fn tx_queue_drops_render_when_positive_and_stay_silent_at_zero() {
     assert!(ifs[2].get("tx_queue_drops").is_none());
 }
 
+#[test]
+fn tx_queue_dedup_renders_when_positive_and_stays_silent_at_zero() {
+    // `tx_queue_dedup` (403) counts frames the send queue refused because
+    // the same bytes were already queued. Same contract as TX drops: a line
+    // only for a non-zero count, nothing for zero or for an rnsd entry
+    // without the key, and `-j` passes the key through.
+    let mut deduping = iface("RNodeInterface[/dev/ttyUSB0]", 292, 0, 0);
+    deduping["tx_queue_dedup"] = serde_json::json!(76);
+    let mut single = iface("RNodeInterface[/dev/ttyUSB1]", 292, 0, 0);
+    single["tx_queue_dedup"] = serde_json::json!(1);
+    let mut clean = iface("RNodeInterface[/dev/ttyUSB2]", 292, 0, 0);
+    clean["tx_queue_dedup"] = serde_json::json!(0);
+    let rnsd_shaped = iface("RNodeInterface[/dev/ttyUSB3]", 292, 0, 0);
+    let stats = serde_json::json!({
+        "interfaces": [deduping, single, clean, rnsd_shaped],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+
+    let text = render_status(&stats, None, &StatusOptions::default());
+    let blocks: Vec<&str> = text.split("RNodeInterface[").collect();
+    assert_eq!(blocks.len(), 5, "all four interfaces render:\n{text}");
+    assert!(
+        blocks[1].contains("    TX dedup  : 76 frames\n"),
+        "a deduping interface shows its count:\n{text}"
+    );
+    assert!(
+        blocks[2].contains("    TX dedup  : 1 frame\n"),
+        "one refusal is singular:\n{text}"
+    );
+    assert!(
+        !blocks[3].contains("TX dedup"),
+        "zero stays silent:\n{text}"
+    );
+    assert!(
+        !blocks[4].contains("TX dedup"),
+        "an rnsd entry without the key renders no line:\n{text}"
+    );
+    assert!(
+        !text.contains("TX drops"),
+        "a refused copy is not a drop:\n{text}"
+    );
+
+    let json: Value = serde_json::from_str(&render_json(&stats)).unwrap();
+    let ifs = json["interfaces"].as_array().unwrap();
+    assert_eq!(ifs[0]["tx_queue_dedup"], serde_json::json!(76));
+    assert!(ifs[3].get("tx_queue_dedup").is_none());
+}
+
 // ---------------------------------------------------------------------------
 // -d / -D discovered interfaces (Codeberg #32)
 // ---------------------------------------------------------------------------

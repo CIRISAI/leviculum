@@ -55,7 +55,7 @@ pub struct StatusOptions {
     /// `LocalServerInterface.clients` counts the programs currently attached
     /// to the shared instance (LocalInterface.py:384 init, :463 on accept,
     /// :355 on teardown), and our daemon reports the same number (the
-    /// per-listener client tally in `rpc/handlers.rs:734`). rnstatus is one of
+    /// per-listener client tally in `rpc/handlers.rs:746`). rnstatus is one of
     /// those programs whenever it asks: `RNS.Reticulum()` in its own process
     /// attaches as a `LocalClientInterface` (Reticulum.py:421-436) and the
     /// stats RPC is reachable only from that attachment (Reticulum.py:1327).
@@ -951,6 +951,17 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
         if not_null(ifstat, "tx_queue_drops") && drops > 0 {
             let word = if drops == 1 { "frame" } else { "frames" };
             pln(out, &format!("    TX drops  : {drops} {word}"));
+        }
+    }
+
+    // TX dedup: frames the send queue refused because the same bytes were
+    // already queued, served as `tx_queue_dedup`. Not a loss, so a line of
+    // its own rather than a share of TX drops; ours, and silent at zero on
+    // the same terms.
+    if let Some(dedup) = ji(ifstat, "tx_queue_dedup") {
+        if not_null(ifstat, "tx_queue_dedup") && dedup > 0 {
+            let word = if dedup == 1 { "frame" } else { "frames" };
+            pln(out, &format!("    TX dedup  : {dedup} {word}"));
         }
     }
 

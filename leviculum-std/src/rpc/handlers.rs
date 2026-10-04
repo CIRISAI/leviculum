@@ -381,6 +381,11 @@ struct StatRow {
     /// Payload bytes of those shed frames: the `txdrb` key (upstream
     /// `interface.tx_dropped_bytes`, same vintage).
     tx_dropped_bytes: u64,
+    /// Outgoing frames the host-side send queue refused because the same
+    /// bytes were already queued (`InterfaceCounters::tx_queue_dedup`). Not
+    /// a loss, the queued copy still goes out. Reads 0 on a medium that
+    /// holds no host-side queue.
+    tx_queue_dedup: u64,
     /// Frames an RNode modem was handed and never accounted for on its own
     /// airtime ledger (`InterfaceCounters::tx_unaccounted`). Reads 0 on every
     /// medium that keeps no such ledger, which is every medium but this one.
@@ -448,6 +453,13 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         (
             pickle_str_key("tx_queue_drops"),
             pickle_int(row.tx_queue_drops as i64),
+        ),
+        // Additive in the same sense: a frame the send queue refused because
+        // its bytes were already queued. Not a loss and no reference key
+        // counts it; served so a re-request storm shows on the status line.
+        (
+            pickle_str_key("tx_queue_dedup"),
+            pickle_int(row.tx_queue_dedup as i64),
         ),
         // Additive in the same sense, and for the same reason it exists: a
         // frame the modem consumed without transmitting is packet loss that
@@ -765,21 +777,23 @@ pub(crate) fn build_interface_stats(
             .unwrap_or_else(|| interface_type(entry.kind, &entry.name));
 
         // Read byte counters and compute speeds from the shared counters
-        let (rxb, txb, rxs, txs, tx_queue_drops, tx_dropped_bytes, tx_unaccounted) = counters_map
-            .get(&entry.id)
-            .map(|c| {
-                let (rxs, txs) = c.speeds();
-                (
-                    c.rx_bytes.load(Ordering::Relaxed),
-                    c.tx_bytes.load(Ordering::Relaxed),
-                    rxs,
-                    txs,
-                    c.tx_queue_drops.load(Ordering::Relaxed),
-                    c.tx_dropped_bytes.load(Ordering::Relaxed),
-                    c.tx_unaccounted.load(Ordering::Relaxed),
-                )
-            })
-            .unwrap_or((0, 0, 0.0, 0.0, 0, 0, 0));
+        let (rxb, txb, rxs, txs, tx_queue_drops, tx_dropped_bytes, tx_queue_dedup, tx_unaccounted) =
+            counters_map
+                .get(&entry.id)
+                .map(|c| {
+                    let (rxs, txs) = c.speeds();
+                    (
+                        c.rx_bytes.load(Ordering::Relaxed),
+                        c.tx_bytes.load(Ordering::Relaxed),
+                        rxs,
+                        txs,
+                        c.tx_queue_drops.load(Ordering::Relaxed),
+                        c.tx_dropped_bytes.load(Ordering::Relaxed),
+                        c.tx_queue_dedup.load(Ordering::Relaxed),
+                        c.tx_unaccounted.load(Ordering::Relaxed),
+                    )
+                })
+                .unwrap_or((0, 0, 0.0, 0.0, 0, 0, 0, 0));
 
         // Totals stay what they were: the traffic-bearing, non-local
         // interfaces. Local IPC clients and (below) listeners are excluded, so
@@ -841,6 +855,7 @@ pub(crate) fn build_interface_stats(
             txs,
             tx_queue_drops,
             tx_dropped_bytes,
+            tx_queue_dedup,
             tx_unaccounted,
             mtu: entry.hw_mtu.map(|m| m as i64),
             // Real `Interface::is_online()` (Codeberg #56): the shared
@@ -901,6 +916,7 @@ pub(crate) fn build_interface_stats(
             // that could shed one, and no modem that could swallow one.
             tx_queue_drops: 0,
             tx_dropped_bytes: 0,
+            tx_queue_dedup: 0,
             tx_unaccounted: 0,
             mtu: Some(listener.hw_mtu),
             status: true,
@@ -3214,6 +3230,7 @@ mod tests {
             "txs",
             // Additive, no reference equivalent (see row_fields).
             "tx_queue_drops",
+            "tx_queue_dedup",
             "tx_unaccounted",
             // The post-1.3.5 upstream key set.
             "mtu",

@@ -111,7 +111,7 @@
 //!     whole-inventory comparison lives in
 //!     `status_inventory_parity_across_daemons`;
 //!   * per-interface key set: ours adds announce_queue/peers/tx_queue_drops/
-//!     tx_unaccounted plus the post-1.3.5 upstream key set (txdrp and its
+//!     tx_queue_dedup/tx_unaccounted plus the post-1.3.5 upstream key set (txdrp and its
 //!     siblings, added
 //!     for current-rnstatus drop-in compatibility — see the note above
 //!     `row_fields` in rpc/handlers.rs) that the 1.3.5 vendor rnsd here
@@ -2517,7 +2517,7 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // `tx_unaccounted` is additive on exactly the same terms: it counts the
     // frames an RNode modem was handed and never accounted for on its own
     // airtime ledger, a packet-loss condition no reference key names. It is
-    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:454) and
+    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:454-470) and
     // so appears on this TCP interface too, reading 0 — the honest value for
     // a medium that keeps no such ledger. Reference tolerance re-measured on
     // the pinned vendor tree for this key: rnstatus reads interface fields
@@ -2525,6 +2525,11 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // interface dict solely to hex-encode `bytes` values
     // (rnstatus.py:189-191, :345-357), so an unknown int key is carried
     // through untouched.
+    //
+    // `tx_queue_dedup` is additive on the same terms again: frames the send
+    // queue refused because their bytes were already queued, emitted
+    // unconditionally beside `tx_queue_drops` and reading 0 on this TCP
+    // interface, which holds no host-side queue.
     //
     // Operational lesson: any batch that adds an interface_stats key MUST run
     // the status-parity step (`bash scripts/run-status-parity.sh`, the recipe
@@ -2568,7 +2573,12 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // The keys we serve on every row that Python has no equivalent for, plus
     // `peers` (Python emits it per interface type). One list, so the two
     // shapes below cannot drift apart: they differ only in `announce_queue`.
-    let additive_ours = ["peers", "tx_queue_drops", "tx_unaccounted"];
+    let additive_ours = [
+        "peers",
+        "tx_queue_drops",
+        "tx_queue_dedup",
+        "tx_unaccounted",
+    ];
     let ours_only_queued: BTreeSet<String> = additive_ours
         .iter()
         .chain(upstream_additions.iter())
