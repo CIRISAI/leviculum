@@ -7061,18 +7061,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     }
                     link_entry.next_hop_interface_index
                 } else if interface_index == link_entry.next_hop_interface_index
-                    || (self.is_local_client(interface_index)
+                    || (interface_index != link_entry.received_interface_index
+                        && self.is_local_client(interface_index)
                         && self.is_local_client(link_entry.next_hop_interface_index))
                 {
-                    // The local-client OR-arm (#374): an entry anchored at
-                    // one client interface must accept the proof from
-                    // another — a redirected link request goes to every
-                    // connected client because the owner is unknowable until
-                    // it proves, and each IPC connection is its own
-                    // interface index. Within the local-client set the
-                    // interface identity carries no route information, only
-                    // the direction does, and a proof from ANY client is the
-                    // destination-side leg.
+                    // The local-client OR-arm (#374): a redirected link
+                    // request reaches every connected client because the
+                    // owner is unknowable until it proves, so an entry
+                    // anchored at one client accepts a proof from another.
+                    // EXCEPT one on the entry's OWN received interface (#392):
+                    // that is the initiator-side leg (the `==
+                    // received_interface_index` arm below). Without the guard a
+                    // link whose BOTH legs are local clients bounces the
+                    // initiator's resource proof back and stalls the sender.
                     // From destination side. The proof travelled destination ->
                     // this relay -> initiator; the operand that direction expects
                     // is `remaining_hops`. This maps to:
@@ -26529,6 +26530,89 @@ mod tests {
             let receipt = transport.get_receipt(&truncated).unwrap();
             // Should use path-aware timeout, not the default 30s
             assert_eq!(receipt.timeout_ms, 22_098);
+        }
+
+        #[test]
+        fn local_link_proof_from_initiator_forwards_to_destination_not_back() {
+            // #392: both legs of a link are shared-instance clients of ONE
+            // daemon (an lnomad session on the received interface, a page
+            // node on the next-hop interface — the lblogd end-to-end shape).
+            // A resource COMPLETION proof travels initiator -> this relay ->
+            // destination and arrives on the received interface. The #374
+            // local-client OR-arm broadened the destination-side test to fire
+            // whenever BOTH legs are local clients, so it swallowed this
+            // initiator-side proof and forwarded it back out the interface it
+            // came in on. The destination (the resource sender) then never
+            // saw its proof, its outgoing resource retransmitted until it
+            // gave up (~46 s on the lblogd test), and every later request on
+            // the link waited behind the stalled single resource slot. The
+            // proof must leave on the NEXT-HOP interface.
+            let mut transport = make_transport_enabled();
+            let recv = transport.register_interface(Box::new(MockInterface::new("initiator", 1)));
+            let next_hop =
+                transport.register_interface(Box::new(MockInterface::new("destination", 2)));
+            // Both legs are IPC clients of this daemon.
+            transport.set_local_client(recv, true);
+            transport.set_local_client(next_hop, true);
+
+            let link_id = [0xAA; TRUNCATED_HASHBYTES];
+            let now = transport.clock.now_ms();
+            // A validated local link, both legs at hops=0: the shape an
+            // established lnomad<->page-node link leaves in a relay's table.
+            transport.storage_mut().set_link_entry(
+                link_id,
+                LinkEntry {
+                    timestamp_ms: now,
+                    next_hop_interface_index: next_hop,
+                    remaining_hops: 0,
+                    received_interface_index: recv,
+                    hops: 0,
+                    validated: true,
+                    proof_timeout_ms: now + 30_000,
+                    destination_hash: [0xBB; TRUNCATED_HASHBYTES],
+                    peer_signing_key: None,
+                },
+            );
+
+            // A resource completion proof (context ResourcePrf, NOT Lrproof,
+            // so the link-table relay skips signature validation) addressed to
+            // the link, arriving on the initiator (received) interface at the
+            // local link's hops=0.
+            let pkt = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: crate::destination::DestinationType::Link,
+                    packet_type: PacketType::Proof,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: link_id,
+                context: PacketContext::ResourcePrf,
+                data: PacketData::Owned(alloc::vec![0x42u8; 64]),
+            };
+            let mut buf = [0u8; 500];
+            let len = pkt.pack(&mut buf).unwrap();
+            transport.process_incoming(recv, &buf[..len]).unwrap();
+
+            let forwarded_ifaces: Vec<usize> = transport
+                .drain_actions()
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::SendPacket { iface, .. } => Some(iface.0),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                forwarded_ifaces,
+                alloc::vec![next_hop],
+                "a proof from the initiator (received) interface must forward \
+                 to the next-hop (destination), not back out the received \
+                 interface; got {forwarded_ifaces:?} (recv={recv}, \
+                 next_hop={next_hop})"
+            );
         }
     }
 
