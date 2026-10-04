@@ -44,6 +44,17 @@
 //!   `known_dest_entries`, which a bench without it never allocates at all,
 //!   and clones that map plus both dedup generations while it writes.
 //!
+//! Two more arrived with Codeberg #399, where the census said 158 MB
+//! against 1080 MB of soak-node RSS:
+//!
+//! * `--tunnel` establishes a tunnel on each ingest interface first, the
+//!   way every TCP uplink peer does, so each learned path also snapshots
+//!   into the tunnel table — per-tunnel maps with no count cap, which the
+//!   census did not price at all until #399.
+//! * `--rate N` paces ingestion to N packets per second, turning the
+//!   volume-compressed bench into a wall-clock growth-shape run at the
+//!   field's announce rate.
+//!
 //! `--progress N` prints the ratio every N packets, which is how a run
 //! answers whether a gap accumulates or appears at a threshold.
 //!
@@ -215,6 +226,25 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     tick_every: u64,
 
+    /// Establish a tunnel on each ingest interface first, the way a TCP
+    /// uplink's peer does with the `rnstransport.tunnel.synthesize`
+    /// handshake (fed through `handle_packet` as the wire packet, so the
+    /// responder path is the production one). Every path learned on that
+    /// interface then also snapshots into the tunnel table — its own
+    /// BTreeMap per tunnel, blob windows cloned per PATH_ADD — which is
+    /// the input the soak node has on every TCP uplink and this bench
+    /// lacked when its census said 158 MB against 1080 MB of RSS
+    /// (Codeberg #399).
+    #[arg(long)]
+    tunnel: bool,
+
+    /// Pace ingestion to this many packets per second (0 = unpaced).
+    /// The miauhaus soak takes ~7 announces/s across its uplinks; a paced
+    /// run turns this bench into the wall-clock growth-shape instrument,
+    /// at the price of wall clock.
+    #[arg(long, default_value_t = 0.0)]
+    rate: f64,
+
     /// Seed for the identity derivation. Same seed, same identities,
     /// same table contents.
     #[arg(long, default_value_t = 1)]
@@ -298,6 +328,15 @@ fn main() {
         node.set_interface_ingress_control(iface, false);
     }
     let transport_id = *node.identity().hash();
+
+    // Tunnel first, load second: the association hook only snapshots paths
+    // learned while the interface carries an established tunnel.
+    if args.tunnel {
+        for iface in IFACES {
+            let raw = tunnel_synthesize_bytes(args.seed, iface);
+            let _ = node.handle_packet(InterfaceId(iface), &raw);
+        }
+    }
 
     let started = Instant::now();
     let visits_before = leviculum_std::event_log::visit_count();
@@ -387,7 +426,7 @@ fn main() {
     let maps = map_count();
 
     println!(
-        "HEAPGAP target={} announces={} repeats={} forwards={} links={} flushes={} ticks={} seed={} event_log={} packets={}",
+        "HEAPGAP target={} announces={} repeats={} forwards={} links={} flushes={} ticks={} tunnel={} rate={} seed={} event_log={} packets={}",
         target_triple(),
         args.announces,
         args.repeats,
@@ -395,6 +434,8 @@ fn main() {
         args.links,
         pace.flushes_done,
         pace.ticks_done,
+        args.tunnel,
+        args.rate,
         args.seed,
         match (args.no_event_log, args.async_event_log) {
             (true, _) => "off",
@@ -448,6 +489,7 @@ struct Pacer {
     ticks_done: u64,
     progress_stride: u64,
     next_progress: u64,
+    rate: f64,
     started: Instant,
 }
 
@@ -478,12 +520,23 @@ impl Pacer {
             ticks_done: 0,
             progress_stride,
             next_progress: progress_stride,
+            rate: args.rate,
             started,
         }
     }
 
     fn after_packet(&mut self, node: &mut StdNodeCore, phase: &str) {
         self.fed += 1;
+        if self.rate > 0.0 {
+            // Hold the AVERAGE rate against the run clock, not a per-packet
+            // gap: a flush or a progress line that costs milliseconds is
+            // then caught up rather than stretching the whole run.
+            let due_ms = (self.fed as f64 / self.rate * 1000.0) as u64;
+            let elapsed_ms = self.started.elapsed().as_millis() as u64;
+            if due_ms > elapsed_ms {
+                std::thread::sleep(std::time::Duration::from_millis(due_ms - elapsed_ms));
+            }
+        }
         if self.fed >= self.next_flush {
             // The daemon's periodic flush, minus the thread: `Storage::flush`
             // is the same three phases the event loop runs, back to back
@@ -634,6 +687,59 @@ fn bench_destination(identity: &Identity) -> Destination {
         &["node"],
     )
     .expect("destination")
+}
+
+/// The `rnstransport.tunnel.synthesize` PLAIN broadcast a TCP uplink's peer
+/// sends on connect, byte-identical to the wire form, so `handle_packet`
+/// takes the production responder path: validate, derive the tunnel id,
+/// establish the tunnel on the receiving interface. The peer identity and
+/// interface hash are derived from the seed, so the tunnel ids — like every
+/// other table key in this bench — are the same on every run.
+fn tunnel_synthesize_bytes(seed: u64, iface: usize) -> Vec<u8> {
+    use leviculum_core::tunnel::{build_synthesize_payload, SYNTH_IFHASH_LEN, SYNTH_RANDHASH_LEN};
+
+    // A peer identity disjoint from the announcing ones: those count up
+    // from 0, this one counts down from the top.
+    let peer = bench_identity(seed, u32::MAX - iface as u32);
+
+    let mut if_hash = [0u8; SYNTH_IFHASH_LEN];
+    let mut h = Sha256::new();
+    h.update(b"heap-gap-bench-tunnel-ifhash");
+    h.update(seed.to_le_bytes());
+    h.update((iface as u64).to_le_bytes());
+    if_hash.copy_from_slice(&h.finalize());
+
+    let mut random_hash = [0u8; SYNTH_RANDHASH_LEN];
+    let mut h = Sha256::new();
+    h.update(b"heap-gap-bench-tunnel-random");
+    h.update(seed.to_le_bytes());
+    h.update((iface as u64).to_le_bytes());
+    random_hash.copy_from_slice(&h.finalize()[..SYNTH_RANDHASH_LEN]);
+
+    let payload = build_synthesize_payload(&peer, &if_hash, &random_hash)
+        .expect("sign tunnel synthesize payload");
+
+    let name_hash = Destination::compute_name_hash("rnstransport", &["tunnel", "synthesize"]);
+    let dest_hash = leviculum_core::crypto::truncated_hash(&name_hash);
+
+    let packet = Packet {
+        flags: PacketFlags {
+            ifac_flag: false,
+            header_type: HeaderType::Type1,
+            context_flag: false,
+            transport_type: TransportType::Broadcast,
+            dest_type: DestinationType::Plain,
+            packet_type: PacketType::Data,
+        },
+        hops: 0,
+        transport_id: None,
+        destination_hash: dest_hash,
+        context: PacketContext::None,
+        data: PacketData::Owned(payload),
+    };
+    let mut buf = [0u8; 512];
+    let len = packet.pack(&mut buf).expect("pack tunnel synthesize");
+    buf[..len].to_vec()
 }
 
 /// A signed Single-destination announce for `identity`, as it would arrive
