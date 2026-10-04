@@ -63,15 +63,23 @@
 //! nRF52840's own 32 MHz ceiling is what binds there: 16 MB/s, which the
 //! concept paper turns into a 0.07 s full-store scan — the number that
 //! makes an on-flash directory affordable and a RAM index unnecessary.
-//! Same on the PUYA part for the same reason: its `fC` is 104 MHz for
-//! `FAST_READ` and every other command the probe issues (P25Q16H
-//! datasheet, "AC Characteristics"), so 32 MHz is the nRF's limit and
-//! not the part's. `Speed::M8` exists for the other kind of part, the
-//! low-power one whose quad read tops out at 8 MHz in its default
-//! ultra-low-power mode (the MX25R1635F is the example, and the reason
-//! the conservative timings below are taken from its datasheet). No
-//! board here carries one, so nothing selects it today; the asymmetry it
-//! encodes is the parts', not ours.
+//!
+//! The PUYA part is where that reasoning stopped being enough. Its `fC`
+//! is 104 MHz for `FAST_READ` (`0Bh`, one dummy byte, the opcode this
+//! driver uses on it) and every other command the probe issues (P25Q16H
+//! datasheet, Table 5-3 "AC parameters"), so the part allows 32 MHz. The
+//! SolarNode's bus does not read at it: on 2026-10-04 everything the
+//! self-test programmed read back clean at 8 MHz and wrong at 32 MHz in
+//! about 80 % of the bytes, 99.8 % of those differing from one read to
+//! the next (Codeberg #435,
+//! [`P25Q16H_BUS`]). The clock a board reads cleanly at is a property of
+//! the part, the board and the sampling delay together, which is why a
+//! part carries a whole [`BusTiming`] and why the P25Q16H's is measured.
+//!
+//! `Speed::M8` also exists for the other kind of part, the low-power one
+//! whose quad read tops out at 8 MHz in its default ultra-low-power mode
+//! (the MX25R1635F is the example, and the reason the conservative
+//! timings below are taken from its datasheet).
 //!
 //! # Quad enable
 //!
@@ -253,15 +261,18 @@ const CMD_RELEASE_DEEP_POWER_DOWN: u8 = 0xAB;
 /// datasheet would buy nothing.
 const RELEASE_WAIT_CYCLES: u32 = 64_000;
 
-/// The two bus speeds we use, in a form a `const` board table can hold.
+/// The bus speeds we use, in a form a `const` board table can hold.
 ///
 /// `embassy_nrf::qspi::Frequency` is neither `Copy` nor constructible out
 /// of a `&'static` struct, so the board table carries this and converts on
 /// the way in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Speed {
-    /// 8 MHz — the MX25R1635F's quad-read ceiling in ultra-low-power mode.
+    /// 8 MHz — the MX25R1635F's quad-read ceiling in ultra-low-power mode,
+    /// and the clock the SolarNode's P25Q16H reads clean at.
     M8,
+    /// 16 MHz — the step between, there for the read sweep's answer.
+    M16,
     /// 32 MHz — the nRF52840 QSPI's own ceiling.
     M32,
 }
@@ -270,6 +281,7 @@ impl Speed {
     fn frequency(self) -> Frequency {
         match self {
             Speed::M8 => Frequency::M8,
+            Speed::M16 => Frequency::M16,
             Speed::M32 => Frequency::M32,
         }
     }
@@ -278,10 +290,30 @@ impl Speed {
     pub fn mhz(self) -> u32 {
         match self {
             Speed::M8 => 8,
+            Speed::M16 => 16,
             Speed::M32 => 32,
         }
     }
 }
+
+/// The read timing a part is driven at: the clock and the input sampling
+/// delay, `IFTIMING.RXDELAY`.
+///
+/// RXDELAY counts 64 MHz periods (15.625 ns) from the SCK edge to the
+/// moment the peripheral samples its input (nRF52840 `IFTIMING` register,
+/// `nrf-pac` 0.2.0; `embassy_nrf::qspi::Config::rx_delay`, 0 to 7). The
+/// same count is a different fraction of a bit at every clock, so a clock
+/// without its delay is half a setting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BusTiming {
+    /// SCK.
+    pub speed: Speed,
+    /// `IFTIMING.RXDELAY`, 0..=7.
+    pub rx_delay: u8,
+}
+
+/// `embassy_nrf::qspi::Config::default()`'s RXDELAY: 2, 31.25 ns.
+pub const DEFAULT_RX_DELAY: u8 = 2;
 
 /// Where a part keeps its Quad Enable bit — or that the boot probe is to
 /// leave every status register alone.
@@ -319,8 +351,8 @@ pub struct FlashPart {
     pub jedec: [u8; 3],
     /// Density in bytes. Also the bound `Qspi` enforces on every access.
     pub capacity: u32,
-    /// Bus clock this part is driven at.
-    pub speed: Speed,
+    /// Bus clock and sampling delay this part is driven at.
+    pub bus: BusTiming,
     /// Where this part's Quad Enable bit is, or that the probe leaves
     /// every status register alone. See [`QuadEnable`].
     pub quad: QuadEnable,
@@ -334,8 +366,36 @@ pub const IS25LP080D: FlashPart = FlashPart {
     name: "IS25LP080D",
     jedec: [0x9D, 0x60, 0x14],
     capacity: 1024 * 1024,
-    speed: Speed::M32,
+    bus: BusTiming {
+        speed: Speed::M32,
+        rx_delay: DEFAULT_RX_DELAY,
+    },
     quad: QuadEnable::StatusBit6,
+};
+
+/// The SolarNode's P25Q16H read timing, the one line a sweep result moves.
+///
+/// **8 MHz at the default RXDELAY, the stated safe value until the read
+/// sweep has run.** The self-test of 2026-10-04 (Codeberg #435,
+/// `/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261004T211914Z.log`)
+/// read the whole part five times per setting:
+///
+/// | written at | read at | RXDELAY | bytes wrong     | of those unstable |
+/// |------------|---------|---------|-----------------|-------------------|
+/// | 32 MHz     | 32 MHz  | 2       | 1 644 555       | 1 642 091         |
+/// | 32 MHz     | 8 MHz   | 2       | 0               | 0                 |
+/// | 8 MHz      | 8 MHz   | 2       | 0               | 0                 |
+/// | 8 MHz      | 32 MHz  | 2       | 1 743 635       | 1 739 416         |
+///
+/// Programming is clean at both clocks; every error is a 32 MHz read,
+/// 0-to-1 flips 130 to 170 times more frequent than 1-to-0, on all eight
+/// bit positions. The self-test's `READSWEEP` table (16 and 32 MHz under
+/// every RXDELAY) ends in a `SWEEPBEST sck_khz=… rxdelay=…` line; that
+/// line, once a run has printed it clean, goes here as the new value and
+/// this table gains its rows.
+pub const P25Q16H_BUS: BusTiming = BusTiming {
+    speed: Speed::M8,
+    rx_delay: DEFAULT_RX_DELAY,
 };
 
 /// PUYA P25Q16H, 16 Mbit, the part the Seeed XIAO nRF52840 module is
@@ -351,14 +411,14 @@ pub const IS25LP080D: FlashPart = FlashPart {
 /// than mount half a part.
 ///
 /// Quad enable is [`QuadEnable::Untouched`]: nothing in this firmware
-/// reads or writes this part, and its QE bit is S9 rather than bit 6 —
-/// see the module's "Quad enable" section for why that difference is not
-/// academic.
+/// writes this part's status registers, and its QE bit is S9 rather than
+/// bit 6 — see the module's "Quad enable" section for why that difference
+/// is not academic.
 pub const P25Q16H: FlashPart = FlashPart {
     name: "P25Q16H",
     jedec: [0x85, 0x60, 0x15],
     capacity: 2 * 1024 * 1024,
-    speed: Speed::M32,
+    bus: P25Q16H_BUS,
     quad: QuadEnable::Untouched,
 };
 
@@ -407,7 +467,8 @@ pub fn identify_at_boot(
     };
 
     let mut config = Config::default();
-    config.frequency = part.speed.frequency();
+    config.frequency = part.bus.speed.frequency();
+    config.rx_delay = part.bus.rx_delay;
     config.capacity = part.capacity;
     if part.quad == QuadEnable::Untouched {
         // Nothing sets QE on this part, so the default `READ4IO`/`PP4IO`
@@ -889,13 +950,14 @@ fn log_part(
     crate::log::log_fmt_critical(
         "[QSPI] ",
         format_args!(
-            "JEDEC id={} id2={} expect={} part={} bytes={} clk={}MHz match={} state={}",
+            "JEDEC id={} id2={} expect={} part={} bytes={} clk={}MHz rxdelay={} match={} state={}",
             JedecId(first),
             JedecId(second),
             JedecId(Some(part.jedec)),
             part.name,
             part.capacity,
-            part.speed.mhz(),
+            part.bus.speed.mhz(),
+            part.bus.rx_delay,
             u8::from(matched),
             state,
         ),

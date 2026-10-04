@@ -240,13 +240,13 @@ pub type GroveScl = peripherals::P0_10;
 // same kind of line that was wrong twice in #384. So this board does not
 // assert a fitted part: it asks, once, at boot. `CONFIG.qspi_part` is
 // `Some(&crate::qspi::P25Q16H)`, `bin/solarnode.rs` calls
-// `qspi::identify_at_boot` and drops the device immediately, and the
-// `[QSPI] JEDEC …` line it prints says `state=ok` for a P25Q16H,
-// `state=unexpected-part` for something else, or `state=no-answer` plus
-// a hand-clocked second opinion for a footprint that was never
-// populated. Nothing else in this firmware touches the part: no
-// filesystem, no store, and no status-register write
-// (`qspi::QuadEnable::Untouched`).
+// `qspi::identify_at_boot`, and the `[QSPI] JEDEC …` line it prints says
+// `state=ok` for a P25Q16H, `state=unexpected-part` for something else,
+// or `state=no-answer` plus a hand-clocked second opinion for a
+// footprint that was never populated. Only on `state=ok` does the
+// firmware read further: `qspi::log_store` looks for a record log,
+// prints one `[QSPI] STORE` line and drops the device. It formats
+// nothing and writes no status register (`qspi::QuadEnable::Untouched`).
 //
 // One positive statement beyond the drawings: the solar node's own
 // `initVariant` opens with `pinMode(PIN_QSPI_CS, OUTPUT);

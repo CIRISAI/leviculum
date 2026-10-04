@@ -61,11 +61,11 @@ separate documents rather than two halves of one.
 **SolarNode: conditional, and the condition is a boot line.** The XIAO
 nRF52840 module's `CONFIG.qspi_part` is `Some(&crate::qspi::P25Q16H)`
 (`leviculum-nrf/src/boards/solarnode.rs:402`), 2 MB
-(`P25Q16H`, `leviculum-nrf/src/qspi.rs:357`). But that part number comes
+(`P25Q16H`, `leviculum-nrf/src/qspi.rs:417`). But that part number comes
 from Seeed's variant headers and the wiring from Seeed's schematic, and
 the schematic for the plain XIAO v1.1 draws the same footprint marked
 **DNP** — do not populate. So the firmware does not assert the part, it
-asks: `identify_at_boot` (`leviculum-nrf/src/qspi.rs:379`) reads the
+asks: `identify_at_boot` (`leviculum-nrf/src/qspi.rs:439`) reads the
 JEDEC id once at boot and prints `[QSPI] JEDEC … state=ok` or does not.
 
 **Our SolarNode prints that line, and the part has been driven.** On
@@ -79,8 +79,28 @@ all 512 sectors erased clean in 8.8 s per pass, slowest sector 17 ms;
 2 MB read back in 0.55 s. **The read-back is red**: 11 445 mismatching
 bytes against the first pattern and 7 012 against the second
 (`RESULT pass=0 reason=mismatch`), while every erase verified all-0xFF.
-Why the bytes come back wrong is open; it is not yet known whether the
-program, the read or the part is at fault.
+
+**The error is the 32 MHz read, not the part and not the program**
+(Codeberg #435). On 2026-10-04 the self-test wrote each pattern at one
+clock and read it five times at each
+(`/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261004T211914Z.log`):
+written at 32 MHz and read at 8 MHz, and written and read at 8 MHz, not
+one byte was wrong; read at 32 MHz the same data came back wrong in
+1 644 555 and 1 743 635 of 2 097 152 bytes, 99.8 % of them different from
+one read to the next, on all eight bit positions, with 0-to-1 flips 130
+to 170 times more frequent than 1-to-0. Data the reads cannot agree on
+is not data the cells hold, and the 2026-10-02 red was the same
+artefact. The part allows the clock: the P25Q16H datasheet gives
+104 MHz for `FAST_READ` (`0Bh`), the opcode the firmware uses. The
+suspect is the nRF52840's input sampling delay as `embassy-nrf` sets
+it, `IFTIMING.RXDELAY` = 2: 31.25 ns after the SCK edge, a quarter of an
+8 MHz bit and a whole 32 MHz one. That is a hypothesis until the
+self-test's read sweep (16 and 32 MHz at every RXDELAY) has run, so the
+firmware reads the part at 8 MHz, one constant (`P25Q16H_BUS`,
+`leviculum-nrf/src/qspi.rs`), until the sweep names a faster setting
+that reads clean.
+At 8 MHz a full 2 MB read takes about 2.1 s instead of 0.55 s; for a
+605 KiB staged image that is 0.6 s per verifying read.
 
 What this means for stage 2: staging plus golden fits the part with room
 to spare ([below](#the-budget-on-a-2-mb-part-and-the-other-claimant)),
@@ -88,7 +108,9 @@ and programming is not the constraint, since a 605 KiB image takes about
 4 s to write and about 2.6 s to erase its 152 sectors. The constraint is
 the transfer, about 4.9 h per image per hop at our default PHY under the
 10 % duty cycle ([below](#what-it-costs-the-channel-in-hours)). And **no
-image is trusted from this flash until its read-back is green**: a part
+image is trusted from this flash until its read-back is green**, and
+the read-back is green only at a bus timing the self-test has shown
+clean: a part
 that hands back other bytes than it was given turns every signature check
 over the staged copy into a coin toss, and a golden image read back wrong
 is a rollback to something nobody built.
@@ -100,7 +122,7 @@ leaving about 838 KiB. That is enough, and it is not so much that the
 region layout can be left implicit, because **the same part is already
 wanted by something else**: the record log, the message store of Codeberg
 #384, mounts over the whole part today
-(`log_store`, `leviculum-nrf/src/qspi.rs:963`, read-only and formatting
+(`log_store`, `leviculum-nrf/src/qspi.rs:1025`, read-only and formatting
 nothing, precisely because that decision had not been taken). Two
 claimants and one part means one region map, decided once, in one place —
 not two mounts that each believe they own sector 0. Whichever batch

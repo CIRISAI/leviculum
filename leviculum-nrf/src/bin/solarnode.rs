@@ -380,18 +380,21 @@ async fn main(spawner: Spawner) {
     // is populated on this unit — the plain XIAO's sheet even prints the
     // value `DNP`. So the firmware asks the part its name, once, and
     // prints the answer: `[QSPI] JEDEC id=… expect=85:60:15 part=P25Q16H
-    // bytes=2097152 clk=32MHz match=… state=…`, with a hand-clocked
-    // second opinion on the pins if nothing answers at all
+    // bytes=2097152 clk=8MHz rxdelay=2 match=… state=…`, with a
+    // hand-clocked second opinion on the pins if nothing answers at all
     // (`qspi::identify_at_boot`, and the evidence in
     // `boards/solarnode.rs`; Codeberg #384).
     //
-    // Identify and nothing else. The device is dropped on the next line,
-    // which deactivates the peripheral and deconfigures the six pins, so
-    // there is no `[STG] qspi-init` stage to hang in, no filesystem, no
-    // store, and — `qspi::QuadEnable::Untouched` — no status-register
-    // write: after this boot the part is in the state it shipped in.
+    // The bus comes up at `qspi::P25Q16H_BUS`, the fastest read timing
+    // the self-test has shown clean on this board (Codeberg #435), and
+    // only then is the record log looked for: `log_store` reads sector
+    // headers, prints one `[QSPI] STORE` line, formats nothing, and drops
+    // the device, which deactivates the peripheral and deconfigures the
+    // six pins. No status register is written
+    // (`qspi::QuadEnable::Untouched`), so after this boot the part holds
+    // what it held before.
     if let Some(part) = solarnode::CONFIG.qspi_part {
-        drop(leviculum_nrf::qspi::identify_at_boot(
+        if let Some(flash) = leviculum_nrf::qspi::identify_at_boot(
             p.QSPI,
             p.P0_21.into(), // SCK
             p.P0_25.into(), // CSN
@@ -400,7 +403,9 @@ async fn main(spawner: Spawner) {
             p.P0_22.into(), // IO2 / WP#
             p.P0_23.into(), // IO3 / HOLD#
             part,
-        ));
+        ) {
+            leviculum_nrf::qspi::log_store(flash, part).await;
+        }
     } else {
         // Unreachable while the board declares a part, and kept because
         // the alternative is a capture with no `[QSPI]` line at all —
