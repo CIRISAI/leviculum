@@ -68,11 +68,30 @@ the schematic for the plain XIAO v1.1 draws the same footprint marked
 asks: `identify_at_boot` (`leviculum-nrf/src/qspi.rs:379`) reads the
 JEDEC id once at boot and prints `[QSPI] JEDEC … state=ok` or does not.
 
-**Nothing on this page is true of our SolarNode until a unit prints that
-line.** The probe landed in the firmware on 2026-09-24 and has not been
-run on our hardware. If it comes back with no part, stage 2 has no
-hardware at all in this project and stays a document until some board
-does.
+**Our SolarNode prints that line, and the part has been driven.** On
+2026-09-24 the unit answered `[QSPI] JEDEC id=85:60:15 … match=1
+state=ok` (`/home/lew/rig-run/solarnode-dfu/dfu-test.log`). On
+2026-10-02 the destructive self-test (`qspi-selftest`, single-line bus
+at 32 MHz) ran over the whole 2 MB of the PUYA P25Q16H
+(`/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261002T134004Z.log`):
+all 512 sectors erased clean in 8.8 s per pass, slowest sector 17 ms;
+2 MB programmed in 13.4 s, 152 KiB/s with single-line page program;
+2 MB read back in 0.55 s. **The read-back is red**: 11 445 mismatching
+bytes against the first pattern and 7 012 against the second
+(`RESULT pass=0 reason=mismatch`), while every erase verified all-0xFF.
+Why the bytes come back wrong is open; it is not yet known whether the
+program, the read or the part is at fault.
+
+What this means for stage 2: staging plus golden fits the part with room
+to spare ([below](#the-budget-on-a-2-mb-part-and-the-other-claimant)),
+and programming is not the constraint, since a 605 KiB image takes about
+4 s to write and about 2.6 s to erase its 152 sectors. The constraint is
+the transfer, about 4.9 h per image per hop at our default PHY under the
+10 % duty cycle ([below](#what-it-costs-the-channel-in-hours)). And **no
+image is trusted from this flash until its read-back is green**: a part
+that hands back other bytes than it was given turns every signature check
+over the staged copy into a coin toss, and a golden image read back wrong
+is a rollback to something nobody built.
 
 ## The budget on a 2 MB part, and the other claimant
 
@@ -267,11 +286,11 @@ capacity:
 **Compression halves it at best.** The measurement above is deliberately
 incompressible — `/dev/urandom`, so that 50 KiB of payload is 50 KiB on
 the air and the durations compare — while a real ARM firmware image does
-compress. How much is *unmeasured here*, and the measurement is one
-command on the image we already build (`xz -9 < firmware.bin | wc -c`),
-so no figure is invented for it: assume a halving, expect less, and
-notice that halving five hours leaves two and a half. It changes the
-scheduling of the operation and not its nature.
+compress, though less than a halving: `xz -9e` takes the built image
+from 619 124 B to 379 608 B, 61 %, so about 4.9 h per hop becomes about
+3 h. That is also not small enough for an internal A/B on the boards
+without external flash. It changes the scheduling of the operation and
+not its nature.
 
 The arithmetic forces the conclusion, and the conclusion is the point of
 the page: **stage 2 is for the board nobody can reach at all.** An update
