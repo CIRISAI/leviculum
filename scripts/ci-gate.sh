@@ -15,6 +15,17 @@
 #                      (rustls, via the lblogd/lnomad dependency graph) needs
 #                      a musl C compiler. Without it the gate dies in cc-rs
 #                      before it lints anything.
+#   socat            — leviculum-std's mvr `media_silence_restore_signal`
+#                      links a pty pair with it, the serial-cable stand-in
+#                      the interop suite uses (Codeberg #102). Absent from
+#                      the image, and the three tests in that file failed on
+#                      the spawn (pipelines 476-488).
+#   iproute2         — `ss`. leviculum-cli's client_tools,
+#                      lnsd_instance_conflict and storage_path_from_config
+#                      wait for a daemon's abstract socket by reading
+#                      `ss -xl`, and rust:bookworm has no iproute2, so the
+#                      wait saw an empty table and reported "lnsd never
+#                      bound" for a daemon that had (pipelines 476-488).
 #   rustfmt, clippy  — rust:bookworm ships neither component.
 #   just             — not packaged in Debian bookworm, and the gate is a
 #                      Justfile recipe on purpose (see the recipe's comment).
@@ -55,7 +66,7 @@ if [ -z "${CI:-}${CI_REPO:-}" ] && [ "${LEV_CI_GATE_FORCE:-0}" != "1" ]; then
     exit 1
 fi
 
-apt-get update && apt-get install -y musl-tools
+apt-get update && apt-get install -y musl-tools socat iproute2
 rustup component add rustfmt clippy
 cargo install --locked just
 

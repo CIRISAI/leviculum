@@ -82,10 +82,15 @@ fn spawn_lnsd(dir: &Path) -> Reaper {
 fn wait_for_instance(name: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if let Ok(out) = Command::new("ss").arg("-xl").output() {
-            if String::from_utf8_lossy(&out.stdout).contains(&format!("@rns/{name}")) {
-                return true;
-            }
+        // A missing `ss` is a missing tool, not a daemon that never bound:
+        // swallowing the spawn error read as the latter on the forge, whose
+        // image had no iproute2 (pipelines 476-488).
+        let out = Command::new("ss")
+            .arg("-xl")
+            .output()
+            .expect("ss runs (apt install iproute2)");
+        if String::from_utf8_lossy(&out.stdout).contains(&format!("@rns/{name}")) {
+            return true;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
