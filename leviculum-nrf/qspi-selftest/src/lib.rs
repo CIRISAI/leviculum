@@ -23,6 +23,10 @@
 //!   fast and a slow read of the same data ([`Diag`]): a byte that reads
 //!   right at 8 MHz and wrong at 32 MHz was programmed right and read
 //!   wrong, a byte that reads wrong at both was programmed wrong;
+//! - the read sweep ([`SWEEP`], [`SweepCell`]): the already-programmed
+//!   pattern B read back at every SCK and `IFTIMING.RXDELAY` the bring-up
+//!   could choose, so the firmware's bus constant comes from a table and
+//!   not from a guess ([`SweepBest`]);
 //! - the census of what was on the part before the first erase
 //!   ([`Census`]), per 64 KiB window, with the same FNV-1a as
 //!   `leviculum_nrf::qspi::log_head`;
@@ -39,11 +43,19 @@
 //! "AC parameters for program and erase") gives a 4 KiB sector erase `tSE`
 //! of 8 ms typical and 20 ms maximum, and a page program `tPP` (up to 256
 //! bytes) of 2 ms typical and 3 ms maximum. The bus runs single-line
-//! (`FASTREAD`/`PP`, the QE bit is never set) at 32 MHz, 4 MB/s, or at
-//! 8 MHz, 1 MB/s, for the half of the run that asks whether the clock is
-//! the problem ([`PLAN`]). From those, [`worst_case_ms`] and
-//! [`typical_ms`] are the run's own bounds, and the per-operation timeouts
-//! are five times the datasheet maximum of the operation they guard.
+//! (`FASTREAD`/`PP`, the QE bit is never set) at 32 MHz, 4 MB/s, at
+//! 16 MHz, 2 MB/s, or at 8 MHz, 1 MB/s ([`PLAN`], [`SWEEP`]). From those,
+//! [`worst_case_ms`] and [`typical_ms`] are the run's own bounds, and the
+//! per-operation timeouts are five times the datasheet maximum of the
+//! operation they guard.
+//!
+//! Those bounds are bus and part time only. The run also compares every
+//! byte it reads, and on the 2026-10-04 capture
+//! (`/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261004T211914Z.log`)
+//! that cost 6.6 s per clean read set and up to 17.1 s per read set
+//! that was wrong almost everywhere, on top of its bus time ([`COMPARE_MS_MAX`]).
+//! [`wall_bound_ms`] adds that per read set, which is the number to plan a
+//! capture window with.
 //!
 //! # Units
 //!
@@ -82,16 +94,27 @@ pub const PATTERN_PASSES: usize = 2;
 pub const READS: usize = 5;
 /// Read sets: each written pattern read [`READS`] times at either clock.
 pub const READ_SETS: usize = 4;
+/// Points of the read sweep ([`SWEEP`]).
+pub const SWEEP_POINTS: usize = 1 + 2 * RXDELAYS;
+/// `IFTIMING.RXDELAY` values the peripheral accepts: a 3-bit field.
+pub const RXDELAYS: usize = 8;
+/// `IFTIMING.RXDELAY` as `embassy_nrf::qspi::Config::default()` sets it,
+/// and as every read set of [`PLAN`] and the control point of [`SWEEP`]
+/// runs: two 64 MHz periods, 31.25 ns after the SCK edge.
+pub const DEFAULT_RXDELAY: u8 = 2;
 /// Mismatched bytes kept per read set for the `MISS` lines.
 pub const MISS_LINES: usize = 64;
 
 /// The QSPI clocks this test drives the part at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BusClock {
-    /// 32 MHz, the nRF52840 QSPI's ceiling and what the firmware runs at.
+    /// 32 MHz, the nRF52840 QSPI's ceiling.
     M32,
+    /// 16 MHz, the step between, swept only.
+    M16,
     /// 8 MHz: a quarter of it, so a sampling-window problem at 32 MHz has
-    /// four times the margin here.
+    /// four times the margin here. The clock every erase verification
+    /// and the census read at.
     M8,
 }
 
@@ -100,15 +123,18 @@ impl BusClock {
     pub const fn mhz(self) -> u32 {
         match self {
             BusClock::M32 => 32,
+            BusClock::M16 => 16,
             BusClock::M8 => 8,
         }
     }
 
     /// The `IFCONFIG1.SCKFREQ` code: SCK = 32 MHz / (code + 1), nRF52840
-    /// PS, and `embassy_nrf::qspi::Frequency` (`M32 = 0`, `M8 = 3`).
+    /// PS, and `embassy_nrf::qspi::Frequency` (`M32 = 0`, `M16 = 1`,
+    /// `M8 = 3`).
     pub const fn sckfreq(self) -> u8 {
         match self {
             BusClock::M32 => 0,
+            BusClock::M16 => 1,
             BusClock::M8 => 3,
         }
     }
@@ -158,9 +184,66 @@ pub const PLAN: [SetPlan; READ_SETS] = [
     },
 ];
 
-/// The clock of each erase pass's verifying read: what the bus is at when
-/// the pass runs (32, then 8 after set 2, then 32 after set 4).
-pub const ERASE_CLOCK: [BusClock; ERASE_PASSES] = [BusClock::M32, BusClock::M8, BusClock::M32];
+/// The clock of each erase pass's verifying read, and of the census before
+/// the first: 8 MHz every time, the clock every read set at it came back
+/// clean on (2026-10-04). The binary sets it before the census, it is
+/// what set 2 leaves the bus at, and the sweep ends on it, so the last
+/// erase's `final_state` is a measurement and not a 32 MHz guess.
+pub const ERASE_CLOCK: [BusClock; ERASE_PASSES] = [BusClock::M8, BusClock::M8, BusClock::M8];
+
+/// The clock of the census read.
+pub const CENSUS_CLOCK: BusClock = BusClock::M8;
+
+/// One bus setting: SCK and the input sampling delay.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Timing {
+    /// `IFCONFIG1.SCKFREQ`, as a clock.
+    pub clock: BusClock,
+    /// `IFTIMING.RXDELAY`, 0..=7, in 64 MHz periods (15.625 ns) from the
+    /// SCK edge to the moment the input is sampled.
+    pub rxdelay: u8,
+}
+
+/// The timing every read set of [`PLAN`], the census and every erase
+/// verification run at, apart from the clock.
+pub const fn at_default_rxdelay(clock: BusClock) -> Timing {
+    Timing {
+        clock,
+        rxdelay: DEFAULT_RXDELAY,
+    }
+}
+
+/// The read sweep, in order, over pattern B as write pass 2 left it
+/// (programmed at 8 MHz, read clean at 8 MHz by set 3): first the 8 MHz
+/// control at the default RXDELAY, then 16 MHz and 32 MHz each at every
+/// RXDELAY from 0 to 7. [`READS`] reads per chunk, as in a read set.
+///
+/// Why RXDELAY and not only the clock: the register counts 15.625 ns
+/// after the SCK edge, so the default 2 samples a quarter of the way into
+/// an 8 MHz bit (125 ns), half way into a 16 MHz one (62.5 ns) and a whole
+/// 32 MHz bit later (31.25 ns), right where the part's next bit is
+/// arriving (`tCLQV` 7 ns after the falling edge, P25Q16H datasheet
+/// Table 5-3). Which delay puts the sample in the eye at 32 MHz is the
+/// board's (pad, trace and part delays), so it is measured, not computed.
+pub const SWEEP: [Timing; SWEEP_POINTS] = {
+    let mut s = [at_default_rxdelay(BusClock::M8); SWEEP_POINTS];
+    let mut i = 0;
+    while i < RXDELAYS {
+        s[1 + i] = Timing {
+            clock: BusClock::M16,
+            rxdelay: i as u8,
+        };
+        s[1 + RXDELAYS + i] = Timing {
+            clock: BusClock::M32,
+            rxdelay: i as u8,
+        };
+        i += 1;
+    }
+    s
+};
+
+/// The pattern the sweep reads: what write pass 2 programmed.
+pub const SWEEP_PATTERN: Pattern = Pattern::B;
 
 /// `tSE`, 4 KiB sector erase, typical (datasheet Table 5-4).
 pub const T_SE_TYP_MS: u32 = 8;
@@ -191,11 +274,12 @@ pub const fn full_read_ms(clock: BusClock) -> u32 {
     ceil_div(PART_BYTES, clock.bytes_per_s() / 1000)
 }
 
-/// Full-part reads at `clock`: the census (32 MHz), every erase
-/// verification at its [`ERASE_CLOCK`], [`READS`] per read set.
+/// Full-part reads at `clock`: the census at [`CENSUS_CLOCK`], every
+/// erase verification at its [`ERASE_CLOCK`], [`READS`] per read set and
+/// per sweep point.
 pub const fn full_reads(clock: BusClock) -> u32 {
     let mut n = 0;
-    if matches!(clock, BusClock::M32) {
+    if CENSUS_CLOCK as u8 == clock as u8 {
         n += 1;
     }
     let mut i = 0;
@@ -212,15 +296,24 @@ pub const fn full_reads(clock: BusClock) -> u32 {
         }
         i += 1;
     }
+    let mut i = 0;
+    while i < SWEEP_POINTS {
+        if SWEEP[i].clock as u8 == clock as u8 {
+            n += READS as u32;
+        }
+        i += 1;
+    }
     n
 }
 
 /// Every full-part read of the run.
-pub const FULL_READS: u32 = full_reads(BusClock::M32) + full_reads(BusClock::M8);
+pub const FULL_READS: u32 =
+    full_reads(BusClock::M32) + full_reads(BusClock::M16) + full_reads(BusClock::M8);
 
 /// Bus time of every read and every page transfer, in ms.
 const fn transfer_ms() -> u32 {
     full_reads(BusClock::M32) * full_read_ms(BusClock::M32)
+        + full_reads(BusClock::M16) * full_read_ms(BusClock::M16)
         + full_reads(BusClock::M8) * full_read_ms(BusClock::M8)
         + full_read_ms(PLAN[0].write)
         + full_read_ms(PLAN[2].write)
@@ -239,6 +332,20 @@ pub const fn typical_ms() -> u32 {
     ERASE_PASSES as u32 * SECTORS * T_SE_TYP_MS
         + PATTERN_PASSES as u32 * PAGES * T_PP_TYP_MS
         + transfer_ms()
+}
+
+/// Comparison and printing time of one read set or sweep point beyond
+/// its bus time, at most. On the 2026-10-04 capture read sets 1 and 4
+/// (32 MHz, about 80 % of their bytes wrong) took 18.4 s and 19.8 s of
+/// wall time between the line before and their own, of which 2.74 s was
+/// reads: 15.7 s and 17.1 s. The clean set 3 took 6.6 s beyond its
+/// 10.6 s of reads. The worse of the two, rounded up to whole seconds.
+pub const COMPARE_MS_MAX: u32 = 18_000;
+
+/// [`worst_case_ms`] plus [`COMPARE_MS_MAX`] for every read set and every
+/// sweep point: what a capture of one whole run has to cover.
+pub const fn wall_bound_ms() -> u32 {
+    worst_case_ms() + (READ_SETS + SWEEP_POINTS) as u32 * COMPARE_MS_MAX
 }
 
 /// The bound under which the binary still completes without calling any
@@ -935,6 +1042,177 @@ impl Bus {
     pub fn with_clock(ifconfig1: u32, clock: BusClock) -> u32 {
         (ifconfig1 & !(0xF << 28)) | (u32::from(clock.sckfreq()) << 28)
     }
+
+    /// `IFTIMING` with RXDELAY set to `rxdelay` (its low three bits) and
+    /// every other bit kept.
+    pub fn with_rxdelay(iftiming: u32, rxdelay: u8) -> u32 {
+        (iftiming & !(0x7 << 8)) | (u32::from(rxdelay & 0x7) << 8)
+    }
+
+    /// Whether these registers carry `t`.
+    pub fn carries(&self, t: Timing) -> bool {
+        self.sckfreq() == t.clock.sckfreq() && self.rxdelay() == t.rxdelay
+    }
+}
+
+/// One point of the read sweep: what was asked, what the registers read
+/// back, and what [`READS`] reads of the whole part at it returned.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SweepCell {
+    /// Index into [`SWEEP`].
+    pub n: u8,
+    /// The timing asked for.
+    pub want: Timing,
+    /// The timing registers as they read back after the switch.
+    pub bus: Bus,
+    /// Sum of the reads' durations, without the comparison.
+    pub us: u64,
+    /// Bytes where at least one read differs from [`SWEEP_PATTERN`].
+    pub mismatches: u32,
+    /// Of those, bytes the reads disagree on.
+    pub unstable: u32,
+    /// Of those, bytes every read returned the same wrong value for.
+    pub stable: u32,
+    /// Bits written 1 that read 0, over every read.
+    pub lost1: u32,
+    /// Bits written 0 that read 1, over every read.
+    pub gained1: u32,
+    /// Wrong bits by position, bit 7 first, over every read.
+    pub bit7_0: [u32; 8],
+}
+
+impl SweepCell {
+    /// The cell for sweep point `n`, from its comparison.
+    pub fn new(n: u8, want: Timing, bus: Bus, us: u64, cmp: &Compare) -> Self {
+        SweepCell {
+            n,
+            want,
+            bus,
+            us,
+            mismatches: cmp.mismatches,
+            unstable: cmp.unstable,
+            stable: cmp.stable,
+            lost1: cmp.lost1,
+            gained1: cmp.gained1,
+            bit7_0: cmp.bit7_0,
+        }
+    }
+
+    /// Whether the registers carried the asked timing. A cell that was not
+    /// applied measured some other setting and says nothing about this one.
+    pub fn applied(&self) -> bool {
+        self.bus.carries(self.want)
+    }
+
+    /// Applied, and every byte of every read right.
+    pub fn clean(&self) -> bool {
+        self.applied() && self.mismatches == 0
+    }
+}
+
+impl fmt::Display for SweepCell {
+    /// `READSWEEP n=<k> sck_khz=<n> rxdelay=<n> applied=<0|1> pattern=B reads=5 unit=byte
+    /// mismatches=<n> unstable=<n> stable=<n> lost1=<bits> gained1=<bits> bit7_0=<n>,..
+    /// ms=<n> kib_s=<n>`
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "READSWEEP n={} sck_khz={} rxdelay={} applied={} pattern={} reads={} unit=byte \
+             mismatches={} unstable={} stable={} lost1={} gained1={} bit7_0={} ms={} kib_s={}",
+            self.n,
+            self.want.clock.mhz() * 1000,
+            self.want.rxdelay,
+            u8::from(self.applied()),
+            SWEEP_PATTERN.letter(),
+            READS,
+            self.mismatches,
+            self.unstable,
+            self.stable,
+            self.lost1,
+            self.gained1,
+            List(&self.bit7_0),
+            ms(self.us),
+            kib_per_s(PART_BYTES.saturating_mul(READS as u32), self.us),
+        )
+    }
+}
+
+/// What the sweep recommends: the fastest clock with any clean RXDELAY,
+/// and of its clean delays the middle of the longest unbroken run, the
+/// one furthest from both edges of the window the sweep found.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SweepBest {
+    /// The recommended timing, `None` when no cell was clean.
+    pub best: Option<Timing>,
+    /// Bit `d` set when RXDELAY `d` was clean at the recommended clock.
+    pub clean_mask: u8,
+}
+
+impl SweepBest {
+    /// Read the recommendation off the cells that ran.
+    pub fn of(cells: &[Option<SweepCell>]) -> Self {
+        for clock in [BusClock::M32, BusClock::M16, BusClock::M8] {
+            let mut mask = 0u8;
+            for c in cells.iter().flatten() {
+                if c.want.clock == clock && c.clean() {
+                    mask |= 1 << (c.want.rxdelay & 0x7);
+                }
+            }
+            if mask == 0 {
+                continue;
+            }
+            // Longest run of set bits; the first one on a tie.
+            let (mut best_start, mut best_len) = (0u8, 0u8);
+            let mut d = 0u8;
+            while d < RXDELAYS as u8 {
+                if mask & (1 << d) == 0 {
+                    d += 1;
+                    continue;
+                }
+                let start = d;
+                while d < RXDELAYS as u8 && mask & (1 << d) != 0 {
+                    d += 1;
+                }
+                if d - start > best_len {
+                    (best_start, best_len) = (start, d - start);
+                }
+            }
+            return SweepBest {
+                best: Some(Timing {
+                    clock,
+                    rxdelay: best_start + (best_len - 1) / 2,
+                }),
+                clean_mask: mask,
+            };
+        }
+        SweepBest::default()
+    }
+}
+
+impl fmt::Display for SweepBest {
+    /// `SWEEPBEST sck_khz=<n|none> rxdelay=<n|none> clean_rxdelays=<d>,..|none`
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some(t) = self.best else {
+            return f.write_str("SWEEPBEST sck_khz=none rxdelay=none clean_rxdelays=none");
+        };
+        write!(
+            f,
+            "SWEEPBEST sck_khz={} rxdelay={} clean_rxdelays=",
+            t.clock.mhz() * 1000,
+            t.rxdelay
+        )?;
+        let mut first = true;
+        for d in 0..RXDELAYS as u8 {
+            if self.clean_mask & (1 << d) != 0 {
+                if !first {
+                    f.write_str(",")?;
+                }
+                write!(f, "{d}")?;
+                first = false;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Display for Bus {
@@ -1027,6 +1305,8 @@ pub struct Run {
     pub writes: [Option<WritePass>; PATTERN_PASSES],
     /// The read sets, in [`PLAN`] order.
     pub reads: [Option<ReadSet>; READ_SETS],
+    /// The sweep, in [`SWEEP`] order.
+    pub sweep: [Option<SweepCell>; SWEEP_POINTS],
     /// The operation that stopped the run, if one did.
     pub failure: Option<Failure>,
     /// Wall time from the start of the run to its end.
@@ -1050,6 +1330,9 @@ pub enum Reason {
     Mismatch,
     /// An erase left bytes that are not `0xFF`.
     NotErased,
+    /// A sweep point's registers did not read back as set, so the sweep
+    /// table has a cell that measured something else.
+    SweepNotApplied,
     /// The run stopped without a failure and without finishing. A bug in
     /// the binary, not in the part.
     Incomplete,
@@ -1089,6 +1372,11 @@ pub struct Verdict {
 impl Run {
     /// Classify the run. Green only when every pass ran and every byte of
     /// every pass read back as intended.
+    ///
+    /// The sweep's mismatches are not in it: the sweep exists to find the
+    /// settings that read wrong, so a red cell is its result and not a
+    /// failure. What the sweep can fail is completeness, and a cell whose
+    /// registers did not take (`sweep-not-applied`).
     pub fn verdict(&self) -> Verdict {
         let mismatches = self
             .reads
@@ -1111,7 +1399,9 @@ impl Run {
         };
         let complete = self.erases.iter().all(Option::is_some)
             && self.writes.iter().all(Option::is_some)
-            && self.reads.iter().all(Option::is_some);
+            && self.reads.iter().all(Option::is_some)
+            && self.sweep.iter().all(Option::is_some);
+        let not_applied = self.sweep.iter().flatten().any(|c| !c.applied());
         let protection = self.status.map(|s| s.protection());
         let reason = if self.no_part {
             Reason::NoPart
@@ -1125,6 +1415,8 @@ impl Run {
             Reason::Mismatch
         } else if not_ff != 0 {
             Reason::NotErased
+        } else if not_applied {
+            Reason::SweepNotApplied
         } else if !complete {
             Reason::Incomplete
         } else {
@@ -1173,6 +1465,7 @@ impl fmt::Display for Verdict {
             Reason::Error => "error",
             Reason::Mismatch => "mismatch",
             Reason::NotErased => "not-erased",
+            Reason::SweepNotApplied => "sweep-not-applied",
             Reason::Incomplete => "incomplete",
         };
         let final_state = match self.final_state {
@@ -1525,6 +1818,22 @@ mod tests {
         assert_eq!(unknown.protection(), Protection::Unknown);
     }
 
+    /// Sweep point `n`, applied, with `mismatches` unstable bytes.
+    fn cell(n: usize, mismatches: u32) -> SweepCell {
+        let want = SWEEP[n];
+        let bus = Bus {
+            ifconfig1: Bus::with_clock(0x0004_0450, want.clock),
+            iftiming: Bus::with_rxdelay(0, want.rxdelay),
+        };
+        SweepCell::new(
+            n as u8,
+            want,
+            bus,
+            2_740_000,
+            &set_with(mismatches, mismatches),
+        )
+    }
+
     fn green_run() -> Run {
         let erase = |pass| ErasePass {
             pass,
@@ -1563,6 +1872,7 @@ mod tests {
                 Some(write(2, Pattern::B, BusClock::M8)),
             ],
             reads: [Some(read(0)), Some(read(1)), Some(read(2)), Some(read(3))],
+            sweep: core::array::from_fn(|n| Some(cell(n, 0))),
             failure: None,
             total_us: 49_000_000,
         }
@@ -1742,6 +2052,19 @@ mod tests {
             "DIAG pattern=B write_mhz=8 fast_mismatches=1 fast_unstable=1 \
              slow_mismatches=0 slow_unstable=0 side=read"
         );
+        let mut c = cell(1 + RXDELAYS + 3, 0);
+        c.mismatches = 7;
+        c.unstable = 6;
+        c.stable = 1;
+        c.lost1 = 1;
+        c.gained1 = 9;
+        c.bit7_0 = [0, 3, 0, 0, 0, 0, 7, 0];
+        assert_eq!(
+            format!("{c}"),
+            "READSWEEP n=12 sck_khz=32000 rxdelay=3 applied=1 pattern=B reads=5 unit=byte \
+             mismatches=7 unstable=6 stable=1 lost1=1 gained1=9 bit7_0=0,3,0,0,0,0,7,0 \
+             ms=2740 kib_s=3737"
+        );
         assert_eq!(
             format!("{}", run.bus.unwrap()),
             "BUS sck_khz=32000 sckfreq=0 rxdelay=2 sckdelay=80 ifconfig1=00000050 iftiming=00000200"
@@ -1768,11 +2091,13 @@ mod tests {
         assert_eq!(SECTORS, 512);
         assert_eq!(PAGES, 8192);
         assert_eq!(WINDOWS, 32);
-        // census + erase 1 + erase 3 + sets 1 and 4 at 32 MHz;
-        // erase 2 + sets 2 and 3 at 8 MHz.
-        assert_eq!(full_reads(BusClock::M32), 1 + 2 + 2 * READS as u32);
-        assert_eq!(full_reads(BusClock::M8), 1 + 2 * READS as u32);
-        assert_eq!(FULL_READS, 24);
+        // Sets 1 and 4 and eight sweep points at 32 MHz; eight sweep
+        // points at 16; the census, three erases, sets 2 and 3 and the
+        // sweep's control at 8.
+        assert_eq!(full_reads(BusClock::M32), (2 + 8) * READS as u32);
+        assert_eq!(full_reads(BusClock::M16), 8 * READS as u32);
+        assert_eq!(full_reads(BusClock::M8), 1 + 3 + (2 + 1) * READS as u32);
+        assert_eq!(FULL_READS, 109);
         // Read chunks and sectors are page-aligned multiples, and a chunk
         // never crosses a census window.
         assert_eq!(SECTOR_BYTES % PAGE_BYTES, 0);
@@ -1789,17 +2114,124 @@ mod tests {
         }
         assert_ne!(PLAN[0].pattern, PLAN[2].pattern);
         assert_ne!(PLAN[0].write, PLAN[2].write);
-        // Each erase verifies at the clock the bus is left at by the set
-        // before it.
-        assert_eq!(ERASE_CLOCK[0], BusClock::M32);
+        // Each erase verifies at 8 MHz, the clock the bus is left at by
+        // what runs before it: the census, set 2, the sweep's restore.
+        assert_eq!(ERASE_CLOCK, [BusClock::M8; ERASE_PASSES]);
+        assert_eq!(ERASE_CLOCK[0], CENSUS_CLOCK);
         assert_eq!(ERASE_CLOCK[1], PLAN[1].read);
-        assert_eq!(ERASE_CLOCK[2], PLAN[3].read);
+    }
+
+    #[test]
+    fn the_sweep_is_the_control_then_every_rxdelay_at_16_and_32() {
+        assert_eq!(SWEEP[0], at_default_rxdelay(BusClock::M8));
+        for d in 0..RXDELAYS {
+            assert_eq!(SWEEP[1 + d].clock, BusClock::M16);
+            assert_eq!(SWEEP[1 + d].rxdelay, d as u8);
+            assert_eq!(SWEEP[1 + RXDELAYS + d].clock, BusClock::M32);
+            assert_eq!(SWEEP[1 + RXDELAYS + d].rxdelay, d as u8);
+        }
+        // It reads what write pass 2 left on the part, which set 3 has
+        // already read clean at 8 MHz.
+        assert_eq!(SWEEP_PATTERN, PLAN[2].pattern);
+        assert_eq!(PLAN[2].read, BusClock::M8);
+    }
+
+    #[test]
+    fn rxdelay_moves_alone_and_the_bus_line_reads_it_back() {
+        let t = Bus::with_rxdelay(0xFFFF_FFFF, 5);
+        assert_eq!(t | 0x0000_0700, 0xFFFF_FFFF);
+        let bus = Bus {
+            ifconfig1: Bus::with_clock(0x0004_0450, BusClock::M16),
+            iftiming: t,
+        };
+        assert_eq!(bus.rxdelay(), 5);
+        assert_eq!(bus.sck_khz(), 16_000);
+        assert!(bus.carries(Timing {
+            clock: BusClock::M16,
+            rxdelay: 5
+        }));
+        assert!(!bus.carries(Timing {
+            clock: BusClock::M32,
+            rxdelay: 5
+        }));
+        assert!(!bus.carries(at_default_rxdelay(BusClock::M16)));
+        // Only the low three bits exist.
+        assert_eq!(Bus::with_rxdelay(0, 9), 0x0000_0100);
+    }
+
+    #[test]
+    fn the_sweep_recommends_the_middle_of_the_fastest_clean_window() {
+        // Everything red but the control: 8 MHz at the default delay.
+        let mut cells: [Option<SweepCell>; SWEEP_POINTS] =
+            core::array::from_fn(|n| Some(cell(n, 1000)));
+        cells[0] = Some(cell(0, 0));
+        let b = SweepBest::of(&cells);
+        assert_eq!(b.best, Some(at_default_rxdelay(BusClock::M8)));
+        assert_eq!(
+            format!("{b}"),
+            "SWEEPBEST sck_khz=8000 rxdelay=2 clean_rxdelays=2"
+        );
+        // 16 MHz clean at 1..=4 and 6: the longest run is 1..=4, its
+        // middle (rounded down) 2.
+        for d in [1, 2, 3, 4, 6] {
+            cells[1 + d] = Some(cell(1 + d, 0));
+        }
+        let b = SweepBest::of(&cells);
+        assert_eq!(
+            b.best,
+            Some(Timing {
+                clock: BusClock::M16,
+                rxdelay: 2
+            })
+        );
+        assert_eq!(
+            format!("{b}"),
+            "SWEEPBEST sck_khz=16000 rxdelay=2 clean_rxdelays=1,2,3,4,6"
+        );
+        // One clean 32 MHz cell beats any number of 16 MHz ones.
+        cells[1 + RXDELAYS + 7] = Some(cell(1 + RXDELAYS + 7, 0));
+        let b = SweepBest::of(&cells);
+        assert_eq!(
+            b.best,
+            Some(Timing {
+                clock: BusClock::M32,
+                rxdelay: 7
+            })
+        );
+        // A clean cell whose registers did not take is not clean.
+        let mut c = cell(1 + RXDELAYS + 7, 0);
+        c.bus.iftiming = Bus::with_rxdelay(0, 2);
+        assert!(!c.applied());
+        cells[1 + RXDELAYS + 7] = Some(c);
+        assert_eq!(
+            SweepBest::of(&cells).best.map(|t| t.clock),
+            Some(BusClock::M16)
+        );
+        // Nothing clean at all.
+        let none: [Option<SweepCell>; SWEEP_POINTS] = core::array::from_fn(|n| Some(cell(n, 1)));
+        assert_eq!(
+            format!("{}", SweepBest::of(&none)),
+            "SWEEPBEST sck_khz=none rxdelay=none clean_rxdelays=none"
+        );
+    }
+
+    #[test]
+    fn red_sweep_cells_do_not_redden_the_run_but_a_missed_one_does() {
+        let mut run = green_run();
+        run.sweep[9] = Some(cell(9, 1_700_000));
+        assert_eq!(run.verdict().reason, Reason::Ok);
+        let mut c = cell(9, 0);
+        c.bus.ifconfig1 = Bus::with_clock(c.bus.ifconfig1, BusClock::M8);
+        run.sweep[9] = Some(c);
+        assert_eq!(run.verdict().reason, Reason::SweepNotApplied);
+        run.sweep[9] = None;
+        assert_eq!(run.verdict().reason, Reason::Incomplete);
     }
 
     #[test]
     fn bus_clock_codes_are_the_peripherals() {
         // SCK = 32 MHz / (SCKFREQ + 1).
-        for c in [BusClock::M32, BusClock::M8] {
+        for c in [BusClock::M32, BusClock::M16, BusClock::M8] {
             let bus = Bus {
                 ifconfig1: Bus::with_clock(0xFFFF_FFFF, c),
                 iftiming: 0,
@@ -1814,13 +2246,22 @@ mod tests {
     #[test]
     fn time_bounds_follow_from_the_datasheet() {
         // 2 MiB at 4 MB/s is 524.288 ms, at 1 MB/s 2097.152 ms; rounded up.
+        // At 2 MB/s 1048.576 ms.
         assert_eq!(full_read_ms(BusClock::M32), 525);
+        assert_eq!(full_read_ms(BusClock::M16), 1049);
         assert_eq!(full_read_ms(BusClock::M8), 2098);
-        // 13 reads at 32, 11 at 8, one program transfer at each clock.
-        let transfer = 13 * 525 + 11 * 2098 + 525 + 2098;
+        // 50 reads at 32, 40 at 16, 19 at 8, one program transfer at 32
+        // and one at 8.
+        let transfer = 50 * 525 + 40 * 1049 + 19 * 2098 + 525 + 2098;
         // 3 x 512 x 20 + 2 x 8192 x 3 + transfers
         assert_eq!(worst_case_ms(), 30_720 + 49_152 + transfer);
-        assert_eq!(worst_case_ms(), 112_398);
+        assert_eq!(worst_case_ms(), 190_567);
+        // The sweep alone: 40 x 525 + 40 x 1049 + 5 x 2098 ms of reads,
+        // 73.45 s, against the 2026-10-04 run's 134 s in all.
+        assert_eq!(40 * 525 + 40 * 1049 + 5 * 2098, 73_450);
+        // With comparison time per read set and sweep point: 9.5 min.
+        assert_eq!(wall_bound_ms(), 190_567 + 21 * 18_000);
+        assert_eq!(wall_bound_ms(), 568_567);
         // 3 x 512 x 8 + 2 x 8192 x 2 + transfers
         assert_eq!(typical_ms(), 12_288 + 32_768 + transfer);
         // Every timeout sits above the datasheet maximum of its operation,
@@ -1832,7 +2273,7 @@ mod tests {
         assert_eq!(READ_TIMEOUT_MS, 100);
         assert_eq!(
             timeout_bound_ms(),
-            3 * 512 * 100 + 2 * 8192 * 15 + 24 * 512 * 100
+            3 * 512 * 100 + 2 * 8192 * 15 + 109 * 512 * 100
         );
     }
 

@@ -15,28 +15,43 @@
 //!    running (none is armed by anything in this tree; the line is the
 //!    measurement that the bootloader did not arm one either).
 //! 2. Bring-up through `qspi::identify_at_boot`, exactly as the SolarNode
-//!    firmware does it, so the `[QSPI] JEDEC` line is the familiar one.
+//!    firmware does it, so the `[QSPI] JEDEC` line is the familiar one and
+//!    the first `BUS` line is the firmware's own bus setting
+//!    (`qspi::P25Q16H_BUS`). Then a second `BUS` line: the run moves to
+//!    8 MHz at the default RXDELAY before it reads anything, so what
+//!    follows does not depend on that constant.
 //! 3. `SR`: status registers 1 and 2 and the configure register, read-only.
 //!    Any block-protect bit, or CMP, ends the run there with
 //!    `RESULT pass=0 reason=block-protected`. No status register is ever
 //!    written: on this part bit 6 is BP4 and survives a power cycle
 //!    (`qspi::QuadEnable`), so the bus stays single-line, and every
 //!    throughput number below is a floor, not the part's ceiling.
-//! 4. `CENSUS` × 32: what the part held before the first erase.
+//! 4. `CENSUS` × 32: what the part held before the first erase, read at
+//!    8 MHz.
 //! 5. The plan (`st::PLAN`), every line of it under the same bus clock the
-//!    line names:
+//!    line names, every read at the default RXDELAY:
 //!    `ERASE pass=1`; `WRITE pass=1` pattern A at 32 MHz; `READSET set=1`,
 //!    five reads at 32 MHz; `BUS` (now 8 MHz); `READSET set=2`, five reads
 //!    of the SAME data at 8 MHz; `ERASE pass=2`; `WRITE pass=2` pattern B
 //!    (A's complement) at 8 MHz; `READSET set=3` at 8 MHz; `BUS` (back to
-//!    32 MHz); `READSET set=4` at 32 MHz; `ERASE pass=3`. Each read set is
-//!    followed by its `MISS` lines (the first 64 mismatched bytes, each
-//!    with all five reads), and each written image by its `DIAG` line,
-//!    which says whether its errors are on the read side or the program
-//!    side. The third erase is what leaves the part blank, so a later
+//!    32 MHz); `READSET set=4` at 32 MHz. Each read set is followed by its
+//!    `MISS` lines (the first 64 mismatched bytes, each with all five
+//!    reads), and each written image by its `DIAG` line, which says
+//!    whether its errors are on the read side or the program side.
+//! 6. The read sweep (`st::SWEEP`, Codeberg #435): pattern B, still on
+//!    the part, read five times per chunk at the 8 MHz control and then at
+//!    16 and 32 MHz under every `IFTIMING.RXDELAY` from 0 to 7, one
+//!    `READSWEEP` line each with `applied=` saying whether the registers
+//!    read back as set; then `SWEEPBEST`, the fastest clean setting. 73 s
+//!    of bus time, about 75 to 360 s with the comparison
+//!    (`st::COMPARE_MS_MAX`); the whole run is bounded by
+//!    `st::wall_bound_ms`, 9.5 min, against 134 s before the sweep.
+//! 7. `BUS` back at 8 MHz and the default RXDELAY, then `ERASE pass=3`,
+//!    verified at 8 MHz, so `final_state` is a measurement. The third
+//!    erase is what leaves the part blank, so the SolarNode firmware's
 //!    `qspi::log_store` mount reports `STORE state=unformatted` and not
 //!    our pattern.
-//! 6. `RESULT`.
+//! 8. `RESULT`. The sweep's red cells are not in it (`Run::verdict`).
 //!
 //! The run starts [`START_HOLD_S`] after boot and not at once, and the
 //! whole report is printed again behind a `REPORT n=<k>` header every
@@ -73,7 +88,7 @@ use leviculum_nrf::log_critical;
 use leviculum_qspi_selftest as st;
 use st::{
     Bus, BusClock, Cause, Census, CensusLine, Compare, ErasePass, Failure, MissLine, Op, Pattern,
-    ReadSet, Run, Status, Tally, WritePass,
+    ReadSet, Run, Status, SweepBest, SweepCell, Tally, Timing, WritePass,
 };
 
 /// One read operation's worth. A multiple of 4, as the peripheral's
@@ -100,7 +115,7 @@ const WDT_RUNSTATUS: *const u32 = 0x4001_0400 as *const u32;
 /// `nrf-pac` `qspi::Qspi::ifconfig1`): SCKFREQ in 31:28.
 const QSPI_IFCONFIG1: *mut u32 = 0x4002_9600 as *mut u32;
 /// The QSPI `IFTIMING` register (offset 0x640): RXDELAY in 10:8.
-const QSPI_IFTIMING: *const u32 = 0x4002_9640 as *const u32;
+const QSPI_IFTIMING: *mut u32 = 0x4002_9640 as *mut u32;
 
 /// Seconds between re-prints of the whole report. Short enough that a
 /// capture which outlives the run by a quarter minute holds one.
@@ -132,23 +147,37 @@ fn bus() -> Bus {
     }
 }
 
-/// Set the QSPI clock to `clock` and return the registers as they read
-/// back.
+/// Set the QSPI clock and input sampling delay to `t` and return the
+/// registers as they read back.
 ///
-/// Only `IFCONFIG1.SCKFREQ` moves. The `&mut Qspi` is the proof that no
-/// operation is in flight: every one of them is awaited to READY before
-/// its borrow ends, and a leaked one (`guarded`) ends the run. The
-/// `READSET` line after a switch carries `ms`/`kib_s`, which is where a
-/// switch that did not take would show: 2 MiB five times is about 2.7 s
-/// at 32 MHz and 10.5 s at 8.
-fn set_clock(_flash: &mut Qspi<'static>, clock: BusClock) -> Bus {
-    // SAFETY: a read-modify-write of an always-mapped QSPI register while
+/// Only `IFCONFIG1.SCKFREQ` and `IFTIMING.RXDELAY` move. The `&mut Qspi`
+/// is the proof that no operation is in flight: every one of them is
+/// awaited to READY before its borrow ends, and a leaked one (`guarded`)
+/// ends the run. The `READSET`/`READSWEEP` line after a switch carries
+/// `ms`/`kib_s`, which is where a clock that did not take would show:
+/// 2 MiB five times is about 2.7 s at 32 MHz, 5.4 s at 16 and 10.6 s at 8.
+fn set_timing(_flash: &mut Qspi<'static>, t: Timing) -> Bus {
+    // SAFETY: read-modify-writes of two always-mapped QSPI registers while
     // the peripheral is idle (see above).
     unsafe {
         let v = core::ptr::read_volatile(QSPI_IFCONFIG1);
-        core::ptr::write_volatile(QSPI_IFCONFIG1, Bus::with_clock(v, clock));
+        core::ptr::write_volatile(QSPI_IFCONFIG1, Bus::with_clock(v, t.clock));
+        let v = core::ptr::read_volatile(QSPI_IFTIMING);
+        core::ptr::write_volatile(QSPI_IFTIMING, Bus::with_rxdelay(v, t.rxdelay));
     }
     bus()
+}
+
+/// Move the bus to `t` unless it is there, printing the `BUS` line of a
+/// move.
+fn move_to(flash: &mut Qspi<'static>, t: Timing) -> Bus {
+    let now = bus();
+    if now.carries(t) {
+        return now;
+    }
+    let moved = set_timing(flash, t);
+    line(format_args!("{moved}"));
+    moved
 }
 
 fn us_since(start: Instant) -> u64 {
@@ -294,16 +323,27 @@ async fn write_pass(
     })
 }
 
-/// Read the whole part [`st::READS`] times against `plan.pattern`, chunk
-/// by chunk: each chunk is read five times back to back into five
-/// buffers, and the five are compared with the pattern and with each
-/// other.
+/// Read the whole part [`st::READS`] times against `plan.pattern` at the
+/// bus's current setting.
 async fn read_set(
     flash: &mut Qspi<'static>,
     bufs: &mut [Buf; st::READS],
     set: u8,
     plan: st::SetPlan,
 ) -> Result<ReadSet, Failure> {
+    let (us, cmp) = read_compare(flash, bufs, plan.pattern).await?;
+    Ok(ReadSet { set, plan, us, cmp })
+}
+
+/// Read the whole part [`st::READS`] times against `pattern`, chunk by
+/// chunk: each chunk is read five times back to back into five buffers,
+/// and the five are compared with the pattern and with each other.
+/// Returns the summed read time and the comparison.
+async fn read_compare(
+    flash: &mut Qspi<'static>,
+    bufs: &mut [Buf; st::READS],
+    pattern: Pattern,
+) -> Result<(u64, Compare), Failure> {
     let mut cmp = Compare::default();
     let mut us = 0u64;
     for addr in (0..st::PART_BYTES).step_by(CHUNK) {
@@ -317,9 +357,28 @@ async fn read_set(
             .await?;
         }
         let reads: [&[u8]; st::READS] = core::array::from_fn(|r| &bufs[r].0[..]);
-        cmp.check(plan.pattern, addr, reads);
+        cmp.check(pattern, addr, reads);
     }
-    Ok(ReadSet { set, plan, us, cmp })
+    Ok((us, cmp))
+}
+
+/// The read sweep over what write pass 2 left on the part, one
+/// `READSWEEP` line per point and `SWEEPBEST` at the end.
+async fn sweep(
+    flash: &mut Qspi<'static>,
+    bufs: &mut [Buf; st::READS],
+    run: &mut Run,
+) -> Result<(), Failure> {
+    for (n, want) in st::SWEEP.into_iter().enumerate() {
+        let bus = set_timing(flash, want);
+        let (us, cmp) = read_compare(flash, bufs, st::SWEEP_PATTERN).await?;
+        let cell = SweepCell::new(n as u8, want, bus, us, &cmp);
+        run.sweep[n] = Some(cell);
+        line(format_args!("{cell}"));
+        pace().await;
+    }
+    line(format_args!("{}", SweepBest::of(&run.sweep)));
+    Ok(())
 }
 
 /// A read set's line and its `MISS` lines.
@@ -374,6 +433,7 @@ async fn test(
         return Ok(());
     }
 
+    move_to(flash, st::at_default_rxdelay(st::CENSUS_CLOCK));
     let mut census = Census::new();
     read_all(flash, &mut bufs[0], |addr, got| census.feed(addr, got)).await?;
     run.census = Some(census);
@@ -395,17 +455,13 @@ async fn test(
         run.erases[i] = Some(erase);
         line(format_args!("{erase}"));
         let clock = st::PLAN[2 * i].write;
-        if bus().sckfreq() != clock.sckfreq() {
-            line(format_args!("{}", set_clock(flash, clock)));
-        }
+        move_to(flash, st::at_default_rxdelay(clock));
         let write = write_pass(flash, &mut bufs[0], pass, pattern, clock).await?;
         run.writes[i] = Some(write);
         line(format_args!("{write}"));
         for k in [2 * i, 2 * i + 1] {
             let plan = st::PLAN[k];
-            if bus().sckfreq() != plan.read.sckfreq() {
-                line(format_args!("{}", set_clock(flash, plan.read)));
-            }
+            move_to(flash, st::at_default_rxdelay(plan.read));
             let set = read_set(flash, bufs, k as u8 + 1, plan).await?;
             run.reads[k] = Some(set);
             print_set(&set).await;
@@ -414,7 +470,9 @@ async fn test(
             line(format_args!("{diag}"));
         }
     }
+    sweep(flash, bufs, run).await?;
     let last = st::ERASE_PASSES - 1;
+    move_to(flash, st::at_default_rxdelay(st::ERASE_CLOCK[last]));
     let erase = erase_pass(flash, &mut bufs[0], st::ERASE_PASSES as u8).await?;
     run.erases[last] = Some(erase);
     line(format_args!("{erase}"));
@@ -443,6 +501,13 @@ async fn print_report(run: &Run) {
     }
     let diags = run.diags();
     for i in 0..st::ERASE_PASSES {
+        if i == st::ERASE_PASSES - 1 && run.sweep.iter().any(Option::is_some) {
+            for cell in run.sweep.iter().flatten() {
+                line(format_args!("{cell}"));
+                pace().await;
+            }
+            line(format_args!("{}", SweepBest::of(&run.sweep)));
+        }
         if let Some(e) = run.erases[i] {
             line(format_args!("{e}"));
         }
