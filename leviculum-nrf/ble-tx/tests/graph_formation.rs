@@ -7451,3 +7451,350 @@ fn the_board_table_cannot_build_seed_2s_room_and_node_0s_first_dial_lands() {
         "the linkless lowest address still has a strict candidate on the air"
     );
 }
+
+// ===================================================================
+// #383: a new link carries the announces it missed (#434)
+// ===================================================================
+
+/// Seed 6's room of the 2026-09-27 sweep, replayed from its own log
+/// (`ble_room_10_2026-09-27T21-36-11Z.log`): the ten edges with their
+/// `BLE_LINK_UP` times, milliseconds after 21:33:30Z. Each edge is the
+/// pair of adjacent central/peripheral lines; the node index is the one
+/// the emulator address encodes (`addr=00aa01<node>...`). The list is
+/// exactly the edge list the 377 report derived — chain `0–2–3–4–8`,
+/// cycle `7–8–9`, tail `5–6–7` — plus the fact the report had no use
+/// for: edge 7–9 landed at 52.8 s, AFTER the 7–8 bridge at 24.5 s.
+const SEED6_LINKS: [(u64, usize, usize); 10] = [
+    (1_160, 4, 8),
+    (2_742, 0, 2),
+    (3_022, 8, 9),
+    (3_464, 2, 3),
+    (4_903, 3, 4),
+    (6_414, 1, 4),
+    (11_650, 5, 6),
+    (17_718, 6, 7),
+    (24_450, 7, 8),
+    (52_770, 7, 9),
+];
+
+const SEED6_N: usize = 10;
+
+/// Receipt → first relay emission: node 7 received node 6's announce at
+/// 21:33:47.7 and relayed at 21:33:47.9.
+const RELAY_DELAY_MS: u64 = 200;
+
+/// First emission → the one retry (`PATHFINDER_RETRIES = 1`,
+/// constants.rs:157): node 7's two relays were 47.9 and 53.2. After the
+/// retry the entry is retired and nothing ever re-emits it — that
+/// retirement is the subject under test.
+const RETRY_GAP_MS: u64 = 5_300;
+
+/// The four policies for what a node emits toward a peer whose link
+/// just came up. `Own` is shipped (#376); `Stored` and `Full` are
+/// #383's candidates (b) and (c). Candidate (a) of the instruction IS
+/// `Own` — it ships today, and seed 6 went red under it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reoffer {
+    /// Pre-#376 control: a node announces itself once (modelled at its
+    /// first link-up — an announce with no link is unobservable), as an
+    /// ordinary two-emission ladder. Nothing happens at later link-ups.
+    None,
+    /// Shipped #376, the instruction's candidate (a): additionally one
+    /// FRESH own announce per link-up, on the new link alone. Fresh
+    /// means a new emission: the peer accepts and relays it.
+    Own,
+    /// Candidate (b): (a) plus the stored announce table — every
+    /// destination the node holds a path and a cached announce for,
+    /// EXCEPT the peer's own destination and entries learned via that
+    /// peer (the #168 bounce-back rule). Stored means the HELD
+    /// emission: a peer that already has it drops it (packet-hash
+    /// dedup), so it propagates only where it is news.
+    Stored,
+    /// Candidate (c): (a) plus the full stored table, no exclusions.
+    Full,
+}
+
+/// What a node holds about one origin: the emission ordinal it has
+/// (fresher announces carry higher ids — the model's random-hash
+/// timebase) and the neighbour that delivered it (the model's
+/// `PathEntry::via_peer`).
+#[derive(Clone, Copy)]
+struct Know {
+    id: u32,
+    via: usize,
+}
+
+struct RoomOutcome {
+    /// Announce packets on the air, all kinds, whole room.
+    tx_total: usize,
+    /// Of those: packets emitted AT each link-up event (fresh own +
+    /// re-offers), in [`SEED6_LINKS`] order.
+    tx_linkup: [usize; 10],
+    /// `know[u][o]`: what `u` ended up holding about origin `o`.
+    know: Vec<Vec<Option<Know>>>,
+}
+
+impl RoomOutcome {
+    /// The nodes that never learned origin `o` — for `o = 6` this is
+    /// the set the probe stage would log `no path` for.
+    fn dark_to(&self, o: usize) -> Vec<usize> {
+        (0..SEED6_N)
+            .filter(|&u| u != o && self.know[u][o].is_none())
+            .collect()
+    }
+
+    /// Ordered pairs `(u, o)` where `u` never learned `o`.
+    fn dark_pairs(&self) -> usize {
+        (0..SEED6_N).map(|o| self.dark_to(o).len()).sum()
+    }
+}
+
+/// One scheduled announce transmission: `at`, transmitting node,
+/// origin, emission id. Ordered for a min-heap by (time, seq) so equal
+/// times fire in schedule order.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct ScheduledTx(u64, u64, usize, usize, u32);
+
+/// Replay seed 6's formation timeline under one re-offer policy.
+///
+/// The model: an announce EMISSION by node `x` at time `t` is one
+/// packet on `x`'s broadcast domain, heard by every neighbour whose
+/// link existed at `t`. A node that hears an emission id NEWER than
+/// what it holds adopts it and relays: two emissions of its own, at
+/// `t + RELAY_DELAY_MS` and `RETRY_GAP_MS` later (the
+/// `PATHFINDER_RETRIES = 1` ladder). An id it already holds is dropped
+/// (packet-hash dedup / not-newer), and dropped announces are not
+/// relayed — which is what keeps a stored re-offer quiet everywhere it
+/// is not news. Links never die (none did in this room's window).
+fn replay_seed6(candidate: Reoffer) -> RoomOutcome {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    let mut know: Vec<Vec<Option<Know>>> = vec![vec![None; SEED6_N]; SEED6_N];
+    let mut next_id = [0u32; SEED6_N];
+    let mut formed: Vec<Vec<(usize, u64)>> = vec![Vec::new(); SEED6_N];
+    let mut first_link = [true; SEED6_N];
+    let mut queue: BinaryHeap<Reverse<ScheduledTx>> = BinaryHeap::new();
+    let mut seq = 0u64;
+    let mut tx_total = 0usize;
+    let mut tx_linkup = [0usize; 10];
+
+    let schedule = |queue: &mut BinaryHeap<Reverse<ScheduledTx>>,
+                    seq: &mut u64,
+                    at: u64,
+                    x: usize,
+                    o: usize,
+                    id: u32| {
+        queue.push(Reverse(ScheduledTx(at, *seq, x, o, id)));
+        *seq += 1;
+    };
+
+    // Adopt-and-relay, shared by broadcast delivery and targeted
+    // offers. Returns whether `y` adopted (so a caller can count news).
+    fn adopt(know: &mut [Vec<Option<Know>>], y: usize, o: usize, id: u32, via: usize) -> bool {
+        if y == o {
+            return false;
+        }
+        match know[y][o] {
+            Some(k) if k.id >= id => false,
+            _ => {
+                know[y][o] = Some(Know { id, via });
+                true
+            }
+        }
+    }
+
+    // Fire every scheduled emission strictly before `until`.
+    macro_rules! drain {
+        ($until:expr) => {
+            while queue.peek().is_some_and(|Reverse(tx)| tx.0 < $until) {
+                let Reverse(ScheduledTx(at, _, x, o, id)) = queue.pop().expect("peeked");
+                tx_total += 1;
+                let neighbours: Vec<usize> = formed[x]
+                    .iter()
+                    .filter(|&&(_, since)| since <= at)
+                    .map(|&(y, _)| y)
+                    .collect();
+                for y in neighbours {
+                    if adopt(&mut know, y, o, id, x) {
+                        schedule(&mut queue, &mut seq, at + RELAY_DELAY_MS, y, o, id);
+                        schedule(
+                            &mut queue,
+                            &mut seq,
+                            at + RELAY_DELAY_MS + RETRY_GAP_MS,
+                            y,
+                            o,
+                            id,
+                        );
+                    }
+                }
+            }
+        };
+    }
+
+    for (k, &(t, a, b)) in SEED6_LINKS.iter().enumerate() {
+        drain!(t);
+        formed[a].push((b, t));
+        formed[b].push((a, t));
+
+        // Both directions' offer lists are read BEFORE either side's
+        // delivery lands: the two peer-up reports race in reality, so
+        // neither side's table already contains what the other is
+        // offering at this very link-up.
+        let mut offers: Vec<(usize, usize, usize, u32)> = Vec::new(); // (from, to, origin, id)
+        for (u, v) in [(a, b), (b, a)] {
+            if first_link[u] {
+                // The app's boot announce, an ordinary ladder. All four
+                // policies have it; `Own`'s targeted fresh copy on this
+                // same link would be redundant with it.
+                let id = next_id[u];
+                next_id[u] += 1;
+                schedule(&mut queue, &mut seq, t, u, u, id);
+                schedule(&mut queue, &mut seq, t + RETRY_GAP_MS, u, u, id);
+            } else if candidate != Reoffer::None {
+                // (a): one fresh own announce, on the new link alone.
+                let id = next_id[u];
+                next_id[u] += 1;
+                offers.push((u, v, u, id));
+            }
+            if matches!(candidate, Reoffer::Stored | Reoffer::Full) {
+                for (o, held) in know[u].iter().enumerate() {
+                    let Some(held) = held else { continue };
+                    if candidate == Reoffer::Stored && (o == v || held.via == v) {
+                        continue;
+                    }
+                    offers.push((u, v, o, held.id));
+                }
+            }
+        }
+        for (u, v, o, id) in offers {
+            tx_linkup[k] += 1;
+            tx_total += 1;
+            if adopt(&mut know, v, o, id, u) {
+                schedule(&mut queue, &mut seq, t + RELAY_DELAY_MS, v, o, id);
+                schedule(
+                    &mut queue,
+                    &mut seq,
+                    t + RELAY_DELAY_MS + RETRY_GAP_MS,
+                    v,
+                    o,
+                    id,
+                );
+            }
+        }
+        first_link[a] = false;
+        first_link[b] = false;
+    }
+    drain!(u64::MAX);
+
+    RoomOutcome {
+        tx_total,
+        tx_linkup,
+        know,
+    }
+}
+
+/// The #383 design table, measured on seed 6's own timeline.
+///
+/// Calibration: under `Own` — the shipped stack — the model's
+/// dark-to-6 set is {0,1,2,3,4,8,9}. The run's measured red was
+/// {0,1,2,3,4}: nodes 8 and 9 were repaired by node 7's PATH RESPONSES
+/// in the measure phase (377 report), which are outside this announce
+/// model and reach one hop only. The five nodes the model and the run
+/// agree on are the five unanswered probes.
+///
+/// | policy | dark-to-6         | dark pairs | announce TX | bridge TX | max link-up TX |
+/// |--------|-------------------|-----------:|------------:|----------:|---------------:|
+/// | none   | 0,1,2,3,4,7,8,9   |         44 |         112 |         0 |              0 |
+/// | own    | 0,1,2,3,4,8,9     |         30 |         176 |         2 |              2 |
+/// | stored | —                 |          0 |         280 |        10 |             18 |
+/// | full   | —                 |          0 |         282 |        10 |             20 |
+///
+/// The verdict is (b), `Stored`: it is the cheapest policy that lights
+/// the room — every red of this cell's honest ~1-in-12 rate is a lost
+/// announce race, and `Own` loses it whenever the late edge's endpoints
+/// are not themselves the unreached destination. `Full` buys nothing
+/// over it: its extra packets are exactly the #168 bounce-backs
+/// (offering the peer its own destination and what it taught us), and
+/// the gap grows with room degree and lifetime. Airtime at the worst
+/// link-up: 18 packets × ~171 B ≈ 3.1 kB on the one BLE link that came
+/// up (~35 ms at the 700 kbit/s bitrate guess) — and nothing of it on
+/// LoRa: the re-offer is emitted on the new link alone, and a
+/// neighbour relays onward only what was NEWS to it, under the #402
+/// announce cap where one is registered.
+#[test]
+fn seed6_replay_design_table() {
+    println!("policy   dark-to-6              dark-pairs  tx-total  bridge-tx  max-linkup-tx");
+    let mut cells = Vec::new();
+    for (label, candidate) in [
+        ("none", Reoffer::None),
+        ("own", Reoffer::Own),
+        ("stored", Reoffer::Stored),
+        ("full", Reoffer::Full),
+    ] {
+        let out = replay_seed6(candidate);
+        let max_linkup = *out.tx_linkup.iter().max().expect("ten link-ups");
+        println!(
+            "{:<8} {:<22} {:>10} {:>9} {:>10} {:>14}",
+            label,
+            format!("{:?}", out.dark_to(6)),
+            out.dark_pairs(),
+            out.tx_total,
+            out.tx_linkup[8],
+            max_linkup,
+        );
+        cells.push((
+            label,
+            out.dark_to(6),
+            out.dark_pairs(),
+            out.tx_total,
+            out.tx_linkup[8],
+            max_linkup,
+        ));
+    }
+    assert_eq!(
+        cells,
+        [
+            ("none", vec![0, 1, 2, 3, 4, 7, 8, 9], 44, 112, 0, 0),
+            ("own", vec![0, 1, 2, 3, 4, 8, 9], 30, 176, 2, 2),
+            ("stored", vec![], 0, 280, 10, 18),
+            ("full", vec![], 0, 282, 10, 20),
+        ]
+    );
+}
+
+/// The mechanism, pinned apart from the table: node 7 held node 6's
+/// announce when the 7–8 bridge came up at t+24.45 s — its relay
+/// ladder had retired 1.25 s earlier (last emission 23.2 s) — and
+/// under the shipped policy that miss is PERMANENT. The stored
+/// re-offer carries exactly that held announce across the bridge, and
+/// the ordinary relay ladders do the rest of the room.
+#[test]
+fn the_bridge_carries_the_stored_announce_or_nothing_ever_does() {
+    let own = replay_seed6(Reoffer::Own);
+    // Node 7 itself holds 6 (the #376 fresh announce at the 6–7
+    // link-up delivered it)…
+    assert!(own.know[7][6].is_some(), "node 7 heard node 6");
+    // …and node 8 never does: both of 7's relay emissions (t+17.9 s,
+    // t+23.2 s) predate the bridge, and nothing re-offers.
+    assert!(
+        own.know[8][6].is_none(),
+        "shipped: missing the bridge by 1.25 s is permanent"
+    );
+
+    let stored = replay_seed6(Reoffer::Stored);
+    // The re-offer puts the held announce on the new link; the far
+    // side of the room then learns 6 through ordinary relaying.
+    assert!(stored.know[8][6].is_some(), "the bridge carried it");
+    assert_eq!(
+        stored.dark_to(6),
+        Vec::<usize>::new(),
+        "every node ends with a path to node 6"
+    );
+    // And the exclusion rule holds: what node 8 learned via the bridge
+    // is not offered back across it at the later 7–9 link-up — `full`'s
+    // two extra packets over `stored` are both bounce-backs on 7–9.
+    let full = replay_seed6(Reoffer::Full);
+    assert_eq!(full.tx_total - stored.tx_total, 2);
+    assert_eq!(full.tx_linkup[9] - stored.tx_linkup[9], 2);
+}
