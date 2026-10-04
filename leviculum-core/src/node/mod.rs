@@ -120,6 +120,8 @@ mod mvr_link_rekey_alias;
 #[cfg(test)]
 mod mvr_link_retry_held_route;
 #[cfg(test)]
+mod mvr_link_up_reoffer;
+#[cfg(test)]
 mod mvr_lnode_pathresolve;
 #[cfg(test)]
 mod mvr_local_client_announce_immediate;
@@ -3081,6 +3083,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     e
                 ),
             }
+        }
+
+        // #383: offer the new peer the stored announces it has missed —
+        // the pull above asks what the peer is, the driver's peer-up
+        // announce tells it what WE are, and this tells it what we can
+        // route to, which a peer that linked after the relay ladders
+        // retired can learn no other way (the #434 lost-route red). The
+        // transport owns every rule of it (eligibility, cap, the
+        // one-link delivery hint); see
+        // `Transport::reoffer_stored_announces_to_peer`.
+        let reoffered = self
+            .transport
+            .reoffer_stored_announces_to_peer(iface.0, &peer);
+        if reoffered > 0 {
+            crate::tracing::debug!(
+                "Peer <{}> up on {}, re-offered {} stored announces",
+                HexShort(&peer),
+                self.transport.iface_name(iface.0),
+                reoffered
+            );
         }
         self.process_events_and_actions()
     }

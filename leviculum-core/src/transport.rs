@@ -713,6 +713,11 @@ pub(crate) struct QueuedAnnounce {
     /// contents when it was emitted later than what is already waiting
     /// (Python Transport.py:1264-1281).
     pub emitted: u64,
+    /// The #376 delivery hint: a peer-up re-offer (#383) that the cap
+    /// held back stays addressed at the one peer it was for when the
+    /// queue drains. `None` — every broadcast rebroadcast — fans out to
+    /// all live links as before.
+    pub peer: Option<[u8; TRUNCATED_HASHBYTES]>,
 }
 
 /// Transport configuration
@@ -2175,6 +2180,14 @@ pub enum AnnounceTxOccasion {
     /// Requested rather than propagated: it is not paced by the cap and does
     /// not mean this node is relaying announces at all.
     PathResponse,
+    /// A stored announce re-offered to one peer whose first link on a
+    /// multi-peer interface just came up (#383): the node held a path and
+    /// the cached announce for a destination the new peer has never heard,
+    /// and nothing else would ever tell it — the relay ladder retired
+    /// (`PATHFINDER_RETRIES`) before the link existed. Emitted on that
+    /// peer's link alone, paced by the interface's announce cap where one
+    /// is registered.
+    Reoffer,
 }
 
 impl AnnounceTxOccasion {
@@ -2186,6 +2199,7 @@ impl AnnounceTxOccasion {
             AnnounceTxOccasion::Local => "local",
             AnnounceTxOccasion::Uncapped => "uncapped",
             AnnounceTxOccasion::PathResponse => "path-response",
+            AnnounceTxOccasion::Reoffer => "reoffer",
         }
     }
 }
@@ -5152,7 +5166,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3602. A destination with no cached
+    /// link-request path uses at transport.rs:3616. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -5947,7 +5961,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1363 ran in the
+        // Gate on the already-incremented hops (transport.rs:1368 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -10653,7 +10667,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2261`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2275`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -11703,6 +11717,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     hops: packet.hops,
                     queued_at_ms: now,
                     emitted,
+                    peer: None,
                 });
                 ann_suppressed.push((*iface_idx, "airtime_cap"));
             }
@@ -11777,9 +11792,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Called from `poll()`. Dequeues lowest-hops announce first, then oldest
     /// within same hops (Python Interface.py:340-343).
     fn drain_announce_queues(&mut self, now: u64) {
-        // (iface_idx, raw, dst, hops) for each drained announce. dst/hops carry
-        // the OBS-1 ANN_TX fields for the deferred send.
-        let mut sends: Vec<(usize, Vec<u8>, [u8; TRUNCATED_HASHBYTES], u8)> = Vec::new();
+        // (iface_idx, raw, dst, hops, peer) for each drained announce. dst/hops
+        // carry the OBS-1 ANN_TX fields for the deferred send; peer keeps a
+        // held-back #383 re-offer on the one link it was for.
+        #[allow(clippy::type_complexity)]
+        let mut sends: Vec<(
+            usize,
+            Vec<u8>,
+            [u8; TRUNCATED_HASHBYTES],
+            u8,
+            Option<[u8; TRUNCATED_HASHBYTES]>,
+        )> = Vec::new();
 
         for (iface_idx, cap) in self.interface_announce_caps.iter_mut() {
             if cap.queue.is_empty() || now < cap.allowed_at_ms {
@@ -11802,7 +11825,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let entry = cap.queue.remove(idx).expect("valid index");
                 let raw_len = entry.raw.len();
 
-                sends.push((*iface_idx, entry.raw, entry.dst, entry.hops));
+                sends.push((*iface_idx, entry.raw, entry.dst, entry.hops, entry.peer));
 
                 // Compute holdoff for next announce
                 let tx_bits = raw_len as u64 * 8;
@@ -11812,15 +11835,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
 
-        for (iface_idx, raw, dst, hops) in sends {
-            self.push_packet(iface_idx, raw, None, None);
+        for (iface_idx, raw, dst, hops, peer) in sends {
+            self.push_packet(iface_idx, raw, None, peer);
             self.record_outgoing_announce(iface_idx);
             // OBS-1: a previously cap-suppressed announce is now actually sent.
             // It is `transit` like one the cap passed immediately — the cap
             // paced it, which is the distinction the occasion draws; that it
             // waited in the queue to do so is on the `ANN_TX_SUPPRESSED
-            // reason=airtime_cap` line that preceded it (#405).
-            let occasion = announce_tx_occasion(hops, true);
+            // reason=airtime_cap` line that preceded it (#405). A held-back
+            // #383 re-offer keeps its occasion instead: the cap paced it too,
+            // but what put it on the air was the peer-up, and the reader
+            // counting re-offers must find it under that name.
+            let occasion = if peer.is_some() {
+                AnnounceTxOccasion::Reoffer
+            } else {
+                announce_tx_occasion(hops, true)
+            };
             crate::tracing::debug!(
                 event = "ANN_TX",
                 occasion = occasion.as_str(),
@@ -11835,6 +11865,172 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 interface_out: Some(iface_idx),
             });
         }
+    }
+
+    /// Re-offer the stored announces to one peer whose first link on a
+    /// multi-peer interface just came up (#383, the #434 lever). Returns
+    /// how many announces were emitted or queued.
+    ///
+    /// The seed-6 mechanism this closes: a relay's rebroadcast ladder is
+    /// two emissions (`PATHFINDER_RETRIES = 1`), and once it retires, a
+    /// stored announce is re-emitted on exactly one occasion — a path
+    /// request. A link that comes up AFTER the ladder died therefore
+    /// never carries the announce, and a peer behind it has no path to
+    /// the destination for as long as the room stands (measured:
+    /// 2026-09-27 sweep seed 6, where missing the 7–8 bridge by 1.2 s
+    /// cost five probes their route to node 6).
+    ///
+    /// Deliberate deviation from the reference, all three clauses of the
+    /// deviation rule held (design table:
+    /// `graph_formation.rs::seed6_replay_design_table`):
+    /// 1. Wire format: the re-offer is the stored announce exactly as
+    ///    the rebroadcast scheduler would have emitted it — Header 2,
+    ///    this node as `transport_id`, the path table's hop count, plain
+    ///    ANNOUNCE context.
+    /// 2. Semantics: the reference does nothing when an interface or
+    ///    link appears (1.3.5 has no interface-up hook at all; its job
+    ///    loop retires announce entries at `retries > PATHFINDER_R`,
+    ///    Transport.py:585-587, and its interface bookkeeping only CULLS
+    ///    — paths whose interface vanished, Transport.py:785-787). A
+    ///    Python peer that receives the re-offer sees an ordinary
+    ///    transit announce and handles it as one: packet-hash dedup
+    ///    absorbs it where the emission was already heard, the
+    ///    newer-emission rule where a fresher path stands, so it
+    ///    propagates exactly as far as it is news.
+    /// 3. Priority 1: the design table turns seed 6's five lost routes
+    ///    into zero at ≤ 18 packets on the one link that came up.
+    ///
+    /// What is NOT offered: expired entries; local destinations and
+    /// local-client destinations (hops 0 — the peer-up own-announce path
+    /// re-announces those, `announce_local_destinations_to_peer`);
+    /// entries that route through the new peer itself (`via_peer` or
+    /// `next_hop` is the peer — the #168 bounce-back rule); destinations
+    /// whose cached announce was evicted; and anything the #91 interface
+    /// mode gate blocks. Emission is paced by the interface's #402
+    /// announce cap where one is registered: over budget, the re-offer
+    /// takes the destination's queue slot (keeping its peer hint) and
+    /// logs `ANN_TX_SUPPRESSED` like any paced rebroadcast.
+    ///
+    /// The emission stays on the new link alone (the #376 delivery
+    /// hint): every other peer on the carrier heard the announce when it
+    /// was relayed, or will hear the onward relay from the new peer if
+    /// it was news there. In particular a LoRa interface beside the BLE
+    /// one never carries the re-offer itself — only a neighbour's
+    /// ordinary rebroadcast of what was news to it.
+    pub fn reoffer_stored_announces_to_peer(
+        &mut self,
+        interface_index: usize,
+        peer: &[u8; TRUNCATED_HASHBYTES],
+    ) -> usize {
+        if !self.config.enable_transport {
+            // A non-transport node never relays announces; offering a
+            // route through itself would advertise a service it does not
+            // render (the reference's rebroadcast gate has the same
+            // shape, Transport.py:1883).
+            return 0;
+        }
+        let now = self.clock.now_ms();
+        let transport_id = *self.identity.hash();
+        let hop_ceiling = self.hop_ceiling();
+        let mut sent = 0usize;
+        for (dest_hash, entry) in self.storage.path_entries() {
+            if entry.expires_ms <= now || entry.hops == 0 {
+                continue;
+            }
+            if self.local_destinations.contains(&dest_hash) {
+                continue;
+            }
+            if entry.via_peer.as_ref() == Some(peer) || entry.next_hop.as_ref() == Some(peer) {
+                continue;
+            }
+            if !self.announce_allowed_on_interface(interface_index, &dest_hash, false) {
+                continue;
+            }
+            let Some(cached_raw) = self.storage.get_announce_cache(&dest_hash) else {
+                continue;
+            };
+            let Ok(mut parsed) = Packet::unpack(cached_raw) else {
+                continue;
+            };
+            // The raw cache holds the PRE-increment wire hops; emit the
+            // stored count, exactly like the scheduler's rebroadcast
+            // (`check_announce_rebroadcasts`) and the path-response arm
+            // (#38 D3).
+            parsed.hops = entry.hops;
+            if parsed.hops > hop_ceiling {
+                continue;
+            }
+            parsed.flags.header_type = HeaderType::Type2;
+            parsed.flags.transport_type = TransportType::Transport;
+            parsed.transport_id = Some(transport_id);
+            parsed.context = PacketContext::None;
+            let size = parsed.packed_size();
+            let mut buf = alloc::vec![0u8; size];
+            let Ok(len) = parsed.pack(&mut buf) else {
+                continue;
+            };
+            let raw = buf[..len].to_vec();
+
+            // The #402 cap, the same arithmetic as
+            // `broadcast_announce_with_caps`.
+            if let Some(cap) = self.interface_announce_caps.get_mut(&interface_index) {
+                if now < cap.allowed_at_ms {
+                    let emitted = ReceivedAnnounce::from_packet(&parsed)
+                        .map(|a| emission_from_random_hash(a.random_hash()))
+                        .unwrap_or(0);
+                    let reason = if cap.queue.iter().any(|e| e.dst == dest_hash) {
+                        // One slot per destination; what waits is at
+                        // least as fresh (the slot's emission-replace
+                        // rule only ever made it fresher).
+                        "airtime_cap"
+                    } else if cap.queue.len() >= self.config.max_queued_announces {
+                        "queue_full"
+                    } else {
+                        cap.queue.push_back(QueuedAnnounce {
+                            raw,
+                            dst: dest_hash,
+                            hops: parsed.hops,
+                            queued_at_ms: now,
+                            emitted,
+                            peer: Some(*peer),
+                        });
+                        sent += 1;
+                        "airtime_cap"
+                    };
+                    crate::tracing::debug!(
+                        event = "ANN_TX_SUPPRESSED",
+                        dst = %HexShort(&dest_hash),
+                        hops = parsed.hops,
+                        iface = %self.iface_name(interface_index),
+                        suppressed = true,
+                        reason = reason,
+                    );
+                    continue;
+                }
+                let tx_bits = raw.len() as u64 * 8;
+                let cap_bps = cap.bitrate_bps as u64 * cap.announce_cap_percent as u64 / 100;
+                let wait_ms = (tx_bits * 1000).checked_div(cap_bps).unwrap_or(0);
+                cap.allowed_at_ms = now + wait_ms;
+            }
+
+            self.push_packet(interface_index, raw, None, Some(*peer));
+            self.record_outgoing_announce(interface_index);
+            crate::tracing::debug!(
+                event = "ANN_TX",
+                occasion = AnnounceTxOccasion::Reoffer.as_str(),
+                dst = %HexShort(&dest_hash),
+                hops = parsed.hops,
+                iface = %self.iface_name(interface_index),
+            );
+            self.events.push(TransportEvent::AnnounceTransmitted {
+                destination_hash: dest_hash,
+                occasion: AnnounceTxOccasion::Reoffer,
+                hops: parsed.hops,
+                interface_out: Some(interface_index),
+            });
+            sent += 1;
+        }
+        sent
     }
 
     fn clean_link_table(&mut self, now: u64) {
@@ -16373,7 +16569,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6575), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6589), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -18043,6 +18239,7 @@ mod tests {
                 hops: 2,
                 queued_at_ms: transport.clock.now_ms(),
                 emitted: 0,
+                peer: None,
             });
 
             // Poll before holdoff expires, nothing should drain
@@ -18790,6 +18987,7 @@ mod tests {
                     hops: 1,
                     queued_at_ms: transport.clock.now_ms() + i as u64,
                     emitted: 0,
+                    peer: None,
                 });
             }
             assert_eq!(cap.queue.len(), max_queued);
@@ -18804,6 +19002,7 @@ mod tests {
                     hops: 1,
                     queued_at_ms: transport.clock.now_ms(),
                     emitted: 0,
+                    peer: None,
                 });
             }
             assert_eq!(
@@ -18980,6 +19179,7 @@ mod tests {
                 hops: 3,
                 queued_at_ms: now,
                 emitted: 0,
+                peer: None,
             });
             cap.queue.push_back(QueuedAnnounce {
                 raw: alloc::vec![0xBB; 50],
@@ -18987,6 +19187,7 @@ mod tests {
                 hops: 1,
                 queued_at_ms: now + 1,
                 emitted: 0,
+                peer: None,
             });
             cap.allowed_at_ms = now; // Allow immediate drain
 
@@ -19068,6 +19269,7 @@ mod tests {
                 hops: 1,
                 queued_at_ms: now,
                 emitted: 0,
+                peer: None,
             });
 
             let deadline = transport.next_deadline();
@@ -22077,7 +22279,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1363) before
+        // The inbound path increments hops once (transport.rs:1368) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

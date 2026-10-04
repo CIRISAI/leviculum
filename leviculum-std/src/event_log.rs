@@ -367,11 +367,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // actually (re)transmits a stored announce on an interface (pairs with
     // ANN_RX); ANN_TX_SUPPRESSED fires when an airtime cap held the rebroadcast
     // back, so a suppressed announce is also visible without claiming a TX.
-    // `occasion` (Codeberg #405) says which of the four kinds of announce
+    // `occasion` (Codeberg #405) says which of the five kinds of announce
     // transmission it was — see `AnnounceTxOccasion` and
     // docs/src/structured-event-logs.md. Without it a transit announce the
     // airtime cap paced, one that bypassed the cap because it originated
-    // here, and a requested path response are one indistinguishable line.
+    // here, a requested path response and a peer-up re-offer (#383,
+    // `occasion=reoffer`) are one indistinguishable line.
     EventSchema {
         name: "ANN_TX",
         required_keys: &["dst", "hops", "iface", "occasion"],

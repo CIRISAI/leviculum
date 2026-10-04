@@ -696,9 +696,10 @@ iface_out=none t=7\r\n"
     }
 
     /// The #405 line, byte for byte: the three occasions a board's capture
-    /// had to tell apart, plus the uncapped one the code also has. Rendering
-    /// them side by side is the point — the acceptance run for #402 saw
-    /// fifteen announce-sized transmissions and could attribute none.
+    /// had to tell apart, plus the uncapped one the code also has and the
+    /// #383 peer-up re-offer. Rendering them side by side is the point —
+    /// the acceptance run for #402 saw fifteen announce-sized
+    /// transmissions and could attribute none.
     #[test]
     fn every_announce_occasion_renders_as_its_own_line() {
         let mut dest = [0u8; 16];
@@ -744,6 +745,18 @@ iface_out=none t=7\r\n"
         assert_eq!(
             line("ANN_TX ", format_args!("{uncapped}"), 146002),
             "ANN_TX occasion=uncapped dst=9f3a02c1 hops=3 iface=2 t=146002\r\n"
+        );
+        // The #383 peer-up re-offer: a stored announce handed to a peer
+        // whose first link just came up, on that link alone.
+        let reoffer = AnnounceTransmittedBody {
+            occasion: "reoffer",
+            dest,
+            hops: 1,
+            iface_out: Some(2),
+        };
+        assert_eq!(
+            line("ANN_TX ", format_args!("{reoffer}"), 146002),
+            "ANN_TX occasion=reoffer dst=9f3a02c1 hops=1 iface=2 t=146002\r\n"
         );
     }
 

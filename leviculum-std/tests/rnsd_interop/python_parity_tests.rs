@@ -152,7 +152,7 @@ async fn test_python_announce_received_by_rust_matches_spec() {
 ///    producing a divergent loop.
 ///
 ///    The announce dedup exemption (`is_single_announce` at
-///    `transport.rs:1429`) matches Python's `Transport.py:1230-1232`;
+///    `transport.rs:1434`) matches Python's `Transport.py:1230-1232`;
 ///    loop suppression is via the path-table "not-better-hops" branch
 ///    and LOCAL_REBROADCASTS_MAX guard.
 #[tokio::test]
@@ -462,8 +462,8 @@ async fn test_announce_cap_forwarding_rate_limit() {
 ///    rebroadcast from a Rust relay.
 ///
 ///    The retry scheduler removes the announce-table entry when
-///    `PATHFINDER_RETRIES` (transport.rs:11261) is exceeded OR
-///    `local_rebroadcasts` (transport.rs:11262) reaches
+///    `PATHFINDER_RETRIES` (transport.rs:11275) is exceeded OR
+///    `local_rebroadcasts` (transport.rs:11276) reaches
 ///    `LOCAL_REBROADCASTS_MAX`. A sustained stream
 ///    of identical re-arrivals from a peer must not produce unbounded
 ///    rebroadcast traffic.

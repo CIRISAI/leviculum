@@ -318,13 +318,13 @@ The reference behaves this way on every forwarding path:
 Loop-freedom never came from interface suppression. It comes from
 transport_id addressing (only the addressed relay processes a Type2
 transport packet), the hop-count limit, and packet-hash dedup —
-`has_packet_hash` (`leviculum-core/src/transport.rs:3624`) drops a
+`has_packet_hash` (`leviculum-core/src/transport.rs:3638`) drops a
 repeated copy, `add_packet_hash`
-(`leviculum-core/src/transport.rs:3678`) records it.
+(`leviculum-core/src/transport.rs:3692`) records it.
 
 The forwarding decision lives in the media-agnostic core
 (`forward_on_interface_from`,
-`leviculum-core/src/transport.rs:7892`). Whether the relayed echo
+`leviculum-core/src/transport.rs:7906`). Whether the relayed echo
 needs TX spacing on a half-duplex channel is the interface's business
 — see [Interface Isolation](interface-isolation.md).
 
