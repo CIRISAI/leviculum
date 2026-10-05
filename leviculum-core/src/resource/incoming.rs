@@ -619,21 +619,32 @@ impl IncomingResource {
         &mut self,
         link: &Link,
     ) -> Result<(Vec<u8>, Option<Vec<u8>>), ResourceError> {
+        // One path for every caller: the inline form is the three phases run
+        // back to back under the caller's borrow (no_std, FFI). The std driver
+        // runs the middle phase off the node lock instead (leviculum#71).
+        let input = self.take_assembly_input(link.resource_crypt_params().token_key)?;
+        let outcome = run_assembly(input);
+        self.apply_assembly(outcome)
+    }
+
+    /// Phase 1 of assembly (leviculum#71): check completeness and take the
+    /// parts, under the node lock. Cheap: one concatenation.
+    ///
+    /// Completeness is decided before the first part is taken, so a transfer
+    /// that is short a part reports it having moved nothing — the same
+    /// `HashMismatch` the borrowing loop returned. After that check every
+    /// `take` hands the part's allocation to this scope, which drops it at the
+    /// end of the iteration: by the decryption `self.parts` holds only its
+    /// spine. The resource is consumed by the caller on this path whether
+    /// assembly succeeds or fails (`link_management.rs`,
+    /// `ResourcePartResult::Assembling`), so nothing later reads a part back.
+    pub(crate) fn take_assembly_input(
+        &mut self,
+        token_key: Option<[u8; 64]>,
+    ) -> Result<AssemblyInput, ResourceError> {
         if self.status != ResourceStatus::Assembling {
             return Err(ResourceError::InvalidRequest);
         }
-
-        // 1. Concatenate all parts, consuming each as it is copied.
-        //
-        // Completeness is decided before the first part is taken, so a
-        // transfer that is short a part reports it having moved nothing —
-        // the same `HashMismatch` the borrowing loop returned. After that
-        // check every `take` hands the part's allocation to this scope,
-        // which drops it at the end of the iteration: by the decryption
-        // below `self.parts` holds only its spine. The resource is
-        // consumed by the caller on this path whether assembly succeeds or
-        // fails (`link_management.rs`, `ResourcePartResult::Assembling`),
-        // so nothing later reads a part back.
         if self.parts.iter().any(|p| p.is_none()) {
             return Err(ResourceError::HashMismatch);
         }
@@ -643,85 +654,39 @@ impl IncomingResource {
                 stream.extend_from_slice(&data);
             }
         }
+        Ok(AssemblyInput {
+            stream,
+            token_key,
+            compressed: self.flags.compressed,
+            data_size: self.data_size,
+            random_hash: self.random_hash,
+            resource_hash: self.resource_hash,
+            extract_metadata: self.flags.has_metadata && self.segment_index == 1,
+        })
+    }
 
-        // 2. Decrypt, then drop the ciphertext: this is the one instant two
-        // whole copies of the transfer are live, and `stream` has no reader
-        // after it.
-        let mut decrypted = vec![0u8; stream.len()];
-        let plaintext_len = link
-            .decrypt(&stream, &mut decrypted)
-            .map_err(|_| ResourceError::CryptoError)?;
-        drop(stream);
-        decrypted.truncate(plaintext_len);
-
-        // 3. Strip LEADING wire_random bytes.
-        //
-        // In place: a memmove inside the buffer already held, where
-        // `&decrypted[4..].to_vec()` was a second whole copy that outlived
-        // the first.
-        if decrypted.len() < RESOURCE_RANDOM_HASH_SIZE {
-            return Err(ResourceError::HashMismatch);
+    /// Phase 3 of assembly (leviculum#71): record the outcome of
+    /// [`run_assembly`] on the resource, under the node lock.
+    pub(crate) fn apply_assembly(
+        &mut self,
+        outcome: Result<Assembled, AssemblyFailure>,
+    ) -> Result<(Vec<u8>, Option<Vec<u8>>), ResourceError> {
+        match outcome {
+            Ok(assembled) => {
+                self.proof_hash = Some(assembled.proof_hash);
+                self.status = ResourceStatus::Complete;
+                Ok((assembled.data, assembled.metadata))
+            }
+            Err(failure) => {
+                if failure.proof_hash.is_some() {
+                    self.proof_hash = failure.proof_hash;
+                }
+                if failure.corrupt {
+                    self.status = ResourceStatus::Corrupt;
+                }
+                Err(failure.error)
+            }
         }
-        decrypted.drain(..RESOURCE_RANDOM_HASH_SIZE);
-
-        // 4. Decompress if needed. The compressed path is the one place a
-        // second buffer is unavoidable — it is sized by `data_size`, not by
-        // the transfer — so the plaintext is released as soon as it has been
-        // read out of.
-        let mut assembled = if self.flags.compressed {
-            #[cfg(feature = "compression")]
-            {
-                let out = super::compression::bz2_decompress(&decrypted, self.data_size as usize)?;
-                drop(decrypted);
-                out
-            }
-            #[cfg(not(feature = "compression"))]
-            {
-                return Err(ResourceError::CompressionUnsupported);
-            }
-        } else {
-            decrypted
-        };
-
-        // 5. Verify hash: full_hash(assembled + random_hash) == resource_hash.
-        // SHA-256 is streaming, so the two pieces are fed in order instead of
-        // being concatenated into a third copy of the transfer.
-        let calculated = full_hash_parts(&[&assembled, &self.random_hash]);
-        if calculated != self.resource_hash {
-            self.status = ResourceStatus::Corrupt;
-            return Err(ResourceError::HashMismatch);
-        }
-
-        // Reduce the assembled data (metadata prefix included) to the only
-        // thing the proof needs of it: its digest. Keeping the bytes kept a
-        // whole copy of the transfer alive from here until the resource was
-        // dropped, and `build_proof` then built a second one to hash.
-        self.proof_hash = Some(self.proof_hash_of(&assembled));
-
-        // 6. Extract metadata if present (only in segment 1, per Python Resource.py:696)
-        let (app_data, metadata) = if self.flags.has_metadata && self.segment_index == 1 {
-            if assembled.len() < 3 {
-                return Err(ResourceError::HashMismatch);
-            }
-            let meta_len = ((assembled[0] as usize) << 16)
-                | ((assembled[1] as usize) << 8)
-                | (assembled[2] as usize);
-            if assembled.len() < 3 + meta_len {
-                return Err(ResourceError::HashMismatch);
-            }
-            let metadata = assembled[3..3 + meta_len].to_vec();
-            // The application data is the tail of the buffer already held:
-            // dropping the header in place returns it without a copy, where
-            // `assembled[3 + meta_len..].to_vec()` made one the size of the
-            // transfer beside the one it read from.
-            assembled.drain(..3 + meta_len);
-            (assembled, Some(metadata))
-        } else {
-            (assembled, None)
-        };
-
-        self.status = ResourceStatus::Complete;
-        Ok((app_data, metadata))
     }
 
     /// The completion proof hash over the assembled plaintext, metadata
@@ -732,8 +697,9 @@ impl IncomingResource {
     /// `completion_proof_follows_reference_formula` pins; `assemble` is the
     /// only production caller and calls it while the assembled bytes are
     /// still live, which is the whole reason they need not be kept.
+    #[cfg(test)]
     fn proof_hash_of(&self, assembled_with_metadata: &[u8]) -> [u8; 32] {
-        full_hash_parts(&[assembled_with_metadata, &self.resource_hash])
+        proof_hash_formula(assembled_with_metadata, &self.resource_hash)
     }
 
     /// Build the completion proof.
@@ -1041,6 +1007,163 @@ impl IncomingResource {
     pub(crate) fn window_state(&self) -> &WindowState {
         &self.window_state
     }
+}
+
+/// What phase 2 of an incoming resource's assembly needs (leviculum#71).
+///
+/// Built under the node lock by `IncomingResource::take_assembly_input`;
+/// owns everything [`run_assembly`] reads, so it can move to another thread.
+pub(crate) struct AssemblyInput {
+    stream: Vec<u8>,
+    token_key: Option<[u8; 64]>,
+    compressed: bool,
+    // Read only by the bz2 path; a build without `compression` refuses a
+    // compressed resource before it would be.
+    #[cfg_attr(not(feature = "compression"), allow(dead_code))]
+    data_size: u64,
+    random_hash: [u8; RESOURCE_RANDOM_HASH_SIZE],
+    resource_hash: [u8; 32],
+    extract_metadata: bool,
+}
+
+/// A successfully assembled resource: application data, metadata, and the
+/// digest its completion proof is built from.
+pub(crate) struct Assembled {
+    data: Vec<u8>,
+    metadata: Option<Vec<u8>>,
+    proof_hash: [u8; 32],
+}
+
+/// Why an assembly failed, and what the resource must record about it.
+pub(crate) struct AssemblyFailure {
+    error: ResourceError,
+    /// The plaintext hashed to the wrong value: the resource is corrupt.
+    corrupt: bool,
+    /// Set when the hash checked out but the metadata prefix did not parse,
+    /// so the proof digest had already been taken (unchanged from the inline
+    /// path, which took it before parsing the metadata).
+    proof_hash: Option<[u8; 32]>,
+}
+
+fn fail(error: ResourceError) -> AssemblyFailure {
+    AssemblyFailure {
+        error,
+        corrupt: false,
+        proof_hash: None,
+    }
+}
+
+/// The completion proof hash: `full_hash(assembled_with_metadata + h)`
+/// (Resource.py:752-758).
+fn proof_hash_formula(assembled_with_metadata: &[u8], resource_hash: &[u8; 32]) -> [u8; 32] {
+    full_hash_parts(&[assembled_with_metadata, resource_hash])
+}
+
+/// Phase 2 of assembly (leviculum#71): decrypt, strip the random prefix,
+/// decompress, verify the resource hash, take the proof digest and split off
+/// the metadata. Pure and lock-free: this is the CPU-heavy part, and the std
+/// driver runs it on a blocking thread so concurrent transfers on different
+/// links no longer serialize on the node lock.
+///
+/// The buffer discipline is the inline path's, unchanged:
+/// [`crate::resource::ASSEMBLY_LIVE_COPIES`] states how many whole copies of
+/// the transfer are live at the peak, and the firmware heap budgets depend on
+/// it.
+pub(crate) fn run_assembly(input: AssemblyInput) -> Result<Assembled, AssemblyFailure> {
+    let stream = input.stream;
+    // 2. Decrypt, then drop the ciphertext: this is the one instant two
+    // whole copies of the transfer are live, and `stream` has no reader
+    // after it.
+    let mut decrypted = vec![0u8; stream.len()];
+    let token_key = input.token_key.ok_or(fail(ResourceError::CryptoError))?;
+    let plaintext_len = crate::crypto::decrypt_token(&token_key, &stream, &mut decrypted)
+        .map_err(|_| fail(ResourceError::CryptoError))?;
+    drop(stream);
+    decrypted.truncate(plaintext_len);
+
+    // 3. Strip LEADING wire_random bytes.
+    //
+    // In place: a memmove inside the buffer already held, where
+    // `&decrypted[4..].to_vec()` was a second whole copy that outlived
+    // the first.
+    if decrypted.len() < RESOURCE_RANDOM_HASH_SIZE {
+        return Err(fail(ResourceError::HashMismatch));
+    }
+    decrypted.drain(..RESOURCE_RANDOM_HASH_SIZE);
+
+    // 4. Decompress if needed. The compressed path is the one place a
+    // second buffer is unavoidable — it is sized by `data_size`, not by
+    // the transfer — so the plaintext is released as soon as it has been
+    // read out of.
+    let mut assembled = if input.compressed {
+        #[cfg(feature = "compression")]
+        {
+            let out = super::compression::bz2_decompress(&decrypted, input.data_size as usize)
+                .map_err(fail)?;
+            drop(decrypted);
+            out
+        }
+        #[cfg(not(feature = "compression"))]
+        {
+            return Err(fail(ResourceError::CompressionUnsupported));
+        }
+    } else {
+        decrypted
+    };
+
+    // 5. Verify hash: full_hash(assembled + random_hash) == resource_hash.
+    // SHA-256 is streaming, so the two pieces are fed in order instead of
+    // being concatenated into a third copy of the transfer.
+    let calculated = full_hash_parts(&[&assembled, &input.random_hash]);
+    if calculated != input.resource_hash {
+        return Err(AssemblyFailure {
+            error: ResourceError::HashMismatch,
+            corrupt: true,
+            proof_hash: None,
+        });
+    }
+
+    // Reduce the assembled data (metadata prefix included) to the only
+    // thing the proof needs of it: its digest. Keeping the bytes kept a
+    // whole copy of the transfer alive from here until the resource was
+    // dropped, and `build_proof` then built a second one to hash.
+    let proof_hash = proof_hash_formula(&assembled, &input.resource_hash);
+
+    // 6. Extract metadata if present (only in segment 1, per Python Resource.py:696)
+    let (app_data, metadata) = if input.extract_metadata {
+        if assembled.len() < 3 {
+            return Err(AssemblyFailure {
+                error: ResourceError::HashMismatch,
+                corrupt: false,
+                proof_hash: Some(proof_hash),
+            });
+        }
+        let meta_len = ((assembled[0] as usize) << 16)
+            | ((assembled[1] as usize) << 8)
+            | (assembled[2] as usize);
+        if assembled.len() < 3 + meta_len {
+            return Err(AssemblyFailure {
+                error: ResourceError::HashMismatch,
+                corrupt: false,
+                proof_hash: Some(proof_hash),
+            });
+        }
+        let metadata = assembled[3..3 + meta_len].to_vec();
+        // The application data is the tail of the buffer already held:
+        // dropping the header in place returns it without a copy, where
+        // `assembled[3 + meta_len..].to_vec()` made one the size of the
+        // transfer beside the one it read from.
+        assembled.drain(..3 + meta_len);
+        (assembled, Some(metadata))
+    } else {
+        (assembled, None)
+    };
+
+    Ok(Assembled {
+        data: app_data,
+        metadata,
+        proof_hash,
+    })
 }
 
 #[cfg(test)]

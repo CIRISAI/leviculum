@@ -75,6 +75,8 @@ mod mvr_client_forgets_a_used_peer;
 mod mvr_client_hosted_report_drop;
 #[cfg(test)]
 mod mvr_default_announce_app_data;
+#[cfg(test)]
+mod mvr_deferred_assembly;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
 #[cfg(test)]
@@ -505,6 +507,17 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// LinkClosed for a link that never established — with the one id
     /// they hold. Entries exist only for re-keyed links.
     link_origin_ids: BTreeMap<LinkId, LinkId>,
+    /// leviculum#71: when set, an incoming resource whose last part arrives is
+    /// not assembled in place. Its parts are taken and handed out as an
+    /// [`crate::resource::AssemblyJob`] for the caller to run without the node
+    /// borrow; the std driver runs it on a blocking thread. Off by default, so
+    /// no_std and FFI callers assemble inline exactly as before.
+    defer_resource_assembly: bool,
+    /// Jobs taken under deferral, waiting for the caller to collect them.
+    resource_assembly_jobs: Vec<crate::resource::AssemblyJob>,
+    /// Resources whose assembly is running outside the node, by link. One per
+    /// link at most: a sender waits for the proof before its next segment.
+    assembling_resources: BTreeMap<LinkId, crate::resource::incoming::IncomingResource>,
     /// Maximum incoming resource size in bytes. Resources larger than this
     /// are rejected at advertisement time, before any allocation.
     max_incoming_resource_size: usize,
@@ -604,6 +617,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_retry_state: BTreeMap::new(),
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
+            defer_resource_assembly: false,
+            resource_assembly_jobs: Vec::new(),
+            assembling_resources: BTreeMap::new(),
             max_incoming_resource_size,
             resource_window_policy,
             announce_control: None,
@@ -1746,6 +1762,55 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             &mut self.rng,
         )?;
         self.commit_resource_send(prepared)
+    }
+
+    /// Assemble incoming resources outside the node (leviculum#71).
+    ///
+    /// When on, an incoming resource whose last part arrives yields an
+    /// [`crate::resource::AssemblyJob`] from
+    /// [`take_resource_assembly_jobs`](Self::take_resource_assembly_jobs)
+    /// instead of being decrypted and decompressed in place. Run the job, then
+    /// hand its result to
+    /// [`complete_resource_assembly`](Self::complete_resource_assembly).
+    pub fn set_defer_resource_assembly(&mut self, defer: bool) {
+        self.defer_resource_assembly = defer;
+    }
+
+    /// Collect the assembly jobs taken since the last call (leviculum#71).
+    pub fn take_resource_assembly_jobs(&mut self) -> Vec<crate::resource::AssemblyJob> {
+        core::mem::take(&mut self.resource_assembly_jobs)
+    }
+
+    /// Apply a finished [`crate::resource::AssemblyJob`] (leviculum#71): send
+    /// the completion proof and emit the completion or failure, exactly as an
+    /// inline assembly would have.
+    ///
+    /// A result whose resource is no longer waiting is dropped: its link
+    /// closed meanwhile, and that teardown already reported the resource as
+    /// failed.
+    pub fn complete_resource_assembly(
+        &mut self,
+        result: crate::resource::AssemblyResult,
+    ) -> crate::transport::TickOutput {
+        let link_id = result.link_id;
+        let waiting = self
+            .assembling_resources
+            .get(&link_id)
+            .is_some_and(|r| *r.resource_hash() == result.resource_hash);
+        if waiting {
+            let mut incoming = self
+                .assembling_resources
+                .remove(&link_id)
+                .expect("checked above");
+            let outcome = incoming.apply_assembly(result.outcome);
+            let now_ms = self.transport.clock().now_ms();
+            let now_secs = now_ms / crate::constants::MS_PER_SECOND;
+            let resource_flags = incoming.flags();
+            let payload = self.conclude_incoming_resource(link_id, incoming, outcome, now_secs);
+            self.reset_pending_requests_on_link(&link_id, now_ms);
+            self.dispatch_completed_internal_payload(link_id, resource_flags, payload);
+        }
+        self.process_events_and_actions()
     }
 
     /// Phase 1 of the off-lock resource send (leviculum#29): snapshot the
