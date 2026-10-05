@@ -380,13 +380,14 @@ async fn main(spawner: Spawner) {
     // is populated on this unit — the plain XIAO's sheet even prints the
     // value `DNP`. So the firmware asks the part its name, once, and
     // prints the answer: `[QSPI] JEDEC id=… expect=85:60:15 part=P25Q16H
-    // bytes=2097152 clk=8MHz rxdelay=2 match=… state=…`, with a
+    // bytes=2097152 clk=16MHz rxdelay=1 match=… state=…`, with a
     // hand-clocked second opinion on the pins if nothing answers at all
     // (`qspi::identify_at_boot`, and the evidence in
     // `boards/solarnode.rs`; Codeberg #384).
     //
     // The bus comes up at `qspi::P25Q16H_BUS`, the fastest read timing
-    // the self-test has shown clean on this board (Codeberg #435), and
+    // the self-test's sweep has shown clean on this board with a sampling
+    // delay of margin on either side (Codeberg #435), and
     // only then is the record log looked for: `log_store` reads sector
     // headers, prints one `[QSPI] STORE` line, formats nothing, and drops
     // the device, which deactivates the peripheral and deconfigures the

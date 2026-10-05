@@ -68,11 +68,12 @@
 //! is 104 MHz for `FAST_READ` (`0Bh`, one dummy byte, the opcode this
 //! driver uses on it) and every other command the probe issues (P25Q16H
 //! datasheet, Table 5-3 "AC parameters"), so the part allows 32 MHz. The
-//! SolarNode's bus does not read at it: on 2026-10-04 everything the
-//! self-test programmed read back clean at 8 MHz and wrong at 32 MHz in
-//! about 80 % of the bytes, 99.8 % of those differing from one read to
-//! the next (Codeberg #435,
-//! [`P25Q16H_BUS`]). The clock a board reads cleanly at is a property of
+//! SolarNode's bus does not read at it with margin: on 2026-10-04
+//! everything the self-test programmed read back clean at 8 MHz and wrong
+//! at 32 MHz in about 80 % of the bytes, 99.8 % of those differing from
+//! one read to the next, and the read sweep of 2026-10-05 found 32 MHz
+//! clean at one sampling delay only and 16 MHz clean at three (Codeberg
+//! #435, [`P25Q16H_BUS`]). The clock a board reads cleanly at is a property of
 //! the part, the board and the sampling delay together, which is why a
 //! part carries a whole [`BusTiming`] and why the P25Q16H's is measured.
 //!
@@ -268,10 +269,10 @@ const RELEASE_WAIT_CYCLES: u32 = 64_000;
 /// the way in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Speed {
-    /// 8 MHz — the MX25R1635F's quad-read ceiling in ultra-low-power mode,
-    /// and the clock the SolarNode's P25Q16H reads clean at.
+    /// 8 MHz — the MX25R1635F's quad-read ceiling in ultra-low-power mode.
     M8,
-    /// 16 MHz — the step between, there for the read sweep's answer.
+    /// 16 MHz — the step between, and the SolarNode's P25Q16H's clock,
+    /// the fastest it reads clean at with margin ([`P25Q16H_BUS`]).
     M16,
     /// 32 MHz — the nRF52840 QSPI's own ceiling.
     M32,
@@ -375,27 +376,44 @@ pub const IS25LP080D: FlashPart = FlashPart {
 
 /// The SolarNode's P25Q16H read timing, the one line a sweep result moves.
 ///
-/// **8 MHz at the default RXDELAY, the stated safe value until the read
-/// sweep has run.** The self-test of 2026-10-04 (Codeberg #435,
-/// `/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261004T211914Z.log`)
-/// read the whole part five times per setting:
+/// **16 MHz at RXDELAY 1, the middle of the only clean eye at least three
+/// RXDELAY steps wide** (`MIN_CLEAN_RUN` in `leviculum-qspi-selftest`).
+/// The self-test of 2026-10-05 (Codeberg #435,
+/// `/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261004T230630Z.log`,
+/// build 8c52c797) read pattern B, programmed at 8 MHz, five times per
+/// chunk at every setting; mismatches in bytes of 2 097 152:
 ///
-/// | written at | read at | RXDELAY | bytes wrong     | of those unstable |
-/// |------------|---------|---------|-----------------|-------------------|
-/// | 32 MHz     | 32 MHz  | 2       | 1 644 555       | 1 642 091         |
-/// | 32 MHz     | 8 MHz   | 2       | 0               | 0                 |
-/// | 8 MHz      | 8 MHz   | 2       | 0               | 0                 |
-/// | 8 MHz      | 32 MHz  | 2       | 1 743 635       | 1 739 416         |
+/// | SCK    | RXDELAY | bytes wrong | unstable  | stable    | reading                  |
+/// |--------|---------|-------------|-----------|-----------|--------------------------|
+/// | 8 MHz  | 2       | 0           | 0         | 0         | control                  |
+/// | 16 MHz | 0       | 0           | 0         | 0         | clean                    |
+/// | 16 MHz | 1       | 0           | 0         | 0         | clean, **chosen**        |
+/// | 16 MHz | 2       | 0           | 0         | 0         | clean                    |
+/// | 16 MHz | 3       | 1 969 638   | 1 956 751 | 12 887    | edge                     |
+/// | 16 MHz | 4, 5, 6 | 2 089 026   | 0         | 2 089 026 | stable wrong, one bit late |
+/// | 16 MHz | 7       | 2 090 781   | 1 977 264 | 113 517   | edge                     |
+/// | 32 MHz | 0       | 2 088 639   | 1 896 695 | 191 944   | edge                     |
+/// | 32 MHz | 1       | 0           | 0         | 0         | clean, one step wide     |
+/// | 32 MHz | 2       | 1 915 318   | 1 900 523 | 14 795    | edge (`embassy-nrf` default) |
+/// | 32 MHz | 3       | 2 089 026   | 0         | 2 089 026 | stable wrong, one bit late |
+/// | 32 MHz | 4, 5, 6 | about 2 09x xxx | mixed |           | wrong                    |
 ///
-/// Programming is clean at both clocks; every error is a 32 MHz read,
-/// 0-to-1 flips 130 to 170 times more frequent than 1-to-0, on all eight
-/// bit positions. The self-test's `READSWEEP` table (16 and 32 MHz under
-/// every RXDELAY) ends in a `SWEEPBEST sck_khz=… rxdelay=…` line; that
-/// line, once a run has printed it clean, goes here as the new value and
-/// this table gains its rows.
+/// "One bit late": `lost1` = `gained1` = 20 979 770, the image shifted by
+/// one bit. RXDELAY 7 at 32 MHz is not in the capture (it closed after
+/// point 15). At 16 MHz the clean eye is three steps wide, 0 to 31 ns; at
+/// 32 MHz it is one step, 15.6 ns, with both neighbours wrong in nearly
+/// every byte, which temperature and supply can move it by. The default
+/// RXDELAY of 2 sits on the falling edge of that 32 MHz eye, the whole of
+/// #435: on 2026-10-04 reads at 32 MHz / 2 came back wrong in 1.64 M and
+/// 1.74 M bytes, at 8 MHz in none
+/// (`qspi-selftest-20261004T211914Z.log`), and the four read sets ahead
+/// of the 2026-10-05 sweep repeat that picture.
+///
+/// A full-part read takes about 1.05 s at 16 MHz, against 2.1 s at the
+/// 8 MHz this constant held from 8c52c797 until this sweep.
 pub const P25Q16H_BUS: BusTiming = BusTiming {
-    speed: Speed::M8,
-    rx_delay: DEFAULT_RX_DELAY,
+    speed: Speed::M16,
+    rx_delay: 1,
 };
 
 /// PUYA P25Q16H, 16 Mbit, the part the Seeed XIAO nRF52840 module is

@@ -61,11 +61,11 @@ separate documents rather than two halves of one.
 **SolarNode: conditional, and the condition is a boot line.** The XIAO
 nRF52840 module's `CONFIG.qspi_part` is `Some(&crate::qspi::P25Q16H)`
 (`leviculum-nrf/src/boards/solarnode.rs:402`), 2 MB
-(`P25Q16H`, `leviculum-nrf/src/qspi.rs:417`). But that part number comes
+(`P25Q16H`, `leviculum-nrf/src/qspi.rs:435`). But that part number comes
 from Seeed's variant headers and the wiring from Seeed's schematic, and
 the schematic for the plain XIAO v1.1 draws the same footprint marked
 **DNP** — do not populate. So the firmware does not assert the part, it
-asks: `identify_at_boot` (`leviculum-nrf/src/qspi.rs:439`) reads the
+asks: `identify_at_boot` (`leviculum-nrf/src/qspi.rs:457`) reads the
 JEDEC id once at boot and prints `[QSPI] JEDEC … state=ok` or does not.
 
 **Our SolarNode prints that line, and the part has been driven.** On
@@ -91,16 +91,43 @@ one read to the next, on all eight bit positions, with 0-to-1 flips 130
 to 170 times more frequent than 1-to-0. Data the reads cannot agree on
 is not data the cells hold, and the 2026-10-02 red was the same
 artefact. The part allows the clock: the P25Q16H datasheet gives
-104 MHz for `FAST_READ` (`0Bh`), the opcode the firmware uses. The
-suspect is the nRF52840's input sampling delay as `embassy-nrf` sets
-it, `IFTIMING.RXDELAY` = 2: 31.25 ns after the SCK edge, a quarter of an
-8 MHz bit and a whole 32 MHz one. That is a hypothesis until the
-self-test's read sweep (16 and 32 MHz at every RXDELAY) has run, so the
-firmware reads the part at 8 MHz, one constant (`P25Q16H_BUS`,
-`leviculum-nrf/src/qspi.rs`), until the sweep names a faster setting
-that reads clean.
-At 8 MHz a full 2 MB read takes about 2.1 s instead of 0.55 s; for a
-605 KiB staged image that is 0.6 s per verifying read.
+104 MHz for `FAST_READ` (`0Bh`), the opcode the firmware uses. What does
+not hold is the nRF52840's input sampling delay as `embassy-nrf` sets
+it, `IFTIMING.RXDELAY` = 2: 31.25 ns after the SCK edge.
+
+**The read sweep of 2026-10-05 measured the eye**
+(`/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261004T230630Z.log`,
+build 8c52c797). Pattern B, programmed at 8 MHz, read five times per
+chunk at the 8 MHz control and at 16 and 32 MHz under every RXDELAY;
+wrong bytes of 2 097 152:
+
+| SCK | RXDELAY | wrong | unstable | stable | reading |
+| --- | --- | --- | --- | --- | --- |
+| 8 MHz | 2 | 0 | 0 | 0 | control |
+| 16 MHz | 0, 1, 2 | 0 | 0 | 0 | clean, three steps wide |
+| 16 MHz | 3 | 1 969 638 | 1 956 751 | 12 887 | edge |
+| 16 MHz | 4, 5, 6 | 2 089 026 | 0 | 2 089 026 | stable wrong, sampled one bit late |
+| 16 MHz | 7 | 2 090 781 | 1 977 264 | 113 517 | edge |
+| 32 MHz | 0 | 2 088 639 | 1 896 695 | 191 944 | edge |
+| 32 MHz | 1 | 0 | 0 | 0 | clean, one step wide |
+| 32 MHz | 2 | 1 915 318 | 1 900 523 | 14 795 | edge, the `embassy-nrf` default |
+| 32 MHz | 3 | 2 089 026 | 0 | 2 089 026 | stable wrong, one bit late |
+| 32 MHz | 4, 5, 6 | about 2 090 000 | mixed | | wrong |
+
+"One bit late" is `lost1` = `gained1` = 20 979 770: the whole image
+shifted by one bit. RXDELAY 7 at 32 MHz is not in the capture, which
+closed after point 15. At 16 MHz the clean eye is three RXDELAY steps
+wide (0 to 31 ns), at 32 MHz one step (15.6 ns), and the default delay
+sits on the falling edge of the 32 MHz one: that is the whole of #435.
+**The firmware therefore reads the part at 16 MHz, RXDELAY 1**, the
+middle of the only clean run at least three steps wide, one constant
+(`P25Q16H_BUS`, `leviculum-nrf/src/qspi.rs`). 32 MHz at RXDELAY 1 is
+faster and has no margin on either side, and temperature and supply move
+a 15 ns eye by more than that. The self-test's `SWEEPBEST` line applies
+the same rule (`MIN_CLEAN_RUN`, `leviculum-nrf/qspi-selftest/src/lib.rs`)
+and names a faster clock with only a narrower eye as `margin=too-narrow`.
+At 16 MHz a full 2 MB read takes about 1.05 s instead of 0.55 s; for a
+605 KiB staged image that is 0.3 s per verifying read.
 
 What this means for stage 2: staging plus golden fits the part with room
 to spare ([below](#the-budget-on-a-2-mb-part-and-the-other-claimant)),
@@ -122,7 +149,7 @@ leaving about 838 KiB. That is enough, and it is not so much that the
 region layout can be left implicit, because **the same part is already
 wanted by something else**: the record log, the message store of Codeberg
 #384, mounts over the whole part today
-(`log_store`, `leviculum-nrf/src/qspi.rs:1025`, read-only and formatting
+(`log_store`, `leviculum-nrf/src/qspi.rs:1043`, read-only and formatting
 nothing, precisely because that decision had not been taken). Two
 claimants and one part means one region map, decided once, in one place —
 not two mounts that each believe they own sector 0. Whichever batch
