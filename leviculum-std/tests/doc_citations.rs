@@ -29,7 +29,14 @@
 //!   name has to be *defined* at the cited line, not merely occur there:
 //!   see [`defines_recipe`].
 //!
-//! A bare citation that names nothing only gets the existence check. The
+//! In the book and the crates both classes are also anchored by the text
+//! their cited line held when the citation was written
+//! (`bare_citations_still_point_at_the_text_they_cited`). For a named
+//! citation that is what catches a move inside the window, which the
+//! proximity check holds by design; until #307 closed, a named citation
+//! could drift up to `WINDOW` lines and stay green.
+//!
+//! A bare citation that names nothing only gets the existence check here. The
 //! status line therefore reports three groups and not one — checked
 //! against the symbol they name and holding, named but not holding, and
 //! could not be checked — and warns when the third is the majority of the
@@ -809,25 +816,30 @@ impl Counts {
 /// backstop for that class, via the tree's own history rather than via a
 /// name.
 ///
-/// `bare_anchored` says whether that backstop runs over this corpus (the
-/// book and the crates, not the scripts), because the line has to say which
-/// of the two a bare citation got.
-fn coverage_lines(label: &str, counts: &Counts, bare_anchored: bool) -> Vec<String> {
+/// `anchored` says whether that backstop runs over this corpus (the book and
+/// the crates, not the scripts), because the line has to say which check a
+/// citation got. Since #307 closed it anchors the named citations as well:
+/// the proximity window alone let a named citation drift up to
+/// [`WINDOW`] lines and stay green.
+fn coverage_lines(label: &str, counts: &Counts, anchored: bool) -> Vec<String> {
     let not_holding = counts
         .with_ident
         .saturating_sub(counts.holds + counts.absent_ident);
     let bare_present = counts
         .bare
         .saturating_sub(counts.absent - counts.absent_ident);
-    let bare_how = if bare_anchored {
-        "anchored by the text of the cited line in \
-         bare_citations_still_point_at_the_text_they_cited"
+    let (bare_how, named_how) = if anchored {
+        (
+            "anchored by the text of the cited line in \
+             bare_citations_still_point_at_the_text_they_cited",
+            "; their cited line anchored by its text, as a bare one is",
+        )
     } else {
-        "existence and length only"
+        ("existence and length only", "")
     };
     let mut out = vec![format!(
         "{label} citations: {} total; {} checked against the symbol they name \
-         (within {WINDOW} lines) and holding; {not_holding} named but not \
+         (within {WINDOW} lines{named_how}) and holding; {not_holding} named but not \
          holding (reported below); {} could not be checked by name \
          ({bare_present} bare: {bare_how}, {} external: not in this workspace, \
          {} skipped: into a reference/ submodule that is not checked out)",
@@ -847,15 +859,15 @@ fn coverage_lines(label: &str, counts: &Counts, bare_anchored: bool) -> Vec<Stri
     }
     if counts.unchecked() * 2 > counts.total() {
         let pct = counts.unchecked() * 100 / counts.total().max(1);
-        let what = if bare_anchored {
+        let what = if anchored {
             format!(
                 "The {bare_present} bare ones are checked by the text their cited \
                  line held when the citation was last written, which catches a \
                  moved or rewritten line but not a citation that was already \
                  wrong then, nor a sentence that went wrong while its line \
                  stayed put; the {} external and {} skipped ones are not \
-                 checked at all. Those named are checked by proximity only: \
-                 the identifier anywhere within {WINDOW} lines of the span holds.",
+                 checked at all. Those named are anchored by the same text, and \
+                 their identifier must also be within {WINDOW} lines of the span.",
                 counts.external, counts.absent,
             )
         } else {
@@ -2722,6 +2734,12 @@ struct AnchoredSpan {
     /// rest of the citation has established where the block went, which is
     /// what keeps a range ending on a `]` repairable.
     weak: bool,
+    /// Placed by its own text: the anchor occurs once in the file now, or
+    /// once together with its two neighbours. Not set by anything that
+    /// places an endpoint afterwards -- the shift, the identifier's
+    /// tie-break -- because those infer from the rest of the citation, and
+    /// [`ident_unproved`] renumbers only what the text itself placed.
+    own: bool,
 }
 
 /// Whether the anchor text can carry a citation at all.
@@ -2749,14 +2767,151 @@ impl AnchorCounts {
     }
 }
 
-/// Anchor every bare citation in `citations` against the tree's own history.
+/// Which citations an anchoring pass takes: the two classes are counted and
+/// reported apart, because they were guarded apart for a long time and a
+/// count that mixes them cannot be compared with any earlier run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnchorClass {
+    /// Citations that name nothing.
+    Bare,
+    /// Citations attached to a backticked identifier. The identifier only
+    /// chooses among several lines that hold the anchored text; see
+    /// [`place_by_identifier`].
+    Ident,
+}
+
+impl AnchorClass {
+    fn takes(self, c: &Citation) -> bool {
+        (self == AnchorClass::Ident) == c.ident.is_some()
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            AnchorClass::Bare => "bare-citation",
+            AnchorClass::Ident => "identifier-citation",
+        }
+    }
+}
+
+/// Place an endpoint whose text is now on several lines by the cited
+/// identifier: the occurrence nearest a line that carries the identifier.
+///
+/// The identifier chooses among hits of the anchored text and decides
+/// nothing on its own. `WINDOW` is the tie-breaker's reach: a hit further
+/// than that from every occurrence of the identifier is not evidence, and
+/// two hits equally near are not either.
+fn place_by_identifier(spans: &mut [AnchoredSpan], ident_lines: &[usize]) {
+    if ident_lines.is_empty() {
+        return;
+    }
+    for s in spans.iter_mut() {
+        let Anchor::Several(hits) = &s.verdict else {
+            continue;
+        };
+        let dist = |h: usize| {
+            ident_lines
+                .iter()
+                .map(|&i| (i as isize - h as isize).unsigned_abs())
+                .min()
+                .unwrap_or(usize::MAX)
+        };
+        let Some(best) = hits.iter().map(|&h| dist(h)).min() else {
+            continue;
+        };
+        let nearest: Vec<usize> = hits.iter().copied().filter(|&h| dist(h) == best).collect();
+        if let [only] = nearest[..] {
+            if best <= WINDOW {
+                s.verdict = Anchor::Moved(only);
+            }
+        }
+    }
+}
+
+/// One citation the anchor found moved or rewritten, with what became of
+/// each of its endpoints.
+struct AnchoredCitation<'a> {
+    citation: &'a Citation,
+    spans: Vec<AnchoredSpan>,
+    /// Why the anchor's placement is not proof enough to renumber this
+    /// citation: see [`ident_unproved`]. Always `None` for a bare one.
+    unproved: Option<&'static str>,
+}
+
+impl AnchoredCitation<'_> {
+    /// The citation as the fixer may write it: the anchor's placement, when
+    /// that placement is proved.
+    fn repair(&self) -> Option<String> {
+        match self.unproved {
+            None => repaired(self.citation, &self.spans),
+            Some(_) => None,
+        }
+    }
+}
+
+/// Why the text anchor has not proved where an identifier citation went, or
+/// `None` when it has.
+///
+/// The fixer renumbers an identifier citation on the same evidence it acts
+/// on for a bare one, and on nothing weaker. Three conditions, all of them
+/// about the text the citation pointed at, none about the nearest
+/// occurrence of its name:
+///
+/// 1. Every endpoint moved by one common shift. A range whose ends moved by
+///    different amounts grew or shrank, and whether the citation still
+///    covers what it meant is a reading question.
+/// 2. The text anchor is unique: every endpoint's text occurs once in the
+///    file now, alone or with its two neighbours. An endpoint only the shift
+///    or the identifier's tie-break placed is inferred from the rest of the
+///    citation, and the inference repeats whatever offset the citation had
+///    when it was written. `embedded.md:70` is the case: its range opened
+///    on a `))` four lines above the `select4` it meant, the day it was
+///    written, and the shift its unique end established would have carried
+///    that error forward intact.
+/// 3. The identifier sits inside the repaired span. The text moved with the
+///    citation; this is what says the name moved with it, so that a
+///    citation is never renumbered onto a line that holds its old text but
+///    no longer its subject.
+fn ident_unproved(
+    cited: &[(usize, usize)],
+    spans: &[AnchoredSpan],
+    ident_lines: &[usize],
+) -> Option<&'static str> {
+    let mut shifts = BTreeSet::new();
+    for s in spans {
+        let Anchor::Moved(to) = s.verdict else {
+            return Some("not every endpoint moved");
+        };
+        shifts.insert(to as isize - s.line as isize);
+    }
+    let [shift] = shifts.into_iter().collect::<Vec<_>>()[..] else {
+        return Some("its endpoints' texts moved by different amounts");
+    };
+    if !spans.iter().all(|s| s.own) {
+        return Some(
+            "an endpoint's text is not unique in the file, so only the rest of the \
+             citation placed it",
+        );
+    }
+    let inside = cited.iter().any(|&(a, b)| {
+        let (a, b) = (a as isize + shift, b as isize + shift);
+        ident_lines.iter().any(|&h| (a..=b).contains(&(h as isize)))
+    });
+    if !inside {
+        return Some("the identifier is not inside the span the anchor places");
+    }
+    None
+}
+
+/// Anchor every citation of `class` in `citations` against the tree's own
+/// history.
 ///
 /// Returns the per-endpoint verdicts for the citations that have at least one
 /// moved or rewritten endpoint, plus the counts over all of them.
-fn anchor_bare_citations<'a>(
+fn anchor_citations<'a>(
     root: &Path,
     citations: &'a [Citation],
-) -> (AnchorCounts, Vec<(&'a Citation, Vec<AnchoredSpan>)>) {
+    class: AnchorClass,
+) -> (AnchorCounts, Vec<AnchoredCitation<'a>>) {
     let mut counts = AnchorCounts::default();
     let mut drifted = Vec::new();
 
@@ -2789,7 +2944,7 @@ fn anchor_bare_citations<'a>(
     let mut pending = Vec::new();
 
     for c in citations {
-        if c.ident.is_some() {
+        if !class.takes(c) {
             continue;
         }
         if EXTERNAL_PREFIXES.iter().any(|p| c.path.starts_with(p)) {
@@ -2885,6 +3040,8 @@ fn anchor_bare_citations<'a>(
                     if edge == 1 && end == start {
                         continue;
                     }
+                    let verdict = anchor_verdict(old, new, line);
+                    let weak = old.get(line - 1).is_some_and(|l| wordless(l.trim()));
                     spans.push(AnchoredSpan {
                         span: i,
                         edge,
@@ -2893,11 +3050,17 @@ fn anchor_bare_citations<'a>(
                             .get(line - 1)
                             .map(|l| l.trim().to_string())
                             .unwrap_or_default(),
-                        verdict: anchor_verdict(old, new, line),
-                        weak: old.get(line - 1).is_some_and(|l| wordless(l.trim())),
+                        own: !weak && matches!(verdict, Anchor::Moved(_)),
+                        verdict,
+                        weak,
                     });
                 }
             }
+            let ident_lines = match &p.citation.ident {
+                Some(ident) => ident_hits(new, ident_needle(ident), is_justfile(cand)),
+                None => Vec::new(),
+            };
+            place_by_identifier(&mut spans, &ident_lines);
             place_by_common_shift(&mut spans, new);
             // Whatever the shift did not corroborate, a wordless anchor
             // cannot claim on its own.
@@ -2906,20 +3069,33 @@ fn anchor_bare_citations<'a>(
                     s.verdict = Anchor::Undecided("the cited line carries no word to anchor to");
                 }
             }
-            per_candidate.push(spans);
+            let unproved = p
+                .citation
+                .ident
+                .as_ref()
+                .and_then(|_| ident_unproved(&p.citation.spans, &spans, &ident_lines));
+            per_candidate.push(AnchoredCitation {
+                citation: p.citation,
+                spans,
+                unproved,
+            });
         }
 
         // A candidate that still holds the citation's text, with nothing
         // moved, settles it: the citation is right about that file, whatever
         // the same-named file one directory over now says.
-        let settled = per_candidate.iter().position(|spans| {
-            !spans.iter().any(|s| matches!(s.verdict, Anchor::Moved(_)))
-                && spans.iter().any(|s| s.verdict == Anchor::Fresh)
+        let settled = per_candidate.iter().position(|a| {
+            !a.spans
+                .iter()
+                .any(|s| matches!(s.verdict, Anchor::Moved(_)))
+                && a.spans.iter().any(|s| s.verdict == Anchor::Fresh)
         });
         let chosen = settled.or_else(|| {
-            per_candidate
-                .iter()
-                .position(|spans| spans.iter().any(|s| matches!(s.verdict, Anchor::Moved(_))))
+            per_candidate.iter().position(|a| {
+                a.spans
+                    .iter()
+                    .any(|s| matches!(s.verdict, Anchor::Moved(_)))
+            })
         });
         let tally = |counts: &mut AnchorCounts, spans: &[AnchoredSpan]| {
             for s in spans {
@@ -2945,15 +3121,15 @@ fn anchor_bare_citations<'a>(
                 );
                 continue;
             };
-            tally(&mut counts, first);
-            if first.iter().any(|s| s.verdict == Anchor::Rewritten) {
-                drifted.push((p.citation, per_candidate.swap_remove(0)));
+            tally(&mut counts, &first.spans);
+            if first.spans.iter().any(|s| s.verdict == Anchor::Rewritten) {
+                drifted.push(per_candidate.swap_remove(0));
             }
             continue;
         };
-        tally(&mut counts, &per_candidate[chosen]);
+        tally(&mut counts, &per_candidate[chosen].spans);
         if settled.is_none() {
-            drifted.push((p.citation, per_candidate.swap_remove(chosen)));
+            drifted.push(per_candidate.swap_remove(chosen));
         }
     }
 
@@ -3042,10 +3218,11 @@ fn rewrite_citations(root: &Path, edits: BTreeMap<PathBuf, Vec<(usize, usize, St
 /// the same code on purpose: a separate fixing script would be a second
 /// implementation of the anchor rule, and the first symptom of the two
 /// disagreeing is a repair pointed at the wrong line.
-fn apply_repairs(root: &Path, drifted: &[(&Citation, Vec<AnchoredSpan>)]) -> usize {
+fn apply_repairs(root: &Path, drifted: &[AnchoredCitation]) -> usize {
     let mut per_file: BTreeMap<PathBuf, Vec<(usize, usize, String)>> = BTreeMap::new();
-    for (c, spans) in drifted {
-        if let Some(new) = repaired(c, spans) {
+    for a in drifted {
+        if let Some(new) = a.repair() {
+            let c = a.citation;
             per_file
                 .entry(c.doc.clone())
                 .or_default()
@@ -3057,13 +3234,15 @@ fn apply_repairs(root: &Path, drifted: &[(&Citation, Vec<AnchoredSpan>)]) -> usi
 
 fn anchor_report(
     label: &str,
+    class: AnchorClass,
     counts: &AnchorCounts,
-    drifted: &[(&Citation, Vec<AnchoredSpan>)],
+    drifted: &[AnchoredCitation],
 ) -> Vec<Failure> {
     println!(
-        "{label} bare-citation anchors: {} cited lines still hold the text they held \
+        "{label} {} anchors: {} cited lines still hold the text they held \
          when cited, {} moved, {} rewritten in place, {} undecidable; {} external, \
          {} unresolved",
+        class.label(),
         counts.fresh,
         counts.moved,
         counts.rewritten,
@@ -3072,11 +3251,12 @@ fn anchor_report(
         counts.unresolved
     );
     for (why, n) in &counts.reasons {
-        println!("{label} bare-citation anchors: {n} undecidable: {why}");
+        println!("{label} {} anchors: {n} undecidable: {why}", class.label());
     }
     drifted
         .iter()
-        .map(|(c, spans)| {
+        .map(|a| {
+            let (c, spans) = (a.citation, &a.spans);
             let mut lines = vec![format!("{}:{}: {}", c.doc.display(), c.doc_line, c.raw)];
             for s in spans.iter() {
                 match s.verdict {
@@ -3097,14 +3277,18 @@ fn anchor_report(
                     _ => {}
                 }
             }
-            match repaired(c, spans) {
-                Some(new) => lines.push(format!("    the citation should read {new}")),
-                None if spans.iter().any(|s| s.verdict == Anchor::Rewritten) => lines.push(
+            match (repaired(c, spans), a.unproved) {
+                (Some(new), None) => lines.push(format!("    the citation should read {new}")),
+                (Some(new), Some(why)) => lines.push(format!(
+                    "    the text anchor would read {new}, but {why}; re-read it rather \
+                     than renumbering it"
+                )),
+                (None, _) if spans.iter().any(|s| s.verdict == Anchor::Rewritten) => lines.push(
                     "    no line holds that text any more; re-read the sentence and point \
                      it at what it means today, or drop the citation"
                         .into(),
                 ),
-                None => lines.push(
+                (None, _) => lines.push(
                     "    not all of this citation's endpoints could be placed; \
                      re-read it rather than renumbering it"
                         .into(),
@@ -3120,11 +3304,11 @@ fn anchor_report(
 
 // --- repair by the diff, not by the nearest name --------------------------
 //
-// `LEVICULUM_CITATION_FIX` above repairs the bare class, where the citation's
-// own anchor text says where the line went. The identifier-anchored classes
-// have no such anchor in the report: what `check` prints is the nearest
-// occurrence of the cited identifier, and that is precisely the number a
-// repair must NOT take.
+// `LEVICULUM_CITATION_FIX` above repairs by the citation's own anchor text:
+// every bare citation it can place, and an identifier-anchored one only on
+// the proof [`ident_unproved`] asks for. What `check` prints for the
+// identifier classes is the nearest occurrence of the cited identifier, and
+// that is precisely the number a repair must NOT take.
 //
 // Order 257 paid for that in full, and the coder who paid it wrote the trap
 // down: a 16-line doc comment inserted at line 950 of transport.rs reddened
@@ -3622,7 +3806,7 @@ fn run_bare_anchor_canary() {
         3,
         "CANARY: the fixture's three citations were not all parsed"
     );
-    let (counts, drifted) = anchor_bare_citations(root, &citations);
+    let (counts, drifted) = anchor_citations(root, &citations, AnchorClass::Bare);
     assert_eq!(
         counts.fresh, 1,
         "CANARY: {} of the 1 unmoved citation was seen as still pointing at its \
@@ -3640,27 +3824,28 @@ fn run_bare_anchor_canary() {
     // shift its opening line establishes carries it. Without that the fixer
     // gives up on every range ending in a brace, which an injected-drift
     // control found it doing.
-    let (block, block_spans) = drifted
+    let block = drifted
         .iter()
-        .find(|(c, _)| c.raw.contains('-'))
+        .find(|a| a.citation.raw.contains('-'))
         .expect("CANARY: the range citation was not reported");
     assert_eq!(
-        repaired(block, block_spans).as_deref(),
+        block.repair().as_deref(),
         Some(format!("`canary_anchor.rs:{}-{}`", 14, 24).as_str()),
         "CANARY: a range whose end is a wordless line was not carried by the \
          displacement its start established"
     );
-    let (cited, spans) = drifted
+    let cited = drifted
         .iter()
-        .find(|(c, _)| !c.raw.contains('-'))
+        .find(|a| !a.citation.raw.contains('-'))
         .expect("CANARY: the single-line moved citation was not reported");
     assert!(
-        cited.raw.contains(&moves[1..moves.len() - 1]),
+        cited.citation.raw.contains(&moves[1..moves.len() - 1]),
         "CANARY: the wrong citation was reported: {}",
-        cited.raw
+        cited.citation.raw
     );
     assert_eq!(
-        spans
+        cited
+            .spans
             .iter()
             .filter_map(|s| match s.verdict {
                 Anchor::Moved(to) => Some(to),
@@ -3671,7 +3856,7 @@ fn run_bare_anchor_canary() {
         "CANARY: the moved citation was reported without the line its text moved to"
     );
     assert_eq!(
-        repaired(cited, spans).as_deref(),
+        cited.repair().as_deref(),
         Some(format!("`canary_anchor.rs:{}`", 14).as_str()),
         "CANARY: the repair does not name the line the text actually moved to"
     );
@@ -3722,14 +3907,21 @@ fn bare_citations_still_point_at_the_text_they_cited() {
         ("doc", book_citations(&root)),
         ("source", source_citations(&root, SOURCE_CRATES)),
     ] {
-        let (counts, drifted) = anchor_bare_citations(&root, &citations);
-        if std::env::var_os("LEVICULUM_CITATION_FIX").is_some() {
-            fixed += apply_repairs(&root, &drifted);
+        // Both classes of one corpus share their citing files, so their
+        // repairs go in through one rewrite: offsets taken from one scan
+        // stay valid only until the first edit to the file.
+        let mut all_drifted = Vec::new();
+        for class in [AnchorClass::Bare, AnchorClass::Ident] {
+            let (counts, drifted) = anchor_citations(&root, &citations, class);
+            failures.extend(anchor_report(label, class, &counts, &drifted));
+            all_drifted.extend(drifted);
         }
-        failures.extend(anchor_report(label, &counts, &drifted));
+        if std::env::var_os("LEVICULUM_CITATION_FIX").is_some() {
+            fixed += apply_repairs(&root, &all_drifted);
+        }
     }
     if fix_mode_on() {
-        println!("LEVICULUM_CITATION_FIX: rewrote {fixed} bare citation(s)");
+        println!("LEVICULUM_CITATION_FIX: rewrote {fixed} anchored citation(s)");
         // The identifier-anchored classes, after the bare ones and in the
         // same invocation rather than in a test of their own: both fixers
         // rewrite the same citing files, and two of them running in parallel
@@ -3742,7 +3934,7 @@ fn bare_citations_still_point_at_the_text_they_cited() {
         );
         return;
     }
-    report("bare-citation anchor", &failures);
+    report("anchored", &failures);
 }
 
 /// A red citation is repaired to where the line map moved its line, never to
@@ -4093,8 +4285,8 @@ fn anchor_fixture_verdicts(
         2,
         "FIXTURE: the fixture's two citations were not both parsed"
     );
-    let (anchor_counts, drifted) = anchor_bare_citations(root, &citations);
-    let anchored = anchor_report("fixture", &anchor_counts, &drifted)
+    let (anchor_counts, drifted) = anchor_citations(root, &citations, AnchorClass::Bare);
+    let anchored = anchor_report("fixture", AnchorClass::Bare, &anchor_counts, &drifted)
         .into_iter()
         .map(|f| f.message)
         .collect();
@@ -4106,8 +4298,9 @@ fn anchor_fixture_verdicts(
 /// One line inserted above both cited lines.
 ///
 /// The bare citation is named moved, with its new number; the identifier
-/// citation holds at +1, because that class is still checked by proximity
-/// to its identifier and a one-line shift is inside the window by design.
+/// citation holds at +1 in the proximity check, whose window a one-line
+/// shift is inside by design. What the text anchor makes of the identifier
+/// class is the next control's.
 #[test]
 fn anchor_control_a_moved_line_is_named_with_its_new_number() {
     let (tmp, code, doc, mut body) = anchor_fixture();
@@ -4220,5 +4413,134 @@ fn anchor_control_an_identifier_moved_past_the_window_is_drift() {
             ANCHOR_IDENT_LINE + pad
         )),
         "CONTROL: the report does not name where the identifier went:\n{only}"
+    );
+}
+
+/// Three lines inserted between the two cited lines: the identifier
+/// citation's line moves by 3 and the bare one stays put.
+///
+/// The proximity check holds it -- three lines are inside its window, which
+/// is the blind spot #307 named -- so the text anchor is what has to see it:
+/// red, naming the line the text went to, and repaired to it, because all
+/// three of [`ident_unproved`]'s conditions hold.
+#[test]
+fn anchor_control_an_identifier_citation_moved_three_lines_is_named_and_repaired() {
+    let (tmp, code, doc, mut body) = anchor_fixture();
+    body.splice(
+        ANCHOR_BARE_LINE..ANCHOR_BARE_LINE,
+        (0..3).map(|n| format!("// inserted {n}")),
+    );
+    fs::write(&code, body.join("\n") + "\n").unwrap();
+    let root = tmp.path();
+
+    let citations = scan(root, std::slice::from_ref(&doc), Corpus::Book);
+    let (counts, failures, _) = check(root, &citations);
+    assert!(
+        failures.is_empty() && counts.offsets.iter().map(|o| o.dist).eq([3]),
+        "CONTROL: the proximity check should still hold the citation at +3, which \
+         is what makes the text anchor necessary"
+    );
+    let (anchor_counts, drifted) = anchor_citations(root, &citations, AnchorClass::Ident);
+    assert_eq!(
+        (anchor_counts.moved, anchor_counts.fresh),
+        (1, 0),
+        "CONTROL: the identifier citation's one endpoint must be counted as moved"
+    );
+    let report: Vec<String> =
+        anchor_report("fixture", AnchorClass::Ident, &anchor_counts, &drifted)
+            .into_iter()
+            .map(|f| f.message)
+            .collect();
+    let [only] = &report[..] else {
+        panic!("CONTROL: expected exactly the identifier citation, got {report:#?}");
+    };
+    let moved_to = ANCHOR_IDENT_LINE + 3;
+    assert!(
+        only.contains(&format!("that text is now at line {moved_to} (+3)")),
+        "CONTROL: the verdict does not name where the text went:\n{only}"
+    );
+    assert!(
+        only.contains(&format!(
+            "the citation should read `anchor_target.rs:{moved_to}`"
+        )),
+        "CONTROL: the repair line does not name the new number:\n{only}"
+    );
+    assert_eq!(
+        apply_repairs(root, &drifted),
+        1,
+        "CONTROL: a proved identifier citation was not rewritten"
+    );
+    let text = fs::read_to_string(&doc).unwrap();
+    assert!(
+        text.contains(&format!("`anchor_named` (`anchor_target.rs:{moved_to}`)")),
+        "CONTROL: the doc does not carry the repaired number:\n{text}"
+    );
+}
+
+/// Each of [`ident_unproved`]'s three conditions refuses on its own, and a
+/// citation that meets all three is accepted.
+///
+/// The fixture above can only show the accepted case: its cited line is
+/// unique and carries the name. Each refusal is a citation the fixer would
+/// otherwise renumber without the evidence the bare class requires, so each
+/// is asserted on a hand-built verdict.
+#[test]
+fn an_identifier_citation_is_renumbered_only_on_proof() {
+    let span = |edge: usize, line: usize, verdict: Anchor, own: bool| AnchoredSpan {
+        span: 0,
+        edge,
+        line,
+        anchor: "text".into(),
+        verdict,
+        weak: false,
+        own,
+    };
+    let range = [(10, 20)];
+
+    // Both ends placed by their own unique text, +5, name at 17: proved.
+    let both = [
+        span(0, 10, Anchor::Moved(15), true),
+        span(1, 20, Anchor::Moved(25), true),
+    ];
+    assert_eq!(ident_unproved(&range, &both, &[17]), None);
+
+    // (1) The ends moved apart: the range grew.
+    let grew = [
+        span(0, 10, Anchor::Moved(15), true),
+        span(1, 20, Anchor::Moved(28), true),
+    ];
+    assert_eq!(
+        ident_unproved(&range, &grew, &[17]),
+        Some("its endpoints' texts moved by different amounts")
+    );
+    // (1) One end did not move at all.
+    let half = [
+        span(0, 10, Anchor::Moved(15), true),
+        span(1, 20, Anchor::Fresh, false),
+    ];
+    assert_eq!(
+        ident_unproved(&range, &half, &[17]),
+        Some("not every endpoint moved")
+    );
+
+    let not_unique = Some(
+        "an endpoint's text is not unique in the file, so only the rest of the \
+         citation placed it",
+    );
+    // (2) Only the identifier's tie-break placed it.
+    let tie = [span(0, 10, Anchor::Moved(15), false)];
+    assert_eq!(ident_unproved(&[(10, 10)], &tie, &[15]), not_unique);
+    // (2) The embedded.md:70 shape: a `))` the shift carried to where the
+    // unique end put it, every condition but this one met.
+    let carried = [
+        span(0, 10, Anchor::Moved(15), false),
+        span(1, 20, Anchor::Moved(25), true),
+    ];
+    assert_eq!(ident_unproved(&range, &carried, &[17]), not_unique);
+
+    // (3) The text moved, the name did not come along.
+    assert_eq!(
+        ident_unproved(&range, &both, &[12, 40]),
+        Some("the identifier is not inside the span the anchor places")
     );
 }
