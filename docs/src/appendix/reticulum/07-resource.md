@@ -7,7 +7,7 @@ Window adaptation and timeout scheduling are informative.
 ## Advertisement
 
 The sender advertises a resource with a RESOURCE_ADV packet (context 0x02)
-carrying a msgpack dictionary (`ResourceAdvertisement.pack`, `Resource.py:1333-1355`):
+carrying a msgpack dictionary (`ResourceAdvertisement.pack`, `Resource.py:1330-1352`):
 
 | Key | Meaning |
 |-----|---------|

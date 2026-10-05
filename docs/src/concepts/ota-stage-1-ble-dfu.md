@@ -28,7 +28,7 @@ way: a magic value in `GPREGRET`, the retained register that survives a
 soft reset, read by the bootloader on the next boot.
 
 We already drive one of them. The 1200-baud touch writes
-`DFU_MAGIC_UF2_RESET` (`leviculum-nrf/src/usb.rs:230`) and resets, and
+`DFU_MAGIC_UF2_RESET` (`leviculum-nrf/src/usb.rs:232`) and resets, and
 the bootloader comes up as a mass-storage volume. The OTA mode is a
 different constant written to the same register at the same point by the
 same code path.

@@ -38,7 +38,7 @@ the three RX sources plus a timer deadline begins at
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
 transport-enabled `lnsd`.
-(`enable_transport` (`leviculum-nrf/src/bin/t114.rs:196`),
+(`enable_transport` (`leviculum-nrf/src/bin/t114.rs:203`),
 `leviculum-nrf/src/bin/rak4631.rs:238`)
 
 ## Hardware coverage
@@ -214,7 +214,7 @@ is what this family adds to the shared code: DIO2 steers only the
 transmit side of the Wio-SX1262's switch, so the receive side is a host
 GPIO the driver asserts for a listening window and releases before every
 key-up (`rx_frontend`, `leviculum-nrf/src/sx1262.rs:373`;
-`LoRaRxEnable`, `leviculum-nrf/src/boards/solarnode.rs:63`).
+`LoRaRxEnable`, `leviculum-nrf/src/boards/solarnode.rs:70`).
 
 | Product | Level | Note |
 |---|---|---|

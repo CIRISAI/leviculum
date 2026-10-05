@@ -142,7 +142,7 @@ drains the `EventReceiver`.
 triple — RNG, [`Clock`](rust-api-spec.md#platform-traits), and
 [`Storage`](rust-api-spec.md#platform-traits) — in its `build` call. The T114
 firmware builds its node the same way (`NodeCoreBuilder`,
-`leviculum-nrf/src/bin/t114.rs:195-213`):
+`leviculum-nrf/src/bin/t114.rs:202-220`):
 
 ```rust
 // Adapted from the T114 builder cited above.
@@ -197,7 +197,7 @@ monotonic.
 ### `Interface`
 
 The **send side** of an interface — `id`, `name`, `mtu`, `is_online`, and the
-non-blocking `try_send` (`leviculum-core/src/traits.rs:277`). The receive side is
+non-blocking `try_send` (`leviculum-core/src/traits.rs:280`). The receive side is
 deliberately *not* in the trait: receiving is platform-specific (an interrupt, a
 DMA buffer, an Embassy channel), and you feed received bytes into the core via
 `handle_packet` yourself. `try_send` returns `InterfaceError::BufferFull`
@@ -231,7 +231,7 @@ core schedules retries against capacity without knowing any radio physics — th
 
 An interface that carries several point-to-point links behind one
 `InterfaceId` (BLE) overrides `try_send_to_peer`
-(`leviculum-core/src/traits.rs:316`): the core passes the 16-byte
+(`leviculum-core/src/traits.rs:317`): the core passes the 16-byte
 identity of the peer it addressed the packet at — the same value the
 interface reports on peer-up/peer-lost — or `None` for a broadcast.
 The interface maps that identity to its own link(s); the core never
@@ -244,9 +244,9 @@ Key-value persistence for the path table, link table, announce caches,
 identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:500`). It
 is a large trait; you do not write it from scratch:
 
-- `NoStorage` (`leviculum-core/src/traits.rs:913`) — zero-sized, every lookup
+- `NoStorage` (`leviculum-core/src/traits.rs:920`) — zero-sized, every lookup
   returns nothing. Use it for a stateless node or a smoke test.
-- `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:84`,
+- `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:91`,
   `EmbeddedStorage::new()` at `:344`) — `heapless`-backed, fixed-capacity, the
   production choice for flash-constrained devices. This is what the nRF52
   firmware uses.

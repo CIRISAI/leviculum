@@ -655,7 +655,7 @@ because a refusal still leaves the citation red and a reader has to
 unpick it.
 
 Step 4 above, read from the other side, is the mechanism. The proof is
-`Placed::Proved` (`leviculum-std/tests/doc_citations.rs:3266`) — the
+`Placed::Proved` (`leviculum-std/tests/doc_citations.rs:3450`) — the
 mapped line's text *now* against the text the *cited number* held in
 the base. The premise of the whole map is therefore that every number
 in the corpus is one the base was right about, and a citation an
@@ -744,9 +744,9 @@ rewrites and run once.*
 
 Built 2026-09-27. The proximity test had lived inline in the checker,
 closed over the current file's lines; it is now `ident_resolves`
-(`leviculum-std/tests/doc_citations.rs:688`), a function over the lines
+(`leviculum-std/tests/doc_citations.rs:695`), a function over the lines
 it is handed, and `place_citation` asks it a second time against the
-base copy of the file (`leviculum-std/tests/doc_citations.rs:3478`). A
+base copy of the file (`leviculum-std/tests/doc_citations.rs:3662`). A
 map repair is emitted only where both halves hold: the map proves the
 move, *and* the base resolved the citation's own identifier at the
 citation's own number. The refusal above is the other branch.

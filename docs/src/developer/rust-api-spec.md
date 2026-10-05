@@ -56,7 +56,7 @@ returns `self`.
 | `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:262` | Identity / known-destinations / ratchet store dir |
 | `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:716` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
 | `fn without_events(self) -> Self` — `builder.rs:211` | Daemon mode: no application event channel |
-| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1018` | Build the node (not yet running) |
+| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1033` | Build the node (not yet running) |
 | `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:803` | Same as `build`, outside an async context |
 
 ### `ReticulumNode`
@@ -89,7 +89,7 @@ The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-st
 hidden; it is what `leviculum-ffi` wraps. Notable facade-only helpers:
 `api::generate_identity()` (`api/mod.rs:35`), `api::version()` (`api/mod.rs:42`),
 `api::version_string()` (`api/mod.rs:51`), and `Node::connect_with_key`
-(`api/mod.rs:455`) / `Node::accept_link` (`api/mod.rs:471`).
+(`api/mod.rs:456`) / `Node::accept_link` (`api/mod.rs:472`).
 
 ### `LinkHandle`
 
@@ -124,8 +124,8 @@ plane and a droppable data plane (Codeberg #71), draining control first.
 
 | Signature | Purpose |
 |-----------|---------|
-| `async fn recv(&mut self) -> Option<NodeEvent>` — `driver/mod.rs:435` | Next event, control plane prioritized; `None` once shut down. Cancel-safe |
-| `fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError>` — `driver/mod.rs:475` | Non-blocking receive |
+| `async fn recv(&mut self) -> Option<NodeEvent>` — `driver/mod.rs:436` | Next event, control plane prioritized; `None` once shut down. Cancel-safe |
+| `fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError>` — `driver/mod.rs:476` | Non-blocking receive |
 
 `NodeEvent` is the event enum, defined in core at
 `leviculum-core/src/node/event.rs:45` and re-exported as
@@ -181,9 +181,9 @@ caller must dispatch.
 | `fn register_destination(&mut self, dest: Destination)` — `node/mod.rs:623` | Register a local destination |
 | `fn announce_destination(&mut self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> Result<TickOutput, AnnounceError>` — `node/mod.rs:870` | Build and queue an announce |
 | `fn send_single_packet(&mut self, dest_hash: &DestinationHash, data: &[u8]) -> Result<([u8; TRUNCATED_HASHBYTES], TickOutput), SendError>` — `node/mod.rs:1056` | Build an unreliable data packet |
-| `fn connect(&mut self, dest_hash: DestinationHash, dest_signing_key: &[u8; 32]) -> (LinkId, bool, TickOutput)` — `node/link_management.rs:245` | Build a link request |
-| `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:663` | Send on an established link |
-| `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:570` | Close a link |
+| `fn connect(&mut self, dest_hash: DestinationHash, dest_signing_key: &[u8; 32]) -> (LinkId, bool, TickOutput)` — `node/link_management.rs:252` | Build a link request |
+| `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:664` | Send on an established link |
+| `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:571` | Close a link |
 | `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2258` | Feed received bytes from an interface |
 | `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2491` | Run periodic maintenance (call at the next deadline) |
 | `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2522` | Earliest timer deadline (ms); when to call `handle_timeout` |
@@ -239,8 +239,8 @@ IFAC wrapping handled in core, so every driver gets it for free.
 | Signature | Purpose |
 |-----------|---------|
 | `fn new(identity: Option<Identity>, direction: Direction, dest_type: DestinationType, app_name: &str, aspects: &[&str]) -> Result<Self, DestinationError>` — `destination.rs:349` | Construct a destination |
-| `fn hash(&self) -> &DestinationHash` — `destination.rs:472` | Its 16-byte hash |
-| `fn direction(&self) -> Direction` — `destination.rs:493` | In / Out |
+| `fn hash(&self) -> &DestinationHash` — `destination.rs:476` | Its 16-byte hash |
+| `fn direction(&self) -> Direction` — `destination.rs:497` | In / Out |
 
 `DestinationHash` — a 16-byte address (newtype, `destination.rs:158`):
 `fn new(bytes: [u8; TRUNCATED_HASHBYTES]) -> Self` (`destination.rs:162`),
@@ -258,14 +258,14 @@ The three abstractions you implement to run the core on a platform. Defined in
 
 | Trait | Required methods (selected) | Source |
 |-------|------------------------------|--------|
-| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:352` |
+| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:421` |
 | `Storage` | key-value persistence: `has_packet_hash`, `get_path`/`set_path`, link/announce tables, identities, ratchets (large trait) | `traits.rs:196` |
 | `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:280` |
 
-Provided `Storage` implementations: `NoStorage` (`traits.rs:913`, zero-sized
+Provided `Storage` implementations: `NoStorage` (`traits.rs:920`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
 (`leviculum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
-`EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:84`, `heapless`-backed
+`EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:91`, `heapless`-backed
 for flash-constrained targets; `fn new() -> Self` at `embedded_storage.rs:344`).
 `leviculum-std` adds a file-backed `Storage` with Python-compatible on-disk
 formats.

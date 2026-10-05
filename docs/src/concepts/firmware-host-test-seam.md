@@ -160,16 +160,16 @@ the pair consistent.
 **3. The 1200-baud touch predicate.** Whether a USB control-out request
 means "reset into the UF2 bootloader" is a four-term match on request
 type, recipient, request code and payload length before the rate is even
-read (`BaudTouchHandler`, `leviculum-nrf/src/usb.rs:216`). A false
+read (`BaudTouchHandler`, `leviculum-nrf/src/usb.rs:218`). A false
 positive resets a board mid-session; a false negative costs a physical
 double-tap on every flash. The predicate is pure; only the GPREGRET write
 and `sys_reset` after it are not.
 
 **4. The control-envelope answer windows.** Three durations, each
 justified against a host-side timeout it must stay inside:
-`CONFIG_DELIVER_WITHIN` (`leviculum-nrf/src/usb.rs:444`),
-`CONFIG_APPLY_WITHIN` (`leviculum-nrf/src/usb.rs:456`) and
-`FRAME_TIMEOUT_MS` (`leviculum-nrf/src/usb.rs:601`). The reasoning is
+`CONFIG_DELIVER_WITHIN` (`leviculum-nrf/src/usb.rs:446`),
+`CONFIG_APPLY_WITHIN` (`leviculum-nrf/src/usb.rs:458`) and
+`FRAME_TIMEOUT_MS` (`leviculum-nrf/src/usb.rs:603`). The reasoning is
 airtime arithmetic at the live modulation, which is exactly what a host
 test can recompute and a comment cannot.
 

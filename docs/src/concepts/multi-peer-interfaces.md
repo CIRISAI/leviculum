@@ -25,10 +25,10 @@ on the interface's side of the boundary.
 
 The listener binds and accepts; every accepted connection becomes its
 own `InterfaceHandle` with its own id, drawn from the shared counter
-(`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:361`). The
+(`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:365`). The
 child is built from the already-connected stream
 (`spawn_tcp_interface_from_stream`,
-`leviculum-std/src/interfaces/tcp.rs:428`), inherits IFAC, mode and
+`leviculum-std/src/interfaces/tcp.rs:432`), inherits IFAC, mode and
 ingress control from the listener, and is handed to the event loop,
 which registers it in the routing map like any other interface
 (`registry`, `leviculum-std/src/driver/mod.rs:4511`).
@@ -37,8 +37,8 @@ The listener itself is deliberately **not** in that map. It carries no
 packets, so it would be a send target that cannot send; it is recorded
 in the reporting inventory instead, where the child registers its
 display identity and its parent link (`add_spawned`,
-`leviculum-std/src/interfaces/tcp.rs:415`; `listener_id`,
-`leviculum-std/src/interfaces/tcp.rs:423`). The split between the
+`leviculum-std/src/interfaces/tcp.rs:419`; `listener_id`,
+`leviculum-std/src/interfaces/tcp.rs:427`). The split between the
 routing map and the reporting inventory is the point of that module
 (`interface_names`, `leviculum-std/src/interfaces/inventory.rs:7`).
 
@@ -58,7 +58,7 @@ leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4059`).
   `InterfaceHandle`,
   `leviculum-std/src/interfaces/auto_interface/orchestrator.rs:805`).
 - Every accepted I2P stream becomes a handle
-  (`new_interface_tx`, `leviculum-std/src/interfaces/i2p/mod.rs:492`).
+  (`new_interface_tx`, `leviculum-std/src/interfaces/i2p/mod.rs:495`).
 - Every accepted shared-instance IPC client becomes a handle
   (`add_spawned`, `leviculum-std/src/interfaces/local.rs:319`).
 
@@ -100,12 +100,12 @@ was the only node able to answer.
 The firmware runs the same shape with fixed ids: serial 0, LoRa 1, BLE
 2, set once at startup (`set_interface_name`,
 `leviculum-nrf/src/bin/t114.rs:286`) and hardcoded in the interface
-itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:652`), with the
+itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:630`), with the
 announce gate naming the same constant (`BLE_IFACE`,
 `leviculum-nrf/src/announce.rs:85`). The fan-out is a task that maps
 the hint onto a per-link queue (`tx_fanout_task`,
-`leviculum-nrf/src/ble/mod.rs:511`; `LINK_OUT`,
-`leviculum-nrf/src/ble/mod.rs:474`).
+`leviculum-nrf/src/ble/mod.rs:489`; `LINK_OUT`,
+`leviculum-nrf/src/ble/mod.rs:453`).
 
 **The receive side is already peer-aware on both stacks.** The board
 reports which peer a packet came from and when a peer appears or
@@ -129,7 +129,7 @@ implementations of *one* model, which is the floor any split model
 would build on top of. lnsd's central task always reports `CentralGone`
 when it ends,
 including when the dial never connected at all (`CentralGone`,
-`leviculum-std/src/interfaces/ble/bluez.rs:290`), and the orchestrator
+`leviculum-std/src/interfaces/ble/bluez.rs:297`), and the orchestrator
 restarts the strict scan phase on that event (`CentralGone`,
 `leviculum-std/src/interfaces/ble/mod.rs:722`, into `note_reset`,
 `leviculum-std/src/interfaces/ble/links.rs:1351`). The firmware restarts
@@ -379,7 +379,7 @@ C and D there is one interface and one path entry; the planner takes
 the first link it finds for that identity
 (`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:765`), and a
 peer loss is reported only when the *last* link for that identity dies
-(`knows_identity`, `leviculum-std/src/interfaces/ble/links.rs:473`).
+(`knows_identity`, `leviculum-std/src/interfaces/ble/links.rs:474`).
 The observable difference is which of two equally good links carries
 the next packet — the transport cannot express a preference it has no
 information to form. Under B, whichever of the two the stack in

@@ -22,7 +22,7 @@ stamp_workblock(material, expand_rounds):
 (`LXStamper.py:49-60`). Each round appends 256 bytes, so the workblock is
 `expand_rounds * 256` bytes. The salt for round `n` is
 `full_hash(material || msgpack(n))`, where `msgpack(n)` is the msgpack encoding of
-the integer `n` (`LXStamper.py:24`). The expand-round counts are:
+the integer `n` (`LXStamper.py:55`). The expand-round counts are:
 
 | Context | Rounds | Workblock size | Citation |
 |---------|--------|----------------|----------|
@@ -113,7 +113,7 @@ not make threads a protocol dependency.
   announce (see [Announce application data](09-announce-appdata.md)). The sender
   generates a stamp over the message-id and appends it as payload element `[4]`
   (`LXMessage.py:371-373,320`). The recipient validates it with `validate_stamp`
-  (`LXMessage.py:270-291`).
+  (`LXMessage.py:273-294`).
 - **Propagation stamp**: generated over the transient-id with
   `WORKBLOCK_EXPAND_ROUNDS_PN` and the node's advertised cost
   (`LXMessage.py:329-353`).
@@ -127,5 +127,5 @@ not make threads a protocol dependency.
 `validate_stamp(target_cost, tickets)` first tries each held inbound ticket: if
 `stamp == truncated_hash(ticket || message_id)` the stamp is accepted with value
 `COST_TICKET` (`LXMessage.py:274-280`). Otherwise it builds the workblock over the
-message-id and runs `stamp_valid` (`LXMessage.py:284-289`). An implementation
+message-id and runs `stamp_valid` (`LXMessage.py:287-292`). An implementation
 MUST check tickets before proof-of-work to interoperate with ticketed senders.

@@ -158,7 +158,7 @@ them is not a judgement about anybody's licence.
 Prose alone has drifted twice here — the code once, this page once —
 so both halves are mechanical now. The code is pinned behaviourally
 by `no_radio_configuration_is_refused_for_a_regulatory_reason`
-(`leviculum-std/src/driver/interface_build/mod.rs:702`), which drives
+(`leviculum-std/src/driver/interface_build/mod.rs:690`), which drives
 the known regulatory edge cases through the config-building entry
 point and asserts each one builds *and* warns at WARN, with a second
 half pinning the capability refusals so the first cannot be satisfied

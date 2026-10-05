@@ -88,7 +88,7 @@ Core daemon settings. Every key below is parsed in
 | `shared_instance_socket` | path | unset | Explicit AF_UNIX socket path (RNS 1.3.x). Parsed for compatibility; cleared when `shared_instance_type = tcp`. (`config.rs:53-58`; `ini_config.rs:406-408`) |
 | `respond_to_probes` | bool | `false` | Answer `rnprobe` requests by signing a proof for each probe packet. (`config.rs:54-60`, `146`; `ini_config.rs:398-400`) |
 | `remote_management_enabled` | bool | `false` | Enable remote management. (`config.rs:61-63`, `147`; `ini_config.rs:391-395`) |
-| `storage_path` | path | unset | Where identity, known destinations and packet hashlist live. Relative values resolve against the config dir. (`config.rs:97-98`; `storage_path` (`ini_config.rs:533`)) |
+| `storage_path` | path | unset | Where identity, known destinations and packet hashlist live. Relative values resolve against the config dir. (`config.rs:97-98`; `storage_path` (`ini_config.rs:545`)) |
 | `flush_interval` | u64 (sec) | `3600` | Seconds between periodic storage flushes. Crash protection only — normal shutdown always flushes. (`config.rs:67-73`, `149`; `ini_config.rs:403-407`) |
 | `control_channel_capacity` | usize | `256` | Capacity of the lossless control-plane event channel (announces, paths, link/resource lifecycle). Raise on servers under heavy announce load. (`config.rs:74-82`, `150`) |
 | `data_channel_capacity` | usize | `128` | Capacity of the droppable data-plane event channel; full means normal backpressure (silent drop). Reliable channel messages are exempt: the node stops proofing them to the sender instead of dropping them, so this value also bounds how far a slow reader lets a channel run ahead. (`config.rs:83-90`, `151`) |
@@ -175,7 +175,7 @@ supported-type filter (`interface_type` (`ini_config.rs:292-316`)):
 `BackboneInterface` and `BackboneClientInterface` are accepted too:
 they are wire-identical to TCP and are mapped onto the TCP interface at
 parse time, as Python does (`normalize_backbone_interface`
-(`ini_config.rs:852-882`)). An interface of any other type is skipped
+(`ini_config.rs:837-867`)). An interface of any other type is skipped
 with a log line (`tracing::warn` (`ini_config.rs:306-314`)), not an
 error.
 
@@ -188,7 +188,7 @@ is `InterfaceConfig` (`config.rs:242-520`).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `type` | string | (required) | Interface type, one of the eleven above. (`type` (`ini_config.rs:615`)) |
+| `type` | string | (required) | Interface type, one of the eleven above. (`type` (`ini_config.rs:603`)) |
 | `enabled` | bool | `true` | Bring this interface up; the legacy spelling `interface_enabled` is honoured too. (`enabled` (`ini_config.rs:607`); `InterfaceConfig::enabled` (`config.rs:364-366`)) |
 | `outgoing` | bool | `true` | Allow sending outgoing packets. (`outgoing` (`ini_config.rs:608`); `InterfaceConfig::outgoing` (`config.rs:416-418`)) |
 | `bitrate` | u64 (bps) | per type | Override the interface's own bitrate figure, which feeds announce bandwidth capping and timing. Values below `MINIMUM_BITRATE` (`constants.rs:384-387`), 5 bps, are ignored. (`bitrate` (`ini_config.rs:656-662`); `InterfaceConfig::bitrate` (`config.rs:419-424`)) |
@@ -198,7 +198,7 @@ is `InterfaceConfig` (`config.rs:242-520`).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `listen_ip` | string | unset | Address to bind. (`listen_ip` (`ini_config.rs:613`)) |
+| `listen_ip` | string | unset | Address to bind. (`listen_ip` (`ini_config.rs:625`)) |
 | `listen_port` | u16 | unset | Port to listen on. (`listen_port` (`ini_config.rs:616`)) |
 
 ```ini
@@ -214,7 +214,7 @@ is `InterfaceConfig` (`config.rs:242-520`).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `target_host` | string | unset | Remote host to connect to. (`target_host` (`ini_config.rs:612`)) |
+| `target_host` | string | unset | Remote host to connect to. (`target_host` (`ini_config.rs:624`)) |
 | `target_port` | u16 | unset | Remote port. (`target_port` (`ini_config.rs:618`)) |
 | `reconnect_interval` | u64 (sec) | `5` | Delay between reconnect attempts. (`reconnect_interval` (`ini_config.rs:710`); `InterfaceConfig::reconnect_interval_secs` (`config.rs:559-560`)) |
 | `max_reconnect_tries` | u64 | unlimited | Give up after this many attempts; unset means never. (`max_reconnect_tries` (`ini_config.rs:711`); `InterfaceConfig::max_reconnect_tries` (`config.rs:561-562`)) |
@@ -232,7 +232,7 @@ is `InterfaceConfig` (`config.rs:242-520`).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `listen_ip` | string | `0.0.0.0` | Local bind address. (`listen_ip` (`ini_config.rs:613`)) |
+| `listen_ip` | string | `0.0.0.0` | Local bind address. (`listen_ip` (`ini_config.rs:625`)) |
 | `listen_port` | u16 | unset | Local bind port. (`listen_port` (`ini_config.rs:616`)) |
 | `forward_ip` | string | unset | Broadcast/forward address or hostname. Names are resolved at runtime and re-resolved periodically; a resolution failure is a logged interface error, not a config error. (`forward_ip` (`ini_config.rs:626`); `InterfaceConfig::forward_ip` (`config.rs:496-506`)) |
 | `forward_port` | u16 | unset | Broadcast/forward port. (`forward_port` (`ini_config.rs:627`)) |

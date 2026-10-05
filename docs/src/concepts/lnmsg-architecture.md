@@ -206,7 +206,7 @@ wrong: `RouterOutput.core.events` contains `NodeEvent`s that must be fed
 drains. This is exactly Codeberg #204's subject. `leviculum-lxmf-node`
 implements it with a bounded worklist and says why the bound is the
 consumer's choice (`MAX_ABSORB_ROUNDS`,
-`leviculum-lxmf-node/src/processor.rs:74-84`, `absorb` at `:392-394`). A
+`leviculum-lxmf-node/src/processor.rs:82-92`, `absorb` at `:392-394`). A
 client that forgets this will silently never see incoming messages.
 
 ### `RouterEvent`
@@ -246,7 +246,7 @@ There is still no event for `Outbound` and none for progress: the router
 folds `LxmfNodeEvent::Progress` into `OutboundEntry::progress` without
 emitting anything (`leviculum-lxmf/src/router.rs:1421-1433`), so progress
 must be polled through `outbound()`
-(`leviculum-lxmf/src/router.rs:698`).
+(`leviculum-lxmf/src/router.rs:701`).
 
 ### `MessageState` and what it honestly means
 
@@ -467,7 +467,7 @@ them" (`leviculum-std/src/driver/processor.rs:191-199`, "Where the events
 come from").
 
 So the messenger must register a `CoreProcessor`
-(`leviculum-std/src/driver/processor.rs:262-290`) on the builder, and the
+(`leviculum-std/src/driver/processor.rs:274-302`) on the builder, and the
 LXMF router lives inside the driver's tick, under the core mutex. That
 carries hard obligations:
 
@@ -489,7 +489,7 @@ carries hard obligations:
 - The processor needs its own periodic slot to drain its command queue,
   because an event tap can never initiate anything. `leviculum-lxmf-node`
   uses 200 ms (`POLL_INTERVAL_MS`,
-  `leviculum-lxmf-node/src/processor.rs:72`).
+  `leviculum-lxmf-node/src/processor.rs:80`).
 
 This is a strong constraint and a gift at the same time: it means the
 "model" that talks to the network is a synchronous state machine with a
