@@ -396,6 +396,56 @@ impl LinkStats {
     }
 }
 
+/// Links whose incoming resource waits for an assembly job, in arrival
+/// order (leviculum#71).
+///
+/// Keyed both ways so enqueue, retire and take are all O(log n) under the
+/// node lock: a deque needed a full scan to dedupe or to retire one link,
+/// which a peer finishing and cancelling transfers on many links could make
+/// quadratic.
+#[derive(Default)]
+pub(crate) struct AssemblyQueue {
+    by_order: BTreeMap<u64, LinkId>,
+    by_link: BTreeMap<LinkId, u64>,
+    next: u64,
+}
+
+impl AssemblyQueue {
+    /// Queue a link once; a link already queued keeps its place.
+    pub(crate) fn push(&mut self, link_id: LinkId) {
+        if self.by_link.contains_key(&link_id) {
+            return;
+        }
+        let order = self.next;
+        self.next = self.next.wrapping_add(1);
+        self.by_order.insert(order, link_id);
+        self.by_link.insert(link_id, order);
+    }
+
+    /// Retire a link's entry, if it has one.
+    pub(crate) fn remove(&mut self, link_id: &LinkId) {
+        if let Some(order) = self.by_link.remove(link_id) {
+            self.by_order.remove(&order);
+        }
+    }
+
+    /// Take the oldest queued link.
+    pub(crate) fn pop(&mut self) -> Option<LinkId> {
+        let (_, link_id) = self.by_order.pop_first()?;
+        self.by_link.remove(&link_id);
+        Some(link_id)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.by_link.len()
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        crate::heap_census::btree_map_bytes(&self.by_order)
+            + crate::heap_census::btree_map_bytes(&self.by_link)
+    }
+}
+
 /// The unified Reticulum node, owns all protocol state
 ///
 /// NodeCore is generic over RNG, Clock, and Storage traits, allowing it to run
@@ -518,7 +568,7 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// slot until a job is taken for it, exactly where inline assembly kept
     /// it, so a cancel, a duplicate ADV, a timeout poll or a link close treat
     /// it as they always did. Taking a job is what moves the parts out.
-    pending_assembly: alloc::collections::VecDeque<LinkId>,
+    pending_assembly: AssemblyQueue,
     /// Resources whose assembly is running outside the node, by link. One per
     /// link at most: a sender waits for the proof before its next segment.
     /// Holds no more than the caller asked for at a time.
@@ -623,7 +673,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
             defer_resource_assembly: false,
-            pending_assembly: alloc::collections::VecDeque::new(),
+            pending_assembly: AssemblyQueue::default(),
             assembling_resources: BTreeMap::new(),
             max_incoming_resource_size,
             resource_window_policy,
@@ -1792,7 +1842,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let mut jobs = Vec::new();
         let now_secs = self.transport.clock().now_ms() / crate::constants::MS_PER_SECOND;
         while jobs.len() < max {
-            let Some(link_id) = self.pending_assembly.pop_front() else {
+            let Some(link_id) = self.pending_assembly.pop() else {
                 break;
             };
             let Some(link) = self.links.get_mut(&link_id) else {
@@ -1875,8 +1925,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let now_ms = self.transport.clock().now_ms();
             let now_secs = now_ms / crate::constants::MS_PER_SECOND;
             let resource_flags = incoming.flags();
+            // No `reset_pending_requests_on_link` here: that deadline renews
+            // on packets received, and the last part already renewed it in
+            // `handle_resource_data`. A local assembly finishing is not peer
+            // activity.
             let payload = self.conclude_incoming_resource(link_id, incoming, outcome, now_secs);
-            self.reset_pending_requests_on_link(&link_id, now_ms);
             self.dispatch_completed_internal_payload(link_id, resource_flags, payload);
         }
         self.process_events_and_actions()
@@ -3685,8 +3738,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         // leviculum#71: resources out of their links for assembly, and the
         // queue of links waiting for one, are still resource memory.
-        resources += hc::btree_map_bytes(&self.assembling_resources)
-            + hc::vec_deque_bytes(&self.pending_assembly);
+        resources +=
+            hc::btree_map_bytes(&self.assembling_resources) + self.pending_assembly.heap_bytes();
         for resource in self.assembling_resources.values() {
             resources += resource.heap_bytes();
         }

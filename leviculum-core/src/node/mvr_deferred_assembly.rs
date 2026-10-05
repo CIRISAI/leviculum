@@ -20,7 +20,7 @@ use rand_core::OsRng;
 
 use crate::destination::{Destination, DestinationType, Direction, ProofStrategy};
 use crate::identity::Identity;
-use crate::link::LinkId;
+use crate::link::{LinkId, LinkState};
 use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
 use crate::packet::PacketContext;
 use crate::resource::{ResourceError, ResourceStrategy};
@@ -528,4 +528,48 @@ fn abandoned_assemblies_fail_as_cancelled_and_parked_ones_are_counted() {
         received(&late.events).is_none(),
         "its late result concludes nothing"
     );
+}
+
+/// Codex review on #73 (fourth pass): an assembly that finishes after the
+/// link went Stale still proves, so the sender completes. Stale means the
+/// peer went quiet, not that the link is closed.
+#[test]
+fn an_assembly_finishing_on_a_stale_link_still_proves() {
+    let (mut initiator, mut responder, i_iface, _r, link_id, _hash, _adv, job) = parked_transfer();
+    responder
+        .links
+        .get_mut(&link_id)
+        .expect("responder link")
+        .set_state(LinkState::Stale);
+
+    let done = responder.complete_resource_assembly(job.run());
+    assert!(received(&done.events).is_some(), "the resource completes");
+    let proof = action_data(&done);
+    assert!(
+        !proof.is_empty(),
+        "and its proof goes out on the Stale link"
+    );
+    let (_, events) = deliver_all(&mut initiator, i_iface, proof);
+    assert!(
+        sender_completed(&events),
+        "the sender accepts it: {events:?}"
+    );
+}
+
+#[test]
+fn the_assembly_queue_is_fifo_deduped_and_retirable() {
+    use crate::node::AssemblyQueue;
+    let id = |n: u8| LinkId::new([n; 16]);
+    let mut q = AssemblyQueue::default();
+    q.push(id(1));
+    q.push(id(2));
+    q.push(id(1)); // already queued: keeps its place
+    q.push(id(3));
+    assert_eq!(q.len(), 3);
+    q.remove(&id(2));
+    q.remove(&id(9)); // not queued: no-op
+    assert_eq!(q.pop(), Some(id(1)));
+    assert_eq!(q.pop(), Some(id(3)));
+    assert_eq!(q.pop(), None);
+    assert_eq!(q.len(), 0);
 }
