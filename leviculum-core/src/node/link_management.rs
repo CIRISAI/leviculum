@@ -2490,6 +2490,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             incoming::IncomingResource, ResourceAdvertisement, ResourceStrategy,
         };
 
+        // A resource whose assembly is running outside the node (leviculum#71)
+        // still occupies this link's one incoming slot, even though the slot
+        // reads empty. Its sender only re-advertises before the first REQ, so
+        // any ADV now is a stale retransmit or a new transfer the link cannot
+        // take yet: ignore it, as the busy-link branch below does.
+        let assembling = self.assembling_resources.contains_key(&link_id);
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
@@ -2497,6 +2503,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
         link.record_inbound(now_secs);
+        if assembling {
+            crate::tracing::debug!("Resource ADV on link with a resource assembling, ignoring");
+            return;
+        }
 
         // An ADV parked for the application is decided there, ignore
         if link.has_pending_resource() {
@@ -3175,6 +3185,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.events.push(NodeEvent::ResourceFailed {
                     link_id,
                     resource_hash,
+                    error: crate::resource::ResourceError::Cancelled,
+                    is_sender: false,
+                });
+            } else if let Some(res) = self.assembling_resources.remove(&link_id) {
+                // Cancelled while its assembly ran outside the node
+                // (leviculum#71): fail it now; the late result then finds
+                // nothing waiting and concludes nothing.
+                self.events.push(NodeEvent::ResourceFailed {
+                    link_id,
+                    resource_hash: *res.resource_hash(),
                     error: crate::resource::ResourceError::Cancelled,
                     is_sender: false,
                 });

@@ -1045,6 +1045,12 @@ pub(crate) struct AssemblyFailure {
     proof_hash: Option<[u8; 32]>,
 }
 
+impl AssemblyFailure {
+    pub(crate) fn from_error(error: ResourceError) -> Self {
+        fail(error)
+    }
+}
+
 fn fail(error: ResourceError) -> AssemblyFailure {
     AssemblyFailure {
         error,

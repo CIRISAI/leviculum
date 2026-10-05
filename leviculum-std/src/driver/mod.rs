@@ -4797,8 +4797,22 @@ async fn run_event_loop(
     // be concluded under a brief lock. Concurrent transfers on different links
     // then finish in about max(t) instead of sum(t), and nothing else waits on
     // the node lock while a ~1 MB transfer is decompressed.
-    let (assembly_tx, mut assembly_rx) =
-        tokio::sync::mpsc::unbounded_channel::<leviculum_core::resource::AssemblyResult>();
+    //
+    // Bounded (Codex review on #73): at most `assembly_concurrency` jobs run
+    // at once, each holding its permit until its result is handed to this
+    // loop, and the result channel holds no more than that. A job waiting
+    // for a permit holds only its input, the ciphertext its parts already
+    // were, which inline assembly held too until it got to it. So a burst of
+    // completions across many links costs no more peak memory or blocking
+    // threads than the bound, however many peers finish together.
+    let assembly_concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 4);
+    let assembly_permits = std::sync::Arc::new(tokio::sync::Semaphore::new(assembly_concurrency));
+    let (assembly_tx, mut assembly_rx) = tokio::sync::mpsc::channel::<
+        leviculum_core::resource::AssemblyResult,
+    >(assembly_concurrency);
     // Deferral itself is set at build time (`assemble_resources_off_lock`,
     // default on); with it off the core hands out no jobs and this is idle.
 
@@ -4827,10 +4841,31 @@ async fn run_event_loop(
                 // lock with the jobs; it runs below, off it.
                 for job in core.take_resource_assembly_jobs() {
                     let tx = assembly_tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        // A closed receiver means the loop is gone: nothing
-                        // is left to conclude the resource for.
-                        let _ = tx.send(job.run());
+                    let permits = std::sync::Arc::clone(&assembly_permits);
+                    tokio::spawn(async move {
+                        let Ok(_permit) = permits.acquire_owned().await else {
+                            return; // semaphore closed: the loop is gone
+                        };
+                        let (link_id, resource_hash) = (job.link_id(), job.resource_hash());
+                        let result = match tokio::task::spawn_blocking(move || job.run()).await {
+                            Ok(result) => result,
+                            // A panicking worker must still conclude its
+                            // resource, or it would wait on this link forever.
+                            Err(e) => {
+                                tracing::error!(
+                                    "resource assembly worker failed on link {}: {e}",
+                                    link_id
+                                );
+                                leviculum_core::resource::AssemblyResult::failed(
+                                    link_id,
+                                    resource_hash,
+                                    leviculum_core::resource::ResourceError::DecompressionFailed,
+                                )
+                            }
+                        };
+                        // A closed receiver means the loop is gone: nothing is
+                        // left to conclude the resource for.
+                        let _ = tx.send(result).await;
                     });
                 }
                 (output, now_ms)

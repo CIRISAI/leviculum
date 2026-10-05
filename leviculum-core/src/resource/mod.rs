@@ -760,6 +760,29 @@ impl AssemblyJob {
     pub fn link_id(&self) -> crate::link::LinkId {
         self.link_id
     }
+
+    /// The resource being assembled.
+    pub fn resource_hash(&self) -> [u8; 32] {
+        self.resource_hash
+    }
+}
+
+impl AssemblyResult {
+    /// A result for a job that could not be run to completion, for example
+    /// because its worker panicked. Applying it fails the resource with
+    /// `error` instead of leaving it waiting for a result that will never
+    /// come.
+    pub fn failed(
+        link_id: crate::link::LinkId,
+        resource_hash: [u8; 32],
+        error: ResourceError,
+    ) -> Self {
+        AssemblyResult {
+            link_id,
+            resource_hash,
+            outcome: Err(incoming::AssemblyFailure::from_error(error)),
+        }
+    }
 }
 
 /// The outcome of an [`AssemblyJob`], to be applied with

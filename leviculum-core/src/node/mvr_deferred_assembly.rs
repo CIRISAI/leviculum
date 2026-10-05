@@ -13,6 +13,7 @@
 extern crate std;
 
 use std::string::String;
+use std::vec;
 use std::vec::Vec;
 
 use rand_core::OsRng;
@@ -21,6 +22,7 @@ use crate::destination::{Destination, DestinationType, Direction, ProofStrategy}
 use crate::identity::Identity;
 use crate::link::LinkId;
 use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
+use crate::packet::PacketContext;
 use crate::resource::{ResourceError, ResourceStrategy};
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::transport::{Action, InterfaceId, TickOutput};
@@ -263,5 +265,112 @@ fn a_link_closed_during_assembly_fails_the_resource_and_drops_the_late_result() 
     assert!(
         received(&late.events).is_none() && late.actions.is_empty(),
         "a result whose link is gone concludes nothing and sends nothing"
+    );
+}
+
+/// Pump a deferred transfer up to the point its assembly job exists, and hand
+/// back the sender's first packet (its advertisement) for replay.
+fn parked_transfer() -> (
+    EndpointNode,
+    EndpointNode,
+    usize,
+    usize,
+    LinkId,
+    [u8; 32],
+    Vec<u8>,
+    crate::resource::AssemblyJob,
+) {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (resource_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let first = action_data(&tick);
+    let adv = first.first().cloned().expect("the advertisement");
+    let _ = pump(&mut initiator, &mut responder, i_iface, r_iface, first);
+    let job = responder
+        .take_resource_assembly_jobs()
+        .pop()
+        .expect("an assembly job");
+    (
+        initiator,
+        responder,
+        i_iface,
+        r_iface,
+        link_id,
+        resource_hash,
+        adv,
+        job,
+    )
+}
+
+/// Codex review on #73: while the resource is parked the link's incoming
+/// slot reads empty, so a retransmitted ADV must still find the link busy.
+#[test]
+fn a_replayed_advertisement_during_assembly_starts_no_second_transfer() {
+    let (_initiator, mut responder, _i, r_iface, _link_id, resource_hash, adv, job) =
+        parked_transfer();
+
+    let (sent, events) = deliver_all(&mut responder, r_iface, vec![adv]);
+    assert!(
+        sent.is_empty(),
+        "no REQ for a replayed ADV: {} packets",
+        sent.len()
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::ResourceTransferStarted { .. })),
+        "no second transfer starts: {events:?}"
+    );
+
+    let done = responder.complete_resource_assembly(job.run());
+    let completions = done
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                NodeEvent::ResourceCompleted { is_sender: false, resource_hash: h, .. } if *h == resource_hash
+            )
+        })
+        .count();
+    assert_eq!(completions, 1, "the parked transfer completes exactly once");
+}
+
+/// Codex review on #73: a sender's ICL during assembly must fail the
+/// resource as Cancelled, and the late result must conclude nothing.
+#[test]
+fn a_cancel_during_assembly_fails_the_resource_and_drops_the_late_result() {
+    let (initiator, mut responder, _i, r_iface, link_id, resource_hash, _adv, job) =
+        parked_transfer();
+
+    let icl = initiator
+        .links
+        .get(&link_id)
+        .expect("sender link")
+        .build_data_packet_with_context(&resource_hash, PacketContext::ResourceIcl, &mut OsRng)
+        .expect("ICL packet");
+    let (_, events) = deliver_all(&mut responder, r_iface, vec![icl]);
+    let cancelled = events.iter().any(|e| {
+        matches!(
+            e,
+            NodeEvent::ResourceFailed {
+                is_sender: false,
+                error: ResourceError::Cancelled,
+                resource_hash: h,
+                ..
+            } if *h == resource_hash
+        )
+    });
+    assert!(
+        cancelled,
+        "the parked resource fails as Cancelled: {events:?}"
+    );
+
+    let late = responder.complete_resource_assembly(job.run());
+    assert!(
+        received(&late.events).is_none() && late.actions.is_empty(),
+        "a cancelled resource's late result concludes nothing"
     );
 }
