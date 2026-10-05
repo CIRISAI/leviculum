@@ -2615,6 +2615,15 @@ impl ReticulumNode {
             .unwrap_or(false)
     }
 
+    /// How many known destinations the identity cap has evicted since the
+    /// node started (leviculum#49). Cumulative, for a transport-stats
+    /// counter: a rising value means the node runs at its cap, and the
+    /// unretained, oldest destinations are the ones going. The same pressure
+    /// is logged per flush as `KNOWN_DESTINATIONS_PRUNED`.
+    pub fn known_destination_evictions(&self) -> u64 {
+        self.inner.lock_recover().storage().identity_evictions()
+    }
+
     /// Current saturation of every bounded structure the driver owns —
     /// depths, capacities, cumulative drops (leviculum#60). See
     /// [`PlaneStats`] for what each limit does when it saturates.

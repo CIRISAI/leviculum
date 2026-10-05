@@ -104,6 +104,13 @@ impl Storage {
     /// table-cap keys reach the runtime collections through here, so a node
     /// on a Raspberry Pi Zero 2W can be given a memory ceiling it fits under
     /// without a rebuild.
+    /// How many identities the known-destinations cap has evicted since this
+    /// storage was built (leviculum#49). Cumulative; a node running at its
+    /// cap shows a rising count rather than silently forgetting.
+    pub fn identity_evictions(&self) -> u64 {
+        self.inner.identity_evictions()
+    }
+
     pub fn new_with_caps<P: AsRef<Path>>(base_path: P, caps: TableCaps) -> Result<Self> {
         let base_path = base_path.as_ref().to_path_buf();
 
@@ -1281,6 +1288,24 @@ mod tests {
     fn read_kd_file(path: &Path) -> BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry> {
         let bytes = std::fs::read(path.join(KNOWN_DESTINATIONS_FILE)).expect("file written");
         decode_known_destinations(&bytes).expect("file decodes")
+    }
+
+    #[test]
+    fn identity_evictions_counts_cap_evictions_through_the_std_storage() {
+        let path = temp_dir().join(format!("reticulum_test_49_evict_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        let mut storage = Storage::new_with_caps(&path, caps_with_identity_cap(1)).unwrap();
+        assert_eq!(storage.identity_evictions(), 0);
+        for n in [1u8, 2, 3] {
+            let id = Identity::generate(&mut rand_core::OsRng);
+            CoreStorage::set_identity(&mut storage, kd_hash(n), id);
+        }
+        assert_eq!(
+            storage.identity_evictions(),
+            2,
+            "two pushed out of a cap of one"
+        );
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
