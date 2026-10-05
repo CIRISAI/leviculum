@@ -77,8 +77,9 @@ outer propagation-node stamp.
 ## Generation
 
 `generate_stamp(material, stamp_cost, expand_rounds)` brute-forces random 32-byte
-stamps until `stamp_valid` (`LXStamper.py:92-111`). The reference parallelizes
-this across processes on Linux and falls back to single-process elsewhere
+stamps until one is `stamp_valid` (`generate_stamp`, `LXStamper.py:123-144`). The
+reference parallelizes this across processes on Linux and falls back to
+single-process elsewhere
 (`LXStamper.py:178-376`); the parallelism is informative, the resulting stamp is
 not.
 

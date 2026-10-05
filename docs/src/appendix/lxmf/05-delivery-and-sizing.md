@@ -34,7 +34,7 @@ size (`LXMessage.py:390-458`). The normative rules:
 4. **PROPAGATED**: the message is wrapped into the propagation envelope (see
    [Propagation](10-propagation.md)); if the envelope size `<=
    LINK_PACKET_MAX_CONTENT` it is a `PACKET`, otherwise a `RESOURCE`
-   (`LXMessage.py:423-441`).
+   (`LXMessage.py:426-444`).
 5. **PAPER**: if the encrypted paper form `<= PAPER_MDU` (2210) the representation
    is paper; otherwise `pack()` raises (`LXMessage.py:446-458`).
 

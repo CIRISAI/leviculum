@@ -132,7 +132,7 @@ signature   = source.sign(signed_part)         (Ed25519, 64 bytes)
 
 ## Unpack and verification
 
-`unpack_from_bytes` (`LXMessage.py:735-807`) slices at the fixed offsets:
+`unpack_from_bytes` (`LXMessage.py:746-822`) slices at the fixed offsets:
 `destination_hash = bytes[0:16]`, `source_hash = bytes[16:32]`,
 `signature = bytes[32:96]`, `packed_payload = bytes[96:]`. It unpacks the
 payload, and if the array has more than four elements treats element `[4]` as the

@@ -29,7 +29,7 @@ replacement between flags. (KISS interfaces use the analogous FEND/FESC framing.
 
 An interface configured with a passphrase derives a 64-byte IFAC identity and an
 IFAC key, then authenticates and masks every packet (`Transport.transmit`,
-`Transport.py:1051-1087`):
+`Transport.py:1052-1087`):
 
 ```
 ifac = ifac_identity.sign(raw)[-ifac_size:]
@@ -44,7 +44,7 @@ The IFAC flag (header bit 7) is set, the `ifac` tag is inserted right after the
 two header bytes, and everything except the tag itself is XOR-masked with the
 HKDF stream. On receipt the interface reverses the mask, extracts the tag,
 recomputes `ifac_identity.sign(recovered_raw)[-ifac_size:]`, and drops the packet
-on mismatch (`Transport.inbound`, `Transport.py:1398-1434`).
+on mismatch (`Transport.inbound`, `Transport.py:1398-1435`).
 
 `[VEC-IFAC]` (`ifac_size = 8`) records the tag, the mask, the masked output
 `9f4a2cf485c1dfcea0…`, the IFAC flag set in the masked header, and proves a full

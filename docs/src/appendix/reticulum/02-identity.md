@@ -71,7 +71,7 @@ decrypt its packets.
 
 A ratchet is an ephemeral X25519 key offering forward secrecy. `RATCHETSIZE =
 256` bits (`Identity.py:64`); the ratchet id is the leading 10 bytes of
-`full_hash` of the ratchet public key (`_get_ratchet_id`, `Identity.py:417`). A
+`full_hash` of the ratchet public key (`_get_ratchet_id`, `Identity.py:417-418`). A
 destination MAY advertise its current ratchet in an announce (see
 [Announce](05-announce.md)); a sender then encrypts to the ratchet public key
 instead of the identity's static key. Ratchet rotation and expiry

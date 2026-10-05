@@ -292,8 +292,8 @@ entry is removed, and from then on it is indistinguishable from a message
 that vanished.
 
 Terminal states remove the entry from the outbound map
-(`remove_outbound`, `leviculum-lxmf/src/router.rs:870-873`; call sites at
-`:859`, `:1298`, `:1322` and
+(`remove_outbound`, `leviculum-lxmf/src/router.rs:873-876`; call sites at
+`:888`, `:1334`, `:1369` and five in the propagation runtime, among them
 `leviculum-lxmf/src/router/propagation_runtime.rs:895`). If the client does
 not capture the `Message` at `enqueue` time it cannot render its own sent
 message afterwards, and it cannot offer a retry button.
@@ -345,7 +345,7 @@ What the router will not do:
 - **It does not persist known propagation nodes.** They live in an
   in-memory map (`known_nodes`,
   `leviculum-lxmf/src/propagation_client.rs:267`) and are absent from the
-  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2031-2048`).
+  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2069-2086`).
   The client must persist and replay them via
   `restore_known_propagation_node`
   (`leviculum-lxmf/src/router/propagation_runtime.rs:1317`). The selected

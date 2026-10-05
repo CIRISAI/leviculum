@@ -40,7 +40,7 @@ by content, not just extension (`config.rs:662-689`):
 In practice your `config` file uses the Python INI form shown
 throughout this page. Boolean values accept `Yes`, `yes`, `True`,
 `true`, `1`, `on` (and their false counterparts); anything else is read
-as `false` (`ini_config.rs:919-930`).
+as `false` (`ini_config.rs:913-924`).
 
 ## A file with a syntax error is refused
 
@@ -82,7 +82,7 @@ Core daemon settings. Every key below is parsed in
 |-----|------|---------|---------|
 | `enable_transport` | bool | `true` | Route announces and serve paths for other peers. `lnsd` defaults this to `true` (it is a daemon); the Python *library* default is `false`. (`config.rs:27-28`, `202`) |
 | `use_implicit_proof` | bool | `true` | Use implicit proof for link identification. (`config.rs:30-31`, `203`; `ini_config.rs:393-395`) |
-| `share_instance` | bool | `false` | Listen on the abstract Unix socket `\0rns/<instance_name>` for local clients. Required for `lnstest diag`, `rnstatus`, Sideband etc. to attach. (`config.rs:37-40`, `205`; key `share_instance` → `shared_instance`, `ini_config.rs:410-412`) |
+| `share_instance` | bool | `false` | Listen on the abstract Unix socket `\0rns/<instance_name>` for local clients. Required for `lnstest diag`, `rnstatus`, Sideband etc. to attach. (`config.rs:37-40`, `205`; key `share_instance` → `shared_instance`, `ini_config.rs:390-392`) |
 | `instance_name` | string | `default` | Names the shared-instance socket: `\0rns/<instance_name>`. Use a unique name to run two daemons side by side. (`config.rs:41-44`, `206`; `ini_config.rs:331-333`) |
 | `shared_instance_type` | `unix`/`tcp` | unset | Parsed for `rnsd` compatibility. Only `tcp`/`unix` are stored; `tcp` clears `shared_instance_socket` (tcp disables AF_UNIX upstream). `lnsd` currently serves only the abstract AF_UNIX socket. (`config.rs:45-52`; `ini_config.rs:396-405`, `284-289`) |
 | `shared_instance_socket` | path | unset | Explicit AF_UNIX socket path (RNS 1.3.x). Parsed for compatibility; cleared when `shared_instance_type = tcp`. (`config.rs:53-58`; `ini_config.rs:406-408`) |
@@ -101,7 +101,7 @@ Core daemon settings. Every key below is parsed in
 | `destination_cap` | usize | profile | Maximum entries in the destination-keyed tables: `announce_cache`, `announce_rate_table`, `known_ratchets`, `known_dest_use`. Desktop `50000`, compact `4096`. One key for four tables because they share one population. (`config.rs:237-247`; `ini_config.rs:485-487`) |
 
 `control_channel_capacity` and `data_channel_capacity` are read from TOML
-only; they have no INI key in `apply_reticulum_key` (`ini_config.rs:280-401`)
+only; they have no INI key in `apply_reticulum_key` (`ini_config.rs:385-555`)
 and are best set in a TOML config or left at their defaults.
 
 `storage_path` is read from both formats and resolves in one order
@@ -165,7 +165,7 @@ differs:
 Interfaces are ConfigObj subsections under `[interfaces]`, each named in
 double brackets `[[Name]]`. The name is free-form; the `type` key
 selects the interface implementation. Twelve types pass the
-supported-type filter (`interface_type` (`ini_config.rs:292-316`)):
+supported-type filter (`interface_type` (`ini_config.rs:300-325`)):
 
 `TCPServerInterface`, `TCPClientInterface`, `UDPInterface`,
 `AutoInterface`, `RNodeInterface`, `RNodeMultiInterface`,
@@ -176,12 +176,12 @@ supported-type filter (`interface_type` (`ini_config.rs:292-316`)):
 they are wire-identical to TCP and are mapped onto the TCP interface at
 parse time, as Python does (`normalize_backbone_interface`
 (`ini_config.rs:837-867`)). An interface of any other type is skipped
-with a log line (`tracing::warn` (`ini_config.rs:306-314`)), not an
+with a log line (`tracing::warn` (`ini_config.rs:316-323`)), not an
 error.
 
 The per-type tables below cover the six types most deployments use. All
 interface keys are parsed in `apply_interface_key`
-(`ini_config.rs:431-616`); the struct they land in, with its defaults,
+(`ini_config.rs:601-819`); the struct they land in, with its defaults,
 is `InterfaceConfig` (`config.rs:242-520`).
 
 ### Keys common to every interface

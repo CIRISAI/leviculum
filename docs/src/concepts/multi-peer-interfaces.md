@@ -70,7 +70,7 @@ The fifth is different. One configured `BLEInterface` section is one
 Reticulum interface and one broadcast domain (`BLEInterface`,
 `leviculum-std/src/interfaces/ble/mod.rs:5`). Every outbound packet
 goes through one planner that decides which links get a copy
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:765`, driven
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:811`, driven
 from `send_packet`,
 `leviculum-std/src/interfaces/ble/mod.rs:966`). Since Codeberg #376 the
 core supplies the addressee: a path entry carries the identity it was
@@ -201,7 +201,7 @@ That is not a criticism of it — the Columba wire spec has one notify
 characteristic, and no software layer can conjure a second one. It is
 the reason "the reference spawns children, so we should" is not an
 argument here. Our own planner is explicit about the same limit
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:765`).
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:811`).
 
 The firmware is the exception, and it cuts the other way: the
 SoftDevice's notification takes a connection handle, so a board *can*
@@ -377,7 +377,7 @@ cleanest behaviour of the four, and it is a real scenario: a rotated-
 address reconnect holds two links to one identity for a moment. Under
 C and D there is one interface and one path entry; the planner takes
 the first link it finds for that identity
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:765`), and a
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:811`), and a
 peer loss is reported only when the *last* link for that identity dies
 (`knows_identity`, `leviculum-std/src/interfaces/ble/links.rs:474`).
 The observable difference is which of two equally good links carries

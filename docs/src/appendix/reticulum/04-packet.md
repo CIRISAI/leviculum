@@ -5,8 +5,8 @@ This section is normative and proven by `[VEC-PKT-PLAIN]`, `[VEC-PKT-ENC]`, and
 
 ## Header bitfield
 
-The first byte is a bitfield (`Packet.get_packed_flags`, `Packet.py:169-175`;
-decoded in `unpack`, `:247-251`):
+The first byte is a bitfield, packed by `Packet.get_packed_flags`
+(`Packet.py:169-175`) and decoded in `unpack` (`:247-251`):
 
 ```
 bit 7   IFAC flag        (set by the interface, not by pack; see Framing/IFAC)
@@ -27,7 +27,8 @@ flags(1) || hops(1) || destination_hash(16) || context(1) || data
 offset 0     1          2                       18           19
 ```
 
-(`Packet.pack`, `Packet.py:177-239`; `unpack`, `:262-264`). The fixed header is
+Packed by `Packet.pack` (`Packet.py:177-239`), read back by `unpack`
+(`:262-264`). The fixed header is
 `HEADER_MINSIZE = 19` bytes (`Reticulum.py:144`).
 
 `[VEC-PKT-PLAIN]` is a PLAIN HEADER_1 DATA packet,

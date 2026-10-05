@@ -65,7 +65,7 @@ nRF52840 module's `CONFIG.qspi_part` is `Some(&crate::qspi::P25Q16H)`
 from Seeed's variant headers and the wiring from Seeed's schematic, and
 the schematic for the plain XIAO v1.1 draws the same footprint marked
 **DNP** — do not populate. So the firmware does not assert the part, it
-asks: `identify_at_boot` (`leviculum-nrf/src/qspi.rs:457`) reads the
+asks: `identify_at_boot` (`leviculum-nrf/src/qspi.rs:463`) reads the
 JEDEC id once at boot and prints `[QSPI] JEDEC … state=ok` or does not.
 
 **Our SolarNode prints that line, and the part has been driven.** On
