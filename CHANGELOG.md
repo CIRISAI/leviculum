@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.28.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master (+164 since the v0.27.0 base), plus the
+known-destinations backpressure fix. The rebase applied cleanly: no carry
+commit conflicted and none was absorbed.
+
+### Fixed (CIRIS fork)
+
+- Known destinations under capacity pressure keep their pins and stay pruned
+  (leviculum#49). The identity cap evicts unretained destinations first. Each
+  flush holds the on-disk file to the cap instead of resurrecting what memory
+  evicted. Runtime retain and last-use state reach the file, disk pins are
+  seeded at load, and pruning is reported by the catalogued
+  KNOWN_DESTINATIONS_PRUNED event and `MemoryStorage::identity_evictions()`.
+
+### From upstream, relevant to library consumers
+
+- Links over asymmetric paths to Python RNS 1.5 peers now form. A
+  link-request proof whose hop count disagrees with the frozen tables is
+  re-balanced as RNS 1.5 does (upstream Codeberg #330), without deleting the
+  route it corrects.
+- A local link routes its resource proof to the destination, not back to the
+  initiator.
+- A resource receiver paces its part timeout by the parts it actually sees.
+- A sender waiting on a peer that stopped answering no longer outlives its
+  caller's deadline.
+- A path to a peer used five minutes ago no longer expires early, and a node
+  no longer holds back the answer to its own path request.
+- A stale echo installs no path but still reaches local clients, and a daemon
+  routes to its own returned client rather than through the mesh.
+
 ## [0.27.0+ciris.1] — CIRIS fork
 
 Catch-up to upstream master (+465), including upstream's 0.9.0 release
