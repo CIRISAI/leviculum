@@ -24,6 +24,12 @@ commit conflicted and none was absorbed.
   seeded at load, and pruning is reported by the catalogued
   KNOWN_DESTINATIONS_PRUNED event and `MemoryStorage::identity_evictions()`.
 
+### Fixed on the fork's CI lanes
+
+- Upstream's diagnostic-dump test asserted the "Census gap" line, which
+  follows an RSS read from `/proc/self/statm`. Only Linux has that file, so
+  the assertion is now Linux-only (the macOS and Windows lanes).
+
 ### From upstream, relevant to library consumers
 
 - Links over asymmetric paths to Python RNS 1.5 peers now form. A
