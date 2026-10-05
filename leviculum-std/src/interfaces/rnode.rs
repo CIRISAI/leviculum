@@ -2359,6 +2359,17 @@ where
     let mut heartbeat_timer = Box::pin(tokio::time::sleep(HEARTBEAT_INTERVAL));
     let mut heartbeat_pending = false;
 
+    // When the last signal report (CMD_STAT_RSSI) arrived with no data frame
+    // after it yet. The firmware writes RSSI, SNR and data back to back for
+    // each frame its modem decoded and sends an RSSI stat at no other time
+    // unless asked (RNode_Firmware.ino:1660-1670, :982), so a second report
+    // while this is set means a decoded frame's data never reached this
+    // reader: LORA_RX_ORPHAN. Without it, a frame lost on the serial hop
+    // and one the modem failed to decode both leave the same silence
+    // (leviculum#431). The orphan is named when the next report arrives, so
+    // one at the very end of a run goes unreported.
+    let mut signal_awaiting_data: Option<tokio::time::Instant> = None;
+
     loop {
         // The one frame a CHTM this iteration asked to re-hand. Set in the
         // read branch, acted on below the select together with the send
@@ -2381,6 +2392,7 @@ where
                             if let KissDeframeResult::Frame { command, payload } = frame {
                                 match command {
                                     rnode::CMD_DATA => {
+                                        signal_awaiting_data = None;
                                         let signal = signal_suffix(&counters);
                                         tracing::debug!(
                                             "{}: RX {} bytes from radio{}",
@@ -2605,6 +2617,19 @@ where
                                     | rnode::CMD_STAT_SNR
                                     | rnode::CMD_STAT_BAT
                                     | rnode::CMD_STAT_TEMP) => {
+                                        if cmd == rnode::CMD_STAT_RSSI {
+                                            let now = tokio::time::Instant::now();
+                                            if let Some(at) = signal_awaiting_data.replace(now) {
+                                                // Still the orphan's pair: the
+                                                // new report is applied below.
+                                                tracing::debug!(
+                                                    target: "leviculum_std::interfaces::rnode::rx_trace",
+                                                    "LORA_RX_ORPHAN iface={name} age_ms={}{}",
+                                                    now.duration_since(at).as_millis(),
+                                                    signal_suffix(&counters)
+                                                );
+                                            }
+                                        }
                                         apply_radio_stat(&name, &counters, cmd, &payload);
                                     }
                                     _ => {
@@ -7872,6 +7897,89 @@ mod tests {
             logs.contains("RX 4 bytes from radio rssi=-57 snr=5.25"),
             "the human RX line carries the same pair; logs:\n{logs}"
         );
+    }
+
+    /// A signal report whose data frame never reached the host is named
+    /// (leviculum#431). The firmware writes CMD_STAT_RSSI, CMD_STAT_SNR and
+    /// CMD_DATA back to back for every frame its modem decoded, and sends an
+    /// RSSI stat at no other time unless the host asks, which it does not
+    /// (RNode_Firmware.ino:1660-1670, :982). So a second RSSI stat arriving
+    /// before any data frame means the modem decoded a frame and its data
+    /// was lost between the modem and this reader. The mocked stream is one
+    /// such orphan followed by a complete reception: exactly one
+    /// LORA_RX_ORPHAN carrying the orphan's own pair, and the complete
+    /// reception after it raises none.
+    #[tokio::test]
+    async fn test_a_signal_report_without_its_data_frame_is_named_an_orphan() {
+        let (buf, _guard) = capture_logs();
+        let (port, mut peer) = tokio::io::duplex(8192);
+        let (incoming_tx, mut incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task = tokio::spawn(async move {
+            rnode_io_task(
+                "test_rnode_orphan".to_string(),
+                port,
+                incoming_tx,
+                outgoing_rx,
+                counters,
+                /* flow_control = */ false,
+                test_channel_access(),
+                125_000,
+                7,
+                5,
+                /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
+                /* alock = */ AirtimeLock::default(),
+            )
+            .await;
+        });
+
+        // Raw 120 is -37 dBm and raw 40 is 10 dB, the orphan's pair; the
+        // complete reception after it reads -57 dBm and 5.25 dB.
+        let mut wire = Vec::new();
+        for (command, payload) in [
+            (rnode::CMD_STAT_RSSI, &[120][..]),
+            (rnode::CMD_STAT_SNR, &[40][..]),
+            (rnode::CMD_STAT_RSSI, &[100][..]),
+            (rnode::CMD_STAT_SNR, &[21][..]),
+            (rnode::CMD_DATA, &[0x00, 0x00, 0x02, 0x03][..]),
+            (rnode::CMD_STAT_RSSI, &[100][..]),
+            (rnode::CMD_STAT_SNR, &[21][..]),
+            (rnode::CMD_DATA, &[0x00, 0x00, 0x04, 0x05][..]),
+        ] {
+            kiss::frame(command, payload, &mut wire);
+            peer.write_all(&wire)
+                .await
+                .expect("write mocked KISS stream");
+        }
+
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(2), incoming_rx.recv())
+                .await
+                .expect("data frame within 2s")
+                .expect("incoming channel open");
+        }
+        drop(outgoing_tx);
+        drop(peer);
+        let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+
+        let captured = buf.lock().unwrap();
+        let logs = String::from_utf8_lossy(&captured);
+        let orphans: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("LORA_RX_ORPHAN"))
+            .collect();
+        assert_eq!(orphans.len(), 1, "one orphan; logs:\n{logs}");
+        assert!(
+            orphans[0].contains("iface=test_rnode_orphan")
+                && orphans[0].contains("rssi=-37 snr=10"),
+            "the orphan carries its own pair: {}",
+            orphans[0]
+        );
+        let rx_events = logs.lines().filter(|l| l.contains("LORA_RX ")).count();
+        assert_eq!(rx_events, 2, "both data frames still logged; logs:\n{logs}");
     }
 
     /// Steady-state throughput sanity for the default `flow_control = false`
