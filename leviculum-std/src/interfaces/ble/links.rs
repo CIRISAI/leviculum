@@ -24,10 +24,10 @@
 
 use leviculum_ble_tx::{
     addr_value, effective_tx_gap_ms, identity_hint, judge_duplicate, manufacturer_data_with_hint,
-    parse_peer_advertisement, should_initiate, usable_mtu, with_free_slots, CandidateTable,
-    ConnectDecision, DupRule, DupVerdict, Origin, ScanMode, TxGap, IDENTITY_HINT_LEN,
-    MANUFACTURER_DATA_HINT_LEN, MIN_USABLE_MTU, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS,
-    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    parse_peer_advertisement, rotating_address, should_initiate, usable_mtu, with_free_slots,
+    CandidateTable, ChurnLedger, ChurnPolicy, ConnectDecision, DupRule, DupVerdict, LeaveNoted,
+    Origin, ScanMode, TxGap, IDENTITY_HINT_LEN, MANUFACTURER_DATA_HINT_LEN, MIN_USABLE_MTU,
+    PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_INTERVAL_MS,
@@ -1434,6 +1434,101 @@ impl LinkPacer {
 }
 
 // ---------------------------------------------------------------------
+// The churn penalty — the peer that keeps leaving (#417, #412)
+// ---------------------------------------------------------------------
+
+/// The churn ledger's policy on lnsd: the firmware's measured one, the
+/// same constants a board compiles in (`ChurnPolicy::MEASURED`, chosen
+/// by the #417 design table). lnsd keeps no A/B switch for it, because
+/// it keeps none for anything else on the dial path: the firmware's
+/// `ble-churn-penalty-off` mirrors `ble-dial-ledger-off`, and lnsd runs
+/// no dial ledger to mirror.
+pub(crate) const CHURN_POLICY: ChurnPolicy = ChurnPolicy::MEASURED;
+
+/// lnsd's instance of the firmware's churn ledger
+/// ([`leviculum_ble_tx::ChurnLedger`]), with the class filter and the
+/// once-per-cooldown log latch the board keeps beside it
+/// (`columba.rs`'s `note_peer_leave` and `churn_dial_held`). Pure, like
+/// everything in this module: the driver feeds it the departures and
+/// asks it before a candidate enters the collection window.
+///
+/// A PC beside a phone is the same case as a board beside one: every
+/// session the phone buys lasts until its next address rotation, and
+/// the one outgoing slot ([`CENTRAL_LINKS`]) pays for each of them.
+/// The rule's reasoning lives on the ledger; this type only adapts it.
+pub(crate) struct ChurnGate {
+    policy: ChurnPolicy,
+    ledger: ChurnLedger,
+    /// The deadline the last `BLE_CHURN_LEDGER held` line was logged
+    /// for: one line per cooldown, not one per advertising report, and
+    /// a re-armed cooldown (a new deadline) gets its own.
+    held_logged_for: Option<u64>,
+}
+
+/// What [`ChurnGate::holds`] decided against a held candidate: the
+/// deadline it is held until, and whether this is the first refusal
+/// under that deadline (the driver logs only then).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChurnHeld {
+    pub(crate) until_ms: u64,
+    pub(crate) fresh: bool,
+}
+
+impl ChurnGate {
+    pub(crate) fn new(policy: ChurnPolicy) -> Self {
+        Self {
+            policy,
+            ledger: ChurnLedger::new(),
+            held_logged_for: None,
+        }
+    }
+
+    /// The policy in force, for the log line.
+    pub(crate) fn policy(&self) -> ChurnPolicy {
+        self.policy
+    }
+
+    /// Record one DEPARTURE: a session with `identity` ended by the
+    /// peer's own leaving — silence until the expiry swept it, or a
+    /// replacement by its next connection. `addr` is the address the
+    /// class is read from (the firmware reads the same one: the expired
+    /// link's, or the newcomer's on a replacement). `None` when the
+    /// address is a static one and nothing was recorded: a flaky board
+    /// must never arm a cooldown that every phone in the room pays for.
+    pub(crate) fn note_leave(
+        &mut self,
+        identity: &IdentityHash,
+        addr: &Addr,
+        now_ms: u64,
+    ) -> Option<LeaveNoted> {
+        rotating_address(addr_value_display(addr))
+            .then(|| self.ledger.note_leave(self.policy, identity, now_ms))
+    }
+
+    /// Whether a candidate with this verdict at this address is held
+    /// right now. Only a FALLBACK verdict whose address rotates can be:
+    /// a strict verdict and a fixed-addressed fallback candidate are
+    /// never held, the scope the #417 design table chose.
+    pub(crate) fn holds(
+        &mut self,
+        addr: &Addr,
+        decision: ConnectDecision,
+        now_ms: u64,
+    ) -> Option<ChurnHeld> {
+        if decision != ConnectDecision::InitiateFallback
+            || !rotating_address(addr_value_display(addr))
+            || !self.ledger.rotating_fallback_held(now_ms)
+        {
+            return None;
+        }
+        let until_ms = self.ledger.held_until_ms()?;
+        let fresh = self.held_logged_for != Some(until_ms);
+        self.held_logged_for = Some(until_ms);
+        Some(ChurnHeld { until_ms, fresh })
+    }
+}
+
+// ---------------------------------------------------------------------
 // The dial queue — one connection setup in flight, jittered (#49 part 3)
 // ---------------------------------------------------------------------
 
@@ -2763,6 +2858,113 @@ mod tests {
         let e = t.expire(30_000 + LINK_TIMEOUT_MS);
         assert_eq!(e.links, vec![(ID_A, ADDR_1, Role::Central)]);
         assert_eq!(t.link_count(), 0);
+    }
+
+    /// A phone's resolvable private address (`0b01` in the top bits):
+    /// the class whose owner redraws it, so the churn gate counts its
+    /// departures. `rotation` makes each one a fresh address, as the
+    /// measured phone's are.
+    const fn phone_addr(rotation: u8) -> Addr {
+        [0x4A, 0x00, 0x00, 0x00, 0x00, rotation]
+    }
+
+    /// Drive one session of `identity` at `addr` through the table to
+    /// its expiry, and feed the departure to the gate exactly as the
+    /// driver's tick does. Returns the expiry time.
+    fn session_expires(
+        t: &mut LinkTable,
+        gate: &mut ChurnGate,
+        identity: IdentityHash,
+        addr: Addr,
+        up_ms: u64,
+    ) -> u64 {
+        t.admit(identity, addr, Role::Peripheral, 185, up_ms);
+        let at = up_ms + LINK_TIMEOUT_MS;
+        let expired = t.expire(at);
+        assert_eq!(expired.links, vec![(identity, addr, Role::Peripheral)]);
+        for (identity, addr, _) in expired.links {
+            gate.note_leave(&identity, &addr, at);
+        }
+        at
+    }
+
+    /// The churn penalty on lnsd (#417 on the firmware, here for #412):
+    /// a rotating peer that leaves three times inside the window holds
+    /// its next fallback appearance for the cooldown, while a strict
+    /// verdict and a fixed-addressed fallback candidate are dialled at
+    /// once — and a fixed-addressed peer leaving as often arms nothing.
+    #[test]
+    fn a_peer_that_keeps_leaving_is_not_redialled_for_the_cooldown() {
+        assert_eq!(CHURN_POLICY, ChurnPolicy::MEASURED, "the firmware's rule");
+        let fallback = ConnectDecision::InitiateFallback;
+
+        // A fixed-addressed board leaving three times: nothing recorded,
+        // its next fallback appearance dialled at once.
+        let mut t = table();
+        let mut gate = ChurnGate::new(CHURN_POLICY);
+        let mut now = 0;
+        for _ in 0..CHURN_POLICY.leave_run {
+            now = session_expires(&mut t, &mut gate, ID_B, ADDR_1, now + 5_000);
+        }
+        assert_eq!(gate.holds(&ADDR_1, fallback, now + 1), None);
+
+        // The phone: three sessions, three rotations, three expiries,
+        // all inside the window.
+        let mut t = table();
+        let mut gate = ChurnGate::new(CHURN_POLICY);
+        let mut now = 0;
+        for rotation in 1..=CHURN_POLICY.leave_run {
+            let addr = phone_addr(u8::try_from(rotation).expect("a small run"));
+            now = session_expires(&mut t, &mut gate, ID_A, addr, now + 5_000);
+        }
+        assert!(now <= CHURN_POLICY.window_ms, "the fixture fits the window");
+        let armed_at = now;
+
+        // Its fourth appearance, on a fourth address, is held for the
+        // cooldown — the first refusal logs, the repeats do not.
+        let fourth = phone_addr(4);
+        let until = armed_at + CHURN_POLICY.cooldown_ms;
+        assert_eq!(
+            gate.holds(&fourth, fallback, armed_at + 1),
+            Some(ChurnHeld {
+                until_ms: until,
+                fresh: true
+            })
+        );
+        assert_eq!(
+            gate.holds(&fourth, fallback, until - 1),
+            Some(ChurnHeld {
+                until_ms: until,
+                fresh: false
+            }),
+            "one line per cooldown"
+        );
+        assert_eq!(gate.holds(&fourth, fallback, until), None, "a deadline");
+
+        // Under the cooldown, the scope: a strict verdict for the same
+        // rotating address and a fixed-addressed fallback candidate are
+        // both dialled at once.
+        assert_eq!(
+            gate.holds(&fourth, ConnectDecision::InitiateLowerAddress, armed_at + 1),
+            None
+        );
+        assert_eq!(gate.holds(&ADDR_2, fallback, armed_at + 1), None);
+    }
+
+    /// The zero: a gate on the policy that keeps no ledger records no
+    /// departure and holds no dial, however much the phone churns.
+    #[test]
+    fn the_churn_gate_off_holds_nothing() {
+        let mut t = table();
+        let mut gate = ChurnGate::new(ChurnPolicy::OFF);
+        let mut now = 0;
+        for rotation in 1..=5 {
+            now = session_expires(&mut t, &mut gate, ID_A, phone_addr(rotation), now + 5_000);
+        }
+        assert_eq!(
+            gate.holds(&phone_addr(6), ConnectDecision::InitiateFallback, now + 1),
+            None
+        );
     }
 
     /// The fallback clock's table-side busy input (#375 part 3): a

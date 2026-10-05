@@ -349,7 +349,16 @@ shows that a list is in force without the config beside it.  The line
 exists so a measuring host that turned strangers away does not read
 like a host nobody tried; its dialling-side sibling is
 `BLE_DIAL_NOT_ALLOWED`, which fires when `initiate_only` is what
-stopped a dial.  A fan-out drop on a congested
+stopped a dial.  The churn penalty (#417) is the firmware's
+`BLE_CHURN_LEDGER` with the bare token spelled `state=`:
+`BLE_CHURN_LEDGER state=armed identity=<hex8> run=<n>
+reason=expiry_central|expiry_peripheral|replaced window_ms=<n>
+cooldown_ms=<n>` when a rotating-addressed identity's run of
+departures (a `BLE_LINK_DOWN reason=timeout` or a `BLE_LINK_REPLACED`)
+closes the rotating fallback class, and `BLE_CHURN_LEDGER state=held
+run=<n> until_ms=<n> now_ms=<n>` once per cooldown when that closed a
+candidate out of the collection window.  Same ledger, same constants
+(`ChurnPolicy::MEASURED`), no A/B switch on lnsd.  A fan-out drop on a congested
 link is `BLE_TX_FANOUT_DROP`.  The delivery-hint decision
 is the firmware's `BLE_TX_ROUTE` / `BLE_TX_FLOOD` /
 `BLE_TX_ROUTE_MISS` (#376), with `conn=central|peripheral` naming the

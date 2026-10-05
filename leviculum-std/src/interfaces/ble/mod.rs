@@ -367,6 +367,10 @@ impl BleTask {
         // not per sighting — a waiting peer advertises several times a
         // second (same rule as the firmware).
         let mut last_decision: HashMap<Addr, links::ScanDecision> = HashMap::new();
+        // The peers that keep leaving (#417, #412): fed at the two
+        // departure sites below, read where a sighting would enter the
+        // collection window.
+        let mut churn = links::ChurnGate::new(links::CHURN_POLICY);
 
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -407,6 +411,7 @@ impl BleTask {
                         &mut dial_queue,
                         &mut backoff_until,
                         &mut last_decision,
+                        &mut churn,
                         &ev_tx,
                         now_ms(Instant::now()),
                     )
@@ -453,6 +458,15 @@ impl BleTask {
                         scheduler.note_reset(now);
                     }
                     for (identity, addr, role) in expired.links {
+                        // An expiry is the peer's own departure (#417):
+                        // it went silent until the bound swept the link,
+                        // the rotation's signature. The firmware's
+                        // `BLE_LINK_EXPIRE` site feeds the same ledger.
+                        let reason = match role {
+                            Role::Central => "expiry_central",
+                            Role::Peripheral => "expiry_peripheral",
+                        };
+                        self.note_peer_leave(&mut churn, &identity, &addr, reason, now);
                         self.log_link_down(&identity, role, "timeout");
                         central_pipes.remove(&addr);
                         disconnect_quietly(&adapter, addr).await;
@@ -499,6 +513,7 @@ impl BleTask {
         dial_queue: &mut DialQueue,
         backoff_until: &mut HashMap<Addr, u64>,
         last_decision: &mut HashMap<Addr, links::ScanDecision>,
+        churn: &mut links::ChurnGate,
         ev_tx: &mpsc::Sender<Ev>,
         now: u64,
     ) {
@@ -525,6 +540,10 @@ impl BleTask {
                         scheduler.note_reset(now);
                         let first_link = displaced.is_none();
                         if let Some(old) = displaced {
+                            // A replacement is a departure too (#417):
+                            // the identity left its old address even
+                            // though it came straight back.
+                            self.note_peer_leave(churn, &identity, &addr.0, "replaced", now);
                             self.log_link_replaced(&identity, &addr.0, Role::Peripheral, &old);
                             self.log_link_down(&old.identity, old.role, "displaced");
                             central_pipes.remove(&old.addr);
@@ -661,6 +680,7 @@ impl BleTask {
                     || table.knows_identity_hint(decision.identity_hint)
                     || dial_queue.knows(&addr.0)
                     || backoff_until.get(&addr.0).is_some_and(|until| *until > now)
+                    || self.churn_held(churn, &addr.0, decision.decision, now)
                 {
                     return;
                 }
@@ -702,6 +722,7 @@ impl BleTask {
                         dial_queue.release(&addr.0, now);
                         let first_link = displaced.is_none();
                         if let Some(old) = displaced {
+                            self.note_peer_leave(churn, &identity, &addr.0, "replaced", now);
                             self.log_link_replaced(&identity, &addr.0, Role::Central, &old);
                             self.log_link_down(&old.identity, old.role, "displaced");
                             central_pipes.remove(&old.addr);
@@ -1133,6 +1154,65 @@ impl BleTask {
             role = role.as_str(),
             reason = reason,
         );
+    }
+
+    /// Record one departure in the churn ledger (#417) and log the
+    /// arming, in the firmware's `BLE_CHURN_LEDGER armed` shape. Only
+    /// the arming is logged: the departure already has its line
+    /// (`BLE_LINK_DOWN reason=timeout`, `BLE_LINK_REPLACED`), and the one
+    /// thing those cannot say is that the run has now closed the class.
+    /// The class filter is the gate's: a static address records nothing.
+    fn note_peer_leave(
+        &self,
+        churn: &mut links::ChurnGate,
+        identity: &IdentityHash,
+        addr: &Addr,
+        reason: &'static str,
+        now: u64,
+    ) {
+        let Some(noted) = churn.note_leave(identity, addr, now) else {
+            return;
+        };
+        if noted.armed {
+            let policy = churn.policy();
+            tracing::info!(
+                event = "BLE_CHURN_LEDGER",
+                iface = %Scalar(&self.name),
+                state = "armed",
+                identity = %hex8(identity),
+                run = noted.run,
+                reason = reason,
+                window_ms = policy.window_ms,
+                cooldown_ms = policy.cooldown_ms,
+            );
+        }
+    }
+
+    /// Whether the churn ledger holds this sighting out of the window
+    /// (#417): a fallback verdict at a rotating address while the
+    /// cooldown stands. Logs the firmware's `BLE_CHURN_LEDGER held`
+    /// line once per cooldown.
+    fn churn_held(
+        &self,
+        churn: &mut links::ChurnGate,
+        addr: &Addr,
+        decision: leviculum_ble_tx::ConnectDecision,
+        now: u64,
+    ) -> bool {
+        let Some(held) = churn.holds(addr, decision, now) else {
+            return false;
+        };
+        if held.fresh {
+            tracing::info!(
+                event = "BLE_CHURN_LEDGER",
+                iface = %Scalar(&self.name),
+                state = "held",
+                run = churn.policy().leave_run,
+                until_ms = held.until_ms,
+                now_ms = now,
+            );
+        }
+        true
     }
 
     /// A duplicate identity we resolved by replacing the old link

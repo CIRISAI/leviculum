@@ -944,6 +944,26 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_DIAL_NOT_ALLOWED",
         required_keys: &["iface", "addr", "hint", "listed"],
     },
+    // The churn penalty (#417): the firmware's `BLE_CHURN_LEDGER armed`
+    // and `held` lines, the bare token spelled as `state=`. Two disjoint
+    // shapes: the arming names the identity whose run closed the class,
+    // the hold names the deadline a fallback candidate waits for.
+    EventSchema {
+        name: "BLE_CHURN_LEDGER",
+        required_keys: &[
+            "iface",
+            "state",
+            "identity",
+            "run",
+            "reason",
+            "window_ms",
+            "cooldown_ms",
+        ],
+    },
+    EventSchema {
+        name: "BLE_CHURN_LEDGER",
+        required_keys: &["iface", "state", "run", "until_ms", "now_ms"],
+    },
     EventSchema {
         name: "BLE_DIAL_QUEUE",
         required_keys: &["iface", "depth", "wait_ms"],
