@@ -4798,21 +4798,47 @@ async fn run_event_loop(
     // then finish in about max(t) instead of sum(t), and nothing else waits on
     // the node lock while a ~1 MB transfer is decompressed.
     //
-    // Bounded (Codex review on #73): at most `assembly_concurrency` jobs run
-    // at once, each holding its permit until its result is handed to this
-    // loop, and the result channel holds no more than that. A job waiting
-    // for a permit holds only its input, the ciphertext its parts already
-    // were, which inline assembly held too until it got to it. So a burst of
-    // completions across many links costs no more peak memory or blocking
-    // threads than the bound, however many peers finish together.
+    // Bounded (Codex review on #73). The core keeps a ready resource in its
+    // link until a job is taken for it, and this loop takes jobs only while
+    // fewer than `assembly_concurrency` are out. So at most that many
+    // transfers' ciphertext and working buffers are outside the node at once,
+    // no detached task ever waits holding a job, and a transfer cancelled or
+    // closed while it waits is simply never taken. The result channel can
+    // then hold no more than the bound either.
     let assembly_concurrency = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2)
         .clamp(1, 4);
-    let assembly_permits = std::sync::Arc::new(tokio::sync::Semaphore::new(assembly_concurrency));
+    let mut assembly_in_flight: usize = 0;
     let (assembly_tx, mut assembly_rx) = tokio::sync::mpsc::channel::<
         leviculum_core::resource::AssemblyResult,
     >(assembly_concurrency);
+
+    // Run one job on a blocking thread and hand its result back. A worker
+    // that panics still concludes its resource, or it would wait forever.
+    let spawn_assembly = {
+        let assembly_tx = assembly_tx.clone();
+        move |job: leviculum_core::resource::AssemblyJob| {
+            let tx = assembly_tx.clone();
+            let (link_id, resource_hash) = (job.link_id(), job.resource_hash());
+            tokio::spawn(async move {
+                let result = match tokio::task::spawn_blocking(move || job.run()).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        tracing::error!("resource assembly worker failed on link {}: {e}", link_id);
+                        leviculum_core::resource::AssemblyResult::failed(
+                            link_id,
+                            resource_hash,
+                            leviculum_core::resource::ResourceError::DecompressionFailed,
+                        )
+                    }
+                };
+                // A closed receiver means the loop is gone: nothing is left
+                // to conclude the resource for.
+                let _ = tx.send(result).await;
+            });
+        }
+    };
     // Deferral itself is set at build time (`assemble_resources_off_lock`,
     // default on); with it off the core hands out no jobs and this is idle.
 
@@ -4839,34 +4865,10 @@ async fn run_event_loop(
                 let now_ms = core.now_ms();
                 // leviculum#71: any assembly this packet completed leaves the
                 // lock with the jobs; it runs below, off it.
-                for job in core.take_resource_assembly_jobs() {
-                    let tx = assembly_tx.clone();
-                    let permits = std::sync::Arc::clone(&assembly_permits);
-                    tokio::spawn(async move {
-                        let Ok(_permit) = permits.acquire_owned().await else {
-                            return; // semaphore closed: the loop is gone
-                        };
-                        let (link_id, resource_hash) = (job.link_id(), job.resource_hash());
-                        let result = match tokio::task::spawn_blocking(move || job.run()).await {
-                            Ok(result) => result,
-                            // A panicking worker must still conclude its
-                            // resource, or it would wait on this link forever.
-                            Err(e) => {
-                                tracing::error!(
-                                    "resource assembly worker failed on link {}: {e}",
-                                    link_id
-                                );
-                                leviculum_core::resource::AssemblyResult::failed(
-                                    link_id,
-                                    resource_hash,
-                                    leviculum_core::resource::ResourceError::DecompressionFailed,
-                                )
-                            }
-                        };
-                        // A closed receiver means the loop is gone: nothing is
-                        // left to conclude the resource for.
-                        let _ = tx.send(result).await;
-                    });
+                let room = assembly_concurrency.saturating_sub(assembly_in_flight);
+                for job in core.take_resource_assembly_jobs(room) {
+                    assembly_in_flight += 1;
+                    spawn_assembly(job);
                 }
                 (output, now_ms)
             };
@@ -4928,7 +4930,18 @@ async fn run_event_loop(
             // Conclude it under a brief lock: proof, completion or failure,
             // exactly as an inline assembly would have.
             Some(result) = assembly_rx.recv() => {
-                let output = inner.lock_recover().complete_resource_assembly(result);
+                assembly_in_flight = assembly_in_flight.saturating_sub(1);
+                let output = {
+                    let mut core = inner.lock_recover();
+                    let output = core.complete_resource_assembly(result);
+                    // A slot just freed: take the next ready resource, if any.
+                    let room = assembly_concurrency.saturating_sub(assembly_in_flight);
+                    for job in core.take_resource_assembly_jobs(room) {
+                        assembly_in_flight += 1;
+                        spawn_assembly(job);
+                    }
+                    output
+                };
                 refresh_ifac!();
                 let processor_delay = dispatch_output(
                     output,

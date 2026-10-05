@@ -513,10 +513,15 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// borrow; the std driver runs it on a blocking thread. Off by default, so
     /// no_std and FFI callers assemble inline exactly as before.
     defer_resource_assembly: bool,
-    /// Jobs taken under deferral, waiting for the caller to collect them.
-    resource_assembly_jobs: Vec<crate::resource::AssemblyJob>,
+    /// Links whose incoming resource has every part and waits to be
+    /// assembled, oldest first. The resource stays in its link's incoming
+    /// slot until a job is taken for it, exactly where inline assembly kept
+    /// it, so a cancel, a duplicate ADV, a timeout poll or a link close treat
+    /// it as they always did. Taking a job is what moves the parts out.
+    pending_assembly: alloc::collections::VecDeque<LinkId>,
     /// Resources whose assembly is running outside the node, by link. One per
     /// link at most: a sender waits for the proof before its next segment.
+    /// Holds no more than the caller asked for at a time.
     assembling_resources: BTreeMap<LinkId, crate::resource::incoming::IncomingResource>,
     /// Maximum incoming resource size in bytes. Resources larger than this
     /// are rejected at advertisement time, before any allocation.
@@ -618,7 +623,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
             defer_resource_assembly: false,
-            resource_assembly_jobs: Vec::new(),
+            pending_assembly: alloc::collections::VecDeque::new(),
             assembling_resources: BTreeMap::new(),
             max_incoming_resource_size,
             resource_window_policy,
@@ -1776,9 +1781,52 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.defer_resource_assembly = defer;
     }
 
-    /// Collect the assembly jobs taken since the last call (leviculum#71).
-    pub fn take_resource_assembly_jobs(&mut self) -> Vec<crate::resource::AssemblyJob> {
-        core::mem::take(&mut self.resource_assembly_jobs)
+    /// Take up to `max` assembly jobs (leviculum#71), oldest ready first.
+    ///
+    /// A resource whose parts are all in waits in its link until it is
+    /// taken here; only then do its parts move into a job. So the caller
+    /// bounds how much work and ciphertext is outside the node at once by
+    /// how many it takes. A link whose resource was cancelled, closed or
+    /// replaced while it waited is skipped.
+    pub fn take_resource_assembly_jobs(&mut self, max: usize) -> Vec<crate::resource::AssemblyJob> {
+        let mut jobs = Vec::new();
+        let now_secs = self.transport.clock().now_ms() / crate::constants::MS_PER_SECOND;
+        while jobs.len() < max {
+            let Some(link_id) = self.pending_assembly.pop_front() else {
+                break;
+            };
+            let Some(link) = self.links.get_mut(&link_id) else {
+                continue;
+            };
+            if !link.incoming_resource().is_some_and(|r| r.is_assembling()) {
+                continue;
+            }
+            let token_key = link.resource_crypt_params().token_key;
+            let mut incoming = link.take_incoming_resource().expect("checked above");
+            let resource_hash = *incoming.resource_hash();
+            match incoming.take_assembly_input(token_key) {
+                Ok(input) => {
+                    jobs.push(crate::resource::AssemblyJob {
+                        link_id,
+                        resource_hash,
+                        input,
+                    });
+                    self.assembling_resources.insert(link_id, incoming);
+                }
+                Err(e) => {
+                    let resource_flags = incoming.flags();
+                    let payload =
+                        self.conclude_incoming_resource(link_id, incoming, Err(e), now_secs);
+                    self.dispatch_completed_internal_payload(link_id, resource_flags, payload);
+                }
+            }
+        }
+        jobs
+    }
+
+    /// How many incoming resources wait for an assembly job (leviculum#71).
+    pub fn pending_resource_assemblies(&self) -> usize {
+        self.pending_assembly.len()
     }
 
     /// Apply a finished [`crate::resource::AssemblyJob`] (leviculum#71): send

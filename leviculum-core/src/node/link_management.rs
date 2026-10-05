@@ -2892,31 +2892,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
             ResourcePartResult::Assembling => {
-                // All parts received. Deferred (leviculum#71): take the parts
-                // now and let the caller decrypt and decompress outside the
-                // node; the resource waits in `assembling_resources` and
-                // concludes in `complete_resource_assembly`. Inline otherwise.
+                // All parts received. Deferred (leviculum#71): leave the
+                // resource in its link, ready, until the caller takes a job
+                // for it (`take_resource_assembly_jobs`); it then waits in
+                // `assembling_resources` and concludes in
+                // `complete_resource_assembly`. Inline otherwise.
                 if self.defer_resource_assembly {
-                    let token_key = link.resource_crypt_params().token_key;
-                    match incoming.take_assembly_input(token_key) {
-                        Ok(input) => {
-                            self.resource_assembly_jobs
-                                .push(crate::resource::AssemblyJob {
-                                    link_id,
-                                    resource_hash,
-                                    input,
-                                });
-                            self.assembling_resources.insert(link_id, incoming);
-                        }
-                        Err(e) => {
-                            completed_internal_payload = self.conclude_incoming_resource(
-                                link_id,
-                                incoming,
-                                Err(e),
-                                now_secs,
-                            );
-                        }
-                    }
+                    link.set_incoming_resource(incoming);
+                    self.pending_assembly.push_back(link_id);
                 } else {
                     let outcome = incoming.assemble(&*link);
                     completed_internal_payload =
