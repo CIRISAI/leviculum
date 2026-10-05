@@ -1474,8 +1474,9 @@ pub enum Reason {
     StatusUnknown,
     /// An operation failed or hung; see the `ERROR` line.
     Error,
-    /// A read-back differed from the pattern.
-    Mismatch,
+    /// An 8 MHz read set differed from the pattern: the part does not hold
+    /// what was programmed.
+    Program,
     /// An erase left bytes that are not `0xFF`.
     NotErased,
     /// A sweep point's registers did not read back as set, so the sweep
@@ -1484,6 +1485,10 @@ pub enum Reason {
     /// The run stopped without a failure and without finishing. A bug in
     /// the binary, not in the part.
     Incomplete,
+    /// The sweep found no swept clock with [`MIN_CLEAN_RUN`] neighbouring
+    /// clean delays (`SWEEPBEST margin=` other than `wide`), so no faster
+    /// bus timing than the 8 MHz control is shown to read with margin.
+    NoWideWindow,
 }
 
 /// What the part is left holding.
@@ -1506,9 +1511,15 @@ pub struct Verdict {
     pub pass: bool,
     /// Why.
     pub reason: Reason,
-    /// Mismatched bytes summed over every read set (a byte counts once
-    /// per set however many of its reads were wrong).
+    /// Mismatched bytes summed over the 8 MHz read sets, the picture of
+    /// the part (a byte counts once per set however many of its reads were
+    /// wrong).
     pub mismatches: u32,
+    /// The same sum over the 32 MHz read sets. Not part of the verdict:
+    /// with the slow sets clean these bytes are the read side's (`DIAG
+    /// side=read`), and the plan keeps the 32 MHz sets because they
+    /// measure the default timing's eye, which is red on a sound part.
+    pub read_side_mismatches: u32,
     /// Non-`0xFF` bytes over every erase verification.
     pub not_ff: u32,
     /// What the part is left holding.
@@ -1518,19 +1529,27 @@ pub struct Verdict {
 }
 
 impl Run {
-    /// Classify the run. Green only when every pass ran and every byte of
-    /// every pass read back as intended.
+    /// Classify the run. Green when every pass ran and the part is sound:
+    /// every 8 MHz read set matches the pattern (the part holds what was
+    /// programmed), every erase verified all `0xFF` (the last one at
+    /// 8 MHz is what the part is left holding), and the sweep found a
+    /// clock with a wide clean window (`SWEEPBEST margin=wide`).
     ///
-    /// The sweep's mismatches are not in it: the sweep exists to find the
-    /// settings that read wrong, so a red cell is its result and not a
-    /// failure. What the sweep can fail is completeness, and a cell whose
-    /// registers did not take (`sweep-not-applied`).
+    /// The 32 MHz read sets' mismatches are not in it, and neither are
+    /// the sweep's: both exist to measure bus timings that read wrong, so
+    /// their red is a result and not a failure of the part. They go to
+    /// `read_side_mismatches` and the `DIAG` and `READSWEEP` lines. What
+    /// the sweep can fail is completeness, a cell whose registers did not
+    /// take (`sweep-not-applied`), and finding no wide window at all.
     pub fn verdict(&self) -> Verdict {
-        let mismatches = self
-            .reads
-            .iter()
-            .flatten()
-            .fold(0u32, |n, r| n.saturating_add(r.cmp.mismatches));
+        let (mut mismatches, mut read_side_mismatches) = (0u32, 0u32);
+        for r in self.reads.iter().flatten() {
+            if r.plan.read == BusClock::M32 {
+                read_side_mismatches = read_side_mismatches.saturating_add(r.cmp.mismatches);
+            } else {
+                mismatches = mismatches.saturating_add(r.cmp.mismatches);
+            }
+        }
         let not_ff = self
             .erases
             .iter()
@@ -1560,13 +1579,15 @@ impl Run {
         } else if self.failure.is_some() {
             Reason::Error
         } else if mismatches != 0 {
-            Reason::Mismatch
+            Reason::Program
         } else if not_ff != 0 {
             Reason::NotErased
         } else if not_applied {
             Reason::SweepNotApplied
         } else if !complete {
             Reason::Incomplete
+        } else if SweepBest::of(&self.sweep).margin != Some(Margin::Wide) {
+            Reason::NoWideWindow
         } else {
             Reason::Ok
         };
@@ -1574,6 +1595,7 @@ impl Run {
             pass: reason == Reason::Ok,
             reason,
             mismatches,
+            read_side_mismatches,
             not_ff,
             final_state,
             total_us: self.total_us,
@@ -1603,7 +1625,7 @@ impl Run {
 }
 
 impl fmt::Display for Verdict {
-    /// `RESULT pass=<0|1> reason=<..> mismatches=<n> not_ff=<n> unit=byte total_ms=<n> final_state=<..>`
+    /// `RESULT pass=<0|1> reason=<..> mismatches=<n> read_side_mismatches=<n> not_ff=<n> unit=byte total_ms=<n> final_state=<..>`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reason = match self.reason {
             Reason::Ok => "ok",
@@ -1611,10 +1633,11 @@ impl fmt::Display for Verdict {
             Reason::BlockProtected => "block-protected",
             Reason::StatusUnknown => "status-unknown",
             Reason::Error => "error",
-            Reason::Mismatch => "mismatch",
+            Reason::Program => "program",
             Reason::NotErased => "not-erased",
             Reason::SweepNotApplied => "sweep-not-applied",
             Reason::Incomplete => "incomplete",
+            Reason::NoWideWindow => "no-wide-window",
         };
         let final_state = match self.final_state {
             FinalState::Untouched => "untouched",
@@ -1624,9 +1647,11 @@ impl fmt::Display for Verdict {
         };
         write!(
             f,
-            "RESULT pass={} reason={reason} mismatches={} not_ff={} unit=byte total_ms={} final_state={final_state}",
+            "RESULT pass={} reason={reason} mismatches={} read_side_mismatches={} not_ff={} \
+             unit=byte total_ms={} final_state={final_state}",
             u8::from(self.pass),
             self.mismatches,
+            self.read_side_mismatches,
             self.not_ff,
             ms(self.total_us),
         )
@@ -2034,24 +2059,133 @@ mod tests {
         assert_eq!(v.final_state, FinalState::Erased);
     }
 
-    #[test]
-    fn one_flipped_bit_in_a_read_back_makes_the_run_red() {
-        let mut run = green_run();
+    /// One read of pattern A at the start of the part with one bit flipped.
+    fn one_flipped_bit() -> Compare {
         let mut reads = reads_of(Pattern::A, 0, 4096);
         reads[3][1234] ^= 0x10;
         let mut c = Compare::default();
         check(&mut c, Pattern::A, 0, &reads);
-        if let Some(r) = run.reads[0].as_mut() {
-            r.cmp = c;
+        c
+    }
+
+    #[test]
+    fn one_flipped_bit_in_a_slow_read_back_makes_the_run_red() {
+        let mut run = green_run();
+        // Set 2: pattern A read at 8 MHz.
+        if let Some(r) = run.reads[1].as_mut() {
+            r.cmp = one_flipped_bit();
         }
         let v = run.verdict();
         assert!(!v.pass);
-        assert_eq!(v.reason, Reason::Mismatch);
+        assert_eq!(v.reason, Reason::Program);
         assert_eq!(v.mismatches, 1);
-        assert_eq!(run.diags()[0].map(|d| d.side()), Some(Side::Read));
-        assert_eq!(run.diags()[1].map(|d| d.side()), Some(Side::None));
+        assert_eq!(v.read_side_mismatches, 0);
         // The final erase was still clean.
         assert_eq!(v.final_state, FinalState::Erased);
+    }
+
+    #[test]
+    fn one_flipped_bit_in_a_fast_read_back_is_the_read_side_and_not_red() {
+        let mut run = green_run();
+        // Set 1: pattern A read at 32 MHz.
+        if let Some(r) = run.reads[0].as_mut() {
+            r.cmp = one_flipped_bit();
+        }
+        let v = run.verdict();
+        assert!(v.pass);
+        assert_eq!(v.reason, Reason::Ok);
+        assert_eq!(v.mismatches, 0);
+        assert_eq!(v.read_side_mismatches, 1);
+        assert_eq!(run.diags()[0].map(|d| d.side()), Some(Side::Read));
+        assert_eq!(run.diags()[1].map(|d| d.side()), Some(Side::None));
+    }
+
+    /// The SolarNode's second sweep run, 2026-10-05
+    /// (`qspi-selftest-20261005T005318Z.log`, Codeberg #413): both 8 MHz
+    /// read sets clean, both 32 MHz sets red, every erase clean, the sweep
+    /// wide at 16 MHz. Its `RESULT` read `pass=0 reason=mismatch
+    /// mismatches=3523349` on a part that holds what was written.
+    fn the_2026_10_05_run() -> Run {
+        let mut run = green_run();
+        for (i, wrong) in [(0, 1_722_408), (3, 1_800_941)] {
+            if let Some(r) = run.reads[i].as_mut() {
+                r.cmp = set_with(wrong, 0);
+            }
+        }
+        run.sweep = sweep_of([
+            0, // 8 MHz, rxdelay 2
+            0, 0, 0, 1_995_532, 2_089_026, 2_089_026, 2_089_026, 2_090_764, // 16 MHz
+            2_088_772, 0, 1_900_982, 2_089_026, 2_090_489, 2_088_998, 2_093_790,
+            2_089_019, // 32 MHz
+        ]);
+        run.total_us = 633_448_000;
+        run
+    }
+
+    #[test]
+    fn the_2026_10_05_capture_passes_with_its_read_side_named() {
+        let run = the_2026_10_05_run();
+        assert_eq!(
+            format!("{}", SweepBest::of(&run.sweep)),
+            "SWEEPBEST sck_khz=16000 rxdelay=1 clean_rxdelays=0,1,2 margin=wide"
+        );
+        assert_eq!(
+            format!("{}", run.verdict()),
+            "RESULT pass=1 reason=ok mismatches=0 read_side_mismatches=3523349 not_ff=0 \
+             unit=byte total_ms=633448 final_state=erased"
+        );
+    }
+
+    #[test]
+    fn the_capture_with_a_slow_read_mismatch_fails_as_program() {
+        let mut run = the_2026_10_05_run();
+        // Set 3: pattern B read at 8 MHz.
+        if let Some(r) = run.reads[2].as_mut() {
+            r.cmp = set_with(7, 0);
+        }
+        let v = run.verdict();
+        assert!(!v.pass);
+        assert_eq!(v.reason, Reason::Program);
+        assert_eq!(v.mismatches, 7);
+        assert_eq!(v.read_side_mismatches, 3_523_349);
+        assert!(format!("{v}").starts_with("RESULT pass=0 reason=program mismatches=7 "));
+    }
+
+    #[test]
+    fn the_capture_with_an_unerased_byte_fails_as_not_erased() {
+        let mut run = the_2026_10_05_run();
+        let mut t = Tally::default();
+        t.check_erased(0x1F_FFFC, &[0xFF, 0xFF, 0xEF, 0xFF]);
+        if let Some(e) = run.erases[2].as_mut() {
+            e.not_ff = t;
+        }
+        let v = run.verdict();
+        assert!(!v.pass);
+        assert_eq!(v.reason, Reason::NotErased);
+        assert!(format!("{v}").starts_with("RESULT pass=0 reason=not-erased "));
+    }
+
+    #[test]
+    fn the_capture_with_no_wide_window_fails_as_no_wide_window() {
+        let mut run = the_2026_10_05_run();
+        // 16 MHz red at RXDELAY 0 leaves it two clean steps, 32 MHz one;
+        // the control is clean, so SWEEPBEST falls back to it.
+        if let Some(c) = run.sweep[1].as_mut() {
+            *c = cell(1, 1_900_000);
+        }
+        assert_eq!(SweepBest::of(&run.sweep).margin, Some(Margin::Control));
+        assert_eq!(run.verdict().reason, Reason::NoWideWindow);
+        // And with the control red too, SWEEPBEST has nothing at all.
+        if let Some(c) = run.sweep[0].as_mut() {
+            *c = cell(0, 1_900_000);
+        }
+        let b = SweepBest::of(&run.sweep);
+        assert_eq!(b.margin, None);
+        assert!(format!("{b}").ends_with("margin=none"));
+        let v = run.verdict();
+        assert!(!v.pass);
+        assert_eq!(v.reason, Reason::NoWideWindow);
+        assert!(format!("{v}").starts_with("RESULT pass=0 reason=no-wide-window "));
     }
 
     #[test]
@@ -2230,7 +2364,8 @@ mod tests {
         );
         assert_eq!(
             format!("{}", run.verdict()),
-            "RESULT pass=1 reason=ok mismatches=0 not_ff=0 unit=byte total_ms=49000 final_state=erased"
+            "RESULT pass=1 reason=ok mismatches=0 read_side_mismatches=0 not_ff=0 unit=byte \
+             total_ms=49000 final_state=erased"
         );
     }
 

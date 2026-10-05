@@ -58,7 +58,12 @@
 //!    erase is what leaves the part blank, so the SolarNode firmware's
 //!    `qspi::log_store` mount reports `STORE state=unformatted` and not
 //!    our pattern.
-//! 8. `RESULT`. The sweep's red cells are not in it (`Run::verdict`).
+//! 8. `RESULT`. It judges the part, not the bus: green iff both 8 MHz
+//!    read sets are clean, every erase verified all `0xFF`, and
+//!    `SWEEPBEST` found a wide window; otherwise `reason=program`,
+//!    `not-erased` or `no-wide-window`. The 32 MHz read sets' bytes are
+//!    `read_side_mismatches=`, and the sweep's red cells are not in it
+//!    (`Run::verdict`).
 //!
 //! The run starts [`START_HOLD_S`] after boot and not at once, and the
 //! whole report is printed again behind a `REPORT n=<k>` header every

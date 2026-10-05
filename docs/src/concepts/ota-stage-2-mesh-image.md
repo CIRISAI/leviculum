@@ -129,6 +129,18 @@ and names a faster clock with only a narrower eye as `margin=too-narrow`.
 At 16 MHz a full 2 MB read takes about 1.05 s instead of 0.55 s; for a
 605 KiB staged image that is 0.3 s per verifying read.
 
+The self-test's `RESULT` line judges the part, not the bus (Codeberg
+#413): it is green iff both 8 MHz read sets match the pattern, every
+erase verified all-0xFF, and `SWEEPBEST` found a wide window, and names
+the failing one as `reason=program`, `not-erased` or `no-wide-window`.
+The 32 MHz read sets stay in the plan, since they measure the default
+timing's eye, and their bytes are reported as `read_side_mismatches=`.
+The second sweep run of 2026-10-05
+(`/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261005T005318Z.log`)
+printed `RESULT pass=0 reason=mismatch mismatches=3523349` on a part
+that held both patterns; under this rule it reads `RESULT pass=1
+reason=ok mismatches=0 read_side_mismatches=3523349 not_ff=0`.
+
 What this means for stage 2: staging plus golden fits the part with room
 to spare ([below](#the-budget-on-a-2-mb-part-and-the-other-claimant)),
 and programming is not the constraint, since a 605 KiB image takes about
