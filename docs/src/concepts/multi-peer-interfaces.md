@@ -134,9 +134,9 @@ restarts the strict scan phase on that event (`CentralGone`,
 `leviculum-std/src/interfaces/ble/mod.rs:702`, into `note_reset`,
 `leviculum-std/src/interfaces/ble/links.rs:1351`). The firmware restarts
 its strict phase only at a real connection event or teardown
-(`note_strict_reset`, `leviculum-nrf/src/ble/columba.rs:1584`); a dial
+(`note_strict_reset`, `leviculum-nrf/src/ble/columba.rs:1618`); a dial
 that timed out records at most a dead end and leaves the clock running
-(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:1736`).
+(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:1752`).
 
 Same protocol, same shared constant, different behaviour after a failed
 dial: lnsd owes another full 30 s strict bound, the board does not.

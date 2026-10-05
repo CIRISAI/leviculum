@@ -413,7 +413,7 @@
 //! every cell of the table above, 0 of 21 066 436 window offers reach
 //! that tier. The reason is structural and not a seed — no advertisement
 //! in the model carries `CAP_PERIPHERAL_ONLY`, because a board's
-//! `LOCAL_CAPS` is 0 (`columba.rs:213`, lnsd's `links.rs:47`) and a phone
+//! `LOCAL_CAPS` is 0 (`columba.rs:214`, lnsd's `links.rs:47`) and a phone
 //! carries no record at all — so a row measured with the tier switched
 //! off would be the same row twice. The tier is counted instead of
 //! switched, which is the stronger statement: it says the tier had
@@ -813,12 +813,12 @@
 //! ## What part 3 wired, and what part 2 still does not answer
 //!
 //! The firmware reads [`leviculum_ble_tx::DialLedger`] since #412 part 3
-//! (`leviculum-nrf/src/ble/columba.rs:1768`, the board-global instance).
+//! (`leviculum-nrf/src/ble/columba.rs:1784`, the board-global instance).
 //! Three outcomes feed it — the two duplicate refusals that used to write
-//! only the 120 s address skip (`columba.rs:878` incoming, `:2233`
-//! outgoing) and the central teardown's session length (`:2265`) — and
+//! only the 120 s address skip (`columba.rs:878` incoming, `:2365`
+//! outgoing) and the central teardown's session length (`:2397`) — and
 //! one site reads it, the fallback branch of the scanner's eligibility
-//! filter (`:2061`).
+//! filter (`:2190`).
 //!
 //! The dial that never CONNECTS still does not feed it, and that is a
 //! decision rather than an omission. It has no identity — nothing
@@ -1357,7 +1357,7 @@ impl Churn {
 ///   `manufacturer_data_with_hint(LOCAL_CAPS, &hint)`, no
 ///   `with_free_slots`), so it states no free-slot count, while this
 ///   peer states one in every window (below). Only the firmware's
-///   advertising path does that (`columba.rs:285`).
+///   advertising path does that (`columba.rs:286`).
 ///
 /// # What the capture shows it doing, and where 306 was wrong
 ///
@@ -1467,7 +1467,7 @@ impl Statics {
 ///
 /// The two are one fact, not two decisions. The identity behind an
 /// advertisement is unknowable before connecting
-/// (`columba.rs:1723`) — the board learns it from the Identity
+/// (`columba.rs:1739`) — the board learns it from the Identity
 /// characteristic, post-connect — so a table keyed by identity cannot be
 /// consulted per candidate at all. What it CAN do is decide whether this
 /// board may spend a fallback dial at all right now, which is what the
@@ -1479,7 +1479,7 @@ impl Statics {
 ///
 /// Keying by identity rather than by address is what lets the count
 /// reach `k` at all: the firmware's address table
-/// (`columba.rs:1660`, fed at `:867` and `:2050`) forgets a rotating peer
+/// (`columba.rs:1740`, fed at `:877` and `:2364`) forgets a rotating peer
 /// at every rotation, which is the hole #412 is about — five addresses in
 /// four minutes, so each entry is a first offence forever.
 ///
@@ -1488,7 +1488,7 @@ impl Statics {
 /// One dial, one outcome, against the peer's identity:
 ///
 /// - refused post-connect because that identity was already live (the
-///   rotated-address duplicate, `columba.rs:867`): wasted, always. The
+///   rotated-address duplicate, `columba.rs:877`): wasted, always. The
 ///   connect, the discovery and the identity read were paid for and the
 ///   session never existed.
 /// - a session that ended below `t_ms`: wasted. The dial was paid, the
@@ -1679,14 +1679,14 @@ impl Ledger {
 /// # What the firmware does with a failure, which is not one thing
 ///
 /// The stage decides, and only one of the five stages condemns anything
-/// (`columba.rs:2124`-`:2318`):
+/// (`columba.rs:2256`-`:2450`):
 ///
 /// - `stage=connect` — `central::connect` timed out, no connection ever
 ///   existed. A FALLBACK dial writes `note_dead_end(addr,
 ///   "fallback_connect")`, the 120 s address skip; a strict dial writes
 ///   nothing (#375 §0). `conn_link_up` never fired either, so the strict
 ///   clock is NOT reset and a stranded board stays in fallback for its
-///   next pass, which is exactly what `columba.rs:2598` is for.
+///   next pass, which is exactly what `columba.rs:2733` is for.
 /// - `stage=discover`, `identity`, `subscribe`, `handshake` — the
 ///   connection came up and went down again. No dead end is written at
 ///   ANY of them, and `conn_link_up` has already reset the strict clock.
@@ -3051,7 +3051,7 @@ fn run_sim(
             tally.dials += 1;
             // The verdict this candidate was elected under: the only
             // thing that decides whether a dial that never connects
-            // condemns its address (`columba.rs:2127`).
+            // condemns its address (`columba.rs:2259`).
             let (target_addr, decision) = candidates
                 .iter()
                 .find(|&&(peer, _, _, _)| peer == target)
@@ -3084,7 +3084,7 @@ fn run_sim(
                     // existed, so `conn_link_up` did not fire and the
                     // strict clock keeps whatever it had — a FALLBACK
                     // dial that fails here leaves the board stranded and
-                    // in fallback, which is what `columba.rs:2598` says
+                    // in fallback, which is what `columba.rs:2733` says
                     // in as many words. The address is condemned only
                     // for a fallback verdict (#375 §0).
                     if strict_verdict {
@@ -4583,7 +4583,7 @@ fn the_steady_state_freed_slot_goes_to_the_phone_under_the_address_order() {
 
     // 2. 303's tier, counted rather than assumed: no advertisement in
     //    this model carries PERIPHERAL_ONLY (boards advertise
-    //    `LOCAL_CAPS = 0`, `columba.rs:213`, and the phone no record at
+    //    `LOCAL_CAPS = 0`, `columba.rs:214`, and the phone no record at
     //    all), so `DialPreference::CannotDialUs` never has a candidate
     //    and the tier's steady-state value is exactly zero — the same
     //    zero it has in the formation tables, for the same structural
