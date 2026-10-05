@@ -76,8 +76,8 @@
 //! aged past 1000 lines while the guard called the file fine, because every
 //! row of it was bare.
 //!
-//! The comma spelling was admitted in 2026-08 after `lora.rs:1061` drifted
-//! onto radio-init code inside a *regulatory* claim and this guard passed
+//! The comma spelling was admitted in 2026-08 after a `lora.rs` citation
+//! drifted onto radio-init code inside a *regulatory* claim and this guard passed
 //! it. Adding it converted 75 book and 55 source citations from
 //! existence-checked to drift-checked without editing one of them, and
 //! immediately reported 30 that had drifted. Which is the argument for
@@ -1544,7 +1544,7 @@ fn run_canary() {
     let correct = format!("canary_target.rs:{CANARY_SUBJECT_LINE}");
     // The drifted citations must be reported: this is the failure the guard
     // exists for, and the one that decays silently. Once per spelling --
-    // a comma-form drift that goes unreported is the `lora.rs:1061` case
+    // a comma-form drift that goes unreported is the 2026-08 `lora.rs` case
     // over again, and a table-form one is Codeberg #307 over again, which is
     // what admitting each spelling was for.
     let drifts: Vec<&Failure> = failures
@@ -2354,17 +2354,22 @@ fn concept_docs_reachable_from_summary() {
 //      exactly one other line -> the text is still there, at a line the
 //      citation does not name. The number is wrong, and by how much.
 //
-// Only step 4's *unique* match is a failure, and that is deliberate: the
-// anchor text is demonstrably in the file at a line the citation does not
-// name, so the report needs no judgement about what the citing sentence
-// meant. Everything else is left undecided and counted, in the open:
+// Step 4's *unique* match is a failure with a repair, and that is
+// deliberate: the anchor text is demonstrably in the file at a line the
+// citation does not name, so the report needs no judgement about what the
+// citing sentence meant. What is left undecided is counted, in the open:
 //
 //   - the anchor matches several lines (`}`, `*/`): decides nothing;
-//   - the anchor has vanished: the cited code was rewritten in place, which
-//     may or may not have invalidated the sentence, and only a reader can
-//     say. Reported as a count, not a failure — making it red would train
-//     the reflex of re-pointing citations to make a gate green;
 //   - the citing line is uncommitted, or the cited file did not exist at C.
+//
+// One more verdict is a failure without being a renumbering: the anchor has
+// vanished, so the cited code was rewritten in place. Whether that broke the
+// sentence only a reader can say, which is why the report offers no number
+// for it and the fixer never touches it. It is red anyway. Until 2026-10-05
+// it was filed as undecidable, and 33 cited lines whose text was gone (16 of
+// them in the Python reference, which had moved to a new upstream release)
+// sat in that count, green, with the status line reading "0 rewritten in
+// place".
 //
 // # What this cannot see, stated rather than hidden
 //
@@ -2706,14 +2711,24 @@ struct AnchorCounts {
     moved: usize,
     rewritten: usize,
     undecided: usize,
+    /// `undecided` split by why, so the status output carries the census
+    /// 427 had to instrument the code for.
+    reasons: BTreeMap<&'static str, usize>,
     external: usize,
     unresolved: usize,
+}
+
+impl AnchorCounts {
+    fn undecide(&mut self, reason: &'static str, n: usize) {
+        self.undecided += n;
+        *self.reasons.entry(reason).or_default() += n;
+    }
 }
 
 /// Anchor every bare citation in `citations` against the tree's own history.
 ///
 /// Returns the per-endpoint verdicts for the citations that have at least one
-/// moved endpoint, plus the counts over all of them.
+/// moved or rewritten endpoint, plus the counts over all of them.
 fn anchor_bare_citations<'a>(
     root: &Path,
     citations: &'a [Citation],
@@ -2772,12 +2787,12 @@ fn anchor_bare_citations<'a>(
             .entry(c.doc.clone())
             .or_insert_with(|| blame_commits(root, &c.doc));
         let Some(commit) = commits.get(&c.doc_line) else {
-            counts.undecided += c.spans.len();
+            counts.undecide("the citing line has no blame", c.spans.len());
             continue;
         };
         if commit.chars().all(|ch| ch == '0') {
             // The citing line is not committed yet: nothing to anchor to.
-            counts.undecided += c.spans.len();
+            counts.undecide("the citing line is not committed", c.spans.len());
             continue;
         }
         pending.push(Pending {
@@ -2882,21 +2897,37 @@ fn anchor_bare_citations<'a>(
                 .iter()
                 .position(|spans| spans.iter().any(|s| matches!(s.verdict, Anchor::Moved(_))))
         });
+        let tally = |counts: &mut AnchorCounts, spans: &[AnchoredSpan]| {
+            for s in spans {
+                match s.verdict {
+                    Anchor::Fresh => counts.fresh += 1,
+                    Anchor::Moved(_) => counts.moved += 1,
+                    Anchor::Rewritten => counts.rewritten += 1,
+                    Anchor::Several(_) => counts.undecide("the cited text is on several lines", 1),
+                    Anchor::Undecided(why) => counts.undecide(why, 1),
+                }
+            }
+        };
         let Some(chosen) = chosen else {
-            counts.undecided += per_candidate
-                .first()
-                .map_or(p.citation.spans.len(), |s| s.len());
+            // Nothing fresh and nothing moved. The first candidate's
+            // verdicts are still verdicts: an endpoint whose text is gone
+            // from the file was rewritten in place, and filing it as
+            // undecidable hid every such citation (427's control 2 moved a
+            // rewrite from fresh to undecidable and left "0 rewritten").
+            let Some(first) = per_candidate.first() else {
+                counts.undecide(
+                    "the cited file was absent at the citing commit",
+                    p.citation.spans.len(),
+                );
+                continue;
+            };
+            tally(&mut counts, first);
+            if first.iter().any(|s| s.verdict == Anchor::Rewritten) {
+                drifted.push((p.citation, per_candidate.swap_remove(0)));
+            }
             continue;
         };
-        let spans = &per_candidate[chosen];
-        for s in spans {
-            match s.verdict {
-                Anchor::Fresh => counts.fresh += 1,
-                Anchor::Moved(_) => counts.moved += 1,
-                Anchor::Rewritten => counts.rewritten += 1,
-                Anchor::Several(_) | Anchor::Undecided(_) => counts.undecided += 1,
-            }
-        }
+        tally(&mut counts, &per_candidate[chosen]);
         if settled.is_none() {
             drifted.push((p.citation, per_candidate.swap_remove(chosen)));
         }
@@ -3016,24 +3047,39 @@ fn anchor_report(
         counts.external,
         counts.unresolved
     );
+    for (why, n) in &counts.reasons {
+        println!("{label} bare-citation anchors: {n} undecidable: {why}");
+    }
     drifted
         .iter()
         .map(|(c, spans)| {
             let mut lines = vec![format!("{}:{}: {}", c.doc.display(), c.doc_line, c.raw)];
             for s in spans.iter() {
-                if let Anchor::Moved(to) = s.verdict {
-                    lines.push(format!(
+                match s.verdict {
+                    Anchor::Moved(to) => lines.push(format!(
                         "    line {} held `{}` when this citation was last written; \
                          that text is now at line {} ({:+})",
                         s.line,
                         s.anchor.chars().take(90).collect::<String>(),
                         to,
                         to as isize - s.line as isize
-                    ));
+                    )),
+                    Anchor::Rewritten => lines.push(format!(
+                        "    line {} held `{}` when this citation was last written; \
+                         that text is gone from the file (rewritten in place)",
+                        s.line,
+                        s.anchor.chars().take(90).collect::<String>(),
+                    )),
+                    _ => {}
                 }
             }
             match repaired(c, spans) {
                 Some(new) => lines.push(format!("    the citation should read {new}")),
+                None if spans.iter().any(|s| s.verdict == Anchor::Rewritten) => lines.push(
+                    "    no line holds that text any more; re-read the sentence and point \
+                     it at what it means today, or drop the citation"
+                        .into(),
+                ),
                 None => lines.push(
                     "    not all of this citation's endpoints could be placed; \
                      re-read it rather than renumbering it"
@@ -3934,5 +3980,221 @@ fn a_repair_follows_the_line_map_and_not_the_nearest_name() {
         matches!(place_by_diff(&base_lines, &now, &[], 3), Placed::Proved(3)),
         "FIXTURE: an unchanged line was not placed, so the proof rejects everything \
          and the mode repairs nothing"
+    );
+}
+
+// --- positive controls for both anchored classes --------------------------
+//
+// 427 ran three perturbations by hand to learn what the guard says about a
+// cited line that moves, one that is rewritten in place, and an identifier
+// that leaves its window. Two of the three answers were not the ones the
+// order expected, which is the argument for keeping them as tests: a
+// verdict nobody asserts is a verdict that can change unnoticed.
+//
+// The fixture pair under `tests/fixtures/` carries one bare and one
+// identifier-anchored citation. Each test commits it into a fresh repo,
+// perturbs the target in the working tree, and asserts the verdict word and
+// the repair line the guard prints for each citation.
+
+const ANCHOR_TARGET: &str = include_str!("fixtures/citation_anchor_target.rs.in");
+const ANCHOR_DOC: &str = include_str!("fixtures/citation_anchor_doc.md.in");
+/// The line `citation_anchor_doc.md.in` cites bare.
+const ANCHOR_BARE_LINE: usize = 3;
+/// The line it cites by the identifier `anchor_named`.
+const ANCHOR_IDENT_LINE: usize = 10;
+
+/// A committed copy of the fixture pair, the target's lines, and the path of
+/// each file. The caller perturbs the target and writes it back.
+fn anchor_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, Vec<String>) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let src = root.join("leviculum-core/src");
+    fs::create_dir_all(&src).unwrap();
+    let docs = root.join("docs/src/concepts");
+    fs::create_dir_all(&docs).unwrap();
+    let code = src.join("anchor_target.rs");
+    fs::write(&code, ANCHOR_TARGET).unwrap();
+    let doc = docs.join("anchor.md");
+    fs::write(&doc, ANCHOR_DOC).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"],
+        &["commit", "-qm", "fixture"],
+    ] {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@localhost",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "FIXTURE: git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let body: Vec<String> = ANCHOR_TARGET.lines().map(str::to_string).collect();
+    assert!(
+        body[ANCHOR_BARE_LINE - 1].contains("ANCHOR_BARE")
+            && body[ANCHOR_IDENT_LINE - 1].contains("fn anchor_named"),
+        "FIXTURE: citation_anchor_target.rs.in no longer has its subjects on the \
+         lines citation_anchor_doc.md.in cites"
+    );
+    (tmp, code, doc, body)
+}
+
+/// The guard's report for the fixture after the perturbation: the bare
+/// class's anchor failures, the counts behind them, and what the identifier
+/// check made of the other citation.
+fn anchor_fixture_verdicts(
+    root: &Path,
+    doc: &Path,
+) -> (AnchorCounts, Vec<String>, Counts, Vec<String>) {
+    let citations = scan(root, &[doc.to_path_buf()], Corpus::Book);
+    assert_eq!(
+        citations.iter().filter(|c| c.ident.is_some()).count(),
+        1,
+        "FIXTURE: the identifier-anchored citation was not parsed as one"
+    );
+    assert_eq!(
+        citations.len(),
+        2,
+        "FIXTURE: the fixture's two citations were not both parsed"
+    );
+    let (anchor_counts, drifted) = anchor_bare_citations(root, &citations);
+    let anchored = anchor_report("fixture", &anchor_counts, &drifted)
+        .into_iter()
+        .map(|f| f.message)
+        .collect();
+    let (counts, failures, _) = check(root, &citations);
+    let checked = failures.into_iter().map(|f| f.message).collect();
+    (anchor_counts, anchored, counts, checked)
+}
+
+/// One line inserted above both cited lines.
+///
+/// The bare citation is named moved, with its new number; the identifier
+/// citation holds at +1, because that class is still checked by proximity
+/// to its identifier and a one-line shift is inside the window by design.
+#[test]
+fn anchor_control_a_moved_line_is_named_with_its_new_number() {
+    let (tmp, code, doc, mut body) = anchor_fixture();
+    body.insert(0, String::new());
+    fs::write(&code, body.join("\n") + "\n").unwrap();
+
+    let (anchor_counts, anchored, counts, checked) = anchor_fixture_verdicts(tmp.path(), &doc);
+    assert_eq!(
+        (
+            anchor_counts.moved,
+            anchor_counts.rewritten,
+            anchor_counts.undecided
+        ),
+        (1, 0, 0),
+        "CONTROL: one moved bare citation, counted as moved"
+    );
+    let [only] = &anchored[..] else {
+        panic!("CONTROL: expected exactly the moved bare citation, got {anchored:#?}");
+    };
+    let moved_to = ANCHOR_BARE_LINE + 1;
+    assert!(
+        only.contains(&format!("that text is now at line {moved_to} (+1)")),
+        "CONTROL: the verdict does not name where the text went:\n{only}"
+    );
+    assert!(
+        only.contains(&format!(
+            "the citation should read `anchor_target.rs:{moved_to}`"
+        )),
+        "CONTROL: the repair line does not name the new number:\n{only}"
+    );
+    assert!(
+        checked.is_empty(),
+        "CONTROL: a one-line shift is inside the identifier window, yet:\n{checked:#?}"
+    );
+    assert_eq!(
+        counts.offsets.iter().map(|o| o.dist).collect::<Vec<_>>(),
+        vec![1],
+        "CONTROL: the identifier citation should hold at +1, its window spent by one line"
+    );
+}
+
+/// The bare-cited line rewritten in place, the identifier citation
+/// untouched.
+///
+/// This verdict used to be filed as undecidable, so the line went from
+/// fresh to undecidable and the guard stayed green (427, control 2).
+#[test]
+fn anchor_control_a_rewritten_line_is_named_rewritten_not_undecidable() {
+    let (tmp, code, doc, mut body) = anchor_fixture();
+    body[ANCHOR_BARE_LINE - 1] = "pub const ANCHOR_RENAMED: u8 = 7;".into();
+    fs::write(&code, body.join("\n") + "\n").unwrap();
+
+    let (anchor_counts, anchored, _, checked) = anchor_fixture_verdicts(tmp.path(), &doc);
+    assert_eq!(
+        (
+            anchor_counts.moved,
+            anchor_counts.rewritten,
+            anchor_counts.undecided
+        ),
+        (0, 1, 0),
+        "CONTROL: a rewritten line must be counted as rewritten, not as undecidable"
+    );
+    let [only] = &anchored[..] else {
+        panic!("CONTROL: expected exactly the rewritten bare citation, got {anchored:#?}");
+    };
+    assert!(
+        only.contains("that text is gone from the file (rewritten in place)"),
+        "CONTROL: the verdict does not say the line was rewritten:\n{only}"
+    );
+    assert!(
+        only.contains("no line holds that text any more; re-read the sentence"),
+        "CONTROL: the repair line must send a reader to the sentence, not offer a number:\n{only}"
+    );
+    assert!(
+        checked.is_empty(),
+        "CONTROL: the identifier citation was not touched, yet:\n{checked:#?}"
+    );
+}
+
+/// `WINDOW + 1` lines inserted between the two cited lines, so the
+/// identifier lands one line past the window and the bare citation above
+/// stays where it was.
+#[test]
+fn anchor_control_an_identifier_moved_past_the_window_is_drift() {
+    let (tmp, code, doc, mut body) = anchor_fixture();
+    let pad = WINDOW + 1;
+    body.splice(
+        ANCHOR_BARE_LINE..ANCHOR_BARE_LINE,
+        (0..pad).map(|n| format!("// inserted {n}")),
+    );
+    fs::write(&code, body.join("\n") + "\n").unwrap();
+
+    let (anchor_counts, anchored, _, checked) = anchor_fixture_verdicts(tmp.path(), &doc);
+    assert!(
+        anchored.is_empty() && anchor_counts.fresh == 1,
+        "CONTROL: the bare citation above the insertion still holds its text, yet:\n{anchored:#?}"
+    );
+    let [only] = &checked[..] else {
+        panic!("CONTROL: expected exactly the identifier citation, got {checked:#?}");
+    };
+    assert!(
+        only.contains(&format!(
+            "`anchor_named` not within {WINDOW} lines of the cited span"
+        )),
+        "CONTROL: the verdict does not say the identifier left its window:\n{only}"
+    );
+    assert!(
+        only.contains(&format!(
+            "nearest `anchor_named`: line {}, {pad} lines from the cited span",
+            ANCHOR_IDENT_LINE + pad
+        )),
+        "CONTROL: the report does not name where the identifier went:\n{only}"
     );
 }

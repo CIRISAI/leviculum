@@ -35,18 +35,18 @@ laptop that is closed for eight hours simply does not receive mail, and the
 program is a toy. With it, the program is usable on hardware that is off
 most of the time, which is the actual deployment.
 
-Scope explicitly excluded: hosting a propagation node. `leviculum-lxmf`
-carries both ends of the *client to node* codec exchange, but a host built
-on those codecs still owns its own mailbox storage, stamp validation, links
-and resources, because the crate performs no I/O
-(`leviculum-lxmf/src/lib.rs:16-18`). What the crate does not implement at
-all is the *node to node* direction — peer sync, peering keys and the
-`/offer` path (`leviculum-lxmf/src/lib.rs:20-30`, Codeberg #209) — and the
-two client modules repeat the exclusion in their own headers
+Scope explicitly excluded: hosting a propagation node. The library side
+of hosting has since been written: `leviculum-lxmf` carries both ends of
+the *client to node* exchange and the node role that stores uploads and
+answers `/get` (`leviculum-lxmf/src/lib.rs:16-21`, leviculum#384 part 1),
+and the *node to node* direction, peer sync and the `/offer` path, in its
+`peering` module (`leviculum-lxmf/src/lib.rs:23-34`, leviculum#384 part 2).
+The crate still performs no I/O, so a host owns links, resources and
+stamp-validation scheduling, and the two client modules lnmsg is built on
+keep hosting out in their own headers
 (`leviculum-lxmf/src/router/propagation_runtime.rs:3-5`,
-`leviculum-lxmf/src/propagation_client.rs:5-8`). A client cannot become a
-node without new library work. That is a separate program and a separate
-argument — and it now exists: the channel design record
+`leviculum-lxmf/src/propagation_client.rs:5-8`). Hosting is a separate
+program and a separate argument — and it now exists: the channel design record
 ([Public channels over LXMF](public-channels.md)) reopens hosting,
 because the channel retrieval side only works on nodes we run.
 

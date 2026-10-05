@@ -1,0 +1,12 @@
+//! Target of the anchored-citation controls in doc_citations.rs.
+//! citation_anchor_doc.md.in cites this file by line number: edit both or neither.
+pub const ANCHOR_BARE: u8 = 7;
+
+// filler
+// filler
+// filler
+// filler
+
+pub fn anchor_named(x: u8) -> u8 {
+    x + 1
+}

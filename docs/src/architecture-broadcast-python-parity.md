@@ -365,7 +365,7 @@ The rate limiter is consulted **only** for forwarded announces
 (`packet.hops > 0`). Self-originated announces bypass it because
 they only fire once and are not worth deferring.
 
-At `Transport.py:1091-1161`:
+At `Transport.py:1252-1311`:
 
 ```python
 if (packet.hops > 0):

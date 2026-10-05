@@ -584,10 +584,11 @@ remains.
 
 **At an advertised cost of 0 the cost is not incurred at all.** Our
 validator short-circuits before the workblock when the cost is zero
-(`validate_stamp`, `leviculum-lxmf/src/stamp.rs:373`), and the firmware
-already runs this way for delivery stamps: the LXMF dependency is
-pulled with default features off, so the node "advertises a zero stamp
-cost and mines nothing" (`leviculum-nrf/Cargo.toml:31`).
+(`validate_stamp`, `leviculum-lxmf/src/stamp.rs:373`). The firmware ran
+this way for delivery stamps until the role landed, with the LXMF
+dependency pulled without `pow`; the role brought `pow` in, because the
+board announces stamp cost 13 and has to validate what it accepts, through
+the streaming validator above (`leviculum-nrf/Cargo.toml:25-33`).
 
 The expensive case is *peering out* to a Python node, which requires
 mining a key at that node's advertised peering cost, default 18, over a

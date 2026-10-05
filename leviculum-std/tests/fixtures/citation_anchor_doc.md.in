@@ -1,0 +1,3 @@
+The constant is cited bare (`anchor_target.rs:3`).
+
+The function is cited by name: `anchor_named` (`anchor_target.rs:10`).

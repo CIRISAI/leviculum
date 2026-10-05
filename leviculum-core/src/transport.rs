@@ -3840,7 +3840,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Compute full packet hash (for deduplication and proofs) and truncated hash
         // (for reverse_table routing). Dedup uses full 32-byte SHA-256, matching
-        // Python Transport.py:1227 which checks `packet.packet_hash` (full hash).
+        // Python Transport.py:1376 which checks `packet.packet_hash` (full hash).
         // When the journey target already hashed above, reuse that value —
         // never hash the same packet twice. Otherwise take the driver's
         // off-lock precomputation (#29) when the bytes are unchanged, and
@@ -4253,7 +4253,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
     /// Send raw data on all online interfaces (emits Broadcast action).
     /// Matches Python Reticulum's Transport.outbound one-shot semantics:
-    /// Destination.announce at Destination.py:322 calls Packet.send exactly
+    /// Destination.announce at Destination.py:316 calls Packet.send exactly
     /// once, and Packet.send at Packet.py:274-300 invokes Transport.outbound
     /// once. This call therefore puts the packet on air exactly once; a caller
     /// announcing one of its own destinations pairs it with
@@ -7964,7 +7964,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Deliver link-addressed proofs to local links.
         //
         // LRPROOF (link establishment proofs, context=Lrproof) need delivery
-        // for non-transport nodes (Python Transport.py:2054-2073).
+        // for non-transport nodes (Python Transport.py:2212-2236).
         // Data proofs (96 bytes, context=None) need delivery for channel ACK
         // processing (Python Link.py:1172 generates proof for every CHANNEL packet).
         //
@@ -10953,7 +10953,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Python shared instance clients use hops to decide routing:
                 // hops == 0: destination is directly reachable, send Header1
                 // hops == 1: destination needs transport, convert to Header2
-                //    with transport_id from path table (Transport.py:1000-1011)
+                //    with transport_id from path table (Transport.py:1155-1166)
                 // Sending Header2 with our identity ensures the client's path table
                 // stores our transport_id, so outbound packets use the correct
                 // transport_id and pass our filter (Transport.py:1341-1343).
@@ -11891,7 +11891,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     }
                 } else {
                     // Apply ANNOUNCE_CAP to retries that forward a relayed
-                    // announce (hops > 0), matching Python Transport.py:1091.
+                    // announce (hops > 0), matching Python Transport.py:1252.
                     // Self-originated retries (hops == 0) and interfaces
                     // without a cap bypass the rate limiter.
                     if parsed.hops == 0 || self.interface_announce_caps.is_empty() {
@@ -12014,7 +12014,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Seed dedup so our emission is recognised when it echoes back on a
         // shared medium. Matches Python Transport.outbound() which iterates
         // all interfaces without filtering by receiving_interface and relies
-        // on packet_hashlist (Transport.py:1227) to absorb the echo.
+        // on packet_hashlist (Transport.py:1376) to absorb the echo.
         self.storage.add_packet_hash(packet_hash(&raw));
 
         // Per-mode announce-propagation gate (Codeberg #91, Transport.py:1193-
@@ -13667,7 +13667,7 @@ mod tests {
         #[test]
         fn test_dedup_uses_full_hash() {
             // Verify that Storage sees the full 32-byte SHA-256 hash,
-            // matching Python Transport.py:1227.
+            // matching Python Transport.py:1376.
             use crate::packet::packet_hash;
 
             let mut transport = test_transport();
@@ -21898,7 +21898,7 @@ mod tests {
 
         /// B3 parity: a self-originated announce is a one-shot broadcast and
         /// must not leave a scheduled retry in announce_table. Python's
-        /// Destination.announce at Destination.py:322 calls Packet.send
+        /// Destination.announce at Destination.py:316 calls Packet.send
         /// exactly once; Rust's send_on_all_interfaces now mirrors that.
         #[test]
         fn test_self_originated_announce_is_one_shot() {
@@ -25067,7 +25067,7 @@ mod tests {
         #[test]
         fn test_plain_announce_always_dropped() {
             // PLAIN announces are always invalid, dropped unconditionally
-            // regardless of hop count. Python Transport.py:1211-1213
+            // regardless of hop count. Python Transport.py:1361-1363
             use crate::destination::DestinationType;
             use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
 

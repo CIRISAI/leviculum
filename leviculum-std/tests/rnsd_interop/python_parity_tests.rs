@@ -51,7 +51,7 @@ async fn start_rust_node_with_tcp(
 ///    exactly once and no phantom retransmits follow.
 ///
 ///    Python's one-shot `Destination.announce() → Packet.send()` at
-///    `Destination.py:322` is mirrored by Rust's `send_on_all_interfaces`.
+///    `Destination.py:316` is mirrored by Rust's `send_on_all_interfaces`.
 #[tokio::test]
 async fn test_rust_announce_received_by_python_matches_spec() {
     let daemon = TestDaemon::start().await.expect("start daemon");
@@ -391,7 +391,7 @@ async fn test_mgmt_announce_keepalive_fires() {
 }
 
 /// 7. Announce cap rate-limits forwarded announces on a capped interface.
-///    Matches Python's `Transport.py:1091-1161` tx_time / wait_time model.
+///    Matches Python's `Transport.py:1252-1311` tx_time / wait_time model.
 ///
 ///    Rather than synthesize an interface with a numerical cap in an
 ///    integration test (which would require new test-harness plumbing),

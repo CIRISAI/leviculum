@@ -37,14 +37,16 @@ holds packets back, applies its own randomised pre-TX jitter on top of
 the RNode firmware's CSMA, and refuses new frames when its airtime
 budget is exhausted. Concretely:
 
-- **Send-side jitter** — packets are queued, not sent immediately; the
-  jitter window is sized from the radio parameters so two nodes do not
-  re-collide (`leviculum-std/src/interfaces/rnode.rs:151`, the
-  `compute_jitter_max_ms` doc comment, and the jitter queue at
-  `:851`).
+- **Send-side jitter** — packets are queued, not sent immediately; a
+  frame that acquires an idle channel first serves a randomised wait,
+  DIFS plus a contention window sized from the radio parameters, so two
+  nodes do not re-collide (`leviculum-std/src/interfaces/rnode.rs:2711-2742`,
+  where the TX loop arms it; the ceiling it reports is
+  `compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:293-303`).
 - **CSMA** — radio-level carrier sensing is handled by the RNode
-  firmware; the interface defers collision avoidance to it rather than
-  the core (`leviculum-std/src/interfaces/rnode.rs:587`).
+  firmware on top; the interface hands the modem one frame at a time so
+  that CSMA runs for every frame, and none of this reaches the core
+  (`leviculum-std/src/interfaces/rnode.rs:2264-2273`).
 - **Airtime backpressure** — a per-interface credit bucket charges
   every send by its airtime cost and signals `BufferFull` rather than
   flooding the serial queue

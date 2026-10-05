@@ -146,7 +146,7 @@ the SoftDevice actually installed, so it answers the version question
 directly rather than by inference. The T114's `Board-ID` is exactly
 `HT-n5262`, not a substring of something longer, which retroactively
 justifies the substring match at
-`leviculum-nrf/tools/uf2-runner.sh:222`.
+`leviculum-nrf/tools/uf2-volumes.sh:258`.
 
 Note the T114 bootloader build date matches Heltec's published
 `HT-n5262-bootloader-20240709.hex`, so that board still carries its

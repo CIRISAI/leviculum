@@ -3507,11 +3507,11 @@ mod tests {
 
     // Codeberg #140: the reported interface type must come from the transport
     // the interface was built over, not from its name. The driver names a
-    // configured RNode interface `rnode_<idx>` (driver/mod.rs:1607) — a peer/
-    // instance label that matches none of `interface_type`'s name prefixes, so
-    // a LoRa radio is reported as the generic "Interface". That is not only a
-    // wrong medium column in rnstatus: `itype` also picks the bitrate guess
-    // (handlers.rs:341-345), so the radio is advertised at 10 Mbps.
+    // configured RNode `rnode_<idx>` (driver/interface_build/rnode.rs:81) —
+    // a peer/instance label that matches none of `interface_type`'s name
+    // prefixes, so a LoRa radio is reported as the generic "Interface". That
+    // is not only a wrong medium column in rnstatus: `itype` also picks the
+    // bitrate guess (handlers.rs:719-725), so the radio is advertised at 10 Mbps.
     #[test]
     fn interface_type_comes_from_the_transport_not_the_name() {
         use crate::clock::SystemClock;

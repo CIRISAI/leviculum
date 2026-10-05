@@ -320,7 +320,7 @@ pub async fn rpc_query(
     // Python `rnsd`'s `path_table` RPC handler reads `call["max_hops"]`
     // unconditionally (it `KeyError`s — and then sends no response — when the
     // key is absent). Python's own client always sends the key, value `None`
-    // for "no hop limit" (RNS/Reticulum.py:1331). Our server treats absent and
+    // for "no hop limit" (RNS/Reticulum.py:1519). Our server treats absent and
     // `None` identically, so this is harmless against `lnsd` too.
     if get_key == "path_table" {
         entries.push((
