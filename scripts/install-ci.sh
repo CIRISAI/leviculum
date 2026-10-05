@@ -337,6 +337,11 @@ echo "[install-ci] licence tooling: cargo-about 0.9.2 (just notices / just notic
 #                             generation as the 1.97.1 host pin, so the
 #                             two compilers do not disagree about the
 #                             core crate a shared crate is built with.
+#                             Decided 2026-10-05 (Lew): the host pin
+#                             stays at 1.97.1 until esp-rs ships a
+#                             non-prerelease Xtensa toolchain of current
+#                             stable's generation; neither decoupled
+#                             from it nor paired with a prerelease.
 #       espflash 4.6.0        newest release; produces the image layout
 #                             esp-hal 1.2.x expects.
 #
