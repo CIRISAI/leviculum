@@ -190,6 +190,10 @@ struct HoldLoop {
     queue: std::vec::Vec<u32>,
     now_ms: u32,
     locked: bool,
+    /// Whether the age rule is in force. `false` is the FIFO hold #433
+    /// replaced: a stale verdict is held like any other, so the frame keys on
+    /// the next dip whatever its age.
+    rule: bool,
     /// Ages, in order, of the frames the rule threw away.
     stale_drops: std::vec::Vec<u32>,
     /// Ages, in order, of the frames that reached the radio.
@@ -204,6 +208,7 @@ impl HoldLoop {
             queue: std::vec::Vec::new(),
             now_ms: 0,
             locked: false,
+            rule: true,
             stale_drops: std::vec::Vec::new(),
             aired: std::vec::Vec::new(),
             aired_at: std::vec::Vec::new(),
@@ -231,6 +236,7 @@ impl HoldLoop {
                 self.aired_at.push(self.now_ms);
             }
             HoldVerdict::Hold { .. } => {}
+            HoldVerdict::DropStale { .. } if !self.rule => {}
             HoldVerdict::DropStale { age_ms } => {
                 self.queue.remove(0);
                 self.stale_drops.push(age_ms);
@@ -426,16 +432,24 @@ fn the_rule_bounds_the_age_of_everything_that_airs() {
     }
 }
 
-/// The derivation, asserted rather than only written down: the cap has to sit
-/// above the short-term airtime window (a lock that engaged on short-term
-/// airtime alone releases within 2 × 7500 ms as the bins roll off, and a cap
-/// below that would drop frames the lock was about to release) and below the
-/// measured field topology's relay-entry deadline minus the measured return
-/// leg, (1 + 2 + 2) × 6 s − 1.0 s.
+/// The derivation, asserted rather than only written down: the cap is the
+/// shortest relay entry the transport grants, `(1 + 0 + 2) × 6 s`
+/// (`proof_timeout_ms`, `leviculum-core/src/transport.rs:6791-6794`); it has
+/// to sit above the short-term airtime window (a lock that engaged on
+/// short-term airtime alone releases within 2 × 7500 ms as the bins roll off,
+/// and a cap below that would drop frames the lock was about to release) and
+/// below the measured field topology's relay-entry deadline minus the
+/// measured return leg, (1 + 2 + 2) × 6 s − 1.0 s.
 #[test]
 fn the_age_sits_between_the_two_bounds_it_is_derived_from() {
+    const PER_HOP_MS: u32 = 6_000;
+    // The shortest entry: a request heard over the air (hops 1) for a
+    // destination the relay reaches directly (path_hops 0).
+    const HOPS: u32 = 1;
+    const PATH_HOPS: u32 = 0;
+    const SHORTEST_ENTRY_DEADLINE_MS: u32 = (HOPS + PATH_HOPS + 2) * PER_HOP_MS;
     const SHORT_TERM_WINDOW_MS: u32 = 2 * 7_500;
-    const FIELD_ENTRY_DEADLINE_MS: u32 = (1 + 2 + 2) * 6_000;
+    const FIELD_ENTRY_DEADLINE_MS: u32 = (1 + 2 + 2) * PER_HOP_MS;
     const MEASURED_RETURN_LEG_MS: u32 = 1_000;
     // Const blocks: both operands are compile-time constants, so these fail
     // the build rather than one test run (the move c746bf8 made, and 358's).
@@ -454,6 +468,228 @@ fn the_age_sits_between_the_two_bounds_it_is_derived_from() {
              entry left to reach"
         )
     };
+    const {
+        assert!(
+            HOLD_MAX_AGE_MS == SHORTEST_ENTRY_DEADLINE_MS,
+            "the cap is the shortest entry a relay grants"
+        )
+    };
     // The value shipped, so a change to it is a deliberate one.
-    assert_eq!(HOLD_MAX_AGE_MS, 20_000);
+    assert_eq!(HOLD_MAX_AGE_MS, 18_000);
+}
+
+/// The field numbers of #433 replayed, before and after the rule: the Pocket
+/// V2 pinned at its long-term cap for 17 minutes (2026-09-27, #255).
+///
+/// The regime as measured: one frame left every 10–15 s (12 s here, the
+/// middle), the task takes a hold turn every 200 ms in between, and the three
+/// relayed link requests in the window keyed 137.7–145.6 s after the stack
+/// handed them over. A FIFO only ages like that if the stack hands over a
+/// little faster than the cap drains: one frame per 10.5 s against one per
+/// 12 s grows the backlog by about twelve frames in 17 minutes, so the head
+/// reaches ~145 s at the end, which is the measured age. The lock engages at
+/// t = 0 on an empty queue.
+///
+/// What this pins, for the report and for the next reader:
+/// * without the rule, at 17 minutes the queue holds 13 frames, 11 of them
+///   older than 18 s, and 80 of the 85 slots the cap allowed keyed a frame
+///   older than 18 s (the oldest 137.8 s) — airtime spent on proofs with no
+///   relay entry left;
+/// * with the rule, the same 85 slots carry no frame older than 18 s: those
+///   80 slots are freed for live traffic, 12 fossils are counted stale, the
+///   queue at 17 minutes holds 1 frame, and all 98 frames handed over are
+///   accounted for as aired, dropped or queued.
+#[test]
+fn the_field_regime_replayed_with_and_without_the_rule() {
+    const TURN_MS: u32 = 200;
+    const DIP_EVERY_MS: u32 = 12_000;
+    const ARRIVE_EVERY_MS: u32 = 10_500;
+    const REGIME_MS: u32 = 17 * 60_000;
+
+    fn run(rule: bool) -> HoldLoop {
+        let mut h = HoldLoop::new();
+        h.rule = rule;
+        let mut next_arrival = 0u32;
+        while h.now_ms < REGIME_MS {
+            if h.now_ms >= next_arrival {
+                h.enqueue();
+                next_arrival += ARRIVE_EVERY_MS;
+            }
+            // The ledger dips below the cap once per drain interval and the
+            // frame keyed in that dip re-pins it.
+            h.locked = h.now_ms % DIP_EVERY_MS != DIP_EVERY_MS - TURN_MS;
+            h.turn();
+            h.advance(TURN_MS);
+        }
+        h
+    }
+    let older_than_cap = |h: &HoldLoop| {
+        h.queue
+            .iter()
+            .filter(|&&t| h.now_ms - t > HOLD_MAX_AGE_MS)
+            .count()
+    };
+    let dead_slots = |h: &HoldLoop| h.aired.iter().filter(|&&a| a > HOLD_MAX_AGE_MS).count();
+
+    let fifo = run(false);
+    let aged = run(true);
+    let handed_over = REGIME_MS.div_ceil(ARRIVE_EVERY_MS) as usize;
+    std::println!(
+        "fifo: queued={} older_than_cap={} aired={} dead_slots={} oldest_aired_ms={}",
+        fifo.queue.len(),
+        older_than_cap(&fifo),
+        fifo.aired.len(),
+        dead_slots(&fifo),
+        fifo.aired.iter().max().copied().unwrap_or(0),
+    );
+    std::println!(
+        "rule: queued={} older_than_cap={} aired={} dead_slots={} stale_drops={} handed_over={}",
+        aged.queue.len(),
+        older_than_cap(&aged),
+        aged.aired.len(),
+        dead_slots(&aged),
+        aged.stale_drops.len(),
+        handed_over,
+    );
+
+    // The FIFO reproduces the field: the head ages to the measured ~145 s.
+    let oldest = fifo.aired.iter().max().copied().unwrap_or(0);
+    assert!(
+        (130_000..=150_000).contains(&oldest),
+        "the replay must age the head as the field did, got {oldest} ms"
+    );
+    assert_eq!(fifo.aired.len(), 85, "the cap allows one frame per 12 s");
+    assert_eq!(fifo.queue.len(), 13, "backlog at 17 minutes, FIFO");
+    assert_eq!(older_than_cap(&fifo), 11, "of which older than the cap");
+    assert_eq!(
+        dead_slots(&fifo),
+        80,
+        "slots spent on frames older than the cap"
+    );
+
+    // The rule spends the same slots on live frames only.
+    assert_eq!(
+        aged.aired.len(),
+        85,
+        "the rule must not cost the radio a slot"
+    );
+    assert_eq!(
+        dead_slots(&aged),
+        0,
+        "no slot keys a frame older than the cap"
+    );
+    assert_eq!(older_than_cap(&aged), 0);
+    assert_eq!(aged.queue.len(), 1, "backlog at 17 minutes, with the rule");
+    assert_eq!(aged.stale_drops.len(), 12, "the fossils, each one counted");
+    assert_eq!(
+        aged.aired.len() + aged.stale_drops.len() + aged.queue.len(),
+        handed_over,
+        "every frame handed over is keyed, counted stale, or still queued"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DutyHolds: the host-side view of the same lock.
+// ---------------------------------------------------------------------------
+
+/// The longest gate closure a handover explains on its own, for these tests.
+const MIN_HOLD_MS: u32 = 2_000;
+
+/// The mvr's shape on the host clock: a 20 s hold; frame A, queued as it
+/// began, is past the cap and dropped with the hold it waited behind; frame
+/// B, queued 5 s before it ended, airs; a frame that waited 17 s airs.
+#[test]
+fn a_frame_queued_behind_a_twenty_second_hold_is_stale_and_a_young_one_airs() {
+    let mut holds = DutyHolds::new(MIN_HOLD_MS);
+    holds.observe(true, 1_000);
+    let a = 1_000;
+    let seventeen = 4_000;
+    let b = 16_000;
+    holds.observe(true, 10_000);
+    holds.observe(false, 21_000);
+    let now = 21_000;
+    assert_eq!(
+        holds.verdict(a, now),
+        (HoldVerdict::DropStale { age_ms: 20_000 }, 20_000)
+    );
+    assert_eq!(
+        holds.verdict(seventeen, now),
+        (HoldVerdict::Hold { age_ms: 17_000 }, 17_000),
+        "17 s is inside the cap; the caller keys it"
+    );
+    assert_eq!(
+        holds.verdict(b, now),
+        (HoldVerdict::Hold { age_ms: 5_000 }, 5_000)
+    );
+}
+
+/// A closure no longer than a handover's own airtime is not a duty hold: a
+/// frame that is old for other reasons keys.
+#[test]
+fn a_short_closure_is_not_a_duty_hold() {
+    let mut holds = DutyHolds::new(MIN_HOLD_MS);
+    holds.observe(true, 30_000);
+    holds.observe(false, 30_000 + MIN_HOLD_MS - 1);
+    assert_eq!(holds.held_ms(0, 40_000), 0);
+    assert_eq!(holds.verdict(0, 40_000).0, HoldVerdict::Key);
+}
+
+/// A frame queued after the hold ended did not wait behind it, however old it
+/// is by the time it reaches the head.
+#[test]
+fn a_frame_queued_after_the_hold_did_not_wait_behind_it() {
+    let mut holds = DutyHolds::new(MIN_HOLD_MS);
+    holds.observe(true, 0);
+    holds.observe(false, 30_000);
+    assert_eq!(holds.held_ms(30_001, 80_000), 0);
+    assert_eq!(holds.verdict(30_001, 80_000).0, HoldVerdict::Key);
+    // The boundary frame, queued the instant it ended, did not either.
+    assert_eq!(holds.held_ms(30_000, 80_000), 0);
+}
+
+/// A hold still in progress counts once it has qualified, and the overlap
+/// runs up to now.
+#[test]
+fn a_hold_in_progress_counts_once_it_qualifies() {
+    let mut holds = DutyHolds::new(MIN_HOLD_MS);
+    holds.observe(true, 5_000);
+    assert_eq!(holds.held_ms(0, 5_000 + MIN_HOLD_MS - 1), 0);
+    assert_eq!(holds.held_ms(0, 25_000), 20_000);
+    assert_eq!(
+        holds.verdict(0, 25_000).0,
+        HoldVerdict::DropStale { age_ms: 25_000 }
+    );
+}
+
+/// Only the latest qualifying hold is kept, and that loses nothing: a frame
+/// that overlapped an earlier one overlapped the latest too, because it was
+/// still queued when the latest began.
+#[test]
+fn the_latest_hold_stands_for_every_earlier_one() {
+    let mut holds = DutyHolds::new(MIN_HOLD_MS);
+    holds.observe(true, 0);
+    holds.observe(false, 10_000);
+    holds.observe(true, 15_000);
+    holds.observe(false, 25_000);
+    // Queued during the first hold, still queued at 30 s: overlaps the second
+    // from its start.
+    assert_eq!(holds.held_ms(5_000, 30_000), 10_000);
+    // A short closure afterwards does not displace the record.
+    holds.observe(true, 26_000);
+    holds.observe(false, 26_500);
+    assert_eq!(holds.held_ms(5_000, 30_000), 10_000);
+}
+
+/// The clock wraps under a queued frame and a hold alike.
+#[test]
+fn the_overlap_survives_the_stamp_wrapping() {
+    let mut holds = DutyHolds::new(MIN_HOLD_MS);
+    let start = u32::MAX - 4_999;
+    holds.observe(true, start);
+    holds.observe(false, 15_000);
+    assert_eq!(holds.held_ms(start, 15_000), 20_000);
+    assert_eq!(
+        holds.verdict(start, 15_000).0,
+        HoldVerdict::DropStale { age_ms: 20_000 }
+    );
 }

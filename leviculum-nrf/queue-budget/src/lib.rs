@@ -222,20 +222,29 @@ impl QueueBudget {
 /// keyed 145.6 s, 137.7 s and 144.0 s after they were handed to the
 /// interface, one frame leaving every 10-15 s.
 ///
-/// # Where 20 s comes from
+/// # Where 18 s comes from
 ///
-/// Two bounds, and the value is the round number between them.
+/// It is the **shortest deadline the transport gives anything that crosses a
+/// relay**, and it sits between two bounds that a cap must respect.
 ///
-/// **Upper bound — the relay entry the frame is trying to reach, 29 s.** A
-/// forwarded link request is routable only until the relay's link-table entry
-/// expires: `proof_timeout_ms = now + (hops + path_hops + 2) *
-/// DEFAULT_PER_HOP_TIMEOUT`, 6 s per hop
-/// (`leviculum-core/src/transport.rs:6503-6506`,
-/// `leviculum-core/src/constants.rs:113`), which is 30 s in the measured field
-/// topology (hops 1, path_hops 2) and starts at forward time — i.e. when the
-/// frame is enqueued here. The measured return leg after key-up was 1.0 s
-/// (key-up 14:24:24.009 UTC, proof back at this board 14:24:25.015), so a
-/// frame keyed later than 29 s after enqueue produces a proof that arrives
+/// **The value — the shortest relay entry, 18 s.** A forwarded link request is
+/// routable only until the relay's link-table entry expires:
+/// `proof_timeout_ms = now + (hops + path_hops + 2) * DEFAULT_PER_HOP_TIMEOUT`,
+/// 6 s per hop (`leviculum-core/src/transport.rs:6791-6794`,
+/// `leviculum-core/src/constants.rs:113`), starting at forward time — i.e.
+/// when the frame is enqueued here. A request a relay heard over the air has
+/// `hops >= 1`, so the shortest entry any relay grants is the one-hop request
+/// to a destination it reaches directly, `(1 + 0 + 2) × 6 s = 18 s`. A frame
+/// older than that is dead on arrival there, and no relay grants a shorter
+/// entry; keying it spends the one air slot the lock allows on traffic nobody
+/// can use. (Until #433's lnsd half this was 20 s, sized for
+/// the measured field topology alone; 18 s is the figure that holds for every
+/// topology, and it still satisfies both bounds below.)
+///
+/// **Upper bound — the measured field topology, 29 s.** The field entry was
+/// `(1 + 2 + 2) × 6 s = 30 s`, and the measured return leg after key-up was
+/// 1.0 s (key-up 14:24:24.009 UTC, proof back at this board 14:24:25.015), so
+/// a frame keyed later than 29 s after enqueue produces a proof that arrives
 /// after the entry it needs is gone. That is exactly the field failure, and it
 /// is why 60 s — the figure the analysis in report 358 §3 floated — would not
 /// have fixed it: with the cap in force the aired frames' age saturates just
@@ -246,25 +255,32 @@ impl QueueBudget {
 /// (`leviculum-core/src/rnode.rs:1460`, `:1909-1910`), so a lock that engaged
 /// on short-term airtime alone releases within 15 s as those bins roll off.
 /// A cap at or below that would throw away frames the lock was about to
-/// release anyway, turning a legal pause into a loss. 20 s leaves a frame the
-/// whole roll-off plus 5 s.
+/// release anyway, turning a legal pause into a loss. 18 s leaves a frame the
+/// whole roll-off plus 3 s.
 ///
 /// **The cadences agree.** An initiator reissues a link request every
 /// `ESTABLISHMENT_TIMEOUT_PER_HOP_MS × hops` — 18 s by our constant at 3
-/// hops, 16 s observed at the phone — so a frame older than 20 s has already
+/// hops, 16 s observed at the phone — so a frame older than 18 s has already
 /// been superseded by a fresher copy from the same sender, and the sender has
 /// written the first attempt off. Announces are reissued on their own cadence
 /// (300 s mobile, ~1 h stationary) and LXMF retries at its own layer, so
 /// neither loses a message to this rule; both gain, because the airtime the
 /// cap does allow now carries current traffic instead of fossils.
 ///
-/// **What it cannot fix.** The arithmetic floor of the entry deadline is
-/// (0 + 0 + 2) × 6 s = 18 s, below this cap. On a topology that short a frame
-/// keyed at 19 s still outlives its entry. No cap can serve both that floor
-/// and the 15 s short-term roll-off, so the rule is sized for the topology
-/// that was measured; it makes no topology worse than the FIFO hold it
-/// replaces, which aired at 145 s.
-pub const HOLD_MAX_AGE_MS: u32 = 20_000;
+/// **What it cannot fix.** A frame keyed at 17.9 s in the shortest topology
+/// still needs its return leg, so its proof can arrive just after the 18 s
+/// entry is gone. A cap that also covered the return leg would sit at ~17 s,
+/// 2 s above the short-term roll-off; the margin to that bound is worth more
+/// than the last second, and the rule makes no topology worse than the FIFO
+/// hold it replaces, which aired at 145 s.
+///
+/// # Both stacks
+///
+/// The firmware applies the rule against its own `AirtimeTracker::is_locked`
+/// ([`hold_verdict`]); `lnsd`'s RNode interface cannot see the modem's lock
+/// and applies it against the holds it observes on its CMD_READY gate
+/// ([`DutyHolds`]). One constant, so the two stacks drop at the same age.
+pub const HOLD_MAX_AGE_MS: u32 = 18_000;
 
 /// What the age rule says about the frame the transmitter is holding.
 ///
@@ -304,7 +320,7 @@ pub enum HoldVerdict {
 /// truncated to `u32`. The difference is taken with `wrapping_sub`, which is
 /// correct for every age shorter than the 49.7-day wrap and therefore for
 /// every age a queued frame can have; the alternative, a saturating
-/// subtraction, would make the frames enqueued in the 20 s before a wrap look
+/// subtraction, would make the frames enqueued in the 18 s before a wrap look
 /// eternally fresh instead of costing one wrongly-dropped frame every seven
 /// weeks. The truncation is deliberate: a `u32` stamp per queued frame is
 /// 4 bytes of `.bss` against the 12 a `u64` would cost once alignment is
@@ -318,6 +334,87 @@ pub fn hold_verdict(enqueued_ms: u32, now_ms: u32, locked: bool) -> HoldVerdict 
         HoldVerdict::DropStale { age_ms }
     } else {
         HoldVerdict::Hold { age_ms }
+    }
+}
+
+/// The duty holds a host-side queue has observed, reduced to what the age
+/// rule needs: whether a frame's wait overlapped one, and by how much.
+///
+/// A host driving an RNode cannot read the modem's airtime lock. What it sees
+/// is its consequence: the CMD_READY gate stays closed with frames queued,
+/// because a modem that may not key cannot drain. Every handover closes that
+/// gate briefly, so the caller says which closures count — `min_hold_ms`, the
+/// longest closure ordinary airtime can explain — and only a closure at least
+/// that long is a duty hold here.
+///
+/// Only the most recent qualifying hold is kept, and that is enough: a frame
+/// overlapped SOME qualifying hold iff it overlapped the one that ended last,
+/// because every earlier one ended before it. So the tracker is two stamps,
+/// whatever the queue depth.
+///
+/// Milliseconds as `u32` on the caller's own clock, differences taken
+/// wrappingly, the same convention as [`hold_verdict`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DutyHolds {
+    min_hold_ms: u32,
+    /// Start of the closure in progress, if the gate is holding now.
+    current: Option<u32>,
+    /// `(start, end)` of the most recent closure that qualified.
+    last: Option<(u32, u32)>,
+}
+
+impl DutyHolds {
+    /// A tracker that counts a closure as a duty hold once it has lasted
+    /// `min_hold_ms`.
+    pub const fn new(min_hold_ms: u32) -> Self {
+        Self {
+            min_hold_ms,
+            current: None,
+            last: None,
+        }
+    }
+
+    /// Feed the gate's state. Called on every turn of the caller's loop,
+    /// before it dequeues, so a hold that ended this turn is on record when
+    /// the frames it held are judged.
+    pub fn observe(&mut self, holding: bool, now_ms: u32) {
+        match (holding, self.current) {
+            (true, None) => self.current = Some(now_ms),
+            (false, Some(start)) => {
+                self.current = None;
+                if now_ms.wrapping_sub(start) >= self.min_hold_ms {
+                    self.last = Some((start, now_ms));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// How long a frame enqueued at `enqueued_ms` has waited behind a duty
+    /// hold by `now_ms`: the overlap of its wait with the most recent
+    /// qualifying hold, a hold still in progress included once it qualifies.
+    /// Zero when its wait overlapped none.
+    pub fn held_ms(&self, enqueued_ms: u32, now_ms: u32) -> u32 {
+        let hold = match self.current {
+            Some(start) if now_ms.wrapping_sub(start) >= self.min_hold_ms => Some((start, now_ms)),
+            _ => self.last,
+        };
+        let Some((start, end)) = hold else {
+            return 0;
+        };
+        // Everything as an age before `now`, where the wrap cannot bite.
+        let waited = now_ms.wrapping_sub(enqueued_ms);
+        let since_start = now_ms.wrapping_sub(start);
+        let since_end = now_ms.wrapping_sub(end);
+        waited.min(since_start).saturating_sub(since_end)
+    }
+
+    /// [`hold_verdict`] for a frame on a host-side queue: locked iff its wait
+    /// overlapped a duty hold. Returns the verdict and the overlap, which the
+    /// caller names on its drop line.
+    pub fn verdict(&self, enqueued_ms: u32, now_ms: u32) -> (HoldVerdict, u32) {
+        let held_ms = self.held_ms(enqueued_ms, now_ms);
+        (hold_verdict(enqueued_ms, now_ms, held_ms > 0), held_ms)
     }
 }
 
