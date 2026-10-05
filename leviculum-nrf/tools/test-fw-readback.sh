@@ -115,7 +115,7 @@ fw_debug_ports() {
 # <silent-windows> windows, then the board's banner — the same shape a board
 # that boots slowly presents to the real reader.
 fw_read_banner() {
-    local port="$1" serial="${1##*/port-}" stamp silent n
+    local port="$1" serial="${1##*/port-}" log="${3:-}" stamp silent n
     printf '%s\n' "$port" >>"$READS"
     stamp="$(board_field "$serial" stamp)"
     silent="$(board_field "$serial" silent)"
@@ -123,6 +123,7 @@ fw_read_banner() {
     [ "$stamp" = "(mute)" ] && return 0
     n="$(grep -c "^$port\$" "$READS")"
     [ "$n" -le "${silent:-0}" ] && return 0
+    [ -n "$log" ] && printf '[INFO!] [FW_BUILD] %s\n' "$stamp" >>"$log"
     printf '[INFO!] [FW_BUILD] %s\n' "$stamp"
     return 0
 }
@@ -140,6 +141,11 @@ reset_scenario() {
     FW_READ_WINDOW=1
     FW_READ_ATTEMPTS=3
     FW_READ_OTHER_ATTEMPTS=1
+    # Boot logs land in the scratch dir, never in the tree's target/: a test
+    # that wrote beside the build would leave files the next gate trips on.
+    FW_BOOT_LOG_DIR="$WORK/target"
+    mkdir -p "$FW_BOOT_LOG_DIR"
+    unset LEVICULUM_FLASH_BOOT_LOG
 }
 
 # The two rig boards, named as they are in #343.
@@ -348,6 +354,44 @@ check_contains "...and says the image is what is missing" \
     "the image carries no [FW_BUILD] stamp" "$FW_ATTR_MESSAGE"
 check_eq "...without reading a board to find that out" "0" "$(reads_for "$A")"
 
+# --- 8b. The read-back keeps the boot it read, and says where ----------------
+# The first window after a flash holds the only copy of the lines a boot prints
+# once ([QSPI] JEDEC, [QSPI] STORE, [MEDIA]); a reader attached later sees the
+# heartbeat and nothing else (#413). The CONFIRMED line names the file so a
+# boot proof can read it instead of chasing a reset.
+
+reset_scenario
+board "$A" "$NEW"
+fw_attribute "(test)" "$NEW" "$A"
+check_contains "a confirmed flash names its boot log, per serial, beside the build" \
+    "boot log $WORK/target/flash-boot-$A-" "$FW_ATTR_MESSAGE"
+check_eq "...as FW_ATTR_BOOT_LOG too" "$FW_ATTR_BOOT_LOG" \
+    "${FW_ATTR_MESSAGE##*boot log }"
+if [[ "$FW_ATTR_BOOT_LOG" =~ /flash-boot-$A-[0-9]{8}T[0-9]{6}Z\.log$ ]]; then
+    ok "...named flash-boot-<serial>-<utc>.log"
+else
+    bad "...named flash-boot-<serial>-<utc>.log"
+    printf '        got  %q\n' "$FW_ATTR_BOOT_LOG"
+fi
+check_contains "...and the file holds what the window read" \
+    "[FW_BUILD] $NEW" "$(cat "$FW_ATTR_BOOT_LOG" 2>/dev/null)"
+
+reset_scenario
+board "$A" "$OLD"
+board "$B" "$NEW"
+fw_attribute "(test)" "$NEW" "$A"
+check_contains "a corrected attribution names the boot log of the board that has the image" \
+    "boot log $WORK/target/flash-boot-$B-" "$FW_ATTR_MESSAGE"
+
+reset_scenario
+board "$A" "$NEW"
+LEVICULUM_FLASH_BOOT_LOG="$WORK/chosen.log"
+fw_attribute "(test)" "$NEW" "$A"
+check_eq "LEVICULUM_FLASH_BOOT_LOG chooses the file" "$WORK/chosen.log" "$FW_ATTR_BOOT_LOG"
+check_contains "...and the CONFIRMED line names it" "boot log $WORK/chosen.log" "$FW_ATTR_MESSAGE"
+check_contains "...and it holds the window" "[FW_BUILD] $NEW" "$(cat "$WORK/chosen.log" 2>/dev/null)"
+unset LEVICULUM_FLASH_BOOT_LOG
+
 # --- 9. The reader really does read a serial port ---------------------------
 # Everything above stubs fw_read_banner. This case runs the real one against a
 # pty, so the parsing (CRLF, the last banner winning, the timeout) is covered
@@ -361,10 +405,13 @@ import os, pty, sys, time
 master, slave = pty.openpty()
 open(sys.argv[1], 'w').write(os.ttyname(slave) + '\n')
 deadline = time.monotonic() + 8
+os.write(master, b'leviculum SolarNode booting\r\n')
 os.write(master, b'[INFO!] [TIME_SOURCE] source=uptime-only\r\n')
 os.write(master, b'[INFO!] [FW_BUILD] git_sha=deadbee dirty=false\r\n')
+os.write(master, b'[INFO!] [QSPI] JEDEC c2 25 35 clk=16MHz rxdelay=1 state=ok\r\n')
 time.sleep(0.3)
 os.write(master, b'[INFO!] [FW_BUILD] git_sha=0269dbf dirty=false\r\n')
+os.write(master, b'[INFO!] [MEDIA] unterminated')
 while time.monotonic() < deadline:
     time.sleep(0.1)
 PY
@@ -380,9 +427,17 @@ done
 # shellcheck source=leviculum-nrf/tools/fw-readback.sh
 . "$SCRIPT_DIR/fw-readback.sh"
 if [ -n "$PTY_DEV" ]; then
-    PTY_BANNER="$(fw_read_banner "$PTY_DEV" 2)"
+    PTY_LOG="$WORK/pty-boot/boot.log"
+    PTY_BANNER="$(fw_read_banner "$PTY_DEV" 2 "$PTY_LOG")"
     check_eq "the real reader returns the LAST banner seen, CR stripped" \
         "[INFO!] [FW_BUILD] git_sha=0269dbf dirty=false" "$PTY_BANNER"
+    check_eq "...and writes every line of the window to the boot log, in order" \
+        "leviculum SolarNode booting
+[INFO!] [TIME_SOURCE] source=uptime-only
+[INFO!] [FW_BUILD] git_sha=deadbee dirty=false
+[INFO!] [QSPI] JEDEC c2 25 35 clk=16MHz rxdelay=1 state=ok
+[INFO!] [FW_BUILD] git_sha=0269dbf dirty=false
+[INFO!] [MEDIA] unterminated" "$(cat "$PTY_LOG" 2>/dev/null)"
     check_eq "a port that says nothing in the window yields nothing" "" \
         "$(fw_read_banner "$WORK/absent-port" 1)"
 else

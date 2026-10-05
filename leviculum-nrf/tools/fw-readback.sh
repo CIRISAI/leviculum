@@ -51,6 +51,26 @@ FW_READ_ATTEMPTS="${LEVICULUM_FW_READ_ATTEMPTS:-3}"
 # for, and each one costs a window; one apiece keeps the worst case bounded.
 FW_READ_OTHER_ATTEMPTS="${LEVICULUM_FW_READ_OTHER_ATTEMPTS:-1}"
 
+# Where the bytes a read-back window saw are kept. The first window after a
+# flash is the only place the lines a boot prints once ever reach the host:
+# `leviculum SolarNode booting`, `[QSPI] JEDEC ... state=ok`, `[QSPI] STORE`,
+# `[MEDIA]`. A reader attached after the runner has let go sees only the 5 s
+# heartbeat, and a DTR pulse on the transport port does not reset the board
+# (the boot proof of 0c3845d9, #413), so a window that discards those bytes
+# discards the boot. `LEVICULUM_FLASH_BOOT_LOG` names one file for every board
+# read; unset, each board gets its own beside the build.
+FW_BOOT_LOG_DIR="${FW_BOOT_LOG_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target}"
+
+# The boot log for one board, under the timestamp of one attribution.
+# Args: $1 = serial, $2 = UTC stamp (YYYYmmddTHHMMSSZ)
+fw_boot_log_path() {
+    if [ -n "${LEVICULUM_FLASH_BOOT_LOG:-}" ]; then
+        printf '%s' "$LEVICULUM_FLASH_BOOT_LOG"
+    else
+        printf '%s/flash-boot-%s-%s.log' "$FW_BOOT_LOG_DIR" "$1" "$2"
+    fi
+}
+
 # --- The image's own build stamp --------------------------------------------
 
 # The stamp carried by an image file, or nothing.
@@ -147,12 +167,32 @@ fw_debug_port_for_serial() {
 # them raised: opening the port without them yields silence, and silence read
 # as "wrong firmware" would reintroduce the guess this file exists to remove.
 # Pure stdlib (termios/fcntl) so no pyserial install is required on the rig.
-# Args: $1 = port, $2 = seconds
+#
+# With a third argument every line the window read is appended to that file,
+# CR stripped and blank lines dropped, the unterminated tail included: the window is the boot, and the
+# banner is only the part of it attribution needs.
+# Args: $1 = port, $2 = seconds, $3 = boot log ("" = keep nothing)
 fw_read_banner() {
-    local port="$1" secs="$2"
-    python3 - "$port" "$secs" <<'PY'
+    local port="$1" secs="$2" log="${3:-}"
+    if [ -n "$log" ]; then
+        mkdir -p "$(dirname "$log")" 2>/dev/null || true
+    fi
+    python3 - "$port" "$secs" "$log" <<'PY'
 import sys, os, time, fcntl, termios, struct, select
-port, secs = sys.argv[1], float(sys.argv[2])
+port, secs, log_path = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+log = None
+if log_path:
+    try:
+        log = open(log_path, 'a', encoding='utf-8')
+    except OSError:
+        # A boot log that cannot be written must not cost the attribution.
+        log = None
+def keep(text):
+    # Blank lines carry nothing, and a tty that still had ICRNL on when the
+    # bytes arrived turns every CRLF into two of them.
+    if log is not None and text:
+        log.write(text + '\n')
+        log.flush()
 try:
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
 except OSError:
@@ -189,11 +229,16 @@ try:
         while b'\n' in buf:
             line, buf = buf.split(b'\n', 1)
             text = line.decode('utf-8', 'replace').replace('\r', '').strip()
+            keep(text)
             if 'FW_BUILD' in text:
                 last = text
+    if buf:
+        keep(buf.decode('utf-8', 'replace').replace('\r', '').strip())
     print(last)
 finally:
     os.close(fd)
+    if log is not None:
+        log.close()
 PY
 }
 
@@ -206,9 +251,10 @@ PY
 #
 # `mismatch` and `noanswer` stay apart all the way to the summary: a crashed
 # board and a wrongly-flashed board need different things done to them.
-# Args: $1 = serial, $2 = expected stamp, $3 = read attempts
+# Args: $1 = serial, $2 = expected stamp, $3 = read attempts,
+#       $4 = boot log for every window read ("" = keep nothing)
 fw_board_state() {
-    local serial="$1" want="$2" attempts="${3:-$FW_READ_ATTEMPTS}"
+    local serial="$1" want="$2" attempts="${3:-$FW_READ_ATTEMPTS}" log="${4:-}"
     local port banner="" got n=0
 
     port="$(fw_debug_port_for_serial "$serial")"
@@ -217,7 +263,7 @@ fw_board_state() {
         return 0
     fi
     while [ "$n" -lt "$attempts" ]; do
-        banner="$(fw_read_banner "$port" "$FW_READ_WINDOW")"
+        banner="$(fw_read_banner "$port" "$FW_READ_WINDOW" "$log")"
         [ -n "$banner" ] && break
         n=$((n + 1))
     done
@@ -253,6 +299,7 @@ FW_ATTR_OUTCOME=""  # match|rebound|mismatch|noanswer|ambiguous|nostamp
 FW_ATTR_SERIAL=""   # the board the image is on, when that is known
 FW_ATTR_STAMP=""    # what that board reports
 FW_ATTR_MESSAGE=""  # the line to print, already worded
+FW_ATTR_BOOT_LOG="" # the boot log of FW_ATTR_SERIAL, when one was kept
 
 # Serials already bound to this image, "|serial|" joined. A board that has
 # been confirmed for an earlier write must not be offered as the recipient of
@@ -291,12 +338,14 @@ fw_state_phrase() {
 #       crashed-firmware recovery pass)
 fw_attribute() {
     local hint="$1" want="$2" named="${3:-}"
-    local state="noanswer" detail="" s st hits="" nhits=0 seen=""
+    local state="noanswer" detail="" s st hits="" nhits=0 seen="" utc
 
     FW_ATTR_OUTCOME=""
     FW_ATTR_SERIAL=""
     FW_ATTR_STAMP=""
     FW_ATTR_MESSAGE=""
+    FW_ATTR_BOOT_LOG=""
+    utc="$(date -u +%Y%m%dT%H%M%SZ)"
 
     if [ -z "$want" ]; then
         FW_ATTR_OUTCOME="nostamp"
@@ -305,13 +354,14 @@ fw_attribute() {
     fi
 
     if [ -n "$named" ]; then
-        IFS=$'\t' read -r state detail <<<"$(fw_board_state "$named" "$want" "$FW_READ_ATTEMPTS")"
+        IFS=$'\t' read -r state detail <<<"$(fw_board_state "$named" "$want" "$FW_READ_ATTEMPTS" "$(fw_boot_log_path "$named" "$utc")")"
         if [ "$state" = "match" ]; then
             fw_mark_attributed "$named"
             FW_ATTR_OUTCOME="match"
             FW_ATTR_SERIAL="$named"
             FW_ATTR_STAMP="$detail"
-            FW_ATTR_MESSAGE="$hint: flash CONFIRMED — serial=$named reports $detail, read back from the board, which is the image that was written"
+            FW_ATTR_BOOT_LOG="$(fw_boot_log_path "$named" "$utc")"
+            FW_ATTR_MESSAGE="$hint: flash CONFIRMED — serial=$named reports $detail, read back from the board, which is the image that was written; boot log $FW_ATTR_BOOT_LOG"
             return 0
         fi
     fi
@@ -325,7 +375,7 @@ fw_attribute() {
         seen="$seen $s"
         # Only the verdict matters here: we are asking who has the image, not
         # cataloguing what everyone else is running.
-        IFS=$'\t' read -r st _ <<<"$(fw_board_state "$s" "$want" "$FW_READ_OTHER_ATTEMPTS")"
+        IFS=$'\t' read -r st _ <<<"$(fw_board_state "$s" "$want" "$FW_READ_OTHER_ATTEMPTS" "$(fw_boot_log_path "$s" "$utc")")"
         [ "$st" = "match" ] && hits="$hits$s"$'\n'
     done <<<"$(fw_candidate_serials)"
 
@@ -337,10 +387,11 @@ fw_attribute() {
         FW_ATTR_OUTCOME="rebound"
         FW_ATTR_SERIAL="$hits"
         FW_ATTR_STAMP="$want"
+        FW_ATTR_BOOT_LOG="$(fw_boot_log_path "$hits" "$utc")"
         if [ -n "$named" ]; then
-            FW_ATTR_MESSAGE="$hint: flash MIS-ATTRIBUTED — the image $want is on serial=$hits, not on serial=$named ($(fw_state_phrase "$state" "$named" "$detail")); bound by read-back, not by enumeration order"
+            FW_ATTR_MESSAGE="$hint: flash MIS-ATTRIBUTED — the image $want is on serial=$hits, not on serial=$named ($(fw_state_phrase "$state" "$named" "$detail")); bound by read-back, not by enumeration order; boot log $FW_ATTR_BOOT_LOG"
         else
-            FW_ATTR_MESSAGE="$hint: the image $want was received by serial=$hits, bound by read-back"
+            FW_ATTR_MESSAGE="$hint: the image $want was received by serial=$hits, bound by read-back; boot log $FW_ATTR_BOOT_LOG"
         fi
         return 0
     fi
