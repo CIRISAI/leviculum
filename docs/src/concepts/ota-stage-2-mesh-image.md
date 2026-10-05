@@ -149,7 +149,7 @@ leaving about 838 KiB. That is enough, and it is not so much that the
 region layout can be left implicit, because **the same part is already
 wanted by something else**: the record log, the message store of Codeberg
 #384, mounts over the whole part today
-(`log_store`, `leviculum-nrf/src/qspi.rs:1043`, read-only and formatting
+(`log_store`, `leviculum-nrf/src/qspi.rs:1054`, read-only and formatting
 nothing, precisely because that decision had not been taken). Two
 claimants and one part means one region map, decided once, in one place —
 not two mounts that each believe they own sector 0. Whichever batch

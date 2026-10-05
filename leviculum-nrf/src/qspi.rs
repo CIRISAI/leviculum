@@ -453,8 +453,14 @@ pub const P25Q16H: FlashPart = FlashPart {
 /// Emits one `[QSPI]` line either way, ungated like `SD_RAM_FLOOR`: a
 /// board that comes up with an unexpected part has to say so in a boot
 /// capture, before any host has attached to the debug port.
+///
+/// Async, and every command awaited rather than spun on, so the deadline
+/// in [`identify_and_mount_bounded`] can fire while a command is
+/// outstanding. `Qspi::new` still spins on the activation's READY
+/// (`embassy-nrf-0.9.0/src/qspi.rs`, `new`); no deadline in this
+/// executor reaches it.
 #[allow(clippy::too_many_arguments)]
-pub fn identify_at_boot(
+pub async fn identify_at_boot(
     qspi: Peri<'static, peripherals::QSPI>,
     sck: Peri<'static, AnyPin>,
     csn: Peri<'static, AnyPin>,
@@ -510,7 +516,8 @@ pub fn identify_at_boot(
     // the rest of its life. Harmless on a part that is already awake,
     // which is why it is in the boot path and not behind a flag.
     if flash
-        .blocking_custom_instruction(CMD_RELEASE_DEEP_POWER_DOWN, &[], &mut [])
+        .custom_instruction(CMD_RELEASE_DEEP_POWER_DOWN, &[], &mut [])
+        .await
         .is_err()
     {
         log_part(part, None, None, false, "release-failed");
@@ -521,7 +528,7 @@ pub fn identify_at_boot(
     // Custom instructions run on the single-line SPI path regardless of
     // the quad read/write opcodes configured above, so this works before
     // QE is set.
-    let first = match read_jedec(&mut flash) {
+    let first = match read_jedec(&mut flash).await {
         Some(id) => id,
         None => {
             log_part(part, None, None, false, "read-failed");
@@ -537,7 +544,7 @@ pub fn identify_at_boot(
     // first one it could have answered. Both go on the log line.
     let second = if first == [0u8; 3] {
         cortex_m::asm::delay(RELEASE_WAIT_CYCLES);
-        match read_jedec(&mut flash) {
+        match read_jedec(&mut flash).await {
             Some(id) => Some(id),
             None => {
                 log_part(part, Some(first), None, false, "read-failed");
@@ -577,7 +584,8 @@ pub fn identify_at_boot(
     if part.quad == QuadEnable::StatusBit6 {
         let mut status = [0u8; 1];
         if flash
-            .blocking_custom_instruction(CMD_READ_STATUS, &[], &mut status)
+            .custom_instruction(CMD_READ_STATUS, &[], &mut status)
+            .await
             .is_err()
         {
             log_part(part, Some(first), second, false, "status-read-failed");
@@ -586,7 +594,8 @@ pub fn identify_at_boot(
         if status[0] & STATUS_QE == 0 {
             let want = status[0] | STATUS_QE;
             if flash
-                .blocking_custom_instruction(CMD_WRITE_STATUS, &[want], &mut [])
+                .custom_instruction(CMD_WRITE_STATUS, &[want], &mut [])
+                .await
                 .is_err()
             {
                 log_part(part, Some(first), second, false, "quad-enable-failed");
@@ -597,7 +606,8 @@ pub fn identify_at_boot(
             // the symptom would be garbage data rather than an error.
             let mut check = [0u8; 1];
             if flash
-                .blocking_custom_instruction(CMD_READ_STATUS, &[], &mut check)
+                .custom_instruction(CMD_READ_STATUS, &[], &mut check)
+                .await
                 .is_err()
                 || check[0] & STATUS_QE == 0
             {
@@ -928,10 +938,11 @@ fn bitbang_second_opinion(pins: [Peri<'static, AnyPin>; 6]) {
 /// One JEDEC id read (opcode 0x9F). `None` is a transaction the peripheral
 /// refused; three zero bytes are a transaction that worked and found
 /// nobody driving the bus.
-fn read_jedec(flash: &mut Qspi<'static>) -> Option<[u8; 3]> {
+async fn read_jedec(flash: &mut Qspi<'static>) -> Option<[u8; 3]> {
     let mut jedec = [0u8; 3];
     flash
-        .blocking_custom_instruction(CMD_READ_JEDEC_ID, &[], &mut jedec)
+        .custom_instruction(CMD_READ_JEDEC_ID, &[], &mut jedec)
+        .await
         .ok()?;
     Some(jedec)
 }
@@ -1070,5 +1081,111 @@ pub async fn log_store(flash: Qspi<'static>, part: &FlashPart) {
             "[QSPI] ",
             format_args!("STORE state=mount-failed sectors={sectors}"),
         ),
+    }
+}
+
+/// The QSPI peripheral's `TASKS_DEACTIVATE` (base 0x4002_9000, offset
+/// 0x010, `nrf-pac` `qspi::Qspi::tasks_deactivate`). Raw for the reason the
+/// self-test's registers are: `embassy-nrf` exports its PAC only under
+/// `unstable-pac`.
+const QSPI_TASKS_DEACTIVATE: *mut u32 = 0x4002_9010 as *mut u32;
+/// `INTENCLR`, offset 0x308.
+const QSPI_INTENCLR: *mut u32 = 0x4002_9308 as *mut u32;
+/// `ENABLE`, offset 0x500.
+const QSPI_ENABLE: *mut u32 = 0x4002_9500 as *mut u32;
+/// The register nRF52840 anomaly 122 has written after a deactivate, as
+/// `Qspi`'s own `Drop` does.
+const QSPI_ANOMALY_122: *mut u32 = 0x4002_9054 as *mut u32;
+/// `PSEL.SCK`, offset 0x524; `PSEL.IO0..IO3` follow at 0x530..0x53C.
+const QSPI_PSEL_SCK: *const u32 = 0x4002_9524 as *const u32;
+const QSPI_PSEL_IO: [*const u32; 4] = [
+    0x4002_9530 as *const u32,
+    0x4002_9534 as *const u32,
+    0x4002_9538 as *const u32,
+    0x4002_953C as *const u32,
+];
+/// `PSEL.CONNECT`: set means no pin is selected.
+const PSEL_DISCONNECTED: u32 = 1 << 31;
+
+/// Identify the part and mount its record log, giving both up together
+/// after [`leviculum_qspi_boot::BOOT_STEP_BUDGET_MS`].
+///
+/// On time this is [`identify_at_boot`] followed by [`log_store`], and the
+/// boot reads the same lines it always did. Past the deadline it prints
+/// `[QSPI] state=timeout after_ms=<n>`, releases the peripheral and the
+/// pins, and returns: the caller goes on to the radio exactly as it does
+/// after `state=no-answer`. No retry.
+///
+/// **The step is leaked, not dropped, on a timeout**, as the self-test's
+/// `guarded` does: every `Qspi` operation future carries an `OnDrop` that
+/// spins on the READY event (`embassy-nrf-0.9.0/src/qspi.rs`,
+/// `custom_instruction`, `read_raw`), and READY is exactly what a hung
+/// transfer never raises. A plain `with_timeout(.., step)` would fire, drop
+/// the step, and hang in that spin. Boxed, so the memory the transfer's
+/// DMA points into stays allocated for good; the `Qspi` inside therefore
+/// never runs its `Drop`, and `release_after_timeout` does that work
+/// instead. The leak is the size of the step future, once, on a board
+/// whose flash already failed.
+#[allow(clippy::too_many_arguments)]
+pub async fn identify_and_mount_bounded(
+    qspi: Peri<'static, peripherals::QSPI>,
+    sck: Peri<'static, AnyPin>,
+    csn: Peri<'static, AnyPin>,
+    io0: Peri<'static, AnyPin>,
+    io1: Peri<'static, AnyPin>,
+    io2: Peri<'static, AnyPin>,
+    io3: Peri<'static, AnyPin>,
+    part: &'static FlashPart,
+) {
+    use embassy_time::{with_timeout, Duration, Instant};
+    use leviculum_qspi_boot::{Timeout, BOOT_STEP_BUDGET_MS};
+
+    let start = Instant::now();
+    let mut step = alloc::boxed::Box::pin(async move {
+        if let Some(flash) = identify_at_boot(qspi, sck, csn, io0, io1, io2, io3, part).await {
+            log_store(flash, part).await;
+        }
+    });
+    let budget = Duration::from_millis(BOOT_STEP_BUDGET_MS.into());
+    if with_timeout(budget, step.as_mut()).await.is_err() {
+        core::mem::forget(step);
+        release_after_timeout();
+        let line = Timeout {
+            after_ms: start.elapsed().as_millis(),
+        };
+        crate::log::log_fmt_critical("[QSPI] ", format_args!("{line}"));
+    }
+}
+
+/// What `Qspi`'s `Drop` does, for a `Qspi` that was leaked mid-operation:
+/// stop the interrupt, deactivate (with the anomaly 122 write), disable,
+/// and disconnect SCK and IO0..IO3.
+///
+/// CSN stays what `Qspi::new` made it, a GPIO output driven high, for
+/// `Drop`'s own reason and one more: a part that stopped answering is best
+/// left deselected rather than with a floating chip select.
+fn release_after_timeout() {
+    // SAFETY: the registers are the QSPI's, which nothing else in the
+    // firmware drives; the only `Qspi` that did is leaked above and is never
+    // polled again. The pins stolen below are the ones that leaked `Qspi`
+    // selected, read back from its PSEL registers; no other driver holds
+    // them, because they were moved into it.
+    unsafe {
+        core::ptr::write_volatile(QSPI_INTENCLR, u32::MAX);
+        core::ptr::write_volatile(QSPI_TASKS_DEACTIVATE, 1);
+        core::ptr::write_volatile(QSPI_ANOMALY_122, 1);
+        core::ptr::write_volatile(QSPI_ENABLE, 0);
+        let sck = core::ptr::read_volatile(QSPI_PSEL_SCK);
+        for psel in core::iter::once(sck).chain(
+            QSPI_PSEL_IO
+                .iter()
+                .map(|reg| core::ptr::read_volatile(*reg)),
+        ) {
+            if psel & PSEL_DISCONNECTED == 0 {
+                // Bits 5:0 are port * 32 + pin, `AnyPin`'s own numbering;
+                // dropping the `Flex` disconnects the pin's input buffer.
+                drop(Flex::new(AnyPin::steal((psel & 0x3F) as u8)));
+            }
+        }
     }
 }

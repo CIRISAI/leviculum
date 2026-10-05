@@ -20,7 +20,8 @@
 # Three claims, in the order they can fail:
 #
 #   1. Each board file's pin aliases equal the recorded reference numbers.
-#   2. The bin's `qspi::identify_at_boot` / `lora::init` call sites pass the
+#   2. The bin's `qspi::identify_and_mount_bounded` / `lora::init` call sites
+#      (the bounded step hands its six pins to `identify_at_boot`) pass the
 #      same pins as those aliases. This is not redundant: the call sites pass
 #      `p.P0_07` peripherals directly, not the aliases, so the alias can be
 #      right while the hardware sees something else. Fixing only `boards/`
@@ -86,17 +87,19 @@ TAG = "[board-pins]"
 # rather than taken from the table's key order, because a table reordered by
 # accident must not silently redefine what the call site is compared against.
 CALL_ORDER = {
-    "qspi": ["sck", "cs", "io0", "io1", "io2", "io3"],  # qspi::identify_at_boot
+    "qspi": ["sck", "cs", "io0", "io1", "io2", "io3"],  # qspi::identify_and_mount_bounded
     "lora": ["sck", "mosi", "miso", "cs", "reset", "busy", "dio1"],  # lora::init
 }
-CALLEE = {"qspi": "qspi::identify_at_boot", "lora": "lora::init"}
+CALLEE = {"qspi": "qspi::identify_and_mount_bounded", "lora": "lora::init"}
 
 ALIAS_RE = re.compile(r"pub type (\w+)\s*=\s*peripherals::(P[01]_\d\d)\s*;")
 PIN_ARG_RE = re.compile(r"\bp\.(P[01]_\d\d)\b")
 # `qspi_part: None` or `qspi_part: Some(&crate::qspi::IS25LP080D)`.
 QSPI_PART_RE = re.compile(r"qspi_part:\s*(None|Some\(\s*&crate::qspi::(\w+)\s*\))")
 ALIAS_ANY_QSPI_RE = re.compile(r"pub type (Qspi\w+)\s*=\s*peripherals::")
-PROBE_RE = re.compile(r"qspi::identify_at_boot\s*\(")
+# Either entry point drives the six pins as a bus; a board with no part
+# calls neither.
+PROBE_RE = re.compile(r"qspi::identify_(?:at_boot|and_mount_bounded)\s*\(")
 PINMAP_RE = re.compile(r"g_ADigitalPinMap\s*\[\s*\]\s*=\s*\{(.*?)\}\s*;", re.S)
 
 # What each board is allowed to declare, stated here as well as in
@@ -356,7 +359,7 @@ pub type QspiIo3 = peripherals::P0_05;
 BAD_BOARD = GOOD_BOARD.replace("QspiIo3 = peripherals::P0_05", "QspiIo3 = peripherals::P1_01")
 
 GOOD_BIN = """
-    if let Some(mut flash) = leviculum_nrf::qspi::identify_at_boot(
+    leviculum_nrf::qspi::identify_and_mount_bounded(
         p.QSPI,
         p.P1_14.into(), // SCK
         p.P1_15.into(), // CSN

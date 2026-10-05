@@ -585,16 +585,19 @@ async fn main(spawner: Spawner) {
     line(format_args!("{PLAN_LINE}"));
     let mut run = Run::default();
     let flash = match solarnode::CONFIG.qspi_part {
-        Some(part) => leviculum_nrf::qspi::identify_at_boot(
-            p.QSPI,
-            p.P0_21.into(), // SCK
-            p.P0_25.into(), // CSN
-            p.P0_20.into(), // IO0 / DI
-            p.P0_24.into(), // IO1 / DO
-            p.P0_22.into(), // IO2 / WP#
-            p.P0_23.into(), // IO3 / HOLD#
-            part,
-        ),
+        Some(part) => {
+            leviculum_nrf::qspi::identify_at_boot(
+                p.QSPI,
+                p.P0_21.into(), // SCK
+                p.P0_25.into(), // CSN
+                p.P0_20.into(), // IO0 / DI
+                p.P0_24.into(), // IO1 / DO
+                p.P0_22.into(), // IO2 / WP#
+                p.P0_23.into(), // IO3 / HOLD#
+                part,
+            )
+            .await
+        }
         None => None,
     };
     // Held to the end of `main`, which never returns: dropping it would

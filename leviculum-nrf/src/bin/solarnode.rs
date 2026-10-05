@@ -394,8 +394,16 @@ async fn main(spawner: Spawner) {
     // six pins. No status register is written
     // (`qspi::QuadEnable::Untouched`), so after this boot the part holds
     // what it held before.
+    //
+    // Identify and mount run under one deadline (Codeberg #435): a part
+    // that stops answering mid-read would otherwise hold the boot here,
+    // before `lora-init`, for good. Past it the boot prints `[QSPI]
+    // state=timeout after_ms=<n>`, releases the peripheral and the pins,
+    // and goes on as it does for `state=no-answer`
+    // (`qspi::identify_and_mount_bounded`, the budget in
+    // `leviculum-qspi-boot`).
     if let Some(part) = solarnode::CONFIG.qspi_part {
-        if let Some(flash) = leviculum_nrf::qspi::identify_at_boot(
+        leviculum_nrf::qspi::identify_and_mount_bounded(
             p.QSPI,
             p.P0_21.into(), // SCK
             p.P0_25.into(), // CSN
@@ -404,9 +412,8 @@ async fn main(spawner: Spawner) {
             p.P0_22.into(), // IO2 / WP#
             p.P0_23.into(), // IO3 / HOLD#
             part,
-        ) {
-            leviculum_nrf::qspi::log_store(flash, part).await;
-        }
+        )
+        .await;
     } else {
         // Unreachable while the board declares a part, and kept because
         // the alternative is a capture with no `[QSPI]` line at all —
