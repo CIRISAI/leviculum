@@ -1051,12 +1051,35 @@
 //!   rotating addresses in two days that no dial could get a service out
 //!   of; whether any of them was the Columba is not something the boards'
 //!   logs can answer, because a failed dial never reads an identity.
+//!
+//! # The peer that keeps leaving (#417)
+//!
+//! The dial ledger's blind spot, measured and closed: a phone that
+//! stays linked until its next rotation buys a session the ledger
+//! rightly calls useful, so no run of waste ever forms — and the
+//! board's one central slot pays for the same identity again at every
+//! rotation. [`leviculum_ble_tx::ChurnLedger`] is the memory of
+//! DEPARTURES that closes it: per identity, sessions that ended by the
+//! peer's own leaving (the expiry after silence, or a replacement),
+//! and a run of them inside one window closes the ROTATING half of the
+//! fallback class for a cooldown. The design table, its two rooms, the
+//! two rejected policies (the class-wide hold, which forfeits every
+//! board-link gain, and connectivity-first, which promotes exactly the
+//! peer #417 demotes) and the parameter sweep live on
+//! `the_peer_that_keeps_leaving_design_table`; the scope's cost to the
+//! bigger rooms — none — is
+//! `control_the_churn_penalty_is_a_parameter_and_every_mechanism_fires`.
+//! One number for the room the issue names: the phone's cost falls
+//! 58 % while the board-to-board links RISE 28 %, because the deficit
+//! term ranks a silent phone above a board carrying one incoming link
+//! and the cooldown is the first mechanism that takes exactly those
+//! windows away.
 
 use leviculum_ble_tx::{
-    dial_preference, free_slots, judge_duplicate, should_initiate, with_free_slots, CandidateTable,
-    ConnectDecision, DialLedger, DialPreference, DupVerdict, FallbackOrder, LedgerPolicy, Origin,
-    ScanMode, CAP_PERIPHERAL_ONLY, LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU,
-    SCAN_FALLBACK_AFTER_MS, WINDOW_CANDIDATES,
+    dial_preference, free_slots, judge_duplicate, rotating_address, should_initiate,
+    with_free_slots, CandidateTable, ChurnLedger, ChurnPolicy, ConnectDecision, DialLedger,
+    DialPreference, DupVerdict, FallbackOrder, LedgerPolicy, Origin, ScanMode, CAP_PERIPHERAL_ONLY,
+    LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU, SCAN_FALLBACK_AFTER_MS, WINDOW_CANDIDATES,
 };
 
 /// The firmware's incoming-slot count (`PERIPH_LINKS`, #372), taken
@@ -1488,6 +1511,18 @@ struct Ledger {
     /// wasted dial to a condemned identity re-arms it, so a condemned
     /// peer is reached for at most once per pause.
     pause_rounds: u32,
+    /// The #417 churn penalty, through the shared rule
+    /// ([`leviculum_ble_tx::ChurnPolicy`]): departures of one identity
+    /// inside a window close the rotating fallback class for a
+    /// cooldown. [`ChurnPolicy::OFF`] in every row measured before it.
+    churn: ChurnPolicy,
+    /// The scope the cooldown holds: `false` (what ships) holds only
+    /// the fallback candidates whose address rotates, `true` holds the
+    /// whole fallback class the way the dial ledger's pause does —
+    /// the design-table alternative, kept so the #417 choice stays
+    /// replayable. Its cost lives in the rooms where fallback dials
+    /// aim at BOARDS, which is every room bigger than the rig's.
+    churn_whole_class: bool,
 }
 
 impl Ledger {
@@ -1496,6 +1531,8 @@ impl Ledger {
         k: 0,
         t_ms: 0,
         pause_rounds: 0,
+        churn: ChurnPolicy::OFF,
+        churn_whole_class: false,
     };
 
     /// The pause the tables are measured with: the firmware's own
@@ -1523,6 +1560,8 @@ impl Ledger {
             k,
             t_ms: USEFUL_SESSION_MS,
             pause_rounds: Self::PAUSE_ROUNDS,
+            churn: ChurnPolicy::OFF,
+            churn_whole_class: false,
         }
     }
 
@@ -1533,6 +1572,8 @@ impl Ledger {
             k,
             t_ms,
             pause_rounds: Self::PAUSE_ROUNDS,
+            churn: ChurnPolicy::OFF,
+            churn_whole_class: false,
         }
     }
 
@@ -1541,6 +1582,24 @@ impl Ledger {
             k,
             t_ms: USEFUL_SESSION_MS,
             pause_rounds,
+            churn: ChurnPolicy::OFF,
+            churn_whole_class: false,
+        }
+    }
+
+    /// This row plus the #417 churn penalty at `churn`, holding the
+    /// rotating fallback candidates — the scope that ships.
+    const fn with_churn(self, churn: ChurnPolicy) -> Self {
+        Self { churn, ..self }
+    }
+
+    /// The same penalty holding the WHOLE fallback class — the scope
+    /// the design table measures against and does not ship.
+    const fn with_churn_class(self, churn: ChurnPolicy) -> Self {
+        Self {
+            churn,
+            churn_whole_class: true,
+            ..self
         }
     }
 
@@ -1855,6 +1914,22 @@ enum TargetChoice {
     /// window keyed by [`pair_hash`] of the two addresses, fallback
     /// class on [`FallbackOrder::Address`] over the same key.
     PairHash,
+    /// Candidate (iii) of #417, #375's open question measured as a
+    /// policy: prefer the candidate that IMPROVES connectivity — one
+    /// not already reachable from the dialler through the standing
+    /// links. Harness-side as a re-offer of the shipped table, the
+    /// same shape as [`Self::GroupAboveDeficit`]: the unreachable
+    /// candidates get a window of their own and the reachable ones are
+    /// offered only when that window came out empty. The reachability
+    /// is computed over the room's whole link graph (phones relay in
+    /// Reticulum, so a board two phone-hops away IS reachable), which
+    /// hands the policy more knowledge than a board has — the measured
+    /// row is therefore its UPPER bound, and the design table is where
+    /// it still loses: a phone fresh from a rotation is unreachable by
+    /// construction, so the policy prefers exactly the peer #417 wants
+    /// demoted, and in the solo window it has nothing to prefer at
+    /// all.
+    ConnectivityFirst,
 }
 
 impl TargetChoice {
@@ -1870,6 +1945,7 @@ impl TargetChoice {
                 | Self::SilenceIsFull
                 | Self::HighestAddress
                 | Self::PairHash
+                | Self::ConnectivityFirst
         )
     }
 
@@ -1877,9 +1953,10 @@ impl TargetChoice {
     fn fallback_order(self) -> FallbackOrder {
         match self {
             Self::FallbackFirstHeard => FallbackOrder::FirstHeard,
-            Self::RotatingLast | Self::GroupAboveDeficit | Self::SilenceIsFull => {
-                FallbackOrder::RotatingLast
-            }
+            Self::RotatingLast
+            | Self::GroupAboveDeficit
+            | Self::SilenceIsFull
+            | Self::ConnectivityFirst => FallbackOrder::RotatingLast,
             _ => FallbackOrder::Address,
         }
     }
@@ -1895,6 +1972,7 @@ impl TargetChoice {
                 | Self::RotatingLast
                 | Self::GroupAboveDeficit
                 | Self::SilenceIsFull
+                | Self::ConnectivityFirst
         )
     }
 }
@@ -1953,10 +2031,16 @@ fn pair_hash(own: u64, peer: u64) -> u64 {
 /// in the order the advertising PDUs arrived. The tier census happens
 /// here, once per offer, whatever the policy does with the offer
 /// afterwards.
+///
+/// `improves` is [`TargetChoice::ConnectivityFirst`]'s input, aligned
+/// with `offers`: whether dialling that candidate would reach a peer
+/// the dialler cannot already reach through a standing link. Only that
+/// policy reads it; every other caller passes `None`.
 fn elect(
     choice: TargetChoice,
     own_addr: u64,
     offers: &[(usize, u64, ConnectDecision, Option<u8>)],
+    improves: Option<&[bool]>,
     tally: &mut Tally,
 ) -> usize {
     let silence_is_full = choice == TargetChoice::SilenceIsFull;
@@ -1980,28 +2064,82 @@ fn elect(
             tally.offers_cannot_dial += 1;
         }
     }
-    let pass = |group: Option<bool>| -> Option<usize> {
+    // Which offers one re-offer pass admits: all of them, one half of
+    // the rotating-group split (#412 steady state 2), or one half of
+    // the reachability split (#417 policy (iii)).
+    #[derive(Clone, Copy)]
+    enum Pass {
+        All,
+        Group(bool),
+        Improving(bool),
+    }
+    let pass = |which: Pass| -> Option<usize> {
         let mut window: CandidateTable<usize, WINDOW_CANDIDATES> =
             CandidateTable::with_fallback_order(choice.fallback_order());
-        for &(p, addr, decision, free) in offers {
+        for (at, &(p, addr, decision, free)) in offers.iter().enumerate() {
             let free = read_slots(free);
-            if group.is_some_and(|want| in_rotating_group(addr, decision, free) != want) {
+            let admitted = match which {
+                Pass::All => true,
+                Pass::Group(want) => in_rotating_group(addr, decision, free) == want,
+                Pass::Improving(want) => {
+                    improves.expect("ConnectivityFirst is handed its reachability")[at] == want
+                }
+            };
+            if !admitted {
                 continue;
             }
             window.offer(table_key(addr), decision, free, p);
         }
         window.into_best().map(|(_, _, p)| p)
     };
-    if choice == TargetChoice::GroupAboveDeficit {
+    match choice {
         // The group term first: the candidates whose address is a key
         // get the window, and the ones that redraw it are only asked
         // when that window is empty.
-        pass(Some(false))
-            .or_else(|| pass(Some(true)))
-            .expect("a non-empty candidate set chooses")
-    } else {
-        pass(None).expect("a non-empty candidate set chooses")
+        TargetChoice::GroupAboveDeficit => pass(Pass::Group(false))
+            .or_else(|| pass(Pass::Group(true)))
+            .expect("a non-empty candidate set chooses"),
+        // #417 (iii): the candidates the dialler cannot already reach
+        // get the window, the rest only when it came out empty.
+        TargetChoice::ConnectivityFirst => pass(Pass::Improving(true))
+            .or_else(|| pass(Pass::Improving(false)))
+            .expect("a non-empty candidate set chooses"),
+        _ => pass(Pass::All).expect("a non-empty candidate set chooses"),
     }
+}
+
+/// Which peers `start` already reaches through the room's standing
+/// links (#417 policy (iii)), indexed over the whole peer space. The
+/// graph is undirected and read off the boards' own entries — every
+/// churner and static-peer link has a board end, and the run invariants
+/// assert both ends exist — with silent links included: a board does
+/// not know a rotated peer is gone until the expiry says so.
+fn reachable_from(
+    start: usize,
+    boards: &[Board],
+    churner_count: usize,
+    static_count: usize,
+) -> Vec<bool> {
+    let total = boards.len() + churner_count + static_count;
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); total];
+    for (i, board) in boards.iter().enumerate() {
+        for link in board.outgoing.iter().chain(&board.incoming) {
+            adjacency[i].push(link.peer);
+            adjacency[link.peer].push(i);
+        }
+    }
+    let mut reached = vec![false; total];
+    reached[start] = true;
+    let mut frontier = vec![start];
+    while let Some(x) = frontier.pop() {
+        for &y in &adjacency[x] {
+            if !reached[y] {
+                reached[y] = true;
+                frontier.push(y);
+            }
+        }
+    }
+    reached
 }
 
 /// xorshift64* — deterministic, seedable, no dependency.
@@ -2087,6 +2225,11 @@ struct Board {
     /// this board paid for and got nothing back from, and the one pause
     /// those runs arm.
     ledger: DialLedger,
+    /// The #417 churn ledger, as the shared type holds it
+    /// ([`leviculum_ble_tx::ChurnLedger`]): per identity the run of
+    /// departures inside one window, and the cooldown those runs arm
+    /// over the rotating fallback candidates.
+    churn_ledger: ChurnLedger,
     /// The round this board may scan again, after a dial that did not
     /// connect ([`ConnectFailure`]). Zero is a board that is not in a
     /// backoff, which every row measured before that parameter is.
@@ -2150,6 +2293,15 @@ impl Board {
         );
     }
 
+    /// One departure of a rotating-addressed peer (#417), through the
+    /// shared rule. Only a CHURNING peer's session ends are fed — the
+    /// firmware's filter is the address class of the session that
+    /// ended, and in this model the churners are that class.
+    fn note_leave(&mut self, ledger: Ledger, identity: &[u8; 16], round: u32) {
+        self.churn_ledger
+            .note_leave(ledger.churn, identity, u64::from(round) * ROUND_MS);
+    }
+
     /// The live link, if any, that already belongs to this identity —
     /// what the firmware finds post-connect when it reads the Identity
     /// characteristic, and the only place a rotated address is ever
@@ -2186,6 +2338,12 @@ struct Churner {
     /// Boards it has dialled since its last rotation — its own central
     /// slots, bounded by [`CHURN_CENTRAL_LINKS`].
     links: Vec<usize>,
+    /// Since when this peer has held no live link at all (#417's
+    /// second design number): set at arrival and at every rotation,
+    /// cleared when any link lands — its own dial or a board's. The
+    /// wait it measures is the operator's requirement that the phone
+    /// still gets a link.
+    linkless_since: Option<u32>,
     /// Whether a dial to the address it currently wears can reach a
     /// Reticulum service at all ([`ConnectFailure`]). Drawn once per
     /// address rather than per dial, because that is the shape the
@@ -2319,6 +2477,17 @@ struct Tally {
     /// `feld-t114`'s.
     held_windows_top: usize,
     held_windows_top_solo: usize,
+    /// Windows the #417 churn cooldown emptied: the board was allowed
+    /// a fallback dial, candidates existed, and every one of them was
+    /// a held fallback verdict — so the dial was not made and the slot
+    /// stayed free. Zero under [`ChurnPolicy::OFF`] by construction.
+    churn_held_windows: usize,
+    /// The churning peers' waits for a link (#417's second design
+    /// number): rounds from an arrival or rotation to the first link
+    /// in either direction, summed, and how many such waits there
+    /// were. A cycle that never got a link counts its full length.
+    churn_wait_rounds: u64,
+    churn_waits: usize,
     /// The first round at the end of which the board graph was ONE
     /// component (#434), or `None` when it never was. Checked only when
     /// a board-to-board link forms, so under [`Mortality::IMMORTAL`]
@@ -2462,6 +2631,7 @@ fn run_sim(
             strict_rounds: 0,
             dead_ends: Vec::new(),
             ledger: DialLedger::new(),
+            churn_ledger: ChurnLedger::new(),
             busy_until: 0,
         });
     }
@@ -2514,6 +2684,7 @@ fn run_sim(
                 identity: identity_from(addr),
                 phase: (next_rand(&mut churn_rng) as u32) % rounds(CHURN_ROTATE_MS),
                 links: Vec::new(),
+                linkless_since: Some(0),
                 reachable: draw_reachable(&mut fail_rng),
             }
         })
@@ -2585,6 +2756,15 @@ fn run_sim(
             // A new address is a new verdict: the captures give one per
             // address and never a mixed one.
             churner.reachable = draw_reachable(&mut fail_rng);
+            // A cycle that ends still linkless counts its full length
+            // (#417's wait column must not survive on the cycles that
+            // succeeded); either way the rotation abandons everything,
+            // so the peer is linkless from here.
+            if let Some(since) = churner.linkless_since {
+                tally.churn_wait_rounds += u64::from(round - since);
+                tally.churn_waits += 1;
+            }
+            churner.linkless_since = Some(round);
             churner.links.clear();
             for board in boards.iter_mut() {
                 for link in board.outgoing.iter_mut().chain(board.incoming.iter_mut()) {
@@ -2617,7 +2797,29 @@ fn run_sim(
                     .expect("only a churning peer ever goes silent")
                     .identity;
                 board.note_dial_outcome(ledger, &identity, Some(link.useful_ms(round)), round);
+                // And the same event is a DEPARTURE (#417): the peer
+                // abandoned the link and the expiry is its signature.
+                board.note_leave(ledger, &identity, round);
                 board.strict_rounds = 0;
+            }
+            // An incoming session that expires is a departure too
+            // (#417): the peer paid for the dial, and its leaving says
+            // exactly as much about its habits — on a board beside a
+            // phone this is most of the evidence, learned without
+            // spending a dial.
+            let left: Vec<[u8; 16]> = board
+                .incoming
+                .iter()
+                .filter(|l| expired(l))
+                .map(|l| {
+                    churners
+                        .get(l.peer.wrapping_sub(churn_base))
+                        .expect("only a churning peer ever goes silent")
+                        .identity
+                })
+                .collect();
+            for identity in left {
+                board.note_leave(ledger, &identity, round);
             }
             let before = board.incoming.len();
             board.incoming.retain(|l| !expired(l));
@@ -2734,8 +2936,31 @@ fn run_sim(
             } else {
                 ScanMode::Strict
             };
-            let candidates =
+            let mut candidates =
                 window_offers(i, mode, round, choice, &boards, &churners, &static_peers);
+            // #417: the churn cooldown. Under the shipped scope it
+            // takes only the ROTATING fallback candidates away — a
+            // strict verdict and a fixed-addressed fallback candidate
+            // pass untouched — and under the design-table alternative
+            // the whole fallback class, the way the dial ledger's
+            // pause does. A window it empties makes no dial and the
+            // slot stays free, which in the solo window is the whole
+            // defence.
+            if ledger.churn.keeps()
+                && mode == ScanMode::Fallback
+                && boards[i]
+                    .churn_ledger
+                    .rotating_fallback_held(u64::from(round) * ROUND_MS)
+            {
+                let before = candidates.len();
+                candidates.retain(|&(_, addr, decision, _)| {
+                    decision != ConnectDecision::InitiateFallback
+                        || (!ledger.churn_whole_class && !rotating_address(addr))
+                });
+                if candidates.is_empty() && before > 0 {
+                    tally.churn_held_windows += 1;
+                }
+            }
             if candidates.is_empty() {
                 // What the pause cost, counted where it was paid: the
                 // strict window is empty, so this board dials nothing
@@ -2801,7 +3026,24 @@ fn run_sim(
                             offers.swap(i, (next_rand(&mut offer_rng) as usize) % (i + 1));
                         }
                     }
-                    elect(choice, boards[i].addr, &offers, &mut tally)
+                    // #417 (iii): what each offer would newly reach,
+                    // read off the room state — no draw is consumed, so
+                    // every other row is untouched by the computation.
+                    let improves = (choice == TargetChoice::ConnectivityFirst).then(|| {
+                        let reached =
+                            reachable_from(i, &boards, churners.len(), static_peers.len());
+                        offers
+                            .iter()
+                            .map(|&(p, _, _, _)| !reached[p])
+                            .collect::<Vec<bool>>()
+                    });
+                    elect(
+                        choice,
+                        boards[i].addr,
+                        &offers,
+                        improves.as_deref(),
+                        &mut tally,
+                    )
                 }
             };
             // The dial. The firmware logs `BLE_CENTRAL_CONNECT` here and
@@ -2975,6 +3217,12 @@ fn run_sim(
                 );
                 match verdict {
                     DupVerdict::KeepNew(_) => {
+                        // A replacement is a departure too (#417): the
+                        // identity left the address the old link was
+                        // made on, even though it came straight back —
+                        // the firmware's `BLE_LINK_REPLACED`.
+                        let identity = churner.identity;
+                        boards[i].note_leave(ledger, &identity, round);
                         boards[i].incoming.retain(|l| l.peer != target);
                         churner.links.retain(|&b| b != i);
                     }
@@ -3053,7 +3301,8 @@ fn run_sim(
                             }
                             // The peer's own dial displaced the link OUR
                             // dial paid for, so that dial's outcome is
-                            // known here too (#412 part 2).
+                            // known here too (#412 part 2) — and the
+                            // replacement is a departure (#417).
                             let identity = churner.identity;
                             boards[b].note_dial_outcome(
                                 ledger,
@@ -3061,9 +3310,14 @@ fn run_sim(
                                 Some(link.useful_ms(round)),
                                 round,
                             );
+                            boards[b].note_leave(ledger, &identity, round);
                             boards[b].strict_rounds = 0;
                         }
-                        Origin::Incoming => boards[b].incoming.retain(|l| l.peer != n + k),
+                        Origin::Incoming => {
+                            let identity = churner.identity;
+                            boards[b].note_leave(ledger, &identity, round);
+                            boards[b].incoming.retain(|l| l.peer != n + k);
+                        }
                     },
                     // Our old link keeps the peer: the phone's dial is
                     // refused. Nothing of ours was spent on it.
@@ -3127,7 +3381,20 @@ fn run_sim(
             // pay for them — so the tier census must not count them
             // either; the window it opens is its own.
             let mut side_ledger = Tally::default();
-            let b = elect(choice, own_addr, &offers, &mut side_ledger);
+            let improves = (choice == TargetChoice::ConnectivityFirst).then(|| {
+                let reached = reachable_from(static_base + k, &boards, churn.peers, statics.peers);
+                offers
+                    .iter()
+                    .map(|&(b, _, _, _)| !reached[b])
+                    .collect::<Vec<bool>>()
+            });
+            let b = elect(
+                choice,
+                own_addr,
+                &offers,
+                improves.as_deref(),
+                &mut side_ledger,
+            );
             let dies_at = mortality
                 .kills()
                 .then(|| round + mortality.draw_lifetime(&mut death_rng));
@@ -3148,6 +3415,26 @@ fn run_sim(
             });
             boards[b].strict_rounds = 0;
             any_link = true;
+        }
+
+        // The churning peers' wait clock (#417): a peer that was
+        // linkless and now holds any link — its own dial landed, or a
+        // board's did — ends its wait this round. Reads state only, so
+        // the column cannot move a draw of any stream.
+        for (k, churner) in churners.iter_mut().enumerate() {
+            let Some(since) = churner.linkless_since else {
+                continue;
+            };
+            let has_link = !churner.links.is_empty()
+                || boards.iter().any(|b| {
+                    b.outgoing
+                        .is_some_and(|l| l.peer == churn_base + k && l.silent_since.is_none())
+                });
+            if has_link {
+                tally.churn_wait_rounds += u64::from(round - since);
+                tally.churn_waits += 1;
+                churner.linkless_since = None;
+            }
         }
 
         linkless_streak = if any_link { 0 } else { linkless_streak + 1 };
@@ -3182,6 +3469,14 @@ fn run_sim(
             if (churning || mortality.kills()) && link.useful_ms(horizon) < USEFUL_SESSION_MS {
                 tally.short += 1;
             }
+        }
+    }
+    // A wait still open at the horizon counts its censored length, so
+    // the #417 column cannot survive on the cycles that succeeded.
+    for churner in &churners {
+        if let Some(since) = churner.linkless_since {
+            tally.churn_wait_rounds += u64::from(horizon - since);
+            tally.churn_waits += 1;
         }
     }
 
@@ -3383,6 +3678,13 @@ struct Outcome {
     /// The same pair for the highest-addressed board alone.
     held_windows_top: usize,
     held_windows_top_solo: usize,
+    /// Windows the #417 churn cooldown emptied, summed. Zero under
+    /// [`ChurnPolicy::OFF`].
+    churn_held_windows: usize,
+    /// The churning peers' waits for a link, summed, and how many
+    /// waits there were — #417's "the phone still gets a link" number.
+    churn_wait_rounds: u64,
+    churn_waits: usize,
 }
 
 impl Outcome {
@@ -3468,6 +3770,23 @@ impl Outcome {
     fn dials_per_useful(&self) -> Option<f64> {
         (self.useful > 0).then(|| self.dials as f64 / self.useful as f64)
     }
+
+    /// How long a churning peer goes without any link after arriving
+    /// or rotating, mean seconds over every such wait (#417's second
+    /// design number — the operator's "the phone still gets a link").
+    /// `None` for a room with no churning peer in it.
+    fn mean_phone_wait_s(&self) -> Option<f64> {
+        (self.churn_waits > 0).then(|| {
+            self.churn_wait_rounds as f64 * ROUND_MS as f64 / 1000.0 / self.churn_waits as f64
+        })
+    }
+
+    /// Every dial the room aimed at a churning peer, landed or refused
+    /// or failed — #417's third design number, "how many dials the
+    /// phone costs".
+    fn dials_on_churn(&self) -> usize {
+        self.churn_links + self.refused + self.failed_churn
+    }
 }
 
 // Eight, for the reason [`run_sim`]'s comment gives: this is that list
@@ -3512,6 +3831,9 @@ fn measure(
         held_windows_solo: 0,
         held_windows_top: 0,
         held_windows_top_solo: 0,
+        churn_held_windows: 0,
+        churn_wait_rounds: 0,
+        churn_waits: 0,
     };
     for seed in 0..ORDERS {
         let sim = run_sim(
@@ -3566,6 +3888,9 @@ fn measure(
         outcome.held_windows_solo += sim.tally.held_windows_solo;
         outcome.held_windows_top += sim.tally.held_windows_top;
         outcome.held_windows_top_solo += sim.tally.held_windows_top_solo;
+        outcome.churn_held_windows += sim.tally.churn_held_windows;
+        outcome.churn_wait_rounds += sim.tally.churn_wait_rounds;
+        outcome.churn_waits += sim.tally.churn_waits;
     }
     outcome
 }
@@ -6471,7 +6796,7 @@ fn elect_from(own_addr: u64, room: &[Advertiser], choice: TargetChoice) -> &'sta
         })
         .collect();
     let mut side_ledger = Tally::default();
-    room[elect(choice, own_addr, &offers, &mut side_ledger)].label
+    room[elect(choice, own_addr, &offers, None, &mut side_ledger)].label
 }
 
 /// The two candidate keys ARE two different policies, which the Monte
@@ -7797,4 +8122,435 @@ fn the_bridge_carries_the_stored_announce_or_nothing_ever_does() {
     let full = replay_seed6(Reoffer::Full);
     assert_eq!(full.tx_total - stored.tx_total, 2);
     assert_eq!(full.tx_linkup[9] - stored.tx_linkup[9], 2);
+}
+
+/// The #417 policy sweep: every row of the design table below, built
+/// over the shipped configuration (eager, rotating-last order, dial
+/// ledger at k=3 — what the firmware runs).
+fn churn_design_policies() -> Vec<(&'static str, TargetChoice, Ledger)> {
+    let base = Ledger::after(3);
+    let churn = |policy: ChurnPolicy| base.with_churn(policy);
+    vec![
+        ("shipped", TargetChoice::RotatingLast, base),
+        ("connfirst", TargetChoice::ConnectivityFirst, base),
+        (
+            "churn k=3",
+            TargetChoice::RotatingLast,
+            churn(ChurnPolicy::MEASURED),
+        ),
+        (
+            "churn k=2",
+            TargetChoice::RotatingLast,
+            churn(ChurnPolicy {
+                leave_run: 2,
+                ..ChurnPolicy::MEASURED
+            }),
+        ),
+        (
+            "churn k=5",
+            TargetChoice::RotatingLast,
+            churn(ChurnPolicy {
+                leave_run: 5,
+                ..ChurnPolicy::MEASURED
+            }),
+        ),
+        (
+            "churn w=150s",
+            TargetChoice::RotatingLast,
+            churn(ChurnPolicy {
+                window_ms: 150_000,
+                ..ChurnPolicy::MEASURED
+            }),
+        ),
+        (
+            "churn w=600s",
+            TargetChoice::RotatingLast,
+            churn(ChurnPolicy {
+                window_ms: 600_000,
+                ..ChurnPolicy::MEASURED
+            }),
+        ),
+        (
+            "churn cd=30s",
+            TargetChoice::RotatingLast,
+            churn(ChurnPolicy {
+                cooldown_ms: 30_000,
+                ..ChurnPolicy::MEASURED
+            }),
+        ),
+        (
+            "churn cd=10m",
+            TargetChoice::RotatingLast,
+            churn(ChurnPolicy {
+                cooldown_ms: 600_000,
+                ..ChurnPolicy::MEASURED
+            }),
+        ),
+        (
+            "churn class",
+            TargetChoice::RotatingLast,
+            base.with_churn_class(ChurnPolicy::MEASURED),
+        ),
+    ]
+}
+
+/// The #417 design table, 383's method: the room the issue names —
+/// three boards and one phone that re-arrives under a new address every
+/// few minutes — and per policy the three numbers the instruction asks
+/// for: board-to-board links formed (`bb`), how long the phone waits
+/// for its link (`wait`, mean seconds from arrival or rotation to the
+/// first link in either direction, censored cycles counted in full),
+/// and how many dials the phone costs the room (`cost`, landed plus
+/// refused plus failed). Reference: Python-RNS has no BLE interface —
+/// the reference here is our own measured field behaviour (#412's
+/// captures), and the deviation rule does not apply: no wire format
+/// and no Python peer is involved.
+///
+/// The room where the phone DIALS, as the capture's phone does:
+///
+/// | policy       | life     | bb    | wait_s | cost | disc |
+/// |--------------|----------|------:|-------:|-----:|-----:|
+/// | shipped      | immortal |  2040 |   0.00 | 5646 |    0 |
+/// | shipped      | 45 s     | 26790 |   0.00 | 4170 |    0 |
+/// | shipped      | 600 s    |  3904 |   0.00 | 5410 |    0 |
+/// | connfirst    | all      | = shipped, every column         |
+/// | churn k=3    | immortal |  2618 |   0.00 | 2364 |    0 |
+/// | churn k=3    | 45 s     | 30074 |   0.00 | 1528 |    0 |
+/// | churn k=3    | 600 s    |  5094 |   0.00 | 2120 |    0 |
+/// | churn class  | immortal |  2040 |   0.00 | 2942 |    0 |
+/// | churn class  | 45 s     | 26790 |   0.00 | 1750 |    0 |
+/// | churn class  | 600 s    |  3904 |   0.00 | 2816 |    0 |
+///
+/// The same room with a phone that only ADVERTISES — the passive worst
+/// case, where every link the peer gets is a board's fallback dial:
+///
+/// | policy      | life     | bb    | wait_s | cost | disc |
+/// |-------------|----------|------:|-------:|-----:|-----:|
+/// | shipped     | immortal |  2618 |  39.03 | 2524 |    0 |
+/// | connfirst   | immortal |  2000 |  34.33 | 6654 |    0 |
+/// | churn k=3   | immortal |  2618 |  39.43 | 2142 |    0 |
+/// | churn k=3   | 45 s     | = shipped (the penalty never arms)      |
+///
+/// **The choice is the churn penalty at its defaults (k=3, 300 s
+/// window, 120 s cooldown), holding the ROTATING fallback candidates
+/// only, and the margin is in three columns at once.** Against the
+/// shipped policy it takes the phone's cost down by 58 % (5646 to
+/// 2364 dials at immortal, 61 % at 600 s), FORMS MORE board-to-board
+/// links (+28 % at immortal, +12 % at 45 s, +30 % at 600 s — the
+/// deficit term ranks a silent phone above a board carrying one
+/// incoming link, and the cooldown is the first mechanism that takes
+/// exactly those windows away), and the phone still gets its link: it
+/// dials the boards itself (wait 0.0 s, unchanged), and even the
+/// passive phone's wait moves only 39.0 s to 39.4 s, because the
+/// window restart re-admits it roughly once per 300 s. The operator's
+/// requirement in #412 — the shortest links form even with a phone in
+/// the room, and the phone still gets a link — holds with margin, and
+/// `CENTRAL_LINKS = 1` is enough for the rule: nothing in the table
+/// asks for a second slot.
+///
+/// **Why not the other two.** Holding the whole fallback class saves
+/// the same dials but forfeits the entire `bb` gain (2040/26790/3904 —
+/// the shipped counts exactly, pinned below), because the windows the
+/// deficit term loses to the phone are fallback windows with a BOARD
+/// in them, and a class-wide hold refuses the board too.
+/// Connectivity-first is bit-identical to shipped against a dialling
+/// phone — a fresh rotation makes the phone unreachable, so the policy
+/// PROMOTES exactly the peer #417 wants demoted, and where that bites,
+/// the passive room, it costs a quarter of the board links (2618 to
+/// 2000) and more than doubles the phone's cost (2524 to 6654). The
+/// k/window/cooldown sweep is in the printed table: k=2 holds more and
+/// k=5 never fires on a passive phone; a 150 s window is blind to the
+/// passive phone's leave cadence and 600 s holds longer than its own
+/// evidence; a 30 s cooldown is the structural zero (a teardown resets
+/// the strict clock, so it expires in the round the fallback becomes
+/// available — the same control the dial ledger's pause has), and ten
+/// minutes is indistinguishable from a 600 s window. The defaults are
+/// the mildest setting that fires on both phones.
+#[test]
+fn the_peer_that_keeps_leaving_design_table() {
+    let mut rows = Vec::new();
+    for (room, churn) in [
+        ("dials", Churn::phones(1)),
+        ("adverts", Churn::advertisers(1)),
+    ] {
+        println!(
+            "#417 design table — 3 boards, 1 phone ({room}), per {ORDERS} orders; cost is \
+             every dial aimed at the phone"
+        );
+        println!(
+            "{:<13} {:>8} {:>7} {:>7} {:>7} {:>8} {:>8} {:>7} {:>6} {:>5}",
+            "policy", "life", "bb", "wait_s", "cost", "refused", "dials", "chold", "d/use", "disc"
+        );
+        for (label, choice, ledger) in churn_design_policies() {
+            for (mortality, life) in LIFETIMES {
+                let outcome = measure(
+                    3,
+                    FallbackSpec::Eager,
+                    choice,
+                    churn,
+                    mortality,
+                    Statics::NONE,
+                    ledger,
+                    ConnectFailure::NONE,
+                );
+                println!(
+                    "{label:<13} {life:>8} {:>7} {:>7} {:>7} {:>8} {:>8} {:>7} {:>6} {:>5}",
+                    outcome.board_links,
+                    Ratio(outcome.mean_phone_wait_s()),
+                    outcome.dials_on_churn(),
+                    outcome.refused,
+                    outcome.dials,
+                    outcome.churn_held_windows,
+                    Ratio(outcome.dials_per_useful()),
+                    outcome.disconnected,
+                );
+                rows.push(((room, label, life), outcome));
+            }
+        }
+    }
+    let pick = |room: &str, label: &str, life: &str| -> &Outcome {
+        &rows
+            .iter()
+            .find(|((rr, rl, rlife), _)| *rr == room && *rl == label && *rlife == life)
+            .expect("the row was measured above")
+            .1
+    };
+
+    // The chosen rule's cells, pinned: more board links, under half the
+    // phone's cost, no split graph, and the dialling phone's wait stays
+    // zero rounds — it pays its own way in and nothing here stops it.
+    for (life, bb, cost) in [
+        ("immortal", 2618, 2364),
+        ("45s", 30_074, 1528),
+        ("600s", 5094, 2120),
+    ] {
+        let chosen = pick("dials", "churn k=3", life);
+        let shipped = pick("dials", "shipped", life);
+        assert_eq!(
+            (
+                chosen.board_links,
+                chosen.dials_on_churn(),
+                chosen.disconnected
+            ),
+            (bb, cost, 0),
+            "dials {life}: the chosen rule's cell moved"
+        );
+        assert!(
+            chosen.board_links > shipped.board_links,
+            "dials {life}: the penalty no longer wins back the deficit-term windows"
+        );
+        assert!(
+            chosen.dials_on_churn() * 2 < shipped.dials_on_churn(),
+            "dials {life}: the phone's cost no longer halves"
+        );
+        let wait = chosen.mean_phone_wait_s().expect("a phone is in the room");
+        assert!(
+            wait < 1.0,
+            "dials {life}: a dialling phone waited {wait:.2}s for its link"
+        );
+    }
+    // The passive phone keeps its link too: its wait moves by less than
+    // two seconds against shipped, which is the operator's requirement
+    // measured on the phone that cannot pay its own way in.
+    for life in ["immortal", "600s"] {
+        let chosen = pick("adverts", "churn k=3", life);
+        let shipped = pick("adverts", "shipped", life);
+        let (with, without) = (
+            chosen.mean_phone_wait_s().expect("a phone is in the room"),
+            shipped.mean_phone_wait_s().expect("a phone is in the room"),
+        );
+        assert!(
+            with - without < 2.0,
+            "adverts {life}: the penalty added {:.2}s to the passive phone's wait",
+            with - without
+        );
+        assert!(
+            chosen.dials_on_churn() < shipped.dials_on_churn(),
+            "adverts {life}: the penalty saved nothing on the passive phone"
+        );
+    }
+
+    // Why not the whole fallback class: same defence, but every bb gain
+    // forfeited — the shipped counts exactly, pinned as equalities.
+    for (life, shipped_bb) in [("immortal", 2040), ("45s", 26_790), ("600s", 3904)] {
+        let class = pick("dials", "churn class", life);
+        assert_eq!(
+            (
+                class.board_links,
+                pick("dials", "shipped", life).board_links
+            ),
+            (shipped_bb, shipped_bb),
+            "dials {life}: the class-wide hold's bb moved off the shipped count"
+        );
+    }
+
+    // Why not connectivity-first: bit-identical to shipped against the
+    // dialling phone (a fresh rotation reads as unreachable, so the
+    // policy promotes exactly the peer #417 demotes)…
+    for (_, life) in LIFETIMES {
+        let conn = pick("dials", "connfirst", life);
+        let shipped = pick("dials", "shipped", life);
+        assert_eq!(
+            (conn.board_links, conn.dials, conn.dials_on_churn()),
+            (shipped.board_links, shipped.dials, shipped.dials_on_churn()),
+            "dials {life}: connectivity-first stopped coinciding with shipped"
+        );
+    }
+    // …and where it does differ it pays: fewer board links and more
+    // than double the phone's cost. This is also the positive control
+    // that the policy is real and not a no-op.
+    let conn = pick("adverts", "connfirst", "immortal");
+    let shipped = pick("adverts", "shipped", "immortal");
+    assert!(
+        conn.board_links < shipped.board_links
+            && conn.dials_on_churn() > 2 * shipped.dials_on_churn(),
+        "adverts immortal: connectivity-first's failure mode moved — bb {} vs {}, cost {} vs {}",
+        conn.board_links,
+        shipped.board_links,
+        conn.dials_on_churn(),
+        shipped.dials_on_churn()
+    );
+
+    // The structural zero: a cooldown of one scan cycle expires in the
+    // round the fallback becomes available and the row IS the shipped
+    // row — the same control the dial ledger's pause carries, and the
+    // guard on `ChurnPolicy::COOLDOWN_MS` being re-derived if the
+    // strict phase after a teardown ever changes.
+    for room in ["dials", "adverts"] {
+        for (_, life) in LIFETIMES {
+            let inert = pick(room, "churn cd=30s", life);
+            let shipped = pick(room, "shipped", life);
+            assert_eq!(
+                (inert.board_links, inert.dials, inert.churn_held_windows),
+                (shipped.board_links, shipped.dials, 0),
+                "{room} {life}: a one-scan-cycle cooldown now withholds a dial"
+            );
+        }
+    }
+}
+
+/// The #417 churn penalty is a parameter, and its scope is the reason
+/// it costs the bigger rooms nothing.
+///
+/// A room with no rotating peer in it never records a leave, so the
+/// penalty's rows are the shipped rows BIT FOR BIT — an equality over
+/// every column, not a bound, at ten boards with links that never end
+/// (#375's own guarantee cell) and with the capture's mortality on.
+/// And in the ten-board room WITH a phone, where the hold does arm,
+/// the shipped scope — rotating candidates only — leaves every
+/// fallback dial at a board untouched: the board graph keeps its
+/// connectivity and its links while the phone's cost falls. The
+/// class-wide scope is printed beside it as the record of what the
+/// design table rejected.
+#[test]
+fn control_the_churn_penalty_is_a_parameter_and_every_mechanism_fires() {
+    let shipped = Ledger::after(3);
+    let chosen = shipped.with_churn(ChurnPolicy::MEASURED);
+    let class = shipped.with_churn_class(ChurnPolicy::MEASURED);
+
+    // 1. The zero: no rotating peer, no leave, no draw — bit-identical.
+    for (mortality, life) in [
+        (Mortality::IMMORTAL, "immortal"),
+        (Mortality::CAPTURE_SHORT_MODE, "45s"),
+    ] {
+        let off = measure(
+            10,
+            FallbackSpec::Eager,
+            TargetChoice::RotatingLast,
+            Churn::NONE,
+            mortality,
+            Statics::NONE,
+            shipped,
+            ConnectFailure::NONE,
+        );
+        let with = measure(
+            10,
+            FallbackSpec::Eager,
+            TargetChoice::RotatingLast,
+            Churn::NONE,
+            mortality,
+            Statics::NONE,
+            chosen,
+            ConnectFailure::NONE,
+        );
+        assert_eq!(
+            (
+                with.board_links,
+                with.dials,
+                with.disconnected,
+                with.boardless,
+                with.held_windows,
+                with.churn_held_windows,
+            ),
+            (
+                off.board_links,
+                off.dials,
+                off.disconnected,
+                off.boardless,
+                off.held_windows,
+                0,
+            ),
+            "empty room {life}: the churn penalty moved a room with nothing to remember"
+        );
+    }
+
+    // 2. The ten-board room with a phone: the mechanism fires and the
+    //    board graph pays nothing for it, at both capture lifetimes.
+    println!("#417 scope control — 10 boards, 1 phone, per {ORDERS} orders");
+    println!(
+        "{:<8} {:>8} {:>8} {:>7} {:>8} {:>6} {:>6} {:>6}",
+        "ledger", "life", "bb", "cost", "dials", "chold", "disc", "board-"
+    );
+    for (mortality, life) in [
+        (Mortality::CAPTURE_SHORT_MODE, "45s"),
+        (Mortality::CAPTURE_TAIL, "600s"),
+    ] {
+        let mut cells = Vec::new();
+        for (ledger, label) in [(shipped, "off"), (chosen, "chosen"), (class, "class")] {
+            let outcome = measure(
+                10,
+                FallbackSpec::Eager,
+                TargetChoice::RotatingLast,
+                Churn::phones(1),
+                mortality,
+                Statics::NONE,
+                ledger,
+                ConnectFailure::NONE,
+            );
+            println!(
+                "{label:<8} {life:>8} {:>8} {:>7} {:>8} {:>6} {:>6} {:>6}",
+                outcome.board_links,
+                outcome.dials_on_churn(),
+                outcome.dials,
+                outcome.churn_held_windows,
+                outcome.disconnected,
+                outcome.boardless,
+            );
+            cells.push((label, outcome));
+        }
+        let off = &cells[0].1;
+        let with = &cells[1].1;
+        assert!(
+            with.dials_on_churn() < off.dials_on_churn(),
+            "{life}: the penalty saved the ten-board room nothing \
+             ({} against {} dials at the phone)",
+            with.dials_on_churn(),
+            off.dials_on_churn()
+        );
+        assert!(
+            with.disconnected <= off.disconnected && with.boardless <= off.boardless,
+            "{life}: the penalty cost the ten-board room connectivity \
+             (disc {} vs {}, boardless {} vs {})",
+            with.disconnected,
+            off.disconnected,
+            with.boardless,
+            off.boardless
+        );
+        let lost = off.board_links.saturating_sub(with.board_links);
+        assert!(
+            lost * 100 <= off.board_links,
+            "{life}: the penalty cost {lost} of {} board links, past the 1 % bound",
+            off.board_links
+        );
+    }
 }
