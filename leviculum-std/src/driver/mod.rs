@@ -4788,6 +4788,20 @@ async fn run_event_loop(
         }};
     }
 
+    // ── Off-lock incoming resource assembly (leviculum#71) ──
+    //
+    // The receive-side mirror of #29's send phases. When the last part of an
+    // incoming resource arrives, the core takes the parts under the lock and
+    // hands out an `AssemblyJob`; decrypt + decompress + hash verification run
+    // on a blocking thread, and the result comes back through this channel to
+    // be concluded under a brief lock. Concurrent transfers on different links
+    // then finish in about max(t) instead of sum(t), and nothing else waits on
+    // the node lock while a ~1 MB transfer is decompressed.
+    let (assembly_tx, mut assembly_rx) =
+        tokio::sync::mpsc::unbounded_channel::<leviculum_core::resource::AssemblyResult>();
+    // Deferral itself is set at build time (`assemble_resources_off_lock`,
+    // default on); with it off the core hands out no jobs and this is idle.
+
     macro_rules! apply_inbound {
         ($prepared:expr) => {{
             let prepared: PreparedRx = $prepared;
@@ -4809,6 +4823,16 @@ async fn run_event_loop(
                 let output =
                     core.handle_packet_precomputed(prepared.iface, &prepared.data, prepared.pre);
                 let now_ms = core.now_ms();
+                // leviculum#71: any assembly this packet completed leaves the
+                // lock with the jobs; it runs below, off it.
+                for job in core.take_resource_assembly_jobs() {
+                    let tx = assembly_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        // A closed receiver means the loop is gone: nothing
+                        // is left to conclude the resource for.
+                        let _ = tx.send(job.run());
+                    });
+                }
                 (output, now_ms)
             };
             if let Some(deadline_ms) = output.next_deadline_ms {
@@ -4865,6 +4889,33 @@ async fn run_event_loop(
         };
 
         tokio::select! {
+            // leviculum#71: an incoming resource's off-lock assembly finished.
+            // Conclude it under a brief lock: proof, completion or failure,
+            // exactly as an inline assembly would have.
+            Some(result) = assembly_rx.recv() => {
+                let output = inner.lock_recover().complete_resource_assembly(result);
+                refresh_ifac!();
+                let processor_delay = dispatch_output(
+                    output,
+                    &mut registry,
+                    event_sink.as_mut(),
+                    &inner,
+                    &mut retry_queues,
+                    &mut retry_queue_warned,
+                    &mut retry_queue_max_depth,
+                    &ifac_configs,
+                    remote_mgmt.as_ref(),
+                    discovery_storage.as_deref(),
+                    discovery_network_identity.as_deref(),
+                    &mut discovery_heard_ifac,
+                    &completions,
+                    &mut assembler,
+                    &plane_counters,
+                    &mut breakers,
+                    core_processor.as_mut(),
+                );
+                tighten_next_poll(&mut next_poll, processor_delay);
+            }
             // Fires exactly when the earliest retry-queue head becomes
             // eligible. The arm only exists when retry_wake_instant is
             // Some; otherwise the select skips it. Inside, we call

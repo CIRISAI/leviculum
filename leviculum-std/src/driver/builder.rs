@@ -59,6 +59,8 @@ pub struct ReticulumNodeBuilder {
     flush_interval_secs_explicit: Option<u64>,
     /// Explicit multi-segment assembly ceiling (leviculum#62).
     max_assembled_resource_size_explicit: Option<usize>,
+    /// leviculum#71: assemble incoming resources off the node lock.
+    assemble_resources_off_lock: bool,
     /// Explicit control-channel capacity override (takes priority over config)
     control_channel_capacity_explicit: Option<usize>,
     /// Explicit data-channel capacity override (takes priority over config)
@@ -110,6 +112,7 @@ impl ReticulumNodeBuilder {
             instance_name_explicit: None,
             flush_interval_secs_explicit: None,
             max_assembled_resource_size_explicit: None,
+            assemble_resources_off_lock: true,
             control_channel_capacity_explicit: None,
             data_channel_capacity_explicit: None,
             link_keepalive_secs_explicit: None,
@@ -819,6 +822,22 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Decrypt and decompress incoming resources off the node lock
+    /// (leviculum#71). Default `true`.
+    ///
+    /// The last part of an incoming resource completes its transfer, and the
+    /// assembly that follows (decrypt, bz2-decompress, hash-verify) is the
+    /// heaviest single step on the receive side: tens of milliseconds for a
+    /// ~1 MB transfer. Off the lock it runs on a blocking thread, so
+    /// concurrent transfers on different links finish in about the longest
+    /// one's time instead of the sum, and the node keeps serving other
+    /// traffic meanwhile. Events and proofs are identical either way; `false`
+    /// restores in-lock assembly, for measurement or as an escape hatch.
+    pub fn assemble_resources_off_lock(mut self, enabled: bool) -> Self {
+        self.assemble_resources_off_lock = enabled;
+        self
+    }
+
     pub fn flush_interval_secs(mut self, secs: u64) -> Self {
         self.flush_interval_secs_explicit = Some(secs);
         self
@@ -1067,7 +1086,8 @@ impl ReticulumNodeBuilder {
             );
 
         // Build NodeCore (consumes storage, persistent data already loaded)
-        let node_core = core_builder.build(rand_core::OsRng, clock, storage);
+        let mut node_core = core_builder.build(rand_core::OsRng, clock, storage);
+        node_core.set_defer_resource_assembly(self.assemble_resources_off_lock);
 
         let mut node = ReticulumNode::new(
             node_core,
