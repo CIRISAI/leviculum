@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.29.0+ciris.1] — CIRIS fork
+
+### Changed
+
+- Incoming resources are assembled off the node lock (leviculum#71). The
+  decrypt, bz2-decompress and hash-verify that follow a transfer's last part
+  ran under the node lock, so concurrent transfers on different links
+  serialized on it (CIRISEdge#739: 8 concurrent ~940 KB chunks). The std
+  driver now runs that work on blocking threads, at most 1 to 4 at a time by
+  CPU count, and concludes each result under a brief lock. Events and proofs
+  are identical to in-lock assembly. `ReticulumNodeBuilder::
+  assemble_resources_off_lock(false)` restores in-lock assembly for A/B
+  measurement or as an escape hatch. no_std and FFI callers are unchanged:
+  `NodeCore` assembles inline unless `set_defer_resource_assembly(true)`.
+  - A ready resource waits in its link until a worker is free, so only the
+    in-flight work is outside the node. A cancel, a duplicate advertisement,
+    the timeout poll and a link close treat it exactly as before.
+  - A resource cancelled or closed while assembling fails as `Cancelled` or
+    `LinkClosed`, and its late result is dropped. On shutdown, in-flight
+    assemblies are applied within 2 s and the rest fail as `Cancelled`.
+  - The completion proof may go out on a Stale link, so an assembly that
+    finishes after the link went quiet still completes the sender.
+  - Hardened through four rounds of Codex review on PR #73.
+
+### Added
+
+- `ReticulumNode::known_destination_evictions()` (leviculum#49): a
+  cumulative count of identity-cap evictions, for a transport-stats counter.
+- The phased assembly API on `NodeCore` (`set_defer_resource_assembly`,
+  `take_resource_assembly_jobs`, `complete_resource_assembly`,
+  `abandon_resource_assemblies`, `pending_resource_assemblies`) and the
+  opaque `resource::{AssemblyJob, AssemblyResult}`.
+
+### Consumer notes
+
+- No public function signature changed between v0.27.0+ciris.1 and this
+  release; there are additions only.
+- `ResourceError` (not `#[non_exhaustive]`) gained `PartRequestTimeout` and
+  `ProofTimeout` in v0.28.0 via upstream. Sender-side timeouts that read
+  `Timeout` now read one of those.
+- `NodeEvent` (non_exhaustive) gained `PacketDropped` in v0.28.0 via upstream.
+- A receiver's `ResourceCompleted` now arrives when the off-lock assembly
+  finishes, normally milliseconds after the last part. If a consumer abandons
+  a link without closing it, a completion on that link can still arrive.
+  Closing the link rules this out.
+
 ## [0.28.0+ciris.1] — CIRIS fork
 
 Catch-up to upstream master (+164 since the v0.27.0 base), plus the
