@@ -387,14 +387,36 @@ tree's own history is where it is kept:
 4. If not, and that text now sits at exactly one other line, the number
    is wrong and the guard says by how much.
 
-Only the unique match in step 4 fails a run. That is the load-bearing
-choice: the cited text is demonstrably in the file at a line the
-citation does not name, so the report needs no judgement about what the
-citing sentence meant, and a guard with false positives gets switched
-off. Everything else is counted in the open and decides nothing — an
-anchor that matches several lines, an anchor that has vanished (the code
-was rewritten in place, which only a reader can adjudicate), a citing
-line nobody has committed yet.
+The unique match in step 4 fails a run with a repair. That is the
+load-bearing choice: the cited text is demonstrably in the file at a line
+the citation does not name, so the report needs no judgement about what
+the citing sentence meant, and a guard with false positives gets switched
+off.
+
+An anchor that has vanished fails a run too, but without a number: the
+code was rewritten in place, and what the sentence should point at now is
+for a reader to decide, so the report says the text is gone and sends the
+reader to the sentence. Until 2026-10-05 this verdict was computed and
+then filed as undecidable whenever no endpoint of the citation was fresh
+or moved, which is every single-line citation. The status line read
+"0 rewritten in place" on every run, and 33 cited lines whose text was
+gone sat in the undecidable count, green; 16 of them pointed into the
+Python reference after it moved to 1.3.5.
+
+Everything else is counted in the open and decides nothing. The run
+prints the undecidable count split by reason, so this census is on every
+run rather than in a one-off instrumentation; on 2026-10-05, after the 33
+were fixed:
+
+| Undecidable because | doc | source | Could a rule decide it? |
+|---|---:|---:|---|
+| the cited line was blank when it was cited | 48 | 147 | Only when the citation's worded endpoints place it; a blank line alone, never |
+| the cited file was absent at the citing commit | 30 | 3 | Yes: every sampled case is the `reticulum-*` to `leviculum-*` crate rename, so following the rename to read the old blob would decide them |
+| the cited text is on several lines | 16 | 11 | Some: a wider context window than one line either side; a wordless line (`}`) alone, never |
+| the cited file was shorter than the citation when cited | 7 | 4 | Decidable as an error, not as drift: the citation was wrong when it was written |
+| the cited line carries no word to anchor to | 2 | 0 | Never on its own, by design (below) |
+| the citing line is not committed | 0 | 0 | Once it is committed |
+| **Sum** | **103** | **165** | |
 
 Two refinements earned their place by being needed on the real corpus,
 and both place endpoints by evidence rather than by inference:
@@ -422,6 +444,30 @@ it was written passes, and reflowing a paragraph re-baselines every
 citation in it. A citation whose *sentence* went wrong while the cited
 line stayed put is invisible here as it is to every other check on this
 page. The number is a floor, not a census.
+
+**The identifier-anchored class does not get this anchor yet.** It is
+checked by proximity alone: the identifier anywhere within `WINDOW`
+(8) lines of the cited span, or enclosing it, holds. A shift of up to
+eight lines is therefore green by design, and so is a span that never
+covered what it claims as long as the name is close by. Giving that class
+the same text anchor, with the identifier only choosing among several
+lines that hold the anchored text, turned 108 of its citations red on
+2026-10-05 (129 moved endpoints in the book, 2 in source, 2 rewritten);
+that rule waits for those to be read. The same day showed the cost: the
+pass that wrote this paragraph moved the `Placed::Proved` line this page
+cites by 24, and the guard stayed green, because the enum variant
+`Proved` sits three lines from the stale number.
+
+**Three standing controls** keep the verdicts honest, each a fixture pair
+under `leviculum-std/tests/fixtures/` (`citation_anchor_target.rs.in`
+and `citation_anchor_doc.md.in`, one bare and one identifier-anchored
+citation) committed into a scratch repository and then perturbed:
+`anchor_control_a_moved_line_is_named_with_its_new_number` (the bare
+citation is reported moved with its new number, the identifier citation
+holds at +1), `anchor_control_a_rewritten_line_is_named_rewritten_not_undecidable`
+(reported rewritten in place, with no number offered), and
+`anchor_control_an_identifier_moved_past_the_window_is_drift` (the
+identifier one line past the window is drift, with the distance named).
 
 Because the finder knows where the text went, it can also put the
 citation there: `LEVICULUM_CITATION_FIX=1` rewrites the repairable ones
@@ -609,7 +655,7 @@ because a refusal still leaves the citation red and a reader has to
 unpick it.
 
 Step 4 above, read from the other side, is the mechanism. The proof is
-`Placed::Proved` (`leviculum-std/tests/doc_citations.rs:3242`) — the
+`Placed::Proved` (`leviculum-std/tests/doc_citations.rs:3266`) — the
 mapped line's text *now* against the text the *cited number* held in
 the base. The premise of the whole map is therefore that every number
 in the corpus is one the base was right about, and a citation an
@@ -700,7 +746,7 @@ Built 2026-09-27. The proximity test had lived inline in the checker,
 closed over the current file's lines; it is now `ident_resolves`
 (`leviculum-std/tests/doc_citations.rs:688`), a function over the lines
 it is handed, and `place_citation` asks it a second time against the
-base copy of the file (`leviculum-std/tests/doc_citations.rs:3454`). A
+base copy of the file (`leviculum-std/tests/doc_citations.rs:3478`). A
 map repair is emitted only where both halves hold: the map proves the
 move, *and* the base resolved the citation's own identifier at the
 citation's own number. The refusal above is the other branch.
@@ -735,10 +781,12 @@ So the status line now names three groups rather than one, because they
 are three different claims:
 
 ```text
-doc citations: 1661 total; 809 checked against the symbol they name and
-holding; 0 named but not holding (reported below); 852 could not be
-checked (844 bare: existence and length only, 8 external: not in this
-workspace)
+doc citations: 1684 total; 814 checked against the symbol they name
+(within 8 lines) and holding; 0 named but not holding (reported below);
+870 could not be checked by name (862 bare: anchored by the text of the
+cited line in bare_citations_still_point_at_the_text_they_cited,
+8 external: not in this workspace, 0 skipped: into a reference/
+submodule that is not checked out)
 ```
 
 and when the third group is more than half the corpus, a warning line
@@ -757,10 +805,14 @@ beside it — and a guard that fails on that gets switched off within a
 week, which is worse than a guard that counts out loud. The number is
 the point: it is the size of the blind spot, and it is now in front of
 whoever reads a green run. Section 5's history anchor is the partial
-backstop for that class and prints its own split (1181 of the book's
-bare citations still hold their text, 100 undecidable; 2571 and 171 in
-source), so "could not be checked *by name*" is not the same as "not
-checked at all".
+backstop for that class and prints its own split (on 2026-10-05, 1205
+of the book's bare cited lines still hold their text, 103 undecidable;
+2820 and 165 in source), so "could not be checked *by name*" is not the
+same as "not checked at all", and the line now says which one a corpus
+got: the book and the crates are anchored, the scripts are not, and
+their bare citations are still existence and length only. Until
+2026-10-05 the line said "existence and length only" for all three,
+which had stopped being true of two of them when the anchor landed.
 
 The same pass gave the drift report the distance it had been leaving to
 the reader. It printed the cited line and the nearest occurrence of the

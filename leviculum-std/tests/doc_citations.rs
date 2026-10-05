@@ -808,19 +808,29 @@ impl Counts {
 /// `bare_citations_still_point_at_the_text_they_cited` is the partial
 /// backstop for that class, via the tree's own history rather than via a
 /// name.
-fn coverage_lines(label: &str, counts: &Counts) -> Vec<String> {
+///
+/// `bare_anchored` says whether that backstop runs over this corpus (the
+/// book and the crates, not the scripts), because the line has to say which
+/// of the two a bare citation got.
+fn coverage_lines(label: &str, counts: &Counts, bare_anchored: bool) -> Vec<String> {
     let not_holding = counts
         .with_ident
         .saturating_sub(counts.holds + counts.absent_ident);
     let bare_present = counts
         .bare
         .saturating_sub(counts.absent - counts.absent_ident);
+    let bare_how = if bare_anchored {
+        "anchored by the text of the cited line in \
+         bare_citations_still_point_at_the_text_they_cited"
+    } else {
+        "existence and length only"
+    };
     let mut out = vec![format!(
         "{label} citations: {} total; {} checked against the symbol they name \
-         and holding; {not_holding} named but not holding (reported below); \
-         {} could not be checked ({bare_present} bare: existence and length \
-         only, {} external: not in this workspace, {} skipped: into a \
-         reference/ submodule that is not checked out)",
+         (within {WINDOW} lines) and holding; {not_holding} named but not \
+         holding (reported below); {} could not be checked by name \
+         ({bare_present} bare: {bare_how}, {} external: not in this workspace, \
+         {} skipped: into a reference/ submodule that is not checked out)",
         counts.total(),
         counts.holds,
         counts.unchecked(),
@@ -837,12 +847,26 @@ fn coverage_lines(label: &str, counts: &Counts) -> Vec<String> {
     }
     if counts.unchecked() * 2 > counts.total() {
         let pct = counts.unchecked() * 100 / counts.total().max(1);
+        let what = if bare_anchored {
+            format!(
+                "The {bare_present} bare ones are checked by the text their cited \
+                 line held when the citation was last written, which catches a \
+                 moved or rewritten line but not a citation that was already \
+                 wrong then, nor a sentence that went wrong while its line \
+                 stayed put; the {} external and {} skipped ones are not \
+                 checked at all. Those named are checked by proximity only: \
+                 the identifier anywhere within {WINDOW} lines of the span holds.",
+                counts.external, counts.absent,
+            )
+        } else {
+            "For those, a green run means a file of that name exists and is \
+             long enough, not that the citation points at what it claims."
+                .to_string()
+        };
         out.push(format!(
             "{label} citations: WARNING -- {} of {} ({pct} %) could not be \
-             checked. For those, a green run means a file of that name exists \
-             and is long enough, not that the citation points at what it \
-             claims. This is not a passing grade for the corpus; it is the \
-             size of the blind spot (Codeberg #307).",
+             checked by name. {what} This is not a passing grade for the \
+             corpus; it is the size of the blind spot (Codeberg #307).",
             counts.unchecked(),
             counts.total(),
         ));
@@ -1591,11 +1615,11 @@ fn run_canary() {
         counts.absent_ident
     );
     assert!(
-        coverage_lines("canary", &counts)
+        coverage_lines("canary", &counts, false)
             .iter()
             .any(|l| l.contains("SKIPPED 2 citation(s)")),
         "CANARY: the status line does not say how many citations it skipped: {:?}",
-        coverage_lines("canary", &counts)
+        coverage_lines("canary", &counts, false)
     );
     assert!(
         failures
@@ -2088,7 +2112,7 @@ fn the_status_line_names_what_it_could_not_check() {
         absent_ident: 0,
         offsets: Vec::new(),
     };
-    let lines = coverage_lines("doc", &good);
+    let lines = coverage_lines("doc", &good, true);
     assert_eq!(
         lines.len(),
         1,
@@ -2118,7 +2142,7 @@ fn the_status_line_names_what_it_could_not_check() {
         absent_ident: 0,
         offsets: Vec::new(),
     };
-    let lines = coverage_lines("source", &blind);
+    let lines = coverage_lines("source", &blind, true);
     assert_eq!(
         lines.len(),
         2,
@@ -2175,7 +2199,7 @@ fn doc_citations_resolve() {
     let citations = book_citations(&root);
     let (counts, failures, _) = check(&root, &citations);
 
-    for line in coverage_lines("doc", &counts) {
+    for line in coverage_lines("doc", &counts, true) {
         println!("{line}");
     }
     report_offsets("doc", &counts);
@@ -2224,7 +2248,7 @@ fn source_citations_resolve() {
     // and not drift inside a file that stays long enough. Converting them to
     // the ``ident` (`path:line`)` form is editorial work (#167).
     println!("source citations cover {}", SOURCE_CRATES.join(", "));
-    for line in coverage_lines("source", &counts) {
+    for line in coverage_lines("source", &counts, true) {
         println!("{line}");
     }
     report_offsets("source", &counts);
@@ -2263,7 +2287,7 @@ fn script_citations_resolve() {
     let (counts, failures, _) = check(&root, &citations);
 
     println!("script citations cover scripts/*.sh and the Justfile");
-    for line in coverage_lines("script", &counts) {
+    for line in coverage_lines("script", &counts, false) {
         println!("{line}");
     }
     report_offsets("script", &counts);
