@@ -1829,6 +1829,27 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.pending_assembly.len()
     }
 
+    /// Fail every assembly still running outside the node (leviculum#71).
+    ///
+    /// For a caller that will never deliver those results, such as an event
+    /// loop that is stopping or one that starts fresh after a stop. Each
+    /// waiting resource fails as `Cancelled` instead of holding its link's
+    /// incoming slot forever. A result that turns up later finds nothing
+    /// waiting and concludes nothing. Resources still queued in their links
+    /// are untouched and are taken by the next caller.
+    pub fn abandon_resource_assemblies(&mut self) -> crate::transport::TickOutput {
+        let parked = core::mem::take(&mut self.assembling_resources);
+        for (link_id, resource) in parked {
+            self.events.push(NodeEvent::ResourceFailed {
+                link_id,
+                resource_hash: *resource.resource_hash(),
+                error: crate::resource::ResourceError::Cancelled,
+                is_sender: false,
+            });
+        }
+        self.process_events_and_actions()
+    }
+
     /// Apply a finished [`crate::resource::AssemblyJob`] (leviculum#71): send
     /// the completion proof and emit the completion or failure, exactly as an
     /// inline assembly would have.
@@ -3661,6 +3682,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         for link in self.links.values() {
             links += link.content_heap_bytes();
             resources += link.resource_heap_bytes();
+        }
+        // leviculum#71: resources out of their links for assembly, and the
+        // queue of links waiting for one, are still resource memory.
+        resources += hc::btree_map_bytes(&self.assembling_resources)
+            + hc::vec_deque_bytes(&self.pending_assembly);
+        for resource in self.assembling_resources.values() {
+            resources += resource.heap_bytes();
         }
         let requests = hc::btree_map_bytes(&self.request_handlers)
             + hc::btree_map_bytes(&self.pending_requests)

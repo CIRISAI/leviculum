@@ -518,6 +518,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .remove(link_id)
                 .map(|r| *r.resource_hash())
         });
+        self.pending_assembly.retain(|queued| queued != link_id);
         if outgoing_hash.is_some() || incoming_hash.is_some() {
             // Report the caller-visible id, consistent with emit_link_closed
             // (which translates re-keyed wire ids back to the original).
@@ -2899,7 +2900,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // `complete_resource_assembly`. Inline otherwise.
                 if self.defer_resource_assembly {
                     link.set_incoming_resource(incoming);
-                    self.pending_assembly.push_back(link_id);
+                    if !self.pending_assembly.contains(&link_id) {
+                        self.pending_assembly.push_back(link_id);
+                    }
                 } else {
                     let outcome = incoming.assemble(&*link);
                     completed_internal_payload =
@@ -3165,6 +3168,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             if let Some(res) = link.incoming_resource() {
                 let resource_hash = *res.resource_hash();
                 link.clear_incoming_resource();
+                // A cancel of a resource queued for assembly also retires its
+                // queue entry (leviculum#71), so the queue never carries work
+                // that no longer exists.
+                self.pending_assembly.retain(|queued| *queued != link_id);
                 self.events.push(NodeEvent::ResourceFailed {
                     link_id,
                     resource_hash,

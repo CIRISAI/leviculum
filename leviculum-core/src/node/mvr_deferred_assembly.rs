@@ -451,3 +451,81 @@ fn taking_one_job_takes_the_ready_resource() {
     assert_eq!(jobs[0].resource_hash(), resource_hash);
     assert_eq!(responder.pending_resource_assemblies(), 0);
 }
+
+/// Codex review on #73 (third pass): a cancel or a link close retires the
+/// queue entry with the resource, so the queue never holds stale work.
+#[test]
+fn a_cancel_or_close_retires_the_queue_entry() {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (resource_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let _ = pump(
+        &mut initiator,
+        &mut responder,
+        i_iface,
+        r_iface,
+        action_data(&tick),
+    );
+    assert_eq!(responder.pending_resource_assemblies(), 1);
+
+    let icl = initiator
+        .links
+        .get(&link_id)
+        .expect("sender link")
+        .build_data_packet_with_context(&resource_hash, PacketContext::ResourceIcl, &mut OsRng)
+        .expect("ICL packet");
+    let _ = deliver_all(&mut responder, r_iface, vec![icl]);
+    assert_eq!(
+        responder.pending_resource_assemblies(),
+        0,
+        "the cancel retires the entry"
+    );
+
+    // A fresh transfer on a fresh link, queued, then the link closes.
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let _ = pump(
+        &mut initiator,
+        &mut responder,
+        i_iface,
+        r_iface,
+        action_data(&tick),
+    );
+    assert_eq!(responder.pending_resource_assemblies(), 1);
+    let _ = responder.close_link(&link_id);
+    assert_eq!(
+        responder.pending_resource_assemblies(),
+        0,
+        "the close retires the entry"
+    );
+}
+
+/// Codex review on #73 (third pass): a caller that will never deliver its
+/// results (a stopping loop) fails what is out, and the census counts it.
+#[test]
+fn abandoned_assemblies_fail_as_cancelled_and_parked_ones_are_counted() {
+    let (_initiator, mut responder, _i, _r, _link_id, resource_hash, _adv, job) = parked_transfer();
+    let census = responder.heap_census();
+    assert!(census.resources > 0, "a parked resource is resource memory");
+
+    let out = responder.abandon_resource_assemblies();
+    assert!(
+        out.events.iter().any(|e| matches!(
+            e,
+            NodeEvent::ResourceFailed { is_sender: false, error: ResourceError::Cancelled, resource_hash: h, .. }
+                if *h == resource_hash
+        )),
+        "the abandoned resource fails as Cancelled: {:?}",
+        out.events
+    );
+    let late = responder.complete_resource_assembly(job.run());
+    assert!(
+        received(&late.events).is_none(),
+        "its late result concludes nothing"
+    );
+}
