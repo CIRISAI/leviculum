@@ -35,6 +35,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod adv;
+pub mod churn_ledger;
 pub mod conn_params;
 pub mod dial_ledger;
 pub mod drain;
@@ -52,6 +53,7 @@ pub use adv::{
     CAP_PERIPHERAL_ONLY, COMPANY_ID, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY,
     MANUFACTURER_DATA_HINT_LEN, MANUFACTURER_DATA_LEN, PERIPH_SLOTS, PROTOCOL_VERSION,
 };
+pub use churn_ledger::{ChurnLedger, ChurnPolicy, LeaveNoted};
 pub use conn_params::{
     judge_supervision_timeout, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq,
     ConnParamsReqLine, LinkPhase, LinkRole, REQUESTED_SUPERVISION_TIMEOUT_UNITS,
@@ -73,8 +75,8 @@ pub use registry::{
 };
 pub use session_census::{HeldBytes, SessionHeld};
 pub use window::{
-    dial_preference, CandidateTable, DialPreference, FallbackOrder, SCAN_FALLBACK_AFTER_MS,
-    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    dial_preference, rotating_address, CandidateTable, DialPreference, FallbackOrder,
+    SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 
 /// Upper bound on a single wait for the SoftDevice's
