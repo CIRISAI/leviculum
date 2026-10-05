@@ -31,13 +31,13 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, dial_preference, identity_hint, judge_supervision_timeout,
-    manufacturer_data_with_hint, parse_peer_advertisement, should_initiate, with_free_slots,
-    CandidateTable, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine,
-    ConnectDecision, DialLedger, GattBytes, LedgerPolicy, LinkPhase, LinkRole, LinkUp, Origin,
-    OversizeFrom, OversizeLine, PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY,
-    GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
-    MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
-    WINDOW_CANDIDATES,
+    manufacturer_data_with_hint, parse_peer_advertisement, rotating_address, should_initiate,
+    with_free_slots, CandidateTable, ChurnLedger, ChurnPolicy, ConnParams, ConnParamsAsk,
+    ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision, DialLedger, GattBytes,
+    LedgerPolicy, LinkPhase, LinkRole, LinkUp, Origin, OversizeFrom, OversizeLine, PeerRegistry,
+    ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, GATT_VALUE_MAX, IDENTITY_HINT_LEN,
+    LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS, MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS,
+    SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -1041,6 +1041,16 @@ async fn gatt_events(
             let _ = conn.disconnect();
         }
         Either4::Fourth(end) => {
+            // An expiry is the peer's own departure (#417): it went
+            // silent on a link it held with us until the registry's
+            // bound swept it — the rotation's signature. The
+            // displacement is fed by the displacer instead
+            // ([`displace_old_link`]), once per event.
+            if matches!(end, LinkEnd::Expired(_)) {
+                if let Some(peer_id) = link_peer.get() {
+                    note_peer_leave(&peer_id, peer_value, "expiry_peripheral");
+                }
+            }
             log_link_end("peripheral", slot_index, conn_handle, end);
             let _ = conn.disconnect();
         }
@@ -1429,6 +1439,12 @@ fn displace_old_link(displaced: DisplacedOld) {
         }
     }
     BLE_LINKS_DISPLACED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // A replacement is a departure too (#417): the identity left the
+    // address the old link was made on, even though it came straight
+    // back. Fed here, by the displacer, so both roles' displacements
+    // are one site and the displaced session's own teardown stays
+    // silent about it.
+    note_peer_leave(&peer_id, peer_value, "replaced");
     crate::log::log_fmt(
         "[BLE ] ",
         format_args!(
@@ -1866,6 +1882,114 @@ fn fallback_dial_held() -> bool {
     true
 }
 
+/// What the board remembers about the peers that keep LEAVING (#417),
+/// keyed by IDENTITY like [`DIAL_LEDGER`] and fed by the opposite
+/// outcome: sessions the dial ledger rightly calls useful — the phone
+/// stays linked until its next rotation — whose identity then departs,
+/// again and again. A run of departures inside one window closes the
+/// ROTATING half of the fallback class for a cooldown: strict verdicts
+/// and fixed-addressed fallback candidates stay dialable, which is the
+/// scope the #417 design table chose (holding the whole class forfeits
+/// the board-to-board links the penalty wins back; `graph_formation`).
+///
+/// The rule is [`leviculum_ble_tx::ChurnLedger`]; this is its
+/// board-global instance, locked like [`DIAL_LEDGER`] and for the same
+/// reason: both session roles write it (a departure is a departure
+/// whoever paid for the dial) while the central task's scan callback
+/// reads it.
+static CHURN_LEDGER: BlockingMutex<CriticalSectionRawMutex, Cell<ChurnLedger>> =
+    BlockingMutex::new(Cell::new(ChurnLedger::new()));
+
+/// The policy [`CHURN_LEDGER`] runs, and the A/B switch for it — the
+/// same shape as [`LEDGER_POLICY`]'s: the `ble-churn-penalty-off`
+/// feature compiles [`ChurnPolicy::OFF`] in instead, which records
+/// nothing and holds nothing.
+#[cfg(not(feature = "ble-churn-penalty-off"))]
+const CHURN_POLICY: ChurnPolicy = ChurnPolicy::MEASURED;
+#[cfg(feature = "ble-churn-penalty-off")]
+const CHURN_POLICY: ChurnPolicy = ChurnPolicy::OFF;
+
+/// The `held_until_ms` of the last cooldown a suppressed dial was
+/// logged for — [`HELD_LOGGED_FOR`]'s twin, one line per cooldown
+/// rather than one per advertising report, and a re-armed cooldown (a
+/// new deadline) gets its own line.
+static CHURN_HELD_LOGGED_FOR: BlockingMutex<CriticalSectionRawMutex, Cell<Option<u64>>> =
+    BlockingMutex::new(Cell::new(None));
+
+/// Record one DEPARTURE of a rotating-addressed peer (#417): the
+/// identity behind `peer_value` ended a session by its own leaving —
+/// silence until the expiry swept the link, or a replacement by its
+/// next connection. A static-addressed session's end is not recorded
+/// (the class filter is here, in one place): a flaky board must never
+/// arm a cooldown that every phone in the room then pays for.
+///
+/// Only the ARMING is logged — the departure itself already has its
+/// line (`BLE_LINK_EXPIRE`, `BLE_LINK_REPLACED`), and the one thing
+/// those lines cannot say is that the run has now closed the class.
+fn note_peer_leave(peer_id: &[u8; 16], peer_value: u64, reason: &str) {
+    if !rotating_address(peer_value) {
+        return;
+    }
+    let now_ms = Instant::now().as_millis();
+    let noted = CHURN_LEDGER.lock(|cell| {
+        let mut ledger = cell.get();
+        let noted = ledger.note_leave(CHURN_POLICY, peer_id, now_ms);
+        cell.set(ledger);
+        noted
+    });
+    if noted.armed {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!(
+                "BLE_CHURN_LEDGER armed identity={:02x}{:02x}{:02x}{:02x} run={} reason={} \
+                 window_ms={} cooldown_ms={}",
+                peer_id[0],
+                peer_id[1],
+                peer_id[2],
+                peer_id[3],
+                noted.run,
+                reason,
+                CHURN_POLICY.window_ms,
+                CHURN_POLICY.cooldown_ms,
+            ),
+        );
+    }
+}
+
+/// Whether a FALLBACK dial to a ROTATING-addressed candidate is held
+/// right now (#417), logging the reason once per cooldown. Called from
+/// the scan callback for a fallback verdict whose address rotates, so
+/// a strict candidate and a fixed-addressed one cost nothing here.
+fn churn_dial_held() -> bool {
+    let now_ms = Instant::now().as_millis();
+    let until = CHURN_LEDGER.lock(|cell| {
+        let ledger = cell.get();
+        ledger
+            .rotating_fallback_held(now_ms)
+            .then(|| ledger.held_until_ms())
+    });
+    let Some(until_ms) = until.flatten() else {
+        return false;
+    };
+    let fresh = CHURN_HELD_LOGGED_FOR.lock(|cell| {
+        if cell.get() == Some(until_ms) {
+            return false;
+        }
+        cell.set(Some(until_ms));
+        true
+    });
+    if fresh {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!(
+                "BLE_CHURN_LEDGER held run={} until_ms={} now_ms={}",
+                CHURN_POLICY.leave_run, until_ms, now_ms
+            ),
+        );
+    }
+    true
+}
+
 /// A dial outcome's session length as the `BLE_DIAL_LEDGER` line prints
 /// it: the milliseconds, or `refused` when there was no session at all.
 ///
@@ -2054,11 +2178,19 @@ async fn find_peer_to_initiate(
         // holds nothing but held fallback verdicts opens no candidate
         // and the outgoing slot stays free, which is the whole point:
         // in the solo window there is no better peer to send it to.
+        // The sixth is the churn ledger (#417), the same shape one
+        // class narrower: it holds only the fallback candidates whose
+        // ADDRESS ROTATES, so a board re-linking to a board through a
+        // fallback dial never pays it — that scope is what the design
+        // table chose, and `graph_formation` measures why.
         if !decision.initiate()
             || dead_end(peer_value)
             || addr_already_linked(peer_value)
             || hint_already_linked(parsed.identity_hint)
             || (decision == ConnectDecision::InitiateFallback && fallback_dial_held())
+            || (decision == ConnectDecision::InitiateFallback
+                && rotating_address(peer_value)
+                && churn_dial_held())
         {
             return false;
         }
@@ -2543,6 +2675,12 @@ async fn run_central_session(
             let _ = conn.disconnect();
         }
         Either4::Fourth(end) => {
+            // The same departure on this side of the connection (#417):
+            // the dial ledger judges what this dial BOUGHT, the churn
+            // ledger what the peer then DID with it.
+            if matches!(end, LinkEnd::Expired(_)) {
+                note_peer_leave(&peer_id, peer_value, "expiry_central");
+            }
             log_link_end("central", slot_index, conn_handle, end);
             let _ = conn.disconnect();
         }

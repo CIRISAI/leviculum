@@ -263,6 +263,11 @@ default = []
 # never had one.
 ble-dial-ledger-off = []
 
+# The same A/B control for the churn penalty (#417): enabling the
+# feature compiles `ChurnPolicy::OFF` in place of the measured policy,
+# so the rig can attribute a capture difference to the penalty alone.
+ble-churn-penalty-off = []
+
 # BSP selection — exactly one must be enabled. Mutex enforced via
 # `compile_error!` in `lib.rs`. Both go through `softdevice` below and
 # therefore share one critical-section impl, the SoftDevice-aware one
