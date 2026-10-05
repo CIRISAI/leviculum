@@ -2066,6 +2066,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-queue-budget"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-std"
 version = "0.10.0-dev"
 dependencies = [
@@ -2084,6 +2088,7 @@ dependencies = [
  "leviculum-cli",
  "leviculum-core",
  "leviculum-lxmf",
+ "leviculum-queue-budget",
  "libc",
  "lnomad",
  "md-5",

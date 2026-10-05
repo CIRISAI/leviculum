@@ -14,6 +14,7 @@ use leviculum_channel_access::{jitter_slot_ms, ChannelAccess, JITTER_CW_SLOTS, J
 use leviculum_core::framing::kiss::{self, KissDeframeResult, KissDeframer};
 use leviculum_core::rnode;
 use leviculum_core::transport::InterfaceId;
+use leviculum_queue_budget::{DutyHolds, HoldVerdict};
 use rand_core::RngCore;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -158,6 +159,135 @@ struct QueuedFrame {
     /// modem consumed without transmitting. Carried on the queue entry so the
     /// frame's second handover knows not to ask for a third.
     rehand: bool,
+    /// When the interface accepted the frame, on the io task's [`stamp_ms`]
+    /// clock. Kept across a re-hand: the age rule (#433) asks how long the
+    /// frame has waited since the stack handed it over, not since its last
+    /// handover.
+    enqueued_ms: u32,
+}
+
+/// Milliseconds since `epoch`, truncated to the `u32` the age rule takes.
+///
+/// The io task fixes its epoch when it starts; the truncation wraps after 49.7
+/// days, which [`leviculum_queue_budget::hold_verdict`] absorbs by
+/// subtracting wrappingly.
+fn stamp_ms(epoch: tokio::time::Instant) -> u32 {
+    epoch.elapsed().as_millis() as u32
+}
+
+/// The longest CMD_READY gate closure ordinary transmission explains, and so
+/// the shortest one [`DutyHolds`] counts as a duty hold (#433).
+///
+/// Every handover closes the gate until the modem has room again, which takes
+/// the frame's own airtime — a full `HW_MTU` frame, split as the modem keys
+/// it (`rnode::host_frame_airtime_ms`) — plus at most one re-query interval
+/// ([`READY_POLL_MAX`]) to learn it. A closure longer than that is the modem
+/// holding a frame it may not key, which is the duty lock's shape. Floored at
+/// [`TX_GATED_EVENT_AFTER`], the threshold the `RNODE_TX_GATED` report already
+/// names that shape by, so the two never disagree at the fast rates.
+fn duty_hold_min_ms(sf: u8, cr: u8, bandwidth_hz: u32) -> u32 {
+    let frame_ms = rnode::host_frame_airtime_ms(
+        rnode::HW_MTU as u32,
+        bandwidth_hz,
+        sf,
+        cr,
+        rnode::derive_preamble_symbols(sf, cr, bandwidth_hz),
+    );
+    let explained = frame_ms.saturating_add(READY_POLL_MAX.as_millis() as u64);
+    explained
+        .max(TX_GATED_EVENT_AFTER.as_millis() as u64)
+        .min(u32::MAX as u64) as u32
+}
+
+/// Count and name one frame the age rule threw away (#433).
+///
+/// A loss, so it is counted where every send-queue loss is
+/// (`tx_queue_drops`, `tx_dropped_bytes`) and on its own counter, which names
+/// the cause. The event carries an age and a length and never a packet type:
+/// the interface does not read the frame.
+fn count_stale_drop(
+    iface: &str,
+    counters: &InterfaceCounters,
+    age_ms: u32,
+    payload_len: u64,
+    held_ms: u32,
+) {
+    counters
+        .tx_stale_drops
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    counters
+        .tx_queue_drops
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    counters
+        .tx_dropped_bytes
+        .fetch_add(payload_len, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!(
+        "LORA_TX_STALE iface={iface} age_ms={age_ms} len={payload_len} held_ms={held_ms}"
+    );
+}
+
+/// Take the next frame worth handing to the modem, dropping every frame ahead
+/// of it that aged out behind a duty hold (#433).
+///
+/// A duty lock does not thin traffic, it ages it: the modem keys one frame per
+/// dip of its ledger below the cap, FIFO intact, so under sustained load what
+/// reaches the air is as old as the standing backlog. A frame past
+/// [`leviculum_queue_budget::HOLD_MAX_AGE_MS`] whose wait overlapped a duty
+/// hold has outlived every relay entry it could be racing; dropping it gives
+/// the slot to one that has not. A frame that is old for any other reason is
+/// handed over whatever its age. The sweep runs to the first live frame, so a
+/// backlog of fossils goes in one turn rather than one per gate cycle.
+fn pop_live_frame(
+    name: &str,
+    counters: &InterfaceCounters,
+    send_queue: &mut VecDeque<QueuedFrame>,
+    holds: &DutyHolds,
+    now_ms: u32,
+) -> Option<QueuedFrame> {
+    while let Some(frame) = send_queue.pop_front() {
+        match holds.verdict(frame.enqueued_ms, now_ms) {
+            (HoldVerdict::DropStale { age_ms }, held_ms) => {
+                count_stale_drop(name, counters, age_ms, frame.payload_len, held_ms);
+            }
+            _ => return Some(frame),
+        }
+    }
+    None
+}
+
+/// One frame in the multi-vport task's shared send queue: the vport it is for,
+/// the payload, and when the interface accepted it ([`stamp_ms`]).
+struct VportFrame {
+    subint: usize,
+    data: Vec<u8>,
+    enqueued_ms: u32,
+}
+
+/// [`pop_live_frame`] for the multi-vport queue. A stale frame is counted on
+/// the vport that owned it and named by that vport, which is where its row
+/// on the status line is.
+fn pop_live_vport_frame(
+    vports: &[VportRuntime],
+    send_queue: &mut VecDeque<VportFrame>,
+    holds: &DutyHolds,
+    now_ms: u32,
+) -> Option<VportFrame> {
+    while let Some(frame) = send_queue.pop_front() {
+        match holds.verdict(frame.enqueued_ms, now_ms) {
+            (HoldVerdict::DropStale { age_ms }, held_ms) => {
+                let v = &vports[frame.subint];
+                count_stale_drop(
+                    &v.name,
+                    &v.counters,
+                    age_ms,
+                    frame.data.len() as u64,
+                    held_ms,
+                );
+            }
+            _ => return Some(frame),
+        }
+    }
+    None
 }
 
 /// The ceiling of the randomised pre-TX wait this interface can impose, for
@@ -1234,6 +1364,9 @@ struct PendingHandover {
     /// silent consume of the same frame is a modem that is not going to send
     /// it, and repeating into that only buys latency for everything behind it.
     is_rehand: bool,
+    /// [`QueuedFrame::enqueued_ms`], carried so a re-handed frame keeps its
+    /// age.
+    enqueued_ms: u32,
     /// When the frame was handed over, on the wall clock the event reports.
     /// The windows below are monotonic; this one is comparable across hosts.
     handed_unix_ms: u64,
@@ -1420,6 +1553,7 @@ fn settle_handovers(
                     payload_len: front.payload_len,
                     high_priority: front.high_priority,
                     rehand: true,
+                    enqueued_ms: front.enqueued_ms,
                 });
             }
         }
@@ -2051,22 +2185,22 @@ fn refuse_queued_duplicate<'a>(
 fn abandon_multi_send_queue(
     name: &str,
     vports: &[VportRuntime],
-    send_queue: &mut VecDeque<(usize, Vec<u8>)>,
+    send_queue: &mut VecDeque<VportFrame>,
     reason: &'static str,
 ) {
     let abandoned = send_queue.len();
     if abandoned == 0 {
         return;
     }
-    for (subint, frame) in send_queue.drain(..) {
-        vports[subint]
+    for frame in send_queue.drain(..) {
+        vports[frame.subint]
             .counters
             .tx_queue_drops
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        vports[subint]
-            .counters
-            .tx_dropped_bytes
-            .fetch_add(frame.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        vports[frame.subint].counters.tx_dropped_bytes.fetch_add(
+            frame.data.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     tracing::warn!(
         event = "RNODE_TX_QUEUE_DROP",
@@ -2086,7 +2220,7 @@ fn abandon_multi_send_queue(
 fn deregister_vport(
     name: &str,
     vports: &[VportRuntime],
-    send_queue: &mut VecDeque<(usize, Vec<u8>)>,
+    send_queue: &mut VecDeque<VportFrame>,
     dead: &mut [bool],
     subint: usize,
 ) {
@@ -2096,8 +2230,8 @@ fn deregister_vport(
     dead[subint] = true;
 
     let mut abandoned = 0usize;
-    send_queue.retain(|(queued, frame)| {
-        if *queued != subint {
+    send_queue.retain(|frame| {
+        if frame.subint != subint {
             return true;
         }
         abandoned += 1;
@@ -2105,10 +2239,10 @@ fn deregister_vport(
             .counters
             .tx_queue_drops
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        vports[subint]
-            .counters
-            .tx_dropped_bytes
-            .fetch_add(frame.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        vports[subint].counters.tx_dropped_bytes.fetch_add(
+            frame.data.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         false
     });
 
@@ -2211,6 +2345,12 @@ where
     let mut gate_blocked_since: Option<tokio::time::Instant> = None;
     let mut gate_event_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
     let mut gate_announced = false;
+
+    // The age rule (#433): the gate closures long enough to be the duty
+    // lock, on a clock that starts with the task. Frames are stamped on it at
+    // enqueue and judged on it at dequeue.
+    let clock_epoch = tokio::time::Instant::now();
+    let mut duty_holds = DutyHolds::new(duty_hold_min_ms(sf, cr, bandwidth_hz));
 
     // Periodic heartbeat: send CMD_DETECT every 5 minutes to keep the
     // serial link alive and verify the RNode firmware is responsive.
@@ -2533,6 +2673,7 @@ where
                             payload_len: pkt.data.len() as u64,
                             high_priority,
                             rehand: false,
+                            enqueued_ms: stamp_ms(clock_epoch),
                         };
                         if high_priority {
                             // Insert before the first non-high-priority packet
@@ -2731,6 +2872,7 @@ where
         // state means the gate reopened — if the hold was announced,
         // RNODE_TX_RELEASED closes the pair opened by RNODE_TX_GATED.
         let gate_holding = flow_control && !interface_ready && !send_queue.is_empty();
+        duty_holds.observe(gate_holding, stamp_ms(clock_epoch));
         match (gate_holding, gate_blocked_since) {
             (true, None) => {
                 gate_blocked_since = Some(tokio::time::Instant::now());
@@ -2756,7 +2898,13 @@ where
         //   Gate 1: timer_ready (jitter/spacing delay elapsed)
         //   Gate 2: interface_ready || !flow_control
         if timer_ready && (interface_ready || !flow_control) {
-            if let Some(queued) = send_queue.pop_front() {
+            if let Some(queued) = pop_live_frame(
+                &name,
+                &counters,
+                &mut send_queue,
+                &duty_holds,
+                stamp_ms(clock_epoch),
+            ) {
                 if let Err(e) = port.write_all(&queued.data).await {
                     tracing::warn!("{}: write error: {}", name, e);
                     // The frame in hand never made it out either — put it
@@ -2892,6 +3040,7 @@ where
                         payload_len: queued.payload_len,
                         high_priority: queued.high_priority,
                         is_rehand: queued.rehand,
+                        enqueued_ms: queued.enqueued_ms,
                         handed_unix_ms: unix_ms(),
                         due,
                         deadline: due + CHTM_PERIOD,
@@ -3740,7 +3889,7 @@ async fn rnode_multi_io_task<S>(
         return;
     }
     let mut interface_ready = true;
-    let mut send_queue: VecDeque<(usize, Vec<u8>)> = VecDeque::new();
+    let mut send_queue: VecDeque<VportFrame> = VecDeque::new();
     let mut send_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
     let mut timer_ready = true;
 
@@ -3756,6 +3905,18 @@ async fn rnode_multi_io_task<S>(
         .unwrap_or(READY_POLL_MAX);
     let mut ready_poll = ready_poll_start;
     let mut ready_query_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+
+    // The age rule (#433), as in the single-radio task. One gate serves every
+    // vport, so one record of its holds; the closure ordinary transmission
+    // explains is the slowest vport's.
+    let clock_epoch = tokio::time::Instant::now();
+    let mut duty_holds = DutyHolds::new(
+        vports
+            .iter()
+            .map(|v| duty_hold_min_ms(v.radio.sf, v.radio.cr, v.radio.bandwidth))
+            .max()
+            .unwrap_or(TX_GATED_EVENT_AFTER.as_millis() as u32),
+    );
 
     loop {
         tokio::select! {
@@ -3911,15 +4072,16 @@ async fn rnode_multi_io_task<S>(
                             send_queue.len(),
                             send_queue
                                 .iter()
-                                .filter(|(queued, _)| *queued == subint)
-                                .map(|(_, data)| data.as_slice()),
+                                .filter(|queued| queued.subint == subint)
+                                .map(|queued| queued.data.as_slice()),
                             &tagged.packet.data,
                             tagged.packet.data.len(),
                         ) {
                             continue;
                         }
                         if send_queue.len() >= FLOW_CONTROL_QUEUE_LIMIT {
-                            if let Some((shed_subint, shed)) = send_queue.pop_front() {
+                            if let Some(shed) = send_queue.pop_front() {
+                                let shed_subint = shed.subint;
                                 // A dropped frame must be loud, same as the
                                 // single-radio twin. The count lands on the
                                 // vport that owned the shed frame; the event
@@ -3931,19 +4093,23 @@ async fn rnode_multi_io_task<S>(
                                     .tx_queue_drops
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 vports[shed_subint].counters.tx_dropped_bytes.fetch_add(
-                                    shed.len() as u64,
+                                    shed.data.len() as u64,
                                     std::sync::atomic::Ordering::Relaxed,
                                 );
                                 tracing::warn!(
                                     event = "RNODE_TX_QUEUE_DROP",
                                     iface = %Scalar(name),
-                                    len = shed.len(),
+                                    len = shed.data.len(),
                                     depth = send_queue.len(),
                                     reason = "queue_full",
                                 );
                             }
                         }
-                        send_queue.push_back((tagged.subint, tagged.packet.data));
+                        send_queue.push_back(VportFrame {
+                            subint: tagged.subint,
+                            data: tagged.packet.data,
+                            enqueued_ms: stamp_ms(clock_epoch),
+                        });
                     }
                     None => {
                         // All vport senders dropped: interface tearing down.
@@ -3989,21 +4155,40 @@ async fn rnode_multi_io_task<S>(
             }
         }
 
+        duty_holds.observe(
+            flow_control && !interface_ready && !send_queue.is_empty(),
+            stamp_ms(clock_epoch),
+        );
+
         // Send if the spacing gate and the flow-control gate are both open.
         if timer_ready && (interface_ready || !flow_control) {
-            if let Some((subint, data)) = send_queue.pop_front() {
+            if let Some(VportFrame {
+                subint,
+                data,
+                enqueued_ms,
+            }) =
+                pop_live_vport_frame(vports, &mut send_queue, &duty_holds, stamp_ms(clock_epoch))
+            {
                 let v = &vports[subint];
                 let frame = rnode::build_vport_data_frame(v.vport, &data);
                 if let Err(e) = port.write_all(&frame).await {
                     tracing::warn!("{}: write error: {}", name, e);
                     // The frame in hand is lost with the rest; count it.
-                    send_queue.push_front((subint, data));
+                    send_queue.push_front(VportFrame {
+                        subint,
+                        data,
+                        enqueued_ms,
+                    });
                     abandon_multi_send_queue(name, vports, &mut send_queue, "serial_write_error");
                     return;
                 }
                 if let Err(e) = port.flush().await {
                     tracing::warn!("{}: flush error: {}", name, e);
-                    send_queue.push_front((subint, data));
+                    send_queue.push_front(VportFrame {
+                        subint,
+                        data,
+                        enqueued_ms,
+                    });
                     abandon_multi_send_queue(name, vports, &mut send_queue, "serial_flush_error");
                     return;
                 }
@@ -5398,6 +5583,7 @@ mod tests {
             payload_len,
             high_priority: false,
             is_rehand,
+            enqueued_ms: 0,
             handed_unix_ms: unix_ms(),
             due,
             deadline: due + CHTM_PERIOD,
@@ -8555,6 +8741,8 @@ mod tests {
         resume_tx: mpsc::Sender<usize>,
         /// CMD_READY queries the stub has answered.
         ready_queries: Arc<std::sync::atomic::AtomicUsize>,
+        /// Each vport's counters, in `subint` order.
+        counters: Vec<Arc<InterfaceCounters>>,
         hub: tokio::task::JoinHandle<()>,
         stub: tokio::task::JoinHandle<()>,
         /// Held so the hub's `incoming_tx.send` of the stub's echo never
@@ -8641,6 +8829,7 @@ mod tests {
         let (in0_tx, in0_rx) = mpsc::channel::<IncomingPacket>(256);
         let (in1_tx, in1_rx) = mpsc::channel::<IncomingPacket>(256);
         let vports = multi_flow_vports(in0_tx, in1_tx);
+        let counters = vports.iter().map(|v| Arc::clone(&v.counters)).collect();
 
         let port_holder = std::sync::Mutex::new(Some(port));
         let connect = move || {
@@ -8672,6 +8861,7 @@ mod tests {
             data_rx,
             resume_tx,
             ready_queries,
+            counters,
             hub,
             stub,
             _incoming_rx: vec![in0_rx, in1_rx],
@@ -8796,6 +8986,42 @@ mod tests {
             .await;
         h.expect_frame(1, b"m6", "held frames drain in order after release")
             .await;
+    }
+
+    /// #433 on the shared multi-vport queue: a frame that aged past the cap
+    /// behind the duty hold is dropped at dequeue and counted on the vport
+    /// that owned it, while a young frame queued behind it airs.
+    #[tokio::test(start_paused = true)]
+    async fn test_multi_vport_frame_aged_behind_the_duty_hold_is_dropped() {
+        let mut h = spawn_multi_flow_harness(true, 0).await;
+        h.push(0, b"seed").await;
+        h.expect_frame(
+            0,
+            b"seed",
+            "cold-start frame ships ungated and jams the modem",
+        )
+        .await;
+
+        h.push(1, b"old").await;
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        h.push(0, b"young").await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        h.resume_tx.send(1000).await.expect("stub alive");
+        h.expect_frame(
+            0,
+            b"young",
+            "the stale frame is dropped, the young one airs",
+        )
+        .await;
+        h.expect_silence(Duration::from_secs(3), "the stale frame never airs")
+            .await;
+        let stale = |i: usize| {
+            h.counters[i]
+                .tx_stale_drops
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        assert_eq!(stale(1), 1, "counted on the vport that owned it");
+        assert_eq!(stale(0), 0);
     }
 
     /// 403 on the shared multi-vport queue: a frame already queued for a
@@ -9216,6 +9442,106 @@ mod tests {
                 panic!("{ctx}: stub must see no CMD_DATA, saw {got:?}");
             }
         }
+    }
+
+    /// #433, lnsd half: a frame that aged behind the duty lock is dropped at
+    /// the interface, a young one airs.
+    ///
+    /// The modem's lock holds the CMD_READY gate shut for 20 s. Frame A,
+    /// queued as the hold began, is 20 s old when the gate reopens: past
+    /// `HOLD_MAX_AGE_MS`, so it is dropped with one `LORA_TX_STALE` line and
+    /// the `tx_stale_drops` counter, never handed to the modem. Frame W,
+    /// queued 3 s in, has waited 17 s and airs; frame B, queued 5 s before
+    /// the release, airs after it. The times are exact because the clock is
+    /// paused and the release is pinned to a poll: once the re-query backoff
+    /// has saturated, polls fall every `READY_POLL_MAX`, so a poll observed
+    /// at Q fixes the one at Q + 20 s.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_frame_aged_behind_the_duty_hold_is_dropped_at_dequeue() {
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(true, 0);
+        let queries =
+            |h: &DutyLockHarness| h.ready_queries.load(std::sync::atomic::Ordering::Relaxed);
+        let stale = |h: &DutyLockHarness| {
+            h.counters
+                .tx_stale_drops
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        h.push(b"bootstrap").await;
+        h.expect_frame(
+            b"bootstrap",
+            "bootstrap frame ships ungated and jams the modem",
+        )
+        .await;
+
+        // Let the backoff saturate, then catch a poll: from here on they fall
+        // every READY_POLL_MAX.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let seen = queries(&h);
+        while queries(&h) == seen {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(READY_POLL_MAX, Duration::from_secs(2));
+
+        h.push(b"frame-a").await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        h.push(b"frame-w17").await;
+        tokio::time::sleep(Duration::from_secs(12)).await;
+        h.push(b"frame-b").await;
+        // Lift the lock between the polls at Q + 18 s and Q + 20 s: the one
+        // at Q + 20 s finds room.
+        tokio::time::sleep(Duration::from_secs(4) + Duration::from_millis(500)).await;
+        h.resume_tx.send(1).await.expect("stub alive");
+
+        h.expect_frame(
+            b"frame-w17",
+            "A is stale and dropped; W waited 17 s and airs",
+        )
+        .await;
+        assert_eq!(stale(&h), 1, "A is counted as a stale drop");
+        h.resume_tx.send(1).await.expect("stub alive");
+        h.expect_frame(b"frame-b", "B is young and airs").await;
+        h.resume_tx.send(1).await.expect("stub alive");
+        h.expect_silence(Duration::from_secs(5), "A never reaches the modem")
+            .await;
+        assert_eq!(stale(&h), 1);
+        assert_eq!(
+            h.counters
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a stale drop is a loss, so txdrp counts it too"
+        );
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        let lines: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("LORA_TX_STALE"))
+            .collect();
+        assert_eq!(lines.len(), 1, "one event per drop\n--- logs ---\n{logs}");
+        // A was queued within the millisecond the poll was caught in, so its
+        // age is the 20 s hold to within that step.
+        let field = |key: &str| -> u32 {
+            lines[0]
+                .split_whitespace()
+                .find_map(|kv| kv.strip_prefix(key))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| panic!("{key} missing: {}", lines[0]))
+        };
+        assert!(
+            lines[0].contains("LORA_TX_STALE iface=test_rnode_duty age_ms="),
+            "{}",
+            lines[0]
+        );
+        let (age, held) = (field("age_ms="), field("held_ms="));
+        assert!(
+            (19_990..=20_000).contains(&age),
+            "the age is the 20 s A waited: {}",
+            lines[0]
+        );
+        assert_eq!(held, age, "A waited behind the hold its whole life");
+        assert_eq!(field("len="), 7, "the payload length of frame-a");
     }
 
     fn count_event(logs: &str, event: &str) -> usize {

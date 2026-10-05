@@ -253,13 +253,25 @@ it waited (Codeberg #433):
 
 - **The rule.** At dequeue, while `AirtimeTracker::is_locked` is true,
   a frame whose age since the interface accepted it exceeds
-  `leviculum_queue_budget::HOLD_MAX_AGE_MS` (20 s) is thrown away
-  instead of keyed. The 20 s is derived, and the derivation is in that
-  constant's own doc comment: above the 15 s short-term airtime window,
-  so a lock that engaged on short-term airtime alone never loses a
-  frame it was about to release; below the measured field topology's
-  30 s entry deadline minus the measured 1.0 s return leg, so a frame
-  that does air can still be proved.
+  `leviculum_queue_budget::HOLD_MAX_AGE_MS` (18 s) is thrown away
+  instead of keyed. The 18 s is derived, and the derivation is in that
+  constant's own doc comment: it is the shortest entry any relay
+  grants, `(1 + 0 + 2) × 6 s` for a one-hop request to a destination
+  the relay reaches directly, so a frame older than that is dead on
+  arrival in every topology; it sits above the 15 s short-term airtime
+  window, so a lock that engaged on short-term airtime alone never
+  loses a frame it was about to release, and below the measured field
+  topology's 30 s entry deadline minus the measured 1.0 s return leg.
+- **Both stacks.** `lnsd` driving an RNode cannot read the modem's
+  lock, so its send queue applies the same constant against what it
+  can see: the CMD_READY gate held shut, with frames waiting, for
+  longer than a full frame's airtime plus one re-query interval
+  explains (`DutyHolds`, in the same crate). A frame past the cap whose
+  wait overlapped such a hold is dropped at dequeue with
+  `LORA_TX_STALE iface=<name> age_ms=<n> len=<n> held_ms=<n>` and
+  counted as `tx_stale_drops` (also inside `tx_queue_drops`), which
+  `lnstatus` shows as `TX stale`. Frames the modem already holds age
+  inside it, out of the host's reach.
 - **Only under the lock.** A frame that waited for CSMA, for an
   acquisition-jitter draw or behind a burst gap is not stale in this
   sense, whatever its age: those waits are the interface's own and end
@@ -270,7 +282,7 @@ it waited (Codeberg #433):
   Isolation](interface-isolation.md)). What makes the drop acceptable
   is not a judgement about the packet but the cadences above it: a link
   request is reissued every 6 s per hop, an announce on its own
-  cadence, LXMF at its own layer — a frame older than 20 s behind a
+  cadence, LXMF at its own layer — a frame older than 18 s behind a
   lock has been superseded or written off by its sender already.
 - **Counted, never silent.** Every drop raises
   `LORA_QUEUE_DROP reason=stale age_ms=<n> bytes=<n> total=<n>` under

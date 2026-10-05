@@ -166,6 +166,11 @@ pub(crate) struct InterfaceCounters {
     /// same bytes were already queued and not yet handed to the modem. Not a
     /// loss: the queued copy still goes out, so these are not drops either.
     pub tx_queue_dedup: Counter64,
+    /// Outgoing frames the RNode host-side send queue threw away at dequeue
+    /// because they had waited longer than
+    /// `leviculum_queue_budget::HOLD_MAX_AGE_MS` behind a duty hold (#433).
+    /// A loss, so each one is also in `tx_queue_drops`; this names the cause.
+    pub tx_stale_drops: Counter64,
     /// Frames an RNode modem was handed and did not account for on its own
     /// airtime ledger: written over the serial line, never keyed, and never
     /// answered for (the RNode firmware is silent on six of its ten paths
@@ -196,6 +201,7 @@ impl InterfaceCounters {
             tx_queue_drops: Counter64::new(0),
             tx_dropped_bytes: Counter64::new(0),
             tx_queue_dedup: Counter64::new(0),
+            tx_stale_drops: Counter64::new(0),
             tx_unaccounted: Counter64::new(0),
             speed: std::sync::Mutex::new(SpeedState {
                 prev_rx: 0,

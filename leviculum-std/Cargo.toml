@@ -78,6 +78,10 @@ leviculum-channel-access = { path = "../leviculum-nrf/channel-access" }
 # host-tested once, next to the firmware that shares it, so the policy the
 # desk measures on a board is the policy the daemon runs.
 leviculum-announce-policy = { path = "../leviculum-nrf/announce-policy" }
+# The age rule for a frame held behind a duty lock (#433): one cap and one
+# verdict for the firmware's LoRa queue and this daemon's RNode send queue,
+# so the two stacks drop at the same age. Pure and dependency-free.
+leviculum-queue-budget = { path = "../leviculum-nrf/queue-budget" }
 # ble-tx's drain slots are `embassy-sync` Signals, so linking it needs a
 # `critical_section::Impl`. ble-tx supplies one only as a dev-dependency —
 # correct there, because the firmware gets the real one from nrf-softdevice

@@ -408,6 +408,50 @@ fn tx_queue_dedup_renders_when_positive_and_stays_silent_at_zero() {
     assert!(ifs[3].get("tx_queue_dedup").is_none());
 }
 
+#[test]
+fn tx_stale_drops_renders_when_positive_and_stays_silent_at_zero() {
+    // `tx_stale_drops` (#433) counts frames the send queue dropped because
+    // they aged past the cap behind a duty hold. Same contract as TX dedup:
+    // a line only for a non-zero count, nothing for zero or for an rnsd
+    // entry without the key, and `-j` passes the key through.
+    let mut aging = iface("RNodeInterface[/dev/ttyUSB0]", 292, 0, 0);
+    aging["tx_stale_drops"] = serde_json::json!(12);
+    let mut single = iface("RNodeInterface[/dev/ttyUSB1]", 292, 0, 0);
+    single["tx_stale_drops"] = serde_json::json!(1);
+    let mut clean = iface("RNodeInterface[/dev/ttyUSB2]", 292, 0, 0);
+    clean["tx_stale_drops"] = serde_json::json!(0);
+    let rnsd_shaped = iface("RNodeInterface[/dev/ttyUSB3]", 292, 0, 0);
+    let stats = serde_json::json!({
+        "interfaces": [aging, single, clean, rnsd_shaped],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+
+    let text = render_status(&stats, None, &StatusOptions::default());
+    let blocks: Vec<&str> = text.split("RNodeInterface[").collect();
+    assert_eq!(blocks.len(), 5, "all four interfaces render:\n{text}");
+    assert!(
+        blocks[1].contains("    TX stale  : 12 frames\n"),
+        "an aging interface shows its count:\n{text}"
+    );
+    assert!(
+        blocks[2].contains("    TX stale  : 1 frame\n"),
+        "one stale drop is singular:\n{text}"
+    );
+    assert!(
+        !blocks[3].contains("TX stale"),
+        "zero stays silent:\n{text}"
+    );
+    assert!(
+        !blocks[4].contains("TX stale"),
+        "an rnsd entry without the key renders no line:\n{text}"
+    );
+
+    let json: Value = serde_json::from_str(&render_json(&stats)).unwrap();
+    let ifs = json["interfaces"].as_array().unwrap();
+    assert_eq!(ifs[0]["tx_stale_drops"], serde_json::json!(12));
+    assert!(ifs[3].get("tx_stale_drops").is_none());
+}
+
 // ---------------------------------------------------------------------------
 // -d / -D discovered interfaces (Codeberg #32)
 // ---------------------------------------------------------------------------

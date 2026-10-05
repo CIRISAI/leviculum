@@ -111,7 +111,7 @@
 //!     whole-inventory comparison lives in
 //!     `status_inventory_parity_across_daemons`;
 //!   * per-interface key set: ours adds announce_queue/peers/tx_queue_drops/
-//!     tx_queue_dedup/tx_unaccounted plus the post-1.3.5 upstream key set (txdrp and its
+//!     tx_queue_dedup/tx_stale_drops/tx_unaccounted plus the post-1.3.5 upstream key set (txdrp and its
 //!     siblings, added
 //!     for current-rnstatus drop-in compatibility — see the note above
 //!     `row_fields` in rpc/handlers.rs) that the 1.3.5 vendor rnsd here
@@ -2517,7 +2517,7 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // `tx_unaccounted` is additive on exactly the same terms: it counts the
     // frames an RNode modem was handed and never accounted for on its own
     // airtime ledger, a packet-loss condition no reference key names. It is
-    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:454-470) and
+    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:459-486) and
     // so appears on this TCP interface too, reading 0 — the honest value for
     // a medium that keeps no such ledger. Reference tolerance re-measured on
     // the pinned vendor tree for this key: rnstatus reads interface fields
@@ -2530,6 +2530,10 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // queue refused because their bytes were already queued, emitted
     // unconditionally beside `tx_queue_drops` and reading 0 on this TCP
     // interface, which holds no host-side queue.
+    //
+    // `tx_stale_drops` (#433) likewise: frames the send queue dropped because
+    // they aged past the cap behind a duty hold, emitted unconditionally and
+    // reading 0 here.
     //
     // Operational lesson: any batch that adds an interface_stats key MUST run
     // the status-parity step (`bash scripts/run-status-parity.sh`, the recipe
@@ -2577,6 +2581,7 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
         "peers",
         "tx_queue_drops",
         "tx_queue_dedup",
+        "tx_stale_drops",
         "tx_unaccounted",
     ];
     let ours_only_queued: BTreeSet<String> = additive_ours

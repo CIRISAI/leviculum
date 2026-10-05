@@ -965,6 +965,18 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
         }
     }
 
+    // TX stale (#433): frames the send queue dropped because they aged past
+    // the cap behind the modem's duty lock, served as `tx_stale_drops`. They
+    // are already counted in TX drops; this line names the cause, so a lock
+    // that ages traffic reads differently from a queue that overflows. Ours,
+    // and silent at zero on the same terms.
+    if let Some(stale) = ji(ifstat, "tx_stale_drops") {
+        if not_null(ifstat, "tx_stale_drops") && stale > 0 {
+            let word = if stale == 1 { "frame" } else { "frames" };
+            pln(out, &format!("    TX stale  : {stale} {word}"));
+        }
+    }
+
     render_traffic_block(out, ifstat, opts, name, clients);
 }
 
