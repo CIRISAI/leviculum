@@ -14,7 +14,10 @@
 //! 1. `START`: the datasheet runtime bounds, and whether a watchdog is
 //!    running (none is armed by anything in this tree; the line is the
 //!    measurement that the bootloader did not arm one either).
-//! 2. Bring-up through `qspi::identify_at_boot`, exactly as the SolarNode
+//! 2. `PLAN wall_bound_ms=…` (`st::PlanLine`), once the start hold is
+//!    over, so a capture attached after the flash runner's read-back holds
+//!    it: the window one whole run needs, from its start and from boot.
+//!    Then bring-up through `qspi::identify_at_boot`, exactly as the SolarNode
 //!    firmware does it, so the `[QSPI] JEDEC` line is the familiar one and
 //!    the first `BUS` line is the firmware's own bus setting
 //!    (`qspi::P25Q16H_BUS`). Then a second `BUS` line: the run moves to
@@ -42,10 +45,14 @@
 //!    the part, read five times per chunk at the 8 MHz control and then at
 //!    16 and 32 MHz under every `IFTIMING.RXDELAY` from 0 to 7, one
 //!    `READSWEEP` line each with `applied=` saying whether the registers
-//!    read back as set; then `SWEEPBEST`, the fastest clean setting. 73 s
-//!    of bus time, about 75 to 360 s with the comparison
-//!    (`st::COMPARE_MS_MAX`); the whole run is bounded by
-//!    `st::wall_bound_ms`, 9.5 min, against 134 s before the sweep.
+//!    read back as set; then one `SWEEPNARROW` line per faster clock
+//!    that read clean only in a run narrower than `st::MIN_CLEAN_RUN`
+//!    delays, and `SWEEPBEST`, the fastest clock with a run that wide and
+//!    the middle of it (`st::SweepBest`). 73 s of bus time, about 177 to
+//!    668 s with the comparison (`st::COMPARE_MS_MAX`, 6.1 s for a clean
+//!    point and 35 s for one wrong in every byte); the whole run is
+//!    bounded by `st::wall_bound_ms`, 15.4 min, against 134 s before the
+//!    sweep, and prints that bound as its `PLAN` line when it starts.
 //! 7. `BUS` back at 8 MHz and the default RXDELAY, then `ERASE pass=3`,
 //!    verified at 8 MHz, so `final_state` is a measurement. The third
 //!    erase is what leaves the part blank, so the SolarNode firmware's
@@ -88,7 +95,7 @@ use leviculum_nrf::log_critical;
 use leviculum_qspi_selftest as st;
 use st::{
     Bus, BusClock, Cause, Census, CensusLine, Compare, ErasePass, Failure, MissLine, Op, Pattern,
-    ReadSet, Run, Status, SweepBest, SweepCell, Tally, Timing, WritePass,
+    PlanLine, ReadSet, Run, Status, SweepBest, SweepCell, Tally, Timing, WritePass,
 };
 
 /// One read operation's worth. A multiple of 4, as the peripheral's
@@ -124,6 +131,12 @@ const REPORT_PERIOD_S: u64 = 15;
 /// Seconds after boot before the run starts: past the flash runner's 8 s
 /// read-back window (module docs), with margin for its re-enumeration.
 const START_HOLD_S: u64 = 12;
+
+/// The capture window this run needs, printed when it starts and in
+/// every report.
+const PLAN_LINE: PlanLine = PlanLine {
+    hold_ms: START_HOLD_S as u32 * 1000,
+};
 
 fn line(args: core::fmt::Arguments) {
     leviculum_nrf::log::log_fmt_critical("[QSPI-TEST] ", args);
@@ -377,8 +390,17 @@ async fn sweep(
         line(format_args!("{cell}"));
         pace().await;
     }
-    line(format_args!("{}", SweepBest::of(&run.sweep)));
+    print_best(&run.sweep);
     Ok(())
+}
+
+/// The `SWEEPNARROW` lines, fastest clock first, then `SWEEPBEST`.
+fn print_best(cells: &[Option<SweepCell>]) {
+    let best = SweepBest::of(cells);
+    for narrow in best.narrow() {
+        line(format_args!("{narrow}"));
+    }
+    line(format_args!("{best}"));
 }
 
 /// A read set's line and its `MISS` lines.
@@ -481,6 +503,7 @@ async fn test(
 
 /// Every line the run produced, in its order, paced.
 async fn print_report(run: &Run) {
+    line(format_args!("{PLAN_LINE}"));
     if let Some(bus) = run.bus {
         line(format_args!("{bus}"));
     }
@@ -506,7 +529,7 @@ async fn print_report(run: &Run) {
                 line(format_args!("{cell}"));
                 pace().await;
             }
-            line(format_args!("{}", SweepBest::of(&run.sweep)));
+            print_best(&run.sweep);
         }
         if let Some(e) = run.erases[i] {
             line(format_args!("{e}"));
@@ -559,6 +582,7 @@ async fn main(spawner: Spawner) {
     Timer::after_secs(START_HOLD_S).await;
 
     let start = Instant::now();
+    line(format_args!("{PLAN_LINE}"));
     let mut run = Run::default();
     let flash = match solarnode::CONFIG.qspi_part {
         Some(part) => leviculum_nrf::qspi::identify_at_boot(

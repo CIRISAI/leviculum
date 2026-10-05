@@ -50,12 +50,13 @@
 //! operation they guard.
 //!
 //! Those bounds are bus and part time only. The run also compares every
-//! byte it reads, and on the 2026-10-04 capture
-//! (`/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261004T211914Z.log`)
-//! that cost 6.6 s per clean read set and up to 17.1 s per read set
-//! that was wrong almost everywhere, on top of its bus time ([`COMPARE_MS_MAX`]).
-//! [`wall_bound_ms`] adds that per read set, which is the number to plan a
-//! capture window with.
+//! byte it reads, and on the 2026-10-05 capture
+//! (`/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261004T230630Z.log`)
+//! that cost 6.1 s per clean read set or sweep point and 34.2 s per one
+//! whose five reads were wrong in nearly every byte, on top of its bus
+//! time ([`COMPARE_MS_MAX`]). [`wall_bound_ms`] adds the worst of that per
+//! read set and sweep point, and the binary prints it as its `PLAN` line
+//! ([`PlanLine`]), which is the number to plan a capture window with.
 //!
 //! # Units
 //!
@@ -335,17 +336,57 @@ pub const fn typical_ms() -> u32 {
 }
 
 /// Comparison and printing time of one read set or sweep point beyond
-/// its bus time, at most. On the 2026-10-04 capture read sets 1 and 4
-/// (32 MHz, about 80 % of their bytes wrong) took 18.4 s and 19.8 s of
-/// wall time between the line before and their own, of which 2.74 s was
-/// reads: 15.7 s and 17.1 s. The clean set 3 took 6.6 s beyond its
-/// 10.6 s of reads. The worse of the two, rounded up to whole seconds.
-pub const COMPARE_MS_MAX: u32 = 18_000;
+/// its bus time, at most, for a read set whose every byte of every read
+/// is wrong.
+///
+/// The comparison is CPU work per byte read, and more of it per byte that
+/// is wrong (`Compare::byte`). On the 2026-10-05 capture
+/// (`/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261004T230630Z.log`)
+/// the gap between a `READSWEEP` line and the line before it, minus that
+/// point's own `ms=` of reads, was 6.10 s for every clean point (n=0 to 3
+/// and 10) and 34.18 s for the stable-wrong points n=5, 6, 7 and 12, whose
+/// five reads were wrong in 2 089 026 bytes each. The difference, 28.08 s
+/// over 5 x 2 089 026 wrong read bytes, is 2.688 us per wrong read byte;
+/// a set with all 5 x 2 097 152 read bytes wrong therefore costs 6.10 s +
+/// 28.19 s = 34.29 s. Rounded up to whole seconds with the printing of a
+/// read set's 64 `MISS` lines on top: 35 s. (The 2026-10-04 figure, 18 s,
+/// came from read sets whose reads were each wrong in about 30 % of their
+/// bytes, not from the worst case.)
+pub const COMPARE_MS_MAX: u32 = 35_000;
 
 /// [`worst_case_ms`] plus [`COMPARE_MS_MAX`] for every read set and every
-/// sweep point: what a capture of one whole run has to cover.
+/// sweep point: what a capture of one whole run has to cover, from the
+/// run's start (after the binary's start hold), even when every compared
+/// read is wrong in every byte.
 pub const fn wall_bound_ms() -> u32 {
     worst_case_ms() + (READ_SETS + SWEEP_POINTS) as u32 * COMPARE_MS_MAX
+}
+
+/// The `PLAN` line, printed when the run starts and in every report, so
+/// the operator sizes the capture window from the board and not from a
+/// doc.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PlanLine {
+    /// The binary's hold between boot and the run's start.
+    pub hold_ms: u32,
+}
+
+impl fmt::Display for PlanLine {
+    /// `PLAN wall_bound_ms=<n> hold_ms=<n> from_boot_ms=<n> worst_case_ms=<n>
+    /// compare_ms_max=<n> compared=<n>`
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "PLAN wall_bound_ms={} hold_ms={} from_boot_ms={} worst_case_ms={} \
+             compare_ms_max={} compared={}",
+            wall_bound_ms(),
+            self.hold_ms,
+            wall_bound_ms().saturating_add(self.hold_ms),
+            worst_case_ms(),
+            COMPARE_MS_MAX,
+            READ_SETS + SWEEP_POINTS,
+        )
+    }
 }
 
 /// The bound under which the binary still completes without calling any
@@ -1137,73 +1178,143 @@ impl fmt::Display for SweepCell {
     }
 }
 
-/// What the sweep recommends: the fastest clock with any clean RXDELAY,
-/// and of its clean delays the middle of the longest unbroken run, the
-/// one furthest from both edges of the window the sweep found.
+/// How many neighbouring RXDELAY steps must read clean at a clock before
+/// [`SweepBest`] trusts it. One step is 15.6 ns. On 2026-10-05 the
+/// SolarNode read clean at 32 MHz under RXDELAY 1 alone, with both
+/// neighbours wrong in nearly every byte, and at 16 MHz under 0, 1 and 2
+/// (`/home/lew/rig-run/solarnode-qspi/qspi-selftest-20261004T230630Z.log`,
+/// Codeberg #435). Temperature and supply move an eye one step wide by
+/// more than its width; three steps leave one on either side of the
+/// middle.
+pub const MIN_CLEAN_RUN: u8 = 3;
+
+/// The swept clocks, fastest first. The 8 MHz control has one point only,
+/// so no run of [`MIN_CLEAN_RUN`] can exist there.
+const SWEPT: [BusClock; 2] = [BusClock::M32, BusClock::M16];
+
+/// Bit `d` set when the cells that ran read clean at `clock` and RXDELAY `d`.
+fn clean_mask(cells: &[Option<SweepCell>], clock: BusClock) -> u8 {
+    let mut mask = 0u8;
+    for c in cells.iter().flatten() {
+        if c.want.clock == clock && c.clean() {
+            mask |= 1 << (c.want.rxdelay & 0x7);
+        }
+    }
+    mask
+}
+
+/// The longest run of set bits in `mask` as `(start, len)`, the first one
+/// on a tie.
+fn longest_run(mask: u8) -> (u8, u8) {
+    let (mut best_start, mut best_len) = (0u8, 0u8);
+    let mut d = 0u8;
+    while d < RXDELAYS as u8 {
+        if mask & (1 << d) == 0 {
+            d += 1;
+            continue;
+        }
+        let start = d;
+        while d < RXDELAYS as u8 && mask & (1 << d) != 0 {
+            d += 1;
+        }
+        if d - start > best_len {
+            (best_start, best_len) = (start, d - start);
+        }
+    }
+    (best_start, best_len)
+}
+
+/// Why [`SweepBest`] trusts its choice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Margin {
+    /// A swept clock with at least [`MIN_CLEAN_RUN`] neighbouring clean
+    /// delays, the choice in the middle of them.
+    Wide,
+    /// No swept clock qualified; the 8 MHz control read clean at the
+    /// default delay, the setting the firmware ran at before any sweep.
+    Control,
+}
+
+/// A swept clock that read clean somewhere, but never at
+/// [`MIN_CLEAN_RUN`] neighbouring delays, and was therefore not chosen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SweepNarrow {
+    /// The clock.
+    pub clock: BusClock,
+    /// Bit `d` set when RXDELAY `d` was clean at it.
+    pub clean_mask: u8,
+}
+
+/// What the sweep recommends: the fastest swept clock whose longest
+/// unbroken run of clean RXDELAYs is at least [`MIN_CLEAN_RUN`] wide, at
+/// the middle of that run (rounded down), the delay furthest from both
+/// edges of the eye; failing that, the 8 MHz control if it read clean.
+/// Faster clocks that read clean only in narrower runs are named in
+/// [`narrow`](Self::narrow) and not chosen.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct SweepBest {
-    /// The recommended timing, `None` when no cell was clean.
+    /// The recommended timing, `None` when nothing qualified.
     pub best: Option<Timing>,
     /// Bit `d` set when RXDELAY `d` was clean at the recommended clock.
     pub clean_mask: u8,
+    /// Why the choice is trusted, `None` with no choice.
+    pub margin: Option<Margin>,
+    /// The faster clocks passed over for a too narrow eye, fastest first.
+    pub narrow: [Option<SweepNarrow>; SWEPT.len()],
 }
 
 impl SweepBest {
     /// Read the recommendation off the cells that ran.
     pub fn of(cells: &[Option<SweepCell>]) -> Self {
-        for clock in [BusClock::M32, BusClock::M16, BusClock::M8] {
-            let mut mask = 0u8;
-            for c in cells.iter().flatten() {
-                if c.want.clock == clock && c.clean() {
-                    mask |= 1 << (c.want.rxdelay & 0x7);
-                }
-            }
+        let mut out = SweepBest::default();
+        for (i, clock) in SWEPT.into_iter().enumerate() {
+            let mask = clean_mask(cells, clock);
             if mask == 0 {
                 continue;
             }
-            // Longest run of set bits; the first one on a tie.
-            let (mut best_start, mut best_len) = (0u8, 0u8);
-            let mut d = 0u8;
-            while d < RXDELAYS as u8 {
-                if mask & (1 << d) == 0 {
-                    d += 1;
-                    continue;
-                }
-                let start = d;
-                while d < RXDELAYS as u8 && mask & (1 << d) != 0 {
-                    d += 1;
-                }
-                if d - start > best_len {
-                    (best_start, best_len) = (start, d - start);
-                }
-            }
-            return SweepBest {
-                best: Some(Timing {
+            let (start, len) = longest_run(mask);
+            if len < MIN_CLEAN_RUN {
+                out.narrow[i] = Some(SweepNarrow {
                     clock,
-                    rxdelay: best_start + (best_len - 1) / 2,
-                }),
-                clean_mask: mask,
-            };
+                    clean_mask: mask,
+                });
+                continue;
+            }
+            out.best = Some(Timing {
+                clock,
+                rxdelay: start + (len - 1) / 2,
+            });
+            out.clean_mask = mask;
+            out.margin = Some(Margin::Wide);
+            return out;
         }
-        SweepBest::default()
+        let control = SWEEP[0];
+        let mask = clean_mask(cells, control.clock);
+        if mask & (1 << control.rxdelay) != 0 {
+            out.best = Some(control);
+            out.clean_mask = mask;
+            out.margin = Some(Margin::Control);
+        }
+        out
+    }
+
+    /// The passed-over clocks, fastest first, one `SWEEPNARROW` line each.
+    pub fn narrow(&self) -> impl Iterator<Item = SweepNarrow> + '_ {
+        self.narrow.iter().flatten().copied()
     }
 }
 
-impl fmt::Display for SweepBest {
-    /// `SWEEPBEST sck_khz=<n|none> rxdelay=<n|none> clean_rxdelays=<d>,..|none`
+/// `d,d,..` for the set bits of `mask`, or `none`.
+struct Delays(u8);
+
+impl fmt::Display for Delays {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Some(t) = self.best else {
-            return f.write_str("SWEEPBEST sck_khz=none rxdelay=none clean_rxdelays=none");
-        };
-        write!(
-            f,
-            "SWEEPBEST sck_khz={} rxdelay={} clean_rxdelays=",
-            t.clock.mhz() * 1000,
-            t.rxdelay
-        )?;
+        if self.0 == 0 {
+            return f.write_str("none");
+        }
         let mut first = true;
         for d in 0..RXDELAYS as u8 {
-            if self.clean_mask & (1 << d) != 0 {
+            if self.0 & (1 << d) != 0 {
                 if !first {
                     f.write_str(",")?;
                 }
@@ -1212,6 +1323,43 @@ impl fmt::Display for SweepBest {
             }
         }
         Ok(())
+    }
+}
+
+impl fmt::Display for SweepNarrow {
+    /// `SWEEPNARROW sck_khz=<n> clean_rxdelays=<d>,.. margin=too-narrow min_run=<n>`
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "SWEEPNARROW sck_khz={} clean_rxdelays={} margin=too-narrow min_run={}",
+            self.clock.mhz() * 1000,
+            Delays(self.clean_mask),
+            MIN_CLEAN_RUN,
+        )
+    }
+}
+
+impl fmt::Display for SweepBest {
+    /// `SWEEPBEST sck_khz=<n|none> rxdelay=<n|none> clean_rxdelays=<d>,..|none margin=<wide|control|none>`
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let margin = match self.margin {
+            Some(Margin::Wide) => "wide",
+            Some(Margin::Control) => "control",
+            None => "none",
+        };
+        let Some(t) = self.best else {
+            return write!(
+                f,
+                "SWEEPBEST sck_khz=none rxdelay=none clean_rxdelays=none margin={margin}"
+            );
+        };
+        write!(
+            f,
+            "SWEEPBEST sck_khz={} rxdelay={} clean_rxdelays={} margin={margin}",
+            t.clock.mhz() * 1000,
+            t.rxdelay,
+            Delays(self.clean_mask),
+        )
     }
 }
 
@@ -2159,21 +2307,71 @@ mod tests {
         assert_eq!(Bus::with_rxdelay(0, 9), 0x0000_0100);
     }
 
+    /// Sweep cells whose `mismatches` are `wrong[n]`.
+    fn sweep_of(wrong: [u32; SWEEP_POINTS]) -> [Option<SweepCell>; SWEEP_POINTS] {
+        core::array::from_fn(|n| Some(cell(n, wrong[n])))
+    }
+
     #[test]
-    fn the_sweep_recommends_the_middle_of_the_fastest_clean_window() {
+    fn the_2026_10_05_sweep_chooses_16_mhz_at_rxdelay_1() {
+        // The SolarNode's sweep (Codeberg #435,
+        // qspi-selftest-20261004T230630Z.log), `mismatches` per point in
+        // SWEEP order: the 8 MHz control, 16 MHz at RXDELAY 0..=7, 32 MHz
+        // at 0..=7. n=16 is not in the capture; it read wrong at 4, 5 and
+        // 6, and any wrong value for 7 leaves 32 MHz with its one clean
+        // delay.
+        let cells = sweep_of([
+            0, // 8 MHz, rxdelay 2
+            0, 0, 0, 1_969_638, 2_089_026, 2_089_026, 2_089_026, 2_090_781, // 16 MHz
+            2_088_639, 0, 1_915_318, 2_089_026, 2_090_570, 2_088_998, 2_093_691,
+            2_090_000, // 32 MHz
+        ]);
+        let b = SweepBest::of(&cells);
+        assert_eq!(
+            b.best,
+            Some(Timing {
+                clock: BusClock::M16,
+                rxdelay: 1
+            })
+        );
+        assert_eq!(
+            format!("{b}"),
+            "SWEEPBEST sck_khz=16000 rxdelay=1 clean_rxdelays=0,1,2 margin=wide"
+        );
+        let narrow: Vec<_> = b.narrow().map(|n| format!("{n}")).collect();
+        assert_eq!(
+            narrow,
+            ["SWEEPNARROW sck_khz=32000 clean_rxdelays=1 margin=too-narrow min_run=3"]
+        );
+    }
+
+    #[test]
+    fn the_sweep_recommends_the_middle_of_the_fastest_wide_enough_window() {
         // Everything red but the control: 8 MHz at the default delay.
-        let mut cells: [Option<SweepCell>; SWEEP_POINTS] =
-            core::array::from_fn(|n| Some(cell(n, 1000)));
+        let mut cells = sweep_of([1000; SWEEP_POINTS]);
         cells[0] = Some(cell(0, 0));
         let b = SweepBest::of(&cells);
         assert_eq!(b.best, Some(at_default_rxdelay(BusClock::M8)));
         assert_eq!(
             format!("{b}"),
-            "SWEEPBEST sck_khz=8000 rxdelay=2 clean_rxdelays=2"
+            "SWEEPBEST sck_khz=8000 rxdelay=2 clean_rxdelays=2 margin=control"
+        );
+        assert_eq!(b.narrow().count(), 0);
+        // 16 MHz clean at 1, 2 and 6: no run of three, so still the
+        // control, and 16 MHz is named as too narrow.
+        for d in [1, 2, 6] {
+            cells[1 + d] = Some(cell(1 + d, 0));
+        }
+        let b = SweepBest::of(&cells);
+        assert_eq!(b.best, Some(at_default_rxdelay(BusClock::M8)));
+        let narrow: Vec<_> = b.narrow().map(|n| format!("{n}")).collect();
+        assert_eq!(
+            narrow,
+            ["SWEEPNARROW sck_khz=16000 clean_rxdelays=1,2,6 margin=too-narrow min_run=3"]
         );
         // 16 MHz clean at 1..=4 and 6: the longest run is 1..=4, its
         // middle (rounded down) 2.
-        for d in [1, 2, 3, 4, 6] {
+        for d in [3, 4] {
             cells[1 + d] = Some(cell(1 + d, 0));
         }
         let b = SweepBest::of(&cells);
@@ -2186,32 +2384,63 @@ mod tests {
         );
         assert_eq!(
             format!("{b}"),
-            "SWEEPBEST sck_khz=16000 rxdelay=2 clean_rxdelays=1,2,3,4,6"
+            "SWEEPBEST sck_khz=16000 rxdelay=2 clean_rxdelays=1,2,3,4,6 margin=wide"
         );
-        // One clean 32 MHz cell beats any number of 16 MHz ones.
-        cells[1 + RXDELAYS + 7] = Some(cell(1 + RXDELAYS + 7, 0));
+        // Two clean 32 MHz cells side by side do not beat it.
+        for d in [6, 7] {
+            cells[1 + RXDELAYS + d] = Some(cell(1 + RXDELAYS + d, 0));
+        }
+        assert_eq!(
+            SweepBest::of(&cells).best.map(|t| t.clock),
+            Some(BusClock::M16)
+        );
+        // A third does: 32 MHz at 5..=7, middle 6.
+        cells[1 + RXDELAYS + 5] = Some(cell(1 + RXDELAYS + 5, 0));
         let b = SweepBest::of(&cells);
         assert_eq!(
             b.best,
             Some(Timing {
                 clock: BusClock::M32,
-                rxdelay: 7
+                rxdelay: 6
             })
         );
+        assert_eq!(b.narrow().count(), 0);
         // A clean cell whose registers did not take is not clean.
         let mut c = cell(1 + RXDELAYS + 7, 0);
         c.bus.iftiming = Bus::with_rxdelay(0, 2);
         assert!(!c.applied());
         cells[1 + RXDELAYS + 7] = Some(c);
+        let b = SweepBest::of(&cells);
+        assert_eq!(b.best.map(|t| t.clock), Some(BusClock::M16));
         assert_eq!(
-            SweepBest::of(&cells).best.map(|t| t.clock),
-            Some(BusClock::M16)
+            b.narrow().map(|n| n.clock).collect::<Vec<_>>(),
+            [BusClock::M32]
         );
-        // Nothing clean at all.
-        let none: [Option<SweepCell>; SWEEP_POINTS] = core::array::from_fn(|n| Some(cell(n, 1)));
+        // Nothing clean at all, the control included.
+        let none = sweep_of([1; SWEEP_POINTS]);
         assert_eq!(
             format!("{}", SweepBest::of(&none)),
-            "SWEEPBEST sck_khz=none rxdelay=none clean_rxdelays=none"
+            "SWEEPBEST sck_khz=none rxdelay=none clean_rxdelays=none margin=none"
+        );
+        // Swept clocks wide enough, but the control red: still the swept
+        // choice, the control is not a precondition.
+        let mut cells = sweep_of([0; SWEEP_POINTS]);
+        cells[0] = Some(cell(0, 1));
+        assert_eq!(
+            SweepBest::of(&cells).best,
+            Some(Timing {
+                clock: BusClock::M32,
+                rxdelay: 3
+            })
+        );
+    }
+
+    #[test]
+    fn the_plan_line_names_the_window_from_boot() {
+        assert_eq!(
+            format!("{}", PlanLine { hold_ms: 12_000 }),
+            "PLAN wall_bound_ms=925567 hold_ms=12000 from_boot_ms=937567 \
+             worst_case_ms=190567 compare_ms_max=35000 compared=21"
         );
     }
 
@@ -2259,9 +2488,17 @@ mod tests {
         // The sweep alone: 40 x 525 + 40 x 1049 + 5 x 2098 ms of reads,
         // 73.45 s, against the 2026-10-04 run's 134 s in all.
         assert_eq!(40 * 525 + 40 * 1049 + 5 * 2098, 73_450);
-        // With comparison time per read set and sweep point: 9.5 min.
-        assert_eq!(wall_bound_ms(), 190_567 + 21 * 18_000);
-        assert_eq!(wall_bound_ms(), 568_567);
+        // With comparison time per read set and sweep point, every one of
+        // them wrong in every byte: 15.4 min. The 2026-10-05 run, whose
+        // sweep was wrong almost everywhere, reached READSWEEP n=15 at
+        // t=586 064 ms from boot, 574 s into the run.
+        assert_eq!(wall_bound_ms(), 190_567 + 21 * 35_000);
+        assert_eq!(wall_bound_ms(), 925_567);
+        // The per-point compare cost the bound is built from: 6.10 s
+        // clean, 2.688 us more per wrong read byte, 5 x 2 MiB read bytes.
+        let all_wrong_ms = 6_100 + (28_076u64 * 5 * PART_BYTES as u64).div_ceil(5 * 2_089_026);
+        assert_eq!(all_wrong_ms, 34_286);
+        assert!(u64::from(COMPARE_MS_MAX) >= all_wrong_ms);
         // 3 x 512 x 8 + 2 x 8192 x 2 + transfers
         assert_eq!(typical_ms(), 12_288 + 32_768 + transfer);
         // Every timeout sits above the datasheet maximum of its operation,
