@@ -124,13 +124,9 @@ const CENTRAL_LINKS: usize = 1;
 /// ceiling on every boot.
 const CONN_COUNT: u8 = (PERIPH_LINKS + CENTRAL_LINKS) as u8;
 
-/// Slots in the per-connection HVN drain table ([`HVN_DRAIN`]).
-///
-/// The #255 design headroom of 4 that this table was pre-sized to is
-/// now spent: #372 raised `CONN_COUNT` to meet it, so every slot is
-/// claimable. Growing further means growing both together (and paying
-/// the `memory.x` bill first).
-pub const MAX_LINKS: usize = 4;
+// Slots in the per-connection HVN drain table ([`HVN_DRAIN`]). A term of
+// the boot heap budget, so it is defined with that arithmetic (#388).
+pub use leviculum_heap_budget::MAX_LINKS;
 
 // A table smaller than the SoftDevice's connection count would refuse a
 // legitimate connection's claim — quietly, on a board.
@@ -230,28 +226,10 @@ pub fn incoming_held_sub(bytes: usize) {
     INCOMING_HELD.sub(bytes);
 }
 
-/// The channel depth every BLE packet queue uses.
-const QUEUE_DEPTH: usize = 4;
-
-/// The MTU this interface reports to the core — the largest packet the
-/// core hands it, and therefore the unit of every queue-depth × packet
-/// bound below.
-pub const INTERFACE_MTU: usize = 564;
-
-/// Worst-case heap bytes ONE BLE session pins (#388, the `per_link=`
-/// slice of the boot `HEAP_BUDGET`): its private `LINK_OUT` queue
-/// full, the packet its pump currently holds plus that packet's
-/// fragment copies, and one full reassembly in its defragmenter. The
-/// running actuals are the census's `ble_s<slot>=` and `ble_defrag=`
-/// terms; this constant is what they must stay under.
-pub const SESSION_BUDGET_BYTES: usize = QUEUE_DEPTH * INTERFACE_MTU // LINK_OUT full
-    + 2 * INTERFACE_MTU // pump: the packet + its fragment copies
-    + INTERFACE_MTU; // defragmenter: one in-progress reassembly
-
-/// Worst case of the two node-facing channels (`BLE_INCOMING` /
-/// `BLE_OUTGOING`) — shared across links, so the budget counts it
-/// once, in its reserve term.
-pub const CHANNEL_BUDGET_BYTES: usize = 2 * QUEUE_DEPTH * INTERFACE_MTU;
+// The queue depth, the MTU and the two worst cases built from them are terms
+// of the boot heap budget (#388), defined with that arithmetic.
+use leviculum_heap_budget::QUEUE_DEPTH;
+pub use leviculum_heap_budget::{CHANNEL_BUDGET_BYTES, INTERFACE_MTU, SESSION_BUDGET_BYTES};
 
 /// One packet queue, as both the node-facing channels and the per-link
 /// queues use it.

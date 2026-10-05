@@ -983,6 +983,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-heap-budget"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+ "leviculum-lxmf",
+]
+
+[[package]]
 name = "leviculum-log-line"
 version = "0.1.0"
 
@@ -1034,6 +1042,7 @@ dependencies = [
  "leviculum-gnss-init",
  "leviculum-gnss-presence",
  "leviculum-gnss-time",
+ "leviculum-heap-budget",
  "leviculum-log-line",
  "leviculum-lxmf",
  "leviculum-media-state",

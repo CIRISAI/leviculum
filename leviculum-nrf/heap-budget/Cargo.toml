@@ -1,0 +1,17 @@
+[package]
+name = "leviculum-heap-budget"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "The firmware's boot heap budget and live serve cap, host-testable"
+
+[dependencies]
+# The serve terms are the propagation role's own model
+# (`serve_cap_for_peak`, `serve_cap_for_live_heap`, `serve_peak_bytes`),
+# which the host-side mvrs also run; copying it here would be a second
+# copy to drift. The SDU overhead is a core constant for the same reason.
+# Neither depends on the target, unlike the size of `Link`, which is
+# pinned as `LINK_BYTES` instead of being read from core.
+leviculum-core = { path = "../../leviculum-core", default-features = false }
+leviculum-lxmf = { path = "../../leviculum-lxmf", default-features = false }

@@ -90,7 +90,7 @@ the whole interface did, so every single-link carrier is unchanged and
 so is lnsd's BLE interface, whose peripheral role notifies its
 subscribed centrals as one group and cannot address a subset of them.
 The firmware implements it (`try_send_excluding_peer`,
-`leviculum-nrf/src/ble/mod.rs:720`), where the decision is a pure
+`leviculum-nrf/src/ble/mod.rs:698`), where the decision is a pure
 function of the registry (`TxAim`,
 `leviculum-nrf/ble-tx/src/registry.rs:828`). Without it a path request
 from the phone died at the board: one `InterfaceId` covered both links,
@@ -279,7 +279,7 @@ Three measured budgets, all from the T114 on the rig, all post-#372:
 
 | Budget | Measured | Headroom |
 |---|---|---|
-| Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:269`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
+| Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/heap-budget/src/lib.rs:54`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
 | Stack, flip-link region below `.data` | `min_free=72 280` of a 104 464 B region, `peak_used=32 184` (`rig-run/proof-dup-t114.log`, 2026-09-10) | ~70 KiB never touched |
 | SoftDevice RAM ceiling | 928 B of margin (`leviculum-nrf/memory.x:166`) | **not the relevant budget, see below** |
 
@@ -307,7 +307,7 @@ fan-out — an announce emits one action per entry in the routing map
 (`interface_names`, `leviculum-core/src/transport.rs:12107`), each
 carrying a cloned packet. With three BLE children an announce would
 allocate three ~500 B action buffers where today it allocates one that
-`tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:511`).
+`tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:489`).
 Same peak, moved one layer up.
 
 ### Which machinery is per medium, and which is per link
