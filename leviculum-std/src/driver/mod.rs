@@ -150,6 +150,11 @@ const RETRY_QUEUE_DEPTH_WARN: usize = 128;
 /// long for the interface tasks to flush their outgoing queues to the socket
 /// before the runtime aborts them. Caps teardown so a wedged or back-pressured
 /// interface cannot hang shutdown; the common case exits in a couple of polls.
+/// How long a stopping event loop waits for in-flight off-lock resource
+/// assemblies before failing them (leviculum#71). An assembly of a ~1 MB
+/// transfer takes tens of milliseconds; this bounds a pathological one.
+const SHUTDOWN_ASSEMBLY_BOUND: Duration = Duration::from_secs(2);
+
 const SHUTDOWN_FLUSH_BOUND: Duration = Duration::from_millis(250);
 
 /// Poll interval while waiting for the interface outgoing queues to drain
@@ -4839,6 +4844,40 @@ async fn run_event_loop(
             });
         }
     };
+    // A previous run of this loop (stop, then start) can have left results
+    // it will never deliver: fail those resources rather than leave them
+    // holding their links, and take whatever is already queued
+    // (Codex review on #73).
+    let orphaned = inner.lock_recover().abandon_resource_assemblies();
+    if !orphaned.events.is_empty() || !orphaned.actions.is_empty() {
+        let _ = dispatch_output(
+            orphaned,
+            &mut registry,
+            event_sink.as_mut(),
+            &inner,
+            &mut retry_queues,
+            &mut retry_queue_warned,
+            &mut retry_queue_max_depth,
+            &ifac_configs,
+            remote_mgmt.as_ref(),
+            discovery_storage.as_deref(),
+            discovery_network_identity.as_deref(),
+            &mut discovery_heard_ifac,
+            &completions,
+            &mut assembler,
+            &plane_counters,
+            &mut breakers,
+            core_processor.as_mut(),
+        );
+    }
+    {
+        let mut core = inner.lock_recover();
+        for job in core.take_resource_assembly_jobs(assembly_concurrency) {
+            assembly_in_flight += 1;
+            spawn_assembly(job);
+        }
+    }
+
     // Deferral itself is set at build time (`assemble_resources_off_lock`,
     // default on); with it off the core hands out no jobs and this is idle.
 
@@ -5292,6 +5331,47 @@ async fn run_event_loop(
                     // without draining would discard those outputs undispatched
                     // — including the SendPacket close bytes AND the LinkClosed
                     // event riding in the same output — which is the #77 loss.
+                    // leviculum#71 (Codex review on #73): apply the assemblies
+                    // still in flight, bounded, so a transfer that finished
+                    // just before stop() still completes and proves; whatever
+                    // misses the bound fails as Cancelled instead of holding
+                    // its link across a restart. Their outputs join the drain
+                    // below, so proofs and events are dispatched and flushed.
+                    let assembly_deadline = tokio::time::Instant::now() + SHUTDOWN_ASSEMBLY_BOUND;
+                    let mut assembly_outputs = Vec::new();
+                    while assembly_in_flight > 0 {
+                        match tokio::time::timeout_at(assembly_deadline, assembly_rx.recv()).await {
+                            Ok(Some(result)) => {
+                                assembly_in_flight -= 1;
+                                assembly_outputs
+                                    .push(inner.lock_recover().complete_resource_assembly(result));
+                            }
+                            _ => break,
+                        }
+                    }
+                    assembly_outputs.push(inner.lock_recover().abandon_resource_assemblies());
+                    for output in assembly_outputs {
+                        refresh_ifac!();
+                        let _ = dispatch_output(
+                            output,
+                            &mut registry,
+                            event_sink.as_mut(),
+                            &inner,
+                            &mut retry_queues,
+                            &mut retry_queue_warned,
+                            &mut retry_queue_max_depth,
+                            &ifac_configs,
+                            remote_mgmt.as_ref(),
+                            discovery_storage.as_deref(),
+                            discovery_network_identity.as_deref(),
+                            &mut discovery_heard_ifac,
+                            &completions,
+                            &mut assembler,
+                            &plane_counters,
+                            &mut breakers,
+                            core_processor.as_mut(),
+                        );
+                    }
                     while let Ok(output) = action_dispatch_rx.try_recv() {
                         // Shutting down; there is no next poll to bring forward.
                         refresh_ifac!();
