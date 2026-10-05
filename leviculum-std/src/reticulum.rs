@@ -200,6 +200,10 @@ mod tests {
             dump.contains("tunnels: "),
             "core tunnel census line reaches the composed dump: {dump}"
         );
+        // The RSS, and so the gap, is read from /proc/self/statm, which only
+        // Linux has; elsewhere the dump carries neither line (CIRIS fork: the
+        // macOS and Windows lanes).
+        #[cfg(target_os = "linux")]
         assert!(
             dump.contains("=== Census gap (RSS - estimated): "),
             "gap line follows the RSS line: {dump}"
