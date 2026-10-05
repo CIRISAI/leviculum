@@ -30,6 +30,19 @@
 # called from the nightly report and from `just toolchain-status`, and
 # neither may lose a run because the machine was offline.
 #
+# WHY A "BEHIND" LINE NAMES THE XTENSA PAIRING
+#
+# The host pin moves only together with the esp-rs Xtensa toolchain of the
+# same generation, and only once esp-rs has taken that one out of
+# prerelease (the pairing rule and Lew's 2026-10-05 decision sit in
+# scripts/install-ci.sh, above the espup pins). On 2026-10-04 stable was
+# 1.99.0 while every esp-rs 1.98.x and 1.99.x was still a prerelease, so
+# "bump due" printed every morning about a bump that could not be made --
+# the unconsidered-bump pressure the paragraph above warns about, from the
+# other side. So every "behind" line also says whether the pairing exists:
+# "bump due (esp-rs vX paired)", "bump waits for esp-rs (...)", or "esp-rs
+# pairing unknown (...)". All three still exit 0.
+#
 # Usage:
 #   bash scripts/toolchain-distance.sh        # or: just toolchain-status
 
@@ -116,22 +129,89 @@ fi
 p_major="${PINNED%%.*}"; p_rest="${PINNED#*.}"; p_minor="${p_rest%%.*}"
 s_major="${STABLE%%.*}"; s_rest="${STABLE#*.}"; s_minor="${s_rest%%.*}"
 
+# --- The Xtensa pairing ---------------------------------------------------
+#
+# One read of the esp-rs release list, newest first. The 30 newest reach
+# back about a year of releases, far past any pairing still worth naming.
+# `curl` is looked up on PATH like `rustup` above, which is the seam the
+# selftest uses: a fake `curl` that prints a fixture body.
+#
+# Parsed with python3's json module, not with `grep -o` over the text:
+# GitHub promises no key order inside a release object, and a grep that
+# pairs each `tag_name` with the next `prerelease` silently pairs the wrong
+# two the day the order changes. A JSON parse also tells a rate-limit
+# answer (an object with a `message`) apart from a release list, where a
+# grep would find no tags in either and call both "none paired".
+# No `-f` on curl for the same reason: a 403 body is read and named
+# unreadable, not reported as offline.
+ESP_RELEASES_URL="https://api.github.com/repos/esp-rs/rust-build/releases?per_page=30"
+ESP_PARSE='
+import json, re, sys
+gen = sys.argv[1]
+try:
+    rels = json.load(sys.stdin)
+except ValueError:
+    sys.exit(3)
+if not isinstance(rels, list):
+    sys.exit(3)
+def key(tag):
+    return tuple(int(x) for x in tag[1:].split("."))
+released = [r["tag_name"] for r in rels
+            if isinstance(r, dict)
+            and r.get("prerelease") is False and r.get("draft") is False
+            and re.fullmatch(r"v[0-9]+(\.[0-9]+)+", str(r.get("tag_name", "")))]
+paired = [t for t in released if t.startswith("v" + gen + ".")]
+if paired:
+    print("paired", max(paired, key=key))
+elif released:
+    print("waits", max(released, key=key))
+else:
+    print("waits -")
+'
+
+pairing() { # -> the clause that follows "behind, "
+    local body verdict tag t_ver t_major t_rest t_minor
+    body="$(curl -s -m 15 "$ESP_RELEASES_URL" 2>/dev/null)" || body=""
+    if [ -z "$body" ]; then
+        echo "esp-rs pairing unknown (offline)"
+        return
+    fi
+    verdict="$(printf '%s' "$body" | python3 -c "$ESP_PARSE" "$s_major.$s_minor" 2>/dev/null)" || verdict=""
+    tag="${verdict#* }"
+    case "$verdict" in
+        "paired "*) echo "bump due (esp-rs $tag paired)" ;;
+        "waits -")
+            echo "bump waits for esp-rs (no non-prerelease Xtensa among its 30 newest releases)" ;;
+        "waits "*)
+            t_ver="${tag#v}"
+            t_major="${t_ver%%.*}"; t_rest="${t_ver#*.}"; t_minor="${t_rest%%.*}"
+            if [ "$t_major.$t_minor" = "$p_major.$p_minor" ]; then
+                echo "bump waits for esp-rs (newest non-prerelease Xtensa is $tag, same generation as the pin)"
+            else
+                # Not the pin's generation: say whose it is, rather than
+                # print a "same generation" the numbers contradict.
+                echo "bump waits for esp-rs (newest non-prerelease Xtensa is $tag, generation $t_major.$t_minor, pin is $p_major.$p_minor)"
+            fi ;;
+        *) echo "esp-rs pairing unknown (release list unreadable)" ;;
+    esac
+}
+
 if [ "$p_major" = "$s_major" ] && [ "$s_minor" -gt "$p_minor" ] 2>/dev/null; then
     # Rust ships one minor per release, so the minor delta IS the number of
     # releases -- the unit the reader thinks in and the one the release
     # calendar is written in.
     n=$((s_minor - p_minor))
     if [ "$n" = 1 ]; then
-        say "pinned $PINNED, current stable $STABLE -- 1 release behind, bump due"
+        say "pinned $PINNED, current stable $STABLE -- 1 release behind, $(pairing)"
     fi
-    say "pinned $PINNED, current stable $STABLE -- $n releases behind, bump due"
+    say "pinned $PINNED, current stable $STABLE -- $n releases behind, $(pairing)"
 fi
 
 # Same minor, higher patch: a point release, which Rust cuts out of band.
 if [ "$p_major" = "$s_major" ] && [ "$p_minor" = "$s_minor" ]; then
-    say "pinned $PINNED, current stable $STABLE -- a point release behind, bump due"
+    say "pinned $PINNED, current stable $STABLE -- a point release behind, $(pairing)"
 fi
 
 # A major change, or any shape the two branches above do not describe. Both
 # numbers are printed, which is the part that matters.
-say "pinned $PINNED, current stable $STABLE -- behind, bump due"
+say "pinned $PINNED, current stable $STABLE -- behind, $(pairing)"
