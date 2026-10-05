@@ -964,6 +964,7 @@ impl ReticulumNodeBuilder {
                     .unwrap_or(config.reticulum.max_links),
             )
             .path_entries_dump(config.reticulum.path_entries_dump)
+            .path_choice(config.reticulum.path_choice.to_core())
             .respond_to_probes(config.reticulum.respond_to_probes)
             .remote_management(
                 config.reticulum.remote_management_enabled,

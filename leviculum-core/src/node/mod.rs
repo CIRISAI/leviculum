@@ -152,6 +152,10 @@ mod mvr_path_response_no_clobber;
 #[cfg(test)]
 mod mvr_path_response_retries;
 #[cfg(test)]
+mod mvr_pathchoice_direct_vs_route;
+#[cfg(test)]
+mod mvr_pathchoice_rule_table;
+#[cfg(test)]
 mod mvr_peer_link_reorigination;
 #[cfg(test)]
 mod mvr_peer_up_pull;

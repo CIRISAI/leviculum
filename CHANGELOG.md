@@ -20,6 +20,20 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- Path choice can weigh what the link has shown, not only how many hops
+  (Codeberg #230). New opt-in `[reticulum]` key `path_choice =
+  hops_and_loss`: competing copies of one announce emission are ranked by
+  route cost, with the direct link priced at the bidirectional ETX its
+  announce re-hear ratio implies, so a clean two-hop route beats a direct
+  link that loses more than ~29 % of announces. The default, `hops`, is
+  today's rule, byte for byte; with it the transport keeps no evidence
+  table at all. Wire-invisible either way — only which next hop the path
+  table keeps changes. The decision table behind the rule is pinned as
+  `mvr_pathchoice_rule_table`: at 0 % loss the two settings are
+  indistinguishable, from 30 % direct-link loss up the evidence rule
+  delivers more probes and flaps less at every measured level, and the
+  Python-reference row matches the shipped rule exactly in that room.
+
 - A board can account for one named packet (Codeberg #421). The firmware's
   `[DROP]` line now carries `ph=`, the same 16-hex journey correlator the
   `PKT_RELAY` line and a peer's `lnsd` journey events already carry, so "did

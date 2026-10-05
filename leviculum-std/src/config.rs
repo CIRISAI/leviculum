@@ -18,6 +18,29 @@ pub struct Config {
     pub interfaces: HashMap<String, InterfaceConfig>,
 }
 
+/// `path_choice` as a config value (Codeberg #230): the serde face of
+/// [`leviculum_core::transport::PathChoice`], kept separate because the
+/// core enum is `no_std` and carries no serde.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathChoiceSetting {
+    /// Fewer hops wins — today's rule and Python's, the default.
+    #[default]
+    Hops,
+    /// Hops with the direct link priced by its announce re-hear evidence.
+    HopsAndLoss,
+}
+
+impl PathChoiceSetting {
+    /// The core knob this setting selects.
+    pub fn to_core(self) -> leviculum_core::transport::PathChoice {
+        match self {
+            Self::Hops => leviculum_core::transport::PathChoice::Hops,
+            Self::HopsAndLoss => leviculum_core::transport::PathChoice::HopsAndLoss,
+        }
+    }
+}
+
 /// Core reticulum settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReticulumConfig {
@@ -154,6 +177,13 @@ pub struct ReticulumConfig {
     /// semantics are unaffected.
     #[serde(default)]
     pub path_entries_dump: bool,
+    /// Route choice between competing copies of one announce emission
+    /// (Codeberg #230). Leviculum-only key; rnsd reading a shared config
+    /// ignores it, and the default is Python's own rule, so a stock config
+    /// behaves identically on either daemon. See
+    /// [`leviculum_core::transport::PathChoice`].
+    #[serde(default)]
+    pub path_choice: PathChoiceSetting,
     /// Collect interface information other transport instances announce
     /// (Python `discover_interfaces`, Reticulum.py:580-583). When false the
     /// daemon keeps no discovered-interface registry, and
@@ -346,6 +376,7 @@ impl Default for ReticulumConfig {
             keepalive_interval: None,
             max_links: None,
             path_entries_dump: false,
+            path_choice: PathChoiceSetting::default(),
             discover_interfaces: default_discover_interfaces(),
             autoconnect_discovered_interfaces: 0,
             network_identity: None,

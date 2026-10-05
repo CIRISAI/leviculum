@@ -493,6 +493,18 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         "path_entries_dump" => {
             config.path_entries_dump = parse_bool(value);
         }
+        // Route choice between competing copies of one announce emission
+        // (Codeberg #230). Leviculum-only key — rnsd reading the shared
+        // config ignores it — and the default is Python's own hop rule, so
+        // only the exact opt-in string changes anything. An unrecognised
+        // value keeps the default, like every other tolerant value in this
+        // section (the LINE is still validated as a keyword, so a typo'd
+        // KEY fails the parse as before).
+        "path_choice" => {
+            if value.trim().eq_ignore_ascii_case("hops_and_loss") {
+                config.path_choice = crate::config::PathChoiceSetting::HopsAndLoss;
+            }
+        }
         // Whether to collect the interface information other transport
         // instances announce (Python `discover_interfaces`,
         // Reticulum.py:580-583). Before this the key fell into the tolerated-
@@ -2449,6 +2461,24 @@ mod tests {
         assert!(on.reticulum.path_entries_dump);
         let off = parse_ini("[reticulum]\n  path_entries_dump = No\n").unwrap();
         assert!(!off.reticulum.path_entries_dump);
+    }
+
+    #[test]
+    fn test_path_choice_defaults_to_hops_and_is_opt_in() {
+        // Codeberg #230: the evidence rule is a deliberate opt-in. Absent
+        // key, the explicit default spelling and any unrecognised value all
+        // keep the hop rule, so a typo'd VALUE degrades to Python's
+        // behaviour rather than to a surprise; only the exact opt-in string
+        // selects the evidence rule.
+        use crate::config::PathChoiceSetting;
+        let absent = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
+        assert_eq!(absent.reticulum.path_choice, PathChoiceSetting::Hops);
+        let explicit = parse_ini("[reticulum]\n  path_choice = hops\n").unwrap();
+        assert_eq!(explicit.reticulum.path_choice, PathChoiceSetting::Hops);
+        let on = parse_ini("[reticulum]\n  path_choice = hops_and_loss\n").unwrap();
+        assert_eq!(on.reticulum.path_choice, PathChoiceSetting::HopsAndLoss);
+        let typo = parse_ini("[reticulum]\n  path_choice = hops_and_los\n").unwrap();
+        assert_eq!(typo.reticulum.path_choice, PathChoiceSetting::Hops);
     }
 
     #[test]

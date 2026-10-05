@@ -234,3 +234,39 @@ Recorded 2026-09-27 against `~/coding/Reticulum` at 1.5.2. The nearest
 thing we have to this arm is our own same-emission clause
 (`transport.rs`, `SameEmissionRule`, Codeberg #231), which ranks by hop
 count rather than by a configured preference.
+
+## 6. The measured same-emission arm: `path_choice = hops_and_loss`
+
+Since 2026-10-05 (Codeberg #230) the same-emission clause has a second,
+opt-in rule beside the default hop ranking: `path_choice =
+hops_and_loss` (the `[reticulum]` key; `TransportConfig::path_choice`,
+`PathChoice` in `transport.rs`). Where §5's 1.5.2 `gravity` re-ranks
+equal-emission copies by an operator-CONFIGURED preference, this rule
+re-ranks them by a MEASURED one: the direct link is priced at its
+bidirectional ETX, estimated for free from the announce re-hear ratio —
+of the emissions this transport provably learned about, the fraction
+that also arrived as a direct copy (`DirectLinkEvidence`,
+`lower_route_cost`). A clean two-hop route then beats a direct link
+losing more than ~29 % of announces. Three properties bound it:
+
+* **Scope.** Only the same-emission comparison changes. A newer
+  emission still installs unconditionally in both hop arms (§3's rules,
+  which is also the liveness guarantee when the relay dies), and the
+  random-blob replay gate lets a same-blob copy through exactly when
+  the cost arm will accept it. Path responses and local-client copies
+  feed no evidence: a response is served once over one route, so the
+  absence of a direct copy of it proves nothing.
+* **Degradation.** Below `DIRECT_EVIDENCE_MIN_KNOWN` known emissions —
+  a fresh destination, or a mesh whose announce cadence is too sparse
+  to score — the rule decides exactly like `hops`. The default IS
+  `hops`; the knob is a deliberate opt-in and rnsd ignores the key in
+  a shared config.
+* **Evidence.** The pinned replay `mvr_pathchoice_rule_table`
+  (leviculum-core, node/) drives both knob settings through the real
+  acceptance gate over the `pathchoice_loss*` room shape at five loss
+  levels and eight seeds: identical at 0 % loss, more delivered and
+  fewer flaps at every measured loss ≥ 30 %, and the Python reference
+  row (§3/§5 semantics as a pure fold) matches the shipped rule
+  exactly, which pins the replay to the gate. The companion
+  `mvr_pathchoice_direct_vs_route` holds the norelay control: with no
+  competing route the penalty can never unroute the only path.

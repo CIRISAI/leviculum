@@ -158,8 +158,8 @@ Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
 | Signature | Purpose |
 |-----------|---------|
 | `fn load<P: AsRef<Path>>(path: P) -> Result<Self>` — `config.rs:901` | Load an INI config (the `rnsd`/`lnsd` format) |
-| `fn default_config_dir() -> PathBuf` — `config.rs:990` | Default config directory |
-| `fn default_config_path() -> PathBuf` — `config.rs:999` | Default config file path |
+| `fn default_config_dir() -> PathBuf` — `config.rs:1021` | Default config directory |
+| `fn default_config_path() -> PathBuf` — `config.rs:1030` | Default config file path |
 
 ## `leviculum-core` (no_std, sans-IO)
 
@@ -171,26 +171,26 @@ All are re-exported from `leviculum-core/src/lib.rs:123-143`.
 
 The sans-IO protocol engine, generic over an RNG `R: CryptoRngCore`, a clock
 `C: Clock`, and storage `S: Storage`. Defined at
-`leviculum-core/src/node/mod.rs:407`. It never performs I/O; every method that
+`leviculum-core/src/node/mod.rs:411`. It never performs I/O; every method that
 can produce output returns a [`TickOutput`](#core-tickoutput-and-action) the
 caller must dispatch.
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn new(identity: Identity, config: TransportConfig, proof_strategy: ProofStrategy, max_incoming_resource_size: usize, rng: R, clock: C, storage: S) -> Self` — `node/mod.rs:548` | Construct directly |
-| `fn register_destination(&mut self, dest: Destination)` — `node/mod.rs:619` | Register a local destination |
-| `fn announce_destination(&mut self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> Result<TickOutput, AnnounceError>` — `node/mod.rs:866` | Build and queue an announce |
-| `fn send_single_packet(&mut self, dest_hash: &DestinationHash, data: &[u8]) -> Result<([u8; TRUNCATED_HASHBYTES], TickOutput), SendError>` — `node/mod.rs:1052` | Build an unreliable data packet |
+| `fn new(identity: Identity, config: TransportConfig, proof_strategy: ProofStrategy, max_incoming_resource_size: usize, rng: R, clock: C, storage: S) -> Self` — `node/mod.rs:552` | Construct directly |
+| `fn register_destination(&mut self, dest: Destination)` — `node/mod.rs:623` | Register a local destination |
+| `fn announce_destination(&mut self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> Result<TickOutput, AnnounceError>` — `node/mod.rs:870` | Build and queue an announce |
+| `fn send_single_packet(&mut self, dest_hash: &DestinationHash, data: &[u8]) -> Result<([u8; TRUNCATED_HASHBYTES], TickOutput), SendError>` — `node/mod.rs:1056` | Build an unreliable data packet |
 | `fn connect(&mut self, dest_hash: DestinationHash, dest_signing_key: &[u8; 32]) -> (LinkId, bool, TickOutput)` — `node/link_management.rs:245` | Build a link request |
 | `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:663` | Send on an established link |
 | `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:570` | Close a link |
-| `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2254` | Feed received bytes from an interface |
-| `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2487` | Run periodic maintenance (call at the next deadline) |
-| `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2518` | Earliest timer deadline (ms); when to call `handle_timeout` |
+| `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2258` | Feed received bytes from an interface |
+| `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2491` | Run periodic maintenance (call at the next deadline) |
+| `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2522` | Earliest timer deadline (ms); when to call `handle_timeout` |
 
 A node is more often built with `NodeCoreBuilder` (`node/builder.rs:40`), whose
 `fn build<R, Clk, S>(self, rng: R, clock: Clk, storage: S) -> NodeCore<R, Clk, S>`
-(`node/builder.rs:227`) supplies the platform triple. Setters include
+(`node/builder.rs:237`) supplies the platform triple. Setters include
 `identity`, `proof_strategy`, and `enable_transport`.
 
 ### Core `TickOutput` and `Action`

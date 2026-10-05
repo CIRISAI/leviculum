@@ -276,6 +276,144 @@ pub(crate) fn accept_same_emission(
     }
 }
 
+/// One route candidate under [`PathChoice::HopsAndLoss`] (Codeberg #230):
+/// the hop count every rule always had, plus the direct-link announce
+/// re-hear evidence when the candidate IS the direct link.
+///
+/// `direct_evidence` is `(heard, known)` over the evidence window —
+/// of the last `known` emissions of this destination the transport learned
+/// about from ANY copy, `heard` also arrived as a direct copy. `None` for a
+/// relayed candidate (we cannot score a relay's onward hops: a relay that
+/// suppressed its rebroadcast because the flood already covered us is
+/// indistinguishable from one that lost the frame), for a direct candidate
+/// still in warmup (fewer than [`DIRECT_EVIDENCE_MIN_KNOWN`] known
+/// emissions), and always under [`PathChoice::Hops`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RouteCost {
+    pub hops: u8,
+    pub direct_evidence: Option<(u16, u16)>,
+}
+
+/// The cost of a candidate as a rational `n/d`, in expected frame
+/// round-trips per delivered exchange.
+///
+/// A relayed route of `h` hops costs `h`: the penalty is only ever applied
+/// to the direct link, so relayed hops are priced clean, which keeps the
+/// comparison conservative (a lossy relay chain is still preferred over a
+/// direct link that looks worse than its whole length). A direct link that
+/// delivered `heard` of `known` provable emissions costs `known²/heard²` —
+/// the bidirectional ETX of the link under the symmetric-loss assumption:
+/// every exchange that matters here (path request/response, link
+/// request/proof, packet/proof) crosses the link twice, and the announce
+/// re-hear ratio measures only the inbound direction. A direct link that
+/// delivered nothing prices as unreachable rather than dividing by zero.
+fn route_cost_rational(c: &RouteCost) -> (u32, u32) {
+    match c.direct_evidence {
+        Some((heard, known)) if heard > 0 => (
+            (known as u32).saturating_mul(known as u32),
+            (heard as u32).saturating_mul(heard as u32),
+        ),
+        Some((_, _)) => (u32::MAX, 1),
+        None => (c.hops as u32, 1),
+    }
+}
+
+/// Does `incoming` replace `existing` for a second copy of ONE emission
+/// under [`PathChoice::HopsAndLoss`]? Strictly lower cost wins; a tie keeps
+/// the installed path, so a retry of the same route never flaps the entry.
+///
+/// Pure, so the rule can be measured in the sans-I/O replay
+/// (`mvr_pathchoice_rule_table`) with exactly the arithmetic the live gate
+/// runs. Cross-multiplied to stay in integers: `known ≤ 17` (window plus
+/// the pending emission) bounds `n`/`d` at 289 for evidence-costed
+/// candidates and `max_hops ≤ 128` bounds relayed ones, so the u64
+/// products cannot wrap.
+pub(crate) fn lower_route_cost(incoming: &RouteCost, existing: &RouteCost) -> bool {
+    let (n_in, d_in) = route_cost_rational(incoming);
+    let (n_ex, d_ex) = route_cost_rational(existing);
+    (n_in as u64) * (d_ex as u64) < (n_ex as u64) * (d_in as u64)
+}
+
+/// Closed emissions the direct-link evidence window holds (a `u16` bitmap).
+pub(crate) const DIRECT_EVIDENCE_WINDOW: u8 = 16;
+
+/// Known emissions before the evidence prices anything. Below this the
+/// direct link is scored as its plain hop count, so a freshly-heard
+/// destination routes exactly as under [`PathChoice::Hops`]: one lost
+/// announce must not condemn a link, and a mesh whose announce cadence is
+/// too sparse to fill this never leaves the hop rule at all.
+pub(crate) const DIRECT_EVIDENCE_MIN_KNOWN: u16 = 4;
+
+/// Cap on tracked destinations under [`PathChoice::HopsAndLoss`]. A full
+/// table evicts the entry with the oldest accounted emission. Sizing: key
+/// 16 B + value 16 B per entry plus BTree node overhead is ≤ ~64 B/entry,
+/// so the whole table is ≤ ~4 KiB — stated against the boards' heap pins
+/// (`SERVE_MARGIN_BYTES`), though a board only pays it with the knob ON.
+pub(crate) const DIRECT_EVIDENCE_CAP: usize = 64;
+
+/// Announce re-hear accounting for ONE destination's direct link
+/// (Codeberg #230).
+///
+/// Per emission the question is binary: the transport provably knows the
+/// emission happened (it heard SOME copy), and either a direct copy was
+/// among the ones heard or it was not. The current emission stays `pending`
+/// until the first copy of a newer one closes it into `window`; queries
+/// count the pending emission too, so the copy under decision is already
+/// evidence for itself.
+///
+/// Only broadcast announces feed this. Path responses are excluded: a
+/// response is served once over one route, so the absence of a direct copy
+/// of it says nothing about the direct link.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DirectLinkEvidence {
+    /// Emission timebase currently being accounted (the pending one).
+    last_emission: u64,
+    /// Bitmap of the last closed emissions, bit 0 the newest: 1 = a direct
+    /// copy was heard for that emission.
+    window: u16,
+    /// Closed emissions represented in `window`, ≤ [`DIRECT_EVIDENCE_WINDOW`].
+    filled: u8,
+    /// Whether the pending emission has shown a direct copy yet.
+    pending_direct: bool,
+}
+
+impl DirectLinkEvidence {
+    fn new(emission: u64, direct: bool) -> Self {
+        Self {
+            last_emission: emission,
+            window: 0,
+            filled: 0,
+            pending_direct: direct,
+        }
+    }
+
+    /// Account one announce copy. Copies of an emission older than the
+    /// pending one carry no new information and are ignored.
+    fn note(&mut self, emission: u64, direct: bool) {
+        if emission > self.last_emission {
+            self.window = (self.window << 1) | u16::from(self.pending_direct);
+            if self.filled < DIRECT_EVIDENCE_WINDOW {
+                self.filled += 1;
+            }
+            self.last_emission = emission;
+            self.pending_direct = direct;
+        } else if emission == self.last_emission {
+            self.pending_direct |= direct;
+        }
+    }
+
+    /// `(heard, known)` including the pending emission, or `None` while the
+    /// sample is below [`DIRECT_EVIDENCE_MIN_KNOWN`].
+    fn ratio(&self) -> Option<(u16, u16)> {
+        let known = self.filled as u16 + 1;
+        if known < DIRECT_EVIDENCE_MIN_KNOWN {
+            return None;
+        }
+        let heard = self.window.count_ones() as u16 + u16::from(self.pending_direct);
+        Some((heard, known))
+    }
+}
+
 // Sans-I/O Types
 /// Opaque interface identifier
 ///
@@ -720,6 +858,38 @@ pub(crate) struct QueuedAnnounce {
     pub peer: Option<[u8; TRUNCATED_HASHBYTES]>,
 }
 
+/// Which rule picks between two routes learned from copies of ONE announce
+/// emission (Codeberg #230, the knob of #425's measured table).
+///
+/// Wire-invisible either way: nothing this knob touches changes a byte we
+/// emit, only which next hop the path table keeps. Deviation rule: (1) wire
+/// format untouched; (2) semantics preserved — a peer is owed announce
+/// rebroadcast and truthful path responses, not any particular internal
+/// ranking, and upstream 1.5.2 itself re-ranks equal-emission copies by its
+/// `gravity` config (docs/src/protocol-notes/announce-dedup-and-path-
+/// replacement.md §5); (3) the measured improvement is
+/// `mvr_pathchoice_rule_table`'s pinned verdict — at ≥ 50 % direct-link
+/// loss the evidence rule delivers more and flaps less than hop count,
+/// and at 0 % loss the two are identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PathChoice {
+    /// Today's rule and the default: fewer hops wins
+    /// (`SameEmissionRule::FewerHopsWins`). Nothing the transport has
+    /// learned about a link enters the choice.
+    #[default]
+    Hops,
+    /// Hops plus a reliability penalty on the DIRECT link, learned for free
+    /// from the announce re-hear ratio (see `RouteCost`): a marginal
+    /// direct link prices as its bidirectional ETX, so a clean two-hop
+    /// route beats a direct link that loses more than ~29 % of announces
+    /// (`1/r² > 2` at `r < 0.71`). Evidence needs
+    /// `DIRECT_EVIDENCE_MIN_KNOWN` announce emissions to warm up; until
+    /// then, and whenever announces are too sparse to score, the rule
+    /// behaves exactly like [`PathChoice::Hops`]. Default-off until a rig
+    /// series says otherwise (#230).
+    HopsAndLoss,
+}
+
 /// Transport configuration
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
@@ -796,6 +966,11 @@ pub struct TransportConfig {
     /// it stopped being right. Local diagnostics only: no wire or semantic
     /// effect, so a node may be flipped either way mid-mesh.
     pub path_entries_dump: bool,
+    /// Route-choice rule for competing copies of one announce emission
+    /// (Codeberg #230). See [`PathChoice`]. Default [`PathChoice::Hops`];
+    /// with the default the transport also keeps no evidence table, so the
+    /// knob costs nothing when off.
+    pub path_choice: PathChoice,
 }
 
 impl Default for TransportConfig {
@@ -815,6 +990,9 @@ impl Default for TransportConfig {
             // The per-entry dump is a debugging aid, not a running cost; the
             // count and the insertion history stay on without it.
             path_entries_dump: false,
+            // Hop count is Python's rule and stays the default until a rig
+            // series on the pathchoice corpus says otherwise (#230).
+            path_choice: PathChoice::default(),
         }
     }
 }
@@ -2710,6 +2888,22 @@ pub struct Transport<C: Clock, S: Storage> {
     /// config key and drives announce bandwidth capping.
     interface_link_profiles: BTreeMap<usize, LinkProfile>,
 
+    /// Direct-link announce re-hear evidence per destination (Codeberg
+    /// #230), populated ONLY under [`PathChoice::HopsAndLoss`] — with the
+    /// default knob this map stays empty and costs nothing. Capped at
+    /// [`DIRECT_EVIDENCE_CAP`] entries; a full table evicts the entry whose
+    /// accounted emission is oldest. In-memory only, like the path table:
+    /// evidence describes current radio conditions and is worth nothing
+    /// across a restart.
+    ///
+    /// Keyed by destination hash, not by neighbour identity: at this layer
+    /// a direct announce names only its destination, so two destinations on
+    /// one physical neighbour are scored separately (correct, merely
+    /// duplicated), and direct copies of one destination over two
+    /// interfaces share a window (a documented v1 simplification — the
+    /// evidence rooms are single-radio).
+    direct_link_evidence: BTreeMap<[u8; TRUNCATED_HASHBYTES], DirectLinkEvidence>,
+
     /// Set of interface indices that are local IPC clients (shared instance).
     /// Used for: announce forwarding, transport override, path request routing.
     /// Removal path: removed in handle_interface_down via set_local_client(id, false).
@@ -2928,6 +3122,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_egress_control: BTreeMap::new(),
             interface_hw_mtus: BTreeMap::new(),
             interface_link_profiles: BTreeMap::new(),
+            direct_link_evidence: BTreeMap::new(),
             local_client_interfaces: BTreeSet::new(),
             shared_instance_interface: None,
             interface_incoming_announce_times: BTreeMap::new(),
@@ -3118,6 +3313,76 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Check if a path is marked as unresponsive
     pub fn path_is_unresponsive(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
         self.storage.get_path_state(dest_hash) == Some(PathState::Unresponsive)
+    }
+
+    /// Account one broadcast announce copy toward the destination's
+    /// direct-link evidence (Codeberg #230). A no-op under
+    /// [`PathChoice::Hops`], so the default pays neither the map nor the
+    /// bookkeeping. Callers exclude path responses and local-client copies —
+    /// see [`DirectLinkEvidence`] for why only flooded copies are evidence.
+    fn note_direct_link_evidence(
+        &mut self,
+        dest_hash: [u8; TRUNCATED_HASHBYTES],
+        emission: u64,
+        direct: bool,
+    ) {
+        if self.config.path_choice != PathChoice::HopsAndLoss {
+            return;
+        }
+        if let Some(evidence) = self.direct_link_evidence.get_mut(&dest_hash) {
+            evidence.note(emission, direct);
+            return;
+        }
+        if self.direct_link_evidence.len() >= DIRECT_EVIDENCE_CAP {
+            // Evict the destination whose accounting is stalest: it is the
+            // one whose window is most likely describing dead air.
+            if let Some(oldest) = self
+                .direct_link_evidence
+                .iter()
+                .min_by_key(|(_, e)| e.last_emission)
+                .map(|(k, _)| *k)
+            {
+                self.direct_link_evidence.remove(&oldest);
+            }
+        }
+        self.direct_link_evidence
+            .insert(dest_hash, DirectLinkEvidence::new(emission, direct));
+    }
+
+    /// Under [`PathChoice::HopsAndLoss`]: would this same-emission copy
+    /// replace the installed path on cost (Codeberg #230)? `false` under
+    /// [`PathChoice::Hops`], and `false` on a cost tie, so a retry of the
+    /// installed route never flaps the entry.
+    ///
+    /// Used by BOTH deciders a same-emission copy meets — the random-blob
+    /// replay gate (which would otherwise drop a worse-hops copy before the
+    /// acceptance arms ever price it) and the acceptance arms themselves —
+    /// so a copy passes the gate exactly when it will be accepted.
+    fn same_emission_cost_swap(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        existing: &PathEntry,
+        incoming_hops: u8,
+        incoming_direct: bool,
+    ) -> bool {
+        if self.config.path_choice != PathChoice::HopsAndLoss {
+            return false;
+        }
+        let evidence = self
+            .direct_link_evidence
+            .get(dest_hash)
+            .and_then(|e| e.ratio());
+        let candidate = |hops: u8, direct: bool| RouteCost {
+            // The re-hear penalty prices exactly the one-hop direct link
+            // the evidence measured; hops 0 (a local client) keeps its
+            // unbeatable plain cost.
+            direct_evidence: if direct && hops == 1 { evidence } else { None },
+            hops,
+        };
+        lower_route_cost(
+            &candidate(incoming_hops, incoming_direct),
+            &candidate(existing.hops, existing.next_hop.is_none()),
+        )
     }
 
     /// Force-expire a path entry
@@ -4625,6 +4890,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             + hc::btree_map_bytes(&self.interface_egress_control)
             + hc::btree_map_bytes(&self.interface_hw_mtus)
             + hc::btree_map_bytes(&self.interface_link_profiles)
+            + hc::btree_map_bytes(&self.direct_link_evidence)
             + hc::btree_set_bytes(&self.local_client_interfaces)
             + hc::btree_map_bytes(&self.pending_local_path_requests)
             + hc::btree_map_bytes(&self.interface_announce_rate_configs)
@@ -5206,7 +5472,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3636. A destination with no cached
+    /// link-request path uses at transport.rs:3901. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6001,7 +6267,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1368 ran in the
+        // Gate on the already-incremented hops (transport.rs:1546 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -6026,11 +6292,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // UNLESS:
         // the path is unresponsive (path recovery), OR
         // the announce has fewer hops than the existing path (better route)
-        // (Python Transport.py:1821-1826).
+        // (Python Transport.py:1821-1826), OR
+        // under `PathChoice::HopsAndLoss`, the copy wins the cost
+        // comparison (Codeberg #230) — a relayed copy of the emission we
+        // installed a marginal DIRECT path from has MORE hops, so without
+        // this clause it would die here and the cost arm below could never
+        // see the alternative route.
         if let Some(path) = self.storage.get_path(&dest_hash) {
             if path.random_blobs.contains(&random_hash)
                 && !self.path_is_unresponsive(&dest_hash)
                 && packet.hops >= path.hops
+                && !self.same_emission_cost_swap(
+                    &dest_hash,
+                    path,
+                    packet.hops,
+                    packet.transport_id.is_none(),
+                )
             {
                 crate::tracing::trace!(
                     dest = %HexShort(&dest_hash),
@@ -6039,6 +6316,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.stats.record_drop(DropReason::AnnounceReplay);
                 return Ok(());
             }
+        }
+
+        // Direct-link evidence (Codeberg #230; no-op under the default
+        // `PathChoice::Hops`). Only flooded copies count: a path response is
+        // served once over one route, and a local client's announce crossed
+        // no radio, so neither says anything about the direct link. Fed
+        // before the acceptance arms so the copy under decision is already
+        // evidence for itself.
+        if !is_path_response && !self.is_local_client(interface_index) {
+            self.note_direct_link_evidence(
+                dest_hash,
+                emission_from_random_hash(&random_hash),
+                packet.transport_id.is_none(),
+            );
         }
 
         // Rate limiting: check if we've seen this destination recently.
@@ -6143,23 +6434,44 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // the same predicate as the `packet.hops < existing.hops`
                 // it replaced, byte for byte at runtime, and the whole of
                 // #231's decision is that one const.
-                let same_emission_wins = accept_same_emission(
-                    SAME_EMISSION_RULE,
-                    SameEmissionCopy {
-                        hops: existing.hops,
-                        interface_index: existing.interface_index,
-                    },
-                    SameEmissionCopy {
-                        hops: packet.hops,
-                        interface_index,
-                    },
-                );
+                //
+                // Under `path_choice = hops_and_loss` (Codeberg #230) the
+                // same-emission clause compares route COST instead: hop
+                // count, with the direct link priced by its announce
+                // re-hear evidence (`lower_route_cost`). With no evidence
+                // yet the costs degenerate to plain hop counts and the two
+                // knob settings decide identically.
+                let (same_emission_wins, same_emission_reason) = match self.config.path_choice {
+                    PathChoice::Hops => (
+                        accept_same_emission(
+                            SAME_EMISSION_RULE,
+                            SameEmissionCopy {
+                                hops: existing.hops,
+                                interface_index: existing.interface_index,
+                            },
+                            SameEmissionCopy {
+                                hops: packet.hops,
+                                interface_index,
+                            },
+                        ),
+                        "same_emission_fewer_hops",
+                    ),
+                    PathChoice::HopsAndLoss => (
+                        self.same_emission_cost_swap(
+                            &dest_hash,
+                            existing,
+                            packet.hops,
+                            packet.transport_id.is_none(),
+                        ),
+                        "same_emission_lower_cost",
+                    ),
+                };
                 if announce_emitted > path_timebase {
                     self.mark_path_unknown_state(&dest_hash);
                     Some("newer_emission")
                 } else if announce_emitted == path_timebase && same_emission_wins {
                     self.mark_path_unknown_state(&dest_hash);
-                    Some("same_emission_fewer_hops")
+                    Some(same_emission_reason)
                 } else {
                     None
                 }
@@ -6180,6 +6492,24 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // do NOT call mark_path_unknown_state() here, state
                     // stays UNRESPONSIVE until a fresh announce resets it.
                     Some("unresponsive_same_emission")
+                } else if announce_emitted == path_timebase
+                    && self.same_emission_cost_swap(
+                        &dest_hash,
+                        existing,
+                        packet.hops,
+                        packet.transport_id.is_none(),
+                    )
+                {
+                    // `path_choice = hops_and_loss` only (the predicate is
+                    // false under the default): a worse-HOPS copy of the
+                    // installed emission whose route prices cheaper than the
+                    // marginal direct link we hold — the relayed copy of the
+                    // very announce the direct entry came from, arriving one
+                    // frame later (Codeberg #230). This is new acceptance
+                    // surface the replay gate above deliberately lets
+                    // through under the knob.
+                    self.mark_path_unknown_state(&dest_hash);
+                    Some("same_emission_lower_cost_worse_hops")
                 } else {
                     None
                 }
@@ -10721,7 +11051,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2275`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2453`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -16702,7 +17032,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6629), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6959), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -22412,7 +22742,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1368) before
+        // The inbound path increments hops once (transport.rs:1546) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use crate::destination::ProofStrategy;
 use crate::identity::Identity;
 use crate::resource::{WindowPolicy, RESOURCE_MAX_INCOMING_SIZE};
-use crate::transport::TransportConfig;
+use crate::transport::{PathChoice, TransportConfig};
 use rand_core::CryptoRngCore;
 
 use super::NodeCore;
@@ -159,6 +159,16 @@ impl NodeCoreBuilder {
     /// [`TransportConfig::path_entries_dump`](crate::transport::TransportConfig::path_entries_dump).
     pub fn path_entries_dump(mut self, enable: bool) -> Self {
         self.transport_config.path_entries_dump = enable;
+        self
+    }
+
+    /// Route-choice rule for competing copies of one announce emission
+    /// (Codeberg #230). Default [`PathChoice::Hops`], today's hop-count
+    /// rule; [`PathChoice::HopsAndLoss`] prices a marginal direct link by
+    /// its announce re-hear evidence. See
+    /// [`TransportConfig::path_choice`](crate::transport::TransportConfig::path_choice).
+    pub fn path_choice(mut self, choice: PathChoice) -> Self {
+        self.transport_config.path_choice = choice;
         self
     }
 
