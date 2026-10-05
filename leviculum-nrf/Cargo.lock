@@ -1038,6 +1038,7 @@ dependencies = [
  "leviculum-persist-ack",
  "leviculum-pn-store",
  "leviculum-qspi-bitbang",
+ "leviculum-qspi-boot",
  "leviculum-qspi-selftest",
  "leviculum-queue-budget",
  "leviculum-record-log",
@@ -1073,6 +1074,10 @@ dependencies = [
 
 [[package]]
 name = "leviculum-qspi-bitbang"
+version = "0.1.0"
+
+[[package]]
+name = "leviculum-qspi-boot"
 version = "0.1.0"
 
 [[package]]

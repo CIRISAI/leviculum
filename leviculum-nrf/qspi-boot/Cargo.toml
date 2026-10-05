@@ -1,0 +1,9 @@
+[package]
+name = "leviculum-qspi-boot"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "How long the SolarNode's boot may wait on its QSPI flash before it gives the part up, host-testable"
+
+[dependencies]

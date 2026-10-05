@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "boot-count", "settle-budget", "drop-budget", "sync-batch", "upload-proof", "mute-lease", "qspi-selftest"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "boot-count", "settle-budget", "drop-budget", "sync-batch", "upload-proof", "mute-lease", "qspi-selftest", "qspi-boot"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -134,6 +134,10 @@ leviculum-record-log = { path = "record-log" }
 # edges live in a crate a host test can drive against a replaying fake
 # part; the firmware supplies six GPIOs and a delay.
 leviculum-qspi-bitbang = { path = "qspi-bitbang" }
+# How long the SolarNode's boot waits on its QSPI flash before it gives the
+# part up, and the `[QSPI] state=timeout` line: a deadline wrong by a factor
+# fails silently, so it is asserted on the host.
+leviculum-qspi-boot = { path = "qspi-boot" }
 # What a raw SAADC count means in millivolts at a battery terminal
 # (#380): the configured ADC gain, the board's divider, the 1S/2S
 # classification and the `BATTERY` line. Here rather than in `battery.rs`

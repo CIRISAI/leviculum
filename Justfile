@@ -113,7 +113,7 @@ lint-nrf:
     # in d6a4b620) and 50 across 11 modules of the firmware crate (Codeberg
     # #367). `build-esp32` has carried the line since it was written.
     #
-    # Host members first -- all 27, one `--target` host run, 1.7 s warm.
+    # Host members first -- all 29, one `--target` host run, 1.7 s warm.
     cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude leviculum-nrf --no-deps --target $(rustc -vV | sed -n 's/host: //p')
     # Then the firmware crate once per BUNDLE feature set, 2.3 s each warm.
     # Not one run for all three: a feature set decides which modules exist at
