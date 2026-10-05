@@ -170,6 +170,7 @@ pub fn log_events(events: &[NodeEvent], now_ms: u64) {
             destination_hash,
             reason,
             interface_in,
+            packet_hash_prefix,
             ..
         } = event
         {
@@ -186,6 +187,7 @@ pub fn log_events(events: &[NodeEvent], now_ms: u64) {
                         "{}",
                         leviculum_log_line::PacketDroppedBody {
                             reason: reason.kebab(),
+                            ph: *packet_hash_prefix,
                             dest: *destination_hash.as_bytes(),
                             iface_in: *interface_in,
                         }

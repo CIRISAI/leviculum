@@ -359,10 +359,10 @@ impl core::fmt::Display for AnnounceTransmittedBody {
 }
 
 /// The body of the firmware's `[DROP]` line, rendered from the core's
-/// `NodeEvent::PacketDropped` (Codeberg #346).
+/// `NodeEvent::PacketDropped` (Codeberg #346, #421).
 ///
 /// ```text
-/// [DROP] reason=<kebab> dst=<8 hex> iface=<n>
+/// [DROP] reason=<kebab> ph=<16 hex|none> dst=<8 hex> iface=<n>
 /// ```
 ///
 /// One line per packet the receive path threw away, naming the taxonomy's own
@@ -372,9 +372,15 @@ impl core::fmt::Display for AnnounceTransmittedBody {
 /// correlating three serial ports against packet-length arithmetic, which is
 /// the story Codeberg #344 was opened on.
 ///
-/// `dst=` is the first 4 bytes, like [`RelayDecidedBody`]'s, a prefix of the
-/// 32-hex `dst=` the host's own `PKT_DROP` carries, so a board line and a
-/// peer's `lnsd` log stitch on one id.
+/// `ph=` is the FULL 8-byte journey correlator where the core's deciding
+/// site held a hash, rendered exactly as [`RelayDecidedBody`]'s, so "did the
+/// relay forward my report, and if not, which reason" is one grep for one id
+/// across a board capture and a peer's `lnsd` log (#421). `ph=none` names
+/// the sites that decide without ever hashing — the HEADER_2 overheard gate
+/// and the path-request refusals — a fixed key set, so a missing hash and a
+/// truncated line never read the same. `dst=` is the first 4 bytes, like
+/// [`RelayDecidedBody`]'s, a prefix of the 32-hex `dst=` the host's own
+/// `PKT_DROP` carries, and remains the correlator on the `ph=none` lines.
 ///
 /// **There is no `forwarded` counterpart and there must not be one.** A line
 /// per successfully relayed packet is a line nobody reads, and the count is
@@ -386,15 +392,37 @@ pub struct PacketDroppedBody {
     /// The reason scalar, the core's own (`DropReason::kebab`), passed
     /// through as `&'static str` so this crate keeps no dependencies.
     pub reason: &'static str,
+    /// The journey correlator: the first 8 bytes of the packet hash, where
+    /// the deciding site held one.
+    pub ph: Option<[u8; 8]>,
     /// The destination the packet was for.
     pub dest: [u8; 16],
     /// The interface it arrived on.
     pub iface_in: usize,
 }
 
+/// The widest `reason=` scalar [`PacketDroppedBody`] can carry, in bytes.
+///
+/// This crate keeps no dependencies, so it cannot iterate the core's
+/// `DropReason` taxonomy; the core pins the same number from its side
+/// (`leviculum-core/src/transport.rs`,
+/// `test_longest_kebab_matches_the_log_line_pin`), and the two tests fail
+/// together when a wider reason lands. `leviculum-drop-budget` derives the
+/// `[DROP]` rate limit from the worst-case line this makes possible.
+pub const DROP_REASON_KEBAB_MAX: usize = 22;
+
 impl core::fmt::Display for PacketDroppedBody {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "reason={} dst=", self.reason)?;
+        write!(f, "reason={} ph=", self.reason)?;
+        match &self.ph {
+            Some(ph) => {
+                for byte in ph {
+                    write!(f, "{byte:02x}")?;
+                }
+            }
+            None => f.write_str("none")?,
+        }
+        f.write_str(" dst=")?;
         for byte in &self.dest[..4] {
             write!(f, "{byte:02x}")?;
         }
@@ -653,12 +681,31 @@ iface_out=none t=7\r\n"
         dest[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
         let body = PacketDroppedBody {
             reason: "overheard-transport-id",
+            ph: None,
             dest,
             iface_in: 1,
         };
         assert_eq!(
             line("[DROP] ", format_args!("{body}"), 1234),
-            "[DROP] reason=overheard-transport-id dst=deadbeef iface=1 t=1234\r\n"
+            "[DROP] reason=overheard-transport-id ph=none dst=deadbeef iface=1 t=1234\r\n"
+        );
+    }
+
+    /// The #421 line: a drop whose deciding site held the packet hash names
+    /// the packet with the same 16-hex `ph=` the `PKT_RELAY` line and a
+    /// peer's `lnsd` journey events carry, so one grep stitches all three.
+    #[test]
+    fn a_dropped_packet_with_a_hash_names_it_like_the_relay_line() {
+        let body = PacketDroppedBody {
+            reason: "single-decrypt-fail",
+            ph: Some([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]),
+            dest: [0x11; 16],
+            iface_in: 0,
+        };
+        assert_eq!(
+            line("[DROP] ", format_args!("{body}"), 99),
+            "[DROP] reason=single-decrypt-fail ph=0123456789abcdef dst=11111111 \
+iface=0 t=99\r\n"
         );
     }
 
@@ -680,9 +727,13 @@ iface_out=none t=7\r\n"
     /// 256-byte log buffer, the same bound the relay line is held to.
     #[test]
     fn the_widest_drop_line_fits_the_firmware_log_buffer() {
+        // The longest kebab in the taxonomy (`DropReason::kebab`), at the
+        // pinned width the core's own test holds it to.
+        let reason = "overheard-transport-id";
+        assert_eq!(reason.len(), DROP_REASON_KEBAB_MAX);
         let body = PacketDroppedBody {
-            // The longest kebab in the taxonomy (`DropReason::kebab`).
-            reason: "overheard-transport-id",
+            reason,
+            ph: Some([0xff; 8]),
             dest: [0xff; 16],
             iface_in: usize::MAX,
         };

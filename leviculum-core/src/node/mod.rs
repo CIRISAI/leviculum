@@ -3947,12 +3947,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 reason,
                 interface_in,
                 hops,
+                packet_hash_prefix,
             } => {
                 self.events.push(NodeEvent::PacketDropped {
                     destination_hash: DestinationHash::new(destination_hash),
                     reason,
                     interface_in,
                     hops,
+                    packet_hash_prefix,
                 });
             }
 

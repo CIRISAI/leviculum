@@ -960,6 +960,9 @@ dependencies = [
 [[package]]
 name = "leviculum-drop-budget"
 version = "0.1.0"
+dependencies = [
+ "leviculum-log-line",
+]
 
 [[package]]
 name = "leviculum-gnss-init"

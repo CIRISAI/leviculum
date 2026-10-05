@@ -290,6 +290,14 @@ pub enum NodeEvent {
         interface_in: usize,
         /// The packet's hop count as it arrived.
         hops: u8,
+        /// The first `PKT_PH_BYTES` of the packet hash, where the deciding
+        /// site held one — the same `ph` correlator
+        /// [`RelayDecided`](NodeEvent::RelayDecided) carries, so a board's
+        /// `[DROP]` line names ONE packet a peer's log also names (Codeberg
+        /// #421). See
+        /// [`TransportEvent::PacketDropped`](crate::transport::TransportEvent::PacketDropped)
+        /// for which sites carry `None` and why.
+        packet_hash_prefix: Option<[u8; PKT_PH_BYTES]>,
     },
 
     /// One announce this node transmitted, and which occasion put it on the

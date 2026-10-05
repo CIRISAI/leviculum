@@ -20,6 +20,24 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- A board can account for one named packet (Codeberg #421). The firmware's
+  `[DROP]` line now carries `ph=`, the same 16-hex journey correlator the
+  `PKT_RELAY` line and a peer's `lnsd` journey events already carry, so "did
+  the relay forward my report, and if not, which reason" is one grep for one
+  id across a board capture and the sender's log. The hash is taken only
+  where the deciding site already held one — the link-request, link-echo and
+  addressed-data drops — and the two paths that never hash (the HEADER_2
+  overheard gate, which stays SHA-256-free on its 99 %-volume path, and the
+  path-request refusals) say `ph=none` instead. The node-layer drop family —
+  a delivered packet that decrypted under no retained key, link data whose
+  owner restarted — raises the `[DROP]` event for the first time: it was the
+  one loss class with no board-visible line at all, despite being a message
+  lost at its last hop. The wider line re-derives the `[DROP]` rate limit
+  from the 8 KiB log ring: 2 lines per second instead of 3, pinned by a test
+  that renders the real worst-case line
+  (`leviculum-drop-budget::the_ring_derivation_still_holds`), with the
+  `suppressed=` window summary unchanged.
+
 - A board can be asked who may read its status remotely. A standalone LNode
   now serves `rnstransport.remote.management` with the `/status` handler when
   — and only when — it carries an allow-list of identity hashes, so

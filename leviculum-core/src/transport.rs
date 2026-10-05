@@ -2418,6 +2418,22 @@ pub enum TransportEvent {
         interface_in: usize,
         /// The packet's hop count as it arrived.
         hops: u8,
+        /// The first `PKT_PH_BYTES` of the packet hash — the SAME correlator
+        /// [`RelayDecided`](TransportEvent::RelayDecided) and the journey
+        /// events carry as `ph`, so a sender's `lnsd` log and a board's
+        /// `[DROP]` line stitch on one id (Codeberg #421): the account of one
+        /// NAMED packet, not just one packet of a named kind.
+        ///
+        /// `Some` exactly where the deciding site already held a hash — the
+        /// dedup, link and node-layer paths compute one to do their job.
+        /// `None` on the two paths that never hash: the HEADER_2
+        /// overheard-transport-id gate (which rejects before any parse
+        /// beyond the header, and is the 99 %-volume path a per-packet
+        /// SHA-256 was deliberately kept off; see `pkt_ph_lazy`) and the
+        /// path-request refusals, whose packets are identified by the
+        /// requested destination. For those, `destination_hash` plus the
+        /// line's own timestamp remain the correlator.
+        packet_hash_prefix: Option<[u8; PKT_PH_BYTES]>,
     },
 
     /// One announce transmission, and which of the occasions in
@@ -3489,6 +3505,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     &packet,
                     interface_index,
                     DropReason::OverheardTransportId,
+                    // No hash: this gate rejects on the header alone, and a
+                    // SHA-256 per overheard copy on the highest-volume path
+                    // is the cost `pkt_ph_lazy` exists to avoid.
+                    None,
                 );
                 self.stats.record_drop(DropReason::OverheardTransportId);
                 return Ok(());
@@ -3788,12 +3808,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         packet: &Packet,
         iface_in: usize,
         reason: DropReason,
+        packet_hash_prefix: Option<[u8; PKT_PH_BYTES]>,
     ) {
         events.push(TransportEvent::PacketDropped {
             destination_hash: packet.destination_hash,
             reason,
             interface_in: iface_in,
             hops: packet.hops,
+            packet_hash_prefix,
         });
     }
 
@@ -3805,6 +3827,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// as every in-transport drop site. `raw_hash` is the wire hash when the
     /// delivering path carried it; locally-delivered packets have none, and
     /// the journey event then says so instead of being skipped.
+    ///
+    /// Since #421 it also pushes the [`TransportEvent::PacketDropped`] a
+    /// board renders as `[DROP]`, carrying the same hash prefix. Before
+    /// that, a packet this node DELIVERED and then threw away — a
+    /// post-rotation decrypt miss, link data whose owner restarted — was
+    /// the one drop family with no board-visible line at all (the order-370
+    /// measurement: ~10 s of initiator traffic dying with `lrproof_no_link=0`
+    /// and `no_path=0` both silent), despite being a message lost at its
+    /// LAST hop, the loss class #344 cost an evening to reconstruct.
+    /// Disjointness with [`TransportEvent::RelayDecided`] holds by layer: a
+    /// delivered packet was never on the addressed relay path.
     pub(crate) fn record_node_layer_drop(
         &mut self,
         raw_hash: Option<&[u8; 32]>,
@@ -3813,6 +3846,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         reason: DropReason,
     ) {
         self.stats.record_drop(reason);
+        Self::push_packet_drop(
+            &mut self.events,
+            packet,
+            iface_in,
+            reason,
+            raw_hash.map(|h| ph8(h)),
+        );
         // The `None` arm is a tracing event: feature sets without the
         // tracing backend compile it to nothing, and clippy then flags a
         // single_match whose "fix" would delete the event where it exists.
@@ -5166,7 +5206,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3616. A destination with no cached
+    /// link-request path uses at transport.rs:3636. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6691,6 +6731,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 &packet,
                 interface_index,
                 DropReason::OverheardTransportId,
+                Some(ph8(&truncated_hash)),
             );
             self.stats.record_drop(DropReason::OverheardTransportId);
             return Ok(());
@@ -6748,6 +6789,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         &packet,
                         interface_index,
                         DropReason::NoPath,
+                        Some(ph8(&truncated_hash)),
                     );
                     self.stats.record_drop(DropReason::NoPath);
                     self.solicit_path_after_relay_no_path(&dest_hash, interface_index);
@@ -7107,6 +7149,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             &packet,
                             interface_index,
                             DropReason::LinkRepeatEcho,
+                            Some(ph8(&cache_hash)),
                         );
                         self.stats.record_drop(DropReason::LinkRepeatEcho);
                         return Ok(());
@@ -7971,6 +8014,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         &packet,
                         interface_index,
                         DropReason::OverheardTransportId,
+                        Some(ph8(&full_packet_hash)),
                     );
                     self.stats.record_drop(DropReason::OverheardTransportId);
                     return Ok(());
@@ -10564,6 +10608,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 &packet,
                 interface_index,
                 DropReason::NextHopIsRequestor,
+                // A path request is identified by the destination it asks
+                // for; no hash is in scope here and none is needed.
+                None,
             );
             self.stats.record_drop(DropReason::NextHopIsRequestor);
             return Ok(());
@@ -14426,7 +14473,14 @@ mod tests {
                             reason,
                             interface_in,
                             hops,
-                        } => Some((*destination_hash, *reason, *interface_in, *hops)),
+                            packet_hash_prefix,
+                        } => Some((
+                            *destination_hash,
+                            *reason,
+                            *interface_in,
+                            *hops,
+                            *packet_hash_prefix,
+                        )),
                         _ => None,
                     })
                     .collect();
@@ -14437,7 +14491,7 @@ mod tests {
                      once; events: {:?}",
                     transport.events
                 );
-                let (dst, reason, iface_in, hops) = dropped[0];
+                let (dst, reason, iface_in, hops, ph) = dropped[0];
                 assert_eq!(reason, DropReason::OverheardTransportId);
                 assert_eq!(
                     dst, [0x11; TRUNCATED_HASHBYTES],
@@ -14450,6 +14504,57 @@ mod tests {
                     "the hop count AFTER the receipt increment, the same \
                      operand RelayDecided carries, so the two lines are \
                      comparable"
+                );
+                assert_eq!(
+                    ph, None,
+                    "the HEADER_2 overheard gate decides on the header alone \
+                     and must not start hashing its 99 %-volume path for a \
+                     correlator (#421)"
+                );
+            }
+
+            // Codeberg #421: a drop decided at the node's destination layer —
+            // the decrypt-miss / dead-link family that order 370 measured as
+            // completely silent on a board — reaches the event stream, and it
+            // carries the `ph` correlator the delivering path already held,
+            // so the board's `[DROP]` line names the ONE packet a sender's
+            // log also names.
+            #[test]
+            fn test_node_layer_drop_pushes_packet_dropped_with_ph() {
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                let raw = make_overheard_packet([0xAB; TRUNCATED_HASHBYTES]);
+                let packet = Packet::unpack(&raw).unwrap();
+                let wire_hash = packet_hash(&raw);
+                transport.record_node_layer_drop(
+                    Some(&wire_hash),
+                    &packet,
+                    0,
+                    DropReason::SingleDecryptFail,
+                );
+
+                let dropped: Vec<_> = transport
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        TransportEvent::PacketDropped {
+                            reason,
+                            packet_hash_prefix,
+                            ..
+                        } => Some((*reason, *packet_hash_prefix)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    dropped,
+                    std::vec![(DropReason::SingleDecryptFail, Some(ph8(&wire_hash)))],
+                    "one event, carrying the wire hash's own ph prefix"
+                );
+                assert_eq!(
+                    transport.stats().drops_single_decrypt_fail,
+                    1,
+                    "and the counter moved with it, so total == reason sum holds"
                 );
             }
 
@@ -15466,6 +15571,27 @@ mod tests {
                 assert_eq!(s.drops_forward_max_hops, 1);
                 assert_eq!(s.drops_blackholed_announce, 1);
                 assert_eq!(s.drops_next_hop_is_requestor, 1);
+            }
+
+            // The firmware's `[DROP]` line budget (#421) is derived from the
+            // worst-case rendered line, whose widest variable field is this
+            // taxonomy's kebab scalar. `leviculum-nrf/log-line` pins that
+            // width as `DROP_REASON_KEBAB_MAX` without depending on this
+            // crate (it keeps no dependencies by design); this test is the
+            // other half of the handshake. Grow a reason past the pin and
+            // both ends fail, each naming the other.
+            #[test]
+            fn test_longest_kebab_matches_the_log_line_pin() {
+                let longest = DropReason::ALL
+                    .iter()
+                    .map(|r| r.kebab().len())
+                    .max()
+                    .unwrap_or(0);
+                assert_eq!(
+                    longest, 22,
+                    "update leviculum-nrf/log-line DROP_REASON_KEBAB_MAX and \
+                     the drop-budget derivation along with this number"
+                );
             }
 
             // OBS-2b: the invariant also holds end-to-end across genuinely
@@ -16576,7 +16702,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6589), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6629), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

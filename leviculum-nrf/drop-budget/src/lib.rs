@@ -16,22 +16,27 @@
 //! The bound that binds is the **ring**: `LOG_RING_SIZE` is 8 KiB
 //! (`leviculum-nrf/src/log.rs:25`) and old data is overwritten when it fills.
 //! A drop storm therefore does not lose drop lines — it evicts the OTHER
-//! lines a capture was taken for. One `[DROP]` line is about 66 bytes, so the
-//! ring holds roughly 124 of them. The periodic traffic a reader needs beside
-//! them is `[STACK]` every 2 s, `[FW_BUILD]` every 5 s and `[TRANSPORT]`
-//! every 30 s — about 22 lines per 30 s window.
+//! lines a capture was taken for. Since #421 put the 16-hex `ph=` correlator
+//! on the line, one `[DROP]` line is up to ~90 bytes (the worst case is
+//! rendered, not estimated, in `the_ring_derivation_still_holds` below).
+//! The periodic traffic a reader needs beside the drops — `[STACK]` every
+//! 2 s, `[FW_BUILD]` every 5 s, `[TRANSPORT]` every 30 s — is about 2.3 KiB
+//! per 30 s window.
 //!
-//! [`LINES_PER_WINDOW`] = 3 per second keeps the drop lines under ~90 of
-//! those 124 slots over 30 s, so a full half-minute of context survives
-//! beside the storm. At ~200 B/s it is also two orders below the 8 KiB the
-//! ring would need refilled per second to lap itself.
+//! [`LINES_PER_WINDOW`] = 2 per second keeps a full storm's worth of drop
+//! lines (60 × ~90 B ≈ 5.4 KiB per 30 s) plus that context inside the 8 KiB
+//! ring, so a full half-minute of context survives beside the storm. At
+//! ~180 B/s it is also well below the 8 KiB the ring would need refilled per
+//! second to lap itself. (Until #421 the line had no `ph=` and the budget
+//! was 3; the wider line is the better trade — the whole point of the line
+//! is naming the packet, and the summary still recovers the rate.)
 //!
-//! The LoRa side gives the same answer from the other direction: at the
+//! The LoRa side bounds the storm from the other direction: at the
 //! project's default PHY (SF8, BW 125 kHz) a 100-byte frame is ~164 ms of
-//! airtime, so one carrier delivers at most ~6 packets per second. Three
-//! lines per second names half of the worst a single radio can produce and
-//! summarises the rest — while a BLE peer, which has no such ceiling, is
-//! exactly the case the limiter earns its keep on.
+//! airtime, so one carrier delivers at most ~6 packets per second. Two
+//! lines per second names a third of the worst a single radio can produce
+//! and summarises the rest — while a BLE peer, which has no such ceiling,
+//! is exactly the case the limiter earns its keep on.
 //!
 //! # Why a summary and not silence
 //!
@@ -62,8 +67,10 @@ pub const WINDOW_MS: u32 = 1_000;
 /// How many `[DROP]` lines may be printed per [`WINDOW_MS`] window.
 ///
 /// See the module docs for the derivation from the 8 KiB `LOG_RING` and the
-/// periodic lines a capture needs to keep beside the drops.
-pub const LINES_PER_WINDOW: u32 = 3;
+/// periodic lines a capture needs to keep beside the drops;
+/// `the_ring_derivation_still_holds` pins the arithmetic against the real
+/// rendered worst-case line.
+pub const LINES_PER_WINDOW: u32 = 2;
 
 /// What one closed window held back.
 ///
@@ -321,6 +328,57 @@ mod tests {
         let still_old = budget.admit(10);
         assert!(!still_old.emit);
         assert_eq!(still_old.summary, None);
+    }
+
+    // The #421 budget table, pinned: the one claim the module docs make that
+    // can rot silently is that a full window's worth of worst-case `[DROP]`
+    // lines plus the periodic context a reader needs still fit the 8 KiB
+    // LOG_RING over one 30 s capture window. Render the real worst-case line
+    // through the crate that owns its shape rather than estimating bytes —
+    // this is the test that forced LINES_PER_WINDOW from 3 to 2 when the
+    // 16-hex `ph=` correlator joined the line.
+    #[test]
+    fn the_ring_derivation_still_holds() {
+        // The debug CDC ring the derivation is sized against
+        // (`leviculum-nrf/src/log.rs:25`, `LOG_RING_SIZE`).
+        const LOG_RING_SIZE: usize = 8 * 1024;
+        // The periodic lines a capture is taken for, per 30 s window:
+        // `[STACK]` every 2 s (~110 B), `[FW_BUILD]` every 5 s (~70 B), and
+        // the `[TRANSPORT]` block every 30 s (counter line plus per-interface
+        // byte lines, ~3 × ~90 B).
+        const CONTEXT_BUDGET: usize = 15 * 110 + 6 * 70 + 3 * 90;
+        const CAPTURE_WINDOW_S: usize = 30;
+
+        let reason = "overheard-transport-id";
+        assert_eq!(
+            reason.len(),
+            leviculum_log_line::DROP_REASON_KEBAB_MAX,
+            "widest kebab in the taxonomy, pinned on both ends"
+        );
+        let body = leviculum_log_line::PacketDroppedBody {
+            reason,
+            ph: Some([0xff; 8]),
+            dest: [0xff; 16],
+            iface_in: 9,
+        };
+        let mut buf = [0u8; 1024];
+        // Eleven days of uptime; a longer soak buys one more digit per order
+        // of magnitude, which the inequality's slack covers.
+        let line = leviculum_log_line::format_line(
+            &mut buf,
+            "[DROP] ",
+            format_args!("{body}"),
+            999_999_999,
+        );
+        let worst = line.len();
+        let windows = CAPTURE_WINDOW_S as u32 * 1_000 / WINDOW_MS;
+        let drops = LINES_PER_WINDOW as usize * windows as usize * worst;
+        assert!(
+            drops + CONTEXT_BUDGET <= LOG_RING_SIZE,
+            "a full 30 s storm ({drops} B of {worst} B [DROP] lines) plus \
+             {CONTEXT_BUDGET} B of context no longer fits the {LOG_RING_SIZE} B \
+             LOG_RING; lower LINES_PER_WINDOW or shrink the line"
+        );
     }
 
     // The suppressed counter saturates rather than wrapping: a wrapped count
