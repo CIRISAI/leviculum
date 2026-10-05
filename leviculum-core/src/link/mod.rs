@@ -2409,10 +2409,36 @@ impl Link {
         data: &[u8],
         packet_context: PacketContext,
     ) -> Result<alloc::vec::Vec<u8>, LinkError> {
+        self.require_state(LinkState::Active)?;
+        Ok(self.encode_proof_packet(data, packet_context))
+    }
+
+    /// Build a resource completion proof on an Active or Stale link
+    /// (leviculum#71).
+    ///
+    /// An off-lock assembly can finish after the link has gone Stale. Stale
+    /// means the peer went quiet, not that the link is closed, and the
+    /// sender is precisely the side waiting on this proof. Refusing it would
+    /// fail a valid transfer that the inline path, which builds the proof
+    /// in the same locked step as the last part's Active check, never could.
+    /// Same rule as [`Self::build_retransmit_packet_with_context`].
+    pub(crate) fn build_resource_proof_packet(
+        &self,
+        data: &[u8],
+    ) -> Result<alloc::vec::Vec<u8>, LinkError> {
+        if self.state != LinkState::Active && self.state != LinkState::Stale {
+            return Err(LinkError::InvalidState);
+        }
+        Ok(self.encode_proof_packet(data, PacketContext::ResourcePrf))
+    }
+
+    fn encode_proof_packet(
+        &self,
+        data: &[u8],
+        packet_context: PacketContext,
+    ) -> alloc::vec::Vec<u8> {
         use crate::destination::DestinationType;
         use crate::packet::{HeaderType, PacketFlags, PacketType, TransportType};
-
-        self.require_state(LinkState::Active)?;
 
         let flags = PacketFlags {
             ifac_flag: false,
@@ -2431,7 +2457,7 @@ impl Link {
         packet.push(packet_context.to_byte());
         packet.extend_from_slice(data);
 
-        Ok(packet)
+        packet
     }
 
     /// Build a data proof packet using an Ed25519 signing key

@@ -518,7 +518,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .remove(link_id)
                 .map(|r| *r.resource_hash())
         });
-        self.pending_assembly.retain(|queued| queued != link_id);
+        self.pending_assembly.remove(link_id);
         if outgoing_hash.is_some() || incoming_hash.is_some() {
             // Report the caller-visible id, consistent with emit_link_closed
             // (which translates re-keyed wire ids back to the original).
@@ -2900,9 +2900,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // `complete_resource_assembly`. Inline otherwise.
                 if self.defer_resource_assembly {
                     link.set_incoming_resource(incoming);
-                    if !self.pending_assembly.contains(&link_id) {
-                        self.pending_assembly.push_back(link_id);
-                    }
+                    self.pending_assembly.push(link_id);
                 } else {
                     let outcome = incoming.assemble(&*link);
                     completed_internal_payload =
@@ -2982,9 +2980,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // Build and send proof, caching for CacheRequest re-send
                 let proof_pkt = match incoming.build_proof() {
                     Ok(pd) => self.links.get_mut(&link_id).and_then(|link| {
-                        let pkt = link
-                            .build_proof_packet_with_context(&pd, PacketContext::ResourcePrf)
-                            .ok()?;
+                        // Active or Stale: an off-lock assembly can finish
+                        // after the link went Stale (leviculum#71).
+                        let pkt = link.build_resource_proof_packet(&pd).ok()?;
                         let ph = crate::packet::packet_hash(&pkt);
                         link.cache_resource_proof(ph, pkt.clone());
                         link.record_outbound(now_secs);
@@ -3171,7 +3169,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // A cancel of a resource queued for assembly also retires its
                 // queue entry (leviculum#71), so the queue never carries work
                 // that no longer exists.
-                self.pending_assembly.retain(|queued| *queued != link_id);
+                self.pending_assembly.remove(&link_id);
                 self.events.push(NodeEvent::ResourceFailed {
                     link_id,
                     resource_hash,
