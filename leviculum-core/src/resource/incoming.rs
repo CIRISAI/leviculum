@@ -638,6 +638,11 @@ impl IncomingResource {
     /// spine. The resource is consumed by the caller on this path whether
     /// assembly succeeds or fails (`link_management.rs`,
     /// `ResourcePartResult::Assembling`), so nothing later reads a part back.
+    /// Every part is in and the resource is waiting to be assembled.
+    pub(crate) fn is_assembling(&self) -> bool {
+        self.status == ResourceStatus::Assembling
+    }
+
     pub(crate) fn take_assembly_input(
         &mut self,
         token_key: Option<[u8; 64]>,

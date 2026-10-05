@@ -186,7 +186,7 @@ fn transfer(data: &[u8], defer: bool) -> ((Vec<u8>, Option<Vec<u8>>), bool) {
             received(&r_events).is_none(),
             "a deferred resource must not complete before its job has run"
         );
-        let jobs = responder.take_resource_assembly_jobs();
+        let jobs = responder.take_resource_assembly_jobs(usize::MAX);
         assert_eq!(jobs.len(), 1, "one transfer, one assembly job");
         assert_eq!(jobs[0].link_id(), link_id);
         // The job runs with no node borrow at all: that is the whole point.
@@ -198,7 +198,7 @@ fn transfer(data: &[u8], defer: bool) -> ((Vec<u8>, Option<Vec<u8>>), bool) {
         i_events.extend(ev);
         delivered
     } else {
-        assert!(responder.take_resource_assembly_jobs().is_empty());
+        assert!(responder.take_resource_assembly_jobs(usize::MAX).is_empty());
         received(&r_events).expect("inline assembly completes in place")
     };
     (delivered, sender_completed(&i_events))
@@ -239,7 +239,7 @@ fn a_link_closed_during_assembly_fails_the_resource_and_drops_the_late_result() 
     );
 
     let job = responder
-        .take_resource_assembly_jobs()
+        .take_resource_assembly_jobs(usize::MAX)
         .pop()
         .expect("an assembly job");
 
@@ -289,7 +289,7 @@ fn parked_transfer() -> (
     let adv = first.first().cloned().expect("the advertisement");
     let _ = pump(&mut initiator, &mut responder, i_iface, r_iface, first);
     let job = responder
-        .take_resource_assembly_jobs()
+        .take_resource_assembly_jobs(usize::MAX)
         .pop()
         .expect("an assembly job");
     (
@@ -373,4 +373,81 @@ fn a_cancel_during_assembly_fails_the_resource_and_drops_the_late_result() {
         received(&late.events).is_none() && late.actions.is_empty(),
         "a cancelled resource's late result concludes nothing"
     );
+}
+
+/// Codex review on #73 (second pass): a ready resource stays in its link
+/// until the caller takes a job for it, so the caller's limit bounds what is
+/// outside the node. A cancel that lands while it waits goes through the
+/// ordinary path, and no job is ever created for it.
+#[test]
+fn a_ready_resource_waits_in_its_link_until_taken_and_a_queued_cancel_needs_no_job() {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (resource_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let _ = pump(
+        &mut initiator,
+        &mut responder,
+        i_iface,
+        r_iface,
+        action_data(&tick),
+    );
+
+    assert_eq!(
+        responder.pending_resource_assemblies(),
+        1,
+        "one transfer waits"
+    );
+    assert!(
+        responder.take_resource_assembly_jobs(0).is_empty(),
+        "a limit of zero takes nothing"
+    );
+    assert_eq!(
+        responder.pending_resource_assemblies(),
+        1,
+        "and it still waits"
+    );
+
+    let icl = initiator
+        .links
+        .get(&link_id)
+        .expect("sender link")
+        .build_data_packet_with_context(&resource_hash, PacketContext::ResourceIcl, &mut OsRng)
+        .expect("ICL packet");
+    let (_, events) = deliver_all(&mut responder, r_iface, vec![icl]);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            NodeEvent::ResourceFailed { is_sender: false, error: ResourceError::Cancelled, resource_hash: h, .. }
+                if *h == resource_hash
+        )),
+        "a cancel while queued fails it as Cancelled: {events:?}"
+    );
+    assert!(
+        responder.take_resource_assembly_jobs(usize::MAX).is_empty(),
+        "a cancelled resource never becomes a job"
+    );
+    assert_eq!(responder.pending_resource_assemblies(), 0);
+}
+
+/// The limit takes exactly as many as asked, oldest first.
+#[test]
+fn taking_one_job_takes_the_ready_resource() {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (resource_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let _ = pump(
+        &mut initiator,
+        &mut responder,
+        i_iface,
+        r_iface,
+        action_data(&tick),
+    );
+    let jobs = responder.take_resource_assembly_jobs(1);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].resource_hash(), resource_hash);
+    assert_eq!(responder.pending_resource_assemblies(), 0);
 }
