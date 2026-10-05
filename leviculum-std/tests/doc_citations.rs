@@ -2863,10 +2863,10 @@ impl AnchoredCitation<'_> {
 ///    file now, alone or with its two neighbours. An endpoint only the shift
 ///    or the identifier's tie-break placed is inferred from the rest of the
 ///    citation, and the inference repeats whatever offset the citation had
-///    when it was written. `embedded.md:70` is the case: its range opened
-///    on a `))` four lines above the `select4` it meant, the day it was
-///    written, and the shift its unique end established would have carried
-///    that error forward intact.
+///    when it was written. The `select4` range in the embedded developer
+///    guide is the case: it opened on a `))` four lines above the call it
+///    meant, the day it was written, and the shift its unique end
+///    established would have carried that error forward intact.
 /// 3. The identifier sits inside the repaired span. The text moved with the
 ///    citation; this is what says the name moved with it, so that a
 ///    citation is never renumbered onto a line that holds its old text but
@@ -4530,8 +4530,8 @@ fn an_identifier_citation_is_renumbered_only_on_proof() {
     // (2) Only the identifier's tie-break placed it.
     let tie = [span(0, 10, Anchor::Moved(15), false)];
     assert_eq!(ident_unproved(&[(10, 10)], &tie, &[15]), not_unique);
-    // (2) The embedded.md:70 shape: a `))` the shift carried to where the
-    // unique end put it, every condition but this one met.
+    // (2) The `select4` range's shape: a `))` the shift carried to where
+    // the unique end put it, every condition but this one met.
     let carried = [
         span(0, 10, Anchor::Moved(15), false),
         span(1, 20, Anchor::Moved(25), true),

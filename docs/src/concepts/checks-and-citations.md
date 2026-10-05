@@ -445,29 +445,67 @@ citation in it. A citation whose *sentence* went wrong while the cited
 line stayed put is invisible here as it is to every other check on this
 page. The number is a floor, not a census.
 
-**The identifier-anchored class does not get this anchor yet.** It is
-checked by proximity alone: the identifier anywhere within `WINDOW`
-(8) lines of the cited span, or enclosing it, holds. A shift of up to
-eight lines is therefore green by design, and so is a span that never
-covered what it claims as long as the name is close by. Giving that class
-the same text anchor, with the identifier only choosing among several
-lines that hold the anchored text, turned 108 of its citations red on
-2026-10-05 (129 moved endpoints in the book, 2 in source, 2 rewritten);
-that rule waits for those to be read. The same day showed the cost: the
-pass that wrote this paragraph moved the `Placed::Proved` line this page
-cites by 24, and the guard stayed green, because the enum variant
-`Proved` sits three lines from the stale number.
+**The identifier-anchored class gets the same anchor, since
+2026-10-06.** Both classes run through one anchoring pass and are
+reported apart (`bare-citation anchors`, `identifier-citation anchors`),
+so a count can still be compared with a run from before. For a named
+citation the identifier decides nothing on its own: it only breaks the
+tie when the anchored text now sits on several lines, picking the
+occurrence nearest a line that carries the name, and only within
+`WINDOW` of one.
 
-**Three standing controls** keep the verdicts honest, each a fixture pair
+Until then that class was checked by proximity alone: the identifier
+anywhere within `WINDOW` (8) lines of the cited span, or enclosing it,
+held. A shift of up to eight lines was green by design, and so was a span
+that never covered what it claimed as long as the name was close by.
+Turning the anchor on found **108** named citations that tolerance had
+hidden (129 moved endpoints in the book, 2 in source, 2 rewritten in
+place, measured 2026-10-05), and the day it was measured showed the cost
+live: the pass that measured it moved the `Placed::Proved` line this
+page cites, and the guard stayed green, because the enum variant `Proved`
+sat three lines from the stale number. The proximity check still runs;
+it is now the second check a named citation passes, not the only one.
+
+The fixer repairs a named citation on the same evidence it acts on for a
+bare one, and on nothing weaker. All three must hold:
+
+1. **Every endpoint moved by one common shift.** A range whose ends
+   moved by different amounts grew or shrank, and whether it still
+   covers what it meant is a question for a reader.
+2. **Every endpoint's text is unique in the file now**, alone or with
+   its two neighbours. An endpoint that only the shift or the
+   identifier's tie-break placed is inferred from the rest of the
+   citation, and the inference carries forward whatever offset the
+   citation had when it was written. The `select4` range in the
+   embedded developer guide is the case: it opened on a `))` four lines
+   above the call it meant, and the shift its unique end established
+   would have kept that error exactly.
+3. **The identifier sits inside the repaired span.** The text moving is
+   what says the line moved; the name being in the new span is what
+   says the citation's subject moved with it.
+
+Landing the rule, the fixer rewrote 83 citations in one run (the 108,
+less those it refused, plus the ones the rule's own edit to the guard
+displaced) and refused 28, which were read by hand one at a time and
+committed apart so their diff can be read alone. A refused citation is
+reported with the number the anchor would give it and the condition
+that failed, never with a bare "should read".
+
+**Four standing controls** keep the verdicts honest, each a fixture pair
 under `leviculum-std/tests/fixtures/` (`citation_anchor_target.rs.in`
 and `citation_anchor_doc.md.in`, one bare and one identifier-anchored
 citation) committed into a scratch repository and then perturbed:
 `anchor_control_a_moved_line_is_named_with_its_new_number` (the bare
 citation is reported moved with its new number, the identifier citation
 holds at +1), `anchor_control_a_rewritten_line_is_named_rewritten_not_undecidable`
-(reported rewritten in place, with no number offered), and
+(reported rewritten in place, with no number offered),
 `anchor_control_an_identifier_moved_past_the_window_is_drift` (the
-identifier one line past the window is drift, with the distance named).
+identifier one line past the window is drift, with the distance named),
+and `anchor_control_an_identifier_citation_moved_three_lines_is_named_and_repaired`
+(the named citation's line moves by three, inside the window: the
+proximity check still holds it, the anchor names the new line, and the
+fixer rewrites it). `an_identifier_citation_is_renumbered_only_on_proof`
+refuses each of the fixer's three conditions on its own.
 
 Because the finder knows where the text went, it can also put the
 citation there: `LEVICULUM_CITATION_FIX=1` rewrites the repairable ones
@@ -479,9 +517,10 @@ remaining 21 were spans whose other end a human had to locate, and eight
 of those left the bare class entirely by acquiring the identifier they
 should have had.
 
-That fixer reaches the bare class only. What repairs the
-identifier-anchored classes without re-anchoring them onto their
-identifiers is section 7.
+Until 2026-10-06 that fixer reached the bare class only; it now reaches
+a named citation as well, on the three conditions above. What repairs
+the identifier-anchored classes when the anchor cannot, without
+re-anchoring them onto their identifiers, is section 7.
 
 The fixer has one trap worth naming, because it sprang once: this guard
 is itself in the corpus it guards, so a fixture string naming a git hook
@@ -549,11 +588,12 @@ is what covers them.
 
 ### 7. The repair follows the diff, not the nearest name
 
-Section 5's fixer repairs the bare class because a bare citation
-carries its own anchor: the text of the line it names says where that
-line went. The identifier-anchored classes have no such anchor in the
-report. What the guard prints for them is the nearest occurrence of the
-cited identifier — and that is exactly the number a repair must not
+Section 5's fixer repairs a citation by its own anchor: the text of the
+line it names says where that line went. Until 2026-10-06 that anchor
+existed for the bare class only, and it still repairs a named citation
+only on the three conditions section 5 lists. What the proximity check
+prints for the identifier-anchored classes is the nearest occurrence of
+the cited identifier — and that is exactly the number a repair must not
 take.
 
 The reason is the trap the order-257 coder recorded, which is worth
@@ -782,7 +822,8 @@ are three different claims:
 
 ```text
 doc citations: 1684 total; 814 checked against the symbol they name
-(within 8 lines) and holding; 0 named but not holding (reported below);
+(within 8 lines; their cited line anchored by its text, as a bare one
+is) and holding; 0 named but not holding (reported below);
 870 could not be checked by name (862 bare: anchored by the text of the
 cited line in bare_citations_still_point_at_the_text_they_cited,
 8 external: not in this workspace, 0 skipped: into a reference/
@@ -813,6 +854,8 @@ got: the book and the crates are anchored, the scripts are not, and
 their bare citations are still existence and length only. Until
 2026-10-05 the line said "existence and length only" for all three,
 which had stopped being true of two of them when the anchor landed.
+Since 2026-10-06 the named group says it is anchored too, and the
+warning no longer calls it "checked by proximity only".
 
 The same pass gave the drift report the distance it had been leaving to
 the reader. It printed the cited line and the nearest occurrence of the
@@ -1303,7 +1346,10 @@ submodule check runs first in `just fast`; its bump path is unbuilt.
 Both halves of it repair since 2026-09-25: the bare class against the
 tree's own history, the identifier-anchored classes against the line map
 of a named base (section 7), and both only when run exactly once, after
-the last source edit of the pass (section 7a).
+the last source edit of the pass (section 7a). Since 2026-10-06 both
+classes are anchored by the text of their cited line, and the history
+fixer repairs a named citation too when the anchor proves where it went
+(section 5); Codeberg #307 closed on that.
 
 Two shapes it refused to see until 2026-09-23, both found by reading
 rather than by a red gate. A **backwards line spec** (`a-b` with `a > b`)
