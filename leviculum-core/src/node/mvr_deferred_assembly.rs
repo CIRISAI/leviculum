@@ -223,8 +223,12 @@ fn deferred_assembly_concludes_exactly_as_inline_assembly_does() {
     );
 }
 
-#[test]
-fn a_link_closed_during_assembly_fails_the_resource_and_drops_the_late_result() {
+/// The receiver-side invariant CIRISEdge builds on (its attribution maps are
+/// cleared at `LinkClosed`): a resource whose link closes while its assembly
+/// runs off the node fails exactly once, as `LinkClosed`, before the link's
+/// `LinkClosed`; and the assembly's late result yields no `ResourceCompleted`
+/// and no second failure. Held for a local close and for one the peer sends.
+fn assert_close_during_assembly_invariant(close: impl FnOnce(&mut Ctx) -> Vec<NodeEvent>) {
     let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
     responder.set_defer_resource_assembly(true);
     let (resource_hash, tick) = initiator
@@ -241,31 +245,78 @@ fn a_link_closed_during_assembly_fails_the_resource_and_drops_the_late_result() 
     let job = responder
         .take_resource_assembly_jobs(usize::MAX)
         .pop()
-        .expect("an assembly job");
+        .expect("an assembly job is out");
 
-    let closed = responder.close_link(&link_id);
-    let failed = closed.events.iter().any(|e| {
+    let mut ctx = Ctx {
+        initiator,
+        responder,
+        r_iface,
+        link_id,
+    };
+    let mut events = close(&mut ctx);
+    let late = ctx.responder.complete_resource_assembly(job.run());
+    assert!(
+        late.actions.is_empty(),
+        "a result whose link is gone sends nothing"
+    );
+    events.extend(late.events);
+
+    let is_failure = |e: &NodeEvent| {
         matches!(
             e,
             NodeEvent::ResourceFailed {
                 is_sender: false,
-                error: ResourceError::LinkClosed,
                 resource_hash: h,
                 ..
             } if *h == resource_hash
         )
-    });
+    };
+    let failures: Vec<&NodeEvent> = events.iter().filter(|e| is_failure(e)).collect();
+    assert_eq!(failures.len(), 1, "exactly one failure: {events:?}");
     assert!(
-        failed,
-        "the waiting resource fails with the link: {:?}",
-        closed.events
+        matches!(
+            failures[0],
+            NodeEvent::ResourceFailed {
+                error: ResourceError::LinkClosed,
+                ..
+            }
+        ),
+        "and it is LinkClosed: {events:?}"
     );
+    assert!(
+        received(&events).is_none(),
+        "no ResourceCompleted at all: {events:?}"
+    );
+    let failed_at = events.iter().position(is_failure).unwrap();
+    let closed_at = events
+        .iter()
+        .position(|e| matches!(e, NodeEvent::LinkClosed { link_id, .. } if *link_id == ctx.link_id))
+        .expect("the link closed");
+    assert!(
+        failed_at < closed_at,
+        "the failure comes before LinkClosed: {events:?}"
+    );
+}
 
-    let late = responder.complete_resource_assembly(job.run());
-    assert!(
-        received(&late.events).is_none() && late.actions.is_empty(),
-        "a result whose link is gone concludes nothing and sends nothing"
-    );
+struct Ctx {
+    initiator: EndpointNode,
+    responder: EndpointNode,
+    r_iface: usize,
+    link_id: LinkId,
+}
+
+#[test]
+fn a_link_closed_during_assembly_fails_the_resource_and_drops_the_late_result() {
+    assert_close_during_assembly_invariant(|ctx| ctx.responder.close_link(&ctx.link_id).events);
+}
+
+#[test]
+fn a_link_the_peer_closes_during_assembly_fails_the_resource_and_drops_the_late_result() {
+    assert_close_during_assembly_invariant(|ctx| {
+        let close = ctx.initiator.close_link(&ctx.link_id);
+        let (_, events) = deliver_all(&mut ctx.responder, ctx.r_iface, action_data(&close));
+        events
+    });
 }
 
 /// Pump a deferred transfer up to the point its assembly job exists, and hand
