@@ -324,6 +324,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
         let previous = link.attached_interface();
         link.set_attached_interface(index);
+        // A link that came up over TCP may have negotiated far more than a
+        // UDP datagram on the open internet carries. Both ends lower it to
+        // the same ceiling here, as rns-rs does, so they keep agreeing on the
+        // link MDU (leviculum#70 review). Never raised.
+        link.lower_mtu(crate::direct_link::DIRECT_LINK_MTU);
         // The direct path just proved itself both ways; do not let a stale
         // timer that was running on the relayed path fire against it.
         link.record_inbound(now_ms / MS_PER_SECOND);
@@ -601,28 +606,78 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
-    /// An interface went down. If it was a direct one, put its link back on
-    /// the interface it used before, which is the relayed path the upgrade
-    /// started from.
+    /// An interface went down.
+    ///
+    /// If it was some link's fallback (the relayed interface the link left),
+    /// that fallback is gone: forget it, so a later loss of the direct path
+    /// cannot send the link back to an index that no longer exists.
+    ///
+    /// If it was a direct one, put its link back on the interface it used
+    /// before. With no fallback left the link has no route at all, so it is
+    /// closed (as `Stale`) rather than pinned to a dead interface.
     pub(super) fn direct_link_interface_down(&mut self, index: usize) {
+        for attachment in self.direct_links.attached.values_mut() {
+            if attachment.previous == Some(index) {
+                attachment.previous = None;
+            }
+        }
         let Some(attachment) = self.direct_links.attached.remove(&index) else {
             return;
         };
+        self.release_direct_attachment(index, attachment, "direct interface lost");
+    }
+
+    /// Return a link from its direct interface to its fallback, or close it
+    /// when there is none, and report the loss.
+    fn release_direct_attachment(&mut self, index: usize, attachment: Attachment, why: &str) {
         let Some(link) = self.links.get_mut(&attachment.link_id) else {
             return;
         };
-        if let Some(previous) = attachment.previous {
-            link.set_attached_interface(previous);
-        }
         crate::tracing::info!(
             link = %HexShort(attachment.link_id.as_bytes()),
             interface = index,
-            restored = ?attachment.previous,
-            "direct link: direct interface lost, link back on its previous path"
+            fallback = ?attachment.previous,
+            "direct link: {why}; link returns to its fallback, or closes without one"
         );
         self.events.push(NodeEvent::DirectLinkLost {
             link_id: attachment.link_id,
             interface_index: index,
         });
+        match attachment.previous {
+            Some(previous) => link.set_attached_interface(previous),
+            None => {
+                let is_initiator = link.is_initiator();
+                let destination = *link.destination_hash();
+                link.close();
+                self.remove_link(&attachment.link_id);
+                self.emit_link_closed(
+                    attachment.link_id,
+                    crate::link::LinkCloseReason::Stale,
+                    is_initiator,
+                    destination,
+                );
+            }
+        }
+    }
+
+    /// Forget every session and direct interface: the driver's sockets are
+    /// gone (a stopped node being started again). Links on a direct interface
+    /// go back to their fallback, sessions in flight fail, and no job from
+    /// before survives. Call before the driver starts taking jobs.
+    pub fn abandon_direct_links(&mut self) -> crate::transport::TickOutput {
+        self.direct_links.jobs.clear();
+        let sessions = core::mem::take(&mut self.direct_links.sessions);
+        for (link_id, session) in sessions {
+            self.events.push(NodeEvent::DirectLinkFailed {
+                link_id,
+                failure: Failure::Timeout,
+                proposed: session.role() == Role::Initiator,
+            });
+        }
+        let attached = core::mem::take(&mut self.direct_links.attached);
+        for (index, attachment) in attached {
+            self.release_direct_attachment(index, attachment, "node restarted");
+        }
+        self.process_events_and_actions()
     }
 }
