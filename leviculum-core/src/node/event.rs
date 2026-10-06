@@ -167,6 +167,41 @@ pub enum NodeEvent {
         tries: u8,
     },
 
+    /// +ciris (leviculum#70): a direct-link upgrade succeeded and the link
+    /// now travels over a punched point-to-point UDP interface.
+    ///
+    /// `interface_index` is that interface; `proposed` is true on the side
+    /// that called `propose_direct_link`.
+    DirectLinkEstablished {
+        /// The link ID
+        link_id: LinkId,
+        /// The direct interface the link was moved onto
+        interface_index: usize,
+        /// Whether this node proposed the upgrade
+        proposed: bool,
+    },
+
+    /// +ciris (leviculum#70): a direct-link upgrade ended without a direct
+    /// path. The link is untouched and keeps its relayed path.
+    DirectLinkFailed {
+        /// The link ID
+        link_id: LinkId,
+        /// What stopped it
+        failure: crate::direct_link::Failure,
+        /// Whether this node proposed the upgrade
+        proposed: bool,
+    },
+
+    /// +ciris (leviculum#70): a link's direct interface went down (NAT
+    /// mapping expired, peer gone, network change). The link is back on the
+    /// interface it used before the upgrade; a new upgrade may be proposed.
+    DirectLinkLost {
+        /// The link ID
+        link_id: LinkId,
+        /// The direct interface that went down
+        interface_index: usize,
+    },
+
     /// The remote peer has proven their identity on a link.
     ///
     /// Emitted on the responder (non-initiator) side when the initiator sends
@@ -636,6 +671,9 @@ impl NodeEvent {
             | NodeEvent::LinkRecovered { link_id, .. }
             | NodeEvent::ChannelRetransmit { link_id, .. }
             | NodeEvent::LinkIdentified { link_id, .. }
+            | NodeEvent::DirectLinkEstablished { link_id, .. }
+            | NodeEvent::DirectLinkFailed { link_id, .. }
+            | NodeEvent::DirectLinkLost { link_id, .. }
             | NodeEvent::LinkClosed { link_id, .. }
             | NodeEvent::LinkProofRequested { link_id, .. }
             | NodeEvent::LinkDeliveryConfirmed { link_id, .. }
@@ -755,6 +793,13 @@ impl NodeEvent {
             | NodeEvent::LinkClosed { .. }
             | NodeEvent::LinkRefused { .. } => EventClass::Control,
 
+            // A link's path changing under it (+ciris, leviculum#70): at most
+            // one of each per upgrade attempt, and the consumer's choice of
+            // path depends on seeing them.
+            NodeEvent::DirectLinkEstablished { .. }
+            | NodeEvent::DirectLinkFailed { .. }
+            | NodeEvent::DirectLinkLost { .. } => EventClass::Control,
+
             // Proof decisions — require an application call to make progress.
             NodeEvent::PacketProofRequested { .. } | NodeEvent::LinkProofRequested { .. } => {
                 EventClass::Control
@@ -850,6 +895,9 @@ impl NodeEvent {
             NodeEvent::LinkRecovered { .. } => "LinkRecovered",
             NodeEvent::ChannelRetransmit { .. } => "ChannelRetransmit",
             NodeEvent::LinkIdentified { .. } => "LinkIdentified",
+            NodeEvent::DirectLinkEstablished { .. } => "DirectLinkEstablished",
+            NodeEvent::DirectLinkFailed { .. } => "DirectLinkFailed",
+            NodeEvent::DirectLinkLost { .. } => "DirectLinkLost",
             NodeEvent::LinkClosed { .. } => "LinkClosed",
             NodeEvent::LinkRefused { .. } => "LinkRefused",
             NodeEvent::PacketProofRequested { .. } => "PacketProofRequested",

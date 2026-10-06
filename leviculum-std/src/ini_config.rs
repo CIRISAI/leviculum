@@ -538,7 +538,7 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         // egress_control, the ic_*/ic_pr_*/ec_pr_freq ingress/egress-control
         // tuning knobs, etc. An unknown key must never make lnsd reject a
         // config a current rnsd would accept.
-        _ => {}
+        _ => crate::direct_link::apply_ini_key(config, key, value),
     }
 }
 

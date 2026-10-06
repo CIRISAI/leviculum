@@ -525,6 +525,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .map(|r| *r.resource_hash())
         });
         self.pending_assembly.remove(link_id);
+        self.direct_link_link_removed(link_id);
         if outgoing_hash.is_some() || incoming_hash.is_some() {
             // Report the caller-visible id, consistent with emit_link_closed
             // (which translates re-keyed wire ids back to the original).
@@ -1686,6 +1687,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // and get proved when drained. This prevents the sender from clearing its
         // retransmit queue for undelivered messages during head-of-line blocking.
         let mut rx_ring_full = false;
+        // Direct-link signals (leviculum#70) are delivered and proofed like
+        // any message, then handled by the node instead of the application.
+        let mut direct_link_signals: Vec<(u16, Vec<u8>)> = Vec::new();
         let proof_packets: Vec<Vec<u8>> = {
             let rtt_ms = link.rtt_ms();
             let channel = link.ensure_channel(rtt_ms);
@@ -1701,12 +1705,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         len = envelope.data.len(),
                         "link_mgr: channel message received (in-order)"
                     );
-                    self.events.push(NodeEvent::MessageReceived {
-                        link_id,
-                        msgtype: envelope.msgtype,
-                        sequence: envelope.sequence,
-                        data: envelope.data,
-                    });
+                    if crate::direct_link::wire::is_signal_msgtype(envelope.msgtype) {
+                        direct_link_signals.push((envelope.msgtype, envelope.data));
+                    } else {
+                        self.events.push(NodeEvent::MessageReceived {
+                            link_id,
+                            msgtype: envelope.msgtype,
+                            sequence: envelope.sequence,
+                            data: envelope.data,
+                        });
+                    }
                     if let Some(budget) = &mut self.channel_delivery_budget {
                         *budget = budget.saturating_sub(1);
                     }
@@ -1752,12 +1760,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 *budget = budget.saturating_sub(drained.len());
             }
             for (envelope, stored_hash) in drained {
-                self.events.push(NodeEvent::MessageReceived {
-                    link_id,
-                    msgtype: envelope.msgtype,
-                    sequence: envelope.sequence,
-                    data: envelope.data,
-                });
+                if crate::direct_link::wire::is_signal_msgtype(envelope.msgtype) {
+                    direct_link_signals.push((envelope.msgtype, envelope.data));
+                } else {
+                    self.events.push(NodeEvent::MessageReceived {
+                        link_id,
+                        msgtype: envelope.msgtype,
+                        sequence: envelope.sequence,
+                        data: envelope.data,
+                    });
+                }
                 if let Some(p) = Self::build_channel_proof_from_hash(link, &link_id, &stored_hash) {
                     proofs.push(p);
                 }
@@ -1772,6 +1784,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         for proof in proof_packets {
             self.route_link_packet(&link_id, &proof);
+        }
+        for (msgtype, data) in direct_link_signals {
+            self.on_direct_link_signal(link_id, msgtype, &data, now_ms);
         }
     }
 

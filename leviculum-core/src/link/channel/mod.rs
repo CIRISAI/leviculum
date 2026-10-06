@@ -540,6 +540,20 @@ impl Channel {
         self.send_raw(M::MSGTYPE, &message.pack(), link_mdu, now_ms, rtt_ms)
     }
 
+    /// Send an already-packed system message whose MSGTYPE is only known at
+    /// run time (the direct-link signals, leviculum#70, are five types sharing
+    /// one codec). Same contract as [`Self::send_system`].
+    pub(crate) fn send_system_raw(
+        &mut self,
+        msgtype: u16,
+        data: &[u8],
+        link_mdu: usize,
+        now_ms: u64,
+        rtt_ms: u64,
+    ) -> Result<Vec<u8>, ChannelError> {
+        self.send_raw(msgtype, data, link_mdu, now_ms, rtt_ms)
+    }
+
     /// Low-level send without MSGTYPE validation
     ///
     /// Called by `send()` (which validates MSGTYPE) and `send_system()` (which

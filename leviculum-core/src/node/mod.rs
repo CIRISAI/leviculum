@@ -571,6 +571,9 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     pending_assembly: AssemblyQueue,
     /// Link lifecycle counters (leviculum#77).
     link_telemetry: telemetry::LinkTelemetry,
+    /// Direct-link upgrades (+ciris, leviculum#70): sessions, the driver's
+    /// job queue, and links moved onto punched interfaces.
+    direct_links: direct_link::DirectLinks,
     /// Resources whose assembly is running outside the node, by link. One per
     /// link at most: a sender waits for the proof before its next segment.
     /// Holds no more than the caller asked for at a time.
@@ -677,6 +680,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             defer_resource_assembly: false,
             pending_assembly: AssemblyQueue::default(),
             link_telemetry: telemetry::LinkTelemetry::default(),
+            direct_links: direct_link::DirectLinks::default(),
             assembling_resources: BTreeMap::new(),
             max_incoming_resource_size,
             resource_window_policy,
@@ -2698,6 +2702,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.check_channel_timeouts(now_ms);
         self.check_resource_timeouts(now_ms);
         self.check_request_timeouts(now_ms);
+        self.check_direct_link_timeouts(now_ms);
 
         // Send management announces (probe destination, etc.)
         self.check_mgmt_announces(now_ms);
@@ -2718,11 +2723,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let transport_deadline = self.transport.next_deadline();
         let link_deadline = self.link_next_deadline(now_ms);
         let mgmt_deadline = self.next_mgmt_announce_ms;
+        let direct_link_deadline = self.direct_link_next_deadline();
 
-        [transport_deadline, link_deadline, mgmt_deadline]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            transport_deadline,
+            link_deadline,
+            mgmt_deadline,
+            direct_link_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Register a human-readable name for an interface.
@@ -3111,6 +3122,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.remove_interface_kind(iface_idx);
         self.transport.remove_interface_hw_mtu(iface_idx);
         self.transport.remove_interface_link_profile(iface_idx);
+
+        // A direct link's interface (leviculum#70): put its link back on the
+        // path it had before the upgrade.
+        self.direct_link_interface_down(iface_idx);
 
         // Emit the InterfaceDown event
         self.events.push(NodeEvent::InterfaceDown(iface_idx));
@@ -12862,3 +12877,11 @@ mod telemetry;
 pub use telemetry::{
     link_close_reason_name, LinkInfo, LinkLifecycle, LinkRole, LINK_CLOSE_REASONS,
 };
+// Direct-link upgrade (+ciris, leviculum#70), declared last so the fork
+// moves no line an upstream citation points at.
+mod direct_link;
+pub use direct_link::{
+    DirectLinkConfig, DirectLinkError, DirectLinkJob, DirectLinkPolicy, PROPOSAL_COOLDOWN_MS,
+};
+#[cfg(test)]
+mod mvr_direct_link;
