@@ -132,7 +132,7 @@ which, because the list below is what is actually left:
 | Media flags, running vs configured | `leviculum-media-state` | `8bbce725`, 2026-09-01 |
 | Heap budget: endpoint links, boot and live serve cap | `leviculum-heap-budget` | `03e99edf`, 2026-10-05 |
 | Node name, derived defaults and the BLE-pending flag | `leviculum-node-name` | `8128a0d2`, 2026-10-06 |
-| Front-end position: never both switch paths at once | `leviculum-rx-arming` (`front_end`) | 2026-10-06 |
+| Front-end position: never both switch paths at once | `leviculum-rx-arming` (`front_end`) | `1a1ef641`, 2026-10-06 |
 
 What has no host assertion, in the order it is cheap to move:
 
