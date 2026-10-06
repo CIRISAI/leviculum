@@ -412,6 +412,9 @@ pub struct ReticulumConfig {
     /// and leaves restarting the whole daemon to its supervisor.
     #[serde(default)]
     pub panic_on_interface_error: bool,
+    /// +ciris (leviculum#70): direct-link upgrade keys.
+    #[serde(flatten)]
+    pub direct_link: crate::direct_link::DirectLinkKeys,
 }
 
 impl ReticulumConfig {
@@ -663,6 +666,7 @@ impl Default for ReticulumConfig {
             egress_control: None,
             ic_max_held_announces: None,
             panic_on_interface_error: false,
+            direct_link: crate::direct_link::DirectLinkKeys::default(),
         }
     }
 }

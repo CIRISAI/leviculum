@@ -170,3 +170,13 @@
 # test (see the module docs of lnpnd/src/engine_hook_load.rs) whenever the
 # engine's hooks or the stores' write paths change.
 1    -p lnpnd --lib
+
+# The three rns-rs interop arms of the direct-link upgrade (+ciris,
+# leviculum#70), added 2026-10-05. They cannot be routed into a tier: each
+# needs a process from another implementation (lelloman/rns-rs's `rnsd`, or a
+# small rns-rs peer program) started beside the test, which no tier builds or
+# runs. The leviculum-only arms in the same file run in every tier. They are
+# run by name with `-- --ignored` and the LEVICULUM_INTEROP_* variables their
+# doc comments describe, whenever the upgrade's wire or either
+# implementation's version changes.
+3    -p leviculum-std --test direct_link_upgrade

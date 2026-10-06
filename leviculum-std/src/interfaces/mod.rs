@@ -19,6 +19,7 @@ pub(crate) mod ble;
 pub(crate) mod byte_channel;
 pub(crate) mod census;
 pub(crate) mod firmware_request;
+pub(crate) mod direct_udp;
 pub use byte_channel::ByteChannelHandle;
 pub use firmware_request::{
     request_firmware, request_firmware_announce, request_firmware_media_restore,
