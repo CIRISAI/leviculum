@@ -22,7 +22,7 @@
 use std::time::{Duration, Instant};
 
 use crate::driver::{EventReceiver, ReticulumNode};
-use crate::{Destination, DestinationHash, Identity, NodeEvent};
+use crate::{Destination, DestinationHash, Identity, LinkId, NodeEvent};
 
 /// Transport app name for the remote management destination
 /// (`RNS.Transport.APP_NAME`, `Transport.py:61`).
@@ -246,8 +246,38 @@ pub async fn fetch_remote_status(
         }
     };
 
+    // The query is one request on this link, so the link ends with it, on
+    // every outcome. Python's `rnstatus` leaves its link to the stale timeout,
+    // which a daemon can afford and a board cannot: a T114 serves four links,
+    // and four queries in a row left the fifth refused for budget
+    // (lnode_remote_status, 2026-10-06).
+    let result = query_on_link(
+        node,
+        events,
+        &link_id,
+        identity,
+        include_lstats,
+        timeout,
+        quiet,
+    )
+    .await;
+    let _ = node.close_link(&link_id).await;
+    result
+}
+
+/// Steps 4-6 of [`fetch_remote_status`] on an established link: identify,
+/// request `/status`, and await the bundle. The caller closes the link.
+async fn query_on_link(
+    node: &ReticulumNode,
+    events: &mut EventReceiver,
+    link_id: &LinkId,
+    identity: &Identity,
+    include_lstats: bool,
+    timeout: Duration,
+    quiet: bool,
+) -> Result<(serde_json::Value, Option<i64>), String> {
     // 4. Identify with the management identity (allow-list authentication).
-    node.identify_link(&link_id, identity)
+    node.identify_link(link_id, identity)
         .await
         .map_err(|e| format!("could not identify to remote: {e}"))?;
 
@@ -256,7 +286,7 @@ pub async fn fetch_remote_status(
     // (`RNS/Link.py:900-903`). Accept incoming resources on this link before
     // sending the request so the transfer the server starts is not rejected.
     node.set_resource_strategy(
-        &link_id,
+        link_id,
         leviculum_core::resource::ResourceStrategy::AcceptAll,
     )
     .map_err(|e| e.to_string())?;
@@ -268,7 +298,7 @@ pub async fn fetch_remote_status(
     let req_data = encode_status_request(include_lstats);
     let request_id = node
         .send_request(
-            &link_id,
+            link_id,
             "/status",
             Some(&req_data),
             Some(timeout.as_millis() as u64),
@@ -301,13 +331,13 @@ pub async fn fetch_remote_status(
                 segment_index,
                 total_segments,
                 ..
-            })) if rlink == link_id => {
+            })) if rlink == *link_id => {
                 resource_buf.extend_from_slice(&data);
                 if segment_index >= total_segments {
                     return decode_status_resource(&resource_buf);
                 }
             }
-            Ok(Some(NodeEvent::ResourceFailed { link_id: rlink, .. })) if rlink == link_id => {
+            Ok(Some(NodeEvent::ResourceFailed { link_id: rlink, .. })) if rlink == *link_id => {
                 return Err("The remote status transfer failed".to_string());
             }
             Ok(Some(NodeEvent::RequestTimedOut {

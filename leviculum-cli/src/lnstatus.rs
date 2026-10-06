@@ -550,12 +550,18 @@ async fn run_remote(args: &Args, config_dir: &Path, config: Option<&Config>, ins
                     let _ = std::io::stdout().flush();
                 } else {
                     print!("{rendered}");
+                    // `stop` drains the LINKCLOSE the query queued; leaving
+                    // it to the process exit would leave the link on the
+                    // remote until its stale timeout.
+                    let _ = node.stop().await;
                     return;
                 }
             }
             Err(e) => {
                 eprintln!("{e}");
                 if !args.monitor {
+                    // `process::exit` skips the node's Drop flush.
+                    let _ = node.stop().await;
                     std::process::exit(20);
                 }
             }

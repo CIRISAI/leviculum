@@ -41,6 +41,29 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
+/// Wait until `server` holds no established or pending link, or fail.
+///
+/// A remote status query is one request on one link, and the client is done
+/// with that link the moment it returns. A link it leaves open occupies one of
+/// the server's link slots until the stale timeout: a board serves four
+/// (`HEAP_BUDGET links=4`), and on 2026-10-06 four queries in a row left the
+/// fifth refused with `LINK_REFUSED reason=budget` (lnode_remote_status, full
+/// hardware run on f4863a6f). The LINKCLOSE crosses a loopback TCP hop here,
+/// so 5 s is margin, not mechanism.
+async fn assert_server_released_link(server: &leviculum_std::driver::ReticulumNode) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while server.active_link_count() + server.pending_link_count() > 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the client returned but the server still holds {} active and {} pending \
+             link(s): the query's link was never closed",
+            server.active_link_count(),
+            server.pending_link_count()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Build a transport-instance server config with remote management enabled and
 /// `allowed` on the ACL.
 fn server_config(allowed: Vec<String>) -> Config {
@@ -152,6 +175,9 @@ async fn test_remote_status_server_allows_and_serves() {
          count here means the verb is reporting terminated links again"
     );
 
+    // The query's link is closed once the bundle is in hand.
+    assert_server_released_link(&server).await;
+
     server.stop().await.ok();
     client.stop().await.ok();
 }
@@ -214,6 +240,10 @@ async fn test_remote_status_server_rejects_non_allowed() {
         result.is_err(),
         "status request from a non-allowed identity must fail, got: {result:?}"
     );
+
+    // A refused query still closes its link: the refusal is silent, so the
+    // client is the only side that knows it is finished with it.
+    assert_server_released_link(&server).await;
 
     server.stop().await.ok();
     client.stop().await.ok();
