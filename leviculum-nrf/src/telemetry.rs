@@ -57,9 +57,9 @@ use leviculum_lxmf::telemetry::{
 };
 use leviculum_persist_ack::{PersistGate, Persisted, SaveTicket};
 use leviculum_telemetry_policy::{
-    choose_position, command_from_wire, EmissionRoute, FailureVerdict, Fix, PacketHash,
-    PositionSource, Profile, ProofTracker, ReportReason, RequestOutcome, SendPolicy, TargetCommand,
-    TargetState, FIXED_POSITION_HDOP_E2,
+    choose_position, command_from_wire, retry_step, EmissionRoute, FailureVerdict, Fix, PacketHash,
+    PositionSource, Profile, ProofTracker, ReportReason, RequestOutcome, RetryStep, SendPolicy,
+    TargetCommand, TargetState, FIXED_POSITION_HDOP_E2,
 };
 
 /// Re-exported for the same reason [`TargetOutcome`] is: the board
@@ -1066,10 +1066,12 @@ pub struct Reporter {
     /// retransmission, not a new reading. Dropped on proof, on give-up,
     /// and when a new report supersedes the wait.
     retry_payload: Option<Vec<u8>>,
-    /// Whether the owed retransmission has already asked for a path.
-    /// One request per owed retry: `request_path` is unthrottled, the
-    /// telemetry tick is five-secondly, and the answer (or a peer-up
-    /// pull) flips `has_path` — asking again every tick would be a storm.
+    /// Whether the owed retransmission has already asked for a path —
+    /// because it had none, or because it dropped the one whose next hop
+    /// did not prove ([`retry_step`]). One request per owed retry:
+    /// `request_path` is unthrottled, the telemetry tick is five-secondly,
+    /// and the answer (or a peer-up pull) flips `has_path` — asking again
+    /// every tick would be a storm.
     retry_path_requested: bool,
     /// The LXMF bytes of the report between [`tick`](Self::tick) and
     /// [`note_dispatch`](Self::note_dispatch), promoted to
@@ -1425,16 +1427,43 @@ impl Reporter {
                 self.proof.clear();
                 return actions;
             };
-            if !node.has_path(&hash) {
-                self.retry_payload = Some(payload);
-                if !self.retry_path_requested {
+            match retry_step(node.has_path(&hash), self.retry_path_requested) {
+                RetryStep::Send => {}
+                RetryStep::Wait => {
+                    // The debt stands; the path answer (or a peer-up pull)
+                    // flips `has_path` and a later tick pays it. A next
+                    // scheduled report supersedes it via
+                    // `note_report_sent`.
+                    self.retry_payload = Some(payload);
+                    return actions;
+                }
+                RetryStep::AskForPath => {
+                    self.retry_payload = Some(payload);
                     self.retry_path_requested = true;
                     actions.extend(node.request_path(&hash).actions);
+                    return actions;
                 }
-                // The debt stands; the path answer (or a peer-up pull)
-                // flips `has_path` and a later tick pays it. A next
-                // scheduled report supersedes it via `note_report_sent`.
-                return actions;
+                RetryStep::Rediscover => {
+                    // The path is held but its next hop did not prove: a
+                    // relay that has moved on keeps the entry alive until
+                    // it expires, and the retry would follow the report
+                    // into the same hole (#344). Drop it and ask, as
+                    // LXMRouter does before its next attempt; the retry
+                    // waits for the answer like a pathless one.
+                    self.retry_payload = Some(payload);
+                    self.retry_path_requested = true;
+                    node.remove_path(hash.as_bytes());
+                    actions.extend(node.request_path(&hash).actions);
+                    crate::log::log_fmt_critical(
+                        "[INFO!] ",
+                        format_args!(
+                            "[TELEMETRY] path dropped, asking again dst={:08x} pkt={:08x}",
+                            self.target_short(),
+                            pkt_short(&first)
+                        ),
+                    );
+                    return actions;
+                }
             }
             match node.send_single_packet(&hash, &payload) {
                 Ok((retry_hash, out)) => {
