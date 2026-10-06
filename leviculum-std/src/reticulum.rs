@@ -132,12 +132,18 @@ impl Reticulum {
                     // holds that no census line accounts for. Printed by
                     // the dump itself so a soak journal says where the
                     // bytes are NOT, instead of only that they exist.
-                    if let Some(estimated) = parse_estimated_total(&dump) {
+                    let estimated = parse_estimated_total(&dump);
+                    if let Some(estimated) = estimated {
                         dump.push_str(&format!(
                             "=== Census gap (RSS - estimated): {} bytes ===\n",
                             rss_bytes.saturating_sub(estimated)
                         ));
                     }
+                    // #437: the gap line alone cannot say whether the
+                    // missing bytes are allocator retention or a live owner
+                    // nobody counts; the allocator's books, the mapping
+                    // histogram and the thread count can.
+                    dump.push_str(&crate::proc_memory::census_sections(rss_bytes, estimated));
                 }
             }
         }
@@ -204,6 +210,26 @@ mod tests {
             dump.contains("=== Census gap (RSS - estimated): "),
             "gap line follows the RSS line: {dump}"
         );
+    }
+
+    /// Codeberg #437: one SIGUSR1 has to name the owner class of the gap,
+    /// so the composed dump carries the allocator, the mapping histogram
+    /// and the gap arithmetic, in that order after the RSS line.
+    #[tokio::test]
+    async fn diagnostic_dump_carries_allocator_mappings_and_gap_arithmetic() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.reticulum.storage_path = Some(td.path().to_path_buf());
+        let rns = Reticulum::with_config(config).unwrap();
+        let dump = rns.diagnostic_dump();
+        let rss = dump.find("=== Process RSS: ").expect("RSS line");
+        let alloc = dump.find("=== Allocator: ").expect("allocator section");
+        let maps = dump.find("=== Mappings: ").expect("mappings section");
+        let gap = dump.find("\ngap: rss ").expect("gap arithmetic line");
+        assert!(rss < alloc && alloc < maps && maps < gap, "{dump}");
+        assert!(dump.contains("\nthreads: "), "{dump}");
+        assert!(dump.contains("; - tracked "), "{dump}");
+        assert!(dump.contains("; unaccounted "), "{dump}");
     }
 
     #[tokio::test]

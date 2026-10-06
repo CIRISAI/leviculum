@@ -11,7 +11,7 @@ The hands-on introduction is the [tutorial](rust-api-tutorial.md); the layer
 overview is [Choosing a layer](choosing-a-layer.md).
 
 All `leviculum-std` types are re-exported from the crate root
-(`leviculum-std/src/lib.rs:64-91`), so `use leviculum_std::{NodeEvent, LinkHandle,
+(`leviculum-std/src/lib.rs:67-94`), so `use leviculum_std::{NodeEvent, LinkHandle,
 …}` works without naming submodules.
 
 ## `leviculum-std` (std / tokio)
@@ -32,7 +32,7 @@ when you assemble interfaces in code.
 | `async fn stop(&mut self) -> Result<()>` — `reticulum.rs:82` | Stop and persist |
 | `fn is_running(&self) -> bool` — `reticulum.rs:89` | Whether the loop is running |
 | `fn config(&self) -> &Config` — `reticulum.rs:94` | Borrow the active config |
-| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `reticulum.rs:148` | Take the event stream, once |
+| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `reticulum.rs:154` | Take the event stream, once |
 
 ### `ReticulumNodeBuilder`
 

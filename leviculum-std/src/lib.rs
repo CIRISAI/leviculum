@@ -49,6 +49,9 @@ pub(crate) mod ini_config;
 pub mod interfaces;
 pub(crate) mod known_destinations;
 pub(crate) mod packet_hashlist;
+/// The process's own memory view for the SIGUSR1 census: allocator totals,
+/// the anonymous-mapping histogram and the gap arithmetic (Codeberg #437).
+pub mod proc_memory;
 pub mod process;
 pub mod remote_status;
 pub mod resource_policy;
