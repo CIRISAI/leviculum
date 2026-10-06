@@ -13194,7 +13194,8 @@ pub use telemetry::{
 // moves no line an upstream citation points at.
 mod direct_link;
 pub use direct_link::{
-    DirectLinkConfig, DirectLinkError, DirectLinkJob, DirectLinkPolicy, PROPOSAL_COOLDOWN_MS,
+    DirectLinkConfig, DirectLinkError, DirectLinkJob, DirectLinkPolicy, FALLBACK_GRACE_MS,
+    PROPOSAL_COOLDOWN_MS,
 };
 #[cfg(test)]
 mod mvr_direct_link;

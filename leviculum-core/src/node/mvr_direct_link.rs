@@ -604,3 +604,147 @@ fn a_restarted_driver_abandons_every_direct_link_and_session() {
         .iter()
         .any(|e| matches!(e, NodeEvent::DirectLinkFailed { proposed: true, .. })));
 }
+
+#[test]
+fn a_busy_channel_delays_signals_instead_of_failing_the_upgrade() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    // B's channel is saturated: messages it sent are unproved (lost on the
+    // way), so when the REQUEST arrives the ACCEPT cannot go at once.
+    let mut saturated = false;
+    for _ in 0..64 {
+        if pair.b.send_on_link(&pair.link, b"busy").is_err() {
+            saturated = true;
+            break;
+        }
+    }
+    assert!(saturated, "B's channel pushes back");
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    pair.pump_from_a(packets(&out));
+    assert_eq!(
+        only_probe(&pair.b.take_direct_link_jobs()),
+        session,
+        "B's session survived the backpressure"
+    );
+    assert_eq!(
+        pair.b.direct_link_outbox_len(),
+        1,
+        "the ACCEPT is held, not dropped"
+    );
+    // B's earlier messages are retransmitted and proved, its window opens,
+    // and the tick flushes the ACCEPT, all inside A's proposal timeout.
+    for _ in 0..18 {
+        if pair.b.direct_link_outbox_len() == 0 {
+            break;
+        }
+        pair.advance(500);
+    }
+    assert_eq!(pair.b.direct_link_outbox_len(), 0, "flushed on a tick");
+    let out = pair.b.direct_link_probed(&session, Some(b_public()));
+    pair.pump_from_b(packets(&out));
+    pair.advance(2_000);
+    let _ = only_punch(&pair.b.take_direct_link_jobs());
+    let _ = only_punch(&pair.a.take_direct_link_jobs());
+    assert!(!pair
+        .a_events
+        .iter()
+        .chain(pair.b_events.iter())
+        .any(|e| matches!(e, NodeEvent::DirectLinkFailed { .. })));
+}
+
+#[test]
+fn a_link_gone_stale_on_its_direct_path_falls_back_and_nudges_the_peer() {
+    let mut pair = Pair::new();
+    let (a_direct, _) = established(&mut pair);
+    let _ = pair.a.take_direct_link_jobs();
+    // The direct path dies: nothing A sends arrives, nothing arrives at A.
+    let mut out_on_mesh = false;
+    let mut stale = false;
+    for _ in 0..600 {
+        pair.a.transport.clock().advance(1_000);
+        let out = pair.a.handle_timeout();
+        if out
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::LinkStale { .. }))
+        {
+            stale = true;
+            assert!(out
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::DirectLinkLost { .. })));
+            out_on_mesh = sent(&out)
+                .iter()
+                .any(|(iface, _)| *iface == Some(pair.a_mesh));
+            break;
+        }
+    }
+    assert!(stale, "the link went stale");
+    assert!(out_on_mesh, "a keepalive went out over the relay at once");
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    assert!(pair
+        .a
+        .take_direct_link_jobs()
+        .contains(&DirectLinkJob::CloseInterface {
+            interface_index: a_direct
+        }));
+    assert_eq!(
+        pair.a.link_count(),
+        1,
+        "stale, waiting on the relay, not closed"
+    );
+}
+
+#[test]
+fn traffic_over_the_relay_after_the_grace_brings_a_direct_end_back() {
+    let mut pair = Pair::new();
+    let (a_direct, b_direct) = established(&mut pair);
+    let _ = pair.a.take_direct_link_jobs();
+    // B loses its direct path and goes back to the relay.
+    let _ = pair.b.handle_interface_down(InterfaceId(b_direct));
+    pair.b.transport.clock().advance(1_000);
+    pair.a.transport.clock().advance(1_000);
+
+    // Inside the grace a relayed packet is taken as a straggler.
+    let out = pair.b.send_on_link(&pair.link, b"early").unwrap();
+    let (_, _) = deliver(&mut pair.a, pair.a_mesh, packets(&out));
+    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
+
+    // Past it, relayed traffic means the peer is back on the relay.
+    pair.b
+        .transport
+        .clock()
+        .advance(crate::node::FALLBACK_GRACE_MS);
+    pair.a
+        .transport
+        .clock()
+        .advance(crate::node::FALLBACK_GRACE_MS);
+    let out = pair.b.send_on_link(&pair.link, b"late").unwrap();
+    let mut a_out = Vec::new();
+    let mut a_ev = Vec::new();
+    for pkt in packets(&out) {
+        let tick = pair.a.handle_packet(InterfaceId(pair.a_mesh), &pkt);
+        a_out.extend(sent(&tick));
+        a_ev.extend(tick.events);
+    }
+    assert!(a_ev
+        .iter()
+        .any(|e| matches!(e, NodeEvent::DirectLinkLost { .. })));
+    assert!(a_ev.iter().any(|e| matches!(
+        e,
+        NodeEvent::MessageReceived { data, .. } if data == b"late"
+    )));
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    assert!(
+        a_out.iter().all(|(iface, _)| *iface == Some(pair.a_mesh)),
+        "A answers over the relay now: {a_out:?}"
+    );
+    assert!(pair
+        .a
+        .take_direct_link_jobs()
+        .contains(&DirectLinkJob::CloseInterface {
+            interface_index: a_direct
+        }));
+}

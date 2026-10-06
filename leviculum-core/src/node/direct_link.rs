@@ -28,6 +28,7 @@ use crate::constants::{MS_PER_SECOND, TRUNCATED_HASHBYTES};
 use crate::direct_link::wire::{self, REJECT_BUSY, REJECT_POLICY};
 use crate::direct_link::{Failure, ProbeProtocol, Role, Session, SessionId, Signal, Step};
 use crate::hex_fmt::HexShort;
+use crate::link::channel::ChannelError;
 use crate::link::{LinkId, LinkState};
 use crate::packet::PacketContext;
 use crate::traits::{Clock, Storage};
@@ -38,6 +39,15 @@ use super::NodeCore;
 /// Minimum spacing between two proposals on the same link, so a caller
 /// retrying in a loop cannot keep a peer probing its facilitator.
 pub const PROPOSAL_COOLDOWN_MS: u64 = 60_000;
+
+/// After a link moves onto its direct interface, link packets still in
+/// flight on the relayed path keep arriving for a while. Only past this grace
+/// does such an arrival mean the peer has gone back to the relay.
+pub const FALLBACK_GRACE_MS: u64 = 10_000;
+
+/// Signals waiting on a link's channel window, at most. An upgrade needs two
+/// or three; anything beyond that is a peer misbehaving.
+const OUTBOX_MAX: usize = 8;
 
 /// Which upgrade REQUESTs this node answers with ACCEPT.
 ///
@@ -116,11 +126,22 @@ pub enum DirectLinkJob {
     CloseInterface { interface_index: usize },
 }
 
+/// What became of one attempt to put a signal on a channel.
+enum SignalSend {
+    Sent,
+    /// Backpressure: the window is full or the channel is pacing.
+    NotYet,
+    /// It will never go.
+    Never,
+}
+
 /// A link moved onto a direct interface, and where it was before.
 #[derive(Debug, Clone, Copy)]
 struct Attachment {
     link_id: LinkId,
     previous: Option<usize>,
+    /// When the link moved onto the direct interface.
+    attached_at_ms: u64,
 }
 
 /// The node's direct-link state.
@@ -133,6 +154,9 @@ pub(crate) struct DirectLinks {
     last_proposal_ms: BTreeMap<LinkId, u64>,
     /// Established direct interfaces, by interface index.
     attached: BTreeMap<usize, Attachment>,
+    /// Signals the channel could not take yet (window full or pacing), per
+    /// link, in order. Flushed on every tick.
+    outbox: BTreeMap<LinkId, VecDeque<Signal>>,
     jobs: VecDeque<DirectLinkJob>,
 }
 
@@ -225,6 +249,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.direct_links.sessions.insert(link_id, session);
         self.apply_direct_link_steps(link_id, steps, now_ms);
         Ok(self.process_events_and_actions())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn direct_link_outbox_len(&self) -> usize {
+        self.direct_links.outbox.values().map(VecDeque::len).sum()
     }
 
     /// Take the driver's pending work, oldest first.
@@ -334,9 +363,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link.record_inbound(now_ms / MS_PER_SECOND);
         let is_initiator = link.is_initiator();
         let destination = *link.destination_hash();
-        self.direct_links
-            .attached
-            .insert(index, Attachment { link_id, previous });
+        self.direct_links.attached.insert(
+            index,
+            Attachment {
+                link_id,
+                previous,
+                attached_at_ms: now_ms,
+            },
+        );
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             interface = index,
@@ -524,13 +558,86 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
-    /// Queue `signal` on the link's channel. False if it could not be.
+    /// Send `signal` on the link's channel, or hold it until the channel can
+    /// take it. False only when it can never go (no active link, a full
+    /// outbox, or a hard channel error).
+    ///
+    /// A full send window or channel pacing is ordinary backpressure on a
+    /// busy link, not a reason to give the upgrade up: the signal waits in
+    /// the link's outbox behind any already waiting there, and the session's
+    /// own phase timer bounds how long that may take.
     fn send_direct_link_signal(&mut self, link_id: &LinkId, signal: &Signal, now_ms: u64) -> bool {
-        let Some(link) = self.links.get_mut(link_id) else {
+        if self
+            .direct_links
+            .outbox
+            .get(link_id)
+            .is_some_and(|q| !q.is_empty())
+        {
+            return self.hold_direct_link_signal(link_id, signal.clone());
+        }
+        match self.try_send_direct_link_signal(link_id, signal, now_ms) {
+            SignalSend::Sent => true,
+            SignalSend::NotYet => self.hold_direct_link_signal(link_id, signal.clone()),
+            SignalSend::Never => false,
+        }
+    }
+
+    fn hold_direct_link_signal(&mut self, link_id: &LinkId, signal: Signal) -> bool {
+        let queue = self.direct_links.outbox.entry(*link_id).or_default();
+        if queue.len() >= OUTBOX_MAX {
             return false;
+        }
+        queue.push_back(signal);
+        true
+    }
+
+    /// Send what each link's outbox holds, in order, until a channel pushes
+    /// back again.
+    fn flush_direct_link_outbox(&mut self, now_ms: u64) {
+        let links: Vec<LinkId> = self.direct_links.outbox.keys().copied().collect();
+        for link_id in links {
+            while let Some(signal) = self
+                .direct_links
+                .outbox
+                .get(&link_id)
+                .and_then(|q| q.front().cloned())
+            {
+                match self.try_send_direct_link_signal(&link_id, &signal, now_ms) {
+                    SignalSend::Sent => {
+                        if let Some(q) = self.direct_links.outbox.get_mut(&link_id) {
+                            q.pop_front();
+                        }
+                    }
+                    SignalSend::NotYet => break,
+                    SignalSend::Never => {
+                        self.direct_links.outbox.remove(&link_id);
+                        self.end_direct_link_session(link_id, Some(Failure::Timeout));
+                        break;
+                    }
+                }
+            }
+            if self
+                .direct_links
+                .outbox
+                .get(&link_id)
+                .is_some_and(VecDeque::is_empty)
+            {
+                self.direct_links.outbox.remove(&link_id);
+            }
+        }
+    }
+
+    fn try_send_direct_link_signal(
+        &mut self,
+        link_id: &LinkId,
+        signal: &Signal,
+        now_ms: u64,
+    ) -> SignalSend {
+        let Some(link) = self.links.get_mut(link_id) else {
+            return SignalSend::Never;
         };
         if link.state() != LinkState::Active {
-            return false;
+            return SignalSend::Never;
         }
         let link_mdu = link.mdu();
         let rtt_ms = link.rtt_ms();
@@ -542,9 +649,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             rtt_ms,
         ) {
             Ok(envelope) => envelope,
+            Err(ChannelError::Busy | ChannelError::PacingDelay { .. }) => {
+                return SignalSend::NotYet;
+            }
             Err(e) => {
                 crate::tracing::debug!(?e, "direct link: channel refused the signal");
-                return false;
+                return SignalSend::Never;
             }
         };
         let packet = match link.build_data_packet_with_context(
@@ -553,7 +663,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             &mut self.rng,
         ) {
             Ok(packet) => packet,
-            Err(_) => return false,
+            Err(_) => return SignalSend::Never,
         };
         // Same receipt as an application channel message, so the channel's
         // own retransmission covers a lost signal.
@@ -562,11 +672,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .register(&packet, *link_id, seq, now_ms);
         }
         self.route_link_packet(link_id, &packet);
-        true
+        SignalSend::Sent
     }
 
     /// Time out sessions whose peer or facilitator went quiet.
     pub(super) fn check_direct_link_timeouts(&mut self, now_ms: u64) {
+        self.flush_direct_link_outbox(now_ms);
         let due: Vec<(LinkId, Vec<Step>)> = self
             .direct_links
             .sessions
@@ -596,6 +707,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             });
         }
         self.direct_links.last_proposal_ms.remove(link_id);
+        self.direct_links.outbox.remove(link_id);
         if let Some(index) = self.direct_links.interface_of_link(link_id) {
             self.direct_links.attached.remove(&index);
             self.direct_links
@@ -624,12 +736,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let Some(attachment) = self.direct_links.attached.remove(&index) else {
             return;
         };
-        self.release_direct_attachment(index, attachment, "direct interface lost");
+        self.release_direct_attachment(index, attachment, "direct interface lost", false);
     }
 
     /// Return a link from its direct interface to its fallback, or close it
     /// when there is none, and report the loss.
-    fn release_direct_attachment(&mut self, index: usize, attachment: Attachment, why: &str) {
+    ///
+    /// `retire` is for a fallback this node decides on while the direct
+    /// interface still exists (the link went stale on it, or the peer came
+    /// back over the relay): the interface is closed, and a keepalive goes out
+    /// on the fallback at once, so a peer still on the direct path sees
+    /// traffic arrive over the relay and comes back too (see
+    /// [`Self::direct_link_inbound`]). Without it a one-way failure strands
+    /// the two ends on different paths.
+    fn release_direct_attachment(
+        &mut self,
+        index: usize,
+        attachment: Attachment,
+        why: &str,
+        retire: bool,
+    ) {
         let Some(link) = self.links.get_mut(&attachment.link_id) else {
             return;
         };
@@ -644,7 +770,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             interface_index: index,
         });
         match attachment.previous {
-            Some(previous) => link.set_attached_interface(previous),
+            Some(previous) => {
+                link.set_attached_interface(previous);
+                if retire {
+                    let nudge = link.build_keepalive_packet().ok();
+                    self.direct_links
+                        .jobs
+                        .push_back(DirectLinkJob::CloseInterface {
+                            interface_index: index,
+                        });
+                    if let Some(nudge) = nudge {
+                        self.route_link_packet(&attachment.link_id, &nudge);
+                    }
+                }
+            }
             None => {
                 let is_initiator = link.is_initiator();
                 let destination = *link.destination_hash();
@@ -660,12 +799,58 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
+    /// A link packet for `link_id` arrived on interface `iface`.
+    ///
+    /// If the link is on a direct interface and the packet came over the
+    /// relayed interface the link left, the peer has fallen back (its side of
+    /// the direct path stopped working). Follow it, after
+    /// [`FALLBACK_GRACE_MS`], before which relayed packets from the moment of
+    /// the upgrade are still draining.
+    pub(super) fn direct_link_inbound(&mut self, link_id: &LinkId, iface: usize, now_ms: u64) {
+        if self.direct_links.attached.is_empty() {
+            return;
+        }
+        let Some(index) = self.direct_links.interface_of_link(link_id) else {
+            return;
+        };
+        let Some(attachment) = self.direct_links.attached.get(&index).copied() else {
+            return;
+        };
+        if attachment.previous != Some(iface)
+            || now_ms < attachment.attached_at_ms.saturating_add(FALLBACK_GRACE_MS)
+        {
+            return;
+        }
+        self.direct_links.attached.remove(&index);
+        self.release_direct_attachment(index, attachment, "peer came back over the relay", true);
+    }
+
+    /// The link went stale while on a direct interface: the direct path has
+    /// stopped carrying the peer's traffic, at least toward this node. Fall
+    /// back now rather than when the interface's own silence timer expires;
+    /// on a fast link the link would be closed long before that.
+    pub(super) fn direct_link_link_stale(&mut self, link_id: &LinkId) {
+        let Some(index) = self.direct_links.interface_of_link(link_id) else {
+            return;
+        };
+        let Some(attachment) = self.direct_links.attached.remove(&index) else {
+            return;
+        };
+        self.release_direct_attachment(
+            index,
+            attachment,
+            "link went stale on the direct path",
+            true,
+        );
+    }
+
     /// Forget every session and direct interface: the driver's sockets are
     /// gone (a stopped node being started again). Links on a direct interface
     /// go back to their fallback, sessions in flight fail, and no job from
     /// before survives. Call before the driver starts taking jobs.
     pub fn abandon_direct_links(&mut self) -> crate::transport::TickOutput {
         self.direct_links.jobs.clear();
+        self.direct_links.outbox.clear();
         let sessions = core::mem::take(&mut self.direct_links.sessions);
         for (link_id, session) in sessions {
             self.events.push(NodeEvent::DirectLinkFailed {
@@ -676,7 +861,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         let attached = core::mem::take(&mut self.direct_links.attached);
         for (index, attachment) in attached {
-            self.release_direct_attachment(index, attachment, "node restarted");
+            self.release_direct_attachment(index, attachment, "node restarted", false);
         }
         self.process_events_and_actions()
     }
