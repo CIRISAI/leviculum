@@ -19,7 +19,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_time::with_timeout;
 use embassy_usb::class::cdc_acm::{self, CdcAcmClass, State};
-use embassy_usb::control::{OutResponse, Recipient, Request, RequestType};
+use embassy_usb::control::{OutResponse, Request};
 use embassy_usb::{Builder, Config, Handler, UsbDevice};
 use leviculum_core::envelope::{self, ConfigDelivery, ControlAction};
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
@@ -200,67 +200,60 @@ pub fn init(
 
 type UsbDriver = usb::Driver<'static, &'static SoftwareVbusDetect>;
 
-/// CDC PSTN spec §6.3.10: SET_LINE_CODING is class request 0x20,
-/// addressed to the CDC communication interface. Payload is the 7-byte
-/// LINE_CODING structure: u32 dwDTERate (LE), u8 bCharFormat,
-/// u8 bParityType, u8 bDataBits.
-const REQ_SET_LINE_CODING: u8 = 0x20;
-
 /// USB control-request handler that triggers the Adafruit nRF52 bootloader
 /// when the host opens any CDC port at exactly 1200 baud (the
 /// "1200-baud-touch" convention). On match: writes the UF2-stay-in-bootloader
 /// magic to GPREGRET and issues a soft reset. The bootloader reads GPREGRET
 /// on next boot and stays in UF2 mass-storage mode for flashing.
 ///
-/// All non-1200 SET_LINE_CODING requests fall through to the CdcAcm handler
-/// untouched. Strict equality only, fuzzy matching would risk spurious
-/// resets when terminal apps round 1215 → 1200.
+/// Whether a request is the touch is `leviculum_usb_policy::is_bootloader_touch`,
+/// asserted on the host against the exact request lnflash causes, each gating
+/// term wrong alone, and the neighbouring rates. All other requests fall
+/// through to the CdcAcm handler untouched.
 struct BaudTouchHandler;
 
 impl Handler for BaudTouchHandler {
     fn control_out(&mut self, req: Request, data: &[u8]) -> Option<OutResponse> {
-        if req.request_type == RequestType::Class
-            && req.recipient == Recipient::Interface
-            && req.request == REQ_SET_LINE_CODING
-            && data.len() >= 7
-        {
-            let data_rate = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            if data_rate == 1200 {
-                // Hot path: no `await`, no allocation, no logging between the
-                // GPREGRET write and `sys_reset()`. Any preemption here would
-                // risk the magic being lost before the reset fires.
-                const DFU_MAGIC_UF2_RESET: u32 = 0x57;
-                // GPREGRET lives in the POWER peripheral, which the S140
-                // SoftDevice owns once `Softdevice::enable` has run: a direct
-                // write post-enable is an MWU MEMACC (info bit 0, POWER) and
-                // records one bogus panic per touch-flash (Codeberg #249).
-                // Post-enable the write must go through the SoC syscalls;
-                // pre-enable (this handler can fire before `ble::init` on a
-                // fast host) the syscalls fail, and the direct write is legal.
-                let mut sd_enabled: u8 = 0;
-                unsafe {
-                    // Legal in every SD state, always returns NRF_SUCCESS.
-                    nrf_softdevice_s140::sd_softdevice_is_enabled(&mut sd_enabled);
-                }
-                if sd_enabled != 0 {
-                    unsafe {
-                        // GPREGRET syscalls are bit-mask ops: clear all bits,
-                        // then set the UF2 magic.
-                        nrf_softdevice_s140::sd_power_gpregret_clr(0, 0xFF);
-                        nrf_softdevice_s140::sd_power_gpregret_set(0, DFU_MAGIC_UF2_RESET);
-                    }
-                } else {
-                    // SAFETY: pre-`Softdevice::enable` the POWER peripheral is
-                    // unprotected; a direct GPREGRET write is legal only in
-                    // this window.
-                    unsafe {
-                        const GPREGRET: *mut u32 = 0x4000_051C as *mut u32;
-                        core::ptr::write_volatile(GPREGRET, DFU_MAGIC_UF2_RESET);
-                    }
-                }
-                cortex_m::peripheral::SCB::sys_reset();
-                // sys_reset() is `-> !` and never returns.
+        if leviculum_usb_policy::is_bootloader_touch(
+            req.request_type as u8,
+            req.recipient as u8,
+            req.request,
+            data,
+        ) {
+            // Hot path: no `await`, no allocation, no logging between the
+            // GPREGRET write and `sys_reset()`. Any preemption here would
+            // risk the magic being lost before the reset fires.
+            const DFU_MAGIC_UF2_RESET: u32 = 0x57;
+            // GPREGRET lives in the POWER peripheral, which the S140
+            // SoftDevice owns once `Softdevice::enable` has run: a direct
+            // write post-enable is an MWU MEMACC (info bit 0, POWER) and
+            // records one bogus panic per touch-flash (Codeberg #249).
+            // Post-enable the write must go through the SoC syscalls;
+            // pre-enable (this handler can fire before `ble::init` on a
+            // fast host) the syscalls fail, and the direct write is legal.
+            let mut sd_enabled: u8 = 0;
+            unsafe {
+                // Legal in every SD state, always returns NRF_SUCCESS.
+                nrf_softdevice_s140::sd_softdevice_is_enabled(&mut sd_enabled);
             }
+            if sd_enabled != 0 {
+                unsafe {
+                    // GPREGRET syscalls are bit-mask ops: clear all bits,
+                    // then set the UF2 magic.
+                    nrf_softdevice_s140::sd_power_gpregret_clr(0, 0xFF);
+                    nrf_softdevice_s140::sd_power_gpregret_set(0, DFU_MAGIC_UF2_RESET);
+                }
+            } else {
+                // SAFETY: pre-`Softdevice::enable` the POWER peripheral is
+                // unprotected; a direct GPREGRET write is legal only in
+                // this window.
+                unsafe {
+                    const GPREGRET: *mut u32 = 0x4000_051C as *mut u32;
+                    core::ptr::write_volatile(GPREGRET, DFU_MAGIC_UF2_RESET);
+                }
+            }
+            cortex_m::peripheral::SCB::sys_reset();
+            // sys_reset() is `-> !` and never returns.
         }
         // Pass-through for everything else: CdcAcm's own handler will accept
         // the SET_LINE_CODING and update its cached line_coding, or reject as
@@ -442,8 +435,10 @@ async fn write_framed(
 /// only a stuck consumer runs the clock out — the consumer that does not
 /// exist (LoRa held down at boot) no longer reaches this wait at all, it
 /// takes the stored route before the channel. Well inside lnflash's 3.5 s
-/// answer window so the refusal still reaches the host.
-const CONFIG_DELIVER_WITHIN: Duration = Duration::from_millis(500);
+/// answer window so the refusal still reaches the host. The value and that
+/// arithmetic live in `leviculum_usb_policy` and are asserted on the host.
+const CONFIG_DELIVER_WITHIN: Duration =
+    Duration::from_millis(leviculum_usb_policy::CONFIG_DELIVER_WITHIN_MS);
 
 /// How long a delivered config may wait for the LoRa task to confirm the
 /// apply before the answer stops waiting and says so. Since the config is
@@ -454,8 +449,11 @@ const CONFIG_DELIVER_WITHIN: Duration = Duration::from_millis(500);
 /// bound, while `CONFIG_DELIVER_WITHIN` plus this stays inside the
 /// tightest host answer window (lnsd's legacy sender waits 2 s per
 /// attempt); slower profiles whose deferral bound exceeds it (4.8 s at
-/// SF10/62.5 kHz) are answered busy and acked on the host's retry.
-const CONFIG_APPLY_WITHIN: Duration = Duration::from_millis(1200);
+/// SF10/62.5 kHz) are answered busy and acked on the host's retry. Both
+/// bounds are recomputed on the host from the airtime formula
+/// (`leviculum_usb_policy::retune_deferral_bound_ms`: 728 ms and 4756 ms).
+const CONFIG_APPLY_WITHIN: Duration =
+    Duration::from_millis(leviculum_usb_policy::CONFIG_APPLY_WITHIN_MS);
 
 /// Hand a parsed radio configuration to the LoRa task and persist it.
 ///
@@ -599,8 +597,9 @@ async fn persist_outcome(
 
 /// Incomplete frame timeout. Python uses 100ms but also sets low_latency mode
 /// so frames arrive as bulk USB packets. Without low_latency, byte-by-byte USB
-/// delivery needs more time. 500ms gives 33x margin for a 167-byte frame at 115200.
-const FRAME_TIMEOUT_MS: u64 = 500;
+/// delivery needs more time. 500ms gives 34x margin for a 167-byte frame at
+/// 115200 (`leviculum_usb_policy::frame_timeout_margin`, host-tested).
+const FRAME_TIMEOUT_MS: u64 = leviculum_usb_policy::FRAME_TIMEOUT_MS;
 
 /// Reticulum serial interface task: HDLC-framed bidirectional I/O on USB CDC-ACM.
 ///

@@ -1,0 +1,16 @@
+[package]
+name = "leviculum-usb-policy"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "The 1200-baud touch predicate and the control-envelope answer windows of the firmware's USB side, host-testable"
+
+[dependencies]
+# For one function and one constant: the retune deferral bound is the airtime
+# of one maximum-size frame at the live modulation, and it is computed with the
+# same `airtime_ms_with_preamble` / `derive_preamble_symbols` the radio driver
+# sizes that deferral with (`leviculum_core::sx126x::rx_extend_ms`), never a
+# second copy of the formula. The firmware already links leviculum-core with
+# default features off, so this costs the image nothing.
+leviculum-core = { path = "../../leviculum-core", default-features = false }

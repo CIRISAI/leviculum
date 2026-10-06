@@ -46,7 +46,7 @@ drive (`stand_down_for_rx`, `leviculum-nrf/src/sx1262.rs:965`).
 
 ## Where the seam runs today
 
-The `leviculum-nrf` workspace has 31 members besides the firmware crate,
+The `leviculum-nrf` workspace has 32 members besides the firmware crate,
 every one of them pure and host-testable: `screen`, `sd-policy`,
 `gnss-time`, `gnss-presence`, `gnss-init`, `telemetry-policy`, `ble-tx`,
 `announce-policy`, `queue-budget`, `log-line`, `tx-spacing`, `rx-arming`,
@@ -54,7 +54,7 @@ every one of them pure and host-testable: `screen`, `sd-policy`,
 `media-state`, `record-log`, `pn-store`, `store-spike`, `qspi-bitbang`,
 `battery-scale`, `settle-budget`, `drop-budget`, `heap-budget`,
 `node-name`, `sync-batch`, `upload-proof`, `mute-lease`, `qspi-selftest`,
-`qspi-boot` (`members`, `leviculum-nrf/Cargo.toml:14`). Before
+`qspi-boot`, `usb-policy` (`members`, `leviculum-nrf/Cargo.toml:14`). Before
 `heap-budget` and `node-name` joined them they carried **806 host assertions across 61 test targets** —
 measured 2026-09-25 by the host-triple lines of `lint-nrf`
 (`Justfile:75`). `mute-lease` is the
@@ -120,9 +120,9 @@ defer.
 
 ## Still stranded
 
-The four areas that prompted this page are already seamed, and so are
-the first three decisions the list below used to name; it is worth saying
-which, because the list below is what is actually left:
+The four areas that prompted this page are already seamed, and so is
+most of what the list below used to name; it is worth saying which,
+because the list below is what is actually left:
 
 | Decision | Crate | Since |
 |---|---|---|
@@ -133,26 +133,21 @@ which, because the list below is what is actually left:
 | Heap budget: endpoint links, boot and live serve cap | `leviculum-heap-budget` | `03e99edf`, 2026-10-05 |
 | Node name, derived defaults and the BLE-pending flag | `leviculum-node-name` | `8128a0d2`, 2026-10-06 |
 | Front-end position: never both switch paths at once | `leviculum-rx-arming` (`front_end`) | `1a1ef641`, 2026-10-06 |
+| The 1200-baud touch predicate | `leviculum-usb-policy` | 2026-10-06 |
+| Control-envelope answer windows and the deferral bound they cover | `leviculum-usb-policy` | 2026-10-06 |
+
+The answer windows moved as constants, not as functions of the
+modulation. What the modulation moves is the delay they must cover, one
+maximum-size frame's airtime (728 ms at the SF8/125 kHz default, 4756 ms
+at SF10/62.5 kHz); the windows answer to the hosts' fixed waits (lnsd's
+2 s per attempt), so a slow profile is answered busy and acked on the
+retry rather than waited out. The crate asserts both halves, and the
+envelope-inside-lnsd relation is a build-time assert the firmware build
+inherits.
 
 What has no host assertion, in the order it is cheap to move:
 
-**1. The 1200-baud touch predicate.** Whether a USB control-out request
-means "reset into the UF2 bootloader" is a four-term match on request
-type, recipient, request code and payload length before the rate is even
-read (`BaudTouchHandler`, `leviculum-nrf/src/usb.rs:218`). A false
-positive resets a board mid-session; a false negative costs a physical
-double-tap on every flash. The predicate is pure; only the GPREGRET write
-and `sys_reset` after it are not.
-
-**2. The control-envelope answer windows.** Three durations, each
-justified against a host-side timeout it must stay inside:
-`CONFIG_DELIVER_WITHIN` (`leviculum-nrf/src/usb.rs:446`),
-`CONFIG_APPLY_WITHIN` (`leviculum-nrf/src/usb.rs:458`) and
-`FRAME_TIMEOUT_MS` (`leviculum-nrf/src/usb.rs:603`). The reasoning is
-airtime arithmetic at the live modulation, which is exactly what a host
-test can recompute and a comment cannot.
-
-**3. The `[TRANSPORT]` ticker.** The re-arm deliberately drops missed
+**1. The `[TRANSPORT]` ticker.** The re-arm deliberately drops missed
 periods so a busy loop does not then emit a burst of catch-up lines
 (`poll`, `leviculum-nrf/src/transport_stats.rs:106`), and the line is
 byte-exact because capture consumers grep it (`log`,

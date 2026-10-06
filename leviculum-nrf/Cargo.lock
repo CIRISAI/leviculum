@@ -1071,6 +1071,7 @@ dependencies = [
  "leviculum-telemetry-policy",
  "leviculum-tx-spacing",
  "leviculum-upload-proof",
+ "leviculum-usb-policy",
  "nmea0183",
  "nrf-softdevice",
  "nrf-softdevice-s140",
@@ -1166,6 +1167,13 @@ version = "0.1.0"
 dependencies = [
  "leviculum-core",
  "leviculum-settle-budget",
+]
+
+[[package]]
+name = "leviculum-usb-policy"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
 ]
 
 [[package]]
