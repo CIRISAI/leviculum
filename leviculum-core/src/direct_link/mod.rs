@@ -26,6 +26,11 @@
 //! The node-level bookkeeping lives in `node::direct_link`; sockets are the
 //! driver's.
 
+/// The MTU a link is lowered to when it moves onto a direct interface: what
+/// fits one unfragmented UDP datagram on common internet paths. The same
+/// value rns-rs uses, so a mixed pair agrees on the link MDU.
+pub const DIRECT_LINK_MTU: u32 = 1400;
+
 pub mod session;
 pub mod wire;
 

@@ -588,7 +588,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Every `self.links.insert(link_id, ..)` is paired with a
     /// `self.transport.register_destination(link_id)`. This helper
     /// ensures the reverse cleanup always happens together.
-    fn remove_link(&mut self, link_id: &LinkId) {
+    pub(super) fn remove_link(&mut self, link_id: &LinkId) {
         // leviculum#77: the close reported next counts as a handshake failure
         // if this link never established.
         if let Some(link) = self.links.get(link_id) {
@@ -1860,10 +1860,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // and retransmits; if the host never drains, the channel's retry budget
         // runs out and the link fails loudly, which is the truth. Same shape as
         // the rx-ring-full refusal below, one layer further out.
-        if self.channel_delivery_budget == Some(0) {
-            self.update_channel_backpressure(now_ms);
-            return;
-        }
+        // A direct-link signal (leviculum#70) never reaches the host sink, so
+        // a full sink is no reason to refuse it: the one exception, admitted
+        // only when it is the next message in sequence (anything behind it
+        // still waits). Telling that needs the envelope header, so only a
+        // full sink pays for the decrypt before the refusal.
+        let sink_full = self.channel_delivery_budget == Some(0);
 
         // 1. Decrypt the envelope data
         let encrypted_data = packet.data.as_slice();
@@ -1880,6 +1882,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         };
         plaintext.truncate(decrypted_len);
+
+        if sink_full {
+            // Whatever its sequence, a signal costs the sink nothing: the next
+            // one is delivered, one ahead waits buffered for its gap, and a
+            // duplicate of a delivered one is re-proved. Application messages
+            // are still refused.
+            let is_signal = plaintext.len() >= 2
+                && crate::direct_link::wire::is_signal_msgtype(u16::from_be_bytes([
+                    plaintext[0],
+                    plaintext[1],
+                ]));
+            if !is_signal {
+                self.update_channel_backpressure(now_ms);
+                return;
+            }
+        }
 
         // 2. Channel receive + proof, link borrow scoped in this block so that
         // route_link_packet (which needs &mut self) can run afterward.
@@ -1914,6 +1932,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         "link_mgr: channel message received (in-order)"
                     );
                     if crate::direct_link::wire::is_signal_msgtype(envelope.msgtype) {
+                        // Handled by the node: costs the host sink nothing.
                         direct_link_signals.push((envelope.msgtype, envelope.data));
                     } else {
                         self.events.push(NodeEvent::MessageReceived {
@@ -1922,9 +1941,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             sequence: envelope.sequence,
                             data: envelope.data,
                         });
-                    }
-                    if let Some(budget) = &mut self.channel_delivery_budget {
-                        *budget = budget.saturating_sub(1);
+                        if let Some(budget) = &mut self.channel_delivery_budget {
+                            *budget = budget.saturating_sub(1);
+                        }
                     }
                     if let Some(p) =
                         Self::build_channel_proof_from_hash(link, &link_id, &full_packet_hash)
@@ -4742,7 +4761,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ///
     /// INVARIANT: The link has already been removed from self.links
     /// at all call sites. This method must not access the link.
-    fn emit_link_closed(
+    pub(super) fn emit_link_closed(
         &mut self,
         link_id: LinkId,
         reason: LinkCloseReason,
