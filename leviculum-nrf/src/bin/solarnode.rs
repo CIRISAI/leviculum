@@ -576,7 +576,12 @@ async fn main(spawner: Spawner) {
     leviculum_nrf::store_spike::exercise(shared_flash).await;
 
     // No display on this board: no ST7789, no `leviculum-screen` path,
-    // and P1.08/P1.09 and SPI3 stay unconfigured (Codeberg #233).
+    // and P1.08/P1.09 and SPI3 stay unconfigured (Codeberg #233). No
+    // button task either. Both absences are declared once, gate-free, so a
+    // boot smoke cell can tell them from a line dropped before the host
+    // attached (Codeberg #296).
+    leviculum_nrf::log::log_fmt_critical("[DISP] ", format_args!("none"));
+    leviculum_nrf::log::log_fmt_critical("[BTN] ", format_args!("none"));
 
     // XIAO L76K on UARTE0, sweep starting at the module's 9600 default.
     // Pin naming is from the MCU's side, as everywhere else in this tree:

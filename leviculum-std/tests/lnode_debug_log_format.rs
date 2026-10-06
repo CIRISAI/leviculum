@@ -1339,6 +1339,108 @@ fn the_ble_link_evidence_is_not_dropped_by_the_runtime_gate() {
     }
 }
 
+/// Codeberg #296: the display and button bring-up lines are not dropped by
+/// the runtime gate.
+///
+/// The boot smoke cells assert BLE, LoRa, battery, GNSS, heap and stack from
+/// the board's own lines, and nothing asserted that the display or the button
+/// came up: both report their bring-up within the first second or so of
+/// boot, before the host attaches, and a gated line written then is not late,
+/// it is gone (the same failure shape as the identity lines, #234, and the
+/// BLE link evidence, #446). Each line is a handful of bytes once per boot,
+/// so it belongs on the critical path like the banner.
+///
+/// Four emission sites, and every board reaches at least one `[DISP]` and
+/// one `[BTN]` line: the Pocket's SSD1306 result (`display.rs`), the T114's
+/// ST7789 result (`st7789.rs`), the button task's init line (`button.rs`),
+/// and the declared absence a bin prints when it brings up no display or no
+/// button, so a smoke cell can assert presence or absence on every board.
+#[test]
+fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
+    // The bring-up half of each task: everything before the render loop.
+    for (file, marker, until, lines) in [
+        (
+            "display.rs",
+            "pub async fn display_task(",
+            "let id_short",
+            &[
+                "OLED probe: {:?} at 0x{:02X}",
+                "init failed: {:?}",
+                "SSD1306 init ok",
+                "SH1106 detected",
+                "no OLED found on TWISPI0",
+            ][..],
+        ),
+        (
+            "st7789.rs",
+            "pub async fn display_task(",
+            "let id_short",
+            &["ST7789 blind init start", "ST7789 init complete"][..],
+        ),
+        (
+            "button.rs",
+            "pub async fn button_task(",
+            "loop {",
+            &["init pin=P{}.{:02} pull=up active=low debounce=none"][..],
+        ),
+    ] {
+        let src = nrf_source(file);
+        let body = body_after(&src, file, marker, "the bring-up task");
+        let head = &body[..body
+            .find(until)
+            .unwrap_or_else(|| panic!("leviculum-nrf/src/{file}: `{until}` not found"))];
+        for line in lines {
+            assert!(
+                head.contains(line),
+                "leviculum-nrf/src/{file} no longer emits `{line}` during bring-up"
+            );
+        }
+        assert!(
+            head.contains("log_fmt_critical("),
+            "leviculum-nrf/src/{file} no longer writes its bring-up through \
+             log_fmt_critical (Codeberg #296)"
+        );
+        assert!(
+            !head.contains("log_fmt(") && !head.contains("info!("),
+            "leviculum-nrf/src/{file} writes a bring-up line through the runtime-gated \
+             path; emitted before DTR-assert it is dropped, not delayed, and the \
+             smoke cell cannot tell a dead display or button from a quiet one \
+             (Codeberg #296)"
+        );
+    }
+
+    // Declared absence: a bin that spawns no display task, or no button
+    // task, says so once on the gate-free path.
+    let none = |tag: &str| format!(r#"log_fmt_critical("{tag} ", format_args!("none"))"#);
+    for (bin, tags) in [
+        ("bin/t114.rs", &["[BTN]"][..]),
+        ("bin/solarnode.rs", &["[DISP]", "[BTN]"][..]),
+        ("bin/rak4631.rs", &["[DISP]", "[BTN]"][..]),
+    ] {
+        let src = nrf_source(bin);
+        for tag in tags {
+            assert!(
+                src.contains(&none(tag)),
+                "leviculum-nrf/src/{bin} no longer declares `{tag} none` on the \
+                 gate-free path (Codeberg #296)"
+            );
+        }
+    }
+    // On the RAK4631 the absence is the bare-module build: the Pocket image
+    // (`display` feature) prints the driver's result instead.
+    let rak = nrf_source("bin/rak4631.rs");
+    let at = rak
+        .find(&none("[DISP]"))
+        .unwrap_or_else(|| panic!("bin/rak4631.rs declares no `[DISP] none`"));
+    assert!(
+        rak[..at]
+            .rfind("#[cfg(not(feature = \"display\"))]")
+            .is_some_and(|cfg| rak[..at].rfind("#[cfg(feature = \"display\")]") < Some(cfg)),
+        "bin/rak4631.rs declares `[DISP] none` outside the bare-module cfg, so the \
+         Pocket image would claim it has no display"
+    );
+}
+
 /// Codeberg #398: `[TIME_SOURCE]` is the only thing a board says about its
 /// clock, and the calendar can heal without passing any of the sites that
 /// record what seated it.

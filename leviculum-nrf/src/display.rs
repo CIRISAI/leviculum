@@ -131,7 +131,10 @@ pub async fn display_task(
     Timer::after(Duration::from_millis(500)).await;
 
     let detected = detect(&mut twim).await;
-    crate::log::log_fmt(
+    // The bring-up result goes through the gate-free path: it is written
+    // about a second into boot, before the host attaches, and a gated line
+    // written then is dropped, not delayed (Codeberg #296).
+    crate::log::log_fmt_critical(
         "[DISP] ",
         format_args!("OLED probe: {:?} at 0x{:02X}", detected.kind, detected.addr),
     );
@@ -142,21 +145,21 @@ pub async fn display_task(
             let mut d = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
                 .into_buffered_graphics_mode();
             if let Err(e) = d.init() {
-                crate::log::log_fmt("[DISP] ", format_args!("init failed: {:?}", e));
+                crate::log::log_fmt_critical("[DISP] ", format_args!("init failed: {:?}", e));
                 return;
             }
-            crate::log::log_fmt("[DISP] ", format_args!("SSD1306 init ok"));
+            crate::log::log_fmt_critical("[DISP] ", format_args!("SSD1306 init ok"));
             d
         }
         DetectedKind::Sh1106 => {
-            crate::log::log_fmt(
+            crate::log::log_fmt_critical(
                 "[DISP] ",
                 format_args!("SH1106 detected — not rendered (driver pending)"),
             );
             return;
         }
         DetectedKind::None => {
-            crate::log::log_fmt(
+            crate::log::log_fmt_critical(
                 "[DISP] ",
                 format_args!("no OLED found on TWISPI0 — display task exiting"),
             );

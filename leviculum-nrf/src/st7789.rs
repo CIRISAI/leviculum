@@ -301,7 +301,9 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
     Timer::after(Duration::from_millis(10)).await;
     rst.set_high();
 
-    crate::log::log_fmt(
+    // Gate-free, like the Pocket's OLED result: this runs before the host
+    // attaches, and a gated line written then is dropped (Codeberg #296).
+    crate::log::log_fmt_critical(
         "[DISP] ",
         format_args!("ST7789 blind init start (write-only panel, no probe possible)"),
     );
@@ -314,7 +316,7 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
     // Panel is black now — light it up.
     leda.set_low();
 
-    crate::log::log_fmt(
+    crate::log::log_fmt_critical(
         "[DISP] ",
         format_args!("ST7789 init complete, status frame at 1 Hz"),
     );

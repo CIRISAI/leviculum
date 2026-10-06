@@ -547,6 +547,14 @@ async fn main(spawner: Spawner) {
         leviculum_nrf::button::init(&spawner, p.P0_09.into());
         info!("button task spawned");
     }
+    // The bare module (no baseboard) has neither; declared once, gate-free,
+    // so a boot smoke cell can tell absence from a line dropped before the
+    // host attached (Codeberg #296).
+    #[cfg(not(feature = "display"))]
+    {
+        leviculum_nrf::log::log_fmt_critical("[DISP] ", format_args!("none"));
+        leviculum_nrf::log::log_fmt_critical("[BTN] ", format_args!("none"));
+    }
     #[cfg(feature = "gnss")]
     {
         leviculum_nrf::gnss::init(

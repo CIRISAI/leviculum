@@ -589,8 +589,8 @@ mattering. The RAK4631 looks like the same problem, since the bare
 module and the Pocket V2 share a `Board-ID` and have separate builds,
 but the baseboard build degrades cleanly on a bare module: the display
 is found by an I2C probe and its task exits when nothing answers
-(`leviculum-nrf/src/display.rs:158-164`), the button pin is pulled up so
-it never reads as pressed (`leviculum-nrf/src/button.rs:36`), the GNSS
+(`leviculum-nrf/src/display.rs:161-167`), the button pin is pulled up so
+it never reads as pressed (`leviculum-nrf/src/button.rs:37`), the GNSS
 task waits on a UART that stays silent, and the battery task publishes
 into a watch channel whose only subscriber is the display that is not
 running. One image therefore covers both, at 47.6 KiB of flash and

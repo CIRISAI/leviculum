@@ -529,6 +529,10 @@ async fn main(spawner: Spawner) {
         );
         info!("display task spawned (ST7789 blind-drive)");
     }
+    // The user button (P1.10) has no task on this board yet; say so once,
+    // gate-free, so a boot smoke cell can tell declared absence from a
+    // line dropped before the host attached (Codeberg #296).
+    leviculum_nrf::log::log_fmt_critical("[BTN] ", format_args!("none"));
 
     // Quectel L76K on UARTE0 (#69). Pin naming is from the MCU's side:
     // the MCU receives on P1.05 and transmits on P1.07. Beware the

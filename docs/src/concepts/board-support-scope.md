@@ -40,9 +40,9 @@ constraint on peripheral handling, not a hope:
 - **Probe where the bus allows it.** The RAK baseboard display is found
   by an I2C address probe (`ack_probe`, `leviculum-nrf/src/display.rs:55`);
   when nothing answers, the task logs and exits
-  (`DetectedKind::None`, `leviculum-nrf/src/display.rs:158-164`).
+  (`DetectedKind::None`, `leviculum-nrf/src/display.rs:161-167`).
 - **Fail into the harmless state.** The user button is configured
-  `Pull::Up` (`leviculum-nrf/src/button.rs:36`), so an absent button
+  `Pull::Up` (`leviculum-nrf/src/button.rs:37`), so an absent button
   reads as not pressed rather than as noise.
 - **Park rather than spin.** The GNSS task awaits a UART that simply
   stays silent when no receiver is fitted.

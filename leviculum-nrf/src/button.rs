@@ -22,7 +22,7 @@
 //! an SSD1306 `set_display_on(_)` command.
 
 use embassy_executor::Spawner;
-use embassy_nrf::gpio::{AnyPin, Input, Pull};
+use embassy_nrf::gpio::{AnyPin, Input, Pin, Pull};
 use embassy_nrf::Peri;
 use embassy_time::{Duration, Instant};
 
@@ -33,7 +33,19 @@ const LONG_PRESS_MIN: Duration = Duration::from_millis(2000);
 
 #[embassy_executor::task]
 pub async fn button_task(button_pin: Peri<'static, AnyPin>) {
+    let (port, pin) = (button_pin.port() as u8, button_pin.pin());
     let mut button = Input::new(button_pin, Pull::Up);
+    // The bring-up line goes through the gate-free path: the task starts
+    // before the host attaches, and a gated line written then is dropped,
+    // not delayed (Codeberg #296). No debounce: a press is classified by
+    // its two GPIOTE edges alone.
+    crate::log::log_fmt_critical(
+        "[BTN] ",
+        format_args!(
+            "init pin=P{}.{:02} pull=up active=low debounce=none",
+            port, pin
+        ),
+    );
     let sender = DISPLAY_ON_REQ.sender();
     // Receiver here is just for the "what's the current state?" lookup
     // when classifying a press. We never block on changes from this side.
