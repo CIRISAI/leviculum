@@ -1103,6 +1103,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         now_ms: u64,
         interface_index: usize,
     ) {
+        // leviculum#70: link traffic over the relay a direct link left means
+        // the peer has fallen back to it.
+        if packet.flags.packet_type != PacketType::LinkRequest {
+            self.direct_link_inbound(
+                &LinkId::new(packet.destination_hash),
+                interface_index,
+                now_ms,
+            );
+        }
         match packet.flags.packet_type {
             PacketType::LinkRequest => {
                 self.handle_link_request(packet, interface_index);
@@ -4374,6 +4383,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 link.set_state(LinkState::Stale);
                 self.events.push(NodeEvent::LinkStale { link_id });
             }
+            // leviculum#70: a direct path gone quiet falls back now.
+            self.direct_link_link_stale(&link_id);
         }
 
         // Second pass: Find stale links that should be closed
