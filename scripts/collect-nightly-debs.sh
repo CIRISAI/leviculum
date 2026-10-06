@@ -12,6 +12,7 @@
 #   lnomad_*_{amd64,arm64}.deb
 #   lblogd_*_{amd64,arm64}.deb
 #   lnpnd_*_{amd64,arm64}.deb
+#   leviculum-heapacct_*_arm64.deb
 # and the lnflash firmware bundle from scripts/lnflash-bundle.sh:
 #   target/lnflash/lnflash-<version>.tar.gz
 # plus:
@@ -31,6 +32,8 @@
 # and arm64:
 #   dist/<pkg>-nightly-<arch>.deb          + .sha256
 #   dist/<pkg>-nightly-<arch>.tar.gz       + .sha256   (just the binaries)
+# plus the instrumented leviculum package, arm64 only (Codeberg #437):
+#   dist/leviculum-nightly-arm64-heapacct.deb + .sha256
 # plus one source tarball and one lnflash bundle:
 #   dist/leviculum-nightly-source.tar.gz   + .sha256
 #   dist/lnflash-nightly-amd64.tar.gz      + .sha256
@@ -83,9 +86,9 @@ rm -rf "$DIST"
 mkdir -p "$DIST"
 
 collect_deb() {
-    local pkg="$1"        # leviculum | lnomad
+    local pkg="$1"        # leviculum | lnomad | ... | leviculum-heapacct
     local arch_dash="$2"  # amd64 | arm64
-    local stable="${pkg}-nightly-${arch_dash}.deb"
+    local stable="${3:-${pkg}-nightly-${arch_dash}.deb}"
 
     # cargo-deb emits one .deb per package and arch under
     # target/debian/. The filename embeds the full nightly version,
@@ -119,6 +122,12 @@ collect_deb lblogd amd64
 collect_deb lblogd arm64
 collect_deb lnpnd amd64
 collect_deb lnpnd arm64
+# Codeberg #437: the heap-accounting build of the leviculum package, for
+# memory censuses on the arm64 soak node. Not for daily use, and published
+# for arm64 only because that is where the census is taken. The plain
+# glob above cannot pick it up: its file name continues `leviculum-`, not
+# `leviculum_`.
+collect_deb leviculum-heapacct arm64 leviculum-nightly-arm64-heapacct.deb
 
 # Per-arch userspace binary tarball: the package's binaries plus
 # README/LICENSE and a VERSION pointer. Drop-in for users who want the

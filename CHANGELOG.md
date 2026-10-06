@@ -20,6 +20,18 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- An instrumented daemon package for memory censuses (Codeberg #437). The
+  nightly publishes `leviculum-nightly-arm64-heapacct.deb` beside the plain
+  packages: package `leviculum-heapacct`, version `<plain>+heapacct`, the
+  same six binaries with `lnsd` built under `--features heap-accounting`. It
+  conflicts with and replaces `leviculum`, and the plain package does the
+  same back, so `dpkg -i` of either swaps the other out. Its SIGUSR1
+  census subtracts the measured live heap from resident plus swap instead
+  of the modelled total, so what is left is allocator retention plus
+  stacks; a plain build prints `live n/a` in the same place. `lnsd
+  --version` names the build with `+heapacct`. Not for daily use: the
+  counting costs a few atomic operations per allocation.
+
 - Path choice can weigh what the link has shown, not only how many hops
   (Codeberg #230). New opt-in `[reticulum]` key `path_choice =
   hops_and_loss`: competing copies of one announce emission are ranked by

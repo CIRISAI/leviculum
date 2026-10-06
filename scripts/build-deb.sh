@@ -30,7 +30,8 @@
 # Requires cargo-deb; arm64 additionally needs cargo-zigbuild and a
 # ziglang on PATH (`just _deb-prereqs` installs both), and python3 for
 # the manual pages. Produces target/debian/*_<arch>.deb, which cargo-deb
-# also hardlinks under target/<triple>/debian/.
+# also hardlinks under target/<triple>/debian/: one per crate, plus
+# leviculum-heapacct, the instrumented variant of the leviculum package.
 
 set -euo pipefail
 
@@ -140,8 +141,55 @@ for crate in "${CRATES[@]}"; do
     debs+=("$TARGET/debian/$(pkg_name "$crate")_${version}_${ARCH}.deb")
 done
 
-# The three things cargo-deb gets wrong or cannot produce: native
-# changelog name, md5sums, empty Depends. Idempotent, in place.
+# The heap-accounting variant of the leviculum package (Codeberg #437): the
+# same six binaries, with lnsd rebuilt under `--features heap-accounting` so
+# its SIGUSR1 census subtracts MEASURED live bytes instead of the model. The
+# feature puts leviculum_std's CountingAllocator in front of the system
+# allocator, which only counts and forwards every call, so the CPU cost is
+# bounded and fixed: three relaxed atomic adds per allocation and one per
+# free, independent of heap size or uptime (heap_accounting.rs module docs;
+# `heap-gap-bench --alloc-overhead` measures it per allocation).
+#
+# Only lnsd is rebuilt, in the same target directory so only leviculum-std
+# and leviculum-cli recompile. Cargo uplifts the instrumented binary over
+# release/lnsd, which the plain tarballs read afterwards, so the plain one is
+# put back once the variant is packaged. `rm` before `cp`, never `cp` over:
+# release/lnsd is a hardlink into deps/, and writing through it would put
+# plain bytes into the cached instrumented artefact.
+release_dir="$TARGET/$TRIPLE/release"
+plain_lnsd="$(mktemp)"
+cp "$release_dir/lnsd" "$plain_lnsd"
+restore_plain_lnsd() {
+    rm -f "$release_dir/lnsd"
+    cp "$plain_lnsd" "$release_dir/lnsd"
+    chmod 755 "$release_dir/lnsd"
+    rm -f "$plain_lnsd"
+}
+trap restore_plain_lnsd EXIT
+
+# Read off the bytes, not the exit code: an arm64 binary cannot be run here,
+# and the startup line exists only in a heap-accounting build.
+heapacct_marker='Heap accounting: on'
+"${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd \
+    --features heap-accounting
+grep -qaF "$heapacct_marker" "$release_dir/lnsd" || {
+    echo "error: lnsd built with --features heap-accounting does not carry the feature" >&2
+    exit 1
+}
+heapacct_version="$(cat .deb-version-leviculum-cli)+heapacct"
+cargo deb -p leviculum-cli --variant heapacct --target "$TRIPLE" --no-build --no-strip \
+    --deb-version "$heapacct_version"
+debs+=("$TARGET/debian/leviculum-heapacct_${heapacct_version}_${ARCH}.deb")
+
+restore_plain_lnsd
+trap - EXIT
+if grep -qaF "$heapacct_marker" "$release_dir/lnsd"; then
+    echo "error: the plain lnsd was not restored after the heap-accounting build" >&2
+    exit 1
+fi
+
+# The things cargo-deb gets wrong or cannot produce: native changelog
+# name, md5sums, empty Depends. Idempotent, in place.
 bash scripts/deb-finalize.sh "${debs[@]}"
 
 for deb in "${debs[@]}"; do

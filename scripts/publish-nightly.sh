@@ -87,6 +87,8 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-arm6
 
 \`sudo apt install ./leviculum-nightly-amd64.deb\` installs \`lnsd\` as a systemd service and sets up \`/etc/reticulum\` for Python-RNS client drop-in compatibility.
 
+\`leviculum-nightly-arm64-heapacct.deb\` is an instrumented build for memory censuses, not for daily use: its \`lnsd\` counts every allocation, and it replaces the plain package on install and is replaced by it again.
+
 **Userspace tarball** (just the binaries plus README/LICENSE/CHANGELOG, no service, no root needed):
 
 \`\`\`

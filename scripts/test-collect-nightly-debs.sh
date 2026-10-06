@@ -138,6 +138,8 @@ EOF
                     > "$EXT_TARGET/debian/${pkg}_1.0.0${NIGHTLY_SUFFIX}_${arch}.deb"
             done
         done
+        echo "real leviculum-heapacct arm64 deb" \
+            > "$EXT_TARGET/debian/leviculum-heapacct_1.0.0${NIGHTLY_SUFFIX}+heapacct_arm64.deb"
         for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
             mkdir -p "$EXT_TARGET/$triple/release"
             for b in "${BINS_AMD[@]}"; do
@@ -197,6 +199,8 @@ for pkg in leviculum lnomad lblogd lnpnd; do
             "${pkg}-nightly-${arch}.tar.gz" "${pkg}-nightly-${arch}.tar.gz.sha256" >> "$expected"
     done
 done
+printf '%s\n' leviculum-nightly-arm64-heapacct.deb leviculum-nightly-arm64-heapacct.deb.sha256 \
+    >> "$expected"
 printf '%s\n' lnflash-nightly-amd64.tar.gz lnflash-nightly-amd64.tar.gz.sha256 \
     leviculum-nightly-source.tar.gz leviculum-nightly-source.tar.gz.sha256 >> "$expected"
 sort -o "$expected" "$expected"
@@ -213,6 +217,11 @@ for arch in amd64 arm64; do
     [ "$got" = "real leviculum ${arch} deb" ] \
         || fail "dist/leviculum-nightly-${arch}.deb holds '${got}' — the decoy under the tree's own target/ was collected"
 done
+# Codeberg #437: the plain and the instrumented package share a name prefix,
+# and neither may be staged under the other's asset name.
+got="$(cat "$TREE/dist/leviculum-nightly-arm64-heapacct.deb" 2>/dev/null)"
+[ "$got" = "real leviculum-heapacct arm64 deb" ] \
+    || fail "dist/leviculum-nightly-arm64-heapacct.deb holds '${got}'"
 
 # Every .sha256 describes the file beside it.
 ( cd "$TREE/dist" && sha256sum -c ./*.sha256 ) >/dev/null 2>&1 \

@@ -7,6 +7,13 @@
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-amd64.deb
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-arm64.deb
 #
+# The arm64 build also ships an instrumented variant of the leviculum
+# package, for memory censuses on a field node and not for daily use
+# (Codeberg #437; scripts/build-deb.sh builds it, the package step stages
+# it, the publish step uploads it with its .sha256 like every other asset):
+#
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-arm64-heapacct.deb
+#
 # The lnomad terminal browser ships as its own .deb + tarball (it must
 # not pull in the auto-started lnsd service that the leviculum package
 # sets up):

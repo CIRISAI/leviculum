@@ -119,6 +119,12 @@ priority = "optional"
 # only real runtime dependency (postinst calls it to create the
 # leviculum system user).
 depends = "adduser"
+# The heap-accounting variant below is the same six binaries under another
+# package name, so the two must never be installed side by side: each
+# conflicts with and replaces the other, and `dpkg -i` of either removes
+# whichever is there (Codeberg #437).
+conflicts = "leviculum-heapacct"
+replaces = "leviculum-heapacct"
 assets = [
     # cargo-deb only recognises "target/release/..." exactly as a Cargo
     # target path and auto-substitutes the --target triple into it.
@@ -172,3 +178,30 @@ unit-scripts = "../packaging/debian/"
 enable = true
 start = true
 restart-after-upgrade = true
+
+# Codeberg #437: the instrumented build for memory censuses on a field node,
+# not for daily use. Same binaries, same unit, same config; only `lnsd` is
+# rebuilt with `--features heap-accounting` (scripts/build-deb.sh), so its
+# SIGUSR1 census subtracts measured live bytes instead of the model. A
+# variant inherits everything above, so only the package relations and the
+# description differ. Built with `cargo deb --variant heapacct`; the version gets a `+heapacct` suffix from
+# the build script, so either direction of a swap is visible in `dpkg -l`.
+[package.metadata.deb.variants.heapacct]
+# Named explicitly: cargo-deb 3.7 keeps the base name for a variant, and a
+# second "leviculum" package in target/debian/ makes it delete the plain one
+# it finds there (measured 2026-10-06, the first local build lost it).
+name = "leviculum-heapacct"
+conflicts = "leviculum"
+replaces = "leviculum"
+provides = "leviculum"
+extended-description = """\
+Leviculum is a Rust implementation of the Reticulum network stack,
+wire-compatible with the Python reference implementation.
+
+This is the heap-accounting build of the leviculum package: the same six
+binaries, but lnsd counts every allocation, so its SIGUSR1 memory census
+reports measured live heap bytes beside the modelled total. It costs a few
+atomic operations per allocation and exists for memory investigations on a
+field node, not for daily use. It conflicts with and replaces the plain
+leviculum package; installing either one swaps the other out.
+"""
