@@ -54,6 +54,11 @@ impl DirectLinkSettings {
     /// config error rather than a silent default: getting either wrong
     /// changes who learns this node's public address.
     pub fn from_config(config: &crate::config::ReticulumConfig) -> Result<Self, Error> {
+        if let Some(bad) = &config.direct_link.invalid_probe_port {
+            return Err(Error::Config(format!(
+                "probe_port must be a UDP port number, not {bad:?}"
+            )));
+        }
         let policy = match config.direct_link.direct_connect_policy.as_deref().map(str::trim) {
             None | Some("") | Some("reject") => DirectLinkPolicy::Reject,
             Some("accept_all") => DirectLinkPolicy::AcceptAll,
@@ -115,6 +120,10 @@ pub struct DirectLinkKeys {
     /// `accept_all` or `identified_only`.
     #[serde(default)]
     pub direct_connect_policy: Option<String>,
+    /// An INI `probe_port` that did not parse, kept so validation refuses it
+    /// (TOML rejects a bad value while parsing).
+    #[serde(skip)]
+    pub invalid_probe_port: Option<String>,
 }
 
 /// Read a `[reticulum]` INI key of the direct-link upgrade. Reached from the
@@ -126,7 +135,12 @@ pub struct DirectLinkKeys {
 /// who learns its public address. Anything else stays tolerated and ignored.
 pub(crate) fn apply_ini_key(config: &mut crate::config::ReticulumConfig, key: &str, value: &str) {
     match key {
-        "probe_port" => config.direct_link.probe_port = value.trim().parse().ok(),
+        "probe_port" => match value.trim().parse() {
+            Ok(port) => config.direct_link.probe_port = Some(port),
+            // Kept for from_config to refuse: a typo here would otherwise be
+            // a node that starts fine and never answers a probe.
+            Err(_) => config.direct_link.invalid_probe_port = Some(value.trim().to_string()),
+        },
         "probe_addr" => config.direct_link.probe_addr = Some(value.trim().to_string()),
         "probe_protocol" => {
             config.direct_link.probe_protocol = Some(value.trim().to_ascii_lowercase())
@@ -141,15 +155,15 @@ pub(crate) fn apply_ini_key(config: &mut crate::config::ReticulumConfig, key: &s
 /// Resolve a `host:port` facilitator to the address put in the REQUEST.
 /// The peer probes that address too, so it has to be an IP, not a name.
 pub(crate) async fn resolve_facilitator(addr: &str) -> io::Result<SocketAddr> {
-    tokio::net::lookup_host(addr)
-        .await?
-        .find(SocketAddr::is_ipv4)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{addr} has no IPv4 address"),
-            )
-        })
+    // IPv4 first: it is what NATs punch most reliably and what most
+    // facilitators serve. An IPv6-only facilitator is used as such.
+    let resolved: Vec<SocketAddr> = tokio::net::lookup_host(addr).await?.collect();
+    resolved
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or_else(|| resolved.first())
+        .copied()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{addr} has no address")))
 }
 
 // Probe
@@ -611,6 +625,15 @@ mod tests {
             }
         );
         assert!(on.active());
+    }
+
+    #[test]
+    fn a_malformed_probe_port_is_a_config_error() {
+        for bad in ["434x", "70000"] {
+            let err =
+                DirectLinkSettings::from_config(&reticulum(&[("probe_port", bad)])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{bad}: {err:?}");
+        }
     }
 
     #[test]

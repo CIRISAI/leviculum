@@ -589,7 +589,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Every `self.links.insert(link_id, ..)` is paired with a
     /// `self.transport.register_destination(link_id)`. This helper
     /// ensures the reverse cleanup always happens together.
-    fn remove_link(&mut self, link_id: &LinkId) {
+    pub(super) fn remove_link(&mut self, link_id: &LinkId) {
         // leviculum#77: the close reported next counts as a handshake failure
         // if this link never established.
         if let Some(link) = self.links.get(link_id) {
@@ -1995,6 +1995,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         "link_mgr: channel message received (in-order)"
                     );
                     if crate::direct_link::wire::is_signal_msgtype(envelope.msgtype) {
+                        // Handled by the node: costs the host sink nothing.
                         direct_link_signals.push((envelope.msgtype, envelope.data));
                     } else {
                         self.events.push(NodeEvent::MessageReceived {
@@ -2003,9 +2004,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             sequence: envelope.sequence,
                             data: envelope.data,
                         });
-                    }
-                    if let Some(budget) = &mut self.channel_delivery_budget {
-                        *budget = budget.saturating_sub(1);
+                        if let Some(budget) = &mut self.channel_delivery_budget {
+                            *budget = budget.saturating_sub(1);
+                        }
                     }
                     if let Some(p) =
                         Self::build_channel_proof_from_hash(link, &link_id, &full_packet_hash)
@@ -4880,7 +4881,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ///
     /// INVARIANT: The link has already been removed from self.links
     /// at all call sites. This method must not access the link.
-    fn emit_link_closed(
+    pub(super) fn emit_link_closed(
         &mut self,
         link_id: LinkId,
         reason: LinkCloseReason,

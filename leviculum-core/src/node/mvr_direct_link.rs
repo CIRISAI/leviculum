@@ -499,3 +499,108 @@ fn a_punch_that_lands_after_the_link_closed_hands_its_interface_back() {
         ]
     );
 }
+
+/// Bring both sides of a punched pair onto their direct interfaces.
+fn established(pair: &mut Pair) -> (usize, usize) {
+    let (session, _) = to_punch(pair);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let out = pair.a.direct_link_punched(&session, Some(a_direct));
+    pair.a_events.extend(out.events);
+    let out = pair.b.direct_link_punched(&session, Some(b_direct));
+    pair.b_events.extend(out.events);
+    (a_direct, b_direct)
+}
+
+#[test]
+fn a_full_application_sink_does_not_hold_back_signals() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    // B's host has no room for one more message.
+    pair.b.set_channel_delivery_budget(Some(0));
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    pair.pump_from_a(packets(&out));
+    assert_eq!(
+        only_probe(&pair.b.take_direct_link_jobs()),
+        session,
+        "B took the REQUEST although its application sink is full"
+    );
+    // An application message is still refused.
+    pair.a.transport.clock().advance(1_000);
+    let out = pair.a.send_on_link(&pair.link, b"waits").unwrap();
+    let (_, ev) = deliver(&mut pair.b, pair.b_mesh, packets(&out));
+    assert!(!ev
+        .iter()
+        .any(|e| matches!(e, NodeEvent::MessageReceived { .. })));
+}
+
+#[test]
+fn a_direct_link_whose_fallback_died_closes_when_the_direct_path_dies() {
+    let mut pair = Pair::new();
+    let (a_direct, _) = established(&mut pair);
+    // The relayed interface goes first; the link carries on directly.
+    let _ = pair.a.handle_interface_down(InterfaceId(pair.a_mesh));
+    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
+    assert_eq!(pair.a.active_link_count(), 1);
+    // Then the direct one: nothing left to fall back to.
+    let out = pair.a.handle_interface_down(InterfaceId(a_direct));
+    assert!(out
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::DirectLinkLost { .. })));
+    assert!(out.events.iter().any(|e| matches!(
+        e,
+        NodeEvent::LinkClosed { link_id, .. } if *link_id == pair.link
+    )));
+    assert_eq!(
+        pair.a.active_link_count(),
+        0,
+        "not pinned to a dead interface"
+    );
+}
+
+#[test]
+fn moving_onto_a_direct_interface_lowers_a_large_link_mtu_on_both_ends() {
+    let mut pair = Pair::new();
+    for node in [&mut pair.a, &mut pair.b] {
+        let link = node.links.get_mut(&pair.link).unwrap();
+        link.set_negotiated_mtu_for_test(16_384);
+    }
+    established(&mut pair);
+    let a = pair.a.links.get(&pair.link).unwrap();
+    let b = pair.b.links.get(&pair.link).unwrap();
+    assert_eq!(a.negotiated_mtu(), crate::direct_link::DIRECT_LINK_MTU);
+    assert_eq!(b.negotiated_mtu(), crate::direct_link::DIRECT_LINK_MTU);
+    assert_eq!(a.mdu(), b.mdu(), "both ends agree on the MDU");
+}
+
+#[test]
+fn a_restarted_driver_abandons_every_direct_link_and_session() {
+    let mut pair = Pair::new();
+    established(&mut pair);
+    let out = pair.a.abandon_direct_links();
+    assert!(out
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::DirectLinkLost { .. })));
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    assert!(pair.a.take_direct_link_jobs().is_empty());
+    pair.a.transport.clock().advance(1_000);
+    let out = pair.a.send_on_link(&pair.link, b"relayed").unwrap();
+    assert!(sent(&out)
+        .iter()
+        .all(|(iface, _)| *iface == Some(pair.a_mesh)));
+
+    // A session in flight fails instead of waiting on a socket that is gone.
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.propose();
+    let _ = pair.a.take_direct_link_jobs();
+    let out = pair.a.abandon_direct_links();
+    assert!(out
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::DirectLinkFailed { proposed: true, .. })));
+}
