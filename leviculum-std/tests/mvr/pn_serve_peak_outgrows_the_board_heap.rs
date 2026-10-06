@@ -78,8 +78,8 @@ use crate::alloc_probe;
 const GET_REQUEST_PATH: &str = "/get";
 
 /// The board announces this per-sync limit and caps its own fetch
-/// responses at it (`BOARD_SYNC_LIMIT_KB`, `leviculum-nrf/src/pn.rs`).
-const BOARD_SYNC_LIMIT_KB: u64 = 8;
+/// responses at it (`BOARD_SYNC_LIMIT_KB`, `leviculum-nrf/heap-budget`).
+const BOARD_SYNC_LIMIT_KB: u64 = leviculum_heap_budget::BOARD_SYNC_LIMIT_KB;
 
 /// The field shape: 24 stored messages, 224 B of body each.
 const FIELD_MESSAGES: u8 = 24;

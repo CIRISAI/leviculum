@@ -75,29 +75,32 @@ const LARGEST_AT_PANIC: usize = 30_320;
 const BOOT_CAP: usize = 194;
 
 /// One inbound sync batch at the announced `BOARD_SYNC_LIMIT_KB`
-/// (`leviculum-nrf/src/pn.rs`).
-const ARRIVING_SYNC_BATCH_BYTES: usize = 8 * 1000;
+/// (`leviculum-nrf/heap-budget`).
+const ARRIVING_SYNC_BATCH_BYTES: usize = leviculum_heap_budget::BOARD_SYNC_LIMIT_KB as usize * 1000;
 
 /// One queued upload at the announced `BOARD_TRANSFER_LIMIT_KB`.
-const ARRIVING_UPLOAD_BYTES: usize = 4 * 1000;
+const ARRIVING_UPLOAD_BYTES: usize = leviculum_heap_budget::BOARD_TRANSFER_LIMIT_KB as usize * 1000;
 
-/// One more endpoint link, at this tree's own `budget_per_link()`
-/// (2 696 B). #384 B2 took it to 2 680 B by shrinking `OutgoingResource`
-/// by the joined-ciphertext copy it kept beside its parts; the
-/// `frame_turnaround_ms` a link now records off its first hop
-/// (#36/#374) put 8 B back, and the `acquisition_ms` beside it
-/// (#36/#374, the burst's one channel acquisition) another 8.
-const ARRIVING_LINK_BYTES: usize = 2_696;
+/// One more endpoint link, at the firmware's own `budget_per_link()`
+/// (2 696 B in this tree).
+const ARRIVING_LINK_BYTES: usize = leviculum_heap_budget::budget_per_link();
 
 /// The margin the firmware takes off before it spends a live reading
-/// (`SERVE_MARGIN_BYTES`, `leviculum-nrf/src/heap_census.rs`): the sum
-/// of the three above, because all three can coexist.
-const BOARD_SERVE_MARGIN_BYTES: usize =
-    ARRIVING_SYNC_BATCH_BYTES + ARRIVING_UPLOAD_BYTES + ARRIVING_LINK_BYTES;
+/// (`SERVE_MARGIN_BYTES`, `leviculum-nrf/heap-budget`): the sum of the
+/// three above, because all three can coexist.
+const BOARD_SERVE_MARGIN_BYTES: usize = leviculum_heap_budget::SERVE_MARGIN_BYTES;
+
+// `peak_under_arrivals` claims the margin as the three allocations above.
+// A term added to the firmware's margin would otherwise go unclaimed here
+// and the test would measure a lighter window than the board budgets for.
+const _: () = assert!(
+    BOARD_SERVE_MARGIN_BYTES
+        == ARRIVING_SYNC_BATCH_BYTES + ARRIVING_UPLOAD_BYTES + ARRIVING_LINK_BYTES
+);
 
 /// The link SDU the serve transient is sized against on a board
-/// (`SERVE_RESOURCE_SDU`, `leviculum-nrf/src/pn.rs`).
-const BOARD_RESOURCE_SDU: usize = 464;
+/// (`SERVE_RESOURCE_SDU`, `leviculum-nrf/heap-budget`).
+const BOARD_RESOURCE_SDU: usize = leviculum_heap_budget::SERVE_RESOURCE_SDU;
 
 /// The mailbox this measures: eight messages of 3 000 B of servable
 /// body, which is deeper than either cap and NOT the field's 24 × 224 B.

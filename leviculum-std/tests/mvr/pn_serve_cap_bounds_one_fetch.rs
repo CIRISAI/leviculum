@@ -88,7 +88,7 @@ const BOOT_CAP: usize = 194;
 
 /// Heap the board keeps clear of the serve because it can be claimed
 /// WHILE the serve is in flight (`SERVE_MARGIN_BYTES`,
-/// `leviculum-nrf/src/heap_census.rs`): one inbound sync batch at
+/// `leviculum-nrf/heap-budget`): one inbound sync batch at
 /// `BOARD_SYNC_LIMIT_KB` (8 000 B), one queued upload at
 /// `BOARD_TRANSFER_LIMIT_KB` (4 000 B), and one more endpoint link at
 /// `budget_per_link()` — 2 696 B in this tree. It was 2 680 B between
@@ -97,22 +97,17 @@ const BOOT_CAP: usize = 194;
 /// now records off its first hop (#36/#374): `frame_turnaround_ms`, then
 /// the `acquisition_ms` beside it. All three can coexist, so they are
 /// summed.
-///
-/// Mirrored here as a literal for the same reason
-/// [`BOARD_RESOURCE_SDU`] is: `leviculum-nrf` is a thumbv7em crate this
-/// host cannot link. The firmware computes it from those three
-/// constants; what this test pins is the rule, at the board's numbers.
-const BOARD_SERVE_MARGIN_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000 + 4 * 1000 + 2_696;
+const BOARD_SERVE_MARGIN_BYTES: usize = leviculum_heap_budget::SERVE_MARGIN_BYTES;
 
 /// The link SDU the serve transient is sized against on a board
-/// (`SERVE_RESOURCE_SDU`, `leviculum-nrf/src/pn.rs`): Reticulum's
+/// (`SERVE_RESOURCE_SDU`, `leviculum-nrf/heap-budget`): Reticulum's
 /// smallest negotiated MTU less the resource per-part overhead.
-const BOARD_RESOURCE_SDU: usize = 464;
+const BOARD_RESOURCE_SDU: usize = leviculum_heap_budget::SERVE_RESOURCE_SDU;
 
 /// The board announces this per-sync limit (`BOARD_SYNC_LIMIT_KB`,
-/// `leviculum-nrf/src/pn.rs`). It bounds the wire response and did not
+/// `leviculum-nrf/heap-budget`). It bounds the wire response and did not
 /// bite here: 24 messages account to 6 552 B, well under 8 000.
-const BOARD_SYNC_LIMIT_KB: u64 = 8;
+const BOARD_SYNC_LIMIT_KB: u64 = leviculum_heap_budget::BOARD_SYNC_LIMIT_KB;
 
 /// The field shape: 24 stored messages, 224 B of servable body each.
 const FIELD_MESSAGES: u8 = 24;
@@ -126,10 +121,8 @@ const FIELD_BODY_BYTES: usize = 224;
 /// this order and the reason these two tests stopped using them.
 const DEEP_MAILBOX_MESSAGES: u8 = 80;
 
-/// The board's whole heap (`HEAP_SIZE`, `leviculum-nrf/heap-budget/src/lib.rs:54`),
-/// mirrored as a literal like [`BOARD_RESOURCE_SDU`]. Its crate is
-/// host-testable since #413, but this workspace does not depend on it.
-const BOARD_HEAP_BYTES: usize = 96 * 1024;
+/// The board's whole heap (`HEAP_SIZE`, `leviculum-nrf/heap-budget`).
+const BOARD_HEAP_BYTES: usize = leviculum_heap_budget::HEAP_SIZE;
 
 /// One stored message of exactly [`FIELD_BODY_BYTES`] servable bytes,
 /// incompressible for the same reason as in

@@ -431,16 +431,13 @@ pub const SERVE_MARGIN_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000
     + BOARD_TRANSFER_LIMIT_KB as usize * 1000
     + budget_per_link();
 
-// Pinned because the host-side mvrs mirror this number as a literal:
-// their workspace does not depend on this crate, so drift
-// between the rule as the firmware computes it and the rule as they
-// pin it would be silent
-// (`BOARD_SERVE_MARGIN_BYTES`,
-// `leviculum-std/tests/mvr/pn_serve_cap_bounds_one_fetch.rs` and
-// `…/pn_serve_cap_survives_a_shrinking_heap.rs`). Shrinking `Link` or
-// moving an announced limit legitimately moves this: move the mvrs'
-// literal and their expected served counts with it, and say what the
-// board serves now.
+// Pinned because the derivation above is the board's whole serve
+// decision: a change to `Link`, to an announced limit or to the sum
+// itself moves what one fetch may serve. The host-side mvrs read this
+// number from here (`leviculum-std/tests/mvr/pn_serve_cap_bounds_one_fetch.rs`
+// and `…/pn_serve_cap_survives_a_shrinking_heap.rs`), but their expected
+// served counts are calibrated at it. Moving it legitimately: move the
+// pin, re-check those counts, and say what the board serves now.
 const _: () = assert!(SERVE_MARGIN_BYTES == 14_696);
 
 /// The cap one fetch may serve to, from the heap the board HAS rather

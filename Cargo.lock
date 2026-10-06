@@ -2023,6 +2023,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-heap-budget"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+ "leviculum-lxmf",
+]
+
+[[package]]
 name = "leviculum-lxmf"
 version = "0.10.0-dev"
 dependencies = [
@@ -2087,6 +2095,7 @@ dependencies = [
  "leviculum-channel-access",
  "leviculum-cli",
  "leviculum-core",
+ "leviculum-heap-budget",
  "leviculum-lxmf",
  "leviculum-queue-budget",
  "libc",
