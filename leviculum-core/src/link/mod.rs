@@ -487,7 +487,8 @@ pub struct Link {
     rtt_confirmed: bool,
     /// Extra establishment timeout from first-hop interface latency (ms).
     /// Matches Python's `get_first_hop_timeout()`: MTU × 8 × 1000 / bitrate.
-    /// Set at link creation from the next-hop interface bitrate.
+    /// Set at link creation from the next-hop interface bitrate, or on a
+    /// shared instance client from the daemon's `first_hop_timeout` answer.
     /// Zero for fast interfaces (TCP, etc).
     first_hop_timeout_extra_ms: u64,
     /// What one frame costs the frame behind it on the interface this link
@@ -1149,6 +1150,27 @@ impl Link {
         if bitrate_bps > 0 {
             self.first_hop_timeout_extra_ms = (MTU as u64) * 8 * 1000 / (bitrate_bps as u64);
         }
+    }
+
+    /// Set the first-hop term from a whole `first_hop_timeout`, the figure a
+    /// shared instance answers over its `first_hop_timeout` RPC
+    /// (Reticulum.py:1607-1625, Transport.py:2700-2703).
+    ///
+    /// That figure already contains Python's `DEFAULT_PER_HOP_TIMEOUT`, which
+    /// [`Self::establishment_timeout_ms`] folds into its hop term, so the
+    /// stored extra is the answer minus one per-hop timeout: an answer of
+    /// exactly the per-hop default (the daemon knows no bitrate) adds nothing.
+    pub(crate) fn set_first_hop_timeout_ms(&mut self, first_hop_timeout_ms: u64) {
+        self.first_hop_timeout_extra_ms =
+            first_hop_timeout_ms.saturating_sub(ESTABLISHMENT_TIMEOUT_PER_HOP_MS);
+    }
+
+    /// The establishment jitter this link drew, in permille of the base
+    /// timeout (Codeberg #129). Lets a caller that cannot pin the RNG
+    /// recover the jitter-free base [`Self::establishment_timeout_ms`] adds
+    /// it to.
+    pub fn establishment_jitter_permille(&self) -> u16 {
+        self.establishment_jitter_permille
     }
 
     /// Learn the per-frame turnaround of an interface this link runs over.

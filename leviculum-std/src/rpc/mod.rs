@@ -225,6 +225,34 @@ async fn handle_rpc_connection(
 
 // Client-side functions
 
+/// The RPC authkey of the shared instance whose transport identity this is:
+/// SHA256 over the 64 private key bytes, as Python derives it
+/// (`rpc_key = RNS.Identity.full_hash(Transport.identity.get_private_key())`,
+/// Reticulum.py:355-356). The daemon keys its listener with it; a client
+/// that shares the daemon's storage loads the same identity and so holds the
+/// same key.
+pub(crate) fn rpc_authkey(
+    identity: &leviculum_core::Identity,
+) -> Result<[u8; 32], leviculum_core::identity::IdentityError> {
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(identity.private_key_bytes()?);
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&hash);
+    Ok(key)
+}
+
+/// What a shared instance answered for `first_hop_timeout`, in whole
+/// milliseconds, or `None` for an answer that is not a duration.
+///
+/// The daemon answers a float in seconds (Transport.py:2700-2703, mirrored
+/// by `handlers::first_hop_timeout_secs`). Truncated to the millisecond, the
+/// floor [`leviculum_core::link::Link`] applies when it prices the same term
+/// from a bitrate, so the two routes to one figure agree.
+pub(crate) fn first_hop_timeout_ms_from_answer(answer: &serde_json::Value) -> Option<u64> {
+    let secs = answer.as_f64()?;
+    (secs.is_finite() && secs >= 0.0).then_some((secs * 1000.0) as u64)
+}
+
 /// Wall-clock cap on the shared-instance RPC handshake + request/response.
 ///
 /// The socket is a local abstract Unix socket, so 5 s is generous. Its real

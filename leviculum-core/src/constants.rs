@@ -270,10 +270,12 @@ pub const ESTABLISHMENT_TIMEOUT_PER_HOP_MS: u64 = DEFAULT_PER_HOP_TIMEOUT * 1000
 /// Conservative bitrate assumption (bps) for multi-hop paths when the actual
 /// next-hop bitrate is unknown. Covers LoRa SF12/BW125kHz (~293 bps).
 ///
-/// Python solves this via `get_first_hop_timeout()` RPC to the transport daemon.
-/// Rust clients that connect via TCP to a transport daemon don't have this RPC,
-/// so they use this conservative estimate to avoid premature link timeout on
-/// paths that traverse slow links (LoRa, etc.).
+/// Python solves this via `get_first_hop_timeout()` RPC to the transport daemon,
+/// and so does a leviculum shared instance client (leviculum#480,
+/// `NodeCore::connect_with_first_hop_timeout`). This estimate is what is left
+/// when there is no daemon to ask or the daemon did not answer, so that such
+/// a node does not time a link out early on a path that traverses slow links
+/// (LoRa, etc.).
 pub const UNKNOWN_BITRATE_ASSUMPTION_BPS: u32 = 300;
 
 /// Responder establishment bonus (milliseconds).

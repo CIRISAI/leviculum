@@ -15,23 +15,31 @@
 //! `first_hop_timeout_extra_ms + ESTABLISHMENT_TIMEOUT_PER_HOP_MS * (hops+1)`,
 //! where the extra term carries only the `MTU * 8 / bitrate` part.
 //!
-//! Two deliberate deviations sit on top of the shared formula, and this
-//! file makes a future change to either one visible:
+//! A shared instance client cannot see the daemon's interfaces, so like a
+//! Python client it asks the daemon's `first_hop_timeout` RPC and takes
+//! the answer as its first hop term (leviculum#480,
+//! `NodeCore::connect_with_first_hop_timeout`; the asking is the std
+//! driver's, pinned end to end in `leviculum-std/src/driver/mod.rs`,
+//! `shared_instance_client_takes_the_daemons_first_hop_timeout`).
 //!
-//! 1. When the next-hop bitrate is unknown and the path is relayed,
-//!    `connect()` assumes `UNKNOWN_BITRATE_ASSUMPTION_BPS` (300 bps,
-//!    LoRa SF12-class) instead of Python's daemon-answered
-//!    `get_first_hop_timeout` RPC. That adds 13 333 ms where a Python
-//!    client on the same path gets the real next-hop figure.
+//! What stays deliberate, and what this file makes a future change to
+//! visible:
+//!
+//! 1. A node with no daemon answer (no shared instance, or the RPC failed)
+//!    and no next-hop bitrate on a relayed path assumes
+//!    `UNKNOWN_BITRATE_ASSUMPTION_BPS` (300 bps, LoRa SF12-class). That
+//!    adds 13 333 ms; Python's client falls back to the flat per-hop
+//!    default instead.
 //! 2. The per-link establishment jitter (Codeberg #129) adds up to
-//!    +25 % on the base. Both tests here pin jitter to 0 by driving the
+//!    +25 % on the base. Every test here pins jitter to 0 by driving the
 //!    node's RNG with a constant-zero source (`draw_establishment_jitter`
 //!    is `next_u32() % (MAX+1)`).
 //!
-//! In run 475/1 both deviations stacked: base 13 333 + 18 000 = 31 333 ms,
-//! and the three attempts drew 72, 189 and 195 permille, giving the
-//! observed 33 589 ms, 37 255 ms and 37 442 ms against roughly 20 s for a
-//! Python initiator on the same path.
+//! In run 475/1, before #480, both stacked on a client whose daemon would
+//! have answered: base 13 333 + 18 000 = 31 333 ms, and the three attempts
+//! drew 72, 189 and 195 permille, giving the observed 33 589 ms, 37 255 ms
+//! and 37 442 ms against roughly 20 s for a Python initiator on the same
+//! path.
 
 use leviculum_core::constants::{
     DEFAULT_PER_HOP_TIMEOUT, MTU, TRUNCATED_HASHBYTES, UNKNOWN_BITRATE_ASSUMPTION_BPS,
@@ -137,7 +145,12 @@ fn relayed(raw: &[u8]) -> Vec<u8> {
 
 /// A jitter-free initiator node that learned the destination 2 hops out
 /// on interface 0, plus the pending link's establishment timeout.
-fn two_hop_initiator_timeout_ms(bitrate_bps: Option<u32>) -> u64 {
+/// `first_hop_timeout_ms` is a daemon's answer handed to the connect, or
+/// `None` for a node that has none.
+fn two_hop_initiator_timeout_ms(
+    bitrate_bps: Option<u32>,
+    first_hop_timeout_ms: Option<u64>,
+) -> u64 {
     let (dest_hash, raw) = origin_announce();
     let frame = relayed(&raw);
 
@@ -158,7 +171,9 @@ fn two_hop_initiator_timeout_ms(bitrate_bps: Option<u32>) -> u64 {
         "the bitrate the timeout derivation will see"
     );
 
-    let (link_id, _, _) = node.connect(dest_hash, &[0x33; 32]).expect("connect");
+    let (link_id, _, _) = node
+        .connect_with_first_hop_timeout(dest_hash, &[0x33; 32], first_hop_timeout_ms)
+        .expect("connect");
     node.link(&link_id)
         .expect("pending link")
         .establishment_timeout_ms()
@@ -169,7 +184,7 @@ fn two_hop_initiator_timeout_ms(bitrate_bps: Option<u32>) -> u64 {
 /// `MTU*8/bitrate + DEFAULT_PER_HOP_TIMEOUT + DEFAULT_PER_HOP_TIMEOUT*hops`.
 #[test]
 fn two_hop_known_bitrate_matches_python_formula() {
-    let timeout_ms = two_hop_initiator_timeout_ms(Some(SF9_CLASS_BITRATE_BPS));
+    let timeout_ms = two_hop_initiator_timeout_ms(Some(SF9_CLASS_BITRATE_BPS), None);
 
     let mtu_latency_ms = (MTU as u64) * 8 * 1000 / (SF9_CLASS_BITRATE_BPS as u64);
     let per_hop_ms = DEFAULT_PER_HOP_TIMEOUT * 1000;
@@ -183,14 +198,49 @@ fn two_hop_known_bitrate_matches_python_formula() {
     );
 }
 
-/// Without a next-hop bitrate on a relayed path, the client falls back
-/// to UNKNOWN_BITRATE_ASSUMPTION_BPS where a Python client would get the
-/// daemon's real figure over the get_first_hop_timeout RPC. This pins
-/// the deviation measured in run 475/1 (base 31 333 ms); resolving #479
-/// in either direction must move this number.
+/// What a daemon whose next hop runs at `bitrate_bps` answers for
+/// `first_hop_timeout`, in seconds (Transport.py:2700-2703), and the
+/// millisecond figure the client takes from it.
+fn daemon_first_hop_answer_ms(bitrate_bps: u32) -> u64 {
+    let secs = MTU as f64 * (8.0 / f64::from(bitrate_bps)) + DEFAULT_PER_HOP_TIMEOUT as f64;
+    (secs * 1000.0) as u64
+}
+
+/// A shared instance client with no next-hop bitrate of its own, whose
+/// daemon answers `first_hop_timeout` for an SF9-class next hop, gets
+/// Python's initiator timeout for the path: the figure
+/// `two_hop_known_bitrate_matches_python_formula` pins for a node that
+/// sees that hop itself (leviculum#480).
 #[test]
-fn two_hop_unknown_bitrate_pins_the_conservative_fallback() {
-    let timeout_ms = two_hop_initiator_timeout_ms(None);
+fn two_hop_daemon_answer_sets_the_first_hop_term() {
+    let answer_ms = daemon_first_hop_answer_ms(SF9_CLASS_BITRATE_BPS);
+    assert_eq!(answer_ms, 8_276, "the daemon's answer, 8.2766 s");
+
+    let timeout_ms = two_hop_initiator_timeout_ms(None, Some(answer_ms));
+    assert_eq!(
+        timeout_ms, 20_276,
+        "the daemon's first hop term plus Python's hop terms"
+    );
+}
+
+/// A daemon that knows no bitrate for the next hop answers the flat
+/// per-hop default, and the client adds nothing for the first hop on top
+/// of it: Python's figure for that answer, not the 300 bps guess.
+#[test]
+fn two_hop_daemon_answer_without_bitrate_adds_no_first_hop_term() {
+    let per_hop_ms = DEFAULT_PER_HOP_TIMEOUT * 1000;
+    let timeout_ms = two_hop_initiator_timeout_ms(None, Some(per_hop_ms));
+    assert_eq!(timeout_ms, per_hop_ms + per_hop_ms * 2);
+}
+
+/// Without a daemon answer and without a next-hop bitrate on a relayed
+/// path, the node falls back to UNKNOWN_BITRATE_ASSUMPTION_BPS. This is
+/// what a client whose RPC failed is left with, and it is still the
+/// run-475 base (31 333 ms); a change to the fallback must move this
+/// number.
+#[test]
+fn two_hop_without_daemon_answer_keeps_the_conservative_fallback() {
+    let timeout_ms = two_hop_initiator_timeout_ms(None, None);
 
     let assumed_latency_ms = (MTU as u64) * 8 * 1000 / (UNKNOWN_BITRATE_ASSUMPTION_BPS as u64);
     let per_hop_ms = DEFAULT_PER_HOP_TIMEOUT * 1000;
@@ -200,6 +250,6 @@ fn two_hop_unknown_bitrate_pins_the_conservative_fallback() {
     assert_eq!(fallback_ms, 31_333, "the run-475 base");
     assert_eq!(
         timeout_ms, fallback_ms,
-        "unknown-bitrate relayed path must use the 300 bps assumption"
+        "unknown-bitrate relayed path with no daemon answer must use the 300 bps assumption"
     );
 }

@@ -254,6 +254,28 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         dest_hash: DestinationHash,
         dest_signing_key: &[u8; 32],
     ) -> Result<(LinkId, bool, crate::transport::TickOutput), LinkError> {
+        self.connect_with_first_hop_timeout(dest_hash, dest_signing_key, None)
+    }
+
+    /// [`Self::connect`] with the first hop's timeout supplied by the caller.
+    ///
+    /// `first_hop_timeout_ms` is Python's whole `first_hop_timeout` for the
+    /// destination (Link.py:283-284), per-hop default included: what a
+    /// shared instance client gets back from its daemon's
+    /// `first_hop_timeout` RPC (Reticulum.py:1607-1625). The client cannot
+    /// see the daemon's interfaces, so the daemon is the one that can price
+    /// the first hop; asking it is the caller's business, and this core only
+    /// takes the answer. `None` prices the first hop from this node's own
+    /// next-hop interface, exactly as [`Self::connect`] does.
+    ///
+    /// # Errors
+    /// As [`Self::connect`].
+    pub fn connect_with_first_hop_timeout(
+        &mut self,
+        dest_hash: DestinationHash,
+        dest_signing_key: &[u8; 32],
+        first_hop_timeout_ms: Option<u64>,
+    ) -> Result<(LinkId, bool, crate::transport::TickOutput), LinkError> {
         if let Some(max) = self.transport_config().max_links {
             if self.links.len() >= max {
                 self.log_link_refused(&dest_hash, max);
@@ -286,18 +308,25 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Scale establishment timeout for slow first-hop interfaces (LoRa, etc.)
         //
-        // When the next-hop bitrate is known (e.g., directly on LoRa), use it.
-        // When unknown and hops > 1 (path traverses relay nodes whose interfaces
-        // we can't see), use a conservative estimate. This covers clients that
-        // connect via TCP to a transport daemon which routes through LoRa, the
-        // client sees TCP (no bitrate) but the actual path includes slow links.
-        // Python handles this via an RPC call to `get_first_hop_timeout()`.
-        if let Some(bitrate) = self
+        // A caller that asked a daemon (a shared instance client, Python's
+        // `get_first_hop_timeout()` RPC) hands its answer in and that is the
+        // term. Otherwise: when the next-hop bitrate is known (e.g., directly
+        // on LoRa), use it. When unknown and hops > 1 (path traverses relay
+        // nodes whose interfaces we can't see), use a conservative estimate,
+        // which is what a client whose daemon did not answer is left with.
+        if let Some(first_hop_ms) = first_hop_timeout_ms {
+            link.set_first_hop_timeout_ms(first_hop_ms);
+        } else if let Some(bitrate) = self
             .transport
             .next_hop_interface_bitrate(dest_hash.as_bytes())
         {
             link.set_first_hop_timeout_from_bitrate(bitrate);
         } else if hops > 1 {
+            crate::tracing::debug!(
+                hops,
+                assumed_bps = crate::constants::UNKNOWN_BITRATE_ASSUMPTION_BPS,
+                "next hop bitrate unknown on a relayed path, first hop term falls back to the assumed bitrate"
+            );
             link.set_first_hop_timeout_from_bitrate(
                 crate::constants::UNKNOWN_BITRATE_ASSUMPTION_BPS,
             );

@@ -2316,14 +2316,8 @@ impl ReticulumNode {
             // Start RPC server for Python CLI tool compatibility (rnstatus, rnpath, rnprobe)
             let authkey = {
                 let core = self.inner.lock_recover();
-                match core.identity().private_key_bytes() {
-                    Ok(prv) => {
-                        use sha2::Digest;
-                        let hash = sha2::Sha256::digest(prv);
-                        let mut key = [0u8; 32];
-                        key.copy_from_slice(&hash);
-                        key
-                    }
+                match crate::rpc::rpc_authkey(core.identity()) {
+                    Ok(key) => key,
                     Err(e) => {
                         tracing::warn!(
                             "Cannot derive RPC authkey (no private key: {}), RPC server disabled",
@@ -2766,11 +2760,16 @@ impl ReticulumNode {
         dest_hash: &DestinationHash,
         dest_signing_key: &[u8; 32],
     ) -> Result<LinkHandle, Error> {
+        let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
         // Request link from NodeCore. A refusal by the configured link cap
         // (`max_links`, #388) surfaces as `Error::Link(TableFull)`.
         let (link_id, _was_routed, output) = {
             let mut inner = self.inner.lock_recover();
-            inner.connect(*dest_hash, dest_signing_key)?
+            inner.connect_with_first_hop_timeout(
+                *dest_hash,
+                dest_signing_key,
+                first_hop_timeout_ms,
+            )?
         };
         // Send output to event loop for dispatch (backpressure, waits if full)
         self.action_dispatch_tx
@@ -2783,6 +2782,65 @@ impl ReticulumNode {
             Arc::clone(&self.inner),
             self.action_dispatch_tx.clone(),
         ))
+    }
+
+    /// The first hop's timeout toward `dest_hash` as this node's shared
+    /// instance prices it, in milliseconds, or `None` when this node is not a
+    /// shared instance client or its daemon did not answer.
+    ///
+    /// A client cannot see the daemon's interfaces, so it asks, exactly as a
+    /// Python client does before every link (Link.py:283-284,
+    /// `get_first_hop_timeout`, Reticulum.py:1607-1625). Without the answer
+    /// the core prices a relayed path at its conservative bitrate guess
+    /// (`UNKNOWN_BITRATE_ASSUMPTION_BPS`), which on run 475/1 made our client
+    /// retry 1.7 times later than a Python client beside it (leviculum#480).
+    async fn shared_instance_first_hop_timeout_ms(
+        &self,
+        dest_hash: &DestinationHash,
+    ) -> Option<u64> {
+        let instance = self.connect_instance_name.as_deref()?;
+        let authkey = {
+            let core = self.inner.lock_recover();
+            crate::rpc::rpc_authkey(core.identity())
+        };
+        let answer = match authkey {
+            Ok(authkey) => crate::rpc::rpc_query_hash_param(
+                instance,
+                &authkey,
+                "first_hop_timeout",
+                "destination_hash",
+                dest_hash.as_bytes(),
+            )
+            .await
+            .map_err(|e| e.to_string()),
+            Err(e) => Err(format!("no RPC authkey: {e}")),
+        };
+        let ms = answer.and_then(|answer| {
+            crate::rpc::first_hop_timeout_ms_from_answer(&answer)
+                .ok_or_else(|| format!("answer {answer} is not a duration"))
+        });
+        match ms {
+            Ok(ms) => {
+                tracing::debug!(
+                    "FIRST_HOP_TIMEOUT dest={} source=shared_instance first_hop_ms={}",
+                    dest_hash,
+                    ms
+                );
+                Some(ms)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "FIRST_HOP_TIMEOUT dest={} source=fallback reason=\"first_hop_timeout RPC to \
+                     shared instance '{}' failed: {}\" (the link prices its first hop locally, \
+                     a relayed path at {} bit/s)",
+                    dest_hash,
+                    instance,
+                    e,
+                    leviculum_core::constants::UNKNOWN_BITRATE_ASSUMPTION_BPS
+                );
+                None
+            }
+        }
     }
 
     /// Attach a byte-channel interface over a caller-supplied duplex to the
@@ -3790,9 +3848,14 @@ impl ReticulumNode {
         dest_hash: &DestinationHash,
         dest_signing_key: &[u8; 32],
     ) -> Result<(LinkHandle, LinkEstablishedFuture), Error> {
+        let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
         let (link_id, _was_routed, output) = {
             let mut inner = self.inner.lock_recover();
-            inner.connect(*dest_hash, dest_signing_key)?
+            inner.connect_with_first_hop_timeout(
+                *dest_hash,
+                dest_signing_key,
+                first_hop_timeout_ms,
+            )?
         };
         let established = self.completions.register_link_established(link_id);
         if self.action_dispatch_tx.send(output).await.is_err() {
@@ -10242,6 +10305,201 @@ mod interface_retry_state_teardown_tests {
         assert!(
             max_depth.is_empty(),
             "an empty queue is the steady state, so it cannot be what prunes the watermark"
+        );
+    }
+}
+
+/// A shared instance client prices its first hop with the daemon's
+/// `first_hop_timeout` answer (leviculum#480), end to end: an in-process
+/// daemon on a real RPC socket, a client attached to it, and the link the
+/// client opens. The core half (`connect_with_first_hop_timeout`) is
+/// pinned in `leviculum-std/tests/link_establishment_timeout_parity.rs`.
+#[cfg(test)]
+mod first_hop_timeout_tests {
+    use super::*;
+    use leviculum_core::constants::{MTU, TRUNCATED_HASHBYTES};
+    use leviculum_core::packet::{HeaderType, Packet, PacketType, TransportType};
+    use leviculum_core::traits::Clock;
+    use leviculum_core::transport::Action;
+    use leviculum_core::{Destination, DestinationType, Direction, Identity, MemoryStorage};
+    use rand_core::OsRng;
+
+    /// The daemon's next hop toward the destination: an SF9-class LoRa
+    /// modem, the run-475 radio.
+    const NEXT_HOP_BPS: u32 = 1757;
+
+    /// The interface both nodes learn the path on. Not one the drivers
+    /// spawned, so nothing ever transmits on it; the cores only need a path
+    /// that names it.
+    const PATH_IFACE: usize = 77;
+
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn now_ms(&self) -> u64 {
+            1_000_000
+        }
+    }
+
+    /// A destination's announce as a relay re-emits it one hop out (header
+    /// Type 2, wire hops 1), so a receiver records the path at hops 2.
+    fn relayed_announce() -> (DestinationHash, Vec<u8>) {
+        let mut origin = leviculum_core::node::NodeCoreBuilder::new().build(
+            OsRng,
+            FixedClock,
+            MemoryStorage::with_defaults(),
+        );
+        let dest = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "test",
+            &["first", "hop"],
+        )
+        .expect("destination");
+        let hash = *dest.hash();
+        origin.register_destination(dest);
+        let out = origin.announce_destination(&hash, None).expect("announce");
+        let raw = out
+            .actions
+            .iter()
+            .map(|a| match a {
+                Action::Broadcast { data, .. } | Action::SendPacket { data, .. } => data.clone(),
+            })
+            .next()
+            .expect("announce must produce an outbound packet");
+        let mut packet = Packet::unpack(&raw).expect("unpack");
+        assert_eq!(packet.flags.packet_type, PacketType::Announce);
+        packet.flags.header_type = HeaderType::Type2;
+        packet.flags.transport_type = TransportType::Transport;
+        packet.transport_id = Some([0xAA; TRUNCATED_HASHBYTES]);
+        packet.hops = 1;
+        let mut buf = [0u8; MTU];
+        let len = packet.pack(&mut buf).expect("pack");
+        (hash, buf[..len].to_vec())
+    }
+
+    /// Hand `frame` to a node's core on [`PATH_IFACE`] and return the hops
+    /// the path was recorded at.
+    fn learn_path(node: &ReticulumNode, dest: &DestinationHash, frame: &[u8]) -> u8 {
+        let inner = node.inner();
+        let mut core = inner.lock_recover();
+        let _ = core.handle_packet(InterfaceId(PATH_IFACE), frame);
+        core.get_path_clone(dest.as_bytes())
+            .expect("the announce must install a path")
+            .hops
+    }
+
+    /// The pending link's establishment timeout and the jitter it drew.
+    fn timeout_and_jitter(node: &ReticulumNode, link_id: &LinkId) -> (u64, u16) {
+        let inner = node.inner();
+        let core = inner.lock_recover();
+        let link = core.link(link_id).expect("pending link");
+        (
+            link.establishment_timeout_ms(),
+            link.establishment_jitter_permille(),
+        )
+    }
+
+    /// `base` with a link's jitter on top, as `establishment_timeout_ms`
+    /// adds it (Codeberg #129).
+    fn jittered(base: u64, jitter_permille: u16) -> u64 {
+        base + base * u64::from(jitter_permille) / 1000
+    }
+
+    /// The establishment timeout a client gets for a 2-hop destination,
+    /// whose daemon prices the next hop at [`NEXT_HOP_BPS`]. The client
+    /// uses `client_identity`; it holds the daemon's RPC key only when that
+    /// is the daemon's own transport identity, as a client sharing the
+    /// daemon's storage does.
+    async fn client_timeout(tag: &str, same_identity_as_daemon: bool) -> (u64, u16) {
+        let identity = Identity::generate(&mut OsRng);
+        let instance = format!("firsthop_{tag}_{}", std::process::id());
+        let daemon_storage = tempfile::tempdir().expect("daemon storage");
+        let mut daemon = ReticulumNodeBuilder::new()
+            .identity(identity.clone())
+            .enable_transport(true)
+            .share_instance(true)
+            .instance_name(instance.clone())
+            .storage_path(daemon_storage.path().to_path_buf())
+            .build()
+            .await
+            .expect("build daemon");
+        daemon.start().await.expect("start daemon");
+
+        let client_identity = if same_identity_as_daemon {
+            identity
+        } else {
+            Identity::generate(&mut OsRng)
+        };
+        let client_storage = tempfile::tempdir().expect("client storage");
+        let mut client = ReticulumNodeBuilder::new()
+            .identity(client_identity)
+            .enable_transport(false)
+            .connect_to_shared_instance(&instance)
+            .storage_path(client_storage.path().to_path_buf())
+            .build()
+            .await
+            .expect("build client");
+        client.start().await.expect("start client");
+
+        let (dest, frame) = relayed_announce();
+        {
+            let inner = daemon.inner();
+            inner
+                .lock_recover()
+                .register_interface_bitrate(PATH_IFACE, NEXT_HOP_BPS);
+        }
+        assert_eq!(learn_path(&daemon, &dest, &frame), 2);
+        assert_eq!(
+            daemon
+                .inner()
+                .lock_recover()
+                .next_hop_interface_bitrate(dest.as_bytes()),
+            Some(NEXT_HOP_BPS),
+            "the daemon must price the next hop at the bitrate it was given"
+        );
+        assert_eq!(learn_path(&client, &dest, &frame), 2);
+        assert_eq!(
+            client
+                .inner()
+                .lock_recover()
+                .next_hop_interface_bitrate(dest.as_bytes()),
+            None,
+            "the client must have no bitrate of its own for the next hop"
+        );
+
+        let handle = client.connect(&dest, &[0x33; 32]).await.expect("connect");
+        let measured = timeout_and_jitter(&client, handle.link_id());
+
+        client.stop().await.expect("stop client");
+        daemon.stop().await.expect("stop daemon");
+        measured
+    }
+
+    /// The daemon answers 8.2766 s for its SF9-class next hop, and the
+    /// client's link carries Python's initiator timeout for that answer on a
+    /// 2-hop path: 2276 + 6000 * 3 = 20 276 ms before jitter. Before #480
+    /// the client never asked and priced the hop at 300 bit/s, 31 333 ms.
+    #[tokio::test]
+    async fn shared_instance_client_takes_the_daemons_first_hop_timeout() {
+        let (timeout, jitter) = client_timeout("answer", true).await;
+        assert_eq!(
+            timeout,
+            jittered(20_276, jitter),
+            "jitter {jitter} permille on a 20 276 ms base; 31 333 ms is the unanswered fallback"
+        );
+    }
+
+    /// A client the daemon does not answer (here: one without the daemon's
+    /// RPC key) keeps the conservative fallback, 31 333 ms before jitter.
+    #[tokio::test]
+    async fn shared_instance_client_without_an_answer_keeps_the_fallback() {
+        let (timeout, jitter) = client_timeout("noanswer", false).await;
+        assert_eq!(
+            timeout,
+            jittered(31_333, jitter),
+            "jitter {jitter} permille"
         );
     }
 }

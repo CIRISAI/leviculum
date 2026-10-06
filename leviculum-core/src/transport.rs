@@ -9500,8 +9500,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Get the bitrate (bps) of the next-hop interface for a destination.
-    /// Returns `None` if no path exists or the interface has no bitrate cap.
+    /// Returns `None` if no path exists or the interface reports no bitrate.
     /// Matches Python `Transport.next_hop_interface_bitrate()`.
+    ///
+    /// The interface's bitrate is resolved with the precedence the
+    /// `interface_stats` and `lowest_interface_bitrate` RPCs report it with
+    /// (`leviculum-std/src/rpc/handlers.rs`, `lowest_online_bitrate`): the
+    /// registered cap bitrate (a configured `bitrate`, or the cap a radio
+    /// declares for itself) over the interface's own link-profile rate. The
+    /// second arm is what an LNode serial interface reports, which declares
+    /// no announce cap of its own; without it the shared instance's
+    /// `first_hop_timeout` answer for a path over an LNode was the flat
+    /// per-hop default (leviculum#480).
     pub(crate) fn next_hop_interface_bitrate(
         &self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
@@ -9510,6 +9520,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_announce_caps
             .get(&path.interface_index)
             .map(|cap| cap.bitrate_bps)
+            .or_else(|| {
+                self.interface_link_profiles
+                    .get(&path.interface_index)
+                    .map(|profile| profile.bitrate_bps)
+            })
+            .filter(|bps| *bps > 0)
     }
 
     /// Compute the receipt timeout for a packet sent to a destination.
@@ -9531,11 +9547,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // first_hop_timeout: MTU * 8 * 1000 / bitrate + per_hop_timeout
         // (Python: MTU * per_byte_latency + DEFAULT_PER_HOP_TIMEOUT)
-        let first_hop_extra = if let Some(bitrate) = self
-            .interface_announce_caps
-            .get(&path.interface_index)
-            .map(|cap| cap.bitrate_bps)
-        {
+        let first_hop_extra = if let Some(bitrate) = self.next_hop_interface_bitrate(dest_hash) {
             (MTU as u64) * 8 * 1000 / (bitrate as u64)
         } else if hops > 1 {
             // Multi-hop through unknown bitrate: assume slow link
@@ -32859,6 +32871,48 @@ mod tests {
         // than leaving a stale figure behind for the next caller to size on.
         t.remove_interface_link_profile(1);
         assert_eq!(t.next_hop_link_profile(&dest), None);
+    }
+
+    /// The next hop's bitrate is the registered cap bitrate where there is
+    /// one, and otherwise the interface's own link-profile rate — the
+    /// precedence the bitrate RPCs report with. An LNode serial interface
+    /// declares no cap, so before leviculum#480 its paths had no next-hop
+    /// bitrate at all and a daemon's `first_hop_timeout` answer for them
+    /// was the flat per-hop default.
+    #[test]
+    fn next_hop_interface_bitrate_falls_back_to_the_link_profile() {
+        use crate::storage_types::PathEntry;
+        use crate::test_utils::test_transport;
+        let mut t = test_transport();
+        let dest = [0xC2; TRUNCATED_HASHBYTES];
+        let now = t.clock.now_ms();
+        t.storage_mut().set_path(
+            dest,
+            PathEntry {
+                hops: 2,
+                expires_ms: now + 1_000_000,
+                interface_index: 3,
+                random_blobs: Vec::new(),
+                next_hop: None,
+                via_peer: None,
+            },
+        );
+        assert_eq!(t.next_hop_interface_bitrate(&dest), None);
+
+        t.register_interface_link_profile(
+            3,
+            LinkProfile {
+                bitrate_bps: 1757,
+                tx_jitter_max_ms: None,
+                tx_hold_spread_max_ms: None,
+                acquisition: None,
+            },
+        );
+        assert_eq!(t.next_hop_interface_bitrate(&dest), Some(1757));
+
+        // A configured `bitrate` (or a radio's own cap) still wins.
+        t.register_interface_bitrate(3, 1200);
+        assert_eq!(t.next_hop_interface_bitrate(&dest), Some(1200));
     }
 
     /// No path, no profile: the lookup is per-destination, and an unknown
