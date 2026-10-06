@@ -378,6 +378,7 @@ mod cad_tears_down_the_frame_it_then_detects;
 mod client_wait_for_path_request_fallback;
 mod core_lock_reentrancy;
 mod core_processor_seam;
+mod forwarding_daemon_forgets_the_request_before_the_proof_returns;
 mod iface_online_after_task_death;
 mod link_failure_recovery_silent_resume;
 mod lncp_fetch_rust_responder;
