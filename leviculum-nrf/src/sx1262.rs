@@ -132,6 +132,12 @@ pub enum Error {
     /// correlation peak is worse than one that was never taken, because the
     /// second is visible right here and the first is visible nowhere.
     NoCarrierDetect,
+    /// The front end refused a direction change that would have asked the
+    /// antenna switch for both paths at once
+    /// ([`leviculum_rx_arming::FrontEnd`]). The driver's own sequence never
+    /// asks for one; this is the assertion that it does not, reported
+    /// before the command that would have followed it goes out.
+    FrontEnd(leviculum_rx_arming::FrontEndFault),
 }
 
 /// Hand-written so `Crc` keeps printing as the bare word it always did.
@@ -151,6 +157,7 @@ impl core::fmt::Debug for Error {
             Error::Crc(_) => "Crc",
             Error::NotArmed => "NotArmed",
             Error::NoCarrierDetect => "NoCarrierDetect",
+            Error::FrontEnd(_) => "FrontEnd",
         })
     }
 }
@@ -269,9 +276,10 @@ pub struct Sx1262<SPI> {
     /// with. The single source of truth for "the chip is armed"; every path
     /// that leaves RX consults it and spends at most one standby.
     rx_state: leviculum_rx_arming::RxArmState<ArmedWindow>,
-    /// The board's external RX-enable line, where it has one.
+    /// Which way the antenna switch points, and the board's external
+    /// RX-enable line where it has one.
     ///
-    /// `None` on a board whose DIO2 owns the whole antenna switch (T114,
+    /// The line is `None` on a board whose DIO2 owns the whole antenna switch (T114,
     /// RAK4631) — there the switch follows the chip and the host drives
     /// nothing. `Some` on a front end that steers its receive side from a
     /// host GPIO while DIO2 steers only the transmit side, which is the
@@ -282,7 +290,25 @@ pub struct Sx1262<SPI> {
     /// chip's state: asserted immediately before `SetRx`/`SetCad`, released
     /// before `SetTx` and on every standby. A caller could only bracket a
     /// whole call and would have to know which calls listen.
-    rx_enable: Option<Output<'static>>,
+    ///
+    /// The line is owned by [`leviculum_rx_arming::FrontEnd`], so it is
+    /// written only through a transition that state machine checks: never
+    /// both paths asked for at once.
+    front_end: leviculum_rx_arming::FrontEnd<RxEnablePin>,
+}
+
+/// The board's RX-enable output, as the line
+/// [`leviculum_rx_arming::FrontEnd`] drives.
+pub struct RxEnablePin(Output<'static>);
+
+impl leviculum_rx_arming::RxEnableLine for RxEnablePin {
+    fn set_asserted(&mut self, asserted: bool) {
+        if asserted {
+            self.0.set_high();
+        } else {
+            self.0.set_low();
+        }
+    }
 }
 
 /// What `SetRx` was programmed with, carried from the arming half to the
@@ -317,7 +343,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// on T114 and RAK4631; see datasheet §13.3.6 Table 13-35).
     ///
     /// `rx_enable` is the board's external RX-enable line or `None`; see the
-    /// field of the same name. It is expected to arrive released (low).
+    /// `front_end` field. It is expected to arrive released (low).
     pub fn new(
         spi: SPI,
         reset: Output<'static>,
@@ -331,7 +357,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             reset,
             busy,
             dio1,
-            rx_enable,
+            front_end: leviculum_rx_arming::FrontEnd::new(rx_enable.map(RxEnablePin)),
             preamble_len: 24,
             tcxo_voltage_reg,
             rx_ext_sf: 0,
@@ -361,31 +387,12 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.wait_busy_ms(100).await
     }
 
-    /// Point the board's front end at the receiver, or away from it.
-    ///
-    /// A no-op on a board whose DIO2 owns the whole antenna switch, and a
-    /// single GPIO write on one that also has a host-driven RX-enable line
-    /// ([`Self::rx_enable`]). Cheap enough to be unconditional at every site
-    /// that changes the chip's direction, which is what makes "asserted for
-    /// receive, released for transmit" a property of this driver rather than
-    /// of its callers' discipline — and what keeps the whole question out of
-    /// the loop above it.
-    fn rx_frontend(&mut self, listening: bool) {
-        if let Some(rxen) = self.rx_enable.as_mut() {
-            if listening {
-                rxen.set_high();
-            } else {
-                rxen.set_low();
-            }
-        }
-    }
-
     /// Reset the SX1262 via the reset pin.
     pub async fn reset(&mut self) {
         // A reset chip listens to nothing; leave its front end released so
         // the state of the pin and the state of the radio agree from the
         // first instruction of this boot.
-        self.rx_frontend(false);
+        self.front_end.release();
         self.reset.set_low();
         Timer::after_millis(10).await;
         self.reset.set_high();
@@ -457,7 +464,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // the LNA once the chip has stopped receiving — and doing it first
         // means an error return from the command below cannot leave it
         // asserted either.
-        self.rx_frontend(false);
+        self.front_end.release();
         self.write_command(opcode::SET_STANDBY, &[0x00]).await
     }
 
@@ -789,38 +796,50 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // Off the receive path before the PA keys. DIO2 rises with `SetTx`
         // and steers the transmit side of the switch; a switch asked for
         // both positions at once passes neither, which on this front end is
-        // a transmit that goes nowhere.
+        // a transmit that goes nowhere. `key_up` releases the receive path
+        // and then records the PA as keyed, and refuses the key if the
+        // release did not happen: the ordering is the state machine's, and
+        // its host tests are where it is asserted.
         //
         // Not folded into the `disarm_rx` above: that call is a no-op
         // whenever the chip left RX by itself at a terminating IRQ, and the
         // line would then still be asserted from the window that ended.
-        self.rx_frontend(false);
+        self.front_end.key_up().map_err(Error::FrontEnd)?;
 
+        // Every way out of the key-up leaves the front end unkeyed: `TxDone`
+        // says the chip is back in standby on its own, anything else takes
+        // the standby that ends the transmit. Without this an SPI error
+        // after `SetTx` would leave the PA recorded as keyed, and the front
+        // end would then refuse every later receive window.
+        let on_air = self.on_air(timeout_ms).await;
+        if on_air.is_ok() {
+            self.front_end.tx_done();
+        } else {
+            let _ = self.set_standby_rc().await;
+        }
+        on_air
+    }
+
+    /// `SetTx` and the wait for `TxDone`: `Ok` only if the chip reported it.
+    async fn on_air(&mut self, timeout_ms: u32) -> Result<(), Error> {
         // Start TX (no hardware timeout, we use our own)
         let t = u24_be(0);
         self.write_command(opcode::SET_TX, &t).await?;
 
         // Wait for DIO1 high (TxDone) via GPIOTE interrupt
-        match with_timeout(
+        with_timeout(
             Duration::from_millis(timeout_ms.max(100) as u64),
             self.dio1.wait_for_high(),
         )
         .await
-        {
-            Ok(()) => {
-                let flags = self.get_irq_status().await?;
-                self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
-                    .await?;
-                if flags & irq::IRQ_TX_DONE != 0 {
-                    return Ok(());
-                }
-                let _ = self.set_standby_rc().await;
-                Err(Error::Timeout)
-            }
-            Err(_) => {
-                let _ = self.set_standby_rc().await;
-                Err(Error::Timeout)
-            }
+        .map_err(|_| Error::Timeout)?;
+        let flags = self.get_irq_status().await?;
+        self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
+            .await?;
+        if flags & irq::IRQ_TX_DONE != 0 {
+            Ok(())
+        } else {
+            Err(Error::Timeout)
         }
     }
 
@@ -1047,8 +1066,9 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // Onto the receive path before the receiver starts, not after: a
         // window whose first symbols arrive through a switch still pointing
         // at the PA loses them, and a preamble is where a LoRa frame is won
-        // or lost.
-        self.rx_frontend(true);
+        // or lost. Refused only under a keyed PA, which every exit from
+        // `transmit` clears, so the refusal is an assertion and not a path.
+        self.front_end.receive().map_err(Error::FrontEnd)?;
         let t = u24_be(hw_timeout);
         self.write_command(opcode::SET_RX, &t).await?;
 
@@ -1393,7 +1413,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // on the timeout branch below. A detected-busy CAD leaves it
         // asserted, which is where it wants to be anyway: the next thing
         // that channel access does is listen.
-        self.rx_frontend(true);
+        self.front_end.receive().map_err(Error::FrontEnd)?;
         self.write_command(opcode::SET_CAD, &[]).await?;
 
         // Timeout sized from the CAD's listening symbols at the live symbol

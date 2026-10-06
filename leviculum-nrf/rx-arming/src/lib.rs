@@ -95,6 +95,15 @@
 //! `SX_RX_TEARDOWN site=rxwait preamble=1 waited_ms=0` cut the sender's
 //! LINKCLOSE in its preamble.
 //!
+//! # The antenna switch beside the arm state
+//!
+//! [`RxArmState`] says whether the chip is listening; [`FrontEnd`] says which
+//! way the switch in front of it points, and owns the one host GPIO that
+//! steers it on the solar node. Arming the receiver under a keyed PA and
+//! keying the PA with the receive path asserted are refused there, so the
+//! ordering the key-up depends on is a host assertion rather than a comment
+//! in the driver. See [`front_end`].
+//!
 //! # What this crate deliberately does not do
 //!
 //! No spacing, no jitter, no periodic delay, and no continuous RX. Both waits
@@ -135,6 +144,9 @@
 //! lines are emitted with the flags as read, including the all-zero case: a
 //! counter that only speaks when it has bad news gives a numerator with no
 //! denominator, and the question is a rate.
+
+pub mod front_end;
+pub use front_end::{FrontEnd, FrontEndFault, Lines, Position, RxEnableLine, Wiring};
 
 /// The receiver operations the arming order is defined over.
 ///

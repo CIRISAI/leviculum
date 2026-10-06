@@ -42,7 +42,7 @@ the vocabulary it is expressed in; the firmware supplies the I/O and the
 clock and does what it is told. `leviculum-rx-arming` is the sharpest
 example already in the tree — it holds the order in which the receive
 path re-arms and hands a frame up, and `src/sx1262.rs` supplies a chip to
-drive (`stand_down_for_rx`, `leviculum-nrf/src/sx1262.rs:946`).
+drive (`stand_down_for_rx`, `leviculum-nrf/src/sx1262.rs:965`).
 
 ## Where the seam runs today
 
@@ -121,7 +121,7 @@ defer.
 ## Still stranded
 
 The four areas that prompted this page are already seamed, and so are
-the first two decisions the list below used to name; it is worth saying
+the first three decisions the list below used to name; it is worth saying
 which, because the list below is what is actually left:
 
 | Decision | Crate | Since |
@@ -132,25 +132,11 @@ which, because the list below is what is actually left:
 | Media flags, running vs configured | `leviculum-media-state` | `8bbce725`, 2026-09-01 |
 | Heap budget: endpoint links, boot and live serve cap | `leviculum-heap-budget` | `03e99edf`, 2026-10-05 |
 | Node name, derived defaults and the BLE-pending flag | `leviculum-node-name` | `8128a0d2`, 2026-10-06 |
+| Front-end position: never both switch paths at once | `leviculum-rx-arming` (`front_end`) | 2026-10-06 |
 
 What has no host assertion, in the order it is cheap to move:
 
-**1. The front-end position as a driver invariant.** "Asserted for
-receive, released for transmit" is claimed as a property of the driver
-rather than of its callers (`rx_frontend`,
-`leviculum-nrf/src/sx1262.rs:373`), and the ordering it depends on — off
-the receive path before the PA keys, because a switch asked for both
-positions at once passes neither — is a comment, not an assertion
-(`leviculum-nrf/src/sx1262.rs:789`). This is the shape of the Solar Node
-receiving nothing (Codeberg #411): a board where DIO2 owns only the
-transmit side (`LORA_DIO2_AS_RF_SWITCH`,
-`leviculum-nrf/src/boards/solarnode.rs:82`) has three candidate causes
-and no way to tell them apart short of flashing. The seam is a
-front-end position tracked beside the arm state in
-`leviculum-rx-arming`, so every direction change can be asserted to leave
-the pair consistent.
-
-**2. The 1200-baud touch predicate.** Whether a USB control-out request
+**1. The 1200-baud touch predicate.** Whether a USB control-out request
 means "reset into the UF2 bootloader" is a four-term match on request
 type, recipient, request code and payload length before the rate is even
 read (`BaudTouchHandler`, `leviculum-nrf/src/usb.rs:218`). A false
@@ -158,7 +144,7 @@ positive resets a board mid-session; a false negative costs a physical
 double-tap on every flash. The predicate is pure; only the GPREGRET write
 and `sys_reset` after it are not.
 
-**3. The control-envelope answer windows.** Three durations, each
+**2. The control-envelope answer windows.** Three durations, each
 justified against a host-side timeout it must stay inside:
 `CONFIG_DELIVER_WITHIN` (`leviculum-nrf/src/usb.rs:446`),
 `CONFIG_APPLY_WITHIN` (`leviculum-nrf/src/usb.rs:458`) and
@@ -166,7 +152,7 @@ justified against a host-side timeout it must stay inside:
 airtime arithmetic at the live modulation, which is exactly what a host
 test can recompute and a comment cannot.
 
-**4. The `[TRANSPORT]` ticker.** The re-arm deliberately drops missed
+**3. The `[TRANSPORT]` ticker.** The re-arm deliberately drops missed
 periods so a busy loop does not then emit a burst of catch-up lines
 (`poll`, `leviculum-nrf/src/transport_stats.rs:106`), and the line is
 byte-exact because capture consumers grep it (`log`,

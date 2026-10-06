@@ -168,11 +168,11 @@ expensive half.** Both were lifted out of the driver so a host test could
 drive them, and being liftable is the same property as being portable:
 
 - `rx-arming` reaches a radio only through two traits, `RxPort`
-  (`leviculum-nrf/rx-arming/src/lib.rs:155`) and `RxWindowProbe`
-  (`leviculum-nrf/rx-arming/src/lib.rs:694`). The driver implements both,
-  `RxPort` (`leviculum-nrf/src/sx1262.rs:1430`) and `RxWindowProbe`
-  (`leviculum-nrf/src/sx1262.rs:1460`), and a test fake implements
-  `RxPort` (`leviculum-nrf/rx-arming/src/lib.rs:1826`) beside it. A second
+  (`leviculum-nrf/rx-arming/src/lib.rs:167`) and `RxWindowProbe`
+  (`leviculum-nrf/rx-arming/src/lib.rs:706`). The driver implements both,
+  `RxPort` (`leviculum-nrf/src/sx1262.rs:1450`) and `RxWindowProbe`
+  (`leviculum-nrf/src/sx1262.rs:1480`), and a test fake implements
+  `RxPort` (`leviculum-nrf/rx-arming/src/lib.rs:1838`) beside it. A second
   family writes a third implementation; it does not fork the crate.
 - `channel-access` touches no radio at all. The caller reports what its
   own channel-activity detection said — `cad_clear`
@@ -186,7 +186,7 @@ drive them, and being liftable is the same property as being portable:
   (`leviculum-nrf/channel-access/src/lib.rs:17`).
 
 **Where the seam would have to open, if it opens.** `RxLatch`
-(`leviculum-nrf/rx-arming/src/lib.rs:355`) is three named LoRa interrupt
+(`leviculum-nrf/rx-arming/src/lib.rs:367`) is three named LoRa interrupt
 bits — preamble, header, `RxDone` — read back without being cleared, and
 the two bounds computed from them are forwarded to
 `leviculum_core::sx126x::tx_defer_ms` and
