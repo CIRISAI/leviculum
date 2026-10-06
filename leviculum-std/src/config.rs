@@ -245,6 +245,9 @@ pub struct ReticulumConfig {
     /// lowering this is what an operator trades for memory.
     #[serde(default)]
     pub destination_cap: Option<usize>,
+    /// +ciris (leviculum#70): direct-link upgrade keys.
+    #[serde(flatten)]
+    pub direct_link: crate::direct_link::DirectLinkKeys,
 }
 
 impl ReticulumConfig {
@@ -356,6 +359,7 @@ impl Default for ReticulumConfig {
             link_table_cap: None,
             announce_table_cap: None,
             destination_cap: None,
+            direct_link: crate::direct_link::DirectLinkKeys::default(),
         }
     }
 }

@@ -1513,6 +1513,8 @@ pub struct ReticulumNode {
     /// (leviculum#62).
     pub(crate) max_assembled_resource_size: usize,
     pub(crate) metrics_baseline: Mutex<crate::telemetry::CounterBaseline>, // leviculum#77
+    /// Direct-link upgrade settings (+ciris, leviculum#70).
+    pub(crate) direct_link: crate::direct_link::DirectLinkSettings,
     /// Merged event receiver for consuming events. `None` either because the
     /// node was built with `without_events()`, or because
     /// `take_event_receiver()` already handed it out.
@@ -1727,6 +1729,7 @@ impl ReticulumNode {
             plane_counters: Arc::new(PlaneCounters::default()),
             max_assembled_resource_size: segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
             metrics_baseline: Mutex::default(),
+            direct_link: crate::direct_link::DirectLinkSettings::default(),
             event_rx,
             shutdown_tx: None,
             runner_handle: None,
@@ -2276,6 +2279,7 @@ impl ReticulumNode {
         let ifac_rotation = self.ifac_rotation.clone();
         let max_assembled_resource_size = self.max_assembled_resource_size;
         let plane_counters = Arc::clone(&self.plane_counters);
+        let direct_link = self.direct_link.clone();
 
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
@@ -2315,6 +2319,7 @@ impl ReticulumNode {
                 ifac_rotation,
                 max_assembled_resource_size,
                 plane_counters,
+                direct_link,
             )
             .await;
         });
@@ -3862,6 +3867,46 @@ impl ReticulumNode {
         Ok(())
     }
 
+    /// +ciris (leviculum#70): try to move a link onto a direct UDP path.
+    ///
+    /// Resolves the configured facilitator (`probe_addr`), learns this
+    /// node's public address from it, and asks the peer to do the same and
+    /// punch. The result arrives as `NodeEvent::DirectLinkEstablished` or
+    /// `NodeEvent::DirectLinkFailed`; until then, and on failure, the link
+    /// keeps its current path.
+    ///
+    /// Only call this for a peer known to speak the upgrade (leviculum or
+    /// rns-rs). A Python RNS peer cannot skip the request, and every later
+    /// channel message on the link stalls behind it.
+    pub async fn propose_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
+        let addr = self
+            .direct_link
+            .facilitator
+            .clone()
+            .ok_or(Error::DirectLink(
+                leviculum_core::node::DirectLinkError::NoFacilitator,
+            ))?;
+        let facilitator = crate::direct_link::resolve_facilitator(&addr).await?;
+        let output = {
+            let mut core = self.inner.lock_recover();
+            let mut config = core.direct_link_config();
+            config.facilitator = Some(facilitator);
+            core.set_direct_link_config(config);
+            core.propose_direct_link(link_id)?
+        };
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)?;
+        Ok(())
+    }
+
+    /// +ciris (leviculum#70): the direct interface a link travels over, if
+    /// an upgrade moved it onto one.
+    pub fn direct_link_interface(&self, link_id: &LinkId) -> Option<usize> {
+        self.inner.lock_recover().direct_link_interface(link_id)
+    }
+
     /// Get the remote identity for a link, if the peer has identified.
     pub fn get_remote_identity(&self, link_id: &LinkId) -> Option<leviculum_core::Identity> {
         let inner = self.inner.lock_recover();
@@ -4721,6 +4766,7 @@ async fn run_event_loop(
     ifac_rotation: IfacRotation,
     max_assembled_resource_size: usize,
     plane_counters: Arc<PlaneCounters>,
+    direct_link: crate::direct_link::DirectLinkSettings,
 ) {
     // A slot rather than the bare box: a panicking hook is detached from
     // inside its own call frame, several `dispatch_output` frames down from
@@ -4761,6 +4807,23 @@ async fn run_event_loop(
     let mut mirror_check_at = tokio::time::Instant::now() + crate::telemetry::MIRROR_CHECK_INTERVAL;
     let mut mirror_watch =
         crate::telemetry::MirrorWatch::new(crate::telemetry::MIRROR_DIVERGENCE_GRACE);
+    // Direct-link upgrades (+ciris, leviculum#70): the sockets and tasks
+    // behind the node's sessions, and this node's facilitator if it runs one.
+    // Inert unless the settings let the node propose or accept.
+    let direct_link_active = direct_link.active();
+    let (direct_outcome_tx, mut direct_outcome_rx) =
+        mpsc::channel::<crate::direct_link::Outcome>(64);
+    let mut direct_links = crate::direct_link::DirectLinkRuntime::new(direct_outcome_tx);
+    let _facilitator = match direct_link.facilitator_port {
+        Some(port) => match crate::direct_link::spawn_facilitator(port).await {
+            Ok(task) => Some(crate::direct_link::AbortOnDrop(task)),
+            Err(e) => {
+                tracing::warn!("direct link: cannot run a facilitator on UDP {port}: {e}");
+                None
+            }
+        },
+        None => None,
+    };
     let mut shutdown = channels.shutdown;
     let mut next_poll = tokio::time::Instant::now();
     let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
@@ -5040,8 +5103,47 @@ async fn run_event_loop(
         }};
     }
 
+    // Dispatch a TickOutput produced inside the loop, the way every branch
+    // does it.
+    macro_rules! dispatch_here {
+        ($output:expr) => {{
+            refresh_ifac!();
+            let processor_delay = dispatch_output(
+                $output,
+                &mut registry,
+                event_sink.as_mut(),
+                &inner,
+                &mut retry_queues,
+                &mut retry_queue_warned,
+                &mut retry_queue_max_depth,
+                &ifac_configs,
+                remote_mgmt.as_ref(),
+                discovery_storage.as_deref(),
+                discovery_network_identity.as_deref(),
+                &mut discovery_heard_ifac,
+                &completions,
+                &mut assembler,
+                &plane_counters,
+                &mut breakers,
+                core_processor.as_mut(),
+            );
+            tighten_next_poll(&mut next_poll, processor_delay);
+        }};
+    }
+
     loop {
         refresh_ifac!();
+
+        // leviculum#70: whatever the last pass asked of the sockets (a probe,
+        // a punch, a release, an interface to close) starts now. Every core
+        // call that can produce such work runs inside a branch below, or
+        // arrives through branch 2, so the top of the loop sees it all.
+        if direct_link_active {
+            let jobs = inner.lock_recover().take_direct_link_jobs();
+            for job in jobs {
+                direct_links.run(job);
+            }
+        }
 
         // Auto-connect poll wake — only armed while the feature is enabled.
         let autoconnect_wake = autoconnect.as_ref().map(|_| next_autoconnect);
@@ -5063,6 +5165,47 @@ async fn run_event_loop(
         };
 
         tokio::select! {
+            // leviculum#70: a direct-link probe or punch finished. A punch
+            // that got through becomes an interface, registered through
+            // branch 5 like any spawned one; the node hears about it there,
+            // once the index is live.
+            Some(outcome) = direct_outcome_rx.recv() => {
+                use crate::direct_link::Outcome;
+                let output = match outcome {
+                    Outcome::Probed { session, public } => {
+                        Some(inner.lock_recover().direct_link_probed(&session, public))
+                    }
+                    Outcome::Punched { session, peer: Some(peer) } => {
+                        let id = InterfaceId(
+                            autoconnect_wiring
+                                .next_id
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        );
+                        // try_send: this loop is the channel's only reader,
+                        // so waiting on a full channel would never end.
+                        match direct_links.interface_for(session, peer, id) {
+                            Some(handle) => match autoconnect_wiring.new_iface_tx.try_send(handle) {
+                                Ok(()) => None,
+                                Err(_) => {
+                                    direct_links.run(leviculum_core::node::DirectLinkJob::CloseInterface {
+                                        interface_index: id.0,
+                                    });
+                                    direct_links.registered(id);
+                                    Some(inner.lock_recover().direct_link_punched(&session, None))
+                                }
+                            },
+                            None => Some(inner.lock_recover().direct_link_punched(&session, None)),
+                        }
+                    }
+                    Outcome::Punched { session, peer: None } => {
+                        Some(inner.lock_recover().direct_link_punched(&session, None))
+                    }
+                };
+                if let Some(output) = output {
+                    dispatch_here!(output);
+                }
+            }
+
             // leviculum#71: an incoming resource's off-lock assembly finished.
             // Conclude it under a brief lock: proof, completion or failure,
             // exactly as an inline assembly would have.
@@ -5180,6 +5323,7 @@ async fn run_event_loop(
                     }
                     RecvEvent::Disconnected(iface_id) => {
                         tracing::warn!("Interface {} ({}) disconnected", iface_id, registry.name_of(iface_id));
+                        direct_links.interface_gone(iface_id);
                         // The core forgets its peer-count mirror in
                         // handle_interface_down; forget the driver's
                         // half too so a re-registered index starts at
@@ -5638,6 +5782,15 @@ async fn run_event_loop(
                     };
                     refresh_ifac!();
                     tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, &mut breakers, core_processor.as_mut()));
+                }
+
+                // leviculum#70: a punched socket's interface is live; move
+                // its link onto it.
+                if let Some(session) = direct_links.registered(InterfaceId(iface_idx)) {
+                    let output = inner
+                        .lock_recover()
+                        .direct_link_punched(&session, Some(iface_idx));
+                    dispatch_here!(output);
                 }
             }
 
@@ -10461,6 +10614,7 @@ mod tests {
             IfacRotation::default(),
             segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
             Arc::new(PlaneCounters::default()),
+            crate::direct_link::DirectLinkSettings::default(),
         ));
 
         FlushLoopHarness {

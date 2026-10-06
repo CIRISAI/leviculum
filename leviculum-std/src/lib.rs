@@ -110,3 +110,6 @@ pub use leviculum_core::node::{
     link_close_reason_name, DestinationLinks, LinkCensus, LinkInfo, LinkLifecycle, LinkRole,
     LINK_CLOSE_REASONS,
 };
+/// Direct-link upgrade (+ciris, leviculum#70). Declared last so the fork
+/// moves no line an upstream citation points at.
+pub mod direct_link;
