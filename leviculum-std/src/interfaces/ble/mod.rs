@@ -118,12 +118,17 @@ impl Default for BleOptions {
 
 /// Everything the carrier tasks report back to the orchestrator.
 pub(crate) enum Ev {
-    /// A central wrote to our RX characteristic.
+    /// A central wrote to our RX characteristic. One central's writes
+    /// arrive in order: they come from its own acquired socket, read by
+    /// one task (`bluez::periph_reader`, #436).
     PeriphWrite {
         addr: Address,
         mtu: usize,
         data: Vec<u8>,
     },
+    /// A central's write socket closed: BlueZ dropped it because the
+    /// central disconnected. Always that reader's last event.
+    PeriphGone { addr: Address },
     /// A central subscribed to our TX characteristic.
     PeriphNotify(CharacteristicNotifier),
     /// One scanner sighting of a device offering (or not) the service.
@@ -298,7 +303,15 @@ impl BleTask {
         // slot frees or the published count goes stale. Both handles
         // deregister on drop.
         let _app = if self.opts.enable_peripheral {
-            Some(bluez::serve_gatt(&adapter, self.identity_hash, ev_tx.clone()).await?)
+            Some(
+                bluez::serve_gatt(
+                    &adapter,
+                    self.identity_hash,
+                    ev_tx.clone(),
+                    self.name.clone(),
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -571,6 +584,17 @@ impl BleTask {
                     Inbound::Keepalive | Inbound::NeedMore | Inbound::NotHandshaked => {}
                 }
                 self.log_abandon_reports(table);
+            }
+            Ev::PeriphGone { addr } => {
+                // The central left (#436). Before the write socket the
+                // host had no word of it and the link waited out the
+                // expiry sweep; now it goes when the carrier says so, the
+                // way a central-role link goes at `CentralGone`.
+                if let Some((identity, _, role)) = table.remove_peripheral_by_addr(&addr.0) {
+                    scheduler.note_reset(now);
+                    self.log_link_down(&identity, role, "disconnected");
+                    self.report_peer_lost(table, identity).await;
+                }
             }
             Ev::Scan {
                 addr,

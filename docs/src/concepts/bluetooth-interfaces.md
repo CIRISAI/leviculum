@@ -392,6 +392,47 @@ broadcast domain behind one Reticulum interface — which is also the
 only shape BlueZ supports on the peripheral side, where a GATT
 notification reaches every subscribed central at once.
 
+### lnsd as peripheral: one ordered socket per central
+
+When a peer dials lnsd, lnsd is the GATT server and every frame the
+peer sends is a write to the RX characteristic. lnsd takes those
+writes over BlueZ's AcquireWrite, not WriteValue (#436): the
+characteristic declares `write-without-response` with bluer's
+`CharacteristicWriteMethod::Io`, BlueZ asks for a socket on the first
+write of each connection, and one reader task per central
+(`bluez::periph_reader`) reads that SEQPACKET socket and hands each
+value to the interface's event loop in the order the kernel received
+it. Through WriteValue every write was its own D-Bus call, and bluer
+runs each on its own tokio task, so two fragments a board wrote back
+to back could reach the defragmenter END before START; the
+2026-10-06 `ble_lxmf_delivery` red lost ten whole packets that way
+with every fragment delivered.
+
+Which writes take the socket is BlueZ's routing, not ours. The
+GattCharacteristic API document (bluez 5.82,
+`doc/org.bluez.GattCharacteristic.rst`, AcquireWrite) says that once
+the fd is acquired WriteValue is locked, and the server side of
+bluetoothd implements exactly that per connection: in
+`src/gatt-database.c` `chrc_write_cb` looks up the connection's
+acquired socket first and sends any write it finds one for down it,
+a Write Request with response included, and acknowledges the ATT
+request itself. Only a Prepare Write request is answered before the
+socket is consulted, and only a failed AcquireWrite falls back to
+WriteValue, which bluer refuses under `Io`. So the identity handshake, which the boards and
+lnsd's own central write WITH response, also arrives on the socket:
+it is the write that triggers the AcquireWrite, and bluetoothd
+forwards it once the socket exists. The socket's end is the
+central's disconnect (`client_io_new` registers a disconnect callback
+on the ATT channel that closes it); the reader reports it as
+`PeriphGone` and the peripheral link is released there, as a
+central-role link is when its session ends, instead of waiting for
+the expiry sweep.
+
+The park-and-replay of an inverted fragment pair (#434, `Link::oo_tail`
+in `links.rs`) stays behind this as the last line of defence: free on
+an ordered stream, and a counted loss rather than a silent one should
+a carrier ever reorder again.
+
 ### Notifications are flow controlled, not fired and forgotten
 
 The GATT server sends a packet as a sequence of notifications, one per

@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use bluer::adv::{Advertisement, AdvertisementHandle, Type as AdvType};
 use bluer::gatt::local::{
-    Application, ApplicationHandle, Characteristic, CharacteristicNotify,
-    CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod,
-    Service,
+    characteristic_control, Application, ApplicationHandle, Characteristic, CharacteristicControl,
+    CharacteristicControlEvent, CharacteristicNotify, CharacteristicNotifyMethod,
+    CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod, Service,
 };
 use bluer::gatt::remote::CharacteristicWriteRequest;
+use bluer::gatt::CharacteristicReader;
 use bluer::gatt::WriteOp;
 use bluer::{Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport, Uuid};
-use futures::{FutureExt, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 
 use super::links::{IdentityHash, SERVICE_UUID_U128};
@@ -100,13 +101,33 @@ pub(crate) async fn register_advertisement(
 /// Register the Columba GATT application; it serves every
 /// peripheral-role session for the whole BlueZ session. Dropping the
 /// returned handle deregisters it.
+///
+/// The RX characteristic takes its writes over AcquireWrite
+/// ([`CharacteristicWriteMethod::Io`], #436): BlueZ hands us one
+/// SEQPACKET socket per connected central, and [`periph_reader`] reads
+/// it in one task, so a central's frames reach the event channel in
+/// the order the kernel received them. Through WriteValue each write
+/// was its own D-Bus call on its own tokio task (bluer-0.17.4
+/// `session.rs` spawns every crossroads method), and two fragments
+/// issued back to back could arrive inverted. Once a central's socket
+/// is acquired BlueZ routes every write on that connection through it,
+/// with or without response (bluez-5.82 `src/gatt-database.c`,
+/// `chrc_write_cb`: a `write_ios` entry for the ATT channel short-cuts
+/// to `sock_io_send` before any WriteValue), so the identity
+/// handshake, a Write Request, arrives on the socket too: it is the
+/// write that triggers the AcquireWrite, and BlueZ forwards it once the
+/// socket exists. The WriteValue method bluer still exports answers
+/// NotSupported under `Io`; BlueZ only falls back to it when an
+/// AcquireWrite fails.
 pub(crate) async fn serve_gatt(
     adapter: &Adapter,
     identity: IdentityHash,
     ev_tx: mpsc::Sender<Ev>,
+    iface: String,
 ) -> bluer::Result<ApplicationHandle> {
     let write_tx = ev_tx.clone();
     let notify_tx = ev_tx;
+    let (rx_control, rx_control_handle) = characteristic_control();
     let app = Application {
         services: vec![Service {
             uuid: SERVICE_UUID,
@@ -141,22 +162,10 @@ pub(crate) async fn serve_gatt(
                     write: Some(CharacteristicWrite {
                         write: true,
                         write_without_response: true,
-                        method: CharacteristicWriteMethod::Fun(Box::new(move |data, req| {
-                            let tx = write_tx.clone();
-                            async move {
-                                let _ = tx
-                                    .send(Ev::PeriphWrite {
-                                        addr: req.device_address,
-                                        mtu: usize::from(req.mtu),
-                                        data,
-                                    })
-                                    .await;
-                                Ok(())
-                            }
-                            .boxed()
-                        })),
+                        method: CharacteristicWriteMethod::Io,
                         ..Default::default()
                     }),
+                    control_handle: rx_control_handle,
                     ..Default::default()
                 },
                 Characteristic {
@@ -173,7 +182,85 @@ pub(crate) async fn serve_gatt(
         }],
         ..Default::default()
     };
-    adapter.serve_gatt_application(app).await
+    let handle = adapter.serve_gatt_application(app).await?;
+    // The acceptor ends with the registration: deregistering drops the
+    // control handle, which ends the event stream.
+    tokio::spawn(accept_writers(rx_control, write_tx, iface));
+    Ok(handle)
+}
+
+/// Accept every central's AcquireWrite on the RX characteristic and
+/// give each socket its own [`periph_reader`]. bluer's AcquireWrite
+/// handler waits for this answer, so the loop does nothing else.
+async fn accept_writers(
+    mut control: CharacteristicControl,
+    ev_tx: mpsc::Sender<Ev>,
+    iface: String,
+) {
+    while let Some(event) = control.next().await {
+        let CharacteristicControlEvent::Write(request) = event else {
+            continue;
+        };
+        let addr = request.device_address();
+        match request.accept() {
+            Ok(reader) => {
+                let mtu = reader.mtu();
+                tracing::debug!("BLE {iface}: write socket acquired for {addr} (mtu {mtu})");
+                tokio::spawn(periph_reader(
+                    addr,
+                    mtu,
+                    reader_frames(reader),
+                    ev_tx.clone(),
+                ));
+            }
+            Err(e) => {
+                // BlueZ falls back to WriteValue, which `Io` refuses: the
+                // central's writes fail and the handshake timeout clears it.
+                tracing::warn!("BLE {iface}: write socket for {addr} not created: {e}");
+            }
+        }
+    }
+}
+
+/// One acquired write socket as a stream of written values, one item
+/// per ATT write.
+fn reader_frames(reader: CharacteristicReader) -> impl Stream<Item = std::io::Result<Vec<u8>>> {
+    futures::stream::unfold(reader, |reader| async move {
+        let frame = reader.recv().await;
+        Some((frame, reader))
+    })
+}
+
+/// One central's write stream, read by ONE task: each value goes to the
+/// event channel as [`Ev::PeriphWrite`] in the order the socket yields
+/// it, which is the order the kernel received the writes (#436). The
+/// stream's end is the central's disconnect — BlueZ closes its end of
+/// the socket when the ATT channel goes (bluez-5.82
+/// `src/gatt-database.c`, `client_io_new` registers
+/// `att_disconnect_cb`, which frees the client and its io) — and is
+/// reported as [`Ev::PeriphGone`], always the reader's last event.
+///
+/// A zero-length read is that end of stream on SEQPACKET. A central
+/// writing an empty value would read the same; the v2.2 protocol never
+/// does (its shortest frame is the one-byte keepalive).
+pub(crate) async fn periph_reader<S>(addr: Address, mtu: usize, frames: S, ev_tx: mpsc::Sender<Ev>)
+where
+    S: Stream<Item = std::io::Result<Vec<u8>>>,
+{
+    let mut frames = std::pin::pin!(frames);
+    while let Some(Ok(data)) = frames.next().await {
+        if data.is_empty() {
+            break;
+        }
+        if ev_tx
+            .send(Ev::PeriphWrite { addr, mtu, data })
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let _ = ev_tx.send(Ev::PeriphGone { addr }).await;
 }
 
 /// Windowed discovery: scan for [`SCAN_WINDOW`], report every sighting,
@@ -457,5 +544,130 @@ fn missing_gatt() -> bluer::Error {
     bluer::Error {
         kind: bluer::ErrorKind::ServicesUnresolved,
         message: "Columba GATT layout not found on peer".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interfaces::ble::links::{Inbound, LinkTable, DEFAULT_MAX_LINKS};
+    use leviculum_core::framing::ble::fragment_packet;
+    use std::os::fd::OwnedFd;
+
+    const OWN: IdentityHash = [0x0E; 16];
+    const PEER: IdentityHash = [0xA1; 16];
+    const ADDR: Address = Address([0xC0, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    const MTU: usize = 185;
+
+    /// What BlueZ and bluer build for one AcquireWrite: a SEQPACKET pair
+    /// (bluer-0.17.4 `gatt/mod.rs` `make_socket_pair`). The first half
+    /// stands in for bluetoothd's end, the second is ours, as tokio
+    /// reads it.
+    fn acquired_socket() -> (socket2::Socket, tokio::net::UnixDatagram) {
+        let (central, ours) =
+            socket2::Socket::pair(socket2::Domain::UNIX, socket2::Type::SEQPACKET, None)
+                .expect("socketpair");
+        let ours = std::os::unix::net::UnixDatagram::from(OwnedFd::from(ours));
+        ours.set_nonblocking(true).expect("nonblocking");
+        (
+            central,
+            tokio::net::UnixDatagram::from_std(ours).expect("tokio socket"),
+        )
+    }
+
+    /// The test's `reader_frames`: the same one-value-per-read stream,
+    /// over the stand-in socket.
+    fn socket_frames(
+        socket: tokio::net::UnixDatagram,
+    ) -> impl Stream<Item = std::io::Result<Vec<u8>>> {
+        futures::stream::unfold(socket, |socket| async move {
+            let mut buf = vec![0u8; MTU];
+            let frame = socket.recv(&mut buf).await.map(|n| {
+                buf.truncate(n);
+                buf
+            });
+            Some((frame, socket))
+        })
+    }
+
+    /// Run the reader over everything the central wrote, then close the
+    /// central's end, and return every event the reader reported.
+    async fn read_all(writes: &[Vec<u8>]) -> Vec<Ev> {
+        let (central, ours) = acquired_socket();
+        for w in writes {
+            central.send(w).expect("central write");
+        }
+        drop(central);
+        let (ev_tx, mut ev_rx) = mpsc::channel(64);
+        periph_reader(ADDR, MTU, socket_frames(ours), ev_tx).await;
+        let mut events = Vec::new();
+        while let Ok(ev) = ev_rx.try_recv() {
+            events.push(ev);
+        }
+        events
+    }
+
+    /// #436: two fragments a central wrote back to back reach the event
+    /// channel in the order it wrote them, tagged with its address and
+    /// the acquired MTU. Through WriteValue each write had its own task
+    /// and the END could overtake its START.
+    #[tokio::test]
+    async fn the_write_socket_delivers_a_centrals_fragments_in_order() {
+        let packet = vec![0x33; 211];
+        let frags = fragment_packet(&packet, MTU);
+        assert_eq!(frags.len(), 2);
+
+        let events = read_all(&frags).await;
+        let writes: Vec<Vec<u8>> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                Ev::PeriphWrite { addr, mtu, data } => {
+                    assert_eq!((*addr, *mtu), (ADDR, MTU));
+                    Some(data.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes, frags, "fragments arrive in write order");
+    }
+
+    /// #436: the socket's end is the central's disconnect. The reader
+    /// reports it as its last event, and the orchestrator's answer to
+    /// that event releases the peripheral link the handshake opened;
+    /// before the socket the link waited for the expiry sweep.
+    #[tokio::test]
+    async fn the_write_sockets_end_releases_the_link() {
+        let packet = vec![0x44; 211];
+        let mut writes = vec![PEER.to_vec()];
+        writes.extend(fragment_packet(&packet, MTU));
+
+        let events = read_all(&writes).await;
+        assert!(
+            matches!(events.last(), Some(Ev::PeriphGone { addr }) if *addr == ADDR),
+            "end of stream is reported, last"
+        );
+
+        // The orchestrator's two arms, as `handle_event` runs them.
+        let mut table = LinkTable::new(OWN, DEFAULT_MAX_LINKS);
+        let mut delivered = Vec::new();
+        for ev in events {
+            match ev {
+                Ev::PeriphWrite { addr, mtu, data } => {
+                    match table.peripheral_frame(addr.0, mtu, &data, 0) {
+                        Inbound::Packet(p) => delivered.push(p),
+                        Inbound::HandshakeComplete { .. } | Inbound::NeedMore => {}
+                        other => panic!("unexpected {other:?}"),
+                    }
+                    assert_eq!(table.link_count(), 1);
+                }
+                Ev::PeriphGone { addr } => {
+                    let gone = table.remove_peripheral_by_addr(&addr.0);
+                    assert_eq!(gone.map(|(id, _, _)| id), Some(PEER));
+                }
+                _ => panic!("reader reports only writes and its end"),
+            }
+        }
+        assert_eq!(delivered, vec![packet]);
+        assert_eq!(table.link_count(), 0, "the link is released");
     }
 }

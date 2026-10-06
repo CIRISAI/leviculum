@@ -196,6 +196,15 @@ pub(crate) struct Link {
     /// reassembly with the same `total`. Any other next frame drops it
     /// as the whole-packet loss it then is, counted in
     /// [`Self::tails_dropped`].
+    ///
+    /// Since #436 this is the last line of defence, not the cure: the
+    /// peripheral write path reads each central's acquired socket in
+    /// one task (`bluez::periph_reader`), so the inversion above no
+    /// longer arises there. It stays because it costs nothing on an
+    /// ordered stream (a tail with no head errors either way) and
+    /// because a carrier that reorders again (another binding, a BlueZ
+    /// that routes differently) must cost a counted loss at worst,
+    /// never a silent one.
     oo_tail: Option<Vec<u8>>,
     /// Parked tails dropped unmatched — each one a whole Reticulum
     /// packet this receiver lost. Added to the defragmenter's own
@@ -662,6 +671,23 @@ impl LinkTable {
     pub(crate) fn remove_by_addr(&mut self, addr: &Addr) -> Option<(IdentityHash, Addr, Role)> {
         self.pending.retain(|p| &p.addr != addr);
         let pos = self.links.iter().position(|l| &l.addr == addr)?;
+        let old = self.links.remove(pos);
+        Some((old.identity, old.addr, old.role))
+    }
+
+    /// The central at `addr` disconnected (its write socket closed,
+    /// #436): forget its pending handshake and its PERIPHERAL-role link.
+    /// A central-role link at the same address is a different connection
+    /// and stays. Returns what was removed, for the `BLE_LINK_DOWN` line.
+    pub(crate) fn remove_peripheral_by_addr(
+        &mut self,
+        addr: &Addr,
+    ) -> Option<(IdentityHash, Addr, Role)> {
+        self.pending.retain(|p| &p.addr != addr);
+        let pos = self
+            .links
+            .iter()
+            .position(|l| &l.addr == addr && l.role == Role::Peripheral)?;
         let old = self.links.remove(pos);
         Some((old.identity, old.addr, old.role))
     }
@@ -4021,5 +4047,34 @@ mod tests {
             "and it is the capacity that stopped it, not the sort"
         );
         assert!(peer_has_room(None), "silence is still not zero");
+    }
+
+    /// #436: a closed write socket names an address, and only the
+    /// peripheral-role link there is the connection that closed. A
+    /// central-role link at the same address is our own dial and stays;
+    /// a pending handshake there goes.
+    #[test]
+    fn a_peripheral_disconnect_leaves_a_central_link_alone() {
+        let mut t = table();
+        let (adm, _) = t.admit(ID_A, ADDR_1, Role::Central, 185, 0);
+        assert_eq!(adm, Admission::Accept);
+        assert_eq!(t.remove_peripheral_by_addr(&ADDR_1), None);
+        assert_eq!(t.link_count(), 1);
+
+        assert_eq!(
+            t.peripheral_frame(ADDR_2, 185, &[0xFF; 30], 10),
+            Inbound::NotHandshaked
+        );
+        assert!(t.has_pending_handshakes());
+        assert_eq!(t.remove_peripheral_by_addr(&ADDR_2), None);
+        assert!(!t.has_pending_handshakes());
+
+        let (adm, _) = t.admit(ID_B, ADDR_3, Role::Peripheral, 185, 20);
+        assert_eq!(adm, Admission::Accept);
+        assert_eq!(
+            t.remove_peripheral_by_addr(&ADDR_3),
+            Some((ID_B, ADDR_3, Role::Peripheral))
+        );
+        assert_eq!(t.link_count(), 1);
     }
 }
