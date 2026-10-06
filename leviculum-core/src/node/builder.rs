@@ -172,6 +172,16 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Interval between the node's management announces (probe and
+    /// remote-management destinations), in milliseconds. Default
+    /// [`MGMT_ANNOUNCE_INTERVAL_MS`](crate::constants::MGMT_ANNOUNCE_INTERVAL_MS).
+    /// See
+    /// [`TransportConfig::mgmt_announce_interval_ms`](crate::transport::TransportConfig::mgmt_announce_interval_ms).
+    pub fn mgmt_announce_interval_ms(mut self, ms: u64) -> Self {
+        self.transport_config.mgmt_announce_interval_ms = ms;
+        self
+    }
+
     /// Override the link keepalive interval (seconds) for every link this node
     /// creates. `None` (default) keeps the RTT-derived interval. Useful for
     /// slow links and for shrinking the stale-link timeout in tests.

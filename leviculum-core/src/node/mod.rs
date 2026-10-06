@@ -236,8 +236,6 @@ use rand_core::CryptoRngCore;
 
 use crate::hex_fmt::{HexFmt, HexShort};
 
-use crate::constants::MGMT_ANNOUNCE_INTERVAL_MS;
-
 /// Delay before the first management announce after startup.
 /// Python defers by `mgmt_announce_interval - 15` so first fires at ~15s.
 const MGMT_ANNOUNCE_INITIAL_DELAY_MS: u64 = 15 * 1000;
@@ -2393,7 +2391,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Send management announces if their timer has expired.
     ///
     /// Announces each destination in `mgmt_destinations` (probe, etc.)
-    /// and reschedules the next announce 2 hours later.
+    /// and reschedules the next announce one
+    /// [`TransportConfig::mgmt_announce_interval_ms`] later (2 hours by
+    /// default).
     /// Queues broadcast actions internally, they are drained by the
     /// `process_events_and_actions()` call at the end of `handle_timeout()`.
     fn check_mgmt_announces(&mut self, now_ms: u64) {
@@ -2441,9 +2441,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         .set_announce_cache(dest_hash.into_bytes(), buf[..len].to_vec());
                     self.transport.send_on_all_interfaces(&buf[..len]);
                     // One emission is all `send_on_all_interfaces` does, and
-                    // the next management announce is 2 h away: a single lost
-                    // LoRa window used to cost the destination the whole
-                    // interval (the residual ble_lora_transport reds of
+                    // the next management announce is 2 h away by default: a
+                    // single lost LoRa window used to cost the destination
+                    // the whole interval (the residual ble_lora_transport reds of
                     // 2026-09-01). Schedule the reference's second emission —
                     // see `Transport::schedule_own_announce_retry` for the
                     // Python citation and the duty math.
@@ -2487,7 +2487,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         }
 
-        self.next_mgmt_announce_ms = Some(now_ms + MGMT_ANNOUNCE_INTERVAL_MS);
+        self.next_mgmt_announce_ms =
+            Some(now_ms + self.transport.config().mgmt_announce_interval_ms);
     }
 
     /// Run periodic maintenance (sans-I/O)
@@ -4503,6 +4504,20 @@ mod tests {
                 .is_some(),
             "after clearing policy the destination announces"
         );
+    }
+
+    /// #449: the management reschedule follows the configured interval, not
+    /// the two-hour constant, so a test room can make a probe destination
+    /// re-announce every few seconds.
+    #[test]
+    fn mgmt_announce_reschedules_at_configured_interval() {
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new()
+            .mgmt_announce_interval_ms(7_000)
+            .build(OsRng, clock, MemoryStorage::with_defaults());
+        node.next_mgmt_announce_ms = Some(TEST_TIME_MS);
+        node.check_mgmt_announces(TEST_TIME_MS);
+        assert_eq!(node.next_mgmt_announce_ms, Some(TEST_TIME_MS + 7_000));
     }
 
     /// mvr — a node's own management announce goes out exactly once and is

@@ -166,7 +166,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             } else {
                 // Inside a top-level section
                 match current_section.as_str() {
-                    "reticulum" => apply_reticulum_key(&mut reticulum, key, value),
+                    "reticulum" => apply_reticulum_key(&mut reticulum, key, value)
+                        .map_err(|e| format!("config line {number}: {e}"))?,
                     "logging" => apply_logging_key(&mut reticulum, key, value),
                     // A key in a section nobody reads. Python keeps it in the
                     // ConfigObj tree and rnsd never looks at it, so it is not
@@ -382,7 +383,10 @@ fn parse_positive(value: &str) -> Option<usize> {
     value.trim().parse().ok().filter(|&n: &usize| n > 0)
 }
 
-fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
+/// Apply one `key = value` from the `[reticulum]` section. Almost every value
+/// is tolerant (an unparseable one keeps the default); the `Err` is for the
+/// few keys whose bad value must stop the daemon instead.
+fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> Result<(), String> {
     match key {
         "enable_transport" => {
             config.enable_transport = parse_bool(value);
@@ -505,6 +509,17 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
                 config.path_choice = crate::config::PathChoiceSetting::HopsAndLoss;
             }
         }
+        // Cadence of the management (probe, remote-management) announces,
+        // #449. Leviculum-only key. Refused rather than tolerated: a test room
+        // that writes it relies on the cadence, and a value that silently
+        // fell back to two hours would leave its cell measuring nothing.
+        "mgmt_announce_interval_secs" => {
+            let secs: u64 = value.trim().parse().map_err(|_| {
+                format!("mgmt_announce_interval_secs = '{value}' is not a whole number of seconds")
+            })?;
+            crate::config::check_mgmt_announce_interval_secs(secs)?;
+            config.mgmt_announce_interval_secs = secs;
+        }
         // Whether to collect the interface information other transport
         // instances announce (Python `discover_interfaces`,
         // Reticulum.py:580-583). Before this the key fell into the tolerated-
@@ -552,6 +567,7 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         // config a current rnsd would accept.
         _ => {}
     }
+    Ok(())
 }
 
 /// Apply one `key = value` from the `[logging]` section. Only `loglevel` (the
@@ -2479,6 +2495,33 @@ mod tests {
         assert_eq!(on.reticulum.path_choice, PathChoiceSetting::HopsAndLoss);
         let typo = parse_ini("[reticulum]\n  path_choice = hops_and_los\n").unwrap();
         assert_eq!(typo.reticulum.path_choice, PathChoiceSetting::Hops);
+    }
+
+    #[test]
+    fn test_mgmt_announce_interval_secs_parsed_and_floored() {
+        // #449: the management/probe announce cadence. Absent keeps Python's
+        // two hours; a test room sets seconds; below the 5 s floor the file
+        // is refused with the key named, not silently clamped.
+        use crate::config::DEFAULT_MGMT_ANNOUNCE_INTERVAL_SECS;
+        let absent = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
+        assert_eq!(
+            absent.reticulum.mgmt_announce_interval_secs,
+            DEFAULT_MGMT_ANNOUNCE_INTERVAL_SECS
+        );
+        let set = parse_ini("[reticulum]\n  mgmt_announce_interval_secs = 7\n").unwrap();
+        assert_eq!(set.reticulum.mgmt_announce_interval_secs, 7);
+        let floor = parse_ini("[reticulum]\n  mgmt_announce_interval_secs = 5\n").unwrap();
+        assert_eq!(floor.reticulum.mgmt_announce_interval_secs, 5);
+        for bad in ["2", "0", "seven"] {
+            let err = parse_ini(&format!(
+                "[reticulum]\n  mgmt_announce_interval_secs = {bad}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                err.contains("mgmt_announce_interval_secs"),
+                "refusal of {bad:?} must name the key: {err}"
+            );
+        }
     }
 
     #[test]

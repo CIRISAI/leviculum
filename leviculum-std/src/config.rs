@@ -184,6 +184,15 @@ pub struct ReticulumConfig {
     /// [`leviculum_core::transport::PathChoice`].
     #[serde(default)]
     pub path_choice: PathChoiceSetting,
+    /// Seconds between this node's management announces, the probe and
+    /// remote-management destinations (#449). Leviculum-only key; rnsd
+    /// reading a shared config ignores it. Default
+    /// [`DEFAULT_MGMT_ANNOUNCE_INTERVAL_SECS`], Python's two hours; at least
+    /// [`MIN_MGMT_ANNOUNCE_INTERVAL_SECS`], a smaller value is refused at
+    /// load. For test rooms that need a probe destination to re-announce
+    /// within minutes; a field node keeps the default.
+    #[serde(default = "default_mgmt_announce_interval_secs")]
+    pub mgmt_announce_interval_secs: u64,
     /// Collect interface information other transport instances announce
     /// (Python `discover_interfaces`, Reticulum.py:580-583). When false the
     /// daemon keeps no discovered-interface registry, and
@@ -304,6 +313,34 @@ impl ReticulumConfig {
     }
 }
 
+/// Default for [`ReticulumConfig::mgmt_announce_interval_secs`]: the core's
+/// [`MGMT_ANNOUNCE_INTERVAL_MS`](leviculum_core::constants::MGMT_ANNOUNCE_INTERVAL_MS)
+/// in seconds.
+pub const DEFAULT_MGMT_ANNOUNCE_INTERVAL_SECS: u64 =
+    leviculum_core::constants::MGMT_ANNOUNCE_INTERVAL_MS / 1000;
+
+/// Smallest accepted [`ReticulumConfig::mgmt_announce_interval_secs`]. Below
+/// it a node's own announces would crowd its interfaces; a test room needs a
+/// few seconds, not less.
+pub const MIN_MGMT_ANNOUNCE_INTERVAL_SECS: u64 = 5;
+
+fn default_mgmt_announce_interval_secs() -> u64 {
+    DEFAULT_MGMT_ANNOUNCE_INTERVAL_SECS
+}
+
+/// Refuse a [`ReticulumConfig::mgmt_announce_interval_secs`] below
+/// [`MIN_MGMT_ANNOUNCE_INTERVAL_SECS`], naming the key. Shared by the INI
+/// parser and [`Config::load`], so both formats refuse the same values.
+pub(crate) fn check_mgmt_announce_interval_secs(secs: u64) -> std::result::Result<(), String> {
+    if secs < MIN_MGMT_ANNOUNCE_INTERVAL_SECS {
+        return Err(format!(
+            "mgmt_announce_interval_secs = {secs} is below the floor of \
+             {MIN_MGMT_ANNOUNCE_INTERVAL_SECS} s"
+        ));
+    }
+    Ok(())
+}
+
 /// Default discovery announcer job interval (seconds), Python
 /// `InterfaceAnnouncer.JOB_INTERVAL`.
 pub const DEFAULT_DISCOVERY_JOB_INTERVAL_SECS: u64 = 60;
@@ -377,6 +414,7 @@ impl Default for ReticulumConfig {
             max_links: None,
             path_entries_dump: false,
             path_choice: PathChoiceSetting::default(),
+            mgmt_announce_interval_secs: DEFAULT_MGMT_ANNOUNCE_INTERVAL_SECS,
             discover_interfaces: default_discover_interfaces(),
             autoconnect_discovered_interfaces: 0,
             network_identity: None,
@@ -995,6 +1033,10 @@ impl Config {
         // promote nor log a second time.
         crate::ini_config::promote_discoverable_modes(&mut config.interfaces);
 
+        // The INI parser refuses this already; TOML reaches it only here.
+        check_mgmt_announce_interval_secs(config.reticulum.mgmt_announce_interval_secs)
+            .map_err(|e| Error::Config(format!("Invalid config {}: {e}", path.display())))?;
+
         Ok(config)
     }
 
@@ -1389,6 +1431,21 @@ mod tests {
     fn resolve_without_home_uses_current_dir_fallback() {
         let r = resolve_config_dir(Path::new("/etc/reticulum"), None, |_| false);
         assert_eq!(r, PathBuf::from("./.reticulum"));
+    }
+
+    // #449: TOML never passes through `parse_ini`, so the floor on the
+    // management announce interval is checked in `load` as well.
+    #[test]
+    fn load_refuses_toml_mgmt_announce_interval_below_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[reticulum]\nmgmt_announce_interval_secs = 2\n").unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(err.contains("mgmt_announce_interval_secs"), "{err}");
+
+        std::fs::write(&path, "[reticulum]\nmgmt_announce_interval_secs = 7\n").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.reticulum.mgmt_announce_interval_secs, 7);
     }
 
     #[test]

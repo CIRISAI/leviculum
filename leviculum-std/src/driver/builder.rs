@@ -965,6 +965,12 @@ impl ReticulumNodeBuilder {
             )
             .path_entries_dump(config.reticulum.path_entries_dump)
             .path_choice(config.reticulum.path_choice.to_core())
+            .mgmt_announce_interval_ms(
+                config
+                    .reticulum
+                    .mgmt_announce_interval_secs
+                    .saturating_mul(1000),
+            )
             .respond_to_probes(config.reticulum.respond_to_probes)
             .remote_management(
                 config.reticulum.remote_management_enabled,
@@ -1280,6 +1286,22 @@ mod tests {
             node.flush_interval_secs, 60,
             "explicit flush_interval_secs should override config value"
         );
+    }
+
+    #[test]
+    fn test_builder_mgmt_announce_interval_from_config() {
+        // #449: the INI key reaches the core's management reschedule.
+        let td = tempfile::tempdir().expect("tempdir");
+        let config =
+            crate::ini_config::parse_ini("[reticulum]\n  mgmt_announce_interval_secs = 7\n")
+                .expect("parse");
+        let node = ReticulumNodeBuilder::new()
+            .config(config)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync failed");
+        let core = crate::sync_ext::MutexRecover::lock_recover(&*node.inner);
+        assert_eq!(core.transport_config().mgmt_announce_interval_ms, 7_000);
     }
 
     #[test]

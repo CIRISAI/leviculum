@@ -49,10 +49,10 @@ The three entry points (signatures in the
 - `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1034`. Feed one
   received frame, tagged with the [`InterfaceId`](rust-api-spec.md#core-tickoutput-and-action)
   it arrived on.
-- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1348`. Run periodic
+- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1346`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
-- `next_deadline()` (`leviculum-core/src/node/mod.rs:2522`). The earliest timer
+- `next_deadline()` (`leviculum-core/src/node/mod.rs:2523`). The earliest timer
   deadline in milliseconds, or `None` if no timer is pending. Sleep until this,
   or until a packet arrives, whichever comes first.
 
@@ -160,7 +160,7 @@ let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
 
 `build` consumes the builder and the platform triple and returns the
 `NodeCore<R, C, S>`. A driver with an inline-storage `S` must not call it:
-use `build_boxed` (`leviculum-core/src/node/builder.rs:319`), which allocates
+use `build_boxed` (`leviculum-core/src/node/builder.rs:329`), which allocates
 first and configures through the box. `Box::new(builder.build(..))` holds a
 full-size `NodeCore` as a by-value local on the way into the box, and with
 `EmbeddedStorage` that is upwards of 40 KB twice over — it gave the T114 a

@@ -46,8 +46,8 @@ use crate::constants::{
     DISCOVERY_TIMEOUT_MS, EMISSION_LEARN_CEILING_SECS, EMISSION_LEARN_MAX_ADVANCE_SECS,
     EMISSION_SANITY_FLOOR_SECS, EMISSION_TIMESTAMP_MAX_SECS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS,
     JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS, LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX,
-    MAX_QUEUED_ANNOUNCES_PER_INTERFACE, MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU,
-    PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_MAX_WIRE_HOPS,
+    MAX_QUEUED_ANNOUNCES_PER_INTERFACE, MAX_RANDOM_BLOBS, MGMT_ANNOUNCE_INTERVAL_MS, MS_PER_SECOND,
+    MTU, PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_MAX_WIRE_HOPS,
     PATHFINDER_RETRIES, PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS, PATH_REQUEST_MIN_INTERVAL_MS,
     PENDING_LOCAL_PR_EXPIRY_MS, RATCHET_SIZE, RECEIPT_TIMEOUT_DEFAULT_MS, REVERSE_TABLE_EXPIRY_MS,
     TRUNCATED_HASHBYTES, UNKNOWN_BITRATE_ASSUMPTION_BPS,
@@ -971,6 +971,12 @@ pub struct TransportConfig {
     /// with the default the transport also keeps no evidence table, so the
     /// knob costs nothing when off.
     pub path_choice: PathChoice,
+    /// Interval between a node's management announces (the probe and
+    /// remote-management destinations), in milliseconds. Default
+    /// [`MGMT_ANNOUNCE_INTERVAL_MS`], Python's two hours. A test room
+    /// shortens it so a cell can watch a probe destination re-announce
+    /// within minutes (#449); a field node keeps the default.
+    pub mgmt_announce_interval_ms: u64,
 }
 
 impl Default for TransportConfig {
@@ -993,6 +999,7 @@ impl Default for TransportConfig {
             // Hop count is Python's rule and stays the default until a rig
             // series on the pathchoice corpus says otherwise (#230).
             path_choice: PathChoice::default(),
+            mgmt_announce_interval_ms: MGMT_ANNOUNCE_INTERVAL_MS,
         }
     }
 }
@@ -5472,7 +5479,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3901. A destination with no cached
+    /// link-request path uses at transport.rs:3908. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6267,7 +6274,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1546 ran in the
+        // Gate on the already-incremented hops (transport.rs:1553 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -11051,7 +11058,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2453`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2460`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -17032,7 +17039,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6959), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6966), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -22742,7 +22749,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1546) before
+        // The inbound path increments hops once (transport.rs:1553) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
