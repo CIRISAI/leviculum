@@ -758,6 +758,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "LINK_ENTRY_SET",
         required_keys: &["dst", "remaining_hops", "packet_hops", "recv", "next_hop"],
     },
+    // The end of that entry's life: the sweep removed it (#482). For
+    // `validated=0` the proof never arrived and `deadline_ms` is the proof
+    // deadline frozen at forward time; for `validated=1` it is the close of
+    // the inactivity window since the entry's last traffic. 480's run
+    // dropped a returning LRPROOF against a removal no line had recorded.
+    EventSchema {
+        name: "LINK_ENTRY_EXPIRED",
+        required_keys: &["link", "validated", "age_ms", "deadline_ms"],
+    },
     // A link request for a local client's destination handed to the
     // connected clients instead of the mesh (#374): the daemon's path table
     // held nothing, `local_client_known_dests` still named the destination.

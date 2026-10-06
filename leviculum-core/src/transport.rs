@@ -12439,7 +12439,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     fn clean_link_table(&mut self, now: u64) {
         let expired = self.storage.expire_link_entries(now, LINK_TIMEOUT_MS);
 
-        for (_link_hash, entry) in expired {
+        for (link_hash, entry) in expired {
+            // Every removal states itself: 480's run lost the LRPROOF for
+            // <4a0870ce…> to this sweep, and the trace between LINK_ENTRY_SET
+            // and the proof's "no link_table entry found" held no line saying
+            // the entry had gone (#482). An unvalidated entry dies at its
+            // proof deadline, a validated one when the inactivity window
+            // since its last traffic closes — `deadline_ms` names whichever
+            // clock killed this one.
+            let deadline_ms = if entry.validated {
+                entry.timestamp_ms.saturating_add(LINK_TIMEOUT_MS)
+            } else {
+                entry.proof_timeout_ms
+            };
+            crate::tracing::debug!(
+                event = "LINK_ENTRY_EXPIRED",
+                link = %HexShort(&link_hash),
+                validated = entry.validated as u8,
+                age_ms = now.saturating_sub(entry.timestamp_ms),
+                deadline_ms = deadline_ms,
+            );
             // Path rediscovery only for unvalidated links (proof never arrived).
             // Matches Python Transport.py:692-764.
             if entry.validated {
