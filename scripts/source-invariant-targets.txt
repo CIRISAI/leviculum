@@ -162,6 +162,7 @@ skip  leviculum-std   jl_jldiff_edge_cases       # spawns the jl and jldiff bina
 skip  leviculum-std   jl_jldiff_fixtures         # spawns the jl and jldiff binaries
 skip  leviculum-std   jl_jldiff_workflow         # spawns binaries and sleeps
 skip  leviculum-std   jldiff_compare             # spawns the jldiff binary
+skip  leviculum-std   link_establishment_timeout_parity # in-process timeout formula pin (#479); subject is the code
 skip  leviculum-std   log_stream_split           # spawns a process to split its streams
 skip  leviculum-std   lxmd_messagestore_takeover # spawns lxmd against a temp-dir store
 skip  leviculum-std   lxmf_rapid_identical_messages # in-process dedup behaviour; subject is the code
