@@ -3418,7 +3418,8 @@ mod persistence_tests {
     /// The queue is a `BTreeMap` keyed by the message ID, which is a content
     /// hash, so a batch that comes due in one tick used to be released in hash
     /// order. Red before the sort in `tick`: with the sort reduced to the
-    /// message ID these three bodies leave as `[third, first, second]`.
+    /// message ID the batch leaves in hash order, which the test makes sure
+    /// is not the write order.
     #[test]
     fn messages_that_waited_are_released_in_the_order_they_were_written() {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
@@ -3428,32 +3429,48 @@ mod persistence_tests {
         assert!(node.remove_path(destination.as_bytes()));
 
         let source = identity_from(0x9b);
-        let written: Vec<Message> = ["first", "second", "third"]
-            .iter()
-            .enumerate()
-            .map(|(index, body)| {
-                Message::create(
-                    destination.into_bytes(),
-                    *source.hash(),
-                    &source,
-                    // One second apart, as the base's ten-minute status cadence
-                    // is: the write order is in the LXMF timestamps.
-                    wall(index as f64),
-                    b"status".to_vec(),
-                    body.as_bytes().to_vec(),
-                    Vec::new(),
-                    DeliveryMethod::Opportunistic,
-                )
-                .expect("status message")
-            })
-            .collect();
-        let write_order: Vec<[u8; 32]> = written.iter().map(|m| m.message_id).collect();
+        let batch = |base: f64| -> Vec<Message> {
+            ["first", "second", "third"]
+                .iter()
+                .enumerate()
+                .map(|(index, body)| {
+                    Message::create(
+                        destination.into_bytes(),
+                        *source.hash(),
+                        &source,
+                        // One second apart, as the base's ten-minute status
+                        // cadence is: the write order is in the LXMF timestamps.
+                        wall(base + index as f64),
+                        b"status".to_vec(),
+                        body.as_bytes().to_vec(),
+                        Vec::new(),
+                        DeliveryMethod::Opportunistic,
+                    )
+                    .expect("status message")
+                })
+                .collect()
+        };
+        let ids = |messages: &[Message]| -> Vec<[u8; 32]> {
+            messages.iter().map(|m| m.message_id).collect()
+        };
+        let sorted = |mut v: Vec<[u8; 32]>| {
+            v.sort_unstable();
+            v
+        };
         // The mechanism this test guards only exists while the content hashes
-        // disagree with the write order. If a payload encoding change ever makes
-        // them agree, the assertion below passes for the wrong reason — pick
-        // different bodies then rather than deleting this check.
-        let mut hash_order = write_order.clone();
-        hash_order.sort_unstable();
+        // disagree with the write order. The timestamps sit on the core's
+        // build stamp (`TEST_WALL_UNIX`), so the hashes change with every
+        // build, and three of them land in write order once in six builds;
+        // the test then passed for the wrong reason or, with the check below,
+        // failed for none. So it takes the first batch, ten seconds apart,
+        // that hashes out of write order: deterministic for one build, never
+        // vacuous for any.
+        let written = (0..64)
+            .map(|step| batch(f64::from(step) * 10.0))
+            .find(|messages| sorted(ids(messages)) != ids(messages))
+            .expect("64 batches cannot all hash in write order");
+        let write_order = ids(&written);
+        let hash_order = sorted(write_order.clone());
         assert_ne!(
             hash_order, write_order,
             "these bodies no longer hash out of write order, so the test is vacuous"
