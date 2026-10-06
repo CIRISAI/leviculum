@@ -508,7 +508,7 @@ const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const CONFIG_ATTEMPTS: u8 = 3;
 
 /// How long the radio query waits for the board's own report — the config
-/// ACK's budget, for the reason [`MEDIA_ANSWER_TIMEOUT`] carries the same
+/// ACK's budget, for the reason [`MEDIA_QUERY_ANSWER_TIMEOUT`] carries the same
 /// one: the answer is composed by the firmware's USB task the moment the
 /// frame lands, so anything past it is a board that is not going to answer.
 const RADIO_REPORT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1047,7 +1047,7 @@ where
 
     let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU as usize);
     let mut buf = vec![0u8; READ_BUF_SIZE];
-    let deadline = tokio::time::Instant::now() + MEDIA_ANSWER_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + MEDIA_QUERY_ANSWER_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -1055,7 +1055,7 @@ where
                 "Serial {}: no media report within {:?} of the media query, so the \
                  dead-radio diagnosis cannot name the carriers",
                 name,
-                MEDIA_ANSWER_TIMEOUT
+                MEDIA_QUERY_ANSWER_TIMEOUT
             );
             return None;
         }
@@ -1396,13 +1396,41 @@ async fn serial_reconnect_task(
     }
 }
 
-/// How long a media verb waits for the board's own report before giving
-/// up on it. The radio config's ACK budget, for the same reason: the
-/// answer is composed by the firmware's USB task the moment the frame
-/// lands, so anything beyond this is a board that is not going to answer.
+/// How long a media query ([`leviculum_core::envelope::TYPE_MEDIA_QUERY`])
+/// waits for the board's own report before giving up on it. The radio
+/// config's ACK budget, for the same reason: the query is read-only, so the
+/// answer is composed by the firmware's USB task the moment the frame lands
+/// (`ControlAction::MediaQuery` in `leviculum-nrf/src/usb.rs` writes no
+/// page), and anything beyond this is a board that is not going to answer.
 /// The io task's read and write paths are parked for the wait, which is
 /// why it is a budget and not a retry loop.
-const MEDIA_ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
+const MEDIA_QUERY_ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long a media profile ([`leviculum_core::envelope::TYPE_MEDIA_PROFILE`])
+/// waits for the board's answer: lnflash's 3.5 s control-conversation window
+/// (`ACK_WITHIN`, `lnflash/src/radio.rs:57`), not the query's 2 s.
+///
+/// The profile is the one media frame the board answers only after a flash
+/// write: the firmware applies it, then waits for the store task to settle
+/// the page (`crate::telemetry::confirm`) for up to `PERSIST_CONFIRM_WITHIN`,
+/// 2500 ms (`leviculum-nrf/src/telemetry.rs:407`), before it writes either
+/// the report or [`leviculum_core::envelope::REFUSE_PERSIST`]. A 2 s window
+/// called a board whose save was merely slow unanswered although it had
+/// taken the profile (470). The firmware sized its bound to land inside
+/// lnflash's window, so the host waits that window and both clients read the
+/// same board the same way; `the_profile_window_covers_the_firmware_persist_bound`
+/// pins the two numbers against each other.
+const MEDIA_PROFILE_ANSWER_TIMEOUT: Duration = Duration::from_millis(3_500);
+
+/// The answer window for a media frame of type `asked_type`: the profile
+/// waits out the board's page write, everything else is answered at once.
+fn media_answer_timeout(asked_type: u8) -> Duration {
+    if asked_type == leviculum_core::envelope::TYPE_MEDIA_PROFILE {
+        MEDIA_PROFILE_ANSWER_TIMEOUT
+    } else {
+        MEDIA_QUERY_ANSWER_TIMEOUT
+    }
+}
 
 /// Everything the read path needs to hand a frame to the transport,
 /// borrowed from the io task.
@@ -1447,8 +1475,14 @@ enum MediaAnswer {
         leviculum_core::envelope::MediaProfileWire,
         leviculum_core::envelope::MediaProfileWire,
     ),
+    /// The board took the profile and is running it, but the record did
+    /// not reach the page: the profile was answered
+    /// [`leviculum_core::envelope::REFUSE_PERSIST`], which the envelope
+    /// defines as the refusal that is not a rejection. Carries no flags,
+    /// because the refusal carries none; [`set_board_media`] asks for them.
+    NotDurable,
     /// The board refused by name, answered something malformed, or said
-    /// nothing within [`MEDIA_ANSWER_TIMEOUT`]. All three are "this board
+    /// nothing within [`media_answer_timeout`]. All three are "this board
     /// did not tell us what it is doing", and the verbs treat them alike.
     NoAnswer,
     /// The port died during the exchange; the io task must return and let
@@ -1500,7 +1534,8 @@ where
         Other,
     }
 
-    let deadline = Instant::now() + MEDIA_ANSWER_TIMEOUT;
+    let window = media_answer_timeout(asked_type);
+    let deadline = Instant::now() + window;
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1508,7 +1543,7 @@ where
             tracing::warn!(
                 "Serial {}: no media report within {:?} of frame type 0x{:02x}",
                 name,
-                MEDIA_ANSWER_TIMEOUT,
+                window,
                 asked_type
             );
             return MediaAnswer::NoAnswer;
@@ -1577,6 +1612,15 @@ where
                     );
                     answer = Some(MediaAnswer::NoAnswer);
                 }
+                Seen::Refused(envelope::REFUSE_PERSIST)
+                    if asked_type == envelope::TYPE_MEDIA_PROFILE =>
+                {
+                    tracing::warn!(
+                        "Serial {}: board applied the media profile but did not persist it",
+                        name
+                    );
+                    answer = Some(MediaAnswer::NotDurable);
+                }
                 Seen::Refused(reason) => {
                     tracing::warn!(
                         "Serial {}: board refused frame type 0x{:02x}, reason 0x{:02x}",
@@ -1596,6 +1640,216 @@ where
         if let Some(answer) = answer {
             return answer;
         }
+    }
+}
+
+/// Whether a media profile the board took will survive its next reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPersist {
+    /// The board answered with its report, which it writes only once the
+    /// record is on the page.
+    Durable,
+    /// The board answered [`leviculum_core::envelope::REFUSE_PERSIST`]: it
+    /// runs the profile now, and a reset may bring back the previous one.
+    Unconfirmed,
+}
+
+impl MediaPersist {
+    /// The `persist=` key of the outcome line.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Durable => "persist=durable",
+            Self::Unconfirmed => "persist=unconfirmed",
+        }
+    }
+}
+
+/// What writing a media profile to a board came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaSet {
+    /// The board runs the profile; `running` and `configured` are its own
+    /// word for it, from the report or, when the save failed, from the
+    /// query that followed the refusal.
+    Applied {
+        running: leviculum_core::envelope::MediaProfileWire,
+        configured: leviculum_core::envelope::MediaProfileWire,
+        persist: MediaPersist,
+    },
+    /// The board took the profile and did not persist it, then did not
+    /// answer the query that would have said what it runs.
+    NotDurableUnread,
+    /// See [`MediaAnswer::NoAnswer`].
+    NoAnswer,
+    /// See [`MediaAnswer::PortLost`].
+    PortLost,
+}
+
+/// Write `profile` to the board and say what it is running afterwards.
+///
+/// A [`leviculum_core::envelope::REFUSE_PERSIST`] is not a refusal of the
+/// profile: the firmware applies it before the save and answers the refusal
+/// only because the page write did not settle in time
+/// (`envelope::media_profile_answer`). So it is followed by a media query,
+/// and the board's answer to that is reported as applied, marked
+/// [`MediaPersist::Unconfirmed`]. Reporting it as unanswered sent a harness
+/// into "nobody knows what it is carrying" for a board that had told us.
+async fn set_board_media<S>(
+    port: &mut S,
+    profile: &leviculum_core::envelope::MediaProfileWire,
+    frame_buf: &mut Vec<u8>,
+    deframer: &mut Deframer,
+    ingress: &Ingress<'_>,
+) -> MediaSet
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use leviculum_core::envelope;
+
+    let persist = match ask_board_media(
+        port,
+        &envelope::encode_media_profile(profile),
+        envelope::TYPE_MEDIA_PROFILE,
+        frame_buf,
+        deframer,
+        ingress,
+    )
+    .await
+    {
+        MediaAnswer::Report(running, configured) => {
+            return MediaSet::Applied {
+                running,
+                configured,
+                persist: MediaPersist::Durable,
+            }
+        }
+        MediaAnswer::NoAnswer => return MediaSet::NoAnswer,
+        MediaAnswer::PortLost => return MediaSet::PortLost,
+        MediaAnswer::NotDurable => MediaPersist::Unconfirmed,
+    };
+    match ask_board_media(
+        port,
+        &envelope::encode_media_query(),
+        envelope::TYPE_MEDIA_QUERY,
+        frame_buf,
+        deframer,
+        ingress,
+    )
+    .await
+    {
+        MediaAnswer::Report(running, configured) => MediaSet::Applied {
+            running,
+            configured,
+            persist,
+        },
+        MediaAnswer::PortLost => MediaSet::PortLost,
+        MediaAnswer::NoAnswer | MediaAnswer::NotDurable => MediaSet::NotDurableUnread,
+    }
+}
+
+/// The `MEDIA_SILENCE` outcome line for a silence that got as far as the
+/// profile write, and whether it is a warning. `None` for a lost port, which
+/// has no line: the reconnect loop reports it.
+///
+/// periculum 465 reads `outcome=applied` and the `running_` keys; `persist=`
+/// is appended at the end so every key before it stays where it was.
+fn media_silence_line(
+    name: &str,
+    remembered: leviculum_core::envelope::MediaProfileWire,
+    set: MediaSet,
+) -> Option<(bool, String)> {
+    match set {
+        MediaSet::PortLost => None,
+        MediaSet::NoAnswer => Some((
+            true,
+            format!(
+                "MEDIA_SILENCE iface={} outcome=unconfirmed {} \
+                 (frame sent, no report back; the profile stays remembered)",
+                name,
+                media_keys("remembered", remembered)
+            ),
+        )),
+        MediaSet::NotDurableUnread => Some((
+            true,
+            format!(
+                "MEDIA_SILENCE iface={} outcome=unconfirmed {} {} \
+                 (board took the profile without persisting it and did not answer \
+                 the query after; the profile stays remembered)",
+                name,
+                media_keys("remembered", remembered),
+                MediaPersist::Unconfirmed.key()
+            ),
+        )),
+        MediaSet::Applied {
+            running,
+            configured,
+            persist,
+        } => Some((
+            persist != MediaPersist::Durable,
+            format!(
+                "MEDIA_SILENCE iface={} outcome=applied {} {} {} {}",
+                name,
+                media_keys("remembered", remembered),
+                media_keys("running", running),
+                media_keys("configured", configured),
+                persist.key()
+            ),
+        )),
+    }
+}
+
+/// The `MEDIA_RESTORE` outcome line, as [`media_silence_line`] is the
+/// silence's.
+fn media_restore_line(
+    name: &str,
+    restored: leviculum_core::envelope::MediaProfileWire,
+    set: MediaSet,
+) -> Option<(bool, String)> {
+    match set {
+        MediaSet::PortLost => None,
+        MediaSet::NoAnswer => Some((
+            true,
+            format!(
+                "MEDIA_RESTORE iface={} outcome=unconfirmed {} \
+                 (frame sent, no report back; still remembered)",
+                name,
+                media_keys("restored", restored)
+            ),
+        )),
+        MediaSet::NotDurableUnread => Some((
+            true,
+            format!(
+                "MEDIA_RESTORE iface={} outcome=unconfirmed {} {} \
+                 (board took the profile without persisting it and did not answer \
+                 the query after; still remembered)",
+                name,
+                media_keys("restored", restored),
+                MediaPersist::Unconfirmed.key()
+            ),
+        )),
+        MediaSet::Applied {
+            running,
+            configured,
+            persist,
+        } => Some((
+            persist != MediaPersist::Durable,
+            format!(
+                "MEDIA_RESTORE iface={} outcome=restored {} {} {} {}",
+                name,
+                media_keys("restored", restored),
+                media_keys("running", running),
+                media_keys("configured", configured),
+                persist.key()
+            ),
+        )),
+    }
+}
+
+/// Log one media outcome line at the level it carries.
+fn log_media_line(warn: bool, line: &str) {
+    if warn {
+        tracing::warn!("{}", line);
+    } else {
+        tracing::info!("{}", line);
     }
 }
 
@@ -1826,7 +2080,11 @@ where
                         ).await;
                         let configured = match asked {
                             MediaAnswer::PortLost => return outgoing_rx,
-                            MediaAnswer::NoAnswer => {
+                            // `NotDurable` is the profile's answer and never
+                            // the query's (`ask_board_media` maps it only
+                            // for `TYPE_MEDIA_PROFILE`), so here it is no
+                            // report like any other.
+                            MediaAnswer::NoAnswer | MediaAnswer::NotDurable => {
                                 // Nothing was written, so nothing has to
                                 // be put back. Silencing a board whose
                                 // previous profile we failed to learn
@@ -1855,27 +2113,14 @@ where
                             lora_enabled: false,
                             ble_enabled: false,
                         };
-                        let applied = ask_board_media(
-                            &mut port,
-                            &leviculum_core::envelope::encode_media_profile(&silent),
-                            leviculum_core::envelope::TYPE_MEDIA_PROFILE, &mut frame_buf,
-                            &mut deframer, &ingress,
+                        let applied = set_board_media(
+                            &mut port, &silent, &mut frame_buf, &mut deframer, &ingress,
                         ).await;
-                        match applied {
-                            MediaAnswer::PortLost => return outgoing_rx,
-                            MediaAnswer::NoAnswer => tracing::warn!(
-                                "MEDIA_SILENCE iface={} outcome=unconfirmed {} \
-                                 (frame sent, no report back; the profile stays remembered)",
-                                name, media_keys("remembered", configured)
-                            ),
-                            MediaAnswer::Report(running, now_configured) => tracing::info!(
-                                "MEDIA_SILENCE iface={} outcome=applied {} {} {}",
-                                name,
-                                media_keys("remembered", configured),
-                                media_keys("running", running),
-                                media_keys("configured", now_configured)
-                            ),
-                        }
+                        let Some((warn, line)) = media_silence_line(&name, configured, applied)
+                        else {
+                            return outgoing_rx;
+                        };
+                        log_media_line(warn, &line);
                     }
                     Some(FirmwareRequest::MediaRestore) => {
                         let Some(profile) = remembered_media_profile(&name) else {
@@ -1897,33 +2142,25 @@ where
                             "Serial {}: commanded media restore requested, {}",
                             name, media_keys("remembered", profile)
                         );
-                        let restored = ask_board_media(
-                            &mut port,
-                            &leviculum_core::envelope::encode_media_profile(&profile),
-                            leviculum_core::envelope::TYPE_MEDIA_PROFILE, &mut frame_buf,
-                            &mut deframer, &ingress,
+                        let restored = set_board_media(
+                            &mut port, &profile, &mut frame_buf, &mut deframer, &ingress,
                         ).await;
-                        match restored {
-                            MediaAnswer::PortLost => return outgoing_rx,
-                            // The memory is kept: an unconfirmed restore
-                            // is a board that may still owe one, and a
-                            // second signal must be able to try again.
-                            MediaAnswer::NoAnswer => tracing::warn!(
-                                "MEDIA_RESTORE iface={} outcome=unconfirmed {} \
-                                 (frame sent, no report back; still remembered)",
-                                name, media_keys("restored", profile)
-                            ),
-                            MediaAnswer::Report(running, configured) => {
-                                silenced_media_profiles().lock_recover().remove(&name);
-                                tracing::info!(
-                                    "MEDIA_RESTORE iface={} outcome=restored {} {} {}",
-                                    name,
-                                    media_keys("restored", profile),
-                                    media_keys("running", running),
-                                    media_keys("configured", configured)
-                                );
-                            }
+                        // The memory is kept unless the restore is durable:
+                        // an unconfirmed restore, or one the board runs but
+                        // may lose at its next reset, is a board that may
+                        // still owe one, and a second signal must be able
+                        // to try again.
+                        if matches!(
+                            restored,
+                            MediaSet::Applied { persist: MediaPersist::Durable, .. }
+                        ) {
+                            silenced_media_profiles().lock_recover().remove(&name);
                         }
+                        let Some((warn, line)) = media_restore_line(&name, profile, restored)
+                        else {
+                            return outgoing_rx;
+                        };
+                        log_media_line(warn, &line);
                     }
                 }
             }
@@ -3140,6 +3377,222 @@ mod tests {
         assert!(
             refusal.contains("outcome=dead-radio") && refusal.contains("media_answered=0"),
             "an unanswered media query is a stated absence, not a missing field: {refusal}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The media profile waits out the board's page write
+    // -----------------------------------------------------------------
+
+    /// How a stub board answers a media profile.
+    #[derive(Clone, Copy)]
+    enum ProfileReply {
+        /// Its report, after the delay: the page write settled.
+        Report,
+        /// [`leviculum_core::envelope::REFUSE_PERSIST`], after the delay:
+        /// applied, page write not confirmed.
+        RefusePersist,
+    }
+
+    /// A board on the far end of a duplex that applies every media profile
+    /// it is sent and answers it `reply` after `delay`, the way the firmware
+    /// answers only once `telemetry::confirm` returns; a media query it
+    /// answers at once with what it runs. Mute to everything else.
+    fn duplex_media_board(mut port: tokio::io::DuplexStream, delay: Duration, reply: ProfileReply) {
+        use leviculum_core::envelope;
+        tokio::spawn(async move {
+            let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU as usize);
+            let mut buf = [0u8; 256];
+            let mut out = Vec::new();
+            let mut running = envelope::MediaProfileWire::BOTH;
+            loop {
+                let n = match port.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                for r in deframer.process(&buf[..n]) {
+                    let DeframeResult::Frame(data) = r else {
+                        continue;
+                    };
+                    let answer = match envelope::decode_frame(&data) {
+                        Ok(f) if f.frame_type == envelope::TYPE_MEDIA_PROFILE => {
+                            let Some(profile) = envelope::decode_media_profile_payload(f.payload)
+                            else {
+                                continue;
+                            };
+                            running = profile;
+                            tokio::time::sleep(delay).await;
+                            match reply {
+                                ProfileReply::Report => {
+                                    envelope::encode_media_report(&running, &running)
+                                }
+                                ProfileReply::RefusePersist => envelope::encode_refusal(
+                                    envelope::TYPE_MEDIA_PROFILE,
+                                    envelope::REFUSE_PERSIST,
+                                ),
+                            }
+                        }
+                        Ok(f) if f.frame_type == envelope::TYPE_MEDIA_QUERY => {
+                            envelope::encode_media_report(&running, &running)
+                        }
+                        _ => continue,
+                    };
+                    frame(&answer, &mut out);
+                    if port.write_all(&out).await.is_err() {
+                        return;
+                    }
+                    let _ = port.flush().await;
+                    out.clear();
+                }
+            }
+        });
+    }
+
+    /// Write the both-off profile through `host` and return what lnsd made
+    /// of the board's answer.
+    async fn silence_through(host: &mut tokio::io::DuplexStream) -> MediaSet {
+        let (incoming_tx, _incoming_rx) = mpsc::channel(8);
+        let counters = InterfaceCounters::new();
+        let ingress = Ingress {
+            name: "media",
+            incoming_tx: &incoming_tx,
+            counters: &counters,
+            drop_direct_ingress: false,
+        };
+        let silent = leviculum_core::envelope::MediaProfileWire {
+            lora_enabled: false,
+            ble_enabled: false,
+        };
+        let mut frame_buf = Vec::new();
+        let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU as usize);
+        set_board_media(host, &silent, &mut frame_buf, &mut deframer, &ingress).await
+    }
+
+    /// 470/474: the firmware answers a profile only after its page write
+    /// settles, which may take up to `PERSIST_CONFIRM_WITHIN` (2.5 s). A
+    /// board whose save took 2.2 s took the profile, and lnsd has to say so
+    /// instead of `outcome=unconfirmed`.
+    #[tokio::test(start_paused = true)]
+    async fn a_profile_answer_after_a_slow_save_is_accepted() {
+        let (mut host, board) = tokio::io::duplex(8192);
+        duplex_media_board(board, Duration::from_millis(2_200), ProfileReply::Report);
+        let set = silence_through(&mut host).await;
+        let off = leviculum_core::envelope::MediaProfileWire {
+            lora_enabled: false,
+            ble_enabled: false,
+        };
+        assert_eq!(
+            set,
+            MediaSet::Applied {
+                running: off,
+                configured: off,
+                persist: MediaPersist::Durable,
+            },
+            "a report 2.2 s after the profile is the board's answer, not silence"
+        );
+    }
+
+    /// A board that applied the profile and could not confirm the page
+    /// answers `REFUSE_PERSIST`; that is not a refusal of the silence. lnsd
+    /// asks what it runs and reports the silence as applied, with
+    /// `persist=unconfirmed`, on the line periculum 465 reads.
+    #[tokio::test(start_paused = true)]
+    async fn a_persist_refusal_is_reported_as_applied_but_unconfirmed() {
+        let (mut host, board) = tokio::io::duplex(8192);
+        duplex_media_board(
+            board,
+            Duration::from_millis(2_500),
+            ProfileReply::RefusePersist,
+        );
+        let set = silence_through(&mut host).await;
+        let off = leviculum_core::envelope::MediaProfileWire {
+            lora_enabled: false,
+            ble_enabled: false,
+        };
+        assert_eq!(
+            set,
+            MediaSet::Applied {
+                running: off,
+                configured: off,
+                persist: MediaPersist::Unconfirmed,
+            },
+            "REFUSE_PERSIST says applied-not-durable, and the query says what runs"
+        );
+
+        let (warn, line) = media_silence_line(
+            "Serial LNode",
+            leviculum_core::envelope::MediaProfileWire::BOTH,
+            set,
+        )
+        .expect("a live port has a line");
+        assert!(warn, "a profile a reset may lose is worth a warning");
+        assert_eq!(
+            line,
+            "MEDIA_SILENCE iface=Serial LNode outcome=applied remembered_lora=1 \
+             remembered_ble=1 running_lora=0 running_ble=0 configured_lora=0 \
+             configured_ble=0 persist=unconfirmed",
+            "the line keeps the shape 465 reads and gains persist= at the end"
+        );
+    }
+
+    /// The durable silence keeps its line and gains `persist=durable`.
+    #[test]
+    fn a_durable_silence_line_says_so() {
+        let off = leviculum_core::envelope::MediaProfileWire {
+            lora_enabled: false,
+            ble_enabled: false,
+        };
+        let (warn, line) = media_silence_line(
+            "Serial LNode",
+            leviculum_core::envelope::MediaProfileWire::BOTH,
+            MediaSet::Applied {
+                running: off,
+                configured: off,
+                persist: MediaPersist::Durable,
+            },
+        )
+        .expect("a live port has a line");
+        assert!(!warn);
+        assert!(
+            line.starts_with("MEDIA_SILENCE iface=Serial LNode outcome=applied remembered_lora=1")
+                && line.ends_with("persist=durable"),
+            "{line}"
+        );
+    }
+
+    /// The profile window is pinned against the firmware's own persist
+    /// bound, read from the firmware source rather than copied: if
+    /// `PERSIST_CONFIRM_WITHIN` grows past the window, this goes red on the
+    /// host before a board's slow save is reported as no answer again.
+    #[test]
+    fn the_profile_window_covers_the_firmware_persist_bound() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../leviculum-nrf/src/telemetry.rs");
+        let source = std::fs::read_to_string(&path).expect("the firmware source is in the tree");
+        let line = source
+            .lines()
+            .find(|l| l.contains("const PERSIST_CONFIRM_WITHIN"))
+            .expect("the firmware still names its persist bound");
+        let millis: u64 = line
+            .split("from_millis(")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .map(|n| n.replace('_', ""))
+            .and_then(|n| n.parse().ok())
+            .expect("the bound is a from_millis literal");
+        assert_eq!(millis, 2_500, "the bound the window was sized against");
+        assert!(
+            MEDIA_PROFILE_ANSWER_TIMEOUT > Duration::from_millis(millis),
+            "the profile window must outlast the firmware's persist wait"
+        );
+        assert_eq!(
+            media_answer_timeout(leviculum_core::envelope::TYPE_MEDIA_PROFILE),
+            Duration::from_millis(3_500)
+        );
+        // The query writes no page, so it keeps the radio config's budget.
+        assert_eq!(
+            media_answer_timeout(leviculum_core::envelope::TYPE_MEDIA_QUERY),
+            CONFIG_ACK_TIMEOUT
         );
     }
 
