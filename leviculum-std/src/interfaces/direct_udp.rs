@@ -39,8 +39,11 @@ pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// keepalives).
 pub(crate) const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Largest datagram accepted, as for `UDPInterface` (UDPInterface.py:74).
-const DATAGRAM_MAX: usize = 1064;
+/// Largest datagram accepted: anything UDP can carry. The link is lowered to
+/// `DIRECT_LINK_MTU` when it moves here, but a part sized for the link's
+/// earlier, larger MTU may still be in flight, and a truncated datagram is
+/// a silently lost packet.
+const DATAGRAM_MAX: usize = 65_535;
 const CHANNEL_DEPTH: usize = 256;
 
 /// Timing knobs, overridable in tests.
@@ -137,7 +140,7 @@ async fn direct_io_task(
     counters: Arc<InterfaceCounters>,
 ) {
     let keepalive = wire::punch_frame(PunchKind::Punch, &session, &token, wire::KEEPALIVE_SEQ);
-    let mut buf = [0u8; DATAGRAM_MAX];
+    let mut buf = vec![0u8; DATAGRAM_MAX];
     let mut last_heard = Instant::now();
     let mut keepalive_tick = tokio::time::interval(timing.keepalive);
     keepalive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -157,19 +160,21 @@ async fn direct_io_task(
                 if src != peer {
                     continue;
                 }
-                last_heard = Instant::now();
                 let frame = &buf[..len];
                 if wire::punch_frame_kind(frame).is_some() {
-                    if let Some((PunchKind::Punch, seq)) =
-                        wire::parse_punch_frame(frame, &session, &token)
-                    {
-                        if seq != wire::KEEPALIVE_SEQ {
+                    // Only a frame carrying this session's token is the peer
+                    // speaking; a stale or forged one must not keep a dead
+                    // path looking alive.
+                    if let Some((kind, seq)) = wire::parse_punch_frame(frame, &session, &token) {
+                        last_heard = Instant::now();
+                        if kind == PunchKind::Punch && seq != wire::KEEPALIVE_SEQ {
                             let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
                             let _ = socket.send_to(&ack, peer).await;
                         }
                     }
                     continue;
                 }
+                last_heard = Instant::now();
                 if len == 0 {
                     continue;
                 }

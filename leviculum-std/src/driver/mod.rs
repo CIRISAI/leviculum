@@ -5031,6 +5031,32 @@ async fn run_event_loop(
             core_processor.as_mut(),
         );
     }
+    // leviculum#70: sockets from a previous run are gone; whatever the core
+    // still believes about direct links is reconciled before any new work.
+    if direct_link_active {
+        let output = inner.lock_recover().abandon_direct_links();
+        if !output.events.is_empty() || !output.actions.is_empty() {
+            let _ = dispatch_output(
+                output,
+                &mut registry,
+                event_sink.as_mut(),
+                &inner,
+                &mut retry_queues,
+                &mut retry_queue_warned,
+                &mut retry_queue_max_depth,
+                &ifac_configs,
+                remote_mgmt.as_ref(),
+                discovery_storage.as_deref(),
+                discovery_network_identity.as_deref(),
+                &mut discovery_heard_ifac,
+                &completions,
+                &mut assembler,
+                &plane_counters,
+                &mut breakers,
+                core_processor.as_mut(),
+            );
+        }
+    }
     {
         let mut core = inner.lock_recover();
         for job in core.take_resource_assembly_jobs(assembly_concurrency) {
