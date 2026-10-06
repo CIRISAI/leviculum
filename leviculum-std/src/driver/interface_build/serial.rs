@@ -60,6 +60,7 @@ pub(super) fn build(
     }
 
     let radio_config = crate::interfaces::serial::serial_radio_config(config);
+    let bitrate = serial_bitrate(speed, radio_config.as_ref());
 
     // A LoRa modem block (one that names a `frequency`) has its radio
     // parameters validated exactly like the RNode builders, so a value that
@@ -115,10 +116,33 @@ pub(super) fn build(
             test_drop_direct_ingress: config.test_drop_direct_ingress,
         },
     );
-    handle.info.bitrate = Some(speed);
+    handle.info.bitrate = Some(bitrate);
 
     tracing::info!("Serial interface on {} (speed={} baud)", port_path, speed,);
     Ok(Built::Handles(vec![handle]))
+}
+
+/// The bitrate a serial interface reports for its medium.
+///
+/// A block that names radio settings drives an LNode, a LoRa modem, and what
+/// a frame costs there is the air rate, not the line speed to the board: the
+/// same `leviculum_core::rnode::compute_bitrate` the RNode interface reports
+/// (`interfaces/rnode.rs`, `spawn_rnode_interface`), which is Python's
+/// `RNodeInterface.updateBitrate` (RNodeInterface.py:695). Without radio
+/// settings the block is a plain serial pipe and the line speed is the rate,
+/// as in Python's `SerialInterface` (SerialInterface.py:98). An uncomputable
+/// PHY (the formula's 0) keeps the line speed rather than reporting nothing.
+fn serial_bitrate(speed: u32, radio: Option<&crate::interfaces::serial::SerialRadioConfig>) -> u32 {
+    radio
+        .map(|rc| {
+            leviculum_core::rnode::compute_bitrate(
+                rc.spreading_factor,
+                rc.coding_rate,
+                rc.bandwidth,
+            )
+        })
+        .filter(|bps| *bps > 0)
+        .unwrap_or(speed)
 }
 
 #[cfg(test)]
@@ -192,5 +216,52 @@ mod tests {
             msg.contains("SerialInterface") && msg.contains("bandwidth"),
             "expected a named bandwidth config error, got: {msg}"
         );
+    }
+
+    /// Python's `RNodeInterface.updateBitrate` (RNodeInterface.py:695), in
+    /// floating point as the reference computes it.
+    fn python_air_bitrate(sf: u8, cr: u8, bandwidth_hz: u32) -> f64 {
+        let sf = f64::from(sf);
+        sf * ((4.0 / f64::from(cr)) / (2f64.powf(sf) / (f64::from(bandwidth_hz) / 1000.0))) * 1000.0
+    }
+
+    fn lnode_block(spreading_factor: u8) -> InterfaceConfig {
+        InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/null".to_string()),
+            speed: Some(115_200),
+            frequency: Some(869_463_000),
+            bandwidth: Some(125_000),
+            spreading_factor: Some(spreading_factor),
+            coding_rate: Some(5),
+            ..Default::default()
+        }
+    }
+
+    /// An LNode block reports the air rate of its radio settings, not the
+    /// 115 200 baud of the line to the board (leviculum#480): 3125 bit/s at
+    /// the rig default SF8/125 kHz/4:5 and 1757 at SF9, Python's figure for
+    /// the same radio truncated to whole bits.
+    #[test]
+    fn lnode_block_reports_the_air_rate() {
+        for (sf, expected) in [(8u8, 3125u32), (9, 1757)] {
+            let cfg = lnode_block(sf);
+            let radio = crate::interfaces::serial::serial_radio_config(&cfg)
+                .expect("frequency present → radio config");
+            let got = serial_bitrate(115_200, Some(&radio));
+            assert_eq!(got, expected, "sf={sf}");
+            assert_eq!(
+                got,
+                python_air_bitrate(sf, 5, 125_000) as u32,
+                "sf={sf}: must be RNodeInterface.py:695's figure"
+            );
+        }
+    }
+
+    /// A block with no radio settings is a plain serial pipe, and its rate
+    /// is the line speed, as Python's SerialInterface reports it.
+    #[test]
+    fn plain_serial_pipe_reports_the_line_speed() {
+        assert_eq!(serial_bitrate(115_200, None), 115_200);
     }
 }
