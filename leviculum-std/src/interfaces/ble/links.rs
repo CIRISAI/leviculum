@@ -30,8 +30,8 @@ use leviculum_ble_tx::{
     PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
-    fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_INTERVAL_MS,
-    MIN_MTU,
+    fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, FRAGMENT_TYPE_CONTINUE,
+    FRAGMENT_TYPE_END, KEEPALIVE_INTERVAL_MS, MIN_MTU,
 };
 
 /// A BLE address in display order (`AA:BB:CC:DD:EE:FF` → `[0xAA, …]`),
@@ -184,6 +184,25 @@ pub(crate) struct Link {
     /// a newer value.
     pub(crate) mtu: usize,
     defrag: BleDefragmenter,
+    /// A structurally valid CONTINUE/END frame the defragmenter had no
+    /// reassembly for, held for exactly one more frame (#434). BlueZ
+    /// hands peripheral-role writes to one tokio task EACH
+    /// (bluer-0.17.4 `session.rs` sets crossroads' async support to
+    /// `tokio::spawn`), so two write-without-response fragments a
+    /// central issued back to back can reach the interface's event
+    /// channel inverted — the END before its START. The carrier
+    /// delivered both; only this process reordered them, so the tail
+    /// is parked here and replayed when the very next frame opens a
+    /// reassembly with the same `total`. Any other next frame drops it
+    /// as the whole-packet loss it then is, counted in
+    /// [`Self::tails_dropped`].
+    oo_tail: Option<Vec<u8>>,
+    /// Parked tails dropped unmatched — each one a whole Reticulum
+    /// packet this receiver lost. Added to the defragmenter's own
+    /// abandonment count for the link's running `BLE_RX_ABANDON`
+    /// total, so the loss is a visible report rather than the silent
+    /// debug line it was before #434.
+    tails_dropped: u32,
     /// When this link last delivered ANY frame, keepalives included —
     /// the liveness clock [`LinkTable::expire`] reads (#382).
     last_heard_ms: u64,
@@ -629,6 +648,8 @@ impl LinkTable {
             role,
             mtu: mtu.max(MIN_MTU),
             defrag: BleDefragmenter::new(),
+            oo_tail: None,
+            tails_dropped: 0,
             last_heard_ms: now_ms,
             last_data_ms: None,
             last_keepalive_tx_ms: now_ms,
@@ -741,16 +762,55 @@ impl LinkTable {
         // one input; round 2 reports it and consults none of it. Per
         // frame and before reassembly, like the liveness clock.
         link.last_data_ms = Some(now_ms);
-        let before = link.defrag.abandoned_count();
-        let result = link.defrag.process(data, now_ms);
-        if matches!(result, DefragResult::Error) {
-            // Hard reset, as the firmware does: a garbage frame amid a
-            // reassembly must not leave a stale head for the next
-            // packet's tail to complete (#255) — and the head it
-            // discards is a loss this link must report.
-            link.defrag.abandon();
+        // Whatever this frame is, the parked tail's fate is decided
+        // now: replayed behind a frame that opened its reassembly, or
+        // dropped as a loss (#434).
+        let parked = link.oo_tail.take();
+        let mut parked_replayed = false;
+        let before = link.defrag.abandoned_count() + link.tails_dropped;
+        let mut result = link.defrag.process(data, now_ms);
+        match &result {
+            DefragResult::Error => {
+                // Hard reset, as the firmware does: a garbage frame
+                // amid a reassembly must not leave a stale head for
+                // the next packet's tail to complete (#255) — and the
+                // head it discards is a loss this link must report.
+                link.defrag.abandon();
+                // A tail the defragmenter had no head for is parked
+                // for one frame instead of dropped (#434): on this
+                // carrier it is almost always the END of the very
+                // next frame's packet, delivered inverted (see
+                // [`Link::oo_tail`]).
+                if is_orphan_tail(data) {
+                    link.oo_tail = Some(data.to_vec());
+                    result = DefragResult::NeedMore;
+                }
+            }
+            DefragResult::NeedMore => {
+                // This frame joined an open reassembly. A parked tail
+                // with the SAME total belongs to it — the inverted
+                // pair back in order; any other parked tail does not
+                // and is dropped below.
+                if let Some(tail) = &parked {
+                    if tail[3..5] == data[3..5] {
+                        parked_replayed = true;
+                        result = link.defrag.process(tail, now_ms);
+                        if matches!(result, DefragResult::Error) {
+                            // Unreachable — the park gate checked the
+                            // header, the total just matched — but a
+                            // garbage frame must still never leave a
+                            // stale head (#255).
+                            link.defrag.abandon();
+                        }
+                    }
+                }
+            }
+            DefragResult::Complete(_) => {}
         }
-        let after = link.defrag.abandoned_count();
+        if parked.is_some() && !parked_replayed {
+            link.tails_dropped = link.tails_dropped.saturating_add(1);
+        }
+        let after = link.defrag.abandoned_count() + link.tails_dropped;
         let report =
             (after != before).then(|| (link.identity, after.saturating_sub(before), after));
         if let Some(report) = report {
@@ -912,6 +972,21 @@ impl LinkTable {
         });
         expired
     }
+}
+
+/// Whether a frame is structurally a TAIL — CONTINUE or END, sequence
+/// number inside a total of at least two — i.e. a frame that can only
+/// ever follow a START. The park gate of [`Link::oo_tail`] (#434):
+/// only such a frame is worth holding for the next one; anything else
+/// that errors is garbage and stays an error.
+fn is_orphan_tail(frame: &[u8]) -> bool {
+    if frame.len() < FRAGMENT_HEADER_SIZE {
+        return false;
+    }
+    let ftype = frame[0];
+    let seq = u16::from_be_bytes([frame[1], frame[2]]);
+    let total = u16::from_be_bytes([frame[3], frame[4]]);
+    (ftype == FRAGMENT_TYPE_CONTINUE || ftype == FRAGMENT_TYPE_END) && seq >= 1 && seq < total
 }
 
 // ---------------------------------------------------------------------
@@ -1835,6 +1910,128 @@ mod tests {
             t.take_abandon_reports().is_empty(),
             "completion never counts"
         );
+    }
+
+    /// The #434 minimal reproduction: a two-fragment packet whose END
+    /// is processed before its START — what bluer's one-task-per-write
+    /// dispatch makes of two back-to-back write-without-response
+    /// frames — must still deliver the packet. Before the park/replay
+    /// the END was a "bad fragment" and the START a head the next
+    /// packet abandoned: one whole packet lost per inversion, ten of
+    /// them in the f4863a6f `ble_lxmf_delivery` red run.
+    #[test]
+    fn an_inverted_fragment_pair_still_delivers_the_packet() {
+        let mut t = table();
+        let (adm, _) = t.admit(ID_A, ADDR_1, Role::Peripheral, 185, 0);
+        assert_eq!(adm, Admission::Accept);
+
+        let packet = vec![0xAB; 211];
+        let frags = fragment_packet(&packet, 185);
+        assert_eq!(frags.len(), 2);
+
+        // END first: parked for one frame, not dropped as an error.
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &frags[1], 100),
+            Inbound::NeedMore
+        );
+        // START next: opens the reassembly, the parked END completes it.
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &frags[0], 101),
+            Inbound::Packet(packet)
+        );
+        assert!(
+            t.take_abandon_reports().is_empty(),
+            "an inversion the link healed is not a loss"
+        );
+    }
+
+    /// The f4863a6f red run's 16-second burst, replayed byte for byte
+    /// in shape (#434): routed 86, flood 83, the 211 with its
+    /// fragments inverted, flood 99 — the sequence that produced one
+    /// `bad fragment` plus one `BLE_RX_ABANDON` per burst on the host.
+    /// All four packets must now arrive and nothing may be counted
+    /// lost.
+    #[test]
+    fn the_red_runs_inverted_burst_delivers_all_four_packets() {
+        let mut t = table();
+        let (adm, _) = t.admit(ID_A, ADDR_1, Role::Peripheral, 185, 0);
+        assert_eq!(adm, Admission::Accept);
+
+        let p86 = vec![0x11; 86];
+        let p83 = vec![0x22; 83];
+        let p211 = vec![0x33; 211];
+        let p99 = vec![0x44; 99];
+        let f86 = fragment_packet(&p86, 185);
+        let f83 = fragment_packet(&p83, 185);
+        let f211 = fragment_packet(&p211, 185);
+        let f99 = fragment_packet(&p99, 185);
+        assert_eq!((f86.len(), f83.len(), f211.len(), f99.len()), (1, 1, 2, 1));
+
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &f86[0], 100),
+            Inbound::Packet(p86)
+        );
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &f83[0], 200),
+            Inbound::Packet(p83)
+        );
+        // The inversion: END before START.
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &f211[1], 300),
+            Inbound::NeedMore
+        );
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &f211[0], 301),
+            Inbound::Packet(p211)
+        );
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &f99[0], 400),
+            Inbound::Packet(p99)
+        );
+        assert!(t.take_abandon_reports().is_empty());
+    }
+
+    /// A parked tail whose START never arrives is a real whole-packet
+    /// loss, and #434 makes it a counted one: the next frame decides,
+    /// and a frame that does not open the tail's reassembly drops it
+    /// into the link's `BLE_RX_ABANDON` total — where before the park
+    /// existed the orphan was a silent debug line.
+    #[test]
+    fn a_parked_tail_without_its_start_is_a_counted_loss() {
+        let mut t = table();
+        let (adm, _) = t.admit(ID_A, ADDR_1, Role::Peripheral, 185, 0);
+        assert_eq!(adm, Admission::Accept);
+
+        let lost = vec![0x55; 211];
+        let single = vec![0x66; 90];
+        let f_lost = fragment_packet(&lost, 185);
+        let f_single = fragment_packet(&single, 185);
+        assert_eq!(f_lost.len(), 2);
+
+        // The tail arrives, its START never does.
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &f_lost[1], 100),
+            Inbound::NeedMore
+        );
+        assert!(
+            t.take_abandon_reports().is_empty(),
+            "held one frame: not yet a loss"
+        );
+        // The next frame is a whole other packet: it must arrive, and
+        // the parked tail is now one counted loss.
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &f_single[0], 200),
+            Inbound::Packet(single)
+        );
+        assert_eq!(t.take_abandon_reports(), vec![(ID_A, 1, 1)]);
+
+        // Garbage stays an error — the park gate holds only frames
+        // that are structurally tails.
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &[0x07; 16], 300),
+            Inbound::Error
+        );
+        assert!(t.take_abandon_reports().is_empty());
     }
 
     /// The peer-up report decision (Codeberg #365), the mirror of the
