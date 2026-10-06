@@ -1013,6 +1013,14 @@ name = "leviculum-mute-lease"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-node-name"
+version = "0.1.0"
+dependencies = [
+ "leviculum-ble-tx",
+ "leviculum-core",
+]
+
+[[package]]
 name = "leviculum-nrf"
 version = "0.4.0"
 dependencies = [
@@ -1047,6 +1055,7 @@ dependencies = [
  "leviculum-lxmf",
  "leviculum-media-state",
  "leviculum-mute-lease",
+ "leviculum-node-name",
  "leviculum-persist-ack",
  "leviculum-pn-store",
  "leviculum-qspi-bitbang",

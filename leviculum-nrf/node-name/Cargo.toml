@@ -1,0 +1,19 @@
+[package]
+name = "leviculum-node-name"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "The board's derived node names and its BLE-pending rule, host-testable"
+
+[dependencies]
+# The name type (`NodeName`) and the two report flags are core's: the host
+# decodes the same `TYPE_NODE_NAME_REPORT` this crate fills, so a copy of
+# either would be a second definition of one wire field. Not the identity
+# hash, which is a plain `[u8; 16]` here as on the board.
+leviculum-core = { path = "../../leviculum-core", default-features = false }
+# `gap_name`, the BLE name a boot comes up on. It stays in ble-tx beside the
+# advertisement builder that sizes it (`DEVICE_NAME_LEN`), and the pending
+# rule compares two of its results, so this crate calls it rather than
+# carrying a copy that could truncate differently from the board.
+leviculum-ble-tx = { path = "../ble-tx" }

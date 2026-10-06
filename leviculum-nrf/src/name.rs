@@ -64,8 +64,12 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 
 use leviculum_ble_tx::{gap_name, DEVICE_NAME_LEN};
-use leviculum_core::envelope::{NODE_NAME_FLAG_BLE_PENDING, NODE_NAME_FLAG_STORED};
 use leviculum_core::node_name::NodeName;
+
+/// The pure half of this module, host-tested in `leviculum-node-name`
+/// (#413): the derived names and the `BLE_PENDING` rule, taking as
+/// arguments the state the statics below hold.
+pub use leviculum_node_name::{gap_name_for, mesh_name_for, report_for};
 
 /// Whether [`load_at_boot`] ran — the capability the serial task's name
 /// answers are gated on.
@@ -149,21 +153,12 @@ pub fn configured() -> Option<NodeName> {
 /// The mesh display name in force right now: the operator's name, or the
 /// derived `LNode-<hex8>`. This is what the next announce carries.
 ///
-/// The derived form is built here rather than in
+/// The derived form is built by [`mesh_name_for`] rather than in
 /// [`crate::telemetry::announce_app_data`] so that the announce path and
 /// the control-frame report cannot disagree about what an unnamed board
 /// is called.
 pub fn mesh_name(identity_hash: &[u8; 16]) -> NodeName {
-    match configured() {
-        Some(name) => name,
-        None => {
-            let mut derived = *b"LNode-00000000";
-            write_hex8(&mut derived[6..], identity_hash);
-            // Ten graphic ASCII bytes at most — inside every bound
-            // `decode` checks — so the fallback arm is unreachable.
-            NodeName::decode(&derived).unwrap_or(NodeName::EMPTY)
-        }
-    }
+    mesh_name_for(identity_hash, configured())
 }
 
 /// The BLE name the advertisement and the GAP attribute are carrying
@@ -181,9 +176,7 @@ pub fn boot_gap_name() -> NodeName {
 /// right now. Compared against [`boot_gap_name`] to decide
 /// `NODE_NAME_FLAG_BLE_PENDING`.
 pub fn pending_gap_name(identity_hash: &[u8; 16]) -> NodeName {
-    let configured = configured();
-    let (buf, len) = gap_name(identity_hash, configured.as_ref().map(NodeName::as_str));
-    NodeName::decode(&buf[..len]).unwrap_or(NodeName::EMPTY)
+    gap_name_for(identity_hash, configured().as_ref())
 }
 
 /// Everything a
@@ -199,24 +192,11 @@ pub fn pending_gap_name(identity_hash: &[u8; 16]) -> NodeName {
 /// `LNode-00000000` instead would send an operator looking for a board
 /// that does not exist.
 ///
-/// `BLE_PENDING` compares the name BLE came up on against the one it
-/// would come up on now — never the mesh name against the BLE name, which
-/// differ both by truncation and by having two unrelated derived
-/// defaults, and would report a freshly cleared board as pending forever.
+/// The flags and names themselves are [`report_for`]'s, which states the
+/// `BLE_PENDING` rule and is where the host tests assert it.
 pub fn report() -> Option<(u8, NodeName, NodeName)> {
     let identity_hash = IDENTITY.lock(|cell| cell.get())?;
-    let stored = if configured().is_some() {
-        NODE_NAME_FLAG_STORED
-    } else {
-        0
-    };
-    let ble = boot_gap_name();
-    let pending = if ble == pending_gap_name(&identity_hash) {
-        0
-    } else {
-        NODE_NAME_FLAG_BLE_PENDING
-    };
-    Some((stored | pending, mesh_name(&identity_hash), ble))
+    Some(report_for(&identity_hash, configured(), boot_gap_name()))
 }
 
 /// Apply a name a host sent — `None` clears it back to the derived
@@ -276,13 +256,4 @@ pub fn log_banner() {
             }
         ),
     );
-}
-
-/// Write the leading four bytes of `hash` as eight lowercase hex digits.
-fn write_hex8(out: &mut [u8], hash: &[u8; 16]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for (i, byte) in hash[..4].iter().enumerate() {
-        out[2 * i] = HEX[usize::from(byte >> 4)];
-        out[2 * i + 1] = HEX[usize::from(byte & 0x0F)];
-    }
 }
