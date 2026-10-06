@@ -151,7 +151,7 @@ mod mvr_path_response_hops;
 mod mvr_path_response_no_clobber;
 #[cfg(test)]
 mod mvr_path_response_retries;
-#[cfg(test)]
+#[cfg(all(test, feature = "tracing"))]
 mod mvr_pathchoice_direct_vs_route;
 #[cfg(test)]
 mod mvr_pathchoice_rule_table;
