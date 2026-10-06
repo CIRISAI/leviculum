@@ -63,7 +63,17 @@ The three configuration directories are tried in that order, matching Python-Ret
 :   Graceful shutdown.
 
 **SIGUSR1**
-:   Dump diagnostic state to stderr.
+:   Dump diagnostic state to stderr; see DIAGNOSTIC DUMP.
+
+## DIAGNOSTIC DUMP
+
+The SIGUSR1 dump lists the estimated size of every tracked table, the `=== Total estimated ===` line, the process RSS, and three sections that say where the rest of the memory sits.
+
+`=== Allocator ===` prints glibc's own balance sheet (`mallinfo2`: arena, ordblks, hblks, hblkhd, uordblks, fordblks, keepcost) and the thread count. The shipped musl-static builds run musl's mallocng, which keeps no such totals, so there the section says it is unavailable and only the thread count is measured.
+
+`=== Mappings ===` buckets the process's anonymous writable mappings by size (under 64 KiB, 64 KiB to 1 MiB, 1 to 8 MiB, 8 to 64 MiB, above) with count and bytes per bucket, then names the ten largest by address. Thread stacks show up as regions of about 2 MiB each, so a growing count in one bucket points at an owner class without a debugger.
+
+The `gap:` line starts from RSS plus swap and subtracts the tracked total, the allocator's free bytes (fordblks + keepcost) and its mmapped bytes (hblkhd) in turn, printing what is left after each. A term the libc cannot report is printed as `n/a` and subtracts nothing; hblkhd counts live large allocations, so it can overlap the tracked total.
 
 ## EXAMPLES
 
