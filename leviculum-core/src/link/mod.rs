@@ -1228,6 +1228,17 @@ impl Link {
         compute_link_mdu(self.negotiated_mtu)
     }
 
+    /// Lower the link MTU to `ceiling` if it is above it (+ciris,
+    /// leviculum#70: a link moved onto a direct UDP interface). Both ends make
+    /// the same call, so they keep agreeing on the MDU. Never raises it, and
+    /// never goes below [`crate::constants::LINK_MTU_MIN`].
+    pub(crate) fn lower_mtu(&mut self, ceiling: u32) {
+        let ceiling = ceiling.max(crate::constants::LINK_MTU_MIN);
+        if self.negotiated_mtu > ceiling {
+            self.negotiated_mtu = ceiling;
+        }
+    }
+
     /// Get the negotiated link MTU
     ///
     /// Returns the MTU established during link handshake via signaling bytes.
@@ -1816,6 +1827,11 @@ impl Link {
         self.stale_time_secs = stale_time_secs;
         self.last_inbound = last_inbound;
         self.had_inbound = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_negotiated_mtu_for_test(&mut self, mtu: u32) {
+        self.negotiated_mtu = mtu;
     }
 
     #[cfg(test)]
