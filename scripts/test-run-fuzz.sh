@@ -34,7 +34,8 @@
 #      tree and landing stops. The fixture reproduces exactly that shape (a
 #      helper crate gains a second path dependency) and asserts the runner
 #      exits 2, names the lockfile, and leaves it byte-identical -- then that
-#      the same run is green again once the lock matches.
+#      the same run is green again once the lock matches. `--check-lock`, the
+#      `just guards` form of the same precondition (#442), is held to both.
 #
 # Needs the nightly toolchain and cargo-fuzz (cases 1-4 build a real fuzz
 # target); skips with a named reason if they are absent. ~1 min.
@@ -298,6 +299,13 @@ AFTER_SUM="$(sha256sum "$LOCK" | cut -d' ' -f1)"
 expect_eq "$AFTER_SUM" "$BEFORE_SUM" "the lockfile is byte-identical: nothing rewrote a tracked file"
 grep -q "FUZZ_REGRESS name=fixture_clean" <<< "$OUT"
 refute $? "no target ran: the lock is a precondition, not something a run discovers"
+# --check-lock is what `just guards` runs (#442): the same refusal, no build.
+OUT="$(run_fixture bash "$RUNNER" --check-lock 2>&1)"
+RC=$?
+expect_eq "$RC" 2 "--check-lock exits 2 on the same stale lock"
+grep -q "Cargo.lock does not match" <<< "$OUT"
+assert $? "--check-lock fails with the runner's own wording"
+expect_eq "$(sha256sum "$LOCK" | cut -d' ' -f1)" "$BEFORE_SUM" "--check-lock left the lockfile byte-identical"
 
 # The counterweight, so case 8 is not "this always fails": the same invocation,
 # the same lock, with the helper's dependency taken back out.
@@ -308,6 +316,11 @@ expect_eq "$RC" 0 "exit 0 once the lock matches the graph again"
 grep -q "FUZZ_REGRESS name=fixture_clean .*status=GREEN" <<< "$OUT"
 assert $? "the replay runs again with the lock unchanged"
 expect_eq "$(sha256sum "$LOCK" | cut -d' ' -f1)" "$BEFORE_SUM" "the green run did not rewrite the lock either"
+OUT="$(run_fixture bash "$RUNNER" --check-lock 2>&1)"
+RC=$?
+expect_eq "$RC" 0 "--check-lock exits 0 once the lock matches"
+grep -q "FUZZ_LOCK crate=$FIX status=CURRENT" <<< "$OUT"
+assert $? "--check-lock names the crate it found current"
 
 echo
 if [ "$FAILED" = 0 ]; then

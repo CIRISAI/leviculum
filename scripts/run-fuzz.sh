@@ -47,6 +47,7 @@
 #   bash scripts/run-fuzz.sh --regress          # replay the corpus, no fuzzing
 #   bash scripts/run-fuzz.sh hdlc_deframe       # one target by name
 #   bash scripts/run-fuzz.sh --list             # what would run, no build
+#   bash scripts/run-fuzz.sh --check-lock       # the lockfile precondition alone
 #
 # Toolchain: cargo-fuzz drives libFuzzer through `-Z` sanitizer flags, so the
 # targets need NIGHTLY -- the repo's pinned 1.97.1 stable (rust-toolchain.toml)
@@ -93,6 +94,7 @@ CARGO="${LEVICULUM_FUZZ_CARGO:-cargo}"
 HOST_TARGET="x86_64-unknown-linux-gnu"
 
 LIST_ONLY=0
+CHECK_LOCK=0
 MODE=fuzz
 SKIP_IF_UNAVAILABLE=0
 SECONDS_SET=""
@@ -106,6 +108,7 @@ while [ $# -gt 0 ]; do
         --skip-if-unavailable) SKIP_IF_UNAVAILABLE=1; shift ;;
         --nightly) MODE=nightly; shift ;;
         --list) LIST_ONLY=1; shift ;;
+        --check-lock) CHECK_LOCK=1; MODE=check-lock; shift ;;
         -h|--help) sed -n '2,75p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 2 ;;
         *) WANTED+=("$1"); shift ;;
@@ -155,7 +158,8 @@ if ! TOOLCHAIN_VERSION="$("$CARGO" "+$TOOLCHAIN" --version 2>/dev/null)"; then
        the pinned stable in rust-toolchain.toml does not have):
        rustup toolchain install $TOOLCHAIN"
 fi
-if ! FUZZ_VERSION="$("$CARGO" "+$TOOLCHAIN" fuzz --version 2>/dev/null)"; then
+FUZZ_VERSION="not needed"
+if [ "$CHECK_LOCK" = 0 ] && ! FUZZ_VERSION="$("$CARGO" "+$TOOLCHAIN" fuzz --version 2>/dev/null)"; then
     skip_or_die "cargo-fuzz is missing: cargo install cargo-fuzz" \
         "cargo-fuzz is missing:
        cargo install cargo-fuzz"
@@ -167,7 +171,7 @@ echo "FUZZ_TOOLCHAIN channel=$TOOLCHAIN version=\"$TOOLCHAIN_VERSION\" cargo_fuz
 
 RUN_TS="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="$STATE/logs/$RUN_TS"
-mkdir -p "$LOG_DIR" || die "cannot create $LOG_DIR"
+[ "$CHECK_LOCK" = 1 ] || mkdir -p "$LOG_DIR" || die "cannot create $LOG_DIR"
 
 # slug for the state layout: leviculum-core/fuzz -> leviculum-core
 crate_slug() {
@@ -210,6 +214,27 @@ assert_lock_current() {
              --format-version 1 --offline >/dev/null"
     fi
 }
+
+# --check-lock: the precondition above and nothing else, for `just guards`
+# (Codeberg #442). The lock is otherwise read only by `fuzz-regress`, which is
+# in no coder gate, so a manifest change that moved a fuzz crate's graph
+# surfaced on the land gate: 8042e34a gave leviculum-std a path dependency on
+# leviculum-queue-budget, the pass that wrote it ran `guards` green, and the
+# gate for the nineteen commits up to bc07cee3 went red in `fuzz-regress` with
+# every target that ran green. Same function, same wording, same exit 2; no
+# build, no cargo-fuzz, no state dir.
+if [ "$CHECK_LOCK" = 1 ]; then
+    for crate_rel in $CRATES; do
+        case "$crate_rel" in
+            /*) FUZZ_DIR="$crate_rel" ;;
+            *)  FUZZ_DIR="$REPO_DIR/$crate_rel" ;;
+        esac
+        [ -f "$FUZZ_DIR/Cargo.toml" ] || die "no fuzz crate at $FUZZ_DIR"
+        assert_lock_current "$FUZZ_DIR" "$crate_rel"
+        echo "FUZZ_LOCK crate=$crate_rel status=CURRENT"
+    done
+    exit 0
+fi
 
 # The per-target status lines carry the mode in their KEY, not in a field: a
 # regress line and a fuzz line report different things (inputs replayed vs

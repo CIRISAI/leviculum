@@ -443,6 +443,17 @@ fuzz-nightly:
 # is now a precondition the recipe fails on by name
 # (`run-fuzz.sh::assert_lock_current`), and `check-tree-clean` below is the
 # backstop for whatever else in this tier learns the same habit.
+# That precondition, alone, for `guards` (Codeberg #442). `fuzz-regress` is the
+# only recipe that reads the fuzz locks and it is in no coder gate, so a
+# manifest change that moved a fuzz crate's graph was first seen on the land
+# gate: 8042e34a gave leviculum-std a path dependency on leviculum-queue-budget
+# and the gate up to bc07cee3 went red here with every target green. The same
+# `assert_lock_current`, `cargo metadata --locked` per crate: no build, 0.07 s
+# red and 0.11 s green over both crates (measured 2026-10-06).
+[doc('Refuse a fuzz crate Cargo.lock that no longer matches its graph')]
+check-fuzz-lock:
+    bash scripts/run-fuzz.sh --check-lock --skip-if-unavailable
+
 [doc('Replay the fuzz corpus and the defect seeds through every target')]
 fuzz-regress:
     bash scripts/run-fuzz.sh --regress --skip-if-unavailable
@@ -1221,7 +1232,9 @@ tree-clean-selftest:
 # Every other member was re-measured the same way (`touch
 # leviculum-core/src/lib.rs`, then the recipe alone) and none of them
 # free-rides: the worst are `nrf-shellcheck` 5.6 s, `check-supervised-spawns`
-# 3.1 s, `nrf-fw-readback` 2.4 s.
+# 3.1 s, `nrf-fw-readback` 2.4 s. `check-fuzz-lock` (#442) came later: 0.11 s,
+# `cargo metadata --locked` over the two fuzz crates, the lock half of
+# `fuzz-regress` (110 s, below).
 #
 # NOT a tier. Tiers nest (`standard` contains `fast`); `guards` is a strict
 # subset of `fast` and adds nothing to it, so a green `guards` is a cheap
@@ -1316,7 +1329,7 @@ tree-clean-selftest:
 #   run all still ahead of it. The `~3.5 min` in the recipe's own doc
 #   string is older than half the dependency list.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck check-fuzz-lock changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1348,7 +1361,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
+fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

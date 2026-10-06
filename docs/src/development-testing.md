@@ -66,6 +66,10 @@ green `guards` is an early verdict on part of Tier 0, never a substitute for
 it. It exists because the recipes in it are the ones a coder never ran and
 the landing gate did, which cost two landings an hour each on 2026-09-26
 (`check-supervised-spawns`, `check-source-invariant-census`).
+The fuzz crates' committed `Cargo.lock` files are a `guards` precondition
+too (`check-fuzz-lock`, 0.1 s, Codeberg #442), because the land gate up to
+bc07cee3 went red in `fuzz-regress` on a lock that 8042e34a's new path
+dependency had made stale, with every fuzz target green.
 
 That the list really is a subset is checked and not promised:
 `check-guards-subset` (in `guards` itself) reads `just --dump` and refuses a
