@@ -419,14 +419,14 @@ fn the_firmware_stamps_every_line_with_board_uptime() {
 /// clock. That is what makes "every line carries a real stamp" true without
 /// exception, so it is asserted rather than merely described.
 /// The brace-balanced body that follows `marker` in `src`.
-fn body_after<'a>(src: &'a str, marker: &str, what: &str) -> &'a str {
+fn body_after<'a>(src: &'a str, file: &str, marker: &str, what: &str) -> &'a str {
     let after = src
         .split_once(marker)
-        .unwrap_or_else(|| panic!("leviculum-nrf/src/lib.rs: {what} not found ({marker:?})"))
+        .unwrap_or_else(|| panic!("leviculum-nrf/src/{file}: {what} not found ({marker:?})"))
         .1;
     let open = after
         .find('{')
-        .unwrap_or_else(|| panic!("leviculum-nrf/src/lib.rs: {what} has no body"));
+        .unwrap_or_else(|| panic!("leviculum-nrf/src/{file}: {what} has no body"));
     let mut depth = 0usize;
     for (i, c) in after[open..].char_indices() {
         match c {
@@ -440,7 +440,7 @@ fn body_after<'a>(src: &'a str, marker: &str, what: &str) -> &'a str {
             _ => {}
         }
     }
-    panic!("leviculum-nrf/src/lib.rs: {what} body is not brace-balanced");
+    panic!("leviculum-nrf/src/{file}: {what} body is not brace-balanced");
 }
 
 #[test]
@@ -450,7 +450,7 @@ fn the_fault_paths_still_capture_rather_than_log() {
         ("#[panic_handler]", "the panic handler"),
         ("unsafe fn HardFault(", "the HardFault handler"),
     ] {
-        let body = body_after(&lib, marker, what);
+        let body = body_after(&lib, "lib.rs", marker, what);
         assert!(
             !body.contains("log_fmt") && !body.contains("log_critical!"),
             "{what} now logs; it runs with the executor dead, and whether its line \
@@ -1259,6 +1259,84 @@ fn the_identity_lines_are_not_dropped_by_the_runtime_gate() {
         "the [IDENTITY] banner lost a field; a hash that is no longer on it has \
          no other gate-free path to a reader"
     );
+}
+
+/// Codeberg #446: the BLE link-evidence lines are not dropped by the
+/// runtime gate.
+///
+/// The reset census waits for `BLE_CONN_PARAMS conn=` on the board
+/// that was reset (periculum `reset_loop.rs::LINK_NEEDLE`), and the
+/// peripheral emits it exactly once per link, at the connected event.
+/// On a T114 the debug port takes ~2.9 s to re-enumerate after a
+/// reset, and the peer's central dial can land before that: in the
+/// reset census of 2026-10-06 (attempts 3 and 17) the pocket connected
+/// at T114-uptime ≈2.1 s and ≈2.4 s, the gate opened at 2939 ms and
+/// 3229 ms, and the link's whole evidence — `BLE: connected`,
+/// `BLE_CONN_PARAMS`, `BLE_CONN_PARAMS_REQ` — was counted into
+/// RUNTIME_DROPPED while the link itself ran on and carried traffic
+/// for the full 120 s window. Same failure shape as the identity
+/// lines above (#234): pre-attach, a gated line is not late, it is
+/// gone, and it never reaches the persistent tail either.
+///
+/// On the critical path the lines land in LOG_RING at the connected
+/// event and are drained to the host when it attaches, which is how
+/// every boot banner already reaches a capture. The cost is bounded by
+/// the link rate, not the traffic rate — at most a handful of lines
+/// per connection lifecycle — so the gate's purpose (the ring must not
+/// be lapped by traffic before the host attaches) is untouched.
+#[test]
+fn the_ble_link_evidence_is_not_dropped_by_the_runtime_gate() {
+    let columba = nrf_source("ble/columba.rs");
+    // The two helpers behind `BLE_CONN_PARAMS` (both roles, open and
+    // close) and `BLE_CONN_PARAMS_REQ` write through the gate-free
+    // path, and through nothing else.
+    for (marker, what) in [
+        ("fn log_conn_params(", "the BLE_CONN_PARAMS helper"),
+        (
+            "fn ask_for_a_survivable_timeout(",
+            "the BLE_CONN_PARAMS_REQ helper",
+        ),
+    ] {
+        let body = body_after(&columba, "ble/columba.rs", marker, what);
+        assert!(
+            body.contains("log_fmt_critical("),
+            "{what} in leviculum-nrf/src/ble/columba.rs no longer writes through \
+             log_fmt_critical; emitted before DTR-assert its line is dropped, not \
+             delayed, and the reset census waits 120 s for a line that no longer \
+             exists (Codeberg #446)"
+        );
+        assert!(
+            !body.contains("log_fmt("),
+            "{what} in leviculum-nrf/src/ble/columba.rs writes through the \
+             runtime-gated log_fmt again (Codeberg #446)"
+        );
+    }
+    // The human-readable bracket of the same evidence. The byte shape
+    // is pinned too: existing captures and the periculum fixtures carry
+    // `[INFO] BLE: connected`, so the gate-free emission keeps the
+    // `[INFO] ` prefix rather than switching to log_critical!'s
+    // `[INFO!] `.
+    for line in ["BLE: connected", "BLE: disconnected att_mtu="] {
+        let at = columba
+            .find(line)
+            .unwrap_or_else(|| panic!("leviculum-nrf/src/ble/columba.rs no longer emits `{line}`"));
+        let head = &columba[..at];
+        let critical = head.rfind(r#"log_fmt_critical("[INFO] ""#);
+        assert!(
+            critical.is_some(),
+            "leviculum-nrf/src/ble/columba.rs no longer emits `{line}` through \
+             log_fmt_critical with the `[INFO] ` prefix the captures are grepped for"
+        );
+        for gated in ["info!(", "crate::log::log_fmt("] {
+            assert!(
+                head.rfind(gated) < critical,
+                "leviculum-nrf/src/ble/columba.rs emits `{line}` through {gated}, \
+                 which is the runtime-gated path: a central that connects before \
+                 the debug port re-enumerates leaves no trace of the link \
+                 (Codeberg #446)"
+            );
+        }
+    }
 }
 
 /// Codeberg #398: `[TIME_SOURCE]` is the only thing a board says about its

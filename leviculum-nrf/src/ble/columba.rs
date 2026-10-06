@@ -521,7 +521,14 @@ async fn peripheral_task(
         };
         match conn {
             Some(conn) => {
-                crate::info!("BLE: connected");
+                // Gate-free, `[INFO] ` prefix kept: a central can dial in
+                // before the debug port re-enumerates (#446, ~2.9 s on a
+                // T114 after a reset), and a gated line there is dropped,
+                // not delayed — the reset census then waits 120 s for
+                // evidence of a link that is up and carrying traffic.
+                // Same treatment as the identity banner (#234); the
+                // bracket below and both conn-params helpers follow.
+                crate::log::log_fmt_critical("[INFO] ", format_args!("BLE: connected"));
                 // Read once, before the session: the handle is gone by
                 // the time the link ends (`on_disconnected` clears it,
                 // unlike the parameters), and the close line has to
@@ -539,7 +546,10 @@ async fn peripheral_task(
                 // `conn_gatt.att_mtu` becomes observable from outside the
                 // board — without it, "is our conn_cfg in force?" can only be
                 // answered by reading crate source.
-                crate::info!("BLE: disconnected att_mtu={}", conn.att_mtu());
+                crate::log::log_fmt_critical(
+                    "[INFO] ",
+                    format_args!("BLE: disconnected att_mtu={}", conn.att_mtu()),
+                );
                 // And the parameters the link ACTUALLY ran on when it
                 // ended, re-read for the same reason and from the same
                 // still-live state (#385): a link that opened at 420 ms
@@ -580,7 +590,12 @@ async fn peripheral_task(
 /// change under us, and the closing pair is the only evidence of what
 /// the central did with the request.
 fn log_conn_params(conn: &Connection, handle: u16, role: LinkRole, phase: LinkPhase) {
-    crate::log::log_fmt(
+    // Critical, not gated: this is the one line per link the reset
+    // census greps for (`reset_loop.rs::LINK_NEEDLE`), emitted at the
+    // connected event — which on a freshly reset peripheral can precede
+    // DTR-assert (#446). At most two of these per link lifecycle, so
+    // the ring cannot be lapped by them.
+    crate::log::log_fmt_critical(
         "[BLE ] ",
         format_args!(
             "{}",
@@ -660,7 +675,9 @@ fn ask_for_a_survivable_timeout(conn: &Connection, handle: u16) {
             (ask.timeout_ms(), result)
         }
     };
-    crate::log::log_fmt(
+    // Gate-free like its `BLE_CONN_PARAMS` companion (#446): the
+    // verdict is made at the connected event, once per peripheral link.
+    crate::log::log_fmt_critical(
         "[BLE ] ",
         format_args!(
             "{}",
