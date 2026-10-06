@@ -1792,3 +1792,23 @@ fn control_a_reachable_target_keeps_its_cadence() {
         "every announce on the success path belongs to a report"
     );
 }
+
+#[test]
+fn an_owed_retry_with_a_path_drops_it_and_asks_again_first() {
+    assert_eq!(retry_step(true, false), RetryStep::Rediscover);
+}
+
+#[test]
+fn an_owed_retry_without_a_path_asks_for_one() {
+    assert_eq!(retry_step(false, false), RetryStep::AskForPath);
+}
+
+#[test]
+fn an_owed_retry_waits_for_the_answer_and_never_asks_twice() {
+    assert_eq!(retry_step(false, true), RetryStep::Wait);
+}
+
+#[test]
+fn an_owed_retry_goes_out_along_the_path_the_answer_brought() {
+    assert_eq!(retry_step(true, true), RetryStep::Send);
+}

@@ -49,3 +49,7 @@ tracing-subscriber.workspace = true
 # heap needs on the host (the firmware supplies its own single-core impl).
 embedded-alloc = { version = "0.7", default-features = false, features = ["llff"] }
 critical-section = { version = "1", features = ["std"] }
+# The board's rule for an owed telemetry retransmission (#344), driven by the
+# report-drop mvr against real NodeCores instead of mirrored in the test.
+# Dev-only and dependency-free: no cycle, and nothing core ships links it.
+leviculum-telemetry-policy = { path = "../leviculum-nrf/telemetry-policy" }

@@ -1993,6 +1993,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "leviculum-telemetry-policy",
  "libbz2-rs-sys",
  "proptest",
  "rand_core 0.6.4",

@@ -1254,5 +1254,41 @@ impl ProofTracker {
     }
 }
 
+/// What the owed retransmission does on this tick (#344, #373).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryStep {
+    /// A path is known and has been asked for since the loss: resend the
+    /// kept payload along it.
+    Send,
+    /// No path and none asked for yet: ask once, keep the debt.
+    AskForPath,
+    /// A path is known but nobody has asked since the loss: drop it and ask
+    /// again, keep the debt. Its next hop is what failed to prove.
+    Rediscover,
+    /// Asked already, no answer yet: keep the debt and wait.
+    Wait,
+}
+
+/// The step an owed retransmission takes, from whether the node holds a
+/// path to the target and whether this debt has already asked for one.
+///
+/// One question per debt, whichever kind: a path held when the proof
+/// failed to come is dropped and asked for again before the retry, as the
+/// reference does for an unproven opportunistic message with a path
+/// (`reference/LXMF/LXMF/LXMRouter.py:2743-2751`). Retrying along it
+/// sends the retransmission to the next hop that just failed to prove,
+/// which for a relay that has moved on is a black hole for as long as the
+/// stale entry lives (#344). After the question the retry goes out along
+/// whatever path the answer brought, and without an answer the debt
+/// waits until the next scheduled report supersedes it.
+pub const fn retry_step(has_path: bool, path_asked: bool) -> RetryStep {
+    match (has_path, path_asked) {
+        (true, false) => RetryStep::Rediscover,
+        (true, true) => RetryStep::Send,
+        (false, false) => RetryStep::AskForPath,
+        (false, true) => RetryStep::Wait,
+    }
+}
+
 #[cfg(test)]
 mod tests;

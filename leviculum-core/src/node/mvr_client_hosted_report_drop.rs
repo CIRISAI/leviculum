@@ -83,6 +83,11 @@ const BOARD_RADIO: usize = 0;
 /// The second LNode's only interface.
 const RELAY_RADIO: usize = 0;
 
+/// Simulated time per round of the in-process medium.
+const STEP_MS: u64 = 1_000;
+/// Rounds a path learning or a path request is given to settle.
+const ROUNDS: usize = 12;
+
 fn make_node() -> Node {
     NodeCoreBuilder::new().enable_transport(true).build(
         OsRng,
@@ -217,8 +222,6 @@ fn run(with_relay: bool) -> Trace {
 
     // Let the announce find its way across the medium. lnsd's forward of a
     // local client's announce is scheduled, so the clock has to run.
-    const STEP_MS: u64 = 1_000;
-    const ROUNDS: usize = 12;
     for _ in 0..ROUNDS {
         let flight = core::mem::take(&mut air);
         for (from, frame) in flight {
@@ -400,7 +403,20 @@ struct RelayOnlyTrace {
     board_hops_after_path_request: Option<u8>,
 }
 
-fn run_relay_only() -> RelayOnlyTrace {
+/// The nodes as the relay leaves the bus: the board holds the target at two
+/// hops through the relay, and from here the board and lnsd hear each other
+/// directly.
+struct RelayDeparted {
+    lnsd: Node,
+    board: Node,
+    target: DestinationHash,
+    relay_identity: [u8; TRUNCATED_HASHBYTES],
+    lnsd_identity: [u8; TRUNCATED_HASHBYTES],
+}
+
+/// The path learning of [`run_relay_only`]: lnsd's frames reach the board only
+/// through the relay.
+fn learn_through_the_relay_only() -> RelayDeparted {
     let mut client = NodeCoreBuilder::new().enable_transport(false).build(
         OsRng,
         MockClock::new(TEST_TIME_MS),
@@ -441,8 +457,6 @@ fn run_relay_only() -> RelayOnlyTrace {
         to_relay.extend(bound_for(&out, LNSD_RADIO));
     }
 
-    const STEP_MS: u64 = 1_000;
-    const ROUNDS: usize = 12;
     for _ in 0..ROUNDS {
         for frame in core::mem::take(&mut to_relay) {
             let out = relay.handle_packet(InterfaceId(RELAY_RADIO), &frame);
@@ -474,6 +488,23 @@ fn run_relay_only() -> RelayOnlyTrace {
         to_relay.extend(bound_for(&out, BOARD_RADIO));
     }
 
+    RelayDeparted {
+        lnsd,
+        board,
+        target,
+        relay_identity,
+        lnsd_identity,
+    }
+}
+
+fn run_relay_only() -> RelayOnlyTrace {
+    let RelayDeparted {
+        mut lnsd,
+        mut board,
+        target,
+        relay_identity,
+        lnsd_identity,
+    } = learn_through_the_relay_only();
     let board_hops = board.hops_to(&target);
 
     // The relay leaves the bus. From here the board and lnsd hear each other
@@ -633,5 +664,212 @@ fn asking_again_heals_the_path_through_the_departed_relay() {
          every further report is addressed at the departed relay and silently \
          discarded ({})",
         describe_relay_only(&t)
+    );
+}
+
+/// What the board's owed retransmission did after the relay left.
+struct RetryTrace {
+    /// The first report never reached anyone who proves it.
+    first_failed: bool,
+    /// Path requests the board put on the air between the loss and the retry.
+    path_requests: usize,
+    /// The transport id the retransmission was addressed at, `None` for a
+    /// HEADER_1 frame (no next hop named).
+    retry_transport_id: Option<Option<[u8; TRUNCATED_HASHBYTES]>>,
+    relay_identity: [u8; TRUNCATED_HASHBYTES],
+    retry_delivered_to_client: bool,
+}
+
+/// The board's side of #344 after the relay departs, driven by the
+/// firmware's own rule for an owed retransmission
+/// ([`leviculum_telemetry_policy::retry_step`], which
+/// `leviculum-nrf/src/telemetry.rs` calls on every tick) and its own
+/// [`ProofTracker`](leviculum_telemetry_policy::ProofTracker).
+fn run_retry_after_the_relay_departs() -> RetryTrace {
+    use leviculum_telemetry_policy::{retry_step, FailureVerdict, ProofTracker, RetryStep};
+
+    let RelayDeparted {
+        mut lnsd,
+        mut board,
+        target,
+        relay_identity,
+        ..
+    } = learn_through_the_relay_only();
+    assert_eq!(
+        board.hops_to(&target),
+        Some(2),
+        "precondition: the board must hold the two-hop path through the relay"
+    );
+    let path_request_dest = *board.transport.path_request_hash();
+
+    let mut tracker = ProofTracker::new();
+    let mut path_asked = false;
+    let mut first_failed = false;
+    let mut path_requests = 0;
+    let mut retry_transport_id = None;
+    let mut retry_hash = None;
+    let mut retry_delivered_to_client = false;
+
+    // (from_board, frame) on the board-lnsd channel; the relay is gone.
+    let mut air: Vec<(bool, Vec<u8>)> = Vec::new();
+
+    let (first, out) = board
+        .send_single_packet(&target, b"[TELEMETRY] report reason=movement")
+        .expect("the board holds a path, so the report must be routable");
+    tracker.note_report_sent(first, board.transport().clock().now_ms());
+    for f in bound_for(&out, BOARD_RADIO) {
+        air.push((true, f));
+    }
+
+    // Long enough for the receipt to time out and the retry to be paid.
+    const RETRY_ROUNDS: usize = 120;
+    for _ in 0..RETRY_ROUNDS {
+        let mut board_events = Vec::new();
+        for (from_board, frame) in core::mem::take(&mut air) {
+            if from_board {
+                if let Ok(p) = Packet::unpack(&frame) {
+                    if p.destination_hash == path_request_dest {
+                        path_requests += 1;
+                    }
+                }
+                let is_retry = retry_hash.is_some() && is_data_for(&frame, &target);
+                let out = lnsd.handle_packet(InterfaceId(LNSD_RADIO), &frame);
+                if is_retry {
+                    retry_delivered_to_client |= bound_for(&out, LNSD_LOCAL)
+                        .iter()
+                        .any(|f| is_data_for(f, &target));
+                }
+                for f in bound_for(&out, LNSD_RADIO) {
+                    air.push((false, f));
+                }
+            } else {
+                let out = board.handle_packet(InterfaceId(BOARD_RADIO), &frame);
+                for f in bound_for(&out, BOARD_RADIO) {
+                    air.push((true, f));
+                }
+                board_events.extend(out.events);
+            }
+        }
+        for node in [&mut lnsd, &mut board] {
+            let now = node.transport().clock().now_ms();
+            node.transport().clock().set(now + STEP_MS);
+        }
+        let now = board.transport().clock().now_ms();
+        let out = lnsd.handle_timeout();
+        for f in bound_for(&out, LNSD_RADIO) {
+            air.push((false, f));
+        }
+        let out = board.handle_timeout();
+        for f in bound_for(&out, BOARD_RADIO) {
+            air.push((true, f));
+        }
+        board_events.extend(out.events);
+
+        for event in &board_events {
+            if let crate::node::NodeEvent::DeliveryFailed { packet_hash, .. } = event {
+                if let FailureVerdict::RetryDue { .. } = tracker.note_failure(packet_hash, now) {
+                    first_failed = true;
+                }
+            }
+        }
+
+        if tracker.awaiting_retry().is_none() {
+            continue;
+        }
+        let step = retry_step(board.has_path(&target), path_asked);
+        let out = match step {
+            RetryStep::Wait => continue,
+            RetryStep::AskForPath => {
+                path_asked = true;
+                board.request_path(&target)
+            }
+            RetryStep::Rediscover => {
+                path_asked = true;
+                board.remove_path(target.as_bytes());
+                board.request_path(&target)
+            }
+            RetryStep::Send => {
+                let (hash, out) = board
+                    .send_single_packet(&target, b"[TELEMETRY] report reason=movement")
+                    .expect("the rule only sends along a known path");
+                tracker.note_retry_sent(hash);
+                retry_hash = Some(hash);
+                for f in bound_for(&out, BOARD_RADIO) {
+                    if is_data_for(&f, &target) {
+                        let parsed = Packet::unpack(&f).expect("the board's own frame must parse");
+                        retry_transport_id = Some(parsed.transport_id);
+                    }
+                }
+                out
+            }
+        };
+        for f in bound_for(&out, BOARD_RADIO) {
+            air.push((true, f));
+        }
+    }
+
+    RetryTrace {
+        first_failed,
+        path_requests,
+        retry_transport_id,
+        relay_identity,
+        retry_delivered_to_client,
+    }
+}
+
+fn describe_retry(t: &RetryTrace) -> String {
+    std::format!(
+        "first_failed={} path_requests={} retry_transport_id={:?} relay_identity={:?} \
+         retry_delivered={}",
+        t.first_failed,
+        t.path_requests,
+        t.retry_transport_id.map(|id| id.map(|h| h[..4].to_vec())),
+        &t.relay_identity[..4],
+        t.retry_delivered_to_client,
+    )
+}
+
+/// The last gap of #344: a report goes out along a path through a relay, the
+/// relay departs, no proof comes back, and the one retransmission the board
+/// owes must not follow the same dead next hop.
+///
+/// The reference drops the path and asks again in exactly this case: an
+/// opportunistic message still unproven while a path is held gets
+/// `drop_path` and then `request_path` before its next attempt
+/// (`reference/LXMF/LXMF/LXMRouter.py:2743-2751`). The board takes the
+/// mechanism within its single retry: drop, ask once, and send the retry
+/// when the answer names a live next hop.
+#[test]
+fn an_unproven_report_asks_for_the_path_again_before_its_retry() {
+    let t = run_retry_after_the_relay_departs();
+
+    assert!(
+        t.first_failed,
+        "precondition: the report addressed at the departed relay must go \
+         unproven ({})",
+        describe_retry(&t)
+    );
+    assert_eq!(
+        t.path_requests,
+        1,
+        "the board held a path when the proof failed to come: a path whose \
+         next hop did not prove is asked for again, once per owed retry and \
+         never in a loop ({})",
+        describe_retry(&t)
+    );
+    let Some(retry_transport_id) = t.retry_transport_id else {
+        panic!("the retransmission never went out ({})", describe_retry(&t));
+    };
+    assert_ne!(
+        retry_transport_id,
+        Some(t.relay_identity),
+        "the retransmission followed the same dead next hop as the report \
+         ({})",
+        describe_retry(&t)
+    );
+    assert!(
+        t.retry_delivered_to_client,
+        "the retransmission must reach the client that hosts the target ({})",
+        describe_retry(&t)
     );
 }
