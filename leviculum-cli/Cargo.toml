@@ -60,7 +60,9 @@ path = "src/bin/auto_crossmachine_test.rs"
 #   cargo build --release -p leviculum-cli --bin lnsd --features heap-accounting
 [features]
 default = []
-heap-accounting = []
+# Forwarded so the census gap line in leviculum-std subtracts the measured
+# live bytes; the global allocator itself is installed in src/lnsd.rs.
+heap-accounting = ["leviculum-std/heap-accounting"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = true }

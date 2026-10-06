@@ -26,6 +26,16 @@ fn main() {
     } else {
         format!("{pkg_version}-{build_id}")
     };
+    // A heap-accounting build says so in `--version`, before the hash so
+    // the integ harness's parenthesised-hash parse is untouched: the soak
+    // node's journal and `dpkg -l` must not be the only places that tell
+    // an instrumented daemon from a plain one. Cargo sets the variable for
+    // every enabled feature, so this needs no rerun-if line.
+    let base = if std::env::var_os("CARGO_FEATURE_HEAP_ACCOUNTING").is_some() {
+        format!("{base}+heapacct")
+    } else {
+        base
+    };
     let git_hash = git_head_hash();
     let full = format!("{base} ({git_hash})");
     println!("cargo:rustc-env=LEVICULUM_VERSION={full}");

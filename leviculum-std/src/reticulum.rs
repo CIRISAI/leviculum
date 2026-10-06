@@ -228,7 +228,13 @@ mod tests {
         let gap = dump.find("\ngap: rss ").expect("gap arithmetic line");
         assert!(rss < alloc && alloc < maps && maps < gap, "{dump}");
         assert!(dump.contains("\nthreads: "), "{dump}");
-        assert!(dump.contains("; - tracked "), "{dump}");
+        // The tracked total is subtracted in a plain build and only shown
+        // beside the measured live bytes in a heap-accounting one.
+        if cfg!(feature = "heap-accounting") {
+            assert!(dump.contains("; - live "), "{dump}");
+        } else {
+            assert!(dump.contains("; - tracked "), "{dump}");
+        }
         assert!(dump.contains("; unaccounted "), "{dump}");
     }
 

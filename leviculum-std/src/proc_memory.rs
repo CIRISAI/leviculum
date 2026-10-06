@@ -17,7 +17,8 @@
 //!   and thread stacks each land in a recognisable size class, and the ten
 //!   largest regions are named by address.
 //! * The `gap:` line does the subtraction a reader would otherwise do by
-//!   hand: resident plus swapped, minus the tracked total, minus the
+//!   hand: resident plus swapped, minus the tracked total (or, in a
+//!   `heap-accounting` build, the measured live bytes instead), minus the
 //!   allocator's free bytes, minus its mmapped bytes.
 //!
 //! Every parser here takes text, not a path, so the tests feed fixtures and
@@ -246,10 +247,18 @@ pub fn render_allocator(view: Option<AllocatorView>, threads: Option<u64>) -> St
 /// Render the `gap:` line: resident plus swap, then what is left after
 /// each subtraction in turn. A term the process cannot measure is printed
 /// as `n/a` and subtracts nothing.
+///
+/// `live` is the counting shim's balance ([`crate::heap_accounting`]), known
+/// only in a `heap-accounting` build. When it is known it is subtracted
+/// INSTEAD of `tracked`, which is then printed but not taken off: `tracked`
+/// is a model of the same live owners, so taking both would count them
+/// twice. What is left after `live` is allocator retention plus stacks, the
+/// split #437 could not make on musl without it.
 pub fn render_gap_line(
     rss: u64,
     swap: Option<u64>,
     tracked: Option<u64>,
+    live: Option<u64>,
     view: Option<AllocatorView>,
 ) -> String {
     fn step(out: &mut String, left: &mut u64, label: &str, term: Option<u64>) {
@@ -269,7 +278,14 @@ pub fn render_gap_line(
         "gap: rss {rss} + swap {} = {left}",
         swap.map_or_else(|| "n/a".to_string(), |s| s.to_string())
     );
-    step(&mut out, &mut left, "tracked", tracked);
+    match (live, tracked) {
+        (Some(_), Some(t)) => {
+            let _ = write!(out, "; tracked {t} (model, not subtracted)");
+        }
+        (Some(_), None) => out.push_str("; tracked n/a"),
+        (None, _) => step(&mut out, &mut left, "tracked", tracked),
+    }
+    step(&mut out, &mut left, "live", live);
     step(
         &mut out,
         &mut left,
@@ -294,8 +310,28 @@ pub fn census_sections(rss: u64, tracked: Option<u64>) -> String {
 
     let mut out = render_allocator(view, status.threads);
     out.push_str(&render_mappings(&regions));
-    out.push_str(&render_gap_line(rss, status.swap_bytes, tracked, view));
+    out.push_str(&render_gap_line(
+        rss,
+        status.swap_bytes,
+        tracked,
+        measured_live(),
+        view,
+    ));
     out
+}
+
+/// The shim's live balance, in a build whose binary installs it. The
+/// feature is the only reliable witness: the counters are statics that
+/// any caller of `CountingAllocator` moves, the unit tests included, so a
+/// nonzero count does not prove the shim is the global allocator.
+#[cfg(feature = "heap-accounting")]
+fn measured_live() -> Option<u64> {
+    Some(crate::heap_accounting::live_bytes() as u64)
+}
+
+#[cfg(not(feature = "heap-accounting"))]
+fn measured_live() -> Option<u64> {
+    None
 }
 
 #[cfg(test)]
@@ -394,15 +430,51 @@ mod tests {
             ..AllocatorView::default()
         };
         assert_eq!(
-            render_gap_line(1000, Some(500), Some(400), Some(view)),
-            "gap: rss 1000 + swap 500 = 1500; - tracked 400 = 1100; \
+            render_gap_line(1000, Some(500), Some(400), None, Some(view)),
+            "gap: rss 1000 + swap 500 = 1500; - tracked 400 = 1100; - live n/a; \
              - allocator free 120 = 980; - mmapped 300 = 680; unaccounted 680\n"
         );
         assert_eq!(
-            render_gap_line(1000, None, Some(400), None),
-            "gap: rss 1000 + swap n/a = 1000; - tracked 400 = 600; \
+            render_gap_line(1000, None, Some(400), None, None),
+            "gap: rss 1000 + swap n/a = 1000; - tracked 400 = 600; - live n/a; \
              - allocator free n/a; - mmapped n/a; unaccounted 600\n"
         );
+    }
+
+    /// A heap-accounting build: the measured balance replaces the model in
+    /// the subtraction, and the model stays on the line to be read against
+    /// it. The musl shape, no allocator books, is the one #437 needs.
+    #[test]
+    fn gap_line_subtracts_live_instead_of_tracked_when_measured() {
+        assert_eq!(
+            render_gap_line(1000, Some(500), Some(400), Some(250), None),
+            "gap: rss 1000 + swap 500 = 1500; tracked 400 (model, not subtracted); \
+             - live 250 = 1250; - allocator free n/a; - mmapped n/a; unaccounted 1250\n"
+        );
+        assert_eq!(
+            render_gap_line(1000, None, None, Some(250), None),
+            "gap: rss 1000 + swap n/a = 1000; tracked n/a; - live 250 = 750; \
+             - allocator free n/a; - mmapped n/a; unaccounted 750\n"
+        );
+    }
+
+    /// The feature decides which shape `census_sections` prints.
+    #[test]
+    fn census_gap_line_shape_follows_the_feature() {
+        let out = census_sections(1 << 20, Some(1024));
+        let gap = out
+            .lines()
+            .find(|l| l.starts_with("gap: "))
+            .unwrap_or_default();
+        if cfg!(feature = "heap-accounting") {
+            assert!(
+                gap.contains("; tracked 1024 (model, not subtracted); - live "),
+                "{gap}"
+            );
+        } else {
+            assert!(gap.contains("; - tracked 1024 = "), "{gap}");
+            assert!(gap.contains("; - live n/a;"), "{gap}");
+        }
     }
 
     #[test]
