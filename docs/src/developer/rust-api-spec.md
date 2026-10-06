@@ -53,7 +53,7 @@ returns `self`.
 | `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:664` | Act as a relay/forwarder |
 | `fn config(self, config: Config) -> Self` — `builder.rs:244` | Use a pre-loaded `Config` |
 | `fn config_file(self, path: PathBuf) -> Self` — `builder.rs:254` | Load an INI config file |
-| `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:262` | Identity / known-destinations / ratchet store dir |
+| `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:265` | Identity / known-destinations / ratchet store dir |
 | `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:716` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
 | `fn without_events(self) -> Self` — `builder.rs:211` | Daemon mode: no application event channel |
 | `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1018` | Build the node (not yet running) |
@@ -71,7 +71,7 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | `fn is_running(&self) -> bool` — `driver/mod.rs:2421` | Loop state |
 | `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2429` | Make a local destination reachable (consumes it) |
 | `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:3389` | Announce a registered destination |
-| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:2591` | Open a link; returns a pending handle |
+| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:2596` | Open a link; returns a pending handle |
 | `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:2847` | Writable handle for an already-established inbound link |
 | `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:3743` | Single-packet send handle |
 | `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:3697` | Send one unreliable datagram |

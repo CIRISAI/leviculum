@@ -69,6 +69,10 @@ pub enum Error {
     /// Request/response operation failed
     #[error("request error: {0}")]
     Request(RequestError),
+
+    /// A direct-link upgrade could not start (+ciris, leviculum#70)
+    #[error("direct link: {0}")]
+    DirectLink(leviculum_core::node::DirectLinkError),
 }
 
 impl From<AnnounceError> for Error {
@@ -98,6 +102,12 @@ impl From<ResourceError> for Error {
 impl From<RequestError> for Error {
     fn from(e: RequestError) -> Self {
         Error::Request(e)
+    }
+}
+
+impl From<leviculum_core::node::DirectLinkError> for Error {
+    fn from(e: leviculum_core::node::DirectLinkError) -> Self {
+        Error::DirectLink(e)
     }
 }
 

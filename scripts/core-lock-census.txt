@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 58
+TOTAL 61
 
 driver::ReticulumNode::accept_resource
 driver::ReticulumNode::active_link_count
@@ -38,6 +38,7 @@ driver::ReticulumNode::connect_awaited
 driver::ReticulumNode::deregister_request_handler
 driver::ReticulumNode::destination_ratchet_public
 driver::ReticulumNode::diagnostic_dump
+driver::ReticulumNode::direct_link_interface
 driver::ReticulumNode::drop_all_paths_via
 driver::ReticulumNode::get_identity
 driver::ReticulumNode::get_path_clone
@@ -48,6 +49,7 @@ driver::ReticulumNode::identify_link
 driver::ReticulumNode::identity_hash
 driver::ReticulumNode::interface_stats
 driver::ReticulumNode::is_transport_enabled
+driver::ReticulumNode::known_destination_evictions
 driver::ReticulumNode::known_remote_ratchet
 driver::ReticulumNode::link_destination
 driver::ReticulumNode::link_is_established
@@ -59,6 +61,7 @@ driver::ReticulumNode::now_ms
 driver::ReticulumNode::path_count
 driver::ReticulumNode::path_table_entries
 driver::ReticulumNode::pending_link_count
+driver::ReticulumNode::propose_direct_link
 driver::ReticulumNode::rate_table_entries
 driver::ReticulumNode::register_destination
 driver::ReticulumNode::register_request_handler
