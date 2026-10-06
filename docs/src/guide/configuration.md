@@ -535,3 +535,39 @@ example; set them for your region and hardware):
 See the upstream
 [Reticulum Manual](https://reticulum.network/manual/) for the
 protocol-level meaning of the radio and IFAC parameters.
+
+## Direct links (+ciris, leviculum#70)
+
+These keys go in the `[reticulum]` section.
+
+Two nodes that both dialled out to a transport node can move a link between
+them onto a direct UDP path, punched through both NATs. Each side learns its
+public address from a *facilitator*, the two swap addresses over the link
+they already share, and both send at once. When the punch works the link moves
+onto a new point-to-point interface; when it does not (symmetric NAT, common
+on cellular) the link stays where it was. The wire protocol is rns-rs's
+DirectLink, so a leviculum node can upgrade a link to an rns-rs node and use
+an rns-rs facilitator. The feature is off unless configured:
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `probe_port` | u16 | unset | Run a facilitator on this UDP port (all IPv4 addresses). It answers RNSP and STUN Binding requests with the address each request came from, and holds no state. Put it on a node with a public address, usually the transport node. |
+| `probe_addr` | `host:port` | unset | The facilitator this node probes when it proposes an upgrade. Without it the node cannot propose, but it can still accept. |
+| `probe_protocol` | `rnsp`/`stun` | `rnsp` | `stun` lets any public STUN server stand in for the facilitator. |
+| `direct_connect_policy` | `reject`/`accept_all`/`identified_only` | `reject` | Which peers' proposals to accept. Accepting tells the peer this node's public address; `identified_only` accepts only from a peer that identified itself on the link. |
+
+An upgrade is never automatic: the application calls
+`ReticulumNode::propose_direct_link` and gets `DirectLinkEstablished` or
+`DirectLinkFailed`. Only propose to a peer known to run leviculum or rns-rs. A
+Python RNS peer cannot skip the request, and every later channel message on
+that link stalls behind it.
+
+```ini
+[reticulum]
+  # On the public transport node:
+  probe_port = 4343
+
+  # On each NAT'd node:
+  probe_addr = transport.example.org:4343
+  direct_connect_policy = identified_only
+```

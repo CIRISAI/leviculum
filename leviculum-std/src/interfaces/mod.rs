@@ -17,6 +17,7 @@ pub mod auto_interface;
 pub(crate) mod ble;
 pub(crate) mod byte_channel;
 pub(crate) mod census;
+pub(crate) mod direct_udp;
 pub use byte_channel::ByteChannelHandle;
 pub mod hdlc;
 pub(crate) mod i2p;

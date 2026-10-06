@@ -628,6 +628,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             incoming_hashes.push(key.1);
         }
         self.pending_assembly.remove_link(link_id);
+        self.direct_link_link_removed(link_id);
         if outgoing_hash.is_some() || !incoming_hashes.is_empty() {
             // Report the caller-visible id, consistent with emit_link_closed
             // (which translates re-keyed wire ids back to the original).
@@ -699,7 +700,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let Some(link) = self.links.get_mut(link_id) else {
             return;
         };
-        if !link.is_initiator() && link.established_at_secs().is_none() {
+        if !link.is_initiator() && link.established_at_ms().is_none() {
             self.remove_link(link_id);
             self.note_link_rejected();
             return;
@@ -1894,6 +1895,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // not kept and so not proven: the sender's retransmit is its only
         // copy.
         let mut rx_ring_full = false;
+        // Direct-link signals (leviculum#70) are delivered and proofed like
+        // any message, then handled by the node instead of the application.
+        let mut direct_link_signals: Vec<(u16, Vec<u8>)> = Vec::new();
         let proof_packets: Vec<Vec<u8>> = {
             let rtt_ms = link.rtt_ms();
             let channel = link.ensure_channel(rtt_ms);
@@ -1909,12 +1913,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         len = envelope.data.len(),
                         "link_mgr: channel message received (in-order)"
                     );
-                    self.events.push(NodeEvent::MessageReceived {
-                        link_id,
-                        msgtype: envelope.msgtype,
-                        sequence: envelope.sequence,
-                        data: envelope.data,
-                    });
+                    if crate::direct_link::wire::is_signal_msgtype(envelope.msgtype) {
+                        direct_link_signals.push((envelope.msgtype, envelope.data));
+                    } else {
+                        self.events.push(NodeEvent::MessageReceived {
+                            link_id,
+                            msgtype: envelope.msgtype,
+                            sequence: envelope.sequence,
+                            data: envelope.data,
+                        });
+                    }
                     if let Some(budget) = &mut self.channel_delivery_budget {
                         *budget = budget.saturating_sub(1);
                     }
@@ -1967,6 +1975,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         for proof in proof_packets {
             self.route_link_packet(&link_id, &proof);
         }
+        for (msgtype, data) in direct_link_signals {
+            self.on_direct_link_signal(link_id, msgtype, &data, now_ms);
+        }
     }
 
     /// Hand the host the buffered channel messages that are now in order,
@@ -1991,13 +2002,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if let Some(budget) = &mut self.channel_delivery_budget {
             *budget = budget.saturating_sub(drained.len());
         }
+        let mut direct_link_signals = Vec::new();
         for (envelope, _proven_on_arrival) in drained {
+            // Direct-link signals (leviculum#70) are the node's, not the
+            // host's.
+            if crate::direct_link::wire::is_signal_msgtype(envelope.msgtype) {
+                direct_link_signals.push((envelope.msgtype, envelope.data));
+                continue;
+            }
             self.events.push(NodeEvent::MessageReceived {
                 link_id,
                 msgtype: envelope.msgtype,
                 sequence: envelope.sequence,
                 data: envelope.data,
             });
+        }
+        if !direct_link_signals.is_empty() {
+            let now_ms = self.transport.clock().now_ms();
+            for (msgtype, data) in direct_link_signals {
+                self.on_direct_link_signal(link_id, msgtype, &data, now_ms);
+            }
         }
     }
 

@@ -184,3 +184,7 @@ pub use traits::{
     Clock, Interface, InterfaceError, InterfaceKind, InterfaceMode, NoStorage, Storage,
     StorageError,
 };
+
+/// Direct-link upgrade (+ciris, leviculum#70). Declared last so the fork
+/// moves no line an upstream citation points at.
+pub mod direct_link;

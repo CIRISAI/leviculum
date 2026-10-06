@@ -115,7 +115,9 @@ pub(crate) fn map_error(e: &leviculum_std::Error) -> c_int {
         // Surface "no path" distinctly so callers can branch on it.
         Error::Send(leviculum_std::SendError::NoPath) => LEV_ERR_NO_PATH,
         Error::Announce(_) | Error::Send(_) => LEV_ERR_SEND,
-        Error::Link(_) => LEV_ERR_LINK,
+        // A direct-link upgrade (leviculum#70) is an operation on a link; the
+        // detail string says which precondition failed.
+        Error::Link(_) | Error::DirectLink(_) => LEV_ERR_LINK,
         Error::Resource(_) => LEV_ERR_RESOURCE,
         Error::Request(_) => LEV_ERR_REQUEST,
     }

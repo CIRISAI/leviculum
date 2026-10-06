@@ -61,6 +61,8 @@ pub struct ReticulumNodeBuilder {
     max_assembled_resource_size_explicit: Option<usize>,
     /// leviculum#71: assemble incoming resources off the node lock.
     assemble_resources_off_lock: bool,
+    /// leviculum#70: direct-link settings (takes priority over config).
+    direct_link_explicit: Option<crate::direct_link::DirectLinkSettings>,
     /// Explicit control-channel capacity override (takes priority over config)
     control_channel_capacity_explicit: Option<usize>,
     /// Explicit data-channel capacity override (takes priority over config)
@@ -116,6 +118,7 @@ impl ReticulumNodeBuilder {
             flush_interval_secs_explicit: None,
             max_assembled_resource_size_explicit: None,
             assemble_resources_off_lock: true,
+            direct_link_explicit: None,
             control_channel_capacity_explicit: None,
             data_channel_capacity_explicit: None,
             link_keepalive_secs_explicit: None,
@@ -857,6 +860,15 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// +ciris (leviculum#70): direct-link upgrade settings, overriding the
+    /// config's `probe_port` / `probe_addr` / `probe_protocol` /
+    /// `direct_connect_policy`. The default is off: no facilitator, and
+    /// every peer's request refused.
+    pub fn direct_link(mut self, settings: crate::direct_link::DirectLinkSettings) -> Self {
+        self.direct_link_explicit = Some(settings);
+        self
+    }
+
     pub fn flush_interval_secs(mut self, secs: u64) -> Self {
         self.flush_interval_secs_explicit = Some(secs);
         self
@@ -1123,8 +1135,20 @@ impl ReticulumNodeBuilder {
         };
 
         // Build NodeCore (consumes storage, persistent data already loaded)
+        let direct_link = match self.direct_link_explicit.take() {
+            Some(settings) => settings,
+            None => crate::direct_link::DirectLinkSettings::from_config(&config.reticulum)?,
+        };
+
         let mut node_core = core_builder.build(rand_core::OsRng, clock, storage);
         node_core.set_defer_resource_assembly(self.assemble_resources_off_lock);
+        // The facilitator address is resolved at each proposal; until then
+        // the core knows only the policy and the probe protocol.
+        node_core.set_direct_link_config(leviculum_core::node::DirectLinkConfig {
+            policy: direct_link.policy,
+            facilitator: None,
+            protocol: direct_link.protocol,
+        });
 
         let mut node = ReticulumNode::new(
             node_core,
@@ -1138,6 +1162,7 @@ impl ReticulumNodeBuilder {
         if let Some(bytes) = self.max_assembled_resource_size_explicit {
             node.max_assembled_resource_size = bytes;
         }
+        node.direct_link = direct_link;
         node.outbound_socket_hook = self.outbound_socket_hook.clone();
         // Where both shared-instance channels live (D2 of the 2026-10-11
         // shared-instance audit; the ports are Codeberg #112): explicit >

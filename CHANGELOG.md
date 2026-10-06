@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [Unreleased] — CIRIS fork
+
+### Added
+
+- Direct-link upgrade (+ciris, leviculum#70): NAT traversal for two nodes
+  whose link runs through a transport node. Each learns its public UDP address
+  from a facilitator, the two swap addresses over the link, and both punch.
+  On success the link moves onto a new point-to-point UDP interface, and
+  that interface announces the node's destinations, so paths drop to one hop.
+  On failure (symmetric NAT) nothing changes. If the direct interface later
+  dies, the link goes back to its previous interface.
+  - Wire-compatible with rns-rs's DirectLink protocol: the same channel
+    signals (MSGTYPE `0xFE00..=0xFE04`), RNSP/STUN probes, punch frames and
+    punch token. This is an independent implementation, not a port; rns-rs is
+    under the Reticulum License, which AGPL code cannot absorb. Interop was
+    verified in all three combinations: rns-rs as relay and facilitator,
+    rns-rs accepting a leviculum proposal, and rns-rs proposing to leviculum.
+  - Off by default. Config keys `probe_port`, `probe_addr`, `probe_protocol`
+    and `direct_connect_policy` (default `reject`), or
+    `ReticulumNodeBuilder::direct_link`. API:
+    `ReticulumNode::propose_direct_link`, `direct_link_interface`, and in
+    core `NodeCore::{propose_direct_link, take_direct_link_jobs,
+    direct_link_probed, direct_link_punched}`. Events: `NodeEvent::
+    {DirectLinkEstablished, DirectLinkFailed, DirectLinkLost}`.
+  - Only propose to a leviculum or rns-rs peer: a Python RNS peer's channel
+    stalls behind the unknown signal.
+
 ## [0.29.0+ciris.1] — CIRIS fork
 
 ### Changed
