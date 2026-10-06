@@ -133,8 +133,8 @@ because the list below is what is actually left:
 | Heap budget: endpoint links, boot and live serve cap | `leviculum-heap-budget` | `03e99edf`, 2026-10-05 |
 | Node name, derived defaults and the BLE-pending flag | `leviculum-node-name` | `8128a0d2`, 2026-10-06 |
 | Front-end position: never both switch paths at once | `leviculum-rx-arming` (`front_end`) | `1a1ef641`, 2026-10-06 |
-| The 1200-baud touch predicate | `leviculum-usb-policy` | 2026-10-06 |
-| Control-envelope answer windows and the deferral bound they cover | `leviculum-usb-policy` | 2026-10-06 |
+| The 1200-baud touch predicate | `leviculum-usb-policy` | `604b5fae`, 2026-10-06 |
+| Control-envelope answer windows and the deferral bound they cover | `leviculum-usb-policy` | `604b5fae`, 2026-10-06 |
 
 The answer windows moved as constants, not as functions of the
 modulation. What the modulation moves is the delay they must cover, one
