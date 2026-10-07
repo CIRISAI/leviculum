@@ -109,3 +109,8 @@ pub use rpc::{
 pub use storage::{
     atomic_write_secret, create_secret_dir_all, create_secret_file, narrow_secret_mode,
 };
+
+/// Metrics through the `metrics` facade (+ciris, leviculum#77). Declared
+/// last so the fork moves no line an upstream citation points at.
+pub mod telemetry;
+pub use telemetry::LinkCountCheck;
