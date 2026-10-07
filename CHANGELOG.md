@@ -20,6 +20,11 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- leviculum.network gets a landing page, a download page, a source page and
+  a board list (leviculum#498, refs #260), shipped in the lblogd package
+  under `/usr/share/lblogd/pages/` and served when `pages_dir` points there;
+  a link from one page to another now also reaches it on the NomadNet side.
+
 - A propagation node leaves half its airtime to forwarding (leviculum#494,
   decided on #433). A board running the propagation role starts no sync
   round, offer, transfer or active delivery of its own, and postpones

@@ -41,6 +41,13 @@ posts_dir = "/var/lib/lblogd/posts"
 #
 # Unlike files_dir, a directory named here has to exist: a typo would
 # otherwise cost the landing page silently.
+#
+# This package ships the leviculum.network pages (a landing page,
+# download, source and boards) in /usr/share/lblogd/pages. Pointing
+# pages_dir there serves them as they are and keeps them current with
+# every upgrade; copy the directory and point here at the copy to edit
+# them. The about page above is unaffected either way.
+# pages_dir = "/usr/share/lblogd/pages"
 # pages_dir = "/var/lib/lblogd/pages"
 
 # Files a post can reference: pictures, mostly. Served as /files/<name>

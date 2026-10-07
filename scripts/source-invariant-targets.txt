@@ -83,6 +83,7 @@ skip  lblogd          node_waits_for_daemon      # tokio runtime and a startup r
 skip  lblogd          page_identity              # in-process page identity derivation; subject is the code
 skip  lblogd          post_model                 # parses posts from a temp dir; subject is the parser
 skip  lblogd          render_html                # HTML renderer; subject is the renderer
+skip  lblogd          site_content               # reads site/pages, but renders them through the router under a tokio runtime; `just site-check` runs it
 skip  lblogd          site_pages                 # spawns binaries under a tokio runtime
 skip  lblogd          source_offer               # tokio runtime plus temp-dir state
 skip  lblogd          visit_counter              # tokio runtime with sleeps over a temp-dir counter file

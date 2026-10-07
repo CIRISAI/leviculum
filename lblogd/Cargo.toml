@@ -69,6 +69,12 @@ assets = [
     # script that dpkg-preconfigure runs as /bin/sh.
     ["../packaging/lblogd/config.toml", "etc/lblogd/config.toml", "644"],
     ["README.md", "usr/share/doc/lblogd/README.md", "644"],
+    # The leviculum.network site pages (landing, download, source, boards).
+    # Under /usr/share and not /var/lib: they are package content that an
+    # upgrade replaces, and an operator who wants them points pages_dir
+    # here. Nothing reads them until a config names the directory, so a
+    # blog that does not opt in serves exactly what it served before.
+    ["../site/pages/*.md", "usr/share/lblogd/pages/", "644"],
     # Rendered from docs/src/man/ by scripts/md2man.py, which the
     # build-deb recipes run before this. The Markdown under docs/ is the
     # single source: mdbook publishes it and the package installs it, so
