@@ -410,3 +410,80 @@ mod two_emissions_in_one_second_both_leave_the_relay;
 mod two_responders_overlap_inside_one_airtime;
 mod udp_hostname_forward;
 mod unparsable_config_must_not_start_a_daemon;
+
+/// Fail, by name, when a release binary an mvr is about to spawn is older
+/// than the host-side source it is built from.
+///
+/// The mvr files that spawn `lnsd` or `lncp` run the RELEASE binary, which
+/// `cargo test` does not build: `just mvr` gets it fresh from
+/// `build-integ-bins`, while a bare `cargo test -p leviculum-std` (or
+/// `--workspace`) runs whatever release build the target directory last
+/// held. On 2026-10-07 that let 501's batch gate pass the media-signal mvr
+/// against an `lnsd` from 08:35, six hours older than the attach query the
+/// commit added, and the land gate's `just mvr` went red on the same tree
+/// (leviculum#507). A stale binary is not a pass or a fail of the code
+/// under test, it is a measurement of different code, so it fails here
+/// with the recipe that fixes it.
+///
+/// The source set is the in-tree crates `lnsd` links. Modification times,
+/// not content: a checkout or an edit after the last release build makes
+/// the binary stale, which is what this has to catch, and a build always
+/// writes the binary after the sources it read.
+pub fn assert_release_bin_fresh(bin: &std::path::Path) {
+    use std::path::Path;
+    use std::time::SystemTime;
+
+    fn newest_rs(dir: &Path, newest: &mut Option<(SystemTime, std::path::PathBuf)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                newest_rs(&path, newest);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                if let Ok(m) = entry.metadata().and_then(|m| m.modified()) {
+                    if newest.as_ref().is_none_or(|(t, _)| m > *t) {
+                        *newest = Some((m, path));
+                    }
+                }
+            }
+        }
+    }
+
+    const SOURCE_DIRS: &[&str] = &[
+        "leviculum-core/src",
+        "leviculum-std/src",
+        "leviculum-cli/src",
+        "leviculum-lxmf/src",
+        "leviculum-nrf/ble-tx/src",
+        "leviculum-nrf/channel-access/src",
+        "leviculum-nrf/announce-policy/src",
+        "leviculum-nrf/queue-budget/src",
+        "leviculum-nrf/heap-budget/src",
+    ];
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let built = std::fs::metadata(bin)
+        .and_then(|m| m.modified())
+        .unwrap_or_else(|e| {
+            panic!(
+                "{} not found ({e}) - run `just build-integ-bins` first, or `just mvr`, \
+                 which builds it",
+                bin.display()
+            )
+        });
+    let mut newest = None;
+    for dir in SOURCE_DIRS {
+        newest_rs(&workspace_root.join(dir), &mut newest);
+    }
+    if let Some((touched, source)) = newest {
+        assert!(
+            built >= touched,
+            "{} is older than {}: the mvr would measure a release build of \
+             different code. Run `just build-integ-bins` first, or `just mvr`, \
+             which builds it (leviculum#507)",
+            bin.display(),
+            source.display()
+        );
+    }
+}

@@ -61,11 +61,13 @@ fn release_bin(name: &str) -> PathBuf {
     let triple = std::env::var("CARGO_BUILD_TARGET")
         .unwrap_or_else(|_| "x86_64-unknown-linux-musl".to_string());
     let triple_release = target_dir.join(&triple).join("release").join(name);
-    if triple_release.exists() {
+    let bin = if triple_release.exists() {
         triple_release
     } else {
         target_dir.join("release").join(name)
-    }
+    };
+    crate::assert_release_bin_fresh(&bin);
+    bin
 }
 
 #[test]
