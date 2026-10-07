@@ -14,7 +14,17 @@
 //! The board here is a scripted stand-in on the far end of a `socat` pty
 //! pair, not firmware: it accepts `TYPE_MEDIA_QUERY` and `TYPE_MEDIA_PROFILE`
 //! and answers both with `TYPE_MEDIA_REPORT`, which is what
-//! `leviculum-nrf/src/usb.rs` does with those two types on the data port.
+//! `leviculum-nrf/src/usb.rs` does with those two types on the data port,
+//! and puts a lifted `TYPE_DUTY_HOLD` behind every query's report, which the
+//! firmware also does (leviculum#501).
+//!
+//! The daemon asks one media query of its own on every attach, before any
+//! signal: that is how it learns the board's duty hold
+//! (`ask_duty_hold_state` in `leviculum-std/src/interfaces/serial.rs`). It is
+//! not one of the media verbs this file measures, so every test consumes it
+//! with [`drain_attach`] first, and "writes nothing" below means nothing
+//! after the attach handshake. The handshake itself has a test of its own:
+//! exactly one query per attach, none later.
 //! What it cannot prove is that the nRF firmware's carriers actually go
 //! quiet — that is a rig measurement and is named as untested in the report
 //! this landed with.
@@ -33,7 +43,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use leviculum_core::envelope::{
-    self, decode_frame, encode_media_report, MediaProfileWire, MEDIA_FLAG_LORA,
+    self, decode_frame, encode_duty_hold, encode_media_report, DutyHoldWire, MediaProfileWire,
+    MEDIA_FLAG_LORA,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_std::interfaces::{FIRMWARE_MEDIA_RESTORE_SIGNAL, FIRMWARE_MEDIA_SILENCE_SIGNAL};
@@ -84,11 +95,13 @@ fn release_bin(name: &str) -> PathBuf {
     let triple = std::env::var("CARGO_BUILD_TARGET")
         .unwrap_or_else(|_| "x86_64-unknown-linux-musl".to_string());
     let triple_release = target_dir.join(&triple).join("release").join(name);
-    if triple_release.exists() {
+    let bin = if triple_release.exists() {
         triple_release
     } else {
         target_dir.join("release").join(name)
-    }
+    };
+    crate::assert_release_bin_fresh(&bin);
+    bin
 }
 
 /// A linked pty pair from `socat`, the serial-cable stand-in the interop
@@ -221,11 +234,23 @@ fn spawn_board_inner(port: &str, initial: MediaProfileWire, answers: bool) -> Re
                 // (`media_query_answer` / `media_profile_answer`), and both
                 // carriers on this stand-in came up at boot, so running and
                 // configured are the same value.
-                frame(&encode_media_report(&profile, &profile), &mut out);
-                if write_half.write_all(&out).is_err() || write_half.flush().is_err() {
-                    return;
+                let mut answer = vec![encode_media_report(&profile, &profile)];
+                // A query's report is followed by the duty-hold notice
+                // (leviculum#501, `TYPE_DUTY_HOLD` in the envelope). This
+                // board never holds: no LoRa traffic crosses it.
+                if seen == BoardFrame::Query {
+                    answer.push(encode_duty_hold(&DutyHoldWire {
+                        held: false,
+                        lt_ms: 0,
+                    }));
                 }
-                out.clear();
+                // One HDLC frame per write: `frame` clears its output.
+                for payload in &answer {
+                    frame(payload, &mut out);
+                    if write_half.write_all(&out).is_err() || write_half.flush().is_err() {
+                        return;
+                    }
+                }
             }
         }
     });
@@ -329,6 +354,24 @@ fn expect_frame(rx: &Receiver<BoardFrame>, what: &str) -> BoardFrame {
     }
 }
 
+/// Consume the one media query the daemon asks on every attach, or fail by
+/// name if it never comes.
+///
+/// That query is lnsd learning the board's duty hold (leviculum#501), not a
+/// media verb, so the "writes nothing" windows of the tests below start
+/// after it. Anything other than a query first is a failure too: the attach
+/// must not write a profile.
+fn drain_attach(rx: &Receiver<BoardFrame>) {
+    match rx.recv_timeout(FRAME_WAIT) {
+        Ok(BoardFrame::Query) => {}
+        Ok(f) => panic!("the attach handshake must be a media query, the board saw {f:?}"),
+        Err(e) => panic!(
+            "the board saw no attach media query (the duty-hold question of \
+             `ask_duty_hold_state`) within {FRAME_WAIT:?}: {e:?}"
+        ),
+    }
+}
+
 /// Assert the board sees nothing for [`SILENCE_WINDOW`].
 fn expect_no_frame(rx: &Receiver<BoardFrame>, why: &str) {
     match rx.recv_timeout(SILENCE_WINDOW) {
@@ -359,6 +402,7 @@ fn the_media_signals_silence_a_board_and_put_back_the_profile_it_had() {
         .expect("the online line names the interface")
         .to_string();
     daemon.wait_for_log("Out-of-band control:", Duration::from_secs(10));
+    drain_attach(&board);
 
     // ---- A restore with no prior silence: the documented no-op. ----
     daemon.signal(FIRMWARE_MEDIA_RESTORE_SIGNAL);
@@ -459,6 +503,7 @@ fn an_unlistened_real_time_signal_is_not_a_media_verb() {
     let mut daemon = Daemon::spawn(&pty.daemon_end, "mvr-media-unlistened");
     daemon.wait_for_log("Out-of-band control:", Duration::from_secs(10));
     daemon.wait_for_log("online on", Duration::from_secs(10));
+    drain_attach(&board);
 
     daemon.signal(UNLISTENED_RT_SIGNAL);
     let status = daemon.child.wait().expect("the daemon is waitable");
@@ -494,6 +539,9 @@ fn a_board_that_does_not_report_is_not_silenced() {
         .nth(1)
         .expect("the online line names the interface")
         .to_string();
+    // A deaf board is asked on attach too; it answers that no more than
+    // the verb's query, and the daemon does not wait on it.
+    drain_attach(&board);
 
     daemon.signal(FIRMWARE_MEDIA_SILENCE_SIGNAL);
     assert_eq!(
@@ -519,4 +567,36 @@ fn a_board_that_does_not_report_is_not_silenced() {
         &format!("MEDIA_RESTORE iface={iface} outcome=nothing-remembered"),
         FRAME_WAIT,
     );
+}
+
+/// The attach handshake the tests above drain: one media query per attach,
+/// and nothing after it while no signal arrives.
+///
+/// The daemon asks it to learn the board's duty hold (leviculum#501). Two
+/// would mean the question is asked on some schedule rather than on the
+/// attach edge, which the media verbs' "writes nothing" windows would then
+/// meet as stray queries; none would mean an lnsd that attached to a held
+/// board keeps relaying announces into the held queue until the next edge.
+#[test]
+fn the_attach_asks_the_board_once_and_then_nothing() {
+    let pty = PtyPair::spawn();
+    let board = spawn_board(
+        &pty.board_end,
+        MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: false,
+        },
+    );
+    let daemon = Daemon::spawn(&pty.daemon_end, "mvr-media-attach");
+    daemon.wait_for_log("online on", Duration::from_secs(10));
+    daemon.wait_for_log("Out-of-band control:", Duration::from_secs(10));
+
+    drain_attach(&board);
+    // Three windows back to back, 1.8 s of quiet after the handshake.
+    for _ in 0..3 {
+        expect_no_frame(&board, "the attach asks once, and nothing asks again");
+    }
+    // The daemon is still up, so the silence above is not a dead process.
+    daemon.signal(FIRMWARE_MEDIA_RESTORE_SIGNAL);
+    daemon.wait_for_log("outcome=nothing-remembered", FRAME_WAIT);
 }
