@@ -144,6 +144,22 @@ fn the_census_counts_live_links_by_role_and_destination() {
     b.reject_link(&pending_on_b.link_id);
     assert_eq!(b.link_lifecycle().rejected, 1);
     assert_eq!(b.link_lifecycle().handshake_failed_total(), 0);
+    // Rejecting a link that is already live is a close, not a refusal: the
+    // counters keep agreeing with the census.
+    let live_on_b = b
+        .link_list()
+        .into_iter()
+        .find(|l| l.age_secs.is_some())
+        .expect("an established link on B");
+    b.reject_link(&live_on_b.link_id);
+    let lc = b.link_lifecycle();
+    assert_eq!(lc.rejected, 1, "not counted as a refusal");
+    assert_eq!(lc.closed(LinkCloseReason::Normal), 1);
+    let census = b.link_census();
+    assert_eq!(
+        lc.established() - lc.closed_total(),
+        (census.initiator + census.responder) as u64
+    );
     let _ = a.close_link(&refused);
 
     // A link that never established is a handshake failure, not a close.
