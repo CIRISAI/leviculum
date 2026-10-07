@@ -42,8 +42,9 @@ pub struct LinkInfo {
     /// Seconds since anything arrived on the link (one-second resolution),
     /// or `None` if nothing has yet.
     pub idle_secs: Option<u64>,
-    /// Measured round-trip time, in milliseconds.
-    pub rtt_ms: u64,
+    /// Measured round-trip time in milliseconds, or `None` before a
+    /// sample exists (the link's working fallback is not a measurement).
+    pub rtt_ms: Option<u64>,
     /// The interface the link is sent on, if attached.
     pub interface_index: Option<usize>,
 }
@@ -90,7 +91,8 @@ pub fn link_close_reason_name(reason: LinkCloseReason) -> &'static str {
 /// Cumulative link lifecycle counters since the node started.
 ///
 /// Every link that ends is counted once: in `closed` if it had been
-/// established, in `handshake_failed` if it never was. So
+/// established, in `handshake_failed` if it never was, or in `rejected` if
+/// the application refused its request. So
 /// `established - closed_total()` is the established links alive now, and
 /// a census that disagrees with it is a bookkeeping fault.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -99,6 +101,8 @@ pub struct LinkLifecycle {
     pub established_initiator: u64,
     /// Links established with this node as responder.
     pub established_responder: u64,
+    /// Incoming link requests the application refused (`reject_link`).
+    pub rejected: u64,
     closed: [u64; REASONS],
     handshake_failed: [u64; REASONS],
 }
@@ -165,7 +169,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     age_secs: established.map(|at| now_secs.saturating_sub(at)),
                     idle_secs: established
                         .map(|_| now_secs.saturating_sub(link.last_inbound_secs())),
-                    rtt_ms: link.rtt_ms(),
+                    rtt_ms: link.rtt_us().map(|us| us / 1000),
                     interface_index: link.attached_interface(),
                 }
             })
@@ -175,6 +179,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Cumulative link lifecycle counters (leviculum#77).
     pub fn link_lifecycle(&self) -> LinkLifecycle {
         self.link_telemetry.lifecycle
+    }
+
+    /// Called by `reject_link`: a request refused before it established,
+    /// which reports no close (Codex review on #76).
+    pub(super) fn note_link_rejected(&mut self) {
+        self.link_telemetry.removing_was_established = None;
+        self.link_telemetry.lifecycle.rejected += 1;
     }
 
     /// Called by `remove_link` as a link leaves the table.
