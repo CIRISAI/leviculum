@@ -262,22 +262,40 @@ const REANNOUNCE_AFTER: [Duration; 2] = [Duration::from_secs(1), Duration::from_
 const PUNCH_INTERVAL: Duration = Duration::from_millis(100);
 const PUNCH_WINDOW: Duration = Duration::from_secs(10);
 
+/// What a successful punch hands on.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Punched {
+    /// Where the peer was actually seen, which a port-preserving NAT makes
+    /// the address punched toward.
+    pub peer: SocketAddr,
+    /// Ordinary datagrams the peer sent while this end was still punching.
+    /// The peer can finish first, move its link onto the new path and send
+    /// at once; dropping those here would lose one-shot packets (a close,
+    /// an identify) that nothing repeats (Codex review on #78). The
+    /// interface delivers them before anything it reads itself.
+    pub early: Vec<Vec<u8>>,
+}
+
+/// How many early datagrams a punch keeps; a peer that sends more before
+/// this end finishes is not waiting for anything.
+const EARLY_MAX: usize = 64;
+
 /// Punch toward `peer` until both directions are proven: a valid punch from
 /// the peer has arrived (so its NAT lets it out to us) and a valid ack for
-/// one of ours has arrived (so ours reach it). Returns the address the peer
-/// was actually seen at, which a port-preserving NAT makes `peer` itself.
+/// one of ours has arrived (so ours reach it).
 pub(crate) async fn punch(
     socket: &UdpSocket,
     peer: SocketAddr,
     session: &SessionId,
     token: &[u8; 32],
-) -> Option<SocketAddr> {
+) -> Option<Punched> {
     let deadline = tokio::time::Instant::now() + PUNCH_WINDOW;
     let mut heard_punch_from: Option<SocketAddr> = None;
     let mut acked_by: Option<SocketAddr> = None;
+    let mut early: Vec<Vec<u8>> = Vec::new();
     let mut seq: u32 = 0;
     let mut tick = tokio::time::interval(PUNCH_INTERVAL);
-    let mut buf = [0u8; 128];
+    let mut buf = vec![0u8; 65_535];
     loop {
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => return None,
@@ -288,17 +306,29 @@ pub(crate) async fn punch(
             }
             result = socket.recv_from(&mut buf) => {
                 let Ok((len, src)) = result else { continue };
-                match wire::parse_punch_frame(&buf[..len], session, token) {
+                let frame = &buf[..len];
+                match wire::parse_punch_frame(frame, session, token) {
                     Some((PunchKind::Punch, their_seq)) => {
                         let ack = wire::punch_frame(PunchKind::Ack, session, token, their_seq);
                         let _ = socket.send_to(&ack, src).await;
                         heard_punch_from = Some(src);
                     }
                     Some((PunchKind::Ack, _)) => acked_by = Some(src),
-                    None => continue,
+                    None => {
+                        let from_peer = src == peer || Some(src) == heard_punch_from;
+                        if from_peer
+                            && wire::punch_frame_kind(frame).is_none()
+                            && !frame.is_empty()
+                            && early.len() < EARLY_MAX
+                        {
+                            early.push(frame.to_vec());
+                        }
+                        continue;
+                    }
                 }
                 if let (Some(from), Some(_)) = (heard_punch_from, acked_by) {
-                    return Some(from);
+                    // Only what came from the address the path settled on.
+                    return Some(Punched { peer: from, early });
                 }
             }
         }
@@ -361,6 +391,8 @@ pub(crate) enum Outcome {
     Punched {
         session: SessionId,
         peer: Option<SocketAddr>,
+        /// Datagrams the peer sent before this end finished punching.
+        early: Vec<Vec<u8>>,
     },
 }
 
@@ -468,6 +500,7 @@ impl DirectLinkRuntime {
             let _ = outcomes.try_send(Outcome::Punched {
                 session,
                 peer: None,
+                early: Vec::new(),
             });
             return;
         };
@@ -475,14 +508,19 @@ impl DirectLinkRuntime {
         let task = tokio::spawn(async move {
             tracing::info!("direct link: punching toward {peer}");
             let seen = punch(&socket, peer, &session, &token).await;
-            match seen {
-                Some(at) => tracing::info!("direct link: punch through to {at}"),
+            match &seen {
+                Some(p) => tracing::info!("direct link: punch through to {}", p.peer),
                 None => tracing::info!("direct link: punch toward {peer} failed"),
             }
+            let (peer, early) = match seen {
+                Some(p) => (Some(p.peer), p.early),
+                None => (None, Vec::new()),
+            };
             let _ = outcomes
                 .send(Outcome::Punched {
                     session,
-                    peer: seen,
+                    peer,
+                    early,
                 })
                 .await;
         });
@@ -511,13 +549,14 @@ impl DirectLinkRuntime {
         &mut self,
         session: SessionId,
         peer: SocketAddr,
+        early: Vec<Vec<u8>>,
         id: InterfaceId,
     ) -> Option<InterfaceHandle> {
         self.tasks.remove(&session);
         let socket = self.sockets.remove(&session)?;
         let token = self.tokens.remove(&session)?;
         let (handle, task) =
-            spawn_direct_udp_interface(id, socket, peer, session, token, self.timing);
+            spawn_direct_udp_interface(id, socket, peer, session, token, early, self.timing);
         self.registering.insert(id, session);
         self.interfaces.insert(id.0, task);
         Some(handle)
@@ -612,7 +651,29 @@ mod tests {
             punch(&a, b_addr, &session, &token),
             punch(&b, a_addr, &session, &token)
         );
-        assert_eq!((ra, rb), (Some(b_addr), Some(a_addr)));
+        assert_eq!(
+            (ra.map(|p| p.peer), rb.map(|p| p.peer)),
+            (Some(b_addr), Some(a_addr))
+        );
+    }
+
+    #[tokio::test]
+    async fn datagrams_the_peer_sends_during_the_punch_are_kept() {
+        let a = loopback().await;
+        let b = loopback().await;
+        let (a_addr, b_addr) = (a.local_addr().unwrap(), b.local_addr().unwrap());
+        let session = [3u8; 16];
+        let token = [4u8; 32];
+        // A has finished and moved its link already: an ordinary datagram
+        // reaches B before B's punch completes.
+        a.send_to(b"a reticulum packet", b_addr).await.unwrap();
+        let (ra, rb) = tokio::join!(
+            punch(&a, b_addr, &session, &token),
+            punch(&b, a_addr, &session, &token)
+        );
+        assert!(ra.is_some());
+        let rb = rb.expect("B punches through");
+        assert_eq!(rb.early, vec![b"a reticulum packet".to_vec()]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -625,7 +686,7 @@ mod tests {
             punch(&a, b_addr, &session, &[4u8; 32]),
             punch(&b, a_addr, &session, &[5u8; 32])
         );
-        assert_eq!((ra, rb), (None, None));
+        assert!(ra.is_none() && rb.is_none());
     }
 
     #[tokio::test]
