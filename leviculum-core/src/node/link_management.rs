@@ -579,7 +579,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// there is nothing to resolve. If responder-side re-keying is ever
     /// added, this becomes the next stale-id bug.
     pub fn reject_link(&mut self, link_id: &LinkId) {
+        let existed = self.links.contains_key(link_id);
         self.remove_link(link_id);
+        if existed {
+            self.note_link_rejected();
+        }
     }
 
     /// Close a link gracefully
