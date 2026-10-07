@@ -1083,7 +1083,7 @@ pub(crate) fn peer_has_room(free_slots: Option<u8>) -> bool {
 /// read in a capture as a peer named zero.
 pub(crate) fn hint_str(hint: Option<[u8; IDENTITY_HINT_LEN]>) -> String {
     match hint {
-        Some(h) => h.iter().map(|b| format!("{b:02x}")).collect(),
+        Some(h) => crate::storage::hex_encode(&h),
         None => "unknown".to_string(),
     }
 }

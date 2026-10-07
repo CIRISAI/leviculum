@@ -484,13 +484,7 @@ pub async fn rpc_drop_path(
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    crate::storage::hex_encode(bytes)
 }
 
 fn f64_to_json(f: f64) -> serde_json::Value {

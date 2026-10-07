@@ -1044,14 +1044,7 @@ impl ReticulumNodeBuilder {
 
 /// Format the first 8 bytes of a hash as hex for logging
 fn hex_short(hash: &[u8]) -> String {
-    use std::fmt::Write;
-    let n = hash.len().min(8);
-    hash[..n]
-        .iter()
-        .fold(String::with_capacity(n * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    crate::storage::hex_encode(&hash[..hash.len().min(8)])
 }
 
 /// Parse a 32-hex-character (16-byte) identity hash. Returns `None` for any
@@ -1126,12 +1119,7 @@ fn load_or_create_network_identity(path: &std::path::Path) -> std::io::Result<Id
 
 /// Format a full hash as hex for logging
 fn hex_full(hash: &[u8]) -> String {
-    use std::fmt::Write;
-    hash.iter()
-        .fold(String::with_capacity(hash.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    crate::storage::hex_encode(hash)
 }
 
 #[cfg(test)]

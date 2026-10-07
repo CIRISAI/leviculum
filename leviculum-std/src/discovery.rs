@@ -123,14 +123,7 @@ pub(crate) fn persist_discovered(
     let dir = discovery_dir(storage_root);
     std::fs::create_dir_all(&dir)?;
 
-    let filename = {
-        let mut s = String::with_capacity(di.discovery_hash.len() * 2);
-        use std::fmt::Write as _;
-        for b in di.discovery_hash.iter() {
-            let _ = write!(s, "{b:02x}");
-        }
-        s
-    };
+    let filename = crate::storage::hex_encode(&di.discovery_hash);
     let path = dir.join(&filename);
 
     // Preserve `discovered` + `heard_count` across re-announces (Python reads

@@ -250,19 +250,14 @@ impl PartialEq<DestinationHash> for [u8; TRUNCATED_HASHBYTES] {
 impl core::fmt::Debug for DestinationHash {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "DestinationHash(")?;
-        for byte in &self.0 {
-            write!(f, "{:02x}", byte)?;
-        }
+        crate::hex_fmt::write_hex(f, &self.0)?;
         write!(f, ")")
     }
 }
 
 impl core::fmt::Display for DestinationHash {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for byte in &self.0 {
-            write!(f, "{:02x}", byte)?;
-        }
-        Ok(())
+        crate::hex_fmt::write_hex(f, &self.0)
     }
 }
 

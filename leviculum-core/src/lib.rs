@@ -118,7 +118,7 @@ pub mod framing;
 pub mod fuzz;
 /// Heap-census estimators (Codeberg #388): who holds the firmware heap.
 pub mod heap_census;
-mod hex_fmt;
+pub mod hex_fmt;
 pub mod identity;
 pub mod identity_store;
 pub mod ifac;

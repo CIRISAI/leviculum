@@ -2255,7 +2255,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ) -> Result<(), crate::resource::ResourceError> {
         // Resolve a possibly-stale caller-visible id: the caller configures
         // the link straight off the `LinkEstablished` event
-        // (`leviculum-cli/src/cp.rs:806`, `leviculum-std/src/remote_status.rs:288`),
+        // (`leviculum-cli/src/cp.rs:806`, `leviculum-std/src/remote_status.rs:283`),
         // and after a #66 retry that id is the pre-re-key one.
         let link_id = &self.resolve_link_id(link_id);
         let link = self

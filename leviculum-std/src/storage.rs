@@ -308,14 +308,14 @@ fn unix_timestamp_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Lowercase hex of `bytes`, through the stack's one hex encoder
+/// ([`leviculum_core::hex_fmt::write_hex`]); every host helper that turns
+/// a hash into a `String` comes here.
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    let mut s = String::with_capacity(bytes.len() * 2);
+    // Writing to a String cannot fail.
+    let _ = leviculum_core::hex_fmt::write_hex(&mut s, bytes);
+    s
 }
 
 /// Decode a hex string, or `None` for anything that is not one.

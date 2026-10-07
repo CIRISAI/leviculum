@@ -1385,11 +1385,7 @@ async fn disconnect_quietly(adapter: &bluer::Adapter, addr: Addr) {
 /// `peer=` value: leading 4 identity-hash bytes as hex, the same hex the
 /// firmware logs and the LN-<hex8> name carries.
 fn hex8(identity: &[u8]) -> String {
-    identity
-        .iter()
-        .take(4)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::storage::hex_encode(&identity[..identity.len().min(4)])
 }
 
 /// `identity=` value: the whole identity hash as hex. `peer=`'s four
@@ -1398,14 +1394,14 @@ fn hex8(identity: &[u8]) -> String {
 /// is expected to copy it back into a config key, and `accept_only`
 /// takes either spelling.
 fn hex_all(identity: &[u8]) -> String {
-    identity.iter().map(|b| format!("{b:02x}")).collect()
+    crate::storage::hex_encode(identity)
 }
 
 /// `addr=` value: the 48-bit address as 12 hex digits in display order,
 /// matching the firmware's `addr={:012x}` (which prints the numeric
 /// value, i.e. the displayed byte order).
 fn hex12(addr: &Addr) -> String {
-    addr.iter().map(|b| format!("{b:02x}")).collect()
+    crate::storage::hex_encode(addr)
 }
 
 /// Aborts a spawned task when dropped, tying its lifetime to the session.

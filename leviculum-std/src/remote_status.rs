@@ -59,12 +59,7 @@ fn encode_status_request(include_lstats: bool) -> Vec<u8> {
 /// Lowercase hex, matching the RPC path's `bin` → hex decoding so the renderer
 /// treats remote and local status identically.
 fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
+    crate::storage::hex_encode(bytes)
 }
 
 fn f64_to_json(f: f64) -> serde_json::Value {
