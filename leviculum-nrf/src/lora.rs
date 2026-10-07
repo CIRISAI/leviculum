@@ -184,6 +184,22 @@ pub static LORA_STALE_DROP_COUNT: core::sync::atomic::AtomicU32 =
 pub static LORA_DUTY_HOLD: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Keyed airtime of the rolling hour, in milliseconds, as of the LoRa task's
+/// last ledger update (leviculum#494).
+///
+/// Written only by the LoRa task, once per loop turn; read by the
+/// propagation node before it originates traffic of its own
+/// (`crate::pn`), which refuses to start what would take it past
+/// [`leviculum_queue_budget::OWN_TRAFFIC_SHARE_PERMILLE`] of the cap. A turn
+/// can park in a receive window for up to a minute, so the figure can lag
+/// by that much; the PN retries on its own cadence, which is longer.
+pub static LORA_LT_USED_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// The long-term airtime cap in force, in milliseconds of the rolling hour,
+/// 0 for unlimited ([`leviculum_queue_budget::lt_cap_ms`]). Written by
+/// `apply_airtime_limits` at bring-up and on every reconfiguration.
+pub static LORA_LT_CAP_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// Occupancy of `LORA_OUTGOING`, in slots and in bytes.
 ///
 /// The channel's own slot bound cannot see bytes, so a queue of twelve MTU
@@ -951,6 +967,10 @@ fn apply_airtime_limits(airtime: &mut leviculum_core::rnode::AirtimeTracker, con
     let lt_alock = config.effective_lt_alock();
     airtime.set_st_limit_u16(config.st_alock);
     airtime.set_lt_limit_u16(lt_alock);
+    LORA_LT_CAP_MS.store(
+        leviculum_queue_budget::lt_cap_ms(lt_alock),
+        core::sync::atomic::Ordering::Relaxed,
+    );
     use leviculum_log_line::facts::LimitSource;
     leviculum_log_line::facts::airtime_limits(
         &mut FirmwareLog,
@@ -1797,13 +1817,21 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
         // A duty hold must end visibly even when the queue emptied under it
         // (every held frame swept stale, or none arrived since): with
         // nothing pending, the lock gate below never runs, so the lift is
-        // re-checked here. One ledger update per idle turn — the same call
-        // the gate itself pays — and only while a hold is actually open.
-        if hold_started.is_some() && pending_tx.is_none() {
-            airtime.update(now_ms);
-            if !airtime.is_locked() {
-                lift_duty_hold(&mut hold_started, &airtime, now_ms);
-            }
+        // re-checked here, on the update below.
+        //
+        // That update runs every turn, not only while a hold is open (one
+        // ledger update, the same call the gate itself pays): it also
+        // publishes the rolling hour for the propagation node's own-traffic
+        // share (leviculum#494), and a ledger refreshed only under traffic
+        // would keep showing a spent budget to a node that, by yielding,
+        // sends nothing to refresh it.
+        airtime.update(now_ms);
+        LORA_LT_USED_MS.store(
+            airtime.long_term_airtime_ms(),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        if hold_started.is_some() && pending_tx.is_none() && !airtime.is_locked() {
+            lift_duty_hold(&mut hold_started, &airtime, now_ms);
         }
         if mute_lease.expired_at(now_ms).is_some() {
             // The run's exact total, and it closes the run: the expiry IS

@@ -20,6 +20,15 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- A propagation node leaves half its airtime to forwarding (leviculum#494,
+  decided on #433). A board running the propagation role starts no sync
+  round, offer, transfer or active delivery of its own, and postpones
+  inbound offers with `ERROR_THROTTLED`, once the rolling hour has spent
+  half its lawful long-term airtime budget; what it relays for others is
+  unaffected, so the relay's own work no longer spends the budget its
+  forwarding needs (a transfer already under way finishes). The firmware logs `PN_YIELD reason=duty_share lt_ms= cap_ms=
+  share=` once when it starts yielding.
+
 - A relay that has spent its lawful airtime budget stops advertising routes
   until the budget returns (leviculum#493, decided on #433). While a LoRa
   interface's duty lock holds its TX gate, the node relays no announce and

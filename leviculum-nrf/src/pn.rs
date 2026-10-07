@@ -250,6 +250,7 @@ use leviculum_lxmf::{
     MESSAGE_GET_PATH,
 };
 use leviculum_pn_store::{FlushOp, PnPeerStore, PnStore, Region};
+use leviculum_queue_budget::{OwnShare, OwnVerdict, OWN_TRAFFIC_SHARE_PERMILLE};
 use leviculum_record_log::SECTOR_SIZE;
 use leviculum_sync_batch::AfterClose;
 use leviculum_upload_proof::UploadProofs;
@@ -748,6 +749,10 @@ pub struct Engine {
     /// Records active delivery skipped as too large for one packet —
     /// left for `/get`, never retried actively.
     too_large: Vec<TransientId>,
+    /// The own-traffic share (leviculum#494): one tracker for every site
+    /// where the engine originates traffic, so a yield is stated once per
+    /// edge however many sites meet it ([`Engine::own_traffic_go`]).
+    own_share: OwnShare,
     /// The stamp validation parked between settle passes, if one is. At most
     /// one: the engine validates one message at a time either way, and the
     /// slicing changed how long one takes, not how many run.
@@ -877,6 +882,7 @@ impl Engine {
             active: None,
             next_active_at_ms: 0,
             too_large: Vec::with_capacity(TOO_LARGE_SLOTS),
+            own_share: OwnShare::new(),
             grind: None,
             serve_boot_cap,
         })
@@ -1453,6 +1459,15 @@ impl Engine {
             return;
         }
         let peer_hash = sync.peer;
+        // The link took its time to come up; if the share was spent
+        // meanwhile (leviculum#494), the identify, the offer and the
+        // transfer behind them are not started. The round ends as a yield
+        // and the next sync pass retries it.
+        if !self.own_traffic_go("sync_offer") {
+            self.finish_round("duty_share", 0, 0);
+            out.merge(node.close_link(link_id));
+            return;
+        }
         match node.identify_link(link_id, &self.identity) {
             Ok(send) => out.merge(send),
             Err(_) => {
@@ -1588,6 +1603,14 @@ impl Engine {
         }
         match action {
             ResponseAction::SendMessages(ids) => {
+                // The transfer is the round's largest airtime by far
+                // (leviculum#494): not started past the share. The cursor
+                // stays, so the next round offers the same messages again.
+                if !self.own_traffic_go("sync_transfer") {
+                    self.finish_round("duty_share", 0, 0);
+                    out.merge(node.close_link(link_id));
+                    return;
+                }
                 let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(ids.len());
                 for id in &ids {
                     if let Ok(Some(body)) = self.role.store().read_body(id) {
@@ -1969,6 +1992,13 @@ impl Engine {
         C: Clock,
         S: Storage,
     {
+        // An active delivery is the engine's own initiative (leviculum#494):
+        // past the share it waits the same gap a missing path costs, and
+        // the message stays in the store for the next trigger or a `/get`.
+        if !self.own_traffic_go("active_delivery") {
+            self.next_active_at_ms = node.now_ms().saturating_add(ACTIVE_GAP_MS);
+            return;
+        }
         let Ok(Some(body)) = self.role.store().read_body(&transient_id) else {
             return;
         };
@@ -2294,6 +2324,39 @@ impl Engine {
         );
     }
 
+    /// Whether the engine may originate traffic now (leviculum#494): the
+    /// rolling hour's keyed airtime, as the LoRa task last published it, is
+    /// below [`OWN_TRAFFIC_SHARE_PERMILLE`] of the long-term cap.
+    ///
+    /// Asked at every site where the engine hands frames to the modem on its
+    /// own initiative, and nowhere else: what the node forwards as a
+    /// transport node never passes through here, so it keeps the other half
+    /// of the budget. A refusal is stated once, on its edge, as `PN_YIELD`;
+    /// the site retries on its own cadence. `site=` names the first site to
+    /// meet the share, which is the one that opened the yield.
+    fn own_traffic_go(&mut self, site: &'static str) -> bool {
+        let lt_ms = crate::lora::LORA_LT_USED_MS.load(Ordering::Relaxed);
+        let cap_ms = crate::lora::LORA_LT_CAP_MS.load(Ordering::Relaxed);
+        match self
+            .own_share
+            .check(lt_ms, cap_ms, OWN_TRAFFIC_SHARE_PERMILLE)
+        {
+            OwnVerdict::Go => true,
+            OwnVerdict::Yield { edge } => {
+                if edge {
+                    crate::log::log_fmt(
+                        "PN_YIELD ",
+                        format_args!(
+                            "reason=duty_share lt_ms={} cap_ms={} share={} site={}",
+                            lt_ms, cap_ms, OWN_TRAFFIC_SHARE_PERMILLE, site
+                        ),
+                    );
+                }
+                false
+            }
+        }
+    }
+
     fn tick_sync<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,
@@ -2337,6 +2400,13 @@ impl Engine {
         C: Clock,
         S: Storage,
     {
+        // The own-traffic share first (leviculum#494), ahead of the path
+        // request and the link this round would originate and before any
+        // backoff is booked: a yield is the budget's state, not the peer's
+        // fault, and the next sync pass retries.
+        if !self.own_traffic_go("sync_round") {
+            return;
+        }
         // Recall order (#388 pass 3): the keys kept with the peer first,
         // the node's rolling `known_identities` cache second. A cache hit
         // for a peer that has no keys yet is captured back into the peer
@@ -2797,6 +2867,19 @@ impl Engine {
         };
         let remote_identity_hash = *identity.hash();
         let remote_hash = propagation_hash_of(&identity);
+
+        // Accepting an inbound offer commits this node to a transfer it
+        // carries its half of (resource requests and proofs, then the
+        // batch's own downstream syncs). Past the share (leviculum#494)
+        // the answer is the reference's own postponement,
+        // `ERROR_THROTTLED` (`reference/LXMF/LXMF/LXMRouter.py:2278`),
+        // on which a stock peer waits `PN_STAMP_THROTTLE` and offers again
+        // (`reference/LXMF/LXMF/LXMPeer.py:421-425`). The one small frame
+        // that says so is still sent: silence would cost the peer its
+        // request timeout and the same retry.
+        if !self.own_traffic_go("offer_answer") {
+            return OfferResponse::Error(PeerError::Throttled).encode();
+        }
 
         if let Err(error) = self.gate.admit(
             self.peers.config(),

@@ -4396,9 +4396,9 @@ mod tests {
 
         for &(at_ms, len) in POCKET_MINUTE_FRAMES.iter() {
             // `lora_task` calls `update` once per turn while a frame is
-            // pending, before it decides to key or hold (lora.rs:1854), and
+            // pending, before it decides to key or hold (lora.rs:1882), and
             // charges the frame only after `radio.transmit` returned Ok
-            // (lora.rs:1104) — i.e. at TX-done, one frame's airtime later.
+            // (lora.rs:1124) — i.e. at TX-done, one frame's airtime later.
             t.update(at_ms);
             t.add_airtime(at_ms + cost(len), cost(len));
         }
@@ -4425,7 +4425,7 @@ mod tests {
     /// current bin (`RNode_Firmware.ino:685-688`, `:693-702`). The reference
     /// firmware gets away with that because its main loop calls
     /// `update_airtime()` every iteration; ours calls it only while a frame is
-    /// pending (`lora.rs:1854`, inside `if let Some(frame) = pending_tx`). A
+    /// pending (`lora.rs:1882`, inside `if let Some(frame) = pending_tx`). A
     /// board whose queue stays empty across more than one bin therefore skips
     /// the clearing, and an hour later those bins are still carrying the
     /// previous hour's airtime — counted a second time. The Pocket never hit

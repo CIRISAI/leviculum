@@ -19,6 +19,15 @@
 //!  7..9   checksum over bytes 0..7
 //! ```
 //!
+//! **No room for a third field without a format bump.** The own-traffic
+//! airtime share (leviculum#494) is a firmware constant for that reason
+//! (`leviculum_queue_budget::OWN_TRAFFIC_SHARE_PERMILLE`). Persisting it
+//! needs version 0x02 with the share as a big-endian u16 at 7..9 and the
+//! checksum moved to 9..11 (11 bytes, still 12 aligned, so the page
+//! layout is untouched), a decoder that still reads 0x01 records as
+//! "share at its default", and a `TYPE_PN_CONFIG` payload of four bytes
+//! beside the two-byte form older `lnflash` builds send.
+//!
 //! **`None` is not "costs of zero".** It is "no record", and the caller's
 //! answer is the Lead's compatibility defaults ([`DEFAULT_STAMP_COST`],
 //! [`DEFAULT_PEERING_COST`]) — the values under which a stock Python peer

@@ -28,7 +28,7 @@ Our LNode firmware enforces the same way: `AirtimeTracker`
 (`leviculum-core/src/rnode.rs:1832`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
-`leviculum-nrf/src/lora.rs:1861-1948`), continuing to listen so RX is
+`leviculum-nrf/src/lora.rs:1889-1976`), continuing to listen so RX is
 not starved — until the frame has waited so long that keying it would
 be pointless, which is
 [the age rule below](#a-hold-ages-traffic-it-does-not-thin-it).
@@ -335,6 +335,34 @@ rule has two halves, and the second is the guard on the first:
   reads `duty_hold` false again
   (`leviculum-nrf/queue-budget/src/tests.rs`, and the end-to-end mvr in
   `leviculum-std/tests/mvr/`).
+
+## A propagation node leaves half its budget to forwarding
+
+The hold above is the end state; the second half of the same decision
+(leviculum#494, Lew 2026-10-07) keeps a propagation node from walking
+into it on its own traffic. The field relay of 2026-09-27 was a
+propagation node: its own sync rounds filled the lawful budget, the
+hold followed, and the link setups of everyone behind it died there
+(#433). So a board running the propagation role originates nothing
+once the rolling hour has spent half its long-term cap
+(`OWN_TRAFFIC_SHARE_PERMILLE`, 500, in
+`leviculum-nrf/queue-budget/src/lib.rs`). The split is by origin, and
+it is decided where the traffic is originated, not where it is keyed:
+the LoRa queue still treats every frame alike, and what the node
+forwards as a transport node never meets the share, so forwarding
+always has the other half.
+
+The engine asks before it starts a sync round, before it identifies
+and offers on the round's link, before it sends the transfer the peer
+asked for, before an active delivery, and before it accepts an inbound
+offer, which past the share is answered with the reference's own
+postponement, `ERROR_THROTTLED`, on which a stock peer waits and offers
+again. Answers to clients (`/get`, upload proofs) are not its own
+initiative and are not gated; its announces are priced against the
+budget by #401 rule 5. A refusal is stated once, on its edge, as
+`PN_YIELD reason=duty_share lt_ms=<n> cap_ms=<n> share=<permille>
+site=<first site>`, and every site retries on its own cadence. The
+used figure is the LoRa task's ledger, published once per loop turn.
 
 ## The firmware ledger is not a cross-session account
 
