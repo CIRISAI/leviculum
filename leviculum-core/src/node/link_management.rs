@@ -636,6 +636,55 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .count()
     }
 
+    /// Live links, counted by role and by destination (CIRISEdge#819,
+    /// leviculum#57).
+    ///
+    /// "Live" is established and not closed: `Active` or `Stale`. Pending
+    /// links (request out, no proof yet) are counted apart. Per destination,
+    /// the initiator count is links this node dialled to that destination,
+    /// and the responder count is links peers opened to this node's own
+    /// destination. A count that only grows names its owner: the initiator
+    /// side keeps a link alive with its keepalives, so a rising initiator
+    /// count toward one destination is this node not closing what it
+    /// dialled.
+    pub fn link_census(&self) -> crate::node::LinkCensus {
+        let mut census = crate::node::LinkCensus::default();
+        let mut by_dest: alloc::collections::BTreeMap<DestinationHash, (usize, usize)> =
+            alloc::collections::BTreeMap::new();
+        for link in self.links.values() {
+            match link.state() {
+                LinkState::Active | LinkState::Stale => {}
+                LinkState::Closed => continue,
+                _ => {
+                    census.pending += 1;
+                    continue;
+                }
+            }
+            let entry = by_dest.entry(*link.destination_hash()).or_default();
+            if link.is_initiator() {
+                census.initiator += 1;
+                entry.0 += 1;
+            } else {
+                census.responder += 1;
+                entry.1 += 1;
+            }
+        }
+        census.by_destination = by_dest
+            .into_iter()
+            .map(
+                |(destination_hash, (initiator, responder))| crate::node::DestinationLinks {
+                    destination_hash,
+                    initiator,
+                    responder,
+                },
+            )
+            .collect();
+        census
+            .by_destination
+            .sort_by_key(|d| core::cmp::Reverse(d.initiator + d.responder));
+        census
+    }
+
     /// Return all local links as RPC-exportable rows.
     ///
     /// One entry per [`crate::link::Link`] currently in the `links` map,

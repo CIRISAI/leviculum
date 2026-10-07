@@ -2624,6 +2624,14 @@ impl ReticulumNode {
         self.inner.lock_recover().storage().identity_evictions()
     }
 
+    /// Live links by role, overall and per destination (CIRISEdge#819,
+    /// leviculum#57). A field gauge for link accumulation: see
+    /// [`leviculum_core::node::NodeCore::link_census`] for how to read it.
+    /// Takes the core lock briefly; walks the link table once.
+    pub fn link_census(&self) -> leviculum_core::node::LinkCensus {
+        self.inner.lock_recover().link_census()
+    }
+
     /// Current saturation of every bounded structure the driver owns —
     /// depths, capacities, cumulative drops (leviculum#60). See
     /// [`PlaneStats`] for what each limit does when it saturates.
