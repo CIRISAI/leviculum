@@ -361,6 +361,24 @@ impl Peer {
         self.next_sync_attempt = 0;
     }
 
+    /// The round this peer was booked for yielded on our own airtime
+    /// budget, not on anything the peer did (leviculum#495, the `duty_share`
+    /// abort of #494).
+    ///
+    /// The round booked one `SYNC_BACKOFF_STEP_SECS` before it dialled
+    /// (see [`note_link_established`](Self::note_link_established)). A
+    /// yield says nothing about the peer's reachability, so the step is
+    /// handed back: the accumulator returns to what the peer's own record
+    /// earned before this round, and the peer is due again on the next sync
+    /// pass, which re-checks the budget first. A yield after the link came
+    /// up finds the booking already cleared and changes nothing.
+    pub fn release_yielded_round(&mut self) {
+        self.sync_backoff_secs = self
+            .sync_backoff_secs
+            .saturating_sub(SYNC_BACKOFF_STEP_SECS);
+        self.next_sync_attempt = 0;
+    }
+
     /// The minimum stamp value this peer accepts:
     /// `max(0, cost − flexibility)`, the filter the offering side applies
     /// (`reference/LXMF/LXMF/LXMPeer.py:331`, `:340`).

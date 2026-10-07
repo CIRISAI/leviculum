@@ -464,6 +464,50 @@ fn a_round_whose_link_came_up_is_not_held_for_a_whole_backoff_step() {
     );
 }
 
+/// A round that yields on our own airtime share (`duty_share`) costs the
+/// peer no backoff step: the peer is due again on the next sync pass and
+/// keeps exactly the accumulator its own failures earned (leviculum#495,
+/// #494's finding 3).
+#[test]
+fn a_round_that_yields_on_the_duty_share_books_no_backoff_step() {
+    let mut table = table();
+    table.handle_announce([1; 16], &announce(1), Some(1), 0, false);
+    let now = 100;
+
+    {
+        let peer = table.get_mut(&[1; 16]).unwrap();
+        // One earlier round the peer never answered: 12 minutes earned.
+        peer.sync_backoff_secs = SYNC_BACKOFF_STEP_SECS;
+        // What `start_round` books before it dials: 24 minutes now.
+        peer.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
+        peer.next_sync_attempt = now + peer.sync_backoff_secs;
+        peer.state = SyncPhase::LinkEstablishing;
+    }
+
+    {
+        let peer = table.get_mut(&[1; 16]).unwrap();
+        // The round yields before the link is used: our budget, not the peer.
+        peer.release_yielded_round();
+        peer.state = SyncPhase::Idle;
+        assert_eq!(
+            peer.sync_backoff_secs, SYNC_BACKOFF_STEP_SECS,
+            "the yield hands back the step it booked and nothing the peer earned"
+        );
+    }
+    assert_eq!(
+        table.next_due(now + SYNC_INTERVAL_SECS, 5, None),
+        Some([1; 16]),
+        "a yielded round is due again on the next sync pass"
+    );
+
+    // A yield after the link came up finds nothing left to hand back.
+    let peer = table.get_mut(&[1; 16]).unwrap();
+    peer.note_link_established();
+    peer.release_yielded_round();
+    assert_eq!(peer.sync_backoff_secs, 0);
+    assert_eq!(peer.next_sync_attempt, 0);
+}
+
 #[test]
 fn max_peer_min_cost_drives_the_accept_time_value_policy() {
     let mut table = table();

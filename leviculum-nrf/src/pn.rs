@@ -1464,7 +1464,7 @@ impl Engine {
         // transfer behind them are not started. The round ends as a yield
         // and the next sync pass retries it.
         if !self.own_traffic_go("sync_offer") {
-            self.finish_round("duty_share", 0, 0);
+            self.yield_round(&peer_hash);
             out.merge(node.close_link(link_id));
             return;
         }
@@ -1607,7 +1607,7 @@ impl Engine {
                 // (leviculum#494): not started past the share. The cursor
                 // stays, so the next round offers the same messages again.
                 if !self.own_traffic_go("sync_transfer") {
-                    self.finish_round("duty_share", 0, 0);
+                    self.yield_round(&peer_hash);
                     out.merge(node.close_link(link_id));
                     return;
                 }
@@ -1739,6 +1739,17 @@ impl Engine {
         );
         self.outbound = None;
         out.merge(node.close_link(link_id));
+    }
+
+    /// End the outbound round as a `duty_share` yield (leviculum#494): the
+    /// budget's state, not the peer's fault, so the backoff step
+    /// `start_round` booked before it dialled is handed back
+    /// (leviculum#495).
+    fn yield_round(&mut self, peer_hash: &[u8; 16]) {
+        if let Some(peer) = self.peers.get_mut(peer_hash) {
+            peer.release_yielded_round();
+        }
+        self.finish_round("duty_share", 0, 0);
     }
 
     fn finish_round(&mut self, result: &str, transferred: usize, bytes: u64) {
