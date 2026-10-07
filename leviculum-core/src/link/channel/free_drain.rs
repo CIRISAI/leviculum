@@ -44,6 +44,17 @@ impl Channel {
     }
 }
 
+impl Channel {
+    /// Whether an envelope still awaiting its proof is larger than the
+    /// channel could send on a link of `mtu`. A link must not move onto a
+    /// smaller carrier while one is: its retransmissions would not fit and
+    /// the link would die of channel retries (Codex review on #78).
+    pub(crate) fn outstanding_exceeds_mtu(&self, mtu: u32) -> bool {
+        let mdu = self.mdu(super::super::compute_link_mdu(mtu));
+        self.tx_ring.iter().any(|out| out.envelope.data.len() > mdu)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

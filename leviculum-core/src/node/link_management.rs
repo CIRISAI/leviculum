@@ -587,6 +587,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// mirror and the lifecycle counters believing it alive (leviculum#77,
     /// Codex review on #76). Its events go out with the node's next output.
     pub fn reject_link(&mut self, link_id: &LinkId) {
+        // A dialled link re-keyed by an establishment retry (Codeberg #66)
+        // lives under its new wire id; callers hold the original.
+        let link_id = &self.resolve_link_id(link_id);
         let Some(link) = self.links.get_mut(link_id) else {
             return;
         };

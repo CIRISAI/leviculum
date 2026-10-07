@@ -73,6 +73,7 @@ pub(crate) fn spawn_direct_udp_interface(
     peer: SocketAddr,
     session: SessionId,
     token: [u8; 32],
+    early: Vec<Vec<u8>>,
     timing: DirectUdpTiming,
 ) -> (InterfaceHandle, tokio::task::AbortHandle) {
     let name = format!(
@@ -92,6 +93,7 @@ pub(crate) fn spawn_direct_udp_interface(
         peer,
         session,
         token,
+        early,
         timing,
         incoming_tx,
         outgoing_rx,
@@ -134,11 +136,21 @@ async fn direct_io_task(
     peer: SocketAddr,
     session: SessionId,
     token: [u8; 32],
+    early: Vec<Vec<u8>>,
     timing: DirectUdpTiming,
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
 ) {
+    // What the peer sent while this end was still punching comes first.
+    for data in early {
+        counters
+            .rx_bytes
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+        if incoming_tx.send(IncomingPacket { data }).await.is_err() {
+            return;
+        }
+    }
     let keepalive = wire::punch_frame(PunchKind::Punch, &session, &token, wire::KEEPALIVE_SEQ);
     let mut buf = vec![0u8; DATAGRAM_MAX];
     let mut last_heard = Instant::now();
