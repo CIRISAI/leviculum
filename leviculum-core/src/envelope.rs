@@ -421,6 +421,36 @@ pub const TYPE_IDENTITY_REPORT: u8 = 0x88;
 /// was sent (duplicates dropped), so "the list the board acknowledged"
 /// is a fact the host prints instead of a repeat of its own argv.
 pub const TYPE_MGMT_ALLOW_REPORT: u8 = 0x89;
+/// Duty-hold notice (leviculum#501); payload is `[state, lt_ms: u32 BE]`,
+/// 5 bytes, `state` [`DUTY_HOLD_LIFTED`] or [`DUTY_HOLD_HELD`]. See
+/// [`DutyHoldWire`].
+///
+/// The one board -> host frame that is not only an answer. The firmware
+/// sends it **unsolicited** on each edge of its LoRa duty hold, and once
+/// more right after every [`TYPE_MEDIA_REPORT`] it answers a
+/// [`TYPE_MEDIA_QUERY`] with (and after the refusal a board with no media
+/// gate answers that query with), so a host that attached mid-hold learns
+/// the state without waiting for the next edge. A second frame and not a
+/// longer media report because every host already in the field decodes
+/// that report strictly at two bytes, and a longer one would break their
+/// media verbs; a frame type they do not know they skip.
+///
+/// Why it exists: a board driven by lnsd over this port holds its LoRa TX
+/// queue when the regulatory airtime budget runs out, and without a word
+/// for it the daemon in front of it keeps relaying announces into the held
+/// queue — a route advertised through a relay that provably cannot carry
+/// the link setup it invites (leviculum#493, #433). lnsd mirrors the state
+/// into the interface's `duty_hold` flag, exactly as it does for an RNode.
+///
+/// **USB protocol between our board and our host, not the radio.** Nothing
+/// of this frame goes on the air and no Python-RNS peer ever sees it.
+pub const TYPE_DUTY_HOLD: u8 = 0x8A;
+
+/// [`TYPE_DUTY_HOLD`] state byte: the hold lifted, or none was in force.
+pub const DUTY_HOLD_LIFTED: u8 = 0x00;
+/// [`TYPE_DUTY_HOLD`] state byte: the LoRa TX gate holds frames for
+/// regulatory airtime budget.
+pub const DUTY_HOLD_HELD: u8 = 0x01;
 
 /// [`TYPE_MGMT_ALLOW_REPORT`] flag: a stored allow-list record exists.
 /// Distinguishes an operator's explicit clear from a board that never had
@@ -1450,6 +1480,51 @@ pub fn media_query_answer(
     } else {
         encode_refusal(TYPE_MEDIA_QUERY, REFUSE_UNSUPPORTED)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Duty hold (board -> host, leviculum#501)
+// ---------------------------------------------------------------------------
+
+/// What one [`TYPE_DUTY_HOLD`] frame carries: whether the board's LoRa TX
+/// gate is holding for airtime budget, and the keyed airtime of the
+/// rolling hour in milliseconds as the board's ledger last stood, so the
+/// edge can be checked against the ledger that caused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DutyHoldWire {
+    pub held: bool,
+    pub lt_ms: u32,
+}
+
+/// Encode a complete duty-hold frame.
+pub fn encode_duty_hold(hold: &DutyHoldWire) -> Vec<u8> {
+    let mut payload = [0u8; 5];
+    payload[0] = if hold.held {
+        DUTY_HOLD_HELD
+    } else {
+        DUTY_HOLD_LIFTED
+    };
+    payload[1..].copy_from_slice(&hold.lt_ms.to_be_bytes());
+    encode_frame(TYPE_DUTY_HOLD, &payload)
+}
+
+/// Decode a duty-hold payload. A state byte other than the two defined is
+/// `None`: a host must not read a state it does not know as "lifted". A
+/// payload longer than five bytes is read by its first five, the
+/// [`TYPE_IDENTITY_REPORT`] rule, so a later field does not make this host
+/// blind to the hold.
+pub fn decode_duty_hold_payload(payload: &[u8]) -> Option<DutyHoldWire> {
+    let state = *payload.first()?;
+    let lt: [u8; 4] = payload.get(1..5)?.try_into().ok()?;
+    let held = match state {
+        DUTY_HOLD_HELD => true,
+        DUTY_HOLD_LIFTED => false,
+        _ => return None,
+    };
+    Some(DutyHoldWire {
+        held,
+        lt_ms: u32::from_be_bytes(lt),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3225,6 +3300,62 @@ mod tests {
                 ControlAction::MediaProfile(profile)
             );
         }
+    }
+
+    #[test]
+    fn a_duty_hold_frame_round_trips_both_states() {
+        for wire in [
+            DutyHoldWire {
+                held: true,
+                lt_ms: 36_000,
+            },
+            DutyHoldWire {
+                held: false,
+                lt_ms: u32::MAX,
+            },
+        ] {
+            let bytes = encode_duty_hold(&wire);
+            let frame = decode_frame(&bytes).expect("a well-formed envelope");
+            assert_eq!(frame.frame_type, TYPE_DUTY_HOLD);
+            assert_eq!(frame.payload.len(), 5, "[state, lt_ms u32 BE]");
+            assert_eq!(decode_duty_hold_payload(frame.payload), Some(wire));
+        }
+        // The layout byte by byte: the state first, lt_ms big-endian.
+        assert_eq!(
+            encode_duty_hold(&DutyHoldWire {
+                held: true,
+                lt_ms: 0x0102_0304
+            }),
+            [
+                0xA4,
+                0xA5,
+                TYPE_DUTY_HOLD,
+                0x00,
+                0x05,
+                0x01,
+                0x01,
+                0x02,
+                0x03,
+                0x04
+            ]
+        );
+    }
+
+    #[test]
+    fn a_duty_hold_payload_with_an_unknown_state_or_short_is_refused() {
+        // An unknown state must not read as "lifted": that would reopen
+        // announce relay through a board that may be holding.
+        assert_eq!(decode_duty_hold_payload(&[0x02, 0, 0, 0, 0]), None);
+        assert_eq!(decode_duty_hold_payload(&[DUTY_HOLD_HELD, 0, 0, 0]), None);
+        assert_eq!(decode_duty_hold_payload(&[]), None);
+        // Longer is read by its first five bytes, the identity-report rule.
+        assert_eq!(
+            decode_duty_hold_payload(&[DUTY_HOLD_HELD, 0, 0, 0, 7, 0xEE]),
+            Some(DutyHoldWire {
+                held: true,
+                lt_ms: 7
+            })
+        );
     }
 
     #[test]
