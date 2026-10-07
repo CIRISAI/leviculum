@@ -10,7 +10,7 @@
 //!
 //! * TX: [`frame_airtime_cost_ms`] per keyed frame. `[T114_TX_FRAME] len=` is
 //!   the full on-air frame length, the same number `add_airtime` is fed after
-//!   a successful `transmit()` (`leviculum-nrf/src/lora.rs:1015-1028`).
+//!   a successful `transmit()` (`leviculum-nrf/src/lora.rs:1091-1104`).
 //! * RX: [`packet_airtime_ms`] per demodulated packet. `[LORA] RX N bytes`
 //!   prints the REASSEMBLED packet length, not the frame length, so the
 //!   per-frame header byte and — above `MAX_SINGLE_PAYLOAD` — the second

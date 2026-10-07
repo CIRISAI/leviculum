@@ -2780,6 +2780,22 @@ pub struct Transport<C: Clock, S: Storage> {
     /// lookup.
     offline_interfaces: BTreeSet<usize>,
 
+    /// Interfaces whose own TX gate currently holds frames for regulatory
+    /// airtime budget (leviculum#493, decided on #433). Mirrored the same
+    /// way as [`Self::set_interface_online`]: the interface is the only
+    /// layer that knows its duty state (firmware `lora.rs` lock gate, lnsd
+    /// `rnode.rs` hold path), and it reports a boolean — the core computes
+    /// nothing. A missing entry means "not holding", the default, so a
+    /// driver that never mirrors keeps today's behaviour. While set,
+    /// [`Self::announce_allowed_on_interface`] refuses transit announces
+    /// and path responses on the interface: a relay that has spent its
+    /// lawful budget cannot carry the link setup a route it advertises
+    /// would invite (479-482 derived that no stack's clocks survive two
+    /// held frames), and Python's per-interface announce admission is the
+    /// precedent — an interface over its cap relays no announce
+    /// (Transport.py:1252-1294).
+    duty_hold_ifaces: BTreeSet<usize>,
+
     /// Live direct-peer count per interface, mirrored by the driver the
     /// same way as [`Self::set_interface_online`] (Codeberg #365). A
     /// missing entry means zero — the default, so only link-shaped
@@ -3126,6 +3142,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_announce_caps: BTreeMap::new(),
             interface_names: BTreeMap::new(),
             offline_interfaces: BTreeSet::new(),
+            duty_hold_ifaces: BTreeSet::new(),
             interface_peer_counts: BTreeMap::new(),
             peer_link_reoriginations: BTreeSet::new(),
             discovery_request_peers: BTreeMap::new(),
@@ -4286,23 +4303,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Codeberg #91: apply the per-mode announce-propagation gate to
         // locally originated announce broadcasts (Python routes these through
-        // Transport.outbound(), Transport.py:1193-1245). Only pays the unpack
-        // cost when a non-Full interface exists; with an all-Full stack the
-        // blocked set is empty and behaviour is identical to before.
-        let exclude_ifaces: Vec<InterfaceId> = if self.interface_modes.is_empty() {
-            Vec::new()
-        } else {
-            match Packet::unpack(data) {
-                Ok(pkt) if pkt.flags.packet_type == PacketType::Announce => {
-                    let is_local = self.local_destinations.contains(&pkt.destination_hash);
-                    self.announce_mode_blocked_ifaces(&pkt.destination_hash, is_local)
-                        .into_iter()
-                        .map(InterfaceId)
-                        .collect()
+        // Transport.outbound(), Transport.py:1193-1245), and since
+        // leviculum#493 the per-interface duty-hold gate with it. Only pays
+        // the unpack cost when a non-Full or duty-held interface exists; with
+        // an all-Full, no-hold stack the blocked set is empty and behaviour
+        // is identical to before.
+        let exclude_ifaces: Vec<InterfaceId> =
+            if self.interface_modes.is_empty() && self.duty_hold_ifaces.is_empty() {
+                Vec::new()
+            } else {
+                match Packet::unpack(data) {
+                    Ok(pkt) if pkt.flags.packet_type == PacketType::Announce => {
+                        let is_local = self.local_destinations.contains(&pkt.destination_hash);
+                        self.announce_blocked_ifaces(&pkt.destination_hash, is_local)
+                            .into_iter()
+                            .map(InterfaceId)
+                            .collect()
+                    }
+                    _ => Vec::new(),
                 }
-                _ => Vec::new(),
-            }
-        };
+            };
 
         self.push_broadcast(
             data.to_vec(),
@@ -4896,6 +4916,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 .map(|name| name.capacity())
                 .sum::<usize>()
             + hc::btree_set_bytes(&self.offline_interfaces)
+            + hc::btree_set_bytes(&self.duty_hold_ifaces)
             + hc::btree_map_bytes(&self.interface_peer_counts)
             + hc::btree_set_bytes(&self.peer_link_reoriginations)
             + hc::btree_map_bytes(&self.discovery_request_peers)
@@ -5489,7 +5510,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3917. A destination with no cached
+    /// link-request path uses at transport.rs:3934. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -8815,12 +8836,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Per-mode announce-propagation gate (Codeberg #91). This path
             // carries relayed/local announces; access-point interfaces never
             // emit them and roaming/boundary interfaces withhold transit
-            // announces per next-hop mode (Transport.py:1193-1245). In the
-            // common all-`Full` case the blocked set is empty and the single
-            // Broadcast reaches every interface as before.
+            // announces per next-hop mode (Transport.py:1193-1245), and an
+            // interface in duty hold withholds every transit announce
+            // (leviculum#493). In the common all-`Full`, no-hold case the
+            // blocked set is empty and the single Broadcast reaches every
+            // interface as before.
             let exclude_ifaces = if packet.flags.packet_type == PacketType::Announce {
                 let is_local = self.local_destinations.contains(&packet.destination_hash);
-                self.announce_mode_blocked_ifaces(&packet.destination_hash, is_local)
+                self.announce_blocked_ifaces(&packet.destination_hash, is_local)
                     .into_iter()
                     .map(InterfaceId)
                     .collect()
@@ -9111,6 +9134,29 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         !self.offline_interfaces.contains(&id)
     }
 
+    // Public: Interface duty-hold mirror (leviculum#493)
+    /// Mirror an interface's duty-hold state into the transport (called by
+    /// the driver whenever it can — per main-loop pass on the firmware,
+    /// from `push_interface_state` in lnsd). Not holding is the default,
+    /// so `false` is stored as a removal and a driver that never calls
+    /// this keeps every interface advertising. The interface alone decides
+    /// when it holds and when the hold lifts; this is a report, never a
+    /// computation (interface isolation, CLAUDE.md).
+    pub fn set_interface_duty_hold(&mut self, id: usize, held: bool) {
+        if held {
+            self.duty_hold_ifaces.insert(id);
+        } else {
+            self.duty_hold_ifaces.remove(&id);
+        }
+    }
+
+    /// Whether the interface currently reports a duty hold. See
+    /// [`Self::set_interface_duty_hold`]; an interface nobody mirrored is
+    /// not holding.
+    pub fn interface_duty_hold(&self, id: usize) -> bool {
+        self.duty_hold_ifaces.contains(&id)
+    }
+
     /// Mirror an interface's live direct-peer count into the transport
     /// (Codeberg #365), the same way the driver mirrors `is_online()`.
     /// Zero is the default, so `0` is stored as a removal and a driver
@@ -9252,6 +9298,34 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
         is_local: bool,
     ) -> bool {
+        // leviculum#493: an interface in duty hold advertises no route. Both
+        // rebroadcasts and path responses are announces and both are refused;
+        // the refusal is final, the announce is NOT queued for later. Python
+        // queues a cap-paced announce per interface (Transport.py:1264-1281)
+        // and that queue was considered here: releasing announces the moment
+        // the hold lifts would key routes exactly as old as the hold, toward
+        // destinations that have re-announced on their own cadence since —
+        // the stale-route shape #433 measured on the stale-frame side. The
+        // node's OWN announces (`is_local`) are exempt: they are governed by
+        // the announce cap (#401 rule 5 prices them against the duty budget),
+        // and a held relay must still be reachable directly once its budget
+        // returns.
+        if !is_local && self.interface_duty_hold(out_iface) {
+            return false;
+        }
+        self.announce_mode_allows(out_iface, dest_hash, is_local)
+    }
+
+    /// The mode half of [`Self::announce_allowed_on_interface`], on its own
+    /// so the suppression line can name which gate refused: the permanent
+    /// cause (interface mode) wins over the transient one (duty hold) when
+    /// both apply, see [`Self::announce_blocked_label`].
+    fn announce_mode_allows(
+        &self,
+        out_iface: usize,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        is_local: bool,
+    ) -> bool {
         match self.interface_mode(out_iface) {
             InterfaceMode::AccessPoint => false,
             InterfaceMode::Roaming => {
@@ -9281,22 +9355,45 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
+    /// Why [`Self::announce_blocked_ifaces`] withheld `iface`, for the
+    /// `ANN_TX_SUPPRESSED` line. Mode first: a reader chasing a quiet
+    /// access-point interface must not be sent to the airtime ledger when
+    /// the interface would stay quiet with a full budget.
+    fn announce_blocked_label(
+        &self,
+        iface: usize,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        is_local: bool,
+    ) -> &'static str {
+        if !self.announce_mode_allows(iface, dest_hash, is_local) {
+            "interface_mode"
+        } else {
+            "duty_hold"
+        }
+    }
+
     /// Interface indices that must NOT receive the announce for `dest_hash`
-    /// because of their mode (see [`Self::announce_allowed_on_interface`]).
-    /// Empty in the common all-`Full` case, so the fast broadcast path is
-    /// unchanged. Only consulted for announce broadcasts.
-    fn announce_mode_blocked_ifaces(
+    /// because of their mode or their duty hold (see
+    /// [`Self::announce_allowed_on_interface`]). Empty in the common
+    /// all-`Full`, no-hold case, so the fast broadcast path is unchanged.
+    /// Only consulted for announce broadcasts.
+    fn announce_blocked_ifaces(
         &self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
         is_local: bool,
     ) -> Vec<usize> {
-        if self.interface_modes.is_empty() {
+        if self.interface_modes.is_empty() && self.duty_hold_ifaces.is_empty() {
             return Vec::new();
         }
+        // Through a set because the chain can name an interface twice
+        // (duty-held AND moded), and the two sources interleave arbitrarily.
         self.interface_modes
             .keys()
+            .chain(self.duty_hold_ifaces.iter())
             .copied()
             .filter(|&idx| !self.announce_allowed_on_interface(idx, dest_hash, is_local))
+            .collect::<BTreeSet<usize>>()
+            .into_iter()
             .collect()
     }
 
@@ -11964,6 +12061,23 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             "Dropped targeted path response, max hops exceeded"
                         );
                         self.stats.record_drop(DropReason::ForwardMaxHops);
+                    } else if !self.local_destinations.contains(&dest_hash)
+                        && self.interface_duty_hold(target_iface)
+                    {
+                        // leviculum#493: a path response is an announce, and
+                        // an interface in duty hold advertises no route on
+                        // it either. Refused outright, not retried — the
+                        // requester re-asks on its own schedule and a held
+                        // answer would name a route this relay cannot carry.
+                        crate::tracing::debug!(
+                            event = "ANN_TX_SUPPRESSED",
+                            dst = %HexShort(&dest_hash),
+                            hops = parsed.hops,
+                            iface = %self.iface_name(target_iface),
+                            suppressed = true,
+                            reason = "duty_hold",
+                            closed = "duty_hold",
+                        );
                     } else {
                         let size = parsed.packed_size();
                         let mut buf = alloc::vec![0u8; size];
@@ -12136,10 +12250,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Per-mode announce-propagation gate (Codeberg #91, Transport.py:1193-
         // 1245): access-point interfaces never emit announces; roaming/boundary
-        // interfaces withhold transit announces per next-hop mode. Empty in the
-        // all-`Full` case.
+        // interfaces withhold transit announces per next-hop mode. Since
+        // leviculum#493 the same list carries interfaces in duty hold. Empty in
+        // the all-`Full`, no-hold case.
         let is_local = self.local_destinations.contains(&packet.destination_hash);
-        let mode_blocked = self.announce_mode_blocked_ifaces(&packet.destination_hash, is_local);
+        let blocked = self.announce_blocked_ifaces(&packet.destination_hash, is_local);
 
         // Handle capped interfaces individually.
         //
@@ -12165,8 +12280,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             .unwrap_or(0);
 
         for iface_idx in &capped_ifaces {
-            if mode_blocked.contains(iface_idx) {
-                ann_suppressed.push((*iface_idx, "interface_mode"));
+            if blocked.contains(iface_idx) {
+                ann_suppressed.push((
+                    *iface_idx,
+                    self.announce_blocked_label(*iface_idx, &packet.destination_hash, is_local),
+                ));
                 continue;
             }
             let cap = self
@@ -12231,8 +12349,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             if self.interface_announce_caps.contains_key(&iface_idx) {
                 continue;
             }
-            if mode_blocked.contains(&iface_idx) {
-                ann_suppressed.push((iface_idx, "interface_mode"));
+            if blocked.contains(&iface_idx) {
+                ann_suppressed.push((
+                    iface_idx,
+                    self.announce_blocked_label(iface_idx, &packet.destination_hash, is_local),
+                ));
                 continue;
             }
             self.pending_actions.push(Action::SendPacket {
@@ -12278,14 +12399,30 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             });
         }
         for (iface_idx, reason) in ann_suppressed {
-            crate::tracing::debug!(
-                event = "ANN_TX_SUPPRESSED",
-                dst = %HexShort(&dst),
-                hops = hops,
-                iface = %self.iface_name(iface_idx),
-                suppressed = true,
-                reason = reason,
-            );
+            if reason == "duty_hold" {
+                // The admission gate's own vocabulary beside the family key:
+                // `closed=` is how the announce path names the gate that
+                // refused (`ANNOUNCE_LEARNED_NOT_RELAYED closed=`), and the
+                // #493 acceptance reads this refusal by it.
+                crate::tracing::debug!(
+                    event = "ANN_TX_SUPPRESSED",
+                    dst = %HexShort(&dst),
+                    hops = hops,
+                    iface = %self.iface_name(iface_idx),
+                    suppressed = true,
+                    reason = reason,
+                    closed = "duty_hold",
+                );
+            } else {
+                crate::tracing::debug!(
+                    event = "ANN_TX_SUPPRESSED",
+                    dst = %HexShort(&dst),
+                    hops = hops,
+                    iface = %self.iface_name(iface_idx),
+                    suppressed = true,
+                    reason = reason,
+                );
+            }
         }
     }
 
@@ -12306,7 +12443,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         )> = Vec::new();
 
         for (iface_idx, cap) in self.interface_announce_caps.iter_mut() {
-            if cap.queue.is_empty() || now < cap.allowed_at_ms {
+            // A duty-held interface drains nothing (leviculum#493): what sits
+            // in the cap queue predates the hold, and handing it to a gate
+            // that cannot key it would only age it into a stale drop. The
+            // holdoff clock is untouched, so the queue resumes the moment
+            // the interface reports the hold lifted.
+            if cap.queue.is_empty()
+                || now < cap.allowed_at_ms
+                || self.duty_hold_ifaces.contains(iface_idx)
+            {
                 continue;
             }
 
@@ -12407,7 +12552,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// entries that route through the new peer itself (`via_peer` or
     /// `next_hop` is the peer — the #168 bounce-back rule); destinations
     /// whose cached announce was evicted; and anything the #91 interface
-    /// mode gate blocks. Emission is paced by the interface's #402
+    /// mode gate or the #493 duty-hold gate blocks (both inside
+    /// `announce_allowed_on_interface`). Emission is paced by the
+    /// interface's #402
     /// announce cap where one is registered: over budget, the re-offer
     /// takes the destination's queue slot (keeping its peer hint) and
     /// logs `ANN_TX_SUPPRESSED` like any paced rebroadcast.
@@ -12920,7 +13067,25 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let size = response.packed_size();
             let mut buf = alloc::vec![0u8; size];
             if let Ok(len) = response.pack(&mut buf) {
+                let is_local = self.local_destinations.contains(dest_hash);
                 for iface in self.discovery_requester_ifaces(dest_hash, requesting_iface) {
+                    // leviculum#493: no route is advertised on an interface
+                    // in duty hold — the discovery answer is an announce
+                    // like any other. The entry is still consumed below;
+                    // the requester retries on its own cadence and will be
+                    // answered once the hold has lifted.
+                    if !is_local && self.interface_duty_hold(iface) {
+                        crate::tracing::debug!(
+                            event = "ANN_TX_SUPPRESSED",
+                            dst = %HexShort(dest_hash),
+                            hops = hops,
+                            iface = %self.iface_name(iface),
+                            suppressed = true,
+                            reason = "duty_hold",
+                            closed = "duty_hold",
+                        );
+                        continue;
+                    }
                     crate::tracing::debug!(
                         "Answering discovery path request for <{}> on {}",
                         HexShort(dest_hash),
@@ -14152,7 +14317,7 @@ mod tests {
             assert!(!transport.announce_allowed_on_interface(ap, &dest, false));
 
             assert_eq!(
-                transport.announce_mode_blocked_ifaces(&dest, true),
+                transport.announce_blocked_ifaces(&dest, true),
                 alloc::vec![ap]
             );
         }
@@ -14225,9 +14390,7 @@ mod tests {
                 assert!(transport.announce_allowed_on_interface(iface, &dest, false));
             }
             // No mode blocks anything here.
-            assert!(transport
-                .announce_mode_blocked_ifaces(&dest, false)
-                .is_empty());
+            assert!(transport.announce_blocked_ifaces(&dest, false).is_empty());
         }
 
         #[test]
@@ -14290,6 +14453,96 @@ mod tests {
             assert!(
                 broadcast.contains(&InterfaceId(ap)),
                 "AP iface must be excluded from the announce broadcast; got {broadcast:?}"
+            );
+        }
+
+        /// leviculum#493: an interface in duty hold refuses transit announces
+        /// and keeps refusing until the interface reports the hold lifted;
+        /// the node's own announces pass the gate throughout (they are
+        /// governed by the announce cap, not by the hold).
+        #[test]
+        fn duty_hold_refuses_transit_announces_until_cleared() {
+            let mut transport = make_transport_enabled();
+            let lora = transport.register_interface(Box::new(MockInterface::new("lora", 1)));
+            let dest = dummy_dest(0x07);
+
+            transport.set_interface_duty_hold(lora, true);
+            assert!(
+                !transport.announce_allowed_on_interface(lora, &dest, false),
+                "a held interface must refuse a transit announce"
+            );
+            assert!(
+                transport.announce_allowed_on_interface(lora, &dest, true),
+                "the node's own announce is governed by the cap, not the hold"
+            );
+            assert_eq!(
+                transport.announce_blocked_ifaces(&dest, false),
+                alloc::vec![lora]
+            );
+            assert!(transport.announce_blocked_ifaces(&dest, true).is_empty());
+
+            transport.set_interface_duty_hold(lora, false);
+            assert!(
+                transport.announce_allowed_on_interface(lora, &dest, false),
+                "the refusal must end with the hold"
+            );
+            assert!(transport.announce_blocked_ifaces(&dest, false).is_empty());
+        }
+
+        /// leviculum#493 end-to-end through `broadcast_announce_with_caps`:
+        /// while one capped interface holds, the other still relays; after
+        /// the hold lifts the formerly held interface relays again.
+        #[test]
+        fn duty_hold_broadcast_with_caps_suppresses_then_lifts() {
+            let mut transport = make_transport_enabled();
+            let full = transport.register_interface(Box::new(MockInterface::new("full", 1)));
+            let lora = transport.register_interface(Box::new(MockInterface::new("lora", 2)));
+            transport.set_interface_name(full, "full".into());
+            transport.set_interface_name(lora, "lora".into());
+            transport.register_interface_bitrate(full, 1200);
+            transport.register_interface_bitrate(lora, 1200);
+            transport.set_interface_duty_hold(lora, true);
+
+            let (raw, _dest) = make_announce_raw(1, PacketContext::None);
+            let mut packet = Packet::unpack(&raw).unwrap();
+            packet.hops = 1;
+            transport.broadcast_announce_with_caps(&mut packet);
+
+            let sent_ifaces: Vec<usize> = transport
+                .pending_actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::SendPacket { iface, .. } => Some(iface.0),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                sent_ifaces.contains(&full),
+                "the unheld iface must still relay"
+            );
+            assert!(
+                !sent_ifaces.contains(&lora),
+                "the held iface must relay nothing; sent={sent_ifaces:?}"
+            );
+
+            // The refusal queued nothing: the held interface's cap queue is
+            // as empty as before, so no stale route keys when the hold ends.
+            assert!(transport.interface_announce_caps[&lora].queue.is_empty());
+
+            transport.pending_actions.clear();
+            transport.set_interface_duty_hold(lora, false);
+            transport.broadcast_announce_with_caps(&mut packet);
+            let sent_after: Vec<usize> = transport
+                .pending_actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::SendPacket { iface, .. } => Some(iface.0),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                sent_after.contains(&lora),
+                "after the hold lifts the iface must relay again; sent={sent_after:?}"
             );
         }
 
@@ -17168,7 +17421,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7010), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7031), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

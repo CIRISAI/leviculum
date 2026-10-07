@@ -28,7 +28,7 @@ Our LNode firmware enforces the same way: `AirtimeTracker`
 (`leviculum-core/src/rnode.rs:1832`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
-`leviculum-nrf/src/lora.rs:1766-1844`), continuing to listen so RX is
+`leviculum-nrf/src/lora.rs:1861-1948`), continuing to listen so RX is
 not starved — until the frame has waited so long that keying it would
 be pointless, which is
 [the age rule below](#a-hold-ages-traffic-it-does-not-thin-it).
@@ -298,6 +298,43 @@ milliseconds it spent before; the change is that they carry current
 traffic instead of fossils. A board that is permanently over its cap
 is still a board with too much to say, and the honest reading of a
 climbing `lora_stale=` is a load problem, not a solved one.
+
+## A relay in duty hold advertises no route — and the hold provably lifts
+
+The same arithmetic binds the control plane (leviculum#493, decided on
+#433). A relay whose interface is in duty hold cannot carry a link
+setup under any stack's clocks — initiator 20 s, forwarding entry 24 s
+ours and 12 s Python's, against two held frames of up to 36 s — so an
+announce it relays there advertises a service it cannot render, and
+every initiator behind it spends 20 s per attempt learning that. The
+rule has two halves, and the second is the guard on the first:
+
+- **While the hold is in force, the interface advertises nothing.**
+  The interface reports its hold to the core as a boolean (`duty_hold`,
+  set by the firmware's lock gate and by lnsd's RNode hold path, mirrored
+  like the online flag — the core computes nothing), and the core's
+  announce admission refuses rebroadcasts and path responses alike on a
+  held interface, logged as `ANN_TX_SUPPRESSED … closed=duty_hold`. The
+  refusal is final, not queued: the destination re-announces on its own
+  cadence, and a queue released at lift time would key routes exactly
+  as old as the hold. The node's own announces are exempt — the #402
+  announce cap governs them, priced against the duty budget by #401
+  rule 5. Python is the precedent for the half that refuses: an
+  interface over its `announce_cap` relays no announce through
+  `Transport.outbound()` at that moment (Transport.py:1252-1294) —
+  though Python queues what we refuse, which is the one place we
+  deviate, per the stale-route argument above.
+- **The hold ends when the rolling window frees budget, visibly.** The
+  firmware states the edge once — `[LORA] hold lifted lt_ms=<n>
+  held_for_ms=<n> dropped_stale=<n>` beside the per-turn
+  `[LORA_AIRTIME_LOCK] … holding` line — and lnsd emits `DUTY_HOLD
+  iface=<name> state=held|lifted lt_ms=<n>` on the same two edges. The
+  lift is pinned by host tests on the real ledger: flat at the cap at
+  t0 it holds, nothing inside the rolling hour frees it, and the first
+  bin that leaves the hour drops the long-term sum below the cap and
+  reads `duty_hold` false again
+  (`leviculum-nrf/queue-budget/src/tests.rs`, and the end-to-end mvr in
+  `leviculum-std/tests/mvr/`).
 
 ## The firmware ledger is not a cross-session account
 

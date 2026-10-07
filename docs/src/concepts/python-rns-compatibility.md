@@ -170,7 +170,7 @@ whichever is lower (`rnode::resolve_tx_power` and
 `lawful_erp_dbm`, applied in both interface builders and in the
 `SerialInterface` LNode path). The standalone LNode firmware's
 compiled profile carries the uncapped board maximum
-(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:371-417`), which
+(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:387-433`), which
 is the capped resolution's own result at that profile's 869.463 MHz.
 
 Against the rule: TX power is a local modem setting. It is never on the
@@ -318,13 +318,13 @@ The reference behaves this way on every forwarding path:
 Loop-freedom never came from interface suppression. It comes from
 transport_id addressing (only the addressed relay processes a Type2
 transport packet), the hop-count limit, and packet-hash dedup —
-`has_packet_hash` (`leviculum-core/src/transport.rs:3939`) drops a
+`has_packet_hash` (`leviculum-core/src/transport.rs:3956`) drops a
 repeated copy, `add_packet_hash`
-(`leviculum-core/src/transport.rs:3993`) records it.
+(`leviculum-core/src/transport.rs:4010`) records it.
 
 The forwarding decision lives in the media-agnostic core
 (`forward_on_interface_from`,
-`leviculum-core/src/transport.rs:8656`). Whether the relayed echo
+`leviculum-core/src/transport.rs:8677`). Whether the relayed echo
 needs TX spacing on a half-duplex channel is the interface's business
 — see [Interface Isolation](interface-isolation.md).
 

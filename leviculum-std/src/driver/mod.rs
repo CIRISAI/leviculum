@@ -6080,6 +6080,11 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
             let max_airtime = credit.lock_recover().max_airtime_ms();
             core.set_interface_max_airtime_ms(iface_idx, max_airtime);
         }
+        // The duty-hold flag the RNode TX task flips at its gate's edges
+        // (leviculum#493). Mirrored like the slot above — the interface
+        // decides, the driver carries — so the transport stops relaying
+        // announces on a held interface and resumes when the hold lifts.
+        core.set_interface_duty_hold(iface_idx, handle.counters.duty_hold());
     }
 }
 

@@ -2351,6 +2351,12 @@ where
     // enqueue and judged on it at dequeue.
     let clock_epoch = tokio::time::Instant::now();
     let mut duty_holds = DutyHolds::new(duty_hold_min_ms(sf, cr, bandwidth_hz));
+    // Whether the hold state last announced (DUTY_HOLD event + the counters
+    // flag the driver mirrors into the core) was "held" (leviculum#493).
+    // Separate from `gate_announced`: that pair reports ANY long closure for
+    // an operator, this one drives route advertisement, so its threshold is
+    // the age rule's own (`duty_hold_min_ms`).
+    let mut duty_hold_announced = false;
 
     // Periodic heartbeat: send CMD_DETECT every 5 minutes to keep the
     // serial link alive and verify the RNode firmware is responsive.
@@ -2898,6 +2904,28 @@ where
         // RNODE_TX_RELEASED closes the pair opened by RNODE_TX_GATED.
         let gate_holding = flow_control && !interface_ready && !send_queue.is_empty();
         duty_holds.observe(gate_holding, stamp_ms(clock_epoch));
+        // The hold as interface state (leviculum#493): once the closure
+        // qualifies as a duty hold, the counters flag goes up — the driver
+        // mirrors it into the core, which then relays no announce and no
+        // path response on this interface — and comes down the moment the
+        // gate reopens. One event line per edge, held and lifted, never per
+        // turn. `lt_ms` is the modem's long-term airtime out of its latest
+        // CMD_STAT reading (one raw unit is 360 ms of the rolling hour), 0
+        // until the first reading arrives.
+        let duty_holding = duty_holds.holding(stamp_ms(clock_epoch));
+        if duty_holding != duty_hold_announced {
+            duty_hold_announced = duty_holding;
+            counters.set_duty_hold(duty_holding);
+            let lt_ms = counters
+                .radio_stats()
+                .map_or(0u64, |r| (r.airtime_long * 36_000.0) as u64);
+            tracing::info!(
+                event = "DUTY_HOLD",
+                iface = %Scalar(&name),
+                state = if duty_holding { "held" } else { "lifted" },
+                lt_ms = lt_ms,
+            );
+        }
         match (gate_holding, gate_blocked_since) {
             (true, None) => {
                 gate_blocked_since = Some(tokio::time::Instant::now());
@@ -3942,6 +3970,10 @@ async fn rnode_multi_io_task<S>(
             .max()
             .unwrap_or(TX_GATED_EVENT_AFTER.as_millis() as u32),
     );
+    // See the single-port task: the hold as interface state (leviculum#493).
+    // The gate is the one shared modem's, so a qualifying hold flags every
+    // vport — each is a route the held radio cannot carry.
+    let mut duty_hold_announced = false;
 
     loop {
         tokio::select! {
@@ -4184,6 +4216,23 @@ async fn rnode_multi_io_task<S>(
             flow_control && !interface_ready && !send_queue.is_empty(),
             stamp_ms(clock_epoch),
         );
+        let duty_holding = duty_holds.holding(stamp_ms(clock_epoch));
+        if duty_holding != duty_hold_announced {
+            duty_hold_announced = duty_holding;
+            for v in vports.iter() {
+                v.counters.set_duty_hold(duty_holding);
+                let lt_ms = v
+                    .counters
+                    .radio_stats()
+                    .map_or(0u64, |r| (r.airtime_long * 36_000.0) as u64);
+                tracing::info!(
+                    event = "DUTY_HOLD",
+                    iface = %Scalar(&v.name),
+                    state = if duty_holding { "held" } else { "lifted" },
+                    lt_ms = lt_ms,
+                );
+            }
+        }
 
         // Send if the spacing gate and the flow-control gate are both open.
         if timer_ready && (interface_ready || !flow_control) {

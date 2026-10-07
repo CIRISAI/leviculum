@@ -2820,6 +2820,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.interface_online(iface)
     }
 
+    /// Mirror an interface's duty-hold state into the core (leviculum#493),
+    /// the sibling of [`set_interface_online`](Self::set_interface_online).
+    /// Set by the interface alone — the firmware's LoRa lock gate per
+    /// main-loop pass, lnsd's RNode hold path via `push_interface_state` —
+    /// when its TX gate starts holding frames for airtime budget, cleared
+    /// when the hold lifts. While set, the transport relays no announce and
+    /// no path response on this interface (own announces stay governed by
+    /// the announce cap).
+    pub fn set_interface_duty_hold(&mut self, iface: usize, held: bool) {
+        self.transport.set_interface_duty_hold(iface, held);
+    }
+
+    /// Whether the interface currently reports a duty hold (see
+    /// [`set_interface_duty_hold`](Self::set_interface_duty_hold)).
+    pub fn interface_duty_hold(&self, iface: usize) -> bool {
+        self.transport.interface_duty_hold(iface)
+    }
+
     /// Mirror an interface's live direct-peer count into the core
     /// (Codeberg #365), the per-peer sibling of
     /// [`set_interface_online`](Self::set_interface_online). Fed from
@@ -2910,6 +2928,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // whose default is zero.
         self.transport.set_interface_online(iface_idx, true);
         self.transport.set_interface_peer_count(iface_idx, 0);
+        // Same rule for the duty-hold mirror (leviculum#493): not holding is
+        // the default, and a later interface under this index must not start
+        // life refusing announces for a hold its predecessor reported.
+        self.transport.set_interface_duty_hold(iface_idx, false);
         self.transport.remove_interface_name(iface_idx);
         self.transport.remove_interface_mode(iface_idx);
         self.transport.remove_interface_kind(iface_idx);

@@ -20,6 +20,20 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- A relay that has spent its lawful airtime budget stops advertising routes
+  until the budget returns (leviculum#493, decided on #433). While a LoRa
+  interface's duty lock holds its TX gate, the node relays no announce and
+  no path response on that interface — a route it advertised there would
+  invite link setups it provably cannot carry — and the refusal is final
+  rather than queued, so no stale route keys when the hold ends. The node's
+  own announces are unaffected (the #402 announce cap governs them). The
+  hold visibly lifts the moment the rolling hour frees budget: the firmware
+  logs `[LORA] hold lifted lt_ms= held_for_ms= dropped_stale=` on the edge,
+  lnsd emits `DUTY_HOLD iface= state=held|lifted lt_ms=` event lines, and
+  suppressed relays carry `ANN_TX_SUPPRESSED … closed=duty_hold`. Python
+  precedent: an interface over its `announce_cap` relays no announce
+  (Transport.py:1252-1294).
+
 - An instrumented daemon package for memory censuses (Codeberg #437). The
   nightly publishes `leviculum-nightly-arm64-heapacct.deb` beside the plain
   packages: package `leviculum-heapacct`, version `<plain>+heapacct`, the

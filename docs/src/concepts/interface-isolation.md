@@ -40,7 +40,7 @@ budget is exhausted. Concretely:
 - **Send-side jitter** — packets are queued, not sent immediately; a
   frame that acquires an idle channel first serves a randomised wait,
   DIFS plus a contention window sized from the radio parameters, so two
-  nodes do not re-collide (`leviculum-std/src/interfaces/rnode.rs:2736-2767`,
+  nodes do not re-collide (`leviculum-std/src/interfaces/rnode.rs:2742-2773`,
   where the TX loop arms it; the ceiling it reports is
   `compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:293-303`).
 - **CSMA** — radio-level carrier sensing is handled by the RNode

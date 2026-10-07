@@ -54,7 +54,7 @@ pub mod harness;
 /// Per-thread arming was necessary and not sufficient. libtest gives each
 /// test its own thread, so no other test's *own* allocations land in this
 /// window — but `tracing` dispatch runs on the thread that emits the event,
-/// and `EventLogLayer::on_event` (`leviculum-std/src/event_log.rs:1759`)
+/// and `EventLogLayer::on_event` (`leviculum-std/src/event_log.rs:1772`)
 /// pushes one `String` into the buffer of EVERY capture handle any test has
 /// registered, "regardless of which test emitted it" (that module's own doc).
 /// So the code under test emitting `PKT_TX`
@@ -378,6 +378,7 @@ mod cad_tears_down_the_frame_it_then_detects;
 mod client_wait_for_path_request_fallback;
 mod core_lock_reentrancy;
 mod core_processor_seam;
+mod duty_hold_relay_advertises_no_route_until_the_hold_lifts;
 mod forwarding_daemon_forgets_the_request_before_the_proof_returns;
 mod iface_online_after_task_death;
 mod link_failure_recovery_silent_resume;

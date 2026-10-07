@@ -7,3 +7,9 @@ license = "AGPL-3.0-or-later"
 description = "Pure two-bound admission policy for the firmware's outbound queues, host-testable"
 
 [dependencies]
+
+[dev-dependencies]
+# The core's airtime ledger, so the hold-lift test (leviculum#493) drives the
+# REAL rolling-hour arithmetic the firmware's lock gate runs, not a stand-in.
+# default-features = false is the firmware's own feature set for this crate.
+leviculum-core = { path = "../../leviculum-core", default-features = false }

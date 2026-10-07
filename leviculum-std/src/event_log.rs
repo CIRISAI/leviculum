@@ -387,6 +387,19 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_TX_SUPPRESSED",
         required_keys: &["dst", "hops", "iface", "suppressed", "reason"],
     },
+    // leviculum#493: the RNode TX gate's duty hold as interface state, one
+    // line per edge (`state=held|lifted`, never per turn). While held, the
+    // transport relays no announce and no path response on the interface —
+    // those refusals are `ANN_TX_SUPPRESSED reason="duty_hold"
+    // closed="duty_hold"` lines — and `lifted` is the visible guarantee the
+    // hold ends when the rolling airtime window frees budget. `lt_ms` is
+    // the modem's long-term airtime from its latest CMD_STAT reading (0
+    // before the first), so the edge can be checked against the ledger
+    // that caused it.
+    EventSchema {
+        name: "DUTY_HOLD",
+        required_keys: &["iface", "state", "lt_ms"],
+    },
     // The ingress burst limiter holding an announce for an unknown
     // destination (Codeberg #87 hold-and-release, emitted by
     // `transport.rs::handle_announce`). Not a drop: the announce is queued

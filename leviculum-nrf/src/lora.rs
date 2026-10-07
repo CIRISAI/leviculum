@@ -168,6 +168,22 @@ fn now_ms32() -> u32 {
 pub static LORA_STALE_DROP_COUNT: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
+/// Whether the LoRa TX gate currently holds frames for regulatory airtime
+/// budget (leviculum#493, decided on #433).
+///
+/// Written only by the LoRa task, at the hold's two edges: set when the lock
+/// gate first holds or sweeps a queued frame, cleared when the lock
+/// disengages — on the next keyed frame, or on an idle re-check when the
+/// queue emptied under the hold. Read by [`AnnounceCap::sync`] on every main
+/// loop wake and mirrored into the core as the interface's `duty_hold`
+/// state, the same channel the announce cap bitrate travels: while it is
+/// set, the core relays no announce and no path response on this interface,
+/// so a relay that cannot carry a link setup advertises no route inviting
+/// one. The flag is interface state about the carrier, not packet policy,
+/// which is what keeps it on this side of the isolation boundary.
+pub static LORA_DUTY_HOLD: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// Occupancy of `LORA_OUTGOING`, in slots and in bytes.
 ///
 /// The channel's own slot bound cannot see bytes, so a queue of twelve MTU
@@ -625,6 +641,11 @@ pub fn pending_config() -> Option<leviculum_core::rnode::RadioConfigWire> {
 /// every wake would carry a cap that never caps.
 pub struct AnnounceCap {
     tracker: leviculum_core::rnode::AnnounceCapBitrate,
+    /// The duty-hold state last mirrored into the core (leviculum#493), so
+    /// the mirror is one atomic load per wake and a core call only on the
+    /// two edges. Starts `false`, the core's own default for an interface
+    /// nobody mirrored.
+    duty_hold_mirrored: bool,
 }
 
 impl Default for AnnounceCap {
@@ -637,6 +658,7 @@ impl AnnounceCap {
     pub const fn new() -> Self {
         Self {
             tracker: leviculum_core::rnode::AnnounceCapBitrate::new(),
+            duty_hold_mirrored: false,
         }
     }
 
@@ -644,12 +666,23 @@ impl AnnounceCap {
     /// on the debug port. Does nothing until the LoRa task has configured the
     /// chip once — [`running_config`] describes live hardware or nothing, and
     /// a cap for a radio that never came up would be a number about a fiction.
+    ///
+    /// Also carries the LoRa task's duty-hold flag into the core
+    /// (leviculum#493), BEFORE the PHY early-returns below: the bitrate
+    /// registers once per PHY and then returns early every wake, while the
+    /// hold flips whenever the airtime budget runs out or returns, and a
+    /// mirror behind the early return would have carried exactly one edge.
     pub fn sync<R, C, S>(&mut self, node: &mut leviculum_core::node::NodeCore<R, C, S>)
     where
         R: rand_core::CryptoRngCore,
         C: leviculum_core::traits::Clock,
         S: leviculum_core::traits::Storage,
     {
+        let held = LORA_DUTY_HOLD.load(core::sync::atomic::Ordering::Relaxed);
+        if held != self.duty_hold_mirrored {
+            self.duty_hold_mirrored = held;
+            node.set_interface_duty_hold(IFACE_INDEX, held);
+        }
         let Some(phy) = running_config() else {
             return;
         };
@@ -703,6 +736,49 @@ impl AnnounceCap {
             ),
         );
     }
+}
+
+/// Open a duty hold if none is in force (leviculum#493): remember when and
+/// at what stale-drop total, and raise [`LORA_DUTY_HOLD`] for the core
+/// mirror. No line of its own — the existing `[LORA_AIRTIME_LOCK] … holding`
+/// line already states every hold turn, the first one included.
+fn start_duty_hold(hold_started: &mut Option<(u64, u32)>, now_ms: u64) {
+    if hold_started.is_none() {
+        *hold_started = Some((
+            now_ms,
+            LORA_STALE_DROP_COUNT.load(core::sync::atomic::Ordering::Relaxed),
+        ));
+        LORA_DUTY_HOLD.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Close a duty hold, if one is in force (leviculum#493): lower
+/// [`LORA_DUTY_HOLD`] and state the lift ONCE, on the edge — not per turn,
+/// which is what taking the start state out of the slot guarantees. The
+/// line carries what the next reader of a dark-relay capture needs: the
+/// ledger the lock re-opened at, how long the board advertised nothing, and
+/// how many queued frames the hold aged into stale drops meanwhile.
+fn lift_duty_hold(
+    hold_started: &mut Option<(u64, u32)>,
+    airtime: &leviculum_core::rnode::AirtimeTracker,
+    now_ms: u64,
+) {
+    let Some((since_ms, stale_at_start)) = hold_started.take() else {
+        return;
+    };
+    LORA_DUTY_HOLD.store(false, core::sync::atomic::Ordering::Relaxed);
+    let dropped = LORA_STALE_DROP_COUNT
+        .load(core::sync::atomic::Ordering::Relaxed)
+        .wrapping_sub(stale_at_start);
+    crate::log::log_fmt(
+        "[LORA] ",
+        format_args!(
+            "hold lifted lt_ms={} held_for_ms={} dropped_stale={}",
+            airtime.long_term_airtime_ms(),
+            now_ms.saturating_sub(since_ms),
+            dropped
+        ),
+    );
 }
 
 // CSMA/CA constants. The retry gate itself (attempt budget, contention
@@ -1659,6 +1735,14 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     // so there is nothing to share it with and no critical section to pay.
     let mut stale_lines = leviculum_drop_budget::DropBudget::new();
 
+    // The duty hold's start, if one is in force (leviculum#493): the uptime
+    // the lock gate first held or swept a frame at, and the stale-drop total
+    // as of that moment, so the lift edge can state how long the board was
+    // dark and what the hold cost. `None` is the only state in which
+    // `LORA_DUTY_HOLD` reads false; the two are flipped together at the
+    // edges and nowhere else.
+    let mut hold_started: Option<(u64, u32)> = None;
+
     loop {
         // Take a new on-air spacing before anything is keyed this
         // iteration, so a value the host set is in force for the very next
@@ -1709,6 +1793,17 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 suppressed.lines,
                 suppressed.window_ms,
             );
+        }
+        // A duty hold must end visibly even when the queue emptied under it
+        // (every held frame swept stale, or none arrived since): with
+        // nothing pending, the lock gate below never runs, so the lift is
+        // re-checked here. One ledger update per idle turn — the same call
+        // the gate itself pays — and only while a hold is actually open.
+        if hold_started.is_some() && pending_tx.is_none() {
+            airtime.update(now_ms);
+            if !airtime.is_locked() {
+                lift_duty_hold(&mut hold_started, &airtime, now_ms);
+            }
         }
         if mute_lease.expired_at(now_ms).is_some() {
             // The run's exact total, and it closes the run: the expiry IS
@@ -1769,6 +1864,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 airtime.is_locked(),
             ) {
                 HoldVerdict::DropStale { age_ms } => {
+                    // A sweep only happens under an engaged lock, so it opens
+                    // the hold like a held frame does (leviculum#493) — the
+                    // backlog case where the first verdict the gate ever
+                    // renders is already a drop.
+                    start_duty_hold(&mut hold_started, now_ms);
                     // A duty lock does not thin traffic, it ages it (#433): at
                     // the cap the queue drains one frame per budget dip with
                     // FIFO order intact, so under sustained load everything
@@ -1809,6 +1909,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     continue;
                 }
                 HoldVerdict::Hold { .. } => {
+                    start_duty_hold(&mut hold_started, now_ms);
                     // Integer milliseconds, not the fractions: the tracker's own
                     // ledger unit, and the only float formatting on the LoRa
                     // path — printing the f32 fractions here was what linked
@@ -1840,8 +1941,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 }
                 // Not locked: key it, whatever its age. A frame that waited
                 // for CSMA, for an acquisition draw or behind a burst is not
-                // stale in this sense — those waits end by themselves.
-                HoldVerdict::Key => {}
+                // stale in this sense — those waits end by themselves. A
+                // verdict of Key is also the hold's ordinary end: the lock
+                // disengaged between turns, so the lift is stated before the
+                // frame that proves it goes out (leviculum#493).
+                HoldVerdict::Key => lift_duty_hold(&mut hold_started, &airtime, now_ms),
             }
             let data = &frame.data;
 

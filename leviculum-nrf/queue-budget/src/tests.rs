@@ -693,3 +693,87 @@ fn the_overlap_survives_the_stamp_wrapping() {
         HoldVerdict::DropStale { age_ms: 20_000 }
     );
 }
+
+/// leviculum#493 half two, the guard on half one: the hold provably lifts.
+///
+/// The core's real rolling-hour ledger drives `holding`, exactly as the
+/// firmware's lock gate does: a ledger seeded flat at the cap holds at t0,
+/// and nothing inside the hour frees it (481's derivation, asserted here as
+/// the negative). The first bin that leaves the rolling hour drops the
+/// long-term airtime below the cap, the lock disengages, `holding` reads
+/// false — the boolean the core's announce admission consumes — and a frame
+/// enqueued inside the last [`HOLD_MAX_AGE_MS`] is handed over, not swept.
+#[test]
+fn the_duty_hold_lifts_at_the_first_bin_that_leaves_the_rolling_hour() {
+    use leviculum_core::rnode::{AirtimeTracker, AIRTIME_BINLEN_MS, AIRTIME_LONGTERM_MS};
+    /// 1 % of the rolling hour, the `set_lt_limit_u16(100)` cap.
+    const CAP_MS: u32 = 36_000;
+
+    let mut ledger = AirtimeTracker::new();
+    ledger.set_lt_limit_u16(100);
+    // Flat at the cap: twelve consecutive bins of 3000 ms sum to exactly
+    // CAP_MS, and no two neighbours trip the (unset) short-term limit.
+    for i in 0..12u64 {
+        ledger.add_airtime(i * AIRTIME_BINLEN_MS, 3_000);
+    }
+    let t0 = 12 * AIRTIME_BINLEN_MS;
+    ledger.update(t0);
+    assert!(ledger.is_locked(), "a ledger flat at the cap holds at t0");
+    assert_eq!(ledger.long_term_airtime_ms(), CAP_MS);
+
+    let mut holds = DutyHolds::new(MIN_HOLD_MS);
+    holds.observe(ledger.is_locked(), t0 as u32);
+    assert!(
+        !holds.holding(t0 as u32),
+        "a closure younger than the handover bound is not yet a duty hold"
+    );
+    assert!(
+        holds.holding(t0 as u32 + MIN_HOLD_MS),
+        "the closure qualifies"
+    );
+
+    // Negative: INSIDE the rolling hour nothing lifts. One bin short of the
+    // seed's age-out, the ledger still carries every seeded millisecond.
+    let inside = AIRTIME_LONGTERM_MS - 2 * AIRTIME_BINLEN_MS;
+    ledger.update(inside);
+    assert!(
+        ledger.is_locked(),
+        "a fresh ledger frees nothing inside the hour (481)"
+    );
+    holds.observe(ledger.is_locked(), inside as u32);
+    assert!(holds.holding(inside as u32));
+
+    // The first bin that leaves the rolling hour: the oldest seeded bin is
+    // zeroed, the long-term sum drops one bin below the cap, the lock
+    // disengages.
+    let lift = AIRTIME_LONGTERM_MS - AIRTIME_BINLEN_MS;
+    ledger.update(lift);
+    assert!(
+        !ledger.is_locked(),
+        "the window's first freed bin must lift the lock"
+    );
+    assert_eq!(ledger.long_term_airtime_ms(), CAP_MS - 3_000);
+    holds.observe(ledger.is_locked(), lift as u32);
+    assert!(
+        !holds.holding(lift as u32),
+        "duty_hold reads false again once the budget returns"
+    );
+
+    // A frame enqueued inside the last HOLD_MAX_AGE_MS keys: its wait
+    // overlapped the hold (the control), but it has not aged out.
+    let fresh = lift as u32 - 10_000;
+    let (verdict, held_ms) = holds.verdict(fresh, lift as u32);
+    assert_eq!(
+        held_ms, 10_000,
+        "control: its whole wait was behind the hold"
+    );
+    assert!(
+        !matches!(verdict, HoldVerdict::DropStale { .. }),
+        "a frame enqueued inside the last {HOLD_MAX_AGE_MS} ms keys, got {verdict:?}"
+    );
+    // While one that waited out the whole hold is swept at dequeue.
+    assert!(matches!(
+        holds.verdict(t0 as u32, lift as u32).0,
+        HoldVerdict::DropStale { .. }
+    ));
+}

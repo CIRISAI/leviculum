@@ -390,6 +390,20 @@ impl DutyHolds {
         }
     }
 
+    /// Whether a qualifying hold is in progress at `now_ms`: the gate is
+    /// closed and has been for at least `min_hold_ms`.
+    ///
+    /// This is the boolean the host hands the core as the interface's
+    /// `duty_hold` state (leviculum#493): while it reads true the transport
+    /// relays no announce and no path response on the interface, and the
+    /// moment it reads false again the interface advertises routes as
+    /// before. The qualification threshold is the same one the age rule
+    /// uses, so the state the core refuses announces on and the holds that
+    /// age frames into stale drops are one notion, not two.
+    pub fn holding(&self, now_ms: u32) -> bool {
+        matches!(self.current, Some(start) if now_ms.wrapping_sub(start) >= self.min_hold_ms)
+    }
+
     /// How long a frame enqueued at `enqueued_ms` has waited behind a duty
     /// hold by `now_ms`: the overlap of its wait with the most recent
     /// qualifying hold, a hold still in progress included once it qualifies.

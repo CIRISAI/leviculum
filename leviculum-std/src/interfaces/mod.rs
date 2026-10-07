@@ -190,6 +190,14 @@ pub(crate) struct InterfaceCounters {
     /// is down, so `rnstatus` shows `Down` instead of a forever-online
     /// corpse.
     online: AtomicBool,
+    /// Whether this interface's TX gate currently holds frames for
+    /// regulatory airtime budget (leviculum#493). Flipped by the RNode TX
+    /// task at the hold's edges — a qualifying gate closure per
+    /// [`leviculum_queue_budget::DutyHolds::holding`] — and mirrored into
+    /// the transport by `push_interface_state`, where it closes announce
+    /// and path-response relay on the interface until the hold lifts.
+    /// Interfaces without a duty gate never touch it and stay at `false`.
+    duty_hold: AtomicBool,
 }
 
 impl InterfaceCounters {
@@ -212,6 +220,7 @@ impl InterfaceCounters {
             }),
             radio: std::sync::Mutex::new(None),
             online: AtomicBool::new(true),
+            duty_hold: AtomicBool::new(false),
         }
     }
 
@@ -224,6 +233,18 @@ impl InterfaceCounters {
     /// Whether the owning interface task currently considers its carrier up.
     pub(crate) fn is_online(&self) -> bool {
         self.online.load(Ordering::Acquire)
+    }
+
+    /// Record the duty hold opening or lifting (leviculum#493). Called by
+    /// the owning interface task only, on the hold's edges; readers use
+    /// [`duty_hold`](Self::duty_hold).
+    pub(crate) fn set_duty_hold(&self, held: bool) {
+        self.duty_hold.store(held, Ordering::Release);
+    }
+
+    /// Whether the owning interface task currently reports a duty hold.
+    pub(crate) fn duty_hold(&self) -> bool {
+        self.duty_hold.load(Ordering::Acquire)
     }
 
     /// Mark this interface as radio-capable so `interface_stats` always emits
