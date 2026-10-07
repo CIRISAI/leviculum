@@ -1512,6 +1512,7 @@ pub struct ReticulumNode {
     /// Per-transfer ceiling for multi-segment resource assembly
     /// (leviculum#62).
     pub(crate) max_assembled_resource_size: usize,
+    pub(crate) metrics_baseline: Mutex<crate::telemetry::CounterBaseline>, // leviculum#77
     /// Merged event receiver for consuming events. `None` either because the
     /// node was built with `without_events()`, or because
     /// `take_event_receiver()` already handed it out.
@@ -1725,6 +1726,7 @@ impl ReticulumNode {
             control_dropped,
             plane_counters: Arc::new(PlaneCounters::default()),
             max_assembled_resource_size: segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
+            metrics_baseline: Mutex::default(),
             event_rx,
             shutdown_tx: None,
             runner_handle: None,
@@ -2664,6 +2666,8 @@ impl ReticulumNode {
     /// (leviculum#77). Call it on the host's cadence, typically right before
     /// each scrape; with no recorder installed it costs the snapshots and
     /// nothing else. The names are `crate::telemetry::METRIC_CATALOG`.
+    /// Counters are process totals that each node adds its growth to, so
+    /// several nodes in one process sum and a replacement node carries on.
     /// Takes the core lock once for all core snapshots.
     pub fn publish_metrics(&self) {
         let (lifecycle, census, transport, known_evictions, heap) = {
@@ -2676,19 +2680,22 @@ impl ReticulumNode {
                 core.heap_census(),
             )
         };
-        crate::telemetry::record(&crate::telemetry::Snapshot {
-            lifecycle,
-            census,
-            mirror: self.completions.established_len(),
-            mirror_alarms: self
-                .plane_counters
-                .mirror_alarms
-                .load(std::sync::atomic::Ordering::Relaxed),
-            transport,
-            known_evictions,
-            plane: self.plane_stats(),
-            heap,
-        });
+        crate::telemetry::record(
+            &crate::telemetry::Snapshot {
+                lifecycle,
+                census,
+                mirror: self.completions.established_len(),
+                mirror_alarms: self
+                    .plane_counters
+                    .mirror_alarms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                transport,
+                known_evictions,
+                plane: self.plane_stats(),
+                heap,
+            },
+            &mut self.metrics_baseline.lock_recover(),
+        );
     }
 
     /// Live links by role, overall and per destination (CIRISEdge#819,
