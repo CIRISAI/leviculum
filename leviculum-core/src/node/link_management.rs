@@ -1665,10 +1665,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // runs out and the link fails loudly, which is the truth. Same shape as
         // the rx-ring-full refusal below, one layer further out.
         // A direct-link signal (leviculum#70) never reaches the host sink, so
-        // a full sink is no reason to refuse it: the one exception, admitted
-        // only when it is the next message in sequence (anything behind it
-        // still waits). Telling that needs the envelope header, so only a
-        // full sink pays for the decrypt before the refusal.
+        // a full sink is no reason to refuse it. Telling one apart needs the
+        // envelope header, so only a full sink pays for the decrypt before
+        // the refusal.
         let sink_full = self.channel_delivery_budget == Some(0);
 
         // 1. Decrypt the envelope data
@@ -1688,14 +1687,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         plaintext.truncate(decrypted_len);
 
         if sink_full {
-            let next_rx = link.channel().map(|ch| ch.next_rx_sequence()).unwrap_or(0);
-            let next_is_signal = plaintext.len() >= 4
+            // Whatever its sequence, a signal costs the sink nothing: the next
+            // one is delivered, one ahead waits buffered for its gap and is
+            // drained past the limit, and a duplicate of a delivered one is
+            // re-proved so a lost proof does not cost the sender its retries
+            // (Codex review on #74). Application messages are still refused.
+            let is_signal = plaintext.len() >= 2
                 && crate::direct_link::wire::is_signal_msgtype(u16::from_be_bytes([
                     plaintext[0],
                     plaintext[1],
-                ]))
-                && u16::from_be_bytes([plaintext[2], plaintext[3]]) == next_rx;
-            if !next_is_signal {
+                ]));
+            if !is_signal {
                 self.update_channel_backpressure(now_ms);
                 return;
             }
