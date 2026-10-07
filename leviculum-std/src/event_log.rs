@@ -67,6 +67,19 @@
 //! Neither synthetic line goes through `tracing`: a sink that reported
 //! on itself through itself would recurse.
 //!
+//! # Cost: an event allocates nothing in steady state (509)
+//!
+//! The event log has to stay on in the field, so writing a line must not
+//! cost the node memory. Every value is rendered into a per-thread
+//! buffer that is cleared, not freed, between events; keys are the
+//! callsite's `&'static str`; the line is built in a second reused
+//! buffer; the queue is one text buffer the writer swaps out whole. 508
+//! measured the layer before this at about three quarters of a field-
+//! loaded node's ~13 700 allocations a second, which musl's allocator
+//! turned into hundreds of retained megabytes (leviculum#437). The bytes
+//! written did not change: `tests::every_catalogued_event_renders_byte_identical_to_the_pre_509_path`
+//! holds the new path to the old one.
+//!
 //! # Architecture: process-global layer + active-handles list
 //!
 //! A single [`EventLogLayer`] is registered once in the process (by
@@ -120,13 +133,14 @@
 //!
 //! `value_problem` ∈ {`whitespace`, `equals`, `non_printable`}.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use crate::counter64::Counter64;
 use crate::sync_ext::MutexRecover;
@@ -1299,6 +1313,44 @@ struct SinkCounters {
     dropped: Counter64,
 }
 
+/// Lines accepted but not yet taken by the writer thread, as one text
+/// buffer rather than one `String` per line (509).
+///
+/// The emitting thread appends its line, newline included, under the
+/// mutex; the writer swaps the whole buffer for its own empty one and
+/// writes it outside the lock. Both buffers keep their capacity, so in
+/// steady state accepting a line is a `memcpy` and no allocation, where
+/// the channel of owned lines this replaced cost one allocation a line on
+/// the emitting side and a batch `Vec` plus a batch `String` on the
+/// writer's (508's census: `writer_loop` was the largest site by bytes).
+struct Pending {
+    /// Newline-terminated lines, in acceptance order.
+    text: String,
+    /// How many lines `text` holds; bounded by `SINK_QUEUE_CAPACITY`.
+    lines: usize,
+    /// `t=` of the first line in `text`, which stamps an
+    /// `EVENT_LOG_DROPPED` line written ahead of the batch.
+    first_t: u128,
+}
+
+/// What the emitting threads and the writer thread share.
+struct SinkQueue {
+    pending: Mutex<Pending>,
+    /// Signalled when `pending` goes from empty to holding a line.
+    wake: Condvar,
+    counters: SinkCounters,
+}
+
+impl SinkQueue {
+    /// Plain `lock` with poison recovery rather than `lock_recover`: the
+    /// writer has to hand this guard to a `Condvar`, which takes a
+    /// `MutexGuard`. A poisoned queue holds whole lines only (a line is
+    /// pushed in one `push_str`), so recovering it loses nothing.
+    fn lock(&self) -> MutexGuard<'_, Pending> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// How the sink gets a line into the file.
 enum SinkMode {
     /// Pre-#418 behaviour: `write(2)` on the emitting thread, under a
@@ -1308,10 +1360,7 @@ enum SinkMode {
     /// escape hatch for anyone who would rather block than lose a line.
     Blocking(Mutex<File>),
     /// Default: hand the line to the writer thread and return.
-    Queued {
-        tx: SyncSender<(u128, String)>,
-        counters: Arc<SinkCounters>,
-    },
+    Queued(Arc<SinkQueue>),
 }
 
 /// The process-wide event-log file sink.
@@ -1348,18 +1397,25 @@ impl FileSink {
                 mode: SinkMode::Blocking(Mutex::new(file)),
             };
         }
-        let (tx, rx) = sync_channel::<(u128, String)>(SINK_QUEUE_CAPACITY);
-        let counters = Arc::new(SinkCounters {
-            enqueued: Counter64::new(0),
-            flushed: Counter64::new(0),
-            dropped: Counter64::new(0),
+        let queue = Arc::new(SinkQueue {
+            pending: Mutex::new(Pending {
+                text: String::new(),
+                lines: 0,
+                first_t: 0,
+            }),
+            wake: Condvar::new(),
+            counters: SinkCounters {
+                enqueued: Counter64::new(0),
+                flushed: Counter64::new(0),
+                dropped: Counter64::new(0),
+            },
         });
-        let writer_counters = Arc::clone(&counters);
+        let writer_queue = Arc::clone(&queue);
         // A named thread so `top -H` / a stack dump can attribute the
         // one thread in the process that is allowed to block on the log.
         let spawned = std::thread::Builder::new()
             .name("leviculum-eventlog".to_string())
-            .spawn(move || writer_loop(file, rx, writer_counters, init_time));
+            .spawn(move || writer_loop(file, &writer_queue, init_time));
         match spawned {
             Ok(_) => {
                 // The queue is drained by a thread, so a process that
@@ -1367,10 +1423,10 @@ impl FileSink {
                 // its own log. `atexit` covers both a `main` return and
                 // `std::process::exit`; a signal death is not covered
                 // and cannot be, which is why the drain is bounded and
-                // the writer never buffers in user space.
+                // the writer holds nothing back once it has a batch.
                 unsafe { libc::atexit(flush_event_log_at_exit) };
                 FileSink {
-                    mode: SinkMode::Queued { tx, counters },
+                    mode: SinkMode::Queued(queue),
                 }
             }
             Err(e) => {
@@ -1400,9 +1456,11 @@ impl FileSink {
         }
     }
 
-    /// Hand one already-formatted line to the file.  Never blocks in
-    /// the default mode.
-    fn write(&self, t_ms: u128, line: String) {
+    /// Hand one already-formatted line (no newline) to the file.  Never
+    /// blocks on the file in the default mode: the only wait is the
+    /// queue's mutex, which the writer holds for a buffer swap and never
+    /// across a `write(2)`.
+    fn write(&self, t_ms: u128, line: &str) {
         match &self.mode {
             SinkMode::Blocking(file) => {
                 if let Ok(mut f) = file.lock() {
@@ -1410,74 +1468,89 @@ impl FileSink {
                     let _ = f.flush();
                 }
             }
-            SinkMode::Queued { tx, counters } => match tx.try_send((t_ms, line)) {
-                Ok(()) => {
-                    counters.enqueued.fetch_add(1, Ordering::Release);
+            SinkMode::Queued(queue) => {
+                let mut pending = queue.lock();
+                if pending.lines >= SINK_QUEUE_CAPACITY {
+                    drop(pending);
+                    queue.counters.dropped.fetch_add(1, Ordering::Relaxed);
+                    return;
                 }
-                Err(TrySendError::Full(_)) => {
-                    counters.dropped.fetch_add(1, Ordering::Relaxed);
+                if pending.lines == 0 {
+                    pending.first_t = t_ms;
                 }
-                Err(TrySendError::Disconnected(_)) => {
-                    counters.dropped.fetch_add(1, Ordering::Relaxed);
+                pending.text.push_str(line);
+                pending.text.push('\n');
+                pending.lines += 1;
+                let was_empty = pending.lines == 1;
+                queue.counters.enqueued.fetch_add(1, Ordering::Release);
+                drop(pending);
+                // Only the first line of a batch can find the writer
+                // asleep; signalling every line would be a futex call per
+                // event for nothing.
+                if was_empty {
+                    queue.wake.notify_one();
                 }
-            },
+            }
         }
     }
 }
 
 /// The one thread in the process allowed to block on the event log.
 ///
-/// Batches whatever is queued into a single `write(2)`: under load that
-/// is both fewer syscalls than the old line-at-a-time path and the
-/// thing that lets the queue drain faster than it fills.
-fn writer_loop(
-    mut file: File,
-    rx: Receiver<(u128, String)>,
-    counters: Arc<SinkCounters>,
-    init_time: Instant,
-) {
+/// Takes whatever is queued as one batch and hands it to a single
+/// `write(2)`: under load that is both fewer syscalls than a
+/// line-at-a-time path and the thing that lets the queue drain faster
+/// than it fills. The batch buffer is swapped with the queue's, not
+/// copied, and both keep their capacity across batches.
+fn writer_loop(mut file: File, queue: &SinkQueue, init_time: Instant) {
     let node = node_name();
     let mut written: u64 = 0;
     let mut reported_drops: u64 = 0;
     let mut last_slow_report_ms: u128 = 0;
+    let mut batch = String::new();
+    // Synthetic lines (drop and slow-write reports), formatted here
+    // rather than through `format!` and reused.
+    let mut note = String::new();
     loop {
-        let first = match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(line) => line,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => return,
-        };
-        let mut batch = Vec::with_capacity(64);
-        batch.push(first);
-        while batch.len() < SINK_QUEUE_CAPACITY {
-            match rx.try_recv() {
-                Ok(line) => batch.push(line),
-                Err(_) => break,
-            }
+        let mut pending = queue.lock();
+        while pending.lines == 0 {
+            pending = queue
+                .wake
+                .wait_timeout(pending, Duration::from_millis(200))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
+        std::mem::swap(&mut pending.text, &mut batch);
+        let lines = pending.lines;
+        let first_t = pending.first_t;
+        pending.lines = 0;
+        drop(pending);
 
-        let mut buf = String::with_capacity(batch.len() * 96);
+        let started = Instant::now();
         // A drop is only knowable here, and it is the loss the old code
         // could not have: say so in the file, in the canonical format,
         // before the lines that survived it.
-        let dropped = counters.dropped.load(Ordering::Relaxed);
+        let dropped = queue.counters.dropped.load(Ordering::Relaxed);
         if dropped > reported_drops {
-            let t = batch[0].0;
-            buf.push_str(&format!(
-                "EVENT_LOG_DROPPED node={node} n={dropped} t={t}\n"
-            ));
+            note.clear();
+            let _ = writeln!(
+                note,
+                "EVENT_LOG_DROPPED node={node} n={dropped} t={first_t}"
+            );
+            let _ = file.write_all(note.as_bytes());
             reported_drops = dropped;
         }
-        for (_, line) in &batch {
-            buf.push_str(line);
-            buf.push('\n');
+        let _ = file.write_all(batch.as_bytes());
+        let took_ms = started.elapsed().as_millis();
+        batch.clear();
+        // A burst can grow the buffers to the queue's full 8192 lines
+        // (about a megabyte); keep a working size, not the high-water mark.
+        if batch.capacity() > BATCH_KEEP_BYTES {
+            batch.shrink_to(BATCH_KEEP_BYTES);
         }
 
-        let started = Instant::now();
-        let _ = file.write_all(buf.as_bytes());
-        let took_ms = started.elapsed().as_millis();
-
-        written += batch.len() as u64;
-        counters.flushed.store(written, Ordering::Release);
+        written += lines as u64;
+        queue.counters.flushed.store(written, Ordering::Release);
 
         // The measurement #418 asks for, from the only place that can
         // take it: how long the disk actually held the write. Emitted
@@ -1487,17 +1560,21 @@ fn writer_loop(
             let now_ms = init_time.elapsed().as_millis();
             if now_ms.saturating_sub(last_slow_report_ms) >= SLOW_REPORT_MIN_GAP_MS {
                 last_slow_report_ms = now_ms;
-                let lines = batch.len();
-                let _ = file.write_all(
-                    format!(
-                        "EVENT_LOG_WRITE_SLOW node={node} lines={lines} ms={took_ms} t={now_ms}\n"
-                    )
-                    .as_bytes(),
+                note.clear();
+                let _ = writeln!(
+                    note,
+                    "EVENT_LOG_WRITE_SLOW node={node} lines={lines} ms={took_ms} t={now_ms}"
                 );
+                let _ = file.write_all(note.as_bytes());
             }
         }
     }
 }
+
+/// Capacity the writer keeps on its batch buffer after a burst: 64 KiB,
+/// several hundred lines, far above a normal batch at the 30-150 events a
+/// second the field runs at.
+const BATCH_KEEP_BYTES: usize = 64 * 1024;
 
 /// `atexit` shim: bounded drain so a normal exit does not truncate the
 /// log the process just wrote.
@@ -1518,9 +1595,10 @@ pub fn flush_event_log(timeout: Duration) {
     let Some(Some(sink)) = FILE_SINK.get() else {
         return;
     };
-    let SinkMode::Queued { counters, .. } = &sink.mode else {
+    let SinkMode::Queued(queue) = &sink.mode else {
         return;
     };
+    let counters = &queue.counters;
     let deadline = Instant::now() + timeout;
     while counters.flushed.load(Ordering::Acquire) < counters.enqueued.load(Ordering::Acquire) {
         if Instant::now() >= deadline {
@@ -1542,9 +1620,10 @@ pub fn sink_status() -> Option<(u64, u64)> {
     let Some(Some(sink)) = FILE_SINK.get() else {
         return None;
     };
-    let SinkMode::Queued { counters, .. } = &sink.mode else {
+    let SinkMode::Queued(queue) = &sink.mode else {
         return None;
     };
+    let counters = &queue.counters;
     let enqueued = counters.enqueued.load(Ordering::Acquire);
     let flushed = counters.flushed.load(Ordering::Acquire);
     Some((
@@ -1674,25 +1753,33 @@ pub struct EventLogLayer {
     init_time: Instant,
 }
 
-impl EventLogLayer {
-    fn caller(&self, event: &Event<'_>) -> String {
-        let meta = event.metadata();
-        match (meta.file(), meta.line()) {
-            (Some(f), Some(l)) => {
-                let basename = f.rsplit('/').next().unwrap_or(f);
-                format!("{basename}:{l}")
+/// The `caller=` value of a violation line, `<basename>:<line>` or `?`.
+///
+/// Rendered where it is written, not built per event: every part of it is
+/// in the callsite's `'static` metadata, and only a violation line, which a
+/// correct emission site never produces, reads it at all. Until 509 every
+/// event paid a `format!` for it (508's census, `EventLogLayer::caller`).
+struct Caller<'a>(&'a Metadata<'a>);
+
+impl std::fmt::Display for Caller<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.0.file(), self.0.line()) {
+            (Some(file), Some(line)) => {
+                let basename = file.rsplit('/').next().unwrap_or(file);
+                write!(f, "{basename}:{line}")
             }
-            _ => "?".to_string(),
+            _ => f.write_str("?"),
         }
     }
 }
 
 /// How many records this layer has visited, i.e. how many times it has
-/// built an [`EventVisitor`] and let a record walk it.
+/// let a record walk its field visitor.
 ///
-/// This is an instrument, not a statistic. A visit costs a
-/// `BTreeMap<String, String>` plus a `String` per field name and per value,
-/// and the layer discards every record that turns out to carry no
+/// This is an instrument, not a statistic. A visit renders every field of
+/// the record (into reused per-thread buffers since 509; until then a
+/// `BTreeMap<String, String>` plus a `String` per field name and per
+/// value), and the layer discards every record that turns out to carry no
 /// `event = "..."` — so "how many visits produced nothing" is the number a
 /// memory experiment on this sink has to be able to read. It is what
 /// `heap-gap-bench` prints as `visits=` and what
@@ -1704,9 +1791,8 @@ static VISITS: Counter64 = Counter64::new(0);
 
 /// Records this layer has visited since process start.
 ///
-/// A visit is one `EventVisitor` built and walked: a
-/// `BTreeMap<String, String>` plus a `String` per field name and per
-/// value. It is an instrument, not a statistic — `heap-gap-bench` prints
+/// A visit is one record walked by the field visitor (see the private
+/// `VISITS` counter for what that costs). It is an instrument, not a statistic — `heap-gap-bench` prints
 /// it as `visits=` and `tests/event_log_callsite_filter.rs` asserts on
 /// it, because "how many visits produced nothing" is the number a churn
 /// experiment on this sink has to be able to read.
@@ -1714,60 +1800,43 @@ pub fn visit_count() -> u64 {
     VISITS.load(Ordering::Relaxed)
 }
 
-impl<S: Subscriber> Layer<S> for EventLogLayer {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        VISITS.fetch_add(1, Ordering::Relaxed);
-        let mut visitor = EventVisitor::default();
-        event.record(&mut visitor);
+thread_local! {
+    /// Per-thread rendering buffers, reused across events (509). Every
+    /// event used to build a `BTreeMap<String, String>`, a `String` per
+    /// field name and value, a `String` for the caller and an owned line;
+    /// 508 measured that at about three quarters of a field-loaded node's
+    /// allocations. Per thread rather than under a lock because the
+    /// emitting threads run concurrently and the buffers are only needed
+    /// for the length of one `on_event`.
+    static SCRATCH: RefCell<EventScratch> = RefCell::new(EventScratch::default());
+}
 
-        let Some(event_name) = visitor.event_name else {
+impl EventLogLayer {
+    /// Render one record and hand the line to every consumer.
+    fn emit(&self, event: &Event<'_>, scratch: &mut EventScratch) {
+        let EventScratch { fields, line } = scratch;
+        fields.clear();
+        event.record(fields);
+        let Some(name_range) = fields.event_name.clone() else {
             return;
         };
-
+        fields.sort();
         let t_ms = self.init_time.elapsed().as_millis();
+        render_line(fields, node_name(), t_ms, line);
+        let event_name = &fields.values[name_range];
+        let caller = Caller(event.metadata());
 
-        // Build the canonical line.  node= reserved as the first
-        // field, sourced from LEVICULUM_EVENT_NODE (default "local").
-        // Other fields alphabetical; t= last.
-        let mut line = String::with_capacity(64);
-        line.push_str(&event_name);
-        line.push(' ');
-        line.push_str("node=");
-        // The reserved prefix bypasses the visitor, so nothing else would
-        // ever rescue it: a `LEVICULUM_EVENT_NODE` with a space in it
-        // (an operator naming a node after the room it stands in) would
-        // split EVERY line this process writes.
-        line.push_str(node_name());
-        for (k, v) in &visitor.fields {
-            // `node` from a tracing call would conflict with the
-            // reserved prefix — env-var wins, user-supplied skipped.
-            if k == "node" {
-                continue;
-            }
-            line.push(' ');
-            line.push_str(k);
-            line.push('=');
-            line.push_str(v);
-        }
-        line.push_str(&format!(" t={t_ms}"));
-
-        let caller = self.caller(event);
-
-        // Build the field-violation lines once; they have no per-
-        // handle component, so all consumers (file + every active
-        // buffer) receive the same text.
-        let field_violation_lines: Vec<String> = visitor
-            .field_violations
+        // Built once, only when a field broke the token contract, which a
+        // correct emission site never does; they have no per-handle
+        // component, so the file and every active buffer get the same text.
+        let field_violation_lines: Vec<String> = fields
+            .violations
             .iter()
-            .map(|(field, problem)| {
-                format!(
-                    "EVENT_FIELD_VIOLATION event={} field={} value_problem={} caller={} t={}",
-                    event_name, field, problem, caller, t_ms,
-                )
-            })
+            .map(|(field, problem)| field_violation_line(event_name, field, problem, &caller, t_ms))
             .collect();
 
-        // Distribute to every active handle.  Per-handle:
+        // Distribute to every active handle (test capture only; a
+        // production daemon has none).  Per-handle:
         //   1. push the canonical line
         //   2. push one EVENT_FIELD_VIOLATION per offending field
         //   3. push one EVENT_SCHEMA_VIOLATION if the handle's
@@ -1798,7 +1867,7 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
                 let missing: Vec<&str> = s
                     .required_keys
                     .iter()
-                    .filter(|k| !visitor.fields.contains_key(**k))
+                    .filter(|k| !fields.contains_key(k))
                     .copied()
                     .collect();
                 if missing.is_empty() {
@@ -1828,18 +1897,78 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
         // Process-wide append-only file (when LEVICULUM_EVENT_LOG is
         // set).  Production daemons + helper bin write here.  Schema
         // violations are per-handle so they don't appear in the file.
-        //
-        // Last, and by value: the handles above need `line` alive to
-        // clone it, and a production daemon has no handles at all, so
-        // moving it here rather than copying it is the difference
-        // between one heap allocation per event and two.
+        // The sink copies the line into its queue; `line` stays this
+        // thread's buffer for the next event.
         if let Some(sink) = file_sink(self.init_time) {
-            for v in field_violation_lines {
+            for v in &field_violation_lines {
                 sink.write(t_ms, v);
             }
             sink.write(t_ms, line);
         }
     }
+}
+
+impl<S: Subscriber> Layer<S> for EventLogLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        VISITS.fetch_add(1, Ordering::Relaxed);
+        // `try_with` and `try_borrow_mut`: a thread being torn down has
+        // no thread-locals left, and a field whose `Debug` emits an event
+        // of its own re-enters here with the buffers borrowed. Both get
+        // fresh buffers rather than a panic inside the subscriber.
+        let reused = SCRATCH.try_with(|cell| match cell.try_borrow_mut() {
+            Ok(mut scratch) => {
+                self.emit(event, &mut scratch);
+                true
+            }
+            Err(_) => false,
+        });
+        if reused != Ok(true) {
+            self.emit(event, &mut EventScratch::default());
+        }
+    }
+}
+
+/// The canonical line: `EVENT_NAME node=<n> k1=v1 ... t=<ms>`, `node=`
+/// reserved first (from `LEVICULUM_EVENT_NODE`), the other fields in
+/// byte order of their key, `t=` last. Written into `line`, which is
+/// cleared first and keeps its capacity. `fields` must be sorted.
+fn render_line(fields: &EventFields, node: &str, t_ms: u128, line: &mut String) {
+    line.clear();
+    if let Some(name) = fields.event_name.clone() {
+        line.push_str(&fields.values[name]);
+    }
+    line.push(' ');
+    line.push_str("node=");
+    // The reserved prefix bypasses the visitor, so nothing else would
+    // ever rescue it: a `LEVICULUM_EVENT_NODE` with a space in it
+    // (an operator naming a node after the room it stands in) would
+    // split EVERY line this process writes.
+    line.push_str(node);
+    for (key, value) in &fields.fields {
+        // `node` from a tracing call would conflict with the
+        // reserved prefix — env-var wins, user-supplied skipped.
+        if *key == "node" {
+            continue;
+        }
+        line.push(' ');
+        line.push_str(key);
+        line.push('=');
+        line.push_str(&fields.values[value.clone()]);
+    }
+    // Writing to a String cannot fail.
+    let _ = write!(line, " t={t_ms}");
+}
+
+fn field_violation_line(
+    event_name: &str,
+    field: &str,
+    problem: &str,
+    caller: &Caller<'_>,
+    t_ms: u128,
+) -> String {
+    format!(
+        "EVENT_FIELD_VIOLATION event={event_name} field={field} value_problem={problem} caller={caller} t={t_ms}",
+    )
 }
 
 /// Fields whose value is a human/discovery-provided *name* rather than a
@@ -1898,7 +2027,13 @@ pub struct Scalar<'a>(pub &'a str);
 
 impl std::fmt::Display for Scalar<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&sanitize_scalar(self.0))
+        // Character by character into the formatter rather than through
+        // `sanitize_scalar`'s `String`: the formatter is the event layer's
+        // reused buffer, so this costs nothing per event.
+        for c in self.0.chars() {
+            f.write_char(sanitized_char(c))?;
+        }
+        Ok(())
     }
 }
 
@@ -1912,16 +2047,16 @@ impl std::fmt::Display for Scalar<'_> {
 /// gets surfaced and fixed), but the emitted line is parseable regardless
 /// (no stray bare tokens, no key collision from an embedded `=`).
 fn sanitize_scalar(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| {
-            if c.is_ascii_whitespace() || c == '=' || !c.is_ascii_graphic() {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect()
+    value.chars().map(sanitized_char).collect()
+}
+
+/// One character of [`sanitize_scalar`]'s mapping.
+fn sanitized_char(c: char) -> char {
+    if c.is_ascii_whitespace() || c == '=' || !c.is_ascii_graphic() {
+        '_'
+    } else {
+        c
+    }
 }
 
 /// Reduce a `Debug` rendering to a scalar token: unwrap a single
@@ -1933,27 +2068,60 @@ fn sanitize_scalar(value: &str) -> String {
 /// empty because legitimate enum variants are also named `None`, e.g.
 /// `PacketContext::None`).  Any residual whitespace/`=` is handled by
 /// [`sanitize_scalar`] at record time.
-fn normalize_debug(raw: &str) -> String {
+///
+/// Returns the scalar as a byte range of `raw`, so the caller can keep it
+/// where it was rendered instead of copying it out.
+fn normalize_debug(raw: &str) -> Range<usize> {
     let s = raw.trim();
     let s = s
         .strip_prefix("Some(")
         .and_then(|inner| inner.strip_suffix(')'))
         .unwrap_or(s);
-    s.strip_prefix('"')
+    let s = s
+        .strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))
-        .unwrap_or(s)
-        .to_string()
+        .unwrap_or(s);
+    // `s` is a subslice of `raw`, so its offset is the pointer difference.
+    let start = s.as_ptr() as usize - raw.as_ptr() as usize;
+    start..start + s.len()
 }
 
+/// One record's fields, rendered into reused storage: every value is a
+/// range of `values`, every key the callsite's `&'static str`.
 #[derive(Default)]
-struct EventVisitor {
-    event_name: Option<String>,
-    fields: BTreeMap<String, String>,
-    field_violations: Vec<(String, &'static str)>,
+struct EventFields {
+    /// Every value of the record, back to back. Ranges stay valid until
+    /// the next `clear`.
+    values: String,
+    event_name: Option<Range<usize>>,
+    /// Key and value range, in visit order until [`Self::sort`]. A key
+    /// recorded twice keeps its last value, as the `BTreeMap` this
+    /// replaced did.
+    fields: Vec<(&'static str, Range<usize>)>,
+    /// Field name and problem, in visit order.
+    violations: Vec<(&'static str, &'static str)>,
 }
 
-impl EventVisitor {
-    fn record(&mut self, field: &Field, value: String) {
+impl EventFields {
+    fn clear(&mut self) {
+        self.values.clear();
+        self.event_name = None;
+        self.fields.clear();
+        self.violations.clear();
+    }
+
+    /// Keys in byte order, the order the canonical line writes them in.
+    /// Keys are unique after `record`, so an unstable sort is exact.
+    fn sort(&mut self) {
+        self.fields.sort_unstable_by_key(|(key, _)| *key);
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.fields.iter().any(|(k, _)| *k == key)
+    }
+
+    /// File the value that occupies `values[value]` under `field`.
+    fn record(&mut self, field: &Field, mut value: Range<usize>) {
         if field.name() == "event" {
             self.event_name = Some(value);
             return;
@@ -1966,42 +2134,417 @@ impl EventVisitor {
         // whitespace, so they are coerced SILENTLY -- sanitized for the
         // line, but no violation, to keep the false-positive flood out of
         // the log.  Structured fields keep the detector.
-        let value = match field_value_problem(&value) {
-            Some(problem) => {
-                if !is_name_field(field.name()) {
-                    self.field_violations
-                        .push((field.name().to_string(), problem));
-                }
-                sanitize_scalar(&value)
+        if let Some(problem) = field_value_problem(&self.values[value.clone()]) {
+            if !is_name_field(field.name()) {
+                self.violations.push((field.name(), problem));
             }
-            None => value,
-        };
-        self.fields.insert(field.name().to_string(), value);
+            value = self.sanitize_in_place(value);
+        }
+        match self.fields.iter_mut().find(|(k, _)| *k == field.name()) {
+            Some(slot) => slot.1 = value,
+            None => self.fields.push((field.name(), value)),
+        }
+    }
+
+    /// Append the [`sanitize_scalar`] form of `values[value]` to `values`
+    /// and return its range. Only reached for a value that broke the token
+    /// contract.
+    fn sanitize_in_place(&mut self, value: Range<usize>) -> Range<usize> {
+        let start = self.values.len();
+        let mut i = value.start;
+        while i < value.end {
+            let Some(c) = self.values[i..value.end].chars().next() else {
+                break;
+            };
+            i += c.len_utf8();
+            self.values.push(sanitized_char(c));
+        }
+        start..self.values.len()
+    }
+
+    /// Render `value` with `Display` into `values` and file it.
+    fn record_display(&mut self, field: &Field, value: impl std::fmt::Display) {
+        let start = self.values.len();
+        let _ = write!(self.values, "{value}");
+        let end = self.values.len();
+        self.record(field, start..end);
     }
 }
 
-impl Visit for EventVisitor {
+impl Visit for EventFields {
     fn record_str(&mut self, field: &Field, value: &str) {
-        self.record(field, value.to_string());
+        let start = self.values.len();
+        self.values.push_str(value);
+        let end = self.values.len();
+        self.record(field, start..end);
     }
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.record(field, value.to_string());
+        self.record_display(field, value);
     }
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.record(field, value.to_string());
+        self.record_display(field, value);
     }
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.record(field, value.to_string());
+        self.record_display(field, value);
     }
     fn record_f64(&mut self, field: &Field, value: f64) {
-        self.record(field, value.to_string());
+        self.record_display(field, value);
     }
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         // BUG-2: emit a bare scalar (e.g. `373e…`), not Rust Debug
         // wrapper syntax (`Some("373e…")`). `trim_matches('"')` used to
         // strip the quotes that kept a Debug string parseable, leaking
         // its spaces into the line; `normalize_debug` unwraps the
-        // wrapper instead.
-        self.record(field, normalize_debug(&format!("{value:?}")));
+        // wrapper instead. The rendering stays where it was written;
+        // the stripped wrapper is dead bytes until the next `clear`.
+        let start = self.values.len();
+        let _ = write!(self.values, "{value:?}");
+        let inner = normalize_debug(&self.values[start..]);
+        self.record(field, start + inner.start..start + inner.end);
+    }
+}
+
+/// The two reused buffers one thread renders events with.
+#[derive(Default)]
+struct EventScratch {
+    fields: EventFields,
+    line: String,
+}
+
+#[cfg(test)]
+mod tests {
+    //! Byte identity of the 509 rendering path against the one it replaced.
+    //!
+    //! `legacy` is the pre-509 visitor and line builder, verbatim apart from
+    //! taking `Metadata` for the caller. Every catalogued event is rendered
+    //! through both with the same recorded values, across every value kind
+    //! the visitor treats differently, and the lines must be equal to the
+    //! byte. Readers of the format (periculum's `FrameTally`, the trace
+    //! tool, `jl`) are untouched by 509 because of this test.
+
+    use super::*;
+    use tracing::callsite::{Callsite, Identifier};
+    use tracing::field::FieldSet;
+    use tracing::Level;
+
+    mod legacy {
+        use super::super::{field_value_problem, is_name_field, sanitize_scalar};
+        use std::collections::BTreeMap;
+        use tracing::field::{Field, Visit};
+        use tracing::Metadata;
+
+        pub(super) fn caller(meta: &Metadata<'_>) -> String {
+            match (meta.file(), meta.line()) {
+                (Some(f), Some(l)) => {
+                    let basename = f.rsplit('/').next().unwrap_or(f);
+                    format!("{basename}:{l}")
+                }
+                _ => "?".to_string(),
+            }
+        }
+
+        fn normalize_debug(raw: &str) -> String {
+            let s = raw.trim();
+            let s = s
+                .strip_prefix("Some(")
+                .and_then(|inner| inner.strip_suffix(')'))
+                .unwrap_or(s);
+            s.strip_prefix('"')
+                .and_then(|inner| inner.strip_suffix('"'))
+                .unwrap_or(s)
+                .to_string()
+        }
+
+        #[derive(Default)]
+        pub(super) struct EventVisitor {
+            pub(super) event_name: Option<String>,
+            pub(super) fields: BTreeMap<String, String>,
+            pub(super) field_violations: Vec<(String, &'static str)>,
+        }
+
+        impl EventVisitor {
+            fn record(&mut self, field: &Field, value: String) {
+                if field.name() == "event" {
+                    self.event_name = Some(value);
+                    return;
+                }
+                let value = match field_value_problem(&value) {
+                    Some(problem) => {
+                        if !is_name_field(field.name()) {
+                            self.field_violations
+                                .push((field.name().to_string(), problem));
+                        }
+                        sanitize_scalar(&value)
+                    }
+                    None => value,
+                };
+                self.fields.insert(field.name().to_string(), value);
+            }
+        }
+
+        impl Visit for EventVisitor {
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.record(field, value.to_string());
+            }
+            fn record_bool(&mut self, field: &Field, value: bool) {
+                self.record(field, value.to_string());
+            }
+            fn record_i64(&mut self, field: &Field, value: i64) {
+                self.record(field, value.to_string());
+            }
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                self.record(field, value.to_string());
+            }
+            fn record_f64(&mut self, field: &Field, value: f64) {
+                self.record(field, value.to_string());
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.record(field, normalize_debug(&format!("{value:?}")));
+            }
+        }
+
+        /// The pre-509 `on_event` body up to the line and the field
+        /// violation lines.
+        pub(super) fn render(
+            visitor: &EventVisitor,
+            node: &str,
+            t_ms: u128,
+            caller: &str,
+        ) -> Option<(String, Vec<String>)> {
+            let event_name = visitor.event_name.as_ref()?;
+            let mut line = String::with_capacity(64);
+            line.push_str(event_name);
+            line.push(' ');
+            line.push_str("node=");
+            line.push_str(node);
+            for (k, v) in &visitor.fields {
+                if k == "node" {
+                    continue;
+                }
+                line.push(' ');
+                line.push_str(k);
+                line.push('=');
+                line.push_str(v);
+            }
+            line.push_str(&format!(" t={t_ms}"));
+            let violations = visitor
+                .field_violations
+                .iter()
+                .map(|(field, problem)| {
+                    format!(
+                        "EVENT_FIELD_VIOLATION event={} field={} value_problem={} caller={} t={}",
+                        event_name, field, problem, caller, t_ms,
+                    )
+                })
+                .collect();
+            Some((line, violations))
+        }
+    }
+
+    struct TestCallsite;
+    static TEST_CALLSITE: TestCallsite = TestCallsite;
+    impl Callsite for TestCallsite {
+        fn set_interest(&self, _: Interest) {}
+        fn metadata(&self) -> &Metadata<'_> {
+            unreachable!("the test callsite is never registered")
+        }
+    }
+
+    /// A hash as the emission sites print one: `%HexShort(&hash)`.
+    struct Hash(&'static [u8]);
+    impl std::fmt::Display for Hash {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            leviculum_core::hex_fmt::write_hex(f, self.0)
+        }
+    }
+
+    const HASH: &[u8] = &[
+        0x37, 0x3e, 0x00, 0xff, 0x12, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x9a, 0xbc,
+        0xde,
+    ];
+
+    /// Number of value kinds `record_kind` knows.
+    const KINDS: usize = 18;
+
+    /// Record one value of kind `kind` under `field` into `v`: every path
+    /// the visitor distinguishes, the clean ones and the ones that trip
+    /// normalisation or the token-contract rescue.
+    fn record_kind(v: &mut dyn Visit, field: &Field, kind: usize) {
+        match kind {
+            0 => v.record_debug(field, &tracing::field::display(Hash(HASH))),
+            1 => v.record_u64(field, 42),
+            2 => v.record_i64(field, -7),
+            3 => v.record_bool(field, true),
+            4 => v.record_str(field, "lora0"),
+            5 => v.record_debug(field, &Some("373e")),
+            6 => v.record_debug(field, &None::<u8>),
+            7 => v.record_f64(field, 1.5),
+            8 => v.record_str(field, "autoconnect/Dark Doodad 23"),
+            9 => v.record_debug(field, &"a=b"),
+            10 => v.record_str(field, "Café"),
+            11 => v.record_debug(field, &tracing::field::display("x y")),
+            12 => v.record_u64(field, u64::MAX),
+            13 => v.record_i64(field, i64::MIN),
+            14 => v.record_debug(field, &format_args!("  padded  ")),
+            15 => v.record_debug(field, &Some(Some("x"))),
+            16 => v.record_str(field, ""),
+            _ => v.record_debug(
+                field,
+                &tracing::field::display(leviculum_core::constants::MTU),
+            ),
+        }
+    }
+
+    fn leak_names(names: Vec<&'static str>) -> &'static [&'static str] {
+        Box::leak(names.into_boxed_slice())
+    }
+
+    fn metadata(fields: FieldSet) -> &'static Metadata<'static> {
+        Box::leak(Box::new(Metadata::new(
+            "test event",
+            "leviculum_std::event_log::tests",
+            Level::DEBUG,
+            Some("leviculum-std/src/event_log.rs"),
+            Some(4242),
+            None,
+            fields,
+            tracing::metadata::Kind::EVENT,
+        )))
+    }
+
+    /// Render `names` (with `event` first) through both paths, every key
+    /// getting kind `(i + variant) % KINDS`, and assert identity.
+    fn assert_identical(event: &'static str, names: &'static [&'static str], variant: usize) {
+        let set = FieldSet::new(names, Identifier(&TEST_CALLSITE));
+        let meta = metadata(FieldSet::new(names, Identifier(&TEST_CALLSITE)));
+        let mut old = legacy::EventVisitor::default();
+        let mut new = EventFields::default();
+        // Dirty the reused buffers first: identity has to hold for the
+        // n-th event a thread renders, not only for its first.
+        new.values
+            .push_str("stale \"junk\" from the previous event");
+        new.fields.push(("zzz", 0..5));
+        new.violations.push(("zzz", "whitespace"));
+        new.event_name = Some(0..5);
+        new.clear();
+        for (i, name) in names.iter().enumerate() {
+            let field = set.field(name).expect("field in its own set");
+            if *name == "event" {
+                old.record_str(&field, event);
+                new.record_str(&field, event);
+                continue;
+            }
+            let kind = (i + variant) % KINDS;
+            record_kind(&mut old, &field, kind);
+            record_kind(&mut new, &field, kind);
+        }
+        let t_ms = 123_456_789u128;
+        let (old_line, old_violations) =
+            legacy::render(&old, "probe", t_ms, &legacy::caller(meta)).expect("event name");
+        new.sort();
+        let mut line = String::from("left over from an earlier, longer line");
+        render_line(&new, "probe", t_ms, &mut line);
+        let caller = Caller(meta);
+        let name = &new.values[new.event_name.clone().expect("event name")];
+        let new_violations: Vec<String> = new
+            .violations
+            .iter()
+            .map(|(f, p)| field_violation_line(name, f, p, &caller, t_ms))
+            .collect();
+        assert_eq!(line, old_line, "{event} variant {variant}");
+        assert_eq!(new_violations, old_violations, "{event} variant {variant}");
+        // The schema check reads the key set; it must be the same set.
+        let old_keys: Vec<&str> = old.fields.keys().map(String::as_str).collect();
+        let new_keys: Vec<&str> = new.fields.iter().map(|(k, _)| *k).collect();
+        assert_eq!(new_keys, old_keys, "{event} variant {variant}");
+    }
+
+    #[test]
+    fn every_catalogued_event_renders_byte_identical_to_the_pre_509_path() {
+        let mut lines = 0;
+        for schema in EVENT_CATALOG {
+            let mut names = vec!["event"];
+            names.extend(schema.required_keys.iter().copied());
+            let names = leak_names(names);
+            for variant in 0..KINDS {
+                assert_identical(schema.name, names, variant);
+                lines += 1;
+            }
+        }
+        assert_eq!(lines, EVENT_CATALOG.len() * KINDS);
+    }
+
+    /// The shapes the catalogue does not exercise: a `node` field from the
+    /// call site, a name field with a space, an extra key past the required
+    /// ones, keys out of order, and fields recorded before `event`.
+    #[test]
+    fn reserved_name_and_unordered_fields_render_byte_identical() {
+        let shapes: [&[&'static str]; 4] = [
+            &["event", "node", "dst", "hops"],
+            &["zeta", "iface", "event", "alpha", "next_hop"],
+            &["event", "iface_in", "iface_out", "note", "a", "B", "_x"],
+            &["event"],
+        ];
+        for names in shapes {
+            let names = leak_names(names.to_vec());
+            for variant in 0..KINDS {
+                assert_identical("SHAPE_PROBE", names, variant);
+            }
+        }
+    }
+
+    /// A key recorded twice keeps its last value, as the map did.
+    #[test]
+    fn a_key_recorded_twice_keeps_the_last_value() {
+        let names = leak_names(vec!["event", "k"]);
+        let set = FieldSet::new(names, Identifier(&TEST_CALLSITE));
+        let ev = set.field("event").expect("event");
+        let k = set.field("k").expect("k");
+        let mut old = legacy::EventVisitor::default();
+        let mut new = EventFields::default();
+        for v in [&mut old as &mut dyn Visit, &mut new] {
+            v.record_str(&ev, "DUP");
+            v.record_str(&k, "first value");
+            v.record_u64(&k, 2);
+        }
+        new.sort();
+        let mut line = String::new();
+        render_line(&new, "n", 1, &mut line);
+        let (old_line, _) = legacy::render(&old, "n", 1, "?").expect("name");
+        assert_eq!(line, old_line);
+        assert_eq!(line, "DUP node=n k=2 t=1");
+        // Both recorded the violation of the first value.
+        assert_eq!(new.violations, vec![("k", "whitespace")]);
+    }
+
+    #[test]
+    fn scalar_display_matches_sanitize_scalar() {
+        for s in [
+            "lora0",
+            "autoconnect/Dark Doodad 23",
+            "a=b",
+            "Café",
+            "a\tb\nc",
+            "",
+        ] {
+            assert_eq!(format!("{}", Scalar(s)), sanitize_scalar(s));
+        }
+    }
+
+    #[test]
+    fn a_metadata_without_file_or_line_renders_a_question_mark() {
+        let names = leak_names(vec!["event"]);
+        let meta = Box::leak(Box::new(Metadata::new(
+            "test event",
+            "t",
+            Level::DEBUG,
+            None,
+            None,
+            None,
+            FieldSet::new(names, Identifier(&TEST_CALLSITE)),
+            tracing::metadata::Kind::EVENT,
+        )));
+        assert_eq!(Caller(meta).to_string(), legacy::caller(meta));
+        assert_eq!(Caller(meta).to_string(), "?");
     }
 }

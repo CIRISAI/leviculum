@@ -110,8 +110,8 @@ impl Reticulum {
         // is the running loss the file also reports as EVENT_LOG_DROPPED.
         match crate::event_log::sink_status() {
             Some((pending, dropped)) => {
-                // ~96 bytes per formatted line, the writer thread's own
-                // batching estimate (`writer_loop`).
+                // ~96 bytes per formatted line, the size the writer's
+                // batch buffer was estimated at before 509 made it reused.
                 dump.push_str(&format!(
                     "event_log_sink: {} pending lines, {} dropped, estimated {} bytes (queue cap 8192)\n",
                     pending,
