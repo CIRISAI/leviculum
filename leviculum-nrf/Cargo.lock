@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-core"
-version = "0.29.0+ciris.1"
+version = "0.30.0+ciris.1"
 dependencies = [
  "aes",
  "cbc",
@@ -985,7 +985,7 @@ version = "0.1.0"
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.29.0+ciris.1"
+version = "0.30.0+ciris.1"
 dependencies = [
  "leviculum-core",
  "rand_core 0.6.4",
