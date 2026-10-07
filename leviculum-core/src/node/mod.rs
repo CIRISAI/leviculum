@@ -3747,8 +3747,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Map nodes (the value slot is a Box pointer since #388) plus one
         // `size_of::<Link>()` block per live link — the Box target — plus
         // what each link's content hangs on the heap.
-        let mut links =
-            hc::btree_map_bytes(&self.links) + self.links.len() * core::mem::size_of::<Link>();
+        let mut links = hc::btree_map_bytes(&self.links)
+            + self.links.len() * core::mem::size_of::<Link>()
+            + self.direct_link_heap_bytes();
         let mut resources = 0usize;
         for link in self.links.values() {
             links += link.content_heap_bytes();

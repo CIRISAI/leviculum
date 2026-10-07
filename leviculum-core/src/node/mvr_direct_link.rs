@@ -1062,3 +1062,44 @@ fn a_responders_queued_reject_survives_its_session() {
         "the REJECT waits for the channel; the stale ACCEPT does not"
     );
 }
+
+#[test]
+fn a_channel_message_too_big_for_udp_holds_the_link_on_the_relay() {
+    let mut pair = Pair::new();
+    for node in [&mut pair.a, &mut pair.b] {
+        node.links
+            .get_mut(&pair.link)
+            .unwrap()
+            .set_negotiated_mtu_for_test(16_384);
+    }
+    let (session, _) = to_punch(&mut pair);
+    // A big message sized for the TCP-era MTU is out and not yet proved.
+    pair.a.transport.clock().advance(1_000);
+    let big = std::vec![9u8; 4_000];
+    let out = pair.a.send_on_link(&pair.link, &big).expect("send");
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let punched = pair.a.direct_link_punched(&session, Some(a_direct));
+    assert!(
+        !punched
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::DirectLinkEstablished { .. })),
+        "not while it could be retransmitted at a size UDP cannot carry"
+    );
+    // It is delivered and proved over the relay; the link then moves.
+    pair.pump_from_a(packets(&out));
+    pair.advance(2_000);
+    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
+}
+
+#[test]
+fn the_heap_census_counts_direct_link_state() {
+    let mut pair = Pair::new();
+    let before = pair.a.heap_census().links;
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.propose();
+    assert!(
+        pair.a.heap_census().links > before,
+        "a running session shows in the links component"
+    );
+}
