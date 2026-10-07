@@ -506,7 +506,10 @@ fn scan(file: &str, text: &str) -> Vec<Site> {
     sites
 }
 
-fn all_sites() -> Vec<Site> {
+/// Every production source file of every workspace member, comments
+/// stripped, `#[cfg(test)]` modules left out: `(path relative to the
+/// workspace root, text)`.
+fn production_sources() -> Vec<(String, String)> {
     let root = workspace_root();
     let mut files = Vec::new();
     for member in workspace_members(&root) {
@@ -527,7 +530,7 @@ fn all_sites() -> Vec<Site> {
         .collect();
 
     let test_only = cfg_test_module_names(&texts);
-    let mut sites = Vec::new();
+    let mut out = Vec::new();
     for (path, text) in &texts {
         let stem = path
             .file_stem()
@@ -551,9 +554,74 @@ fn all_sites() -> Vec<Site> {
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
-        sites.extend(scan(&rel, text));
+        out.push((rel, text.clone()));
+    }
+    out
+}
+
+fn all_sites() -> Vec<Site> {
+    production_sources()
+        .iter()
+        .flat_map(|(rel, text)| scan(rel, text))
+        .collect()
+}
+
+/// One `counter!`/`gauge!`/`histogram!` call site (leviculum#77): the
+/// metric name and the label keys written into the call.
+#[derive(Debug)]
+struct MetricSite {
+    file: String,
+    line: usize,
+    name: String,
+    labels: Vec<String>,
+}
+
+/// Find the metric macro call sites in one file. A name has to be a string
+/// literal for the catalogue to be checkable, so a call whose first
+/// argument is not one is reported with an empty name, and fails.
+fn scan_metrics(file: &str, text: &str) -> Vec<MetricSite> {
+    let mut sites = Vec::new();
+    for mac in ["counter!(", "gauge!(", "histogram!("] {
+        let mut from = 0;
+        while let Some(rel) = text[from..].find(mac) {
+            let at = from + rel;
+            from = at + mac.len();
+            // `describe_counter!(` and friends name a variable, not a literal.
+            if text[..at].ends_with("describe_") {
+                continue;
+            }
+            let args_start = at + mac.len();
+            let Some(close) = text[args_start..].find(')') else {
+                continue;
+            };
+            let args = &text[args_start..args_start + close];
+            let mut quoted = args.split('"').skip(1).step_by(2);
+            let name = if args.trim_start().starts_with('"') {
+                quoted.next().unwrap_or_default().to_string()
+            } else {
+                String::new()
+            };
+            let labels = args
+                .split("=>")
+                .take(args.matches("=>").count())
+                .filter_map(|left| left.rsplit('"').nth(1).map(str::to_string))
+                .collect();
+            sites.push(MetricSite {
+                file: file.to_string(),
+                line: text[..at].matches('\n').count() + 1,
+                name,
+                labels,
+            });
+        }
     }
     sites
+}
+
+fn all_metric_sites() -> Vec<MetricSite> {
+    production_sources()
+        .iter()
+        .flat_map(|(rel, text)| scan_metrics(rel, text))
+        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -670,4 +738,75 @@ fn no_catalogue_entry_requires_a_message_key() {
         offenders.is_empty(),
         "EVENT_CATALOG entries requiring a `message` key: {offenders:?}"
     );
+}
+
+/// The metric scanner reads names and label keys from a real call shape.
+#[test]
+fn metric_scanner_reads_names_and_label_keys() {
+    let text = r#"
+        counter!("a.b", "role" => "x").absolute(1);
+        gauge!("c.d").set(2.0);
+        describe_counter!(spec.name, spec.unit, spec.description);
+        histogram!(name);
+    "#;
+    let sites = scan_metrics("f.rs", text);
+    assert_eq!(sites.len(), 3, "{sites:?}");
+    assert_eq!(sites[0].name, "a.b");
+    assert_eq!(sites[0].labels, vec!["role".to_string()]);
+    assert_eq!(sites[1].name, "c.d");
+    assert!(sites[1].labels.is_empty());
+    assert_eq!(
+        sites[2].name, "",
+        "a non-literal name is reported, not skipped"
+    );
+}
+
+/// Every metric the code records is in `METRIC_CATALOG`, with only the label
+/// keys the catalogue allows; and every catalogue entry is recorded
+/// somewhere (leviculum#77). A metric outside the catalogue has no unit, no
+/// description and no label contract, and an entry nothing records is a
+/// promise a dashboard will wait on forever.
+#[test]
+fn every_recorded_metric_is_catalogued_and_every_entry_recorded() {
+    use crate::telemetry::METRIC_CATALOG;
+    let sites = all_metric_sites();
+    assert!(
+        sites.len() >= METRIC_CATALOG.len(),
+        "the scan found only {} metric sites",
+        sites.len()
+    );
+    let catalogue: BTreeMap<&str, &[&str]> =
+        METRIC_CATALOG.iter().map(|m| (m.name, m.labels)).collect();
+    assert_eq!(
+        catalogue.len(),
+        METRIC_CATALOG.len(),
+        "a name is catalogued twice"
+    );
+    let mut problems = Vec::new();
+    let mut recorded = BTreeSet::new();
+    for site in &sites {
+        match catalogue.get(site.name.as_str()) {
+            None => problems.push(format!(
+                "{}:{}: `{}` is recorded but not in METRIC_CATALOG",
+                site.file, site.line, site.name
+            )),
+            Some(allowed) => {
+                recorded.insert(site.name.as_str());
+                for label in &site.labels {
+                    if !allowed.contains(&label.as_str()) {
+                        problems.push(format!(
+                            "{}:{}: `{}` carries label `{label}`, which its entry does not allow",
+                            site.file, site.line, site.name
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for name in catalogue.keys() {
+        if !recorded.contains(name) {
+            problems.push(format!("`{name}` is catalogued but nothing records it"));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }

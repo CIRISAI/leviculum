@@ -95,3 +95,8 @@ pub use rpc::{
     rpc_drop_path, rpc_query, rpc_query_hash_param, rpc_query_transport_tables,
     TRANSPORT_TABLE_NAMES,
 };
+
+/// Metrics through the `metrics` facade (+ciris, leviculum#77). Declared
+/// last so the fork moves no line an upstream citation points at.
+pub mod telemetry;
+pub use telemetry::LinkCountCheck;

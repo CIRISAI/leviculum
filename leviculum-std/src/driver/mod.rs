@@ -266,6 +266,7 @@ pub(crate) struct PlaneCounters {
     /// `retry_dropped`, these never paid for an IFAC signature and never
     /// entered a retry queue — that saving is the point of the breaker.
     shed_packets: AtomicU64,
+    mirror_alarms: AtomicU64, // leviculum#77: crate::telemetry::MirrorWatch alarms
 }
 
 /// Sender half of the split control/data node-event channels (Codeberg #71).
@@ -2624,6 +2625,72 @@ impl ReticulumNode {
         self.inner.lock_recover().storage().identity_evictions()
     }
 
+    /// Every link in the table with its role, state, age and idle time
+    /// (leviculum#77). Ids are the ones the application was given.
+    /// Takes the core lock briefly; walks the link table once.
+    pub fn link_list(&self) -> Vec<leviculum_core::node::LinkInfo> {
+        self.inner.lock_recover().link_list()
+    }
+
+    /// Cumulative link lifecycle counters: established by role, closed by
+    /// reason, handshake failures by reason (leviculum#77).
+    pub fn link_lifecycle(&self) -> leviculum_core::node::LinkLifecycle {
+        self.inner.lock_recover().link_lifecycle()
+    }
+
+    /// The node core's heap census: accounted bytes by component, the link
+    /// table among them (leviculum#77). An estimate from container sizes,
+    /// not an allocator reading. Takes the core lock and walks every table.
+    pub fn heap_census(&self) -> leviculum_core::heap_census::NodeHeapCensus {
+        self.inner.lock_recover().heap_census()
+    }
+
+    /// The completion mirror's established-link count beside the core's,
+    /// and how many sustained divergences the event loop has alarmed on
+    /// (leviculum#77). The two can differ for an instant while events are
+    /// in flight; the loop alarms only when they stay apart.
+    pub fn link_count_check(&self) -> crate::telemetry::LinkCountCheck {
+        crate::telemetry::LinkCountCheck {
+            mirror: self.completions.established_len(),
+            core: self.inner.lock_recover().established_link_count(),
+            alarms: self
+                .plane_counters
+                .mirror_alarms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Record the node's metrics onto the installed `metrics` recorder
+    /// (leviculum#77). Call it on the host's cadence, typically right before
+    /// each scrape; with no recorder installed it costs the snapshots and
+    /// nothing else. The names are `crate::telemetry::METRIC_CATALOG`.
+    /// Takes the core lock once for all core snapshots.
+    pub fn publish_metrics(&self) {
+        let (lifecycle, census, transport, known_evictions, heap) = {
+            let core = self.inner.lock_recover();
+            (
+                core.link_lifecycle(),
+                core.link_census(),
+                core.transport_stats(),
+                core.storage().identity_evictions(),
+                core.heap_census(),
+            )
+        };
+        crate::telemetry::record(&crate::telemetry::Snapshot {
+            lifecycle,
+            census,
+            mirror: self.completions.established_len(),
+            mirror_alarms: self
+                .plane_counters
+                .mirror_alarms
+                .load(std::sync::atomic::Ordering::Relaxed),
+            transport,
+            known_evictions,
+            plane: self.plane_stats(),
+            heap,
+        });
+    }
+
     /// Live links by role, overall and per destination (CIRISEdge#819,
     /// leviculum#57). A field gauge for link accumulation: see
     /// [`leviculum_core::node::NodeCore::link_census`] for how to read it.
@@ -4680,6 +4747,13 @@ async fn run_event_loop(
     // (a detach racing a just-accepted add); held here, applied on arrival.
     let mut pending_removals: std::collections::HashSet<InterfaceId> =
         std::collections::HashSet::new();
+    // leviculum#77: the completion mirror and the core must agree on how many
+    // links are established. They differ for an instant while events are in
+    // flight between the core and this loop, so only a disagreement that
+    // outlasts crate::telemetry::MIRROR_DIVERGENCE_GRACE is alarmed, once per episode.
+    let mut mirror_check_at = tokio::time::Instant::now() + crate::telemetry::MIRROR_CHECK_INTERVAL;
+    let mut mirror_watch =
+        crate::telemetry::MirrorWatch::new(crate::telemetry::MIRROR_DIVERGENCE_GRACE);
     let mut shutdown = channels.shutdown;
     let mut next_poll = tokio::time::Instant::now();
     let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
@@ -5322,6 +5396,25 @@ async fn run_event_loop(
             &plane_counters,
                             &mut breakers,
                             None,
+                        );
+                    }
+                }
+
+                if tokio::time::Instant::now() >= mirror_check_at {
+                    mirror_check_at = tokio::time::Instant::now() + crate::telemetry::MIRROR_CHECK_INTERVAL;
+                    let mirror = completions.established_len();
+                    let core = inner.lock_recover().established_link_count();
+                    if let Some(alarm) =
+                        mirror_watch.observe(mirror, core, std::time::Instant::now())
+                    {
+                        plane_counters
+                            .mirror_alarms
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!(
+                            event = "LINK_MIRROR_DIVERGED",
+                            mirror = alarm.mirror,
+                            core = alarm.core,
+                            for_secs = alarm.for_secs,
                         );
                     }
                 }
