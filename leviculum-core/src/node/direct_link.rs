@@ -373,6 +373,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // The direct path just proved itself both ways; do not let a stale
         // timer that was running on the relayed path fire against it.
         link.record_inbound(now_ms / MS_PER_SECOND);
+        // A punch both ways is the peer answering: a link that went stale on
+        // the relay while the punch ran is live again, as any authenticated
+        // inbound traffic would make it (Codex review on #74).
+        let recovered = link.state() == LinkState::Stale;
+        if recovered {
+            link.set_state(LinkState::Active);
+        }
         let is_initiator = link.is_initiator();
         let destination = *link.destination_hash();
         self.direct_links.attached.insert(
@@ -390,6 +397,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             previous = ?previous,
             "direct link: established, link moved onto the direct interface"
         );
+        if recovered {
+            self.events.push(NodeEvent::LinkRecovered { link_id });
+        }
         self.events.push(NodeEvent::DirectLinkEstablished {
             link_id,
             interface_index: index,
@@ -559,6 +569,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let Some(session) = self.direct_links.sessions.remove(&link_id) else {
             return;
         };
+        // Its signals still waiting on the channel would outlive it: a
+        // REQUEST sent after the initiator gave up starts the peer on a
+        // session nobody holds (Codex review on #74).
+        if let Some(queue) = self.direct_links.outbox.get_mut(&link_id) {
+            queue.retain(|signal| signal.session() != session.id());
+            if queue.is_empty() {
+                self.direct_links.outbox.remove(&link_id);
+            }
+        }
         // After success the driver's socket now belongs to the interface,
         // so only a failed session has anything to release.
         if let Some(failure) = failure {
@@ -828,6 +847,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
             None => {
+                // The link goes, so its direct interface must too: the
+                // attachment is already gone, so `remove_link` cannot find it
+                // (Codex review on #74).
+                self.direct_links
+                    .jobs
+                    .push_back(DirectLinkJob::CloseInterface {
+                        interface_index: index,
+                    });
                 let is_initiator = link.is_initiator();
                 let destination = *link.destination_hash();
                 link.close();
