@@ -375,7 +375,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             return;
         };
-        let previous = link.attached_interface();
+        // The fallback is the interface the link used until now, if it still
+        // exists: one that went down meanwhile (while the punch ran, or while
+        // the link waited out a transfer) is no fallback (Codex review on
+        // #78); handle_interface_down does not repoint links.
+        let previous = link
+            .attached_interface()
+            .filter(|prev| self.transport.interface_name(*prev).is_some());
         link.set_attached_interface(index);
         // A link that came up over TCP may have negotiated far more than a
         // UDP datagram on the open internet carries. Both ends lower it to
@@ -463,6 +469,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             protocol,
         } = signal
         else {
+            if let Signal::Complete { session } = &signal {
+                self.direct_link_nudged(&link_id, session);
+            }
             let steps = match self.direct_links.sessions.get_mut(&link_id) {
                 Some(s) => s.signal(&signal, now_ms),
                 None => Vec::new(),
@@ -491,7 +500,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .direct_links
                 .sessions
                 .values()
-                .any(|s| s.id() == &session);
+                .any(|s| s.id() == &session)
+            // The cooldown binds the peer's proposals too, or one that keeps
+            // asking keeps this node binding sockets and probing (Codex
+            // review on #78).
+            || self
+                .direct_links
+                .last_proposal_ms
+                .get(&link_id)
+                .is_some_and(|last| now_ms.saturating_sub(*last) < PROPOSAL_COOLDOWN_MS);
         let reject = if !allowed {
             Some(REJECT_POLICY)
         } else if busy {
@@ -523,6 +540,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             peer = %initiator_public,
             "direct link: accepting a peer's proposal"
         );
+        self.direct_links.last_proposal_ms.insert(link_id, now_ms);
         let token = wire::punch_token(&link_key, &session);
         let (session, steps) = Session::respond(
             session,
@@ -783,6 +801,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.links.get(link_id).is_some_and(|link| {
             link.outgoing_resource().is_some()
                 || link.incoming_resource().is_some()
+                // An advertisement awaiting the application: accepting it
+                // later sizes its parts from the link's MTU (Codex review
+                // on #78).
+                || link.has_pending_resource()
                 || link.channel().is_some_and(|ch| {
                     ch.outstanding_exceeds_mtu(crate::direct_link::DIRECT_LINK_MTU)
                 })
@@ -892,8 +914,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             fallback = ?attachment.previous,
             "direct link: {why}; link returns to its fallback, or closes without one"
         );
+        // Reported under the id the application holds. If the link closes
+        // below, emit_link_closed consumes the re-key mapping before the
+        // event drain could translate this event (Codex review on #78).
+        let visible = self
+            .link_origin_ids
+            .get(&attachment.link_id)
+            .copied()
+            .unwrap_or(attachment.link_id);
         self.events.push(NodeEvent::DirectLinkLost {
-            link_id: attachment.link_id,
+            link_id: visible,
             interface_index: index,
         });
         match attachment.previous {
@@ -1000,6 +1030,28 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.release_direct_attachment(index, attachment, "peer came back over the relay", true);
     }
 
+    /// The peer's fallback nudge (COMPLETE for the session that made the link
+    /// direct) arrived over the relay. Unlike ordinary relayed traffic it is
+    /// unambiguous, so it counts during the grace too: a peer that lost its
+    /// direct path seconds after the upgrade must not be ignored until its
+    /// nudge's retries run out (Codex review on #78).
+    fn direct_link_nudged(&mut self, link_id: &LinkId, session: &SessionId) {
+        let Some(iface) = self.direct_links.rx_iface else {
+            return;
+        };
+        let Some(index) = self.direct_links.interface_of_link(link_id) else {
+            return;
+        };
+        let Some(attachment) = self.direct_links.attached.get(&index).copied() else {
+            return;
+        };
+        if attachment.previous != Some(iface) || &attachment.session != session {
+            return;
+        }
+        self.direct_links.attached.remove(&index);
+        self.release_direct_attachment(index, attachment, "peer nudged over the relay", true);
+    }
+
     /// The link went stale while on a direct interface: the direct path has
     /// stopped carrying the peer's traffic, at least toward this node. Fall
     /// back now rather than when the interface's own silence timer expires;
@@ -1026,13 +1078,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     pub fn abandon_direct_links(&mut self) -> crate::transport::TickOutput {
         self.direct_links.jobs.clear();
         self.direct_links.outbox.clear();
-        for (link_id, (_, _, proposed)) in core::mem::take(&mut self.direct_links.deferred) {
-            self.events.push(NodeEvent::DirectLinkFailed {
-                link_id,
-                failure: Failure::Timeout,
-                proposed,
-            });
-        }
         let sessions = core::mem::take(&mut self.direct_links.sessions);
         for (link_id, session) in sessions {
             self.events.push(NodeEvent::DirectLinkFailed {
@@ -1041,9 +1086,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 proposed: session.role() == Role::Initiator,
             });
         }
-        let attached = core::mem::take(&mut self.direct_links.attached);
-        for (index, attachment) in attached {
-            self.release_direct_attachment(index, attachment, "node restarted", false);
+        // Each direct interface of the previous run is gone: take it down the
+        // way any lost interface goes, so its paths and the rest of its
+        // transport state go too, not only the link's attachment (Codex
+        // review on #78). That also moves attached links back to their
+        // fallback and fails links still deferred.
+        let mut gone: Vec<usize> = self.direct_links.attached.keys().copied().collect();
+        gone.extend(self.direct_links.deferred.values().map(|d| d.1));
+        for index in gone {
+            let out = self.handle_interface_down(crate::transport::InterfaceId(index));
+            self.events.extend(out.events);
         }
         self.process_events_and_actions()
     }
