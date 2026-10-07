@@ -21,6 +21,14 @@ Two checks, in this order:
    asset list: the site target mirrors the forge's names, and until it is live
    (see scripts/publish-site.sh) fetching them would only report that.
 
+One URL may answer 404 without failing: https://leviculum.network/docs/,
+the book, which is only there once packaging/site/lev-unpack-docs has run on
+the server after the first nightly that carries it (Codeberg #260). Online,
+its status is still fetched and printed, and a 404 there is reported as
+"not published yet" rather than as a finding; any other status of 400 or
+above still fails. PENDING_FIRST_PUBLISH holds that exemption and nothing
+else, and an entry comes out once the URL has answered 200.
+
 When the forge cannot be reached at all (no route, no DNS, a timeout), the
 online half is skipped with a message and the script exits 0: an offline
 machine has nothing to say about URLs, and the offline half has already run.
@@ -47,6 +55,13 @@ FORGE_PREFIX = "https://codeberg.org/Lew_Palm/leviculum/releases/download/nightl
 SITE_PREFIX = "https://leviculum.network/releases/nightly/latest/"
 RELEASE_API = "https://codeberg.org/api/v1/repos/Lew_Palm/leviculum/releases/tags/nightly"
 TIMEOUT = 20
+
+# URLs whose 404 means "not published yet", not "wrong link", with the reason.
+PENDING_FIRST_PUBLISH = {
+    "https://leviculum.network/docs/": (
+        "the book appears there when packaging/site/lev-unpack-docs first runs on the server"
+    ),
+}
 
 LINK = re.compile(r"\]\((https?://[^)\s]+)\)")
 
@@ -130,9 +145,25 @@ def online_findings(links: list) -> list:
         # Some forges refuse HEAD on pages they serve to GET.
         if status in (405, 501):
             status, _ = fetch(url)
-        if status >= 400:
-            findings.append(f"{page}: {url} answered {status}")
+        finding, note = judge(page, url, status)
+        if note:
+            print(f"site-check: {note}")
+        if finding:
+            findings.append(finding)
     return findings
+
+
+def judge(page: str, url: str, status: int) -> tuple:
+    """(finding or None, note or None) for an external link's HTTP status."""
+    if url in PENDING_FIRST_PUBLISH:
+        if status == 404:
+            return None, (f"{page}: {url} answered 404, not published yet and not counted as a "
+                          f"failure: {PENDING_FIRST_PUBLISH[url]}")
+        if status < 400:
+            return None, f"{page}: {url} answered {status}; it is published, drop it from PENDING_FIRST_PUBLISH"
+    if status >= 400:
+        return f"{page}: {url} answered {status}", None
+    return None, None
 
 
 def selftest() -> int:
@@ -161,6 +192,19 @@ def selftest() -> int:
     if len(findings) != 1 or "bad.md" not in findings[0] or "lnsd-nightly-amd64.deb" not in findings[0]:
         print(f"selftest: expected exactly the bad.md finding, got {findings}")
         ok = False
+    docs = "https://leviculum.network/docs/"
+    cases = [
+        (docs, 404, False, True),
+        (docs, 500, True, False),
+        (docs, 200, False, True),
+        ("https://example.org/x", 404, True, False),
+        ("https://example.org/x", 200, False, False),
+    ]
+    for url, status, want_finding, want_note in cases:
+        finding, note = judge("p.md", url, status)
+        if bool(finding) != want_finding or bool(note) != want_note:
+            print(f"selftest: {url} {status} gave finding={finding!r} note={note!r}")
+            ok = False
     print("site-check selftest:", "ok" if ok else "FAILED")
     return 0 if ok else 1
 

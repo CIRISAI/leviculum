@@ -24,7 +24,7 @@ Active development, nightly builds, no release yet.
 ## Links
 
 - [Download](/download)
-- [Documentation](https://codeberg.org/Lew_Palm/leviculum/src/branch/master/docs/src/introduction.md)
+- [Documentation](https://leviculum.network/docs/)
 - [Source](/source)
 - [Blog](/blog)
 

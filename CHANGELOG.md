@@ -25,6 +25,13 @@ Toolchain: Rust 1.97.1
   under `/usr/share/lblogd/pages/` and served when `pages_dir` points there;
   a link from one page to another now also reaches it on the NomadNet side.
 
+- The book is published (leviculum#503, refs #260). The nightly renders
+  `docs/` with a pinned mdbook and ships it as
+  `leviculum-docs-nightly.tar.gz` beside the packages;
+  `packaging/site/lev-unpack-docs` checks it and swaps it in under
+  https://leviculum.network/docs/, which the landing page's Documentation
+  link now points at.
+
 - A propagation node leaves half its airtime to forwarding (leviculum#494,
   decided on #433). A board running the propagation role starts no sync
   round, offer, transfer or active delivery of its own, and postpones
