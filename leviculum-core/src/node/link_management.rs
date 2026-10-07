@@ -494,6 +494,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// `self.transport.register_destination(link_id)`. This helper
     /// ensures the reverse cleanup always happens together.
     fn remove_link(&mut self, link_id: &LinkId) {
+        // leviculum#77: the close reported next counts as a handshake failure
+        // if this link never established.
+        if let Some(link) = self.links.get(link_id) {
+            let established = link.established_at_secs().is_some();
+            self.note_link_removing(established);
+        }
         // Fail any in-flight resource transfers before dropping the link, so
         // the app waiting on the transfer is notified instead of hanging
         // (mirrors RNS Link.link_closed() cancelling both incoming and
@@ -1284,6 +1290,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         match link.build_rtt_packet(rtt_seconds_wire, &mut self.rng) {
             Ok(rtt_packet) => {
                 link.record_rtt_sent(now_ms);
+                self.link_telemetry.lifecycle.established_initiator += 1;
                 self.events.push(NodeEvent::LinkEstablished {
                     link_id,
                     is_initiator: true,
@@ -1299,6 +1306,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 );
                 // Emit the event anyway, the link IS established even if the
                 // RTT packet could not be sent.
+                self.link_telemetry.lifecycle.established_initiator += 1;
                 self.events.push(NodeEvent::LinkEstablished {
                     link_id,
                     is_initiator: true,
@@ -1529,6 +1537,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 link.stale_close_timeout_secs().saturating_mul(MS_PER_SECOND),
                 link.hops(),
             );
+            self.link_telemetry.lifecycle.established_responder += 1;
             self.events.push(NodeEvent::LinkEstablished {
                 link_id,
                 is_initiator: false,
@@ -4271,6 +4280,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         is_initiator: bool,
         destination_hash: DestinationHash,
     ) {
+        self.note_link_closed(reason);
         // Translate a re-keyed wire id back to the caller-visible
         // original and consume the mapping — the close is the last
         // event for this link (Codeberg #66). Registries may hold

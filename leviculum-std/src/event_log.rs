@@ -1022,6 +1022,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "HELPER_TICK",
         required_keys: &["i"],
     },
+    // leviculum#77: the completion mirror and the core disagreed on the
+    // established-link count for longer than the event loop's grace.
+    EventSchema {
+        name: "LINK_MIRROR_DIVERGED",
+        required_keys: &["mirror", "core", "for_secs"],
+    },
 ];
 
 /// Where the buffer is dumped on a panicking drop.
@@ -1317,7 +1323,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4540`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:5172`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the

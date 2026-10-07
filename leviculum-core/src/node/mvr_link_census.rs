@@ -12,7 +12,8 @@ use rand_core::OsRng;
 
 use crate::destination::{Destination, DestinationType, Direction};
 use crate::identity::Identity;
-use crate::node::{LinkCensus, NodeCore, NodeCoreBuilder};
+use crate::link::{LinkCloseReason, LinkState};
+use crate::node::{LinkCensus, LinkRole, NodeCore, NodeCoreBuilder};
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::transport::{Action, InterfaceId, TickOutput};
 
@@ -104,7 +105,43 @@ fn the_census_counts_live_links_by_role_and_destination() {
     assert_eq!((census.initiator, census.responder), (0, 2));
     assert_eq!(census.by_destination[0].responder, 2);
 
-    // A closed link leaves the census.
-    let _ = a.close_link(&ids[0]);
+    // The list names each link with its role and state; idle and age are
+    // known only once established.
+    let list = a.link_list();
+    assert_eq!(list.len(), 3);
+    let live: Vec<_> = list.iter().filter(|l| l.age_secs.is_some()).collect();
+    assert_eq!(live.len(), 2);
+    assert!(live
+        .iter()
+        .all(|l| l.role == LinkRole::Initiator && l.state == LinkState::Active));
+    assert!(b.link_list().iter().all(|l| l.role == LinkRole::Responder));
+    a.transport.clock().advance(7_000);
+    assert!(a
+        .link_list()
+        .iter()
+        .filter(|l| l.age_secs.is_some())
+        .all(|l| l.idle_secs == Some(7) && l.age_secs == Some(7)));
+
+    let lc = a.link_lifecycle();
+    assert_eq!((lc.established_initiator, lc.established_responder), (2, 0));
+    assert_eq!(b.link_lifecycle().established_responder, 2);
+
+    // A closed link leaves the census and is counted by reason, on both ends.
+    let close = a.close_link(&ids[0]);
     assert_eq!(a.link_census().initiator, 1);
+    assert_eq!(a.link_lifecycle().closed(LinkCloseReason::Normal), 1);
+    deliver(&mut b, b_mesh, packets(&close));
+    assert_eq!(b.link_lifecycle().closed(LinkCloseReason::PeerClosed), 1);
+
+    // A link that never established is a handshake failure, not a close.
+    let _ = a.close_link(&ids[2]);
+    let lc = a.link_lifecycle();
+    assert_eq!(lc.handshake_failed(LinkCloseReason::Normal), 1);
+    assert_eq!(lc.closed_total(), 1);
+    // And the counters agree with the census.
+    let census = a.link_census();
+    assert_eq!(
+        lc.established() - lc.closed_total(),
+        (census.initiator + census.responder) as u64
+    );
 }
