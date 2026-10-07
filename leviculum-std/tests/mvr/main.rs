@@ -393,6 +393,7 @@ mod pn_serve_peak_outgrows_the_board_heap;
 mod radio_config_sleeps_through_the_peer_yield_window;
 mod radio_config_wedges_without_lora_task;
 mod ratchet_rotation_single_packet;
+mod rate_window_withholds_no_reference_relay;
 mod recall_survives_a_restart;
 mod reliable_channel_delivery_backpressure;
 mod resource_consecutive_push_window_policy;

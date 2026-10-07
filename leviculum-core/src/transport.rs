@@ -6580,28 +6580,39 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         };
         let should_update = accept_reason.is_some();
 
-        // A newer emission at equal or fewer hops is news, not a repeat, and
-        // it leaves a reference relay no matter how recently the destination
-        // was last rebroadcast: the only per-destination rate gate either
-        // reference tree has is the default-off `announce_rate_target`
-        // (1.3.5 Transport.py:1838, 1.5.2 Transport.py:2303 — our port of it
-        // is `check_announce_rate` below, Codeberg #92), and an accepted
-        // newer emission simply overwrites any pending announce-table entry
-        // for retransmission (1.3.5 Transport.py:1898, 1.5.2
-        // Transport.py:2363). Our 2 s window has no reference counterpart,
-        // and the pair it was withholding here is not a storm — the
-        // reference protocol itself emits one destination's announce twice
-        // within a second whenever a scheduled retransmit and a fresh
-        // path-response answer travel the same leg (periculum 488, nightly
-        // 2026-10-07 03:54, leviculum#440; mvr
-        // `two_emissions_in_one_second_both_leave_the_relay`). The window
-        // keeps suppressing exactly what the reference also refuses to
-        // relay: same-blob copies and same-second re-announces. What it
-        // gives up — a flood of genuinely new emissions at equal or fewer
-        // hops — is the flood the reference accepts by design and prices at
-        // egress through the per-interface announce cap, plus
-        // `announce_rate_target` where configured.
-        let rate_limited = rate_limited && accept_reason != Some("newer_emission");
+        // An announce the reference's acceptance rule takes leaves a
+        // reference relay no matter how recently the destination was last
+        // rebroadcast: every `should_add` branch of 1.3.5
+        // Transport.py:1765-1831 (1.5.2 :2221-2295) inserts the announce
+        // into the announce table for retransmission (1.3.5 :1886-1898,
+        // 1.5.2 :2351-2363), and the only per-destination rate gate either
+        // tree has is the default-off `announce_rate_target` (1.3.5 :1838,
+        // 1.5.2 :2303 — our port of it is `check_announce_rate` below,
+        // Codeberg #92). Our 2 s window has no reference counterpart. It
+        // withheld a newer emission at equal hops that the reference
+        // protocol itself sends twice within a second whenever a scheduled
+        // retransmit and a fresh path-response answer travel the same leg
+        // (periculum 488, leviculum#440; mvr
+        // `two_emissions_in_one_second_both_leave_the_relay`), and the four
+        // other reference branches the same way (leviculum#441; mvr
+        // `rate_window_withholds_no_reference_relay`). What the window still
+        // withholds is only what the reference does not accept at all: the
+        // same-emission swaps that are our own deviation
+        // (`same_emission_fewer_hops`, the `path_choice = hops_and_loss`
+        // cost swaps). A flood of announces the reference accepts meets the
+        // per-interface announce cap at egress, the reference's own defence,
+        // plus `announce_rate_target` where configured.
+        let reference_accepts = matches!(
+            accept_reason,
+            Some(
+                "newer_emission"
+                    | "newer_emission_worse_hops"
+                    | "expired_path"
+                    | "unresponsive_same_emission"
+                    | "new_destination"
+            )
+        );
+        let rate_limited = rate_limited && !reference_accepts;
 
         // Refresh local client tracking timestamp unconditionally.
         // Even when the path table isn't updated (same emission, same hops),
@@ -17157,7 +17168,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6999), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7010), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
