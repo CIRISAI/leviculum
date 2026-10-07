@@ -32,10 +32,10 @@ use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, admit, connect_failure_condemns, dial_preference, identity_hint,
     judge_supervision_timeout, manufacturer_data_with_hint, parse_peer_advertisement,
-    rotating_address, with_free_slots, AdvReport, CandidateTable, ChurnLedger, ChurnPolicy,
-    ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision,
-    DeadEnds, DialLedger, Exclusion, GattBytes, LedgerPolicy, Ledgers, LinkPhase, LinkRole, LinkUp,
-    Local, Origin, OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent, PhaseNeighbours,
+    with_free_slots, AdvReport, CandidateTable, ChurnLedger, ChurnPolicy, ConnParams,
+    ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision, DeadEnds,
+    DialLedger, Exclusion, GattBytes, LedgerPolicy, Ledgers, LinkPhase, LinkRole, LinkUp, Local,
+    Origin, OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent, PhaseNeighbours,
     ScanMode, ScanPhase, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, DEAD_END_SLOTS,
     DEAD_END_TTL_MS, GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
     MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, PHASE_NEIGHBOUR_SLOTS, SCAN_WINDOW_COLLECT_MS,
@@ -872,7 +872,7 @@ async fn gatt_events(
                     if !peer_link_up(
                         slot_index,
                         conn_handle,
-                        peer_value,
+                        peer,
                         peer_id,
                         Origin::Incoming,
                         conn.att_mtu(),
@@ -1069,7 +1069,7 @@ async fn gatt_events(
             // ([`displace_old_link`]), once per event.
             if matches!(end, LinkEnd::Expired(_)) {
                 if let Some(peer_id) = link_peer.get() {
-                    note_peer_leave(&peer_id, peer_value, "expiry_peripheral");
+                    note_peer_leave(&peer_id, peer, "expiry_peripheral");
                 }
             }
             log_link_end("peripheral", slot_index, conn_handle, end);
@@ -1282,11 +1282,12 @@ async fn link_over(slot_index: usize, conn_handle: u16) -> LinkEnd {
 fn peer_link_up(
     slot_index: usize,
     conn_handle: u16,
-    peer_value: u64,
+    peer: PeerAddr,
     peer_id: [u8; 16],
     origin: Origin,
     att_mtu: u16,
 ) -> bool {
+    let peer_value = peer.value;
     let now_ms = Instant::now().as_millis();
     let up = LIVE_PEERS.lock(|peers| {
         peers
@@ -1333,7 +1334,7 @@ fn peer_link_up(
                 old_slot,
                 new_slot: slot_index,
                 new_conn: conn_handle,
-                peer_value,
+                peer,
                 peer_id,
                 origin,
                 rule,
@@ -1411,7 +1412,9 @@ struct DisplacedOld {
     new_slot: usize,
     /// The newcomer's connection handle, for the log line.
     new_conn: u16,
-    peer_value: u64,
+    /// The newcomer's address with its type, which the churn arming
+    /// reads (#506).
+    peer: PeerAddr,
     peer_id: [u8; 16],
     /// Who opened the NEWCOMER — the role map the arbitration was
     /// computed over, reported as `origin=`.
@@ -1449,7 +1452,7 @@ fn displace_old_link(displaced: DisplacedOld) {
         old_slot,
         new_slot,
         new_conn,
-        peer_value,
+        peer,
         peer_id,
         origin,
         rule,
@@ -1458,6 +1461,7 @@ fn displace_old_link(displaced: DisplacedOld) {
         old_usable_mtu,
         new_usable_mtu,
     } = displaced;
+    let peer_value = peer.value;
     let old_conn = HVN_DRAIN
         .handle_at(old_slot)
         .unwrap_or(leviculum_ble_tx::NO_CONN_HANDLE);
@@ -1482,7 +1486,7 @@ fn displace_old_link(displaced: DisplacedOld) {
     // back. Fed here, by the displacer, so both roles' displacements
     // are one site and the displaced session's own teardown stays
     // silent about it.
-    note_peer_leave(&peer_id, peer_value, "replaced");
+    note_peer_leave(&peer_id, peer, "replaced");
     crate::log::log_fmt(
         "[BLE ] ",
         format_args!(
@@ -1912,29 +1916,29 @@ static CHURN_HELD_LOGGED_FOR: BlockingMutex<CriticalSectionRawMutex, Cell<Option
     BlockingMutex::new(Cell::new(None));
 
 /// Record one DEPARTURE of a rotating-addressed peer (#417): the
-/// identity behind `peer_value` ended a session by its own leaving —
+/// identity behind `peer` ended a session by its own leaving —
 /// silence until the expiry swept the link, or a replacement by its
-/// next connection. A static-addressed session's end is not recorded
-/// (the class filter is here, in one place): a flaky board must never
+/// next connection. A fixed-addressed session's end is not recorded
+/// (the class filter is `ChurnLedger::note_departure`, called from here
+/// alone, and reads the address type, #506): a flaky board must never
 /// arm a cooldown that every phone in the room then pays for.
 ///
 /// Only the ARMING is logged — the departure itself already has its
 /// line (`BLE_LINK_EXPIRE`, `BLE_LINK_REPLACED`), and the one thing
 /// those lines cannot say is that the run has now closed the class.
-fn note_peer_leave(peer_id: &[u8; 16], peer_value: u64, reason: &str) {
-    // The class by the top bits alone: the departing link's address
-    // reaches here without its type, so a public address with a low OUI
-    // still arms (`rotating_address`'s guess, #504).
-    if !rotating_address(peer_value, None) {
-        return;
-    }
+fn note_peer_leave(peer_id: &[u8; 16], peer: PeerAddr, reason: &str) {
     let now_ms = Instant::now().as_millis();
+    // The class by the address type the link was made with (#506): the
+    // top bits alone armed a cooldown for #504's public address.
     let noted = CHURN_LEDGER.lock(|cell| {
         let mut ledger = cell.get();
-        let noted = ledger.note_leave(CHURN_POLICY, peer_id, now_ms);
+        let noted = ledger.note_departure(CHURN_POLICY, peer, peer_id, now_ms);
         cell.set(ledger);
         noted
     });
+    let Some(noted) = noted else {
+        return;
+    };
     if noted.armed {
         crate::log::log_fmt(
             "[BLE ] ",
@@ -2210,7 +2214,15 @@ async fn find_peer_to_initiate(
         }
         window
             .borrow_mut()
-            .offer(peer_value, decision, free_slots, peer)
+            // The report's type ranks a public address with the fixed
+            // ones (#506; the guess put #504's behind every board).
+            .offer(
+                peer_value,
+                Some(adv.addr.addr_type),
+                decision,
+                free_slots,
+                peer,
+            )
     };
     // Phase 1: scan until the first eligible candidate opens the
     // window. A strict pass that never finds one never ends — that is
@@ -2248,7 +2260,10 @@ async fn central_link(
     peer: Address,
     decision: ConnectDecision,
 ) {
-    let peer_value = addr_value(&peer.bytes());
+    // The address with the type the SoftDevice reports for it, which
+    // the churn arming reads when this link ends (#506).
+    let typed_peer = peer_addr(&peer);
+    let peer_value = typed_peer.value;
     let whitelist = [&peer];
     let config = central::ConnectConfig {
         scan_config: central::ScanConfig {
@@ -2358,11 +2373,11 @@ async fn central_link(
     while outgoing_rx.try_receive().is_ok() {}
     // #388 census: queue drained, custody starts at zero.
     super::session_held_reset(slot_index);
-    conn_link_up(slot_index, peer_addr(&peer));
+    conn_link_up(slot_index, typed_peer);
     if !peer_link_up(
         slot_index,
         conn_handle,
-        peer_value,
+        typed_peer,
         peer_id,
         Origin::Outgoing,
         conn.att_mtu(),
@@ -2397,7 +2412,7 @@ async fn central_link(
         peer_id,
         slot_index,
         conn_handle,
-        peer_value,
+        typed_peer,
     )
     .await;
 
@@ -2435,8 +2450,9 @@ async fn run_central_session(
     peer_id: [u8; 16],
     slot_index: usize,
     conn_handle: u16,
-    peer_value: u64,
+    peer: PeerAddr,
 ) {
+    let peer_value = peer.value;
     // Subscribe to the peer's TX before announcing ourselves, so
     // nothing the peer sends in response to the handshake can fall into
     // an unsubscribed gap (v2.2 §Connection Phase steps 5 and 6).
@@ -2693,7 +2709,7 @@ async fn run_central_session(
             // the dial ledger judges what this dial BOUGHT, the churn
             // ledger what the peer then DID with it.
             if matches!(end, LinkEnd::Expired(_)) {
-                note_peer_leave(&peer_id, peer_value, "expiry_central");
+                note_peer_leave(&peer_id, peer, "expiry_central");
             }
             log_link_end("central", slot_index, conn_handle, end);
             let _ = conn.disconnect();

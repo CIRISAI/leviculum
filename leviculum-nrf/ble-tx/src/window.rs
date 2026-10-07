@@ -223,16 +223,17 @@ pub enum FallbackOrder {
 /// PUBLIC address (an IEEE assignment, which a BlueZ host commonly
 /// uses) is never rotating, because its top bits are the OUI's and say
 /// nothing about a class; any RANDOM type is classed by its top bits as
-/// above. The firmware's admission passes the type its advertising
-/// report carried ([`crate::PeerAddr::rotating`]), so the churn
-/// cooldown no longer holds a public address.
+/// above. Every shipped caller passes the type its advertising report
+/// or its link record carried: the firmware's admission
+/// ([`crate::PeerAddr::rotating`], #504), and since #506 the candidate
+/// window, the churn arming ([`crate::ChurnLedger::note_departure`])
+/// and lnsd's churn gate.
 ///
 /// `addr_type: None` is the GUESS, for a caller that has only the 48
 /// bits: it reads every address as random, so a public address whose
-/// OUI begins in `0x00..=0x7F` reads as rotating. The candidate window
-/// (its entries carry only the value), the firmware's churn arming and
-/// lnsd still ask it that way; there it costs such a peer position in
-/// the fallback class or an early cooldown, never a dial.
+/// OUI begins in `0x00..=0x7F` reads as rotating. Only the simulations
+/// in `graph_formation.rs`, whose rooms hold random addresses alone,
+/// and lnsd when BlueZ cannot name the type still ask it that way.
 #[must_use]
 pub fn rotating_address(addr: u64, addr_type: Option<AddrType>) -> bool {
     addr_type != Some(AddrType::Public) && addr >> 46 != 0b11
@@ -245,6 +246,9 @@ pub fn rotating_address(addr: u64, addr_type: Option<AddrType>) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Candidate<T> {
     addr: u64,
+    /// The type the advertising report carried with `addr`, `None` for
+    /// a caller that has only the 48 bits ([`rotating_address`]).
+    addr_type: Option<AddrType>,
     decision: ConnectDecision,
     /// Free incoming slots the peer advertised, `None` when it said
     /// nothing (#375 item 3).
@@ -346,7 +350,11 @@ fn rank<T>(candidate: &Candidate<T>, order: FallbackOrder) -> (DialPreference, u
     let (group, tie) = match (fallback, order) {
         (false, _) | (_, FallbackOrder::Address) => (0, candidate.addr),
         (_, FallbackOrder::FirstHeard) => (0, u64::from(candidate.seq)),
-        (_, FallbackOrder::RotatingLast) if rotating_address(candidate.addr, None) => {
+        // The type the report carried, so a public address is a key
+        // here too (#506; the guess ranked #504's address behind boards).
+        (_, FallbackOrder::RotatingLast)
+            if rotating_address(candidate.addr, candidate.addr_type) =>
+        {
             (1, u64::from(candidate.seq))
         }
         (_, FallbackOrder::RotatingLast) => (0, candidate.addr),
@@ -401,7 +409,10 @@ impl<T, const N: usize> CandidateTable<T, N> {
     }
 
     /// Record one eligible sighting. Only initiate verdicts are
-    /// candidates; anything else is refused (`false`). `free_slots` is
+    /// candidates; anything else is refused (`false`). `addr_type` is
+    /// the type the advertising report carried, `None` only for a
+    /// caller that has none (#506): it decides whether `addr` is a key
+    /// in the fallback class ([`rotating_address`]). `free_slots` is
     /// what the peer advertised (`None` when it said nothing, #375
     /// item 3). A sighting of an address already in the table replaces
     /// that entry iff the new verdict ranks better (the payload — a
@@ -421,6 +432,7 @@ impl<T, const N: usize> CandidateTable<T, N> {
     pub fn offer(
         &mut self,
         addr: u64,
+        addr_type: Option<AddrType>,
         decision: ConnectDecision,
         free_slots: Option<u8>,
         payload: T,
@@ -431,6 +443,7 @@ impl<T, const N: usize> CandidateTable<T, N> {
         let order = self.order;
         let mut candidate = Candidate {
             addr,
+            addr_type,
             decision,
             free_slots,
             seq: self.next_seq,
@@ -498,9 +511,9 @@ mod tests {
     #[test]
     fn the_lowest_address_wins_within_a_tier() {
         let mut t = Table::new();
-        assert!(t.offer(0x30, InitiateLowerAddress, None, "c"));
-        assert!(t.offer(0x10, InitiateLowerAddress, None, "a"));
-        assert!(t.offer(0x20, InitiateLowerAddress, None, "b"));
+        assert!(t.offer(0x30, None, InitiateLowerAddress, None, "c"));
+        assert!(t.offer(0x10, None, InitiateLowerAddress, None, "a"));
+        assert!(t.offer(0x20, None, InitiateLowerAddress, None, "b"));
         assert_eq!(t.seen(), 3);
         assert_eq!(t.into_best(), Some((0x10, InitiateLowerAddress, "a")));
     }
@@ -512,9 +525,16 @@ mod tests {
     #[test]
     fn the_peer_that_cannot_dial_us_outranks_the_address_sorts_winner() {
         let mut t = Table::new();
-        assert!(t.offer(0x10, InitiateLowerAddress, Some(3), "sort winner, empty"));
+        assert!(t.offer(
+            0x10,
+            None,
+            InitiateLowerAddress,
+            Some(3),
+            "sort winner, empty"
+        ));
         assert!(t.offer(
             0x20,
+            None,
             InitiatePeripheralOnlyPeer,
             Some(1),
             "cannot dial us, nearly full"
@@ -546,14 +566,14 @@ mod tests {
             "silence is not zero"
         );
         let mut t = Table::new();
-        assert!(t.offer(0x20, InitiatePeripheralOnlyPeer, Some(0), "full"));
-        assert!(t.offer(0x10, InitiateLowerAddress, Some(1), "room left"));
+        assert!(t.offer(0x20, None, InitiatePeripheralOnlyPeer, Some(0), "full"));
+        assert!(t.offer(0x10, None, InitiateLowerAddress, Some(1), "room left"));
         assert_eq!(
             t.into_best(),
             Some((0x10, InitiateLowerAddress, "room left"))
         );
         let mut alone = Table::new();
-        assert!(alone.offer(0x20, InitiatePeripheralOnlyPeer, Some(0), "full"));
+        assert!(alone.offer(0x20, None, InitiatePeripheralOnlyPeer, Some(0), "full"));
         assert_eq!(
             alone.into_best(),
             Some((0x20, InitiatePeripheralOnlyPeer, "full"))
@@ -582,9 +602,9 @@ mod tests {
         let mut t = Table::new();
         // The lowest address is also the fullest: before item 3 it won
         // and three searchers piled onto its last slot.
-        assert!(t.offer(0x10, InitiateLowerAddress, Some(1), "nearly full"));
-        assert!(t.offer(0x20, InitiateLowerAddress, Some(3), "empty"));
-        assert!(t.offer(0x30, InitiateLowerAddress, Some(2), "middling"));
+        assert!(t.offer(0x10, None, InitiateLowerAddress, Some(1), "nearly full"));
+        assert!(t.offer(0x20, None, InitiateLowerAddress, Some(3), "empty"));
+        assert!(t.offer(0x30, None, InitiateLowerAddress, Some(2), "middling"));
         assert_eq!(
             t.into_best(),
             Some((0x20, InitiateLowerAddress, "empty")),
@@ -595,9 +615,9 @@ mod tests {
     #[test]
     fn equal_free_slot_counts_fall_back_to_the_lowest_address() {
         let mut t = Table::new();
-        assert!(t.offer(0x30, InitiateLowerAddress, Some(2), "high"));
-        assert!(t.offer(0x10, InitiateLowerAddress, Some(2), "low"));
-        assert!(t.offer(0x20, InitiateLowerAddress, Some(2), "mid"));
+        assert!(t.offer(0x30, None, InitiateLowerAddress, Some(2), "high"));
+        assert!(t.offer(0x10, None, InitiateLowerAddress, Some(2), "low"));
+        assert!(t.offer(0x20, None, InitiateLowerAddress, Some(2), "mid"));
         assert_eq!(t.into_best(), Some((0x10, InitiateLowerAddress, "low")));
     }
 
@@ -608,13 +628,13 @@ mod tests {
         // count existed. Ranking silence as zero would have inverted
         // this and demoted every phone below every board.
         let mut t = Table::new();
-        assert!(t.offer(0x10, InitiateLowerAddress, None, "silent"));
-        assert!(t.offer(0x20, InitiateLowerAddress, Some(3), "all free"));
+        assert!(t.offer(0x10, None, InitiateLowerAddress, None, "silent"));
+        assert!(t.offer(0x20, None, InitiateLowerAddress, Some(3), "all free"));
         assert_eq!(t.into_best(), Some((0x10, InitiateLowerAddress, "silent")));
         // But a peer that says it is nearly full loses to the silent one.
         let mut t = Table::new();
-        assert!(t.offer(0x90, InitiateLowerAddress, None, "silent"));
-        assert!(t.offer(0x10, InitiateLowerAddress, Some(1), "nearly full"));
+        assert!(t.offer(0x90, None, InitiateLowerAddress, None, "silent"));
+        assert!(t.offer(0x10, None, InitiateLowerAddress, Some(1), "nearly full"));
         assert_eq!(t.into_best(), Some((0x90, InitiateLowerAddress, "silent")));
     }
 
@@ -623,8 +643,8 @@ mod tests {
         // Class still dominates: eligibility is a rule, the slot count
         // is only a preference inside what the rule already permits.
         let mut t = Table::new();
-        assert!(t.offer(0x10, InitiateFallback, Some(3), "fallback, empty"));
-        assert!(t.offer(0x90, InitiateLowerAddress, Some(0), "strict, full"));
+        assert!(t.offer(0x10, None, InitiateFallback, Some(3), "fallback, empty"));
+        assert!(t.offer(0x90, None, InitiateLowerAddress, Some(0), "strict, full"));
         assert_eq!(
             t.into_best(),
             Some((0x90, InitiateLowerAddress, "strict, full"))
@@ -634,10 +654,10 @@ mod tests {
     #[test]
     fn a_repeated_address_takes_the_latest_slot_count() {
         let mut t = Table::new();
-        assert!(t.offer(0x10, InitiateLowerAddress, Some(3), "first sighting"));
+        assert!(t.offer(0x10, None, InitiateLowerAddress, Some(3), "first sighting"));
         // A link landed on it during our window: believe the news.
-        assert!(t.offer(0x10, InitiateLowerAddress, Some(1), "later sighting"));
-        assert!(t.offer(0x20, InitiateLowerAddress, Some(2), "other"));
+        assert!(t.offer(0x10, None, InitiateLowerAddress, Some(1), "later sighting"));
+        assert!(t.offer(0x20, None, InitiateLowerAddress, Some(2), "other"));
         assert_eq!(t.seen(), 2);
         assert_eq!(
             t.into_best(),
@@ -652,9 +672,9 @@ mod tests {
         // count cannot be lost to a newcomer that ranks worse on it.
         let mut t = Table::new();
         for addr in [0x10u64, 0x20, 0x30, 0x40] {
-            assert!(t.offer(addr, InitiateLowerAddress, Some(3), "empty"));
+            assert!(t.offer(addr, None, InitiateLowerAddress, Some(3), "empty"));
         }
-        assert!(!t.offer(0x05, InitiateLowerAddress, Some(0), "full newcomer"));
+        assert!(!t.offer(0x05, None, InitiateLowerAddress, Some(0), "full newcomer"));
         assert_eq!(
             t.into_best(),
             Some((0x10, InitiateLowerAddress, "empty")),
@@ -665,19 +685,19 @@ mod tests {
     #[test]
     fn a_strict_verdict_outranks_a_lower_addressed_fallback_verdict() {
         let mut t = Table::new();
-        assert!(t.offer(0x10, InitiateFallback, None, "fallback"));
-        assert!(t.offer(0x90, InitiateLowerAddress, None, "strict"));
+        assert!(t.offer(0x10, None, InitiateFallback, None, "fallback"));
+        assert!(t.offer(0x90, None, InitiateLowerAddress, None, "strict"));
         assert_eq!(t.into_best(), Some((0x90, InitiateLowerAddress, "strict")));
     }
 
     #[test]
     fn a_repeated_address_is_one_candidate_with_the_best_verdict() {
         let mut t = Table::new();
-        assert!(t.offer(0x10, InitiateFallback, None, "first sighting"));
-        assert!(t.offer(0x10, InitiateFallback, None, "second sighting"));
+        assert!(t.offer(0x10, None, InitiateFallback, None, "first sighting"));
+        assert!(t.offer(0x10, None, InitiateFallback, None, "second sighting"));
         assert_eq!(t.seen(), 1, "re-advertisement is not a new candidate");
         // An upgrade keeps the address as one entry with the better rank.
-        assert!(t.offer(0x10, InitiatePeripheralOnlyPeer, None, "upgraded"));
+        assert!(t.offer(0x10, None, InitiatePeripheralOnlyPeer, None, "upgraded"));
         assert_eq!(t.seen(), 1);
         assert_eq!(
             t.into_best(),
@@ -688,8 +708,8 @@ mod tests {
     #[test]
     fn a_wait_verdict_is_not_a_candidate() {
         let mut t = Table::new();
-        assert!(!t.offer(0x10, WaitPeerHasLowerAddress, None, "no"));
-        assert!(!t.offer(0x10, NobodyEqualAddresses, None, "no"));
+        assert!(!t.offer(0x10, None, WaitPeerHasLowerAddress, None, "no"));
+        assert!(!t.offer(0x10, None, NobodyEqualAddresses, None, "no"));
         assert_eq!(t.seen(), 0);
         assert_eq!(t.into_best(), None);
     }
@@ -698,18 +718,18 @@ mod tests {
     fn overflow_keeps_the_best_candidates_and_never_changes_the_choice() {
         let mut t = Table::new();
         for addr in [0x40u64, 0x30, 0x20, 0x10] {
-            assert!(t.offer(addr, InitiateLowerAddress, None, "filler"));
+            assert!(t.offer(addr, None, InitiateLowerAddress, None, "filler"));
         }
         assert_eq!(t.seen(), 4, "at the bound");
         // A better newcomer displaces the worst entry.
-        assert!(t.offer(0x05, InitiateLowerAddress, None, "best"));
+        assert!(t.offer(0x05, None, InitiateLowerAddress, None, "best"));
         assert_eq!(t.seen(), 4, "seen saturates at the bound");
         // A worse newcomer is dropped.
         let mut t2 = Table::new();
         for addr in [0x10u64, 0x20, 0x30, 0x40] {
-            assert!(t2.offer(addr, InitiateLowerAddress, None, "filler"));
+            assert!(t2.offer(addr, None, InitiateLowerAddress, None, "filler"));
         }
-        assert!(!t2.offer(0x50, InitiateLowerAddress, None, "worst"));
+        assert!(!t2.offer(0x50, None, InitiateLowerAddress, None, "worst"));
         assert_eq!(t.into_best(), Some((0x05, InitiateLowerAddress, "best")));
         assert_eq!(t2.into_best(), Some((0x10, InitiateLowerAddress, "filler")));
     }
@@ -731,7 +751,7 @@ mod tests {
         for offers in [[BOARD, PHONE], [PHONE, BOARD]] {
             let mut t = Table::new();
             for addr in offers {
-                assert!(t.offer(addr, InitiateFallback, None, "peer"));
+                assert!(t.offer(addr, None, InitiateFallback, None, "peer"));
             }
             assert_eq!(
                 t.into_best().map(|(addr, _, _)| addr),
@@ -743,12 +763,63 @@ mod tests {
             let mut legacy: CandidateTable<&'static str, 4> =
                 CandidateTable::with_fallback_order(FallbackOrder::Address);
             for addr in offers {
-                assert!(legacy.offer(addr, InitiateFallback, None, "peer"));
+                assert!(legacy.offer(addr, None, InitiateFallback, None, "peer"));
             }
             assert_eq!(
                 legacy.into_best().map(|(addr, _, _)| addr),
                 Some(PHONE),
                 "the address order must still be replayable"
+            );
+        }
+    }
+
+    /// #506: the address #504 caught (`00:1A:7D:DA:71:13`, a BlueZ
+    /// host's public address). Its top bits are the OUI's, so the
+    /// guess reads it as rotating and puts it behind every board; with
+    /// the type the report carried it is a key like any static address,
+    /// and as the lowest one it wins the class.
+    #[test]
+    fn a_public_address_ranks_with_the_fixed_addresses() {
+        const PUBLIC_504: u64 = 0x001A_7DDA_7113;
+        assert!(
+            rotating_address(PUBLIC_504, None),
+            "the fixture is the guess's victim"
+        );
+        for public_first in [true, false] {
+            let mut t = Table::new();
+            let offer_public = |t: &mut Table| {
+                assert!(t.offer(
+                    PUBLIC_504,
+                    Some(AddrType::Public),
+                    InitiateFallback,
+                    None,
+                    "public"
+                ));
+            };
+            if public_first {
+                offer_public(&mut t);
+            }
+            assert!(t.offer(
+                BOARD,
+                Some(AddrType::RandomStatic),
+                InitiateFallback,
+                None,
+                "board"
+            ));
+            assert!(t.offer(
+                PHONE,
+                Some(AddrType::RandomPrivateResolvable),
+                InitiateFallback,
+                None,
+                "phone"
+            ));
+            if !public_first {
+                offer_public(&mut t);
+            }
+            assert_eq!(
+                t.into_best().map(|(_, _, label)| label),
+                Some("public"),
+                "public heard first: {public_first}"
             );
         }
     }
@@ -759,7 +830,7 @@ mod tests {
     #[test]
     fn a_rotating_address_is_still_dialled_when_it_is_the_only_candidate() {
         let mut t = Table::new();
-        assert!(t.offer(PHONE, InitiateFallback, None, "phone"));
+        assert!(t.offer(PHONE, None, InitiateFallback, None, "phone"));
         assert_eq!(t.into_best(), Some((PHONE, InitiateFallback, "phone")));
     }
 
@@ -768,8 +839,8 @@ mod tests {
         let higher = PHONE | 0x0000_0F00_0000;
         assert!(rotating_address(PHONE, None) && rotating_address(higher, None));
         let mut t = Table::new();
-        assert!(t.offer(higher, InitiateFallback, None, "heard first"));
-        assert!(t.offer(PHONE, InitiateFallback, None, "lower, heard later"));
+        assert!(t.offer(higher, None, InitiateFallback, None, "heard first"));
+        assert!(t.offer(PHONE, None, InitiateFallback, None, "lower, heard later"));
         assert_eq!(
             t.into_best(),
             Some((higher, InitiateFallback, "heard first"))
@@ -825,7 +896,7 @@ mod tests {
             let mut t: CandidateTable<&'static str, 4> =
                 CandidateTable::with_fallback_order(FallbackOrder::FirstHeard);
             for addr in offers {
-                assert!(t.offer(addr, InitiateFallback, None, "peer"));
+                assert!(t.offer(addr, None, InitiateFallback, None, "peer"));
             }
             assert_eq!(
                 t.into_best().map(|(addr, _, _)| addr),
@@ -843,8 +914,8 @@ mod tests {
             FallbackOrder::RotatingLast,
         ] {
             let mut t: CandidateTable<&'static str, 4> = CandidateTable::with_fallback_order(order);
-            assert!(t.offer(PHONE, InitiateLowerAddress, None, "heard first"));
-            assert!(t.offer(0x10, InitiateLowerAddress, None, "lowest"));
+            assert!(t.offer(PHONE, None, InitiateLowerAddress, None, "heard first"));
+            assert!(t.offer(0x10, None, InitiateLowerAddress, None, "lowest"));
             assert_eq!(
                 t.into_best(),
                 Some((0x10, InitiateLowerAddress, "lowest")),
@@ -861,8 +932,8 @@ mod tests {
         // groups, which is what keeps this a preference and not a
         // second eligibility rule.
         let mut t = Table::new();
-        assert!(t.offer(BOARD, InitiateFallback, Some(1), "fixed, nearly full"));
-        assert!(t.offer(PHONE, InitiateFallback, Some(3), "rotating, empty"));
+        assert!(t.offer(BOARD, None, InitiateFallback, Some(1), "fixed, nearly full"));
+        assert!(t.offer(PHONE, None, InitiateFallback, Some(3), "rotating, empty"));
         assert_eq!(
             t.into_best(),
             Some((PHONE, InitiateFallback, "rotating, empty"))
@@ -875,9 +946,9 @@ mod tests {
         // advertising through the window must not lose its place to one
         // that advertised once.
         let mut t = Table::new();
-        assert!(t.offer(0x90, InitiateFallback, None, "first"));
-        assert!(t.offer(0x10, InitiateFallback, None, "second"));
-        assert!(t.offer(0x90, InitiateFallback, None, "first again"));
+        assert!(t.offer(0x90, None, InitiateFallback, None, "first"));
+        assert!(t.offer(0x10, None, InitiateFallback, None, "second"));
+        assert!(t.offer(0x90, None, InitiateFallback, None, "first again"));
         assert_eq!(t.seen(), 2);
         assert_eq!(
             t.into_best(),
@@ -890,19 +961,19 @@ mod tests {
     fn overflow_keeps_the_earliest_rotating_candidates() {
         let mut t = Table::new();
         for addr in [0x40u64, 0x30, 0x20, 0x10] {
-            assert!(t.offer(addr, InitiateFallback, None, "held"));
+            assert!(t.offer(addr, None, InitiateFallback, None, "held"));
         }
         // Lower-addressed than every holder and rotating like them, so
         // under the pre-#412 order it would have displaced one; now it
         // ranks worse than all four and is dropped.
-        assert!(!t.offer(0x05, InitiateFallback, None, "latecomer"));
+        assert!(!t.offer(0x05, None, InitiateFallback, None, "latecomer"));
         assert_eq!(t.seen(), 4);
         // A fixed address displaces one of them whenever it arrives.
         let mut fixed = Table::new();
         for addr in [0x40u64, 0x30, 0x20, 0x10] {
-            assert!(fixed.offer(addr, InitiateFallback, None, "held"));
+            assert!(fixed.offer(addr, None, InitiateFallback, None, "held"));
         }
-        assert!(fixed.offer(BOARD, InitiateFallback, None, "fixed"));
+        assert!(fixed.offer(BOARD, None, InitiateFallback, None, "fixed"));
         assert_eq!(t.into_best(), Some((0x40, InitiateFallback, "held")));
         assert_eq!(fixed.into_best(), Some((BOARD, InitiateFallback, "fixed")));
     }
@@ -911,9 +982,9 @@ mod tests {
     fn a_full_table_still_evicts_a_fallback_for_a_strict_newcomer() {
         let mut t = Table::new();
         for addr in [0x10u64, 0x20, 0x30, 0x40] {
-            assert!(t.offer(addr, InitiateFallback, None, "fallback"));
+            assert!(t.offer(addr, None, InitiateFallback, None, "fallback"));
         }
-        assert!(t.offer(0xF0, InitiateLowerAddress, None, "strict"));
+        assert!(t.offer(0xF0, None, InitiateLowerAddress, None, "strict"));
         assert_eq!(
             t.into_best(),
             Some((0xF0, InitiateLowerAddress, "strict")),

@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::links::{IdentityHash, SERVICE_UUID_U128};
 use super::{Ev, LINK_QUEUE_DEPTH};
 use crate::event_log::Scalar;
-use leviculum_ble_tx::COMPANY_ID;
+use leviculum_ble_tx::{AddrType, COMPANY_ID};
 
 /// The Columba GATT service and its three characteristics
 /// (BLE_PROTOCOL_v2.2 §GATT Service Structure).
@@ -332,6 +332,7 @@ impl ScanTask {
     async fn probe(&self, addr: Address) -> Option<Ev> {
         let device = self.adapter.device(addr).ok()?;
         let rssi = device.rssi().await.ok()?;
+        let addr_type = device_addr_type(&device).await;
         let offers_service = device
             .uuids()
             .await
@@ -345,11 +346,26 @@ impl ScanTask {
             .and_then(|mut m| m.remove(&COMPANY_ID));
         Some(Ev::Scan {
             addr,
+            addr_type,
             rssi,
             offers_service,
             record,
         })
     }
+}
+
+/// The address type BlueZ holds for a device (#506), `None` when it
+/// cannot say: the device object is gone, or the property read failed.
+pub(crate) async fn addr_type(adapter: &Adapter, addr: Address) -> Option<AddrType> {
+    device_addr_type(&adapter.device(addr).ok()?).await
+}
+
+async fn device_addr_type(device: &bluer::Device) -> Option<AddrType> {
+    let kind = device.address_type().await.ok()?;
+    Some(super::links::addr_type_from_bluez(
+        kind == bluer::AddressType::LeRandom,
+        &device.address().0,
+    ))
 }
 
 /// One central-role connection: connect, read the peer's identity, ask

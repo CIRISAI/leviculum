@@ -25,9 +25,10 @@
 use leviculum_ble_tx::{
     addr_value, effective_tx_gap_ms, identity_hint, judge_duplicate, manufacturer_data_with_hint,
     parse_peer_advertisement, rotating_address, should_initiate, usable_mtu, with_free_slots,
-    CandidateTable, ChurnLedger, ChurnPolicy, ConnectDecision, DupRule, DupVerdict, LeaveNoted,
-    Origin, ScanMode, TxGap, IDENTITY_HINT_LEN, MANUFACTURER_DATA_HINT_LEN, MIN_USABLE_MTU,
-    PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    AddrType, CandidateTable, ChurnLedger, ChurnPolicy, ConnectDecision, DupRule, DupVerdict,
+    LeaveNoted, Origin, ScanMode, TxGap, IDENTITY_HINT_LEN, MANUFACTURER_DATA_HINT_LEN,
+    MIN_USABLE_MTU, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
+    WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, FRAGMENT_TYPE_CONTINUE,
@@ -1096,6 +1097,23 @@ pub(crate) fn addr_value_display(addr: &Addr) -> u64 {
     addr_value(&le)
 }
 
+/// The address type BlueZ names for a device, in the terms the
+/// firmware's SoftDevice reports (#506). BlueZ says only public or
+/// random (`random`); a random address's class is its top two bits
+/// (Core Spec Vol 6 Part B §1.3.2), so the subtype is read from there.
+/// The reserved `10` reads as non-resolvable: neither is a key, so
+/// [`rotating_address`] answers the same for both.
+pub(crate) fn addr_type_from_bluez(random: bool, addr: &Addr) -> AddrType {
+    if !random {
+        return AddrType::Public;
+    }
+    match addr_value_display(addr) >> 46 {
+        0b11 => AddrType::RandomStatic,
+        0b01 => AddrType::RandomPrivateResolvable,
+        _ => AddrType::RandomPrivateNonResolvable,
+    }
+}
+
 /// What one scanner sighting resolved to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ScanDecision {
@@ -1462,6 +1480,7 @@ impl ScanScheduler {
     pub(crate) fn offer(
         &mut self,
         addr: Addr,
+        addr_type: Option<AddrType>,
         decision: ConnectDecision,
         free_slots: Option<u8>,
         now_ms: u64,
@@ -1469,7 +1488,13 @@ impl ScanScheduler {
         let (_, table) = self
             .window
             .get_or_insert_with(|| (now_ms + SCAN_WINDOW_COLLECT_MS, CandidateTable::new()));
-        table.offer(addr_value_display(&addr), decision, free_slots, addr);
+        table.offer(
+            addr_value_display(&addr),
+            addr_type,
+            decision,
+            free_slots,
+            addr,
+        );
     }
 
     /// Close the window once its bound has passed: the dial target —
@@ -1593,16 +1618,20 @@ impl ChurnGate {
     /// peer's own leaving — silence until the expiry swept it, or a
     /// replacement by its next connection. `addr` is the address the
     /// class is read from (the firmware reads the same one: the expired
-    /// link's, or the newcomer's on a replacement). `None` when the
-    /// address is a static one and nothing was recorded: a flaky board
+    /// link's, or the newcomer's on a replacement), with the type BlueZ
+    /// named for it (`None` when BlueZ could not). `None` when the
+    /// address is a fixed one and nothing was recorded: a flaky board
     /// must never arm a cooldown that every phone in the room pays for.
     pub(crate) fn note_leave(
         &mut self,
         identity: &IdentityHash,
         addr: &Addr,
+        addr_type: Option<AddrType>,
         now_ms: u64,
     ) -> Option<LeaveNoted> {
-        rotating_address(addr_value_display(addr), None)
+        // The type, so a public address arms nothing (#506; the guess
+        // classed #504's as rotating).
+        rotating_address(addr_value_display(addr), addr_type)
             .then(|| self.ledger.note_leave(self.policy, identity, now_ms))
     }
 
@@ -1613,11 +1642,13 @@ impl ChurnGate {
     pub(crate) fn holds(
         &mut self,
         addr: &Addr,
+        addr_type: Option<AddrType>,
         decision: ConnectDecision,
         now_ms: u64,
     ) -> Option<ChurnHeld> {
         if decision != ConnectDecision::InitiateFallback
-            || !rotating_address(addr_value_display(addr), None)
+            // The type, so a public address is never held (#506).
+            || !rotating_address(addr_value_display(addr), addr_type)
             || !self.ledger.rotating_fallback_held(now_ms)
         {
             return None;
@@ -2318,7 +2349,13 @@ mod tests {
         let mut s = ScanScheduler::new(0);
         assert_eq!(s.poll(10_000), None, "no window before a candidate");
 
-        s.offer(ADDR_2, ConnectDecision::InitiateLowerAddress, None, 1_000);
+        s.offer(
+            ADDR_2,
+            None,
+            ConnectDecision::InitiateLowerAddress,
+            None,
+            1_000,
+        );
         assert_eq!(
             s.poll(1_000 + SCAN_WINDOW_COLLECT_MS - 1),
             None,
@@ -2326,9 +2363,16 @@ mod tests {
         );
         // A lower-addressed strict candidate and an even lower fallback
         // candidate arrive during the window.
-        s.offer(ADDR_1, ConnectDecision::InitiateLowerAddress, None, 2_000);
+        s.offer(
+            ADDR_1,
+            None,
+            ConnectDecision::InitiateLowerAddress,
+            None,
+            2_000,
+        );
         s.offer(
             [0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+            None,
             ConnectDecision::InitiateFallback,
             None,
             2_500,
@@ -2372,8 +2416,14 @@ mod tests {
         assert!(ADDR_1 < ADDR_2, "the fuller peer is also the lower address");
 
         let mut s = ScanScheduler::new(0);
-        s.offer(ADDR_1, nearly_full.decision, nearly_full.free_slots, 1_000);
-        s.offer(ADDR_2, empty.decision, empty.free_slots, 1_100);
+        s.offer(
+            ADDR_1,
+            None,
+            nearly_full.decision,
+            nearly_full.free_slots,
+            1_000,
+        );
+        s.offer(ADDR_2, None, empty.decision, empty.free_slots, 1_100);
         let (addr, _, seen) = s
             .poll(1_000 + SCAN_WINDOW_COLLECT_MS)
             .expect("window closes at its bound");
@@ -2386,8 +2436,8 @@ mod tests {
             .expect("a Columba peer");
         assert_eq!(silent.free_slots, None);
         let mut s = ScanScheduler::new(0);
-        s.offer(ADDR_1, silent.decision, silent.free_slots, 1_000);
-        s.offer(ADDR_2, empty.decision, empty.free_slots, 1_100);
+        s.offer(ADDR_1, None, silent.decision, silent.free_slots, 1_000);
+        s.offer(ADDR_2, None, empty.decision, empty.free_slots, 1_100);
         assert_eq!(
             s.poll(1_000 + SCAN_WINDOW_COLLECT_MS).map(|(a, _, _)| a),
             Some(ADDR_1),
@@ -2406,6 +2456,7 @@ mod tests {
         assert_eq!(s.mode(false, SCAN_FALLBACK_AFTER_MS).0, ScanMode::Fallback);
         s.offer(
             ADDR_1,
+            None,
             ConnectDecision::InitiateFallback,
             None,
             SCAN_FALLBACK_AFTER_MS,
@@ -2421,6 +2472,7 @@ mod tests {
         // The strict counterpart restarts the phase.
         s.offer(
             ADDR_1,
+            None,
             ConnectDecision::InitiateLowerAddress,
             None,
             closed + 2,
@@ -3106,7 +3158,7 @@ mod tests {
         let expired = t.expire(at);
         assert_eq!(expired.links, vec![(identity, addr, Role::Peripheral)]);
         for (identity, addr, _) in expired.links {
-            gate.note_leave(&identity, &addr, at);
+            gate.note_leave(&identity, &addr, None, at);
         }
         at
     }
@@ -3129,7 +3181,7 @@ mod tests {
         for _ in 0..CHURN_POLICY.leave_run {
             now = session_expires(&mut t, &mut gate, ID_B, ADDR_1, now + 5_000);
         }
-        assert_eq!(gate.holds(&ADDR_1, fallback, now + 1), None);
+        assert_eq!(gate.holds(&ADDR_1, None, fallback, now + 1), None);
 
         // The phone: three sessions, three rotations, three expiries,
         // all inside the window.
@@ -3148,30 +3200,79 @@ mod tests {
         let fourth = phone_addr(4);
         let until = armed_at + CHURN_POLICY.cooldown_ms;
         assert_eq!(
-            gate.holds(&fourth, fallback, armed_at + 1),
+            gate.holds(&fourth, None, fallback, armed_at + 1),
             Some(ChurnHeld {
                 until_ms: until,
                 fresh: true
             })
         );
         assert_eq!(
-            gate.holds(&fourth, fallback, until - 1),
+            gate.holds(&fourth, None, fallback, until - 1),
             Some(ChurnHeld {
                 until_ms: until,
                 fresh: false
             }),
             "one line per cooldown"
         );
-        assert_eq!(gate.holds(&fourth, fallback, until), None, "a deadline");
+        assert_eq!(
+            gate.holds(&fourth, None, fallback, until),
+            None,
+            "a deadline"
+        );
 
         // Under the cooldown, the scope: a strict verdict for the same
         // rotating address and a fixed-addressed fallback candidate are
         // both dialled at once.
         assert_eq!(
-            gate.holds(&fourth, ConnectDecision::InitiateLowerAddress, armed_at + 1),
+            gate.holds(
+                &fourth,
+                None,
+                ConnectDecision::InitiateLowerAddress,
+                armed_at + 1
+            ),
             None
         );
-        assert_eq!(gate.holds(&ADDR_2, fallback, armed_at + 1), None);
+        assert_eq!(gate.holds(&ADDR_2, None, fallback, armed_at + 1), None);
+    }
+
+    /// #506: lnsd's churn gate reads the address type too. #504's
+    /// address (`00:1A:7D:DA:71:13`, a BlueZ host's public address)
+    /// leaving as often as the phone arms nothing, and under a cooldown
+    /// the phone armed its fallback candidacy is not held, because
+    /// BlueZ names it public; the guess classed it rotating on both.
+    #[test]
+    fn a_public_address_is_not_classed_rotating() {
+        const PUBLIC_504: Addr = [0x00, 0x1A, 0x7D, 0xDA, 0x71, 0x13];
+        let public = Some(addr_type_from_bluez(false, &PUBLIC_504));
+        assert_eq!(public, Some(AddrType::Public));
+        assert!(rotating_address(addr_value_display(&PUBLIC_504), None));
+        let fallback = ConnectDecision::InitiateFallback;
+
+        let mut gate = ChurnGate::new(CHURN_POLICY);
+        for leave in 1..=u64::from(CHURN_POLICY.leave_run) {
+            assert_eq!(
+                gate.note_leave(&ID_B, &PUBLIC_504, public, leave * 5_000),
+                None
+            );
+        }
+        assert_eq!(gate.holds(&PUBLIC_504, public, fallback, 20_001), None);
+
+        // Armed by the phone, the cooldown still passes it by.
+        let phone = Some(addr_type_from_bluez(true, &phone_addr(1)));
+        assert_eq!(phone, Some(AddrType::RandomPrivateResolvable));
+        let mut armed = false;
+        for leave in 1..=CHURN_POLICY.leave_run {
+            let at = u64::from(leave) * 5_000;
+            let addr = phone_addr(u8::try_from(leave).expect("a small run"));
+            armed = gate
+                .note_leave(&ID_A, &addr, phone, at)
+                .is_some_and(|noted| noted.armed);
+        }
+        assert!(armed, "the control: the phone's departures arm");
+        assert!(gate
+            .holds(&phone_addr(9), phone, fallback, 20_001)
+            .is_some());
+        assert_eq!(gate.holds(&PUBLIC_504, public, fallback, 20_001), None);
     }
 
     /// The zero: a gate on the policy that keeps no ledger records no
@@ -3185,7 +3286,12 @@ mod tests {
             now = session_expires(&mut t, &mut gate, ID_A, phone_addr(rotation), now + 5_000);
         }
         assert_eq!(
-            gate.holds(&phone_addr(6), ConnectDecision::InitiateFallback, now + 1),
+            gate.holds(
+                &phone_addr(6),
+                None,
+                ConnectDecision::InitiateFallback,
+                now + 1
+            ),
             None
         );
     }

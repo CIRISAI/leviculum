@@ -1995,8 +1995,8 @@ fn in_rotating_group(addr: u64, decision: ConnectDecision, free: Option<u8>) -> 
     assert_ne!(addr, PROBE, "the probe's address is in the room");
     let mut table: CandidateTable<bool, 2> =
         CandidateTable::with_fallback_order(FallbackOrder::RotatingLast);
-    table.offer(addr, decision, free, false);
-    table.offer(PROBE, decision, free, true);
+    table.offer(addr, None, decision, free, false);
+    table.offer(PROBE, None, decision, free, true);
     table
         .into_best()
         .map(|(_, _, probe_won)| probe_won)
@@ -2088,7 +2088,7 @@ fn elect(
             if !admitted {
                 continue;
             }
-            window.offer(table_key(addr), decision, free, p);
+            window.offer(table_key(addr), None, decision, free, p);
         }
         window.into_best().map(|(_, _, p)| p)
     };
@@ -6407,6 +6407,7 @@ fn dial_from(own_addr: u64, room: &[Advertiser], mode: ScanMode) -> Option<&'sta
         let decision = should_initiate(DUAL_ROLE, own_addr, peer.caps, peer.addr, mode);
         window.offer(
             peer.addr,
+            None,
             decision,
             peer.caps.and_then(free_slots),
             peer.label,
@@ -6736,6 +6737,7 @@ fn dial_admitted(
         if admission.admitted() {
             window.offer(
                 r.peer.addr,
+                Some(r.addr_type),
                 admission.decision,
                 r.peer.caps.and_then(free_slots),
                 r.peer.label,

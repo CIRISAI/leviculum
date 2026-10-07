@@ -44,7 +44,7 @@ use super::{
     ReadySignal,
 };
 use crate::event_log::Scalar;
-use leviculum_ble_tx::dial_preference;
+use leviculum_ble_tx::{dial_preference, AddrType};
 use leviculum_core::traits::{InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
 use links::{
@@ -134,6 +134,9 @@ pub(crate) enum Ev {
     /// One scanner sighting of a device offering (or not) the service.
     Scan {
         addr: Address,
+        /// The type BlueZ holds for the address, `None` when it could
+        /// not say (#506).
+        addr_type: Option<AddrType>,
         rssi: Option<i16>,
         offers_service: bool,
         /// Payload of the CID 0xFFFF manufacturer record, if present.
@@ -384,6 +387,11 @@ impl BleTask {
         // departure sites below, read where a sighting would enter the
         // collection window.
         let mut churn = links::ChurnGate::new(links::CHURN_POLICY);
+        // The address type of every handshaked link, read from BlueZ at
+        // the handshake (#506): the departure that ends the link reads
+        // it, when the device object may already be gone. Pruned to the
+        // table's links on every tick.
+        let mut link_addr_types: HashMap<Addr, AddrType> = HashMap::new();
 
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -425,6 +433,7 @@ impl BleTask {
                         &mut backoff_until,
                         &mut last_decision,
                         &mut churn,
+                        &mut link_addr_types,
                         &ev_tx,
                         now_ms(Instant::now()),
                     )
@@ -479,7 +488,8 @@ impl BleTask {
                             Role::Central => "expiry_central",
                             Role::Peripheral => "expiry_peripheral",
                         };
-                        self.note_peer_leave(&mut churn, &identity, &addr, reason, now);
+                        let addr_type = link_addr_types.get(&addr).copied();
+                        self.note_peer_leave(&mut churn, &identity, &addr, addr_type, reason, now);
                         self.log_link_down(&identity, role, "timeout");
                         central_pipes.remove(&addr);
                         disconnect_quietly(&adapter, addr).await;
@@ -494,6 +504,7 @@ impl BleTask {
                         disconnect_quietly(&adapter, addr).await;
                     }
                     backoff_until.retain(|_, until| *until > now);
+                    link_addr_types.retain(|addr, _| table.knows_addr(addr));
                     // A collection window whose bound passed without a
                     // further sighting closes on the tick.
                     self.dial_window_choice(
@@ -527,6 +538,7 @@ impl BleTask {
         backoff_until: &mut HashMap<Addr, u64>,
         last_decision: &mut HashMap<Addr, links::ScanDecision>,
         churn: &mut links::ChurnGate,
+        link_addr_types: &mut HashMap<Addr, AddrType>,
         ev_tx: &mpsc::Sender<Ev>,
         now: u64,
     ) {
@@ -551,12 +563,18 @@ impl BleTask {
                         // A connection event in either role restarts
                         // the strict phase (#375 §0).
                         scheduler.note_reset(now);
+                        let addr_type = bluez::addr_type(adapter, addr).await;
+                        if let Some(addr_type) = addr_type {
+                            link_addr_types.insert(addr.0, addr_type);
+                        }
                         let first_link = displaced.is_none();
                         if let Some(old) = displaced {
                             // A replacement is a departure too (#417):
                             // the identity left its old address even
                             // though it came straight back.
-                            self.note_peer_leave(churn, &identity, &addr.0, "replaced", now);
+                            self.note_peer_leave(
+                                churn, &identity, &addr.0, addr_type, "replaced", now,
+                            );
                             self.log_link_replaced(&identity, &addr.0, Role::Peripheral, &old);
                             self.log_link_down(&old.identity, old.role, "displaced");
                             central_pipes.remove(&old.addr);
@@ -598,6 +616,7 @@ impl BleTask {
             }
             Ev::Scan {
                 addr,
+                addr_type,
                 rssi,
                 offers_service,
                 record,
@@ -704,7 +723,7 @@ impl BleTask {
                     || table.knows_identity_hint(decision.identity_hint)
                     || dial_queue.knows(&addr.0)
                     || backoff_until.get(&addr.0).is_some_and(|until| *until > now)
-                    || self.churn_held(churn, &addr.0, decision.decision, now)
+                    || self.churn_held(churn, &addr.0, addr_type, decision.decision, now)
                 {
                     return;
                 }
@@ -715,7 +734,15 @@ impl BleTask {
                 // advertised peer (#375 item 3), then the lowest
                 // address, except that a peer which redraws its address
                 // does not get to win that tie with it (#412).
-                scheduler.offer(addr.0, decision.decision, decision.free_slots, now);
+                // The type ranks a public address with the fixed ones
+                // (#506; the guess put #504's behind every board).
+                scheduler.offer(
+                    addr.0,
+                    addr_type,
+                    decision.decision,
+                    decision.free_slots,
+                    now,
+                );
                 self.dial_window_choice(
                     scheduler,
                     table,
@@ -744,9 +771,15 @@ impl BleTask {
                         // still fires at the session's end; its release
                         // is then a no-op.
                         dial_queue.release(&addr.0, now);
+                        let addr_type = bluez::addr_type(adapter, addr).await;
+                        if let Some(addr_type) = addr_type {
+                            link_addr_types.insert(addr.0, addr_type);
+                        }
                         let first_link = displaced.is_none();
                         if let Some(old) = displaced {
-                            self.note_peer_leave(churn, &identity, &addr.0, "replaced", now);
+                            self.note_peer_leave(
+                                churn, &identity, &addr.0, addr_type, "replaced", now,
+                            );
                             self.log_link_replaced(&identity, &addr.0, Role::Central, &old);
                             self.log_link_down(&old.identity, old.role, "displaced");
                             central_pipes.remove(&old.addr);
@@ -1191,10 +1224,11 @@ impl BleTask {
         churn: &mut links::ChurnGate,
         identity: &IdentityHash,
         addr: &Addr,
+        addr_type: Option<AddrType>,
         reason: &'static str,
         now: u64,
     ) {
-        let Some(noted) = churn.note_leave(identity, addr, now) else {
+        let Some(noted) = churn.note_leave(identity, addr, addr_type, now) else {
             return;
         };
         if noted.armed {
@@ -1220,10 +1254,11 @@ impl BleTask {
         &self,
         churn: &mut links::ChurnGate,
         addr: &Addr,
+        addr_type: Option<AddrType>,
         decision: leviculum_ble_tx::ConnectDecision,
         now: u64,
     ) -> bool {
-        let Some(held) = churn.holds(addr, decision, now) else {
+        let Some(held) = churn.holds(addr, addr_type, decision, now) else {
             return false;
         };
         if held.fresh {

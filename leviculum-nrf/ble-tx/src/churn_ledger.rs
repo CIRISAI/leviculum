@@ -35,10 +35,11 @@
 //! switch, displacement we initiated), a supervision timeout or range
 //! loss (a board that walks away wears a static address, and its
 //! address is [`crate::dial_ledger`]'s and the dead-end table's
-//! business), and any session with a static-addressed peer. The filter
-//! is the caller's: this table is fed leaves of rotating-addressed
-//! sessions only, so that a flaky board can never arm a pause that is
-//! paid by every phone in the room.
+//! business), and any session with a fixed-addressed peer, static or
+//! public. The filter is [`ChurnLedger::note_departure`]'s, or the
+//! caller's before [`ChurnLedger::note_leave`]: this table is fed leaves
+//! of rotating-addressed sessions only, so that a flaky board can never
+//! arm a pause that is paid by every phone in the room.
 //!
 //! # Why the key is an identity and the effect is a CLASS
 //!
@@ -79,6 +80,7 @@
 //! wire/semantics deviation rule does not apply — no wire format and
 //! no Python peer is involved.
 
+use crate::admission::PeerAddr;
 use crate::dial_ledger::LEDGER_SLOTS;
 
 /// When a run of leaves closes the rotating fallback class, and for
@@ -219,6 +221,21 @@ impl ChurnLedger {
         LeaveNoted { run, armed }
     }
 
+    /// Record one departure of `peer`'s identity iff `peer` rotates —
+    /// the class filter the module docs give the caller, in one place
+    /// for the firmware (#506). `None` for a fixed address, public or
+    /// static random, which records nothing.
+    pub fn note_departure(
+        &mut self,
+        policy: ChurnPolicy,
+        peer: PeerAddr,
+        identity: &[u8; 16],
+        now_ms: u64,
+    ) -> Option<LeaveNoted> {
+        peer.rotating()
+            .then(|| self.note_leave(policy, identity, now_ms))
+    }
+
     /// Whether a fallback dial to a ROTATING-addressed candidate is
     /// held right now. A strict verdict is never held, and neither is
     /// a fallback candidate whose address is a key — the class is the
@@ -328,6 +345,42 @@ mod tests {
             !ledger.rotating_fallback_held(at + POLICY.cooldown_ms),
             "the cooldown is a deadline, not a state"
         );
+    }
+
+    /// #506: the address #504 caught (`00:1A:7D:DA:71:13`, Public)
+    /// leaves as often as the measured phone and arms nothing, because
+    /// its type says it is a key; the same value read as random would.
+    #[test]
+    fn a_public_address_leaving_arms_no_churn_cooldown() {
+        use crate::admission::AddrType;
+        const PUBLIC_504: u64 = 0x001A_7DDA_7113;
+        let host = identity(5);
+        let mut ledger = ChurnLedger::new();
+        for leave in 1..=POLICY.leave_run {
+            let at = u64::from(leave) * ROTATE_MS;
+            let public = PeerAddr {
+                value: PUBLIC_504,
+                addr_type: AddrType::Public,
+            };
+            assert_eq!(ledger.note_departure(POLICY, public, &host, at), None);
+            assert!(!ledger.rotating_fallback_held(at));
+        }
+        assert_eq!(ledger.run_of(&host), 0);
+        // The control: a resolvable private address with the same
+        // cadence does arm, so the departures above were enough to.
+        let mut control = ChurnLedger::new();
+        let phone = PeerAddr {
+            value: 0x4A1B_2C3D_4E5F,
+            addr_type: AddrType::RandomPrivateResolvable,
+        };
+        let mut armed = false;
+        for leave in 1..=POLICY.leave_run {
+            let at = u64::from(leave) * ROTATE_MS;
+            armed = control
+                .note_departure(POLICY, phone, &host, at)
+                .is_some_and(|noted| noted.armed);
+        }
+        assert!(armed);
     }
 
     /// The window is what keeps an occasional leaver innocent: the
