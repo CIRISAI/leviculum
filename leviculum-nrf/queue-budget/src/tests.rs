@@ -777,3 +777,128 @@ fn the_duty_hold_lifts_at_the_first_bin_that_leaves_the_rolling_hour() {
         HoldVerdict::DropStale { .. }
     ));
 }
+
+/// leviculum#494: the 10 % EU cap, the budget the field relay ran under.
+const CAP_10_PCT_MS: u32 = 360_000;
+
+#[test]
+fn the_cap_in_milliseconds_matches_the_core_fraction() {
+    use leviculum_core::rnode::{alock_u16_to_fraction, AIRTIME_LONGTERM_MS};
+    assert_eq!(lt_cap_ms(100), 36_000);
+    assert_eq!(lt_cap_ms(1_000), CAP_10_PCT_MS);
+    for at in [0u16, 1, 100, 1_000, 5_000, 9_999, 10_000, u16::MAX] {
+        let expected = (alock_u16_to_fraction(at) as f64 * AIRTIME_LONGTERM_MS as f64).round();
+        assert_eq!(lt_cap_ms(at) as f64, expected, "lt_alock {at}");
+    }
+}
+
+#[test]
+fn own_traffic_goes_from_an_empty_ledger() {
+    assert!(own_traffic_allowed(
+        0,
+        CAP_10_PCT_MS,
+        OWN_TRAFFIC_SHARE_PERMILLE
+    ));
+}
+
+#[test]
+fn own_traffic_goes_one_millisecond_below_the_share() {
+    assert!(own_traffic_allowed(
+        CAP_10_PCT_MS / 2 - 1,
+        CAP_10_PCT_MS,
+        OWN_TRAFFIC_SHARE_PERMILLE
+    ));
+}
+
+#[test]
+fn own_traffic_yields_exactly_at_the_share() {
+    assert!(!own_traffic_allowed(
+        CAP_10_PCT_MS / 2,
+        CAP_10_PCT_MS,
+        OWN_TRAFFIC_SHARE_PERMILLE
+    ));
+}
+
+#[test]
+fn own_traffic_yields_above_the_share_and_at_the_cap() {
+    let share = OWN_TRAFFIC_SHARE_PERMILLE;
+    assert!(!own_traffic_allowed(
+        CAP_10_PCT_MS / 2 + 1,
+        CAP_10_PCT_MS,
+        share
+    ));
+    assert!(!own_traffic_allowed(CAP_10_PCT_MS, CAP_10_PCT_MS, share));
+    assert!(!own_traffic_allowed(u32::MAX, CAP_10_PCT_MS, share));
+}
+
+#[test]
+fn an_unlimited_ledger_refuses_nothing() {
+    for used in [0, 1, CAP_10_PCT_MS, u32::MAX] {
+        assert!(own_traffic_allowed(used, 0, OWN_TRAFFIC_SHARE_PERMILLE));
+    }
+}
+
+#[test]
+fn the_share_is_a_parameter_not_a_hidden_half() {
+    // The control on the default: a different share moves the edge.
+    assert!(own_traffic_allowed(CAP_10_PCT_MS / 2, CAP_10_PCT_MS, 600));
+    assert!(!own_traffic_allowed(1, CAP_10_PCT_MS, 0));
+    assert!(own_traffic_allowed(CAP_10_PCT_MS - 1, CAP_10_PCT_MS, 1_000));
+    assert!(!own_traffic_allowed(CAP_10_PCT_MS, CAP_10_PCT_MS, 1_000));
+}
+
+/// The propagation node's decision: every originating site shares one
+/// tracker, the yield is stated on its edge only, and the first check below
+/// the share again re-arms the edge for the next yield.
+#[test]
+fn the_yield_is_stated_once_per_edge() {
+    let share = OWN_TRAFFIC_SHARE_PERMILLE;
+    let half = CAP_10_PCT_MS / 2;
+    let mut gate = OwnShare::new();
+    assert_eq!(gate.check(0, CAP_10_PCT_MS, share), OwnVerdict::Go);
+    assert!(!gate.yielding());
+    // The sync round meets the share: the edge.
+    assert_eq!(
+        gate.check(half, CAP_10_PCT_MS, share),
+        OwnVerdict::Yield { edge: true }
+    );
+    // The offer answer a second later, and every tick after: no new line.
+    for used in [half, half + 1_000, CAP_10_PCT_MS] {
+        assert_eq!(
+            gate.check(used, CAP_10_PCT_MS, share),
+            OwnVerdict::Yield { edge: false }
+        );
+    }
+    assert!(gate.yielding());
+    // The rolling hour frees airtime: the node originates again ...
+    assert_eq!(gate.check(half - 1, CAP_10_PCT_MS, share), OwnVerdict::Go);
+    // ... and the next crossing is a new edge, stated again.
+    assert_eq!(
+        gate.check(half, CAP_10_PCT_MS, share),
+        OwnVerdict::Yield { edge: true }
+    );
+}
+
+/// The share on the core's real ledger: a relay whose rolling hour has
+/// spent half its 10 % cap yields its own traffic while the lock gate still
+/// keys every forwarded frame, so forwarding keeps the other half.
+#[test]
+fn half_the_real_ledger_stops_own_traffic_while_the_lock_stays_open() {
+    use leviculum_core::rnode::{AirtimeTracker, AIRTIME_BINLEN_MS};
+    let mut ledger = AirtimeTracker::new();
+    ledger.set_lt_limit_u16(1_000);
+    // 60 bins of 3000 ms: 180 000 ms, exactly half of 360 000 ms.
+    for i in 0..60u64 {
+        ledger.add_airtime(i * AIRTIME_BINLEN_MS, 3_000);
+    }
+    let now = 60 * AIRTIME_BINLEN_MS;
+    ledger.update(now);
+    let cap = lt_cap_ms(1_000);
+    assert_eq!(ledger.long_term_airtime_ms(), cap / 2);
+    assert!(!ledger.is_locked(), "forwarding still keys at half the cap");
+    assert!(!own_traffic_allowed(
+        ledger.long_term_airtime_ms(),
+        cap,
+        OWN_TRAFFIC_SHARE_PERMILLE
+    ));
+}

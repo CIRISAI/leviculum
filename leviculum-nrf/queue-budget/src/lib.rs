@@ -432,5 +432,101 @@ impl DutyHolds {
     }
 }
 
+/// The share of the lawful long-term airtime budget a propagation node's
+/// OWN originated traffic may use, in permille: half (Lew, 2026-10-07,
+/// leviculum#433, #384).
+///
+/// The field relay of 2026-09-27 was a propagation node. Its own sync
+/// traffic filled the 10 % budget, the duty hold followed, and the link
+/// setups of everyone behind it died in the hold. A relay that is also a
+/// propagation node therefore stops starting work of its own once the
+/// rolling hour has spent half the cap, so forwarding always has the other
+/// half. The split is by origin, decided where the traffic is originated:
+/// the LoRa queue still treats every frame alike.
+///
+/// A constant, not a persisted setting: the propagation-node record
+/// (`leviculum_core::pn_config_store`) has no room for a third field without
+/// a format bump, which the module docs of that record name.
+pub const OWN_TRAFFIC_SHARE_PERMILLE: u16 = 500;
+
+/// The long-term airtime cap in milliseconds of the rolling hour for a
+/// `CMD_LT_ALOCK` value, or 0 for "unlimited".
+///
+/// The same mapping as `leviculum_core::rnode::alock_u16_to_fraction`
+/// (`at / 10000`, 0 and anything at or above 100 % unlimited), in integer
+/// milliseconds so the firmware can publish it in an atomic and nobody pays
+/// a float: 100 (1 %) is 36 000 ms, 1000 (10 %) is 360 000 ms.
+pub const fn lt_cap_ms(lt_alock: u16) -> u32 {
+    if lt_alock == 0 || lt_alock >= 10_000 {
+        0
+    } else {
+        lt_alock as u32 * 360
+    }
+}
+
+/// Whether a node may originate traffic of its own: true while the rolling
+/// hour's used airtime is below `share_permille` of the long-term cap.
+///
+/// `lt_cap_ms` 0 is an unlimited ledger (the tracker's own convention for
+/// a limit of 0), against which nothing is refused. Exactly at the share is
+/// refused: "below" is the rule, so a node that has spent precisely half
+/// leaves the rest to forwarding.
+pub fn own_traffic_allowed(lt_used_ms: u32, lt_cap_ms: u32, share_permille: u16) -> bool {
+    if lt_cap_ms == 0 {
+        return true;
+    }
+    (lt_used_ms as u64) * 1000 < (lt_cap_ms as u64) * (share_permille as u64)
+}
+
+/// What [`OwnShare::check`] decided for one originating site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnVerdict {
+    /// Below the share: originate.
+    Go,
+    /// At or above the share: do not originate, retry on the caller's own
+    /// cadence.
+    Yield {
+        /// True on the first refusal after a [`Go`](Self::Go) (or since
+        /// boot), so the caller states the yield once per edge and not once
+        /// per tick.
+        edge: bool,
+    },
+}
+
+/// The own-traffic share as one decision with memory of its edge, shared by
+/// every site where a propagation node originates traffic.
+///
+/// One tracker for all sites, so a sync round refused and an offer answer
+/// refused a second later are the same yield and produce one line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OwnShare {
+    yielding: bool,
+}
+
+impl OwnShare {
+    /// A tracker that has not yielded yet.
+    pub const fn new() -> Self {
+        Self { yielding: false }
+    }
+
+    /// Apply [`own_traffic_allowed`] and report whether a refusal is the
+    /// edge into yielding.
+    pub fn check(&mut self, lt_used_ms: u32, lt_cap_ms: u32, share_permille: u16) -> OwnVerdict {
+        if own_traffic_allowed(lt_used_ms, lt_cap_ms, share_permille) {
+            self.yielding = false;
+            OwnVerdict::Go
+        } else {
+            let edge = !self.yielding;
+            self.yielding = true;
+            OwnVerdict::Yield { edge }
+        }
+    }
+
+    /// Whether the last check refused.
+    pub fn yielding(&self) -> bool {
+        self.yielding
+    }
+}
+
 #[cfg(test)]
 mod tests;
