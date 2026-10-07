@@ -37,6 +37,11 @@ socket2.workspace = true
 libc.workspace = true
 tokio-serial.workspace = true
 tracing = { workspace = true, features = ["std"] }
+# The metrics facade (leviculum#77, CIRISServer FSD UNIFIED_TELEMETRY §5):
+# libraries emit through it, the host installs the recorder and exporter.
+# With no recorder installed every call is a no-op, so no exporter is a
+# dependency here.
+metrics = { version = "0.24", default-features = false }
 # Used by `test_support::tracing_setup` (and from commit 2 onward
 # `test_support::event_log`) for the test-harness subscriber.  The
 # crate's runtime presence is a few KB; production builds that don't
