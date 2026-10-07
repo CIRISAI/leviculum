@@ -627,6 +627,8 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// duplicate ADV, a timeout poll or a link close treat it as they always
     /// did. Taking a job is what moves the parts out.
     pending_assembly: AssemblyQueue,
+    /// Link lifecycle counters (leviculum#77).
+    link_telemetry: telemetry::LinkTelemetry,
     /// Resources whose assembly is running outside the node, by link and
     /// resource hash. A link can have several. Holds no more than the caller
     /// asked for at a time.
@@ -736,6 +738,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_origin_ids: BTreeMap::new(),
             defer_resource_assembly: false,
             pending_assembly: AssemblyQueue::default(),
+            link_telemetry: telemetry::LinkTelemetry::default(),
             assembling_resources: BTreeMap::new(),
             max_incoming_resource_size,
             max_incoming_resources_per_link: crate::resource::RESOURCE_MAX_INCOMING_PER_LINK,
@@ -13165,3 +13168,10 @@ pub struct DestinationLinks {
 }
 #[cfg(test)]
 mod mvr_link_census;
+
+// Link telemetry (+ciris, leviculum#77), declared last so the fork moves no
+// line an upstream citation points at.
+mod telemetry;
+pub use telemetry::{
+    link_close_reason_name, LinkInfo, LinkLifecycle, LinkRole, LINK_CLOSE_REASONS,
+};

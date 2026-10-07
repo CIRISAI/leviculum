@@ -1183,6 +1183,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "HELPER_TICK",
         required_keys: &["i"],
     },
+    // leviculum#77: the completion mirror and the core disagreed on the
+    // established-link count for longer than the event loop's grace.
+    EventSchema {
+        name: "LINK_MIRROR_DIVERGED",
+        required_keys: &["mirror", "core", "for_secs"],
+    },
 ];
 
 /// Where the buffer is dumped on a panicking drop.
