@@ -2062,3 +2062,15 @@ flash-rnode-read-image PORT IMAGE BOARD="auto":
 [doc('Write a full-flash image back, EEPROM and all')]
 flash-rnode-write-image PORT IMAGE BOARD="auto":
     {{rnode_flash}} write-image --port {{PORT}} --board {{BOARD}} --image {{IMAGE}}
+
+# The leviculum.network pages under site/pages/ (Codeberg #260): the lblogd
+# test renders every page on both sides and checks that the site links land,
+# the board page names the catalogue's boards and no page takes a reserved
+# name; the script then checks the external links, the nightly ones against
+# the names collect-nightly-debs.sh produces and, when the forge answers,
+# against the release's asset list. Offline, the online half says it skipped.
+[doc('Test the site pages and check their links against the nightly release')]
+site-check:
+    cargo test -p lblogd --test site_content
+    python3 scripts/site-check.py --selftest
+    python3 scripts/site-check.py
