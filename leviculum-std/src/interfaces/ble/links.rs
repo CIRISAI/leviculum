@@ -1602,7 +1602,7 @@ impl ChurnGate {
         addr: &Addr,
         now_ms: u64,
     ) -> Option<LeaveNoted> {
-        rotating_address(addr_value_display(addr))
+        rotating_address(addr_value_display(addr), None)
             .then(|| self.ledger.note_leave(self.policy, identity, now_ms))
     }
 
@@ -1617,7 +1617,7 @@ impl ChurnGate {
         now_ms: u64,
     ) -> Option<ChurnHeld> {
         if decision != ConnectDecision::InitiateFallback
-            || !rotating_address(addr_value_display(addr))
+            || !rotating_address(addr_value_display(addr), None)
             || !self.ledger.rotating_fallback_held(now_ms)
         {
             return None;

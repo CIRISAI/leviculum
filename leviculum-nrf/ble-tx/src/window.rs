@@ -124,6 +124,7 @@
 //! `graph_formation.rs` replays the #375 and #412 findings with it —
 //! the same reason `FallbackSpec::Quiet` survives there.
 
+use crate::admission::AddrType;
 use crate::adv::PERIPH_SLOTS;
 use crate::peer::ConnectDecision;
 
@@ -218,17 +219,23 @@ pub enum FallbackOrder {
 /// peer that is the only candidate is dialled whatever its address
 /// class.
 ///
-/// The residual, stated because the window cannot see past it: a
+/// The address TYPE settles it when the caller has one (#504): a
 /// PUBLIC address (an IEEE assignment, which a BlueZ host commonly
-/// uses) has no constraint on its top bits, so one whose OUI begins in
-/// `0x00..=0x7F` reads as rotating here and is ordered behind the
-/// boards inside the fallback class. It costs such a peer position in
-/// one class, never a dial. The address TYPE the scanner receives with
-/// every advertising report would settle it exactly; plumbing that
-/// through both stacks is the honest fix and it is not this one.
+/// uses) is never rotating, because its top bits are the OUI's and say
+/// nothing about a class; any RANDOM type is classed by its top bits as
+/// above. The firmware's admission passes the type its advertising
+/// report carried ([`crate::PeerAddr::rotating`]), so the churn
+/// cooldown no longer holds a public address.
+///
+/// `addr_type: None` is the GUESS, for a caller that has only the 48
+/// bits: it reads every address as random, so a public address whose
+/// OUI begins in `0x00..=0x7F` reads as rotating. The candidate window
+/// (its entries carry only the value), the firmware's churn arming and
+/// lnsd still ask it that way; there it costs such a peer position in
+/// the fallback class or an early cooldown, never a dial.
 #[must_use]
-pub fn rotating_address(addr: u64) -> bool {
-    addr >> 46 != 0b11
+pub fn rotating_address(addr: u64, addr_type: Option<AddrType>) -> bool {
+    addr_type != Some(AddrType::Public) && addr >> 46 != 0b11
 }
 
 /// One collected candidate: the address the sort compares, the verdict
@@ -339,7 +346,7 @@ fn rank<T>(candidate: &Candidate<T>, order: FallbackOrder) -> (DialPreference, u
     let (group, tie) = match (fallback, order) {
         (false, _) | (_, FallbackOrder::Address) => (0, candidate.addr),
         (_, FallbackOrder::FirstHeard) => (0, u64::from(candidate.seq)),
-        (_, FallbackOrder::RotatingLast) if rotating_address(candidate.addr) => {
+        (_, FallbackOrder::RotatingLast) if rotating_address(candidate.addr, None) => {
             (1, u64::from(candidate.seq))
         }
         (_, FallbackOrder::RotatingLast) => (0, candidate.addr),
@@ -759,7 +766,7 @@ mod tests {
     #[test]
     fn rotating_addresses_among_themselves_go_by_first_heard() {
         let higher = PHONE | 0x0000_0F00_0000;
-        assert!(rotating_address(PHONE) && rotating_address(higher));
+        assert!(rotating_address(PHONE, None) && rotating_address(higher, None));
         let mut t = Table::new();
         assert!(t.offer(higher, InitiateFallback, None, "heard first"));
         assert!(t.offer(PHONE, InitiateFallback, None, "lower, heard later"));
@@ -773,12 +780,41 @@ mod tests {
     fn the_address_class_test_reads_the_core_spec_classes() {
         // Static random (`11`) is the only fixed one; the two private
         // classes (`01`, `00`) and the reserved `10` are not keys.
-        assert!(!rotating_address(0xC000_0000_0000));
-        assert!(!rotating_address(0xFFFF_FFFF_FFFF));
-        assert!(rotating_address(0xBFFF_FFFF_FFFF));
-        assert!(rotating_address(0x4000_0000_0000));
-        assert!(rotating_address(0x3FFF_FFFF_FFFF));
-        assert!(rotating_address(0));
+        assert!(!rotating_address(0xC000_0000_0000, None));
+        assert!(!rotating_address(0xFFFF_FFFF_FFFF, None));
+        assert!(rotating_address(0xBFFF_FFFF_FFFF, None));
+        assert!(rotating_address(0x4000_0000_0000, None));
+        assert!(rotating_address(0x3FFF_FFFF_FFFF, None));
+        assert!(rotating_address(0, None));
+    }
+
+    #[test]
+    fn a_typed_address_is_classed_by_its_type_before_its_bits() {
+        // A public address is never rotating, whatever its OUI's bits.
+        for value in [0, 0x001A_7DDA_7113, 0x4000_0000_0000, 0xC000_0000_0000] {
+            assert!(
+                !rotating_address(value, Some(AddrType::Public)),
+                "{value:012x}"
+            );
+        }
+        // A random type keeps the Core Spec classes of its top bits.
+        assert!(rotating_address(
+            0x4000_0000_1234,
+            Some(AddrType::RandomPrivateResolvable)
+        ));
+        assert!(rotating_address(
+            0x0000_0000_1234,
+            Some(AddrType::RandomPrivateNonResolvable)
+        ));
+        assert!(!rotating_address(
+            0xC000_0000_1234,
+            Some(AddrType::RandomStatic)
+        ));
+        // A type that names no address class leaves the guess standing.
+        assert!(rotating_address(
+            0x4000_0000_1234,
+            Some(AddrType::Other(0x42))
+        ));
     }
 
     /// Under `FirstHeard` — the order measured and not shipped — the

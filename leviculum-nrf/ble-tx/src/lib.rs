@@ -50,7 +50,8 @@ pub mod window;
 
 pub use admission::{
     admit, connect_failure_condemns, AddrType, Admission, AdvReport, DeadEnds, Exclusion, Ledgers,
-    Local, PeerAddr, PhaseEvent, PhasePoll, ScanPhase, DEAD_END_SLOTS, DEAD_END_TTL_MS,
+    Local, Neighbour, PeerAddr, PhaseEvent, PhaseNeighbours, PhasePoll, ScanPhase, DEAD_END_SLOTS,
+    DEAD_END_TTL_MS, PHASE_NEIGHBOUR_SLOTS,
 };
 pub use adv::{
     ad_structure_len, free_slots, identity_hint, manufacturer_data, manufacturer_data_with_hint,

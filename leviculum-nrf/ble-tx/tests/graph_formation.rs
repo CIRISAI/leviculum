@@ -2955,7 +2955,7 @@ fn run_sim(
                 let before = candidates.len();
                 candidates.retain(|&(_, addr, decision, _)| {
                     decision != ConnectDecision::InitiateFallback
-                        || (!ledger.churn_whole_class && !rotating_address(addr))
+                        || (!ledger.churn_whole_class && !rotating_address(addr, None))
                 });
                 if candidates.is_empty() && before > 0 {
                     tally.churn_held_windows += 1;

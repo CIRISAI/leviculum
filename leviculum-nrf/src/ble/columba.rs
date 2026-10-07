@@ -35,10 +35,11 @@ use leviculum_ble_tx::{
     rotating_address, with_free_slots, AdvReport, CandidateTable, ChurnLedger, ChurnPolicy,
     ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision,
     DeadEnds, DialLedger, Exclusion, GattBytes, LedgerPolicy, Ledgers, LinkPhase, LinkRole, LinkUp,
-    Local, Origin, OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent, ScanMode,
-    ScanPhase, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, DEAD_END_SLOTS, DEAD_END_TTL_MS,
-    GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
-    MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    Local, Origin, OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent, PhaseNeighbours,
+    ScanMode, ScanPhase, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, DEAD_END_SLOTS,
+    DEAD_END_TTL_MS, GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
+    MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, PHASE_NEIGHBOUR_SLOTS, SCAN_WINDOW_COLLECT_MS,
+    WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -790,11 +791,13 @@ async fn gatt_events(
         return;
     };
     // The connection event, before any identity: the peer's address
-    // enters the registry (pre-dial exclusion) and the fallback clock
-    // restarts (#375 §0 — resetting only at identity left a 3 s gap
-    // the rig's fallback fired straight into).
-    let peer_value = addr_value(&conn.peer_address().bytes());
-    conn_link_up(slot_index, peer_value);
+    // enters the registry (pre-dial exclusion) and, when it is a new
+    // fixed address, the fallback clock restarts (#375 §0 — resetting
+    // only at identity left a 3 s gap the rig's fallback fired straight
+    // into; #504 — a known or rotating address does not).
+    let peer = peer_addr(&conn.peer_address());
+    let peer_value = peer.value;
+    conn_link_up(slot_index, peer);
 
     // Per-connection state. `Cell` lets the closure inside
     // `gatt_server::run` mutate handshake_done while the outbound branch
@@ -1339,22 +1342,27 @@ fn peer_link_up(
                 old_usable_mtu,
                 new_usable_mtu,
             });
-            // A displacement restarts the fallback clock too, as every
-            // link up does (#375). For a rotating phone that reconnects
-            // inside the bound this keeps the board in strict mode for
-            // good: `issue_412_a_rotating_peer_that_keeps_reconnecting_
-            // holds_off_the_fallback` in leviculum_ble_tx::admission.
+            // A displacement is a peer we hold a link to, reconnecting:
+            // never a new neighbour, so the fallback clock runs on
+            // (#504). Until then it restarted the clock, and a rotating
+            // phone that reconnected inside the bound kept the board in
+            // strict mode for good: `issue_412_a_rotating_peer_that_
+            // keeps_reconnecting_no_longer_holds_off_the_fallback` in
+            // leviculum_ble_tx::admission. The identity is recorded all
+            // the same, so its next plain link in this phase is known.
+            let _ = meet_link(&peer_id);
             note_phase_event(PhaseEvent::LinkDisplaced);
         }
         LinkUp::Accepted { first } => {
             if first {
                 super::report_peer_event(super::PeerEvent::Up(peer_id));
             }
-            // A link up in either role restarts the fallback clock
-            // (#375): the board is reachable over BLE again, so the
-            // strict rule gets its full bound before the scanner may
-            // dial against the sort.
-            note_phase_event(PhaseEvent::LinkAccepted);
+            // A NEW neighbour's link in either role restarts the
+            // fallback clock (#375, narrowed by #504): the strict rule
+            // gets its full bound to place the newcomer before the
+            // scanner may dial against the sort. An identity already
+            // linked in this phase restarts nothing.
+            note_phase_event(PhaseEvent::LinkAccepted(meet_link(&peer_id)));
         }
     }
     true
@@ -1501,21 +1509,36 @@ fn peer_link_down(slot_index: usize) {
 }
 
 /// Register a connection's address at the connection event, in either
-/// role — before any identity is known — and restart the strict phase:
-/// the rig showed the fallback firing in the 3 s gap between `BLE:
-/// connected` and the identity handshake (#375 §0), because the clock
-/// used to reset only at identity.
-fn conn_link_up(slot_index: usize, addr_value: u64) {
-    LIVE_PEERS.lock(|peers| peers.borrow_mut().conn_up(slot_index, addr_value));
-    note_phase_event(PhaseEvent::ConnUp);
+/// role — before any identity is known — and restart the strict phase
+/// when the address is a NEW fixed one: the rig showed the fallback
+/// firing in the 3 s gap between `BLE: connected` and the identity
+/// handshake (#375 §0), because the clock used to reset only at
+/// identity. A rotating address cannot say who connected, so it waits
+/// for the identity (#504).
+fn conn_link_up(slot_index: usize, addr: PeerAddr) {
+    LIVE_PEERS.lock(|peers| peers.borrow_mut().conn_up(slot_index, addr.value));
+    let neighbour = PHASE_NEIGHBOURS.lock(|seen| seen.borrow_mut().meet_conn(addr));
+    note_phase_event(PhaseEvent::ConnUp(neighbour));
 }
 
-/// Clear a connection's address at teardown. The strict phase restarts
-/// here too: a board that just lost a link gets the full strict bound
-/// before it may dial against the sort.
+/// Clear a connection's address at teardown. A departure is not a new
+/// neighbour, so the strict phase runs on (#504; until then it
+/// restarted here, and a phone's every reconnect bought another bound).
 fn conn_link_down(slot_index: usize) {
     LIVE_PEERS.lock(|peers| peers.borrow_mut().conn_down(slot_index));
     note_phase_event(PhaseEvent::ConnDown);
+}
+
+/// A connection's peer address with the type the SoftDevice reported,
+/// so a public address is never taken for a rotating one (#504).
+fn peer_addr(addr: &Address) -> PeerAddr {
+    PeerAddr::from_raw(&addr.bytes(), addr.as_raw().addr_type())
+}
+
+/// Record that `identity` linked in the current phase and say whether
+/// it is new to it ([`PhaseNeighbours::meet_link`]).
+fn meet_link(identity: &[u8; 16]) -> leviculum_ble_tx::Neighbour {
+    PHASE_NEIGHBOURS.lock(|seen| seen.borrow_mut().meet_link(identity))
 }
 
 // The scanner's two exclusions by link, filters three and four of
@@ -1614,8 +1637,9 @@ const CENTRAL_RETRY_BACKOFF_MS: u64 = 5_000;
 /// [`leviculum_ble_tx::admission`] since #496): when the current strict
 /// phase began and whether the switch to fallback was already logged for
 /// this phase. Reset by [`note_phase_event`] for every [`PhaseEvent`]
-/// the reset rule names — a connection event in either role, a
-/// teardown, or the strict rule producing a target — and otherwise it
+/// the reset rule names — a NEW neighbour's link or fixed-address
+/// connection ([`PHASE_NEIGHBOURS`], #504), or the strict rule
+/// producing a target — and otherwise it
 /// runs whenever the central task is scanning, live links
 /// notwithstanding (the eager spec, #375 part 3). Live links no longer
 /// suspend it: the doomed dial that motivated the quiet spec is
@@ -1634,11 +1658,26 @@ const CENTRAL_RETRY_BACKOFF_MS: u64 = 5_000;
 static FALLBACK_CLOCK: BlockingMutex<CriticalSectionRawMutex, Cell<ScanPhase>> =
     BlockingMutex::new(Cell::new(ScanPhase::new()));
 
+/// Who linked in the current phase, the "seen before" input of the
+/// reset rule (#504): identities, and fixed addresses at the connection
+/// event before the identity is known. [`PHASE_NEIGHBOUR_SLOTS`] keys
+/// (12: one per link slot plus the eight a dead-end table holds), the
+/// oldest overwritten when full; an evicted peer that comes back reads
+/// as new and buys one early reset. Cleared by [`scan_mode_now`] when
+/// the phase reaches fallback, so a peer restarts the clock at most
+/// once per phase however often it reconnects. A `RefCell` under a
+/// blocking mutex, like [`LIVE_PEERS`], written from both roles.
+static PHASE_NEIGHBOURS: BlockingMutex<
+    CriticalSectionRawMutex,
+    RefCell<PhaseNeighbours<PHASE_NEIGHBOUR_SLOTS>>,
+> = BlockingMutex::new(RefCell::new(PhaseNeighbours::new()));
+const _: () = assert!(PHASE_NEIGHBOUR_SLOTS == MAX_LINKS + DEAD_END_SLOTS);
+
 /// Hand one [`PhaseEvent`] to the fallback clock, which restarts the
-/// strict phase iff [`PhaseEvent::resets_strict`] says so: a link came
-/// up or went down in either role, or the strict rule found a permitted
-/// peer — either way the board is not stranded, so the clock starts
-/// over.
+/// strict phase iff [`PhaseEvent::resets_strict`] says so: a new
+/// neighbour linked in either role, or the strict rule found a
+/// permitted peer — either way the strict sort has work to do, so the
+/// clock starts over.
 fn note_phase_event(event: PhaseEvent) {
     let now_ms = Instant::now().as_millis();
     FALLBACK_CLOCK.lock(|clock| {
@@ -1677,6 +1716,9 @@ fn scan_mode_now() -> ScanMode {
         poll
     });
     if let Some(elapsed_ms) = poll.announce_ms {
+        // The phase reached fallback: a new phase starts with nobody
+        // seen, so each peer may restart the clock once more (#504).
+        PHASE_NEIGHBOURS.lock(|seen| seen.borrow_mut().clear());
         crate::log::log_fmt(
             "[BLE ] ",
             format_args!("BLE_SCAN_FALLBACK after_ms={elapsed_ms}"),
@@ -1880,7 +1922,10 @@ static CHURN_HELD_LOGGED_FOR: BlockingMutex<CriticalSectionRawMutex, Cell<Option
 /// line (`BLE_LINK_EXPIRE`, `BLE_LINK_REPLACED`), and the one thing
 /// those lines cannot say is that the run has now closed the class.
 fn note_peer_leave(peer_id: &[u8; 16], peer_value: u64, reason: &str) {
-    if !rotating_address(peer_value) {
+    // The class by the top bits alone: the departing link's address
+    // reaches here without its type, so a public address with a low OUI
+    // still arms (`rotating_address`'s guess, #504).
+    if !rotating_address(peer_value, None) {
         return;
     }
     let now_ms = Instant::now().as_millis();
@@ -2042,8 +2087,8 @@ async fn find_peer_to_initiate(
         }
         let peer = Address::from_raw(report.peer_addr);
         // The address type travels with the address (#496): the report
-        // carries it, and `rotating_address` should one day not have to
-        // guess it from the top two bits.
+        // carries it, and filter six reads it (#504), so a public
+        // address is never held as a rotating one.
         let adv = AdvReport {
             addr: PeerAddr::from_raw(&peer.bytes(), report.peer_addr.addr_type()),
             caps: parsed.caps,
@@ -2313,7 +2358,7 @@ async fn central_link(
     while outgoing_rx.try_receive().is_ok() {}
     // #388 census: queue drained, custody starts at zero.
     super::session_held_reset(slot_index);
-    conn_link_up(slot_index, peer_value);
+    conn_link_up(slot_index, peer_addr(&peer));
     if !peer_link_up(
         slot_index,
         conn_handle,

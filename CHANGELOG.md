@@ -618,6 +618,20 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A phone that keeps reconnecting no longer keeps a board from dialling other
+  boards (Codeberg #412). A board dials against the address sort only
+  after 30 s of strict scanning, and every link up and every teardown restarted
+  that clock, so a phone that reconnected every 20 s held the board in strict
+  mode for good: the replay of twenty such reconnects measured a longest strict
+  stretch of 19 s and never reached the fallback. Now only a NEW neighbour
+  restarts the clock, a peer the board has not linked since it last reached the
+  fallback, or a strict target; the phone's reconnects, displacements and
+  teardowns leave it running, and the same replay reaches the fallback at 30 s
+  and stays there. Separately, the churn cooldown that holds back rotating
+  addresses read a public address with a low OUI (a BlueZ host's `00:1A:7D`)
+  as rotating from its top bits; the scanner now reads the address type the
+  radio reports, and a public address is never held as rotating.
+
 - The `lxmf-node` test helper installs the same stderr `tracing` subscriber
   `lnsd` does, so what `leviculum-core` and `leviculum-std` say underneath it
   is observable at last (Codeberg #330). It installed none, which made every
