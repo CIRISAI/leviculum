@@ -1076,10 +1076,12 @@
 //! windows away.
 
 use leviculum_ble_tx::{
-    dial_preference, free_slots, judge_duplicate, rotating_address, should_initiate,
-    with_free_slots, CandidateTable, ChurnLedger, ChurnPolicy, ConnectDecision, DialLedger,
-    DialPreference, DupVerdict, FallbackOrder, LedgerPolicy, Origin, ScanMode, CAP_PERIPHERAL_ONLY,
-    LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU, SCAN_FALLBACK_AFTER_MS, WINDOW_CANDIDATES,
+    admit, dial_preference, free_slots, judge_duplicate, rotating_address, should_initiate,
+    with_free_slots, AddrType, AdvReport, CandidateTable, ChurnLedger, ChurnPolicy,
+    ConnectDecision, DeadEnds, DialLedger, DialPreference, DupVerdict, Exclusion, FallbackOrder,
+    LedgerPolicy, Ledgers, Local, Origin, PeerAddr, PeerRegistry, ScanMode, CAP_PERIPHERAL_ONLY,
+    DEAD_END_SLOTS, DEAD_END_TTL_MS, LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU,
+    SCAN_FALLBACK_AFTER_MS, WINDOW_CANDIDATES,
 };
 
 /// The firmware's incoming-slot count (`PERIPH_LINKS`, #372), taken
@@ -1140,13 +1142,11 @@ const LINK_EXPIRY_ROUNDS: u32 = rounds(LINK_TIMEOUT_MS);
 /// *under*-states the waste rather than manufacturing it.
 const USEFUL_SESSION_MS: u64 = LINK_ABANDONED_MS / 2;
 
-/// The firmware's `DEAD_END_TTL`: how long an address is skipped after
-/// a duplicate refusal or a fallback dial that could not connect.
-const DEAD_END_TTL_MS: u64 = 120_000;
-
-/// The firmware's `DEAD_END_SLOTS` (`2 * MAX_LINKS`). Overflow reuses
-/// the oldest entry — an early re-dial, not a loss.
-const DEAD_END_SLOTS: usize = 8;
+// `DEAD_END_TTL_MS` (how long an address is skipped after a duplicate
+// refusal or a fallback dial that could not connect) and `DEAD_END_SLOTS`
+// (`2 * MAX_LINKS`; overflow reuses the oldest entry, an early re-dial,
+// not a loss) are the crate's since #496, the same constants the
+// firmware's `DeadEnds` runs on.
 
 /// How many boards one churning peer holds links to as a central at a
 /// time. A model parameter, not a protocol constant: the corpus night
@@ -6680,6 +6680,182 @@ fn a_redrawn_address_never_takes_the_slot_from_a_board() {
         dial_from(OUR_BOARD, &[phone], ScanMode::Fallback),
         Some("phone")
     );
+}
+
+/// One advertiser of an [`admit`] room: an [`Advertiser`] plus the
+/// address type its report carries.
+#[derive(Debug, Clone, Copy)]
+struct Reported {
+    peer: Advertiser,
+    addr_type: AddrType,
+}
+
+/// One advertiser's admission outcome in [`dial_admitted`]: its label
+/// and what [`admit`] said.
+type Admitted = (&'static str, Result<(), Exclusion>);
+
+/// One scan window the way the FIRMWARE fills it since #496: every
+/// report goes through [`admit`] — the verdict and the six filters,
+/// against the board's registry, dead ends and ledgers — and only an
+/// admitted advertiser is offered to the window. Returns the elected
+/// label and every advertiser's admission outcome, so a cell can say
+/// which filter took which peer away.
+fn dial_admitted(
+    own_addr: u64,
+    room: &[Reported],
+    mode: ScanMode,
+    registry: &PeerRegistry<4>,
+    dead_ends: &DeadEnds,
+    ledgers: Ledgers<'_>,
+    now_ms: u64,
+) -> (Option<&'static str>, Vec<Admitted>) {
+    let mut window: CandidateTable<&'static str, WINDOW_CANDIDATES> = CandidateTable::new();
+    let mut outcomes = Vec::new();
+    for r in room {
+        let report = AdvReport {
+            addr: PeerAddr {
+                value: r.peer.addr,
+                addr_type: r.addr_type,
+            },
+            caps: r.peer.caps,
+            identity_hint: None,
+        };
+        let admission = admit(
+            Local {
+                caps: DUAL_ROLE,
+                addr: own_addr,
+            },
+            &report,
+            mode,
+            registry,
+            dead_ends,
+            ledgers,
+            now_ms,
+        );
+        outcomes.push((r.peer.label, admission.outcome));
+        if admission.admitted() {
+            window.offer(
+                r.peer.addr,
+                admission.decision,
+                r.peer.caps.and_then(free_slots),
+                r.peer.label,
+            );
+        }
+    }
+    (window.into_best().map(|(_, _, label)| label), outcomes)
+}
+
+/// The firmware's dial choice in the rig room, with the admission the
+/// firmware runs (#496): a board above every neighbour, so in fallback,
+/// whose outgoing slot is free. One neighbour it already holds a
+/// connection to, one whose address it condemned, a rotating phone
+/// under the churn cooldown, and one free board. The rule the
+/// instrument and the board share decides it: the free board is
+/// dialled, and with the free board gone the window stays EMPTY — the
+/// cooldown leaves the slot free rather than spend it on the phone —
+/// until the cooldown runs out.
+#[test]
+fn the_firmwares_admission_decides_the_rig_rooms_dial() {
+    const OUR_HIGH: u64 = 0xC000_0000_0010;
+    let board = |label, addr| Reported {
+        peer: Advertiser {
+            label,
+            addr,
+            caps: record(DUAL_ROLE, PERIPH_SLOTS as u8),
+        },
+        addr_type: AddrType::RandomStatic,
+    };
+    let linked = board("linked board", BOARD_A);
+    let condemned = board("dead-end board", BOARD_B);
+    let free = board("free board", OUR_BOARD);
+    let phone = Reported {
+        peer: Advertiser {
+            label: "phone",
+            addr: PHONE_ADDR,
+            caps: None,
+        },
+        addr_type: AddrType::RandomPrivateResolvable,
+    };
+    let now_ms = 600_000;
+    let mut registry: PeerRegistry<4> = PeerRegistry::new();
+    registry.conn_up(0, BOARD_A);
+    let mut dead_ends = DeadEnds::new();
+    dead_ends.note(BOARD_B, now_ms);
+    let mut churn = ChurnLedger::new();
+    for _ in 0..ChurnPolicy::MEASURED.leave_run {
+        churn.note_leave(ChurnPolicy::MEASURED, &[0x77; 16], now_ms);
+    }
+    let dial = DialLedger::new();
+    let ledgers = Ledgers {
+        dial: &dial,
+        churn: &churn,
+    };
+    let until_ms = now_ms + ChurnPolicy::MEASURED.cooldown_ms;
+
+    let (chosen, outcomes) = dial_admitted(
+        OUR_HIGH,
+        &[linked, condemned, phone, free],
+        ScanMode::Fallback,
+        &registry,
+        &dead_ends,
+        ledgers,
+        now_ms,
+    );
+    assert_eq!(chosen, Some("free board"));
+    assert_eq!(
+        outcomes,
+        vec![
+            ("linked board", Err(Exclusion::AddrLinked)),
+            ("dead-end board", Err(Exclusion::DeadEnd)),
+            ("phone", Err(Exclusion::ChurnHeld { until_ms })),
+            ("free board", Ok(())),
+        ]
+    );
+
+    // Without the free board nothing is admitted: the slot stays free.
+    let (chosen, _) = dial_admitted(
+        OUR_HIGH,
+        &[linked, condemned, phone],
+        ScanMode::Fallback,
+        &registry,
+        &dead_ends,
+        ledgers,
+        now_ms,
+    );
+    assert_eq!(chosen, None, "the cooldown spent the slot on the phone");
+
+    // Once the cooldown and the dead end have both run out, the
+    // condemned board is dialable again and wins over the phone by the
+    // rotating-last order; the linked board never is.
+    let later = until_ms.max(now_ms + DEAD_END_TTL_MS);
+    let (chosen, outcomes) = dial_admitted(
+        OUR_HIGH,
+        &[linked, condemned, phone],
+        ScanMode::Fallback,
+        &registry,
+        &dead_ends,
+        ledgers,
+        later,
+    );
+    assert_eq!(chosen, Some("dead-end board"));
+    assert_eq!(outcomes[0], ("linked board", Err(Exclusion::AddrLinked)));
+    assert_eq!(outcomes[2], ("phone", Ok(())));
+
+    // Under the strict rule every neighbour sorts below us: no verdict
+    // initiates, and the window is the searching state.
+    let (chosen, outcomes) = dial_admitted(
+        OUR_HIGH,
+        &[linked, condemned, phone, free],
+        ScanMode::Strict,
+        &registry,
+        &dead_ends,
+        ledgers,
+        now_ms,
+    );
+    assert_eq!(chosen, None);
+    assert!(outcomes
+        .iter()
+        .all(|(_, o)| *o == Err(Exclusion::NotInitiate)));
 }
 
 /// The preference is for the peer that cannot dial US, not for one

@@ -34,6 +34,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod admission;
 pub mod adv;
 pub mod churn_ledger;
 pub mod conn_params;
@@ -47,6 +48,10 @@ pub mod registry;
 pub mod session_census;
 pub mod window;
 
+pub use admission::{
+    admit, connect_failure_condemns, AddrType, Admission, AdvReport, DeadEnds, Exclusion, Ledgers,
+    Local, PeerAddr, PhaseEvent, PhasePoll, ScanPhase, DEAD_END_SLOTS, DEAD_END_TTL_MS,
+};
 pub use adv::{
     ad_structure_len, free_slots, identity_hint, manufacturer_data, manufacturer_data_with_hint,
     with_free_slots, ADV_BYTES_USED, CAP_FREE_SLOTS_MASK, CAP_FREE_SLOTS_VALID, CAP_IDENTITY_HINT,
