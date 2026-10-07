@@ -39,7 +39,7 @@ fn next_port() -> u16 {
 /// A recorder that keeps the last value written to every series, keyed
 /// `name{label=value,...}`.
 #[derive(Default, Clone)]
-struct Capture(Arc<Mutex<BTreeMap<String, f64>>>);
+struct Capture(Arc<Mutex<BTreeMap<String, f64>>>, Arc<Mutex<Vec<String>>>);
 
 struct Series(String, Arc<Mutex<BTreeMap<String, f64>>>);
 
@@ -77,8 +77,12 @@ fn series_name(key: &Key) -> String {
 }
 
 impl Recorder for Capture {
-    fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
-    fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+    fn describe_counter(&self, name: KeyName, _: Option<Unit>, _: SharedString) {
+        self.1.lock().unwrap().push(name.as_str().to_string());
+    }
+    fn describe_gauge(&self, name: KeyName, _: Option<Unit>, _: SharedString) {
+        self.1.lock().unwrap().push(name.as_str().to_string());
+    }
     fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
     fn register_counter(&self, key: &Key, _: &Metadata<'_>) -> Counter {
         Counter::from_arc(Arc::new(Series(series_name(key), self.0.clone())))
@@ -195,6 +199,10 @@ async fn the_link_telemetry_follows_a_link_through_its_life() {
     assert_eq!(list[0].role, LinkRole::Initiator);
     assert_eq!(list[0].destination_hash, hash);
     assert!(list[0].age_secs.is_some() && list[0].idle_secs.is_some());
+    assert!(
+        list[0].rtt_ms.is_some(),
+        "an established link has a measured RTT"
+    );
     assert_eq!(a.node.link_list()[0].role, LinkRole::Responder);
 
     // The mirror agrees with the core.
@@ -213,8 +221,29 @@ async fn the_link_telemetry_follows_a_link_through_its_life() {
     assert!(m["leviculum.transport.packets{direction=sent}"] > 0.0);
     assert!(m["leviculum.memory.bytes{component=links}"] > 0.0);
     assert!(m.contains_key("leviculum.transport.dropped{reason=no-path}"));
-    let a_metrics = Capture::default().publish(&a.node);
+    let a_capture = Capture::default();
+    let a_metrics = a_capture.publish(&a.node);
     assert_eq!(a_metrics["leviculum.link.established{role=responder}"], 1.0);
+    // A recorder that arrives after earlier publishes still learns every
+    // unit and description.
+    assert_eq!(
+        a_capture.1.lock().unwrap().len(),
+        leviculum_std::telemetry::METRIC_CATALOG.len()
+    );
+
+    // Two nodes publishing into one recorder sum their counters, rather than
+    // the series holding only the larger total.
+    let both = Capture::default();
+    both.publish(&a.node);
+    let m = both.publish(&b.node);
+    let sent = a.node.transport_stats().packets_sent() + b.node.transport_stats().packets_sent();
+    assert!(
+        m["leviculum.transport.packets{direction=sent}"] >= sent as f64,
+        "summed: {} vs {sent}",
+        m["leviculum.transport.packets{direction=sent}"]
+    );
+    assert_eq!(m["leviculum.link.established{role=initiator}"], 1.0);
+    assert_eq!(m["leviculum.link.established{role=responder}"], 1.0);
 
     // Close it: the counters move, the gauges fall, the ends agree on why.
     b.node.close_link(&link_id).await.unwrap();
