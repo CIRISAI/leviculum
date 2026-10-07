@@ -8,8 +8,16 @@
 //! The bridge is pulled, not pushed: the host calls
 //! [`crate::driver::ReticulumNode::publish_metrics`] on its own cadence,
 //! typically right before each scrape, and every value is set from the
-//! node's snapshots at that moment. Counters are set with `absolute`, so a
-//! scrape always reads the node's own cumulative total.
+//! node's snapshots at that moment.
+//!
+//! Counters are process totals. Each node remembers what it last published
+//! ([`CounterBaseline`]) and adds only its new growth to one process-wide
+//! sum per series, which is what `absolute` records. Two nodes in one
+//! process therefore sum, a node that replaces another carries on instead
+//! of sitting under the old total (`absolute` keeps the largest value it
+//! has seen; Codex review on #76), and a recorder installed late still
+//! reads full totals. Gauges are levels and are simply set: with several
+//! nodes in one process the last publish wins.
 //!
 //! [`METRIC_CATALOG`] is the one list of names. Every name the code records
 //! must be in it and every entry must be recorded somewhere, with only the
@@ -17,8 +25,6 @@
 //! source, the way it checks `EVENT_CATALOG`. Label values are always bounded
 //! enumerations (role, reason, plane, component): no link id, destination or
 //! peer key ever becomes a label.
-
-use std::sync::Once;
 
 use leviculum_core::heap_census::NodeHeapCensus;
 use leviculum_core::node::{link_close_reason_name, LinkCensus, LinkLifecycle, LINK_CLOSE_REASONS};
@@ -99,7 +105,8 @@ pub const METRIC_CATALOG: &[MetricSpec] = &[
         "leviculum.link.handshake_failed",
         Unit::Count,
         &["reason"],
-        "Links that ended before they were established, by close reason.",
+        "Links that ended before they were established, by close reason, plus \
+         reason=rejected for requests the application refused.",
     ),
     gauge_spec(
         "leviculum.link.live",
@@ -252,37 +259,88 @@ pub(crate) struct Snapshot {
     pub heap: NodeHeapCensus,
 }
 
-static DESCRIBED: Once = Once::new();
-
-/// Register every catalogue entry's unit and description with the
-/// installed recorder, once.
+/// Register every catalogue entry's unit and description with whatever
+/// recorder is installed now. Done on every publish, not once per process:
+/// a recorder installed (or swapped for a local one) after the first
+/// publish must still learn them (Codex review on #76). Twenty-four calls,
+/// against a scrape.
 fn describe_all() {
-    DESCRIBED.call_once(|| {
-        for spec in METRIC_CATALOG {
-            match spec.kind {
-                MetricKind::Counter => describe_counter!(spec.name, spec.unit, spec.description),
-                MetricKind::Gauge => describe_gauge!(spec.name, spec.unit, spec.description),
-            }
+    for spec in METRIC_CATALOG {
+        match spec.kind {
+            MetricKind::Counter => describe_counter!(spec.name, spec.unit, spec.description),
+            MetricKind::Gauge => describe_gauge!(spec.name, spec.unit, spec.description),
         }
-    });
+    }
+}
+
+/// The counter totals one node last published, per series, so the next
+/// publish adds only the difference to the process-wide total.
+#[derive(Debug, Default)]
+pub(crate) struct CounterBaseline(std::collections::HashMap<(&'static str, &'static str), u64>);
+
+/// Every node's contributions to each counter series, summed over the life
+/// of the process.
+static PROCESS_TOTALS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<(&'static str, &'static str), u64>>,
+> = std::sync::OnceLock::new();
+
+impl CounterBaseline {
+    /// Add what this node's series `name{label}` gained since its last
+    /// publish to the process-wide total, and return that total.
+    ///
+    /// Recording the process total with `absolute` keeps every property at
+    /// once: two nodes in one process sum, a node that replaces another
+    /// carries on from where the series stood, and a recorder installed
+    /// after earlier publishes still reads full totals. A node's own totals
+    /// never fall, so a smaller value adds nothing.
+    fn accumulate(&mut self, name: &'static str, label: &'static str, total: u64) -> u64 {
+        let last = self.0.insert((name, label), total).unwrap_or(0);
+        let delta = total.saturating_sub(last);
+        let mut totals = PROCESS_TOTALS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = totals.entry((name, label)).or_insert(0);
+        *entry += delta;
+        *entry
+    }
 }
 
 /// Record a snapshot onto whatever recorder is installed.
-pub(crate) fn record(s: &Snapshot) {
+pub(crate) fn record(s: &Snapshot, b: &mut CounterBaseline) {
     describe_all();
 
     // Link lifecycle
     let lc = &s.lifecycle;
-    counter!("leviculum.link.established", "role" => "initiator")
-        .absolute(lc.established_initiator);
-    counter!("leviculum.link.established", "role" => "responder")
-        .absolute(lc.established_responder);
+    counter!("leviculum.link.established", "role" => "initiator").absolute(b.accumulate(
+        "leviculum.link.established",
+        "initiator",
+        lc.established_initiator,
+    ));
+    counter!("leviculum.link.established", "role" => "responder").absolute(b.accumulate(
+        "leviculum.link.established",
+        "responder",
+        lc.established_responder,
+    ));
     for reason in LINK_CLOSE_REASONS {
         let name = link_close_reason_name(reason);
-        counter!("leviculum.link.closed", "reason" => name).absolute(lc.closed(reason));
-        counter!("leviculum.link.handshake_failed", "reason" => name)
-            .absolute(lc.handshake_failed(reason));
+        counter!("leviculum.link.closed", "reason" => name).absolute(b.accumulate(
+            "leviculum.link.closed",
+            name,
+            lc.closed(reason),
+        ));
+        counter!("leviculum.link.handshake_failed", "reason" => name).absolute(b.accumulate(
+            "leviculum.link.handshake_failed",
+            name,
+            lc.handshake_failed(reason),
+        ));
     }
+    // A request the application refused ended before it established too.
+    counter!("leviculum.link.handshake_failed", "reason" => "rejected").absolute(b.accumulate(
+        "leviculum.link.handshake_failed",
+        "rejected",
+        lc.rejected,
+    ));
     gauge!("leviculum.link.live", "role" => "initiator").set(s.census.initiator as f64);
     gauge!("leviculum.link.live", "role" => "responder").set(s.census.responder as f64);
     gauge!("leviculum.link.pending").set(s.census.pending as f64);
@@ -299,29 +357,74 @@ pub(crate) fn record(s: &Snapshot) {
     let core = s.census.initiator + s.census.responder;
     gauge!("leviculum.link.mirror").set(s.mirror as f64);
     gauge!("leviculum.link.mirror_skew").set(s.mirror as f64 - core as f64);
-    counter!("leviculum.link.mirror_divergence_alarms").absolute(s.mirror_alarms);
+    counter!("leviculum.link.mirror_divergence_alarms").absolute(b.accumulate(
+        "leviculum.link.mirror_divergence_alarms",
+        "",
+        s.mirror_alarms,
+    ));
 
     // Transport
     let t = &s.transport;
-    counter!("leviculum.transport.packets", "direction" => "sent").absolute(t.packets_sent());
-    counter!("leviculum.transport.packets", "direction" => "received")
-        .absolute(t.packets_received());
-    counter!("leviculum.transport.packets", "direction" => "forwarded")
-        .absolute(t.packets_forwarded());
-    counter!("leviculum.transport.packets", "direction" => "forwarded_link")
-        .absolute(t.packets_forwarded_link());
-    counter!("leviculum.transport.announces_processed").absolute(t.announces_processed());
+    counter!("leviculum.transport.packets", "direction" => "sent").absolute(b.accumulate(
+        "leviculum.transport.packets",
+        "sent",
+        t.packets_sent(),
+    ));
+    counter!("leviculum.transport.packets", "direction" => "received").absolute(b.accumulate(
+        "leviculum.transport.packets",
+        "received",
+        t.packets_received(),
+    ));
+    counter!("leviculum.transport.packets", "direction" => "forwarded").absolute(b.accumulate(
+        "leviculum.transport.packets",
+        "forwarded",
+        t.packets_forwarded(),
+    ));
+    counter!("leviculum.transport.packets", "direction" => "forwarded_link").absolute(
+        b.accumulate(
+            "leviculum.transport.packets",
+            "forwarded_link",
+            t.packets_forwarded_link(),
+        ),
+    );
+    counter!("leviculum.transport.announces_processed").absolute(b.accumulate(
+        "leviculum.transport.announces_processed",
+        "",
+        t.announces_processed(),
+    ));
     for reason in DropReason::ALL {
-        counter!("leviculum.transport.dropped", "reason" => reason.kebab())
-            .absolute(t.drops_for(reason));
+        counter!("leviculum.transport.dropped", "reason" => reason.kebab()).absolute(b.accumulate(
+            "leviculum.transport.dropped",
+            reason.kebab(),
+            t.drops_for(reason),
+        ));
     }
-    counter!("leviculum.transport.suppressed", "kind" => "lr_local_client_redirect")
-        .absolute(t.lr_local_client_redirects());
-    counter!("leviculum.transport.suppressed", "kind" => "path_request_pending")
-        .absolute(t.path_request_pending_suppressions());
-    counter!("leviculum.transport.suppressed", "kind" => "path_request_retry")
-        .absolute(t.path_request_retry_withholds());
-    counter!("leviculum.known_destination.evictions").absolute(s.known_evictions);
+    counter!("leviculum.transport.suppressed", "kind" => "lr_local_client_redirect").absolute(
+        b.accumulate(
+            "leviculum.transport.suppressed",
+            "lr_local_client_redirect",
+            t.lr_local_client_redirects(),
+        ),
+    );
+    counter!("leviculum.transport.suppressed", "kind" => "path_request_pending").absolute(
+        b.accumulate(
+            "leviculum.transport.suppressed",
+            "path_request_pending",
+            t.path_request_pending_suppressions(),
+        ),
+    );
+    counter!("leviculum.transport.suppressed", "kind" => "path_request_retry").absolute(
+        b.accumulate(
+            "leviculum.transport.suppressed",
+            "path_request_retry",
+            t.path_request_retry_withholds(),
+        ),
+    );
+    counter!("leviculum.known_destination.evictions").absolute(b.accumulate(
+        "leviculum.known_destination.evictions",
+        "",
+        s.known_evictions,
+    ));
 
     // Planes and queues
     let p = &s.plane;
@@ -329,11 +432,27 @@ pub(crate) fn record(s: &Snapshot) {
     gauge!("leviculum.events.queued", "plane" => "data").set(p.data_queued as f64);
     gauge!("leviculum.events.capacity", "plane" => "control").set(p.control_capacity as f64);
     gauge!("leviculum.events.capacity", "plane" => "data").set(p.data_capacity as f64);
-    counter!("leviculum.events.dropped", "plane" => "control").absolute(p.control_dropped_total);
-    counter!("leviculum.events.dropped", "plane" => "data").absolute(p.data_dropped_total);
+    counter!("leviculum.events.dropped", "plane" => "control").absolute(b.accumulate(
+        "leviculum.events.dropped",
+        "control",
+        p.control_dropped_total,
+    ));
+    counter!("leviculum.events.dropped", "plane" => "data").absolute(b.accumulate(
+        "leviculum.events.dropped",
+        "data",
+        p.data_dropped_total,
+    ));
     gauge!("leviculum.retry.queued").set(p.retry_queued as f64);
-    counter!("leviculum.retry.dropped").absolute(p.retry_dropped_total);
-    counter!("leviculum.shed.packets").absolute(p.shed_packets_total);
+    counter!("leviculum.retry.dropped").absolute(b.accumulate(
+        "leviculum.retry.dropped",
+        "",
+        p.retry_dropped_total,
+    ));
+    counter!("leviculum.shed.packets").absolute(b.accumulate(
+        "leviculum.shed.packets",
+        "",
+        p.shed_packets_total,
+    ));
     gauge!("leviculum.completion.recent").set(p.recent_outcomes as f64);
 
     // Memory

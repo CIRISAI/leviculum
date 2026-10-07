@@ -133,10 +133,23 @@ fn the_census_counts_live_links_by_role_and_destination() {
     deliver(&mut b, b_mesh, packets(&close));
     assert_eq!(b.link_lifecycle().closed(LinkCloseReason::PeerClosed), 1);
 
+    // A request B refuses is counted as rejected on B.
+    let (refused, _, out) = a.connect(dest_hash, &signing_key).expect("connect");
+    let _ = deliver(&mut b, b_mesh, packets(&out));
+    let pending_on_b = b
+        .link_list()
+        .into_iter()
+        .find(|l| l.age_secs.is_none())
+        .expect("B holds the pending request");
+    b.reject_link(&pending_on_b.link_id);
+    assert_eq!(b.link_lifecycle().rejected, 1);
+    assert_eq!(b.link_lifecycle().handshake_failed_total(), 0);
+    let _ = a.close_link(&refused);
+
     // A link that never established is a handshake failure, not a close.
     let _ = a.close_link(&ids[2]);
     let lc = a.link_lifecycle();
-    assert_eq!(lc.handshake_failed(LinkCloseReason::Normal), 1);
+    assert_eq!(lc.handshake_failed(LinkCloseReason::Normal), 2);
     assert_eq!(lc.closed_total(), 1);
     // And the counters agree with the census.
     let census = a.link_census();
