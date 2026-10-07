@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 58
+TOTAL 60
 
 driver::ReticulumNode::accept_resource
 driver::ReticulumNode::active_link_count
@@ -48,7 +48,9 @@ driver::ReticulumNode::identify_link
 driver::ReticulumNode::identity_hash
 driver::ReticulumNode::interface_stats
 driver::ReticulumNode::is_transport_enabled
+driver::ReticulumNode::known_destination_evictions
 driver::ReticulumNode::known_remote_ratchet
+driver::ReticulumNode::link_census
 driver::ReticulumNode::link_destination
 driver::ReticulumNode::link_is_established
 driver::ReticulumNode::link_mdu
