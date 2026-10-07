@@ -953,15 +953,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         now_ms: u64,
         interface_index: usize,
     ) {
-        // leviculum#70: link traffic over the relay a direct link left means
-        // the peer has fallen back to it.
-        if packet.flags.packet_type != PacketType::LinkRequest {
-            self.direct_link_inbound(
-                &LinkId::new(packet.destination_hash),
-                interface_index,
-                now_ms,
-            );
-        }
+        // leviculum#70: remember which interface this packet came in on, so a
+        // channel packet that then decrypts can tell the direct-link code it
+        // was authenticated traffic over the relay (see
+        // `direct_link_authenticated`).
+        self.direct_link_rx_begin(interface_index);
         match packet.flags.packet_type {
             PacketType::LinkRequest => {
                 self.handle_link_request(packet, raw_packet, interface_index);
@@ -976,6 +972,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // Announces are not link packets, ignore
             }
         }
+        self.direct_link_rx_end();
     }
 
     /// Handle an incoming LINK_REQUEST packet
@@ -1811,6 +1808,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
 
         // 3. Post-processing (link borrow released)
+        // The packet decrypted under the link key: authenticated traffic
+        // (leviculum#70).
+        self.direct_link_authenticated(&link_id, now_ms);
         if rx_ring_full {
             self.update_rx_ring_full(now_ms);
         }
