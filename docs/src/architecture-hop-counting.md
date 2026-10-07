@@ -178,15 +178,15 @@ Recorded 2026-07-10 against `reference/Reticulum` as vendored.
 | Receipt increment | `:1498` | `transport.rs:2498` | matches |
 | IPC exception, instance side | `:1523` | `transport.rs:1750` | matches |
 | IPC exception, client side | `:1525` | `transport.rs:1750` (else-arm of the `has_local_clients` gate) | matches — **fixed 2026-07-10 (D2, commit `06aadaff`); was absent** |
-| Announce rebroadcast | `:2050` | `transport.rs:7269` | matches |
+| Announce rebroadcast | `:2050` | `transport.rs:7292` | matches |
 | Path table store | `:1909`, `:2055` | `transport.rs:4340` | matches |
 | Path acceptance | `:1806`, `:2412` | `transport.rs:4436` (`should_update`) | matches |
 | Path-response hop emission | `:2997` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:6995` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
 | Link entry fields | `:1615-1625` | `storage_types.rs:60 (destination_hash at :76)` | matches, including the destination hash |
 | LRPROOF relay check | `:2215-2206` (single `== remaining_hops`, drop else; the `:1697` disjunction is gated OUT for LRPROOF at `:1687`) | `transport.rs:5202`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
-| Healing, no path | `:737` | `transport.rs:8481` | matches |
-| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:8772` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
-| Healing, destination direct | `:753` | `transport.rs:8489` | matches |
+| Healing, no path | `:737` | `transport.rs:8504` | matches |
+| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:8795` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
+| Healing, destination direct | `:753` | `transport.rs:8512` | matches |
 | Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:7729` | matches |
 
 ### The deliberate deviation, and its cost
