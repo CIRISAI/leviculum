@@ -1044,6 +1044,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .map_err(|_| send::SendError::EncryptionFailed)
     }
 
+    /// Record a shared instance's `first_hop_timeout` answer for
+    /// `dest_hash` (whole milliseconds), so the receipt of the next single
+    /// packet to it is priced as Python's client prices it: the answer plus
+    /// `TIMEOUT_PER_HOP × hops` (Packet.py:433-434). Core stays free of
+    /// RPC; the std driver asks the daemon and hands the answer in. See
+    /// `Transport::record_shared_instance_first_hop_timeout` for the expiry
+    /// (leviculum#485).
+    pub fn record_shared_instance_first_hop_timeout(
+        &mut self,
+        dest_hash: &DestinationHash,
+        first_hop_timeout_ms: u64,
+    ) {
+        self.transport
+            .record_shared_instance_first_hop_timeout(dest_hash.into_bytes(), first_hop_timeout_ms);
+    }
+
     /// Send unreliable data via single packet
     ///
     /// This builds and sends a single data packet to the destination.

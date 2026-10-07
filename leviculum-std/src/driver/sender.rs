@@ -45,6 +45,9 @@ pub struct PacketSender {
     dest_hash: DestinationHash,
     inner: Arc<Mutex<StdNodeCore>>,
     action_dispatch_tx: mpsc::Sender<TickOutput>,
+    /// The shared instance this node is a client of, asked for the first
+    /// hop timeout that prices each receipt (leviculum#485).
+    connect_instance_name: Option<String>,
 }
 
 impl PacketSender {
@@ -53,17 +56,30 @@ impl PacketSender {
         dest_hash: DestinationHash,
         inner: Arc<Mutex<StdNodeCore>>,
         action_dispatch_tx: mpsc::Sender<TickOutput>,
+        connect_instance_name: Option<String>,
     ) -> Self {
         Self {
             dest_hash,
             inner,
             action_dispatch_tx,
+            connect_instance_name,
         }
     }
 
     /// Get the destination hash for this endpoint
     pub fn dest_hash(&self) -> &DestinationHash {
         &self.dest_hash
+    }
+
+    /// The shared instance's first hop timeout toward this destination, or
+    /// `None` when this node is no client or the daemon did not answer.
+    async fn first_hop_timeout_ms(&self) -> Option<u64> {
+        super::shared_instance_first_hop_timeout_ms(
+            self.connect_instance_name.as_deref(),
+            &self.inner,
+            &self.dest_hash,
+        )
+        .await
     }
 
     /// Send a single packet to the destination
@@ -74,8 +90,14 @@ impl PacketSender {
     /// # Returns
     /// The truncated packet hash, usable for tracking delivery proofs.
     pub async fn send(&self, data: &[u8]) -> Result<[u8; TRUNCATED_HASHBYTES], Error> {
+        let first_hop_timeout_ms = self.first_hop_timeout_ms().await;
         let (packet_hash, output) = {
             let mut core = self.inner.lock_recover();
+            // Python prices the receipt with the daemon's answer
+            // (Packet.py:433-434); the core takes it before the send.
+            if let Some(ms) = first_hop_timeout_ms {
+                core.record_shared_instance_first_hop_timeout(&self.dest_hash, ms);
+            }
             core.send_single_packet(&self.dest_hash, data)?
         };
         self.action_dispatch_tx
@@ -97,8 +119,14 @@ impl PacketSender {
         &self,
         data: &[u8],
     ) -> Result<([u8; TRUNCATED_HASHBYTES], usize), Error> {
+        let first_hop_timeout_ms = self.first_hop_timeout_ms().await;
         let (packet_hash, wire_len, output) = {
             let mut core = self.inner.lock_recover();
+            // Python prices the receipt with the daemon's answer
+            // (Packet.py:433-434); the core takes it before the send.
+            if let Some(ms) = first_hop_timeout_ms {
+                core.record_shared_instance_first_hop_timeout(&self.dest_hash, ms);
+            }
             core.send_single_packet_measured(&self.dest_hash, data)?
         };
         self.action_dispatch_tx
@@ -137,7 +165,7 @@ mod tests {
     async fn test_packet_sender_dest_hash() {
         let (inner, tx, _td) = make_node_and_inner();
         let dest_hash = DestinationHash::new([0xAB; 16]);
-        let ep = PacketSender::new(dest_hash, inner, tx);
+        let ep = PacketSender::new(dest_hash, inner, tx, None);
 
         assert_eq!(*ep.dest_hash(), dest_hash);
     }
@@ -146,7 +174,7 @@ mod tests {
     async fn test_packet_sender_send_no_path_returns_error() {
         let (inner, tx, _td) = make_node_and_inner();
         let dest_hash = DestinationHash::new([0xAB; 16]);
-        let ep = PacketSender::new(dest_hash, inner, tx);
+        let ep = PacketSender::new(dest_hash, inner, tx, None);
 
         let result = ep.send(b"hello").await;
         assert!(result.is_err(), "send with no path should fail");
@@ -182,7 +210,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<TickOutput>(1);
         drop(rx); // close the receiver
 
-        let ep = PacketSender::new(dest_hash, Arc::clone(&inner), tx);
+        let ep = PacketSender::new(dest_hash, Arc::clone(&inner), tx, None);
         let result = ep.send(b"hello").await;
         assert!(result.is_err(), "send on closed channel should fail");
     }

@@ -2786,61 +2786,18 @@ impl ReticulumNode {
 
     /// The first hop's timeout toward `dest_hash` as this node's shared
     /// instance prices it, in milliseconds, or `None` when this node is not a
-    /// shared instance client or its daemon did not answer.
-    ///
-    /// A client cannot see the daemon's interfaces, so it asks, exactly as a
-    /// Python client does before every link (Link.py:283-284,
-    /// `get_first_hop_timeout`, Reticulum.py:1607-1625). Without the answer
-    /// the core prices a relayed path at its conservative bitrate guess
-    /// (`UNKNOWN_BITRATE_ASSUMPTION_BPS`), which on run 475/1 made our client
-    /// retry 1.7 times later than a Python client beside it (leviculum#480).
+    /// shared instance client or its daemon did not answer. See
+    /// [`shared_instance_first_hop_timeout_ms`].
     async fn shared_instance_first_hop_timeout_ms(
         &self,
         dest_hash: &DestinationHash,
     ) -> Option<u64> {
-        let instance = self.connect_instance_name.as_deref()?;
-        let authkey = {
-            let core = self.inner.lock_recover();
-            crate::rpc::rpc_authkey(core.identity())
-        };
-        let answer = match authkey {
-            Ok(authkey) => crate::rpc::rpc_query_hash_param(
-                instance,
-                &authkey,
-                "first_hop_timeout",
-                "destination_hash",
-                dest_hash.as_bytes(),
-            )
-            .await
-            .map_err(|e| e.to_string()),
-            Err(e) => Err(format!("no RPC authkey: {e}")),
-        };
-        let ms = answer.and_then(|answer| {
-            crate::rpc::first_hop_timeout_ms_from_answer(&answer)
-                .ok_or_else(|| format!("answer {answer} is not a duration"))
-        });
-        match ms {
-            Ok(ms) => {
-                tracing::debug!(
-                    "FIRST_HOP_TIMEOUT dest={} source=shared_instance first_hop_ms={}",
-                    dest_hash,
-                    ms
-                );
-                Some(ms)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "FIRST_HOP_TIMEOUT dest={} source=fallback reason=\"first_hop_timeout RPC to \
-                     shared instance '{}' failed: {}\" (the link prices its first hop locally, \
-                     a relayed path at {} bit/s)",
-                    dest_hash,
-                    instance,
-                    e,
-                    leviculum_core::constants::UNKNOWN_BITRATE_ASSUMPTION_BPS
-                );
-                None
-            }
-        }
+        shared_instance_first_hop_timeout_ms(
+            self.connect_instance_name.as_deref(),
+            &self.inner,
+            dest_hash,
+        )
+        .await
     }
 
     /// Attach a byte-channel interface over a caller-supplied duplex to the
@@ -3758,8 +3715,14 @@ impl ReticulumNode {
         dest_hash: &DestinationHash,
         data: &[u8],
     ) -> Result<[u8; TRUNCATED_HASHBYTES], Error> {
+        let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
         let (packet_hash, output) = {
             let mut inner = self.inner.lock_recover();
+            // Python prices the receipt with the daemon's answer
+            // (Packet.py:433-434); the core takes it before the send.
+            if let Some(ms) = first_hop_timeout_ms {
+                inner.record_shared_instance_first_hop_timeout(dest_hash, ms);
+            }
             inner.send_single_packet(dest_hash, data)?
         };
         self.action_dispatch_tx
@@ -3804,6 +3767,7 @@ impl ReticulumNode {
             *dest_hash,
             Arc::clone(&self.inner),
             self.action_dispatch_tx.clone(),
+            self.connect_instance_name.clone(),
         )
     }
 
@@ -6159,6 +6123,67 @@ fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::Int
         "BLEInterface" => InterfaceKind::Ble,
         "LocalInterface" | "LocalServerInterface" | "LocalClientInterface" => InterfaceKind::Local,
         _ => InterfaceKind::Unknown,
+    }
+}
+
+/// The first hop's timeout toward `dest_hash` as the shared instance
+/// `instance` prices it, in milliseconds, or `None` when there is no
+/// instance (not a client) or the daemon did not answer.
+///
+/// A client cannot see the daemon's interfaces, so it asks, exactly as a
+/// Python client does before every link (Link.py:283-284) and for every
+/// packet receipt (Packet.py:433-434), both through `get_first_hop_timeout`
+/// (Reticulum.py:1607-1625). Without the answer the core prices a relayed
+/// path at its conservative bitrate guess (`UNKNOWN_BITRATE_ASSUMPTION_BPS`),
+/// which on run 475/1 made our client retry 1.7 times later than a Python
+/// client beside it (leviculum#480, receipts leviculum#485).
+pub(crate) async fn shared_instance_first_hop_timeout_ms(
+    instance: Option<&str>,
+    inner: &Mutex<StdNodeCore>,
+    dest_hash: &DestinationHash,
+) -> Option<u64> {
+    let instance = instance?;
+    let authkey = {
+        let core = inner.lock_recover();
+        crate::rpc::rpc_authkey(core.identity())
+    };
+    let answer = match authkey {
+        Ok(authkey) => crate::rpc::rpc_query_hash_param(
+            instance,
+            &authkey,
+            "first_hop_timeout",
+            "destination_hash",
+            dest_hash.as_bytes(),
+        )
+        .await
+        .map_err(|e| e.to_string()),
+        Err(e) => Err(format!("no RPC authkey: {e}")),
+    };
+    let ms = answer.and_then(|answer| {
+        crate::rpc::first_hop_timeout_ms_from_answer(&answer)
+            .ok_or_else(|| format!("answer {answer} is not a duration"))
+    });
+    match ms {
+        Ok(ms) => {
+            tracing::debug!(
+                "FIRST_HOP_TIMEOUT dest={} source=shared_instance first_hop_ms={}",
+                dest_hash,
+                ms
+            );
+            Some(ms)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "FIRST_HOP_TIMEOUT dest={} source=fallback reason=\"first_hop_timeout RPC to \
+                 shared instance '{}' failed: {}\" (the first hop is priced locally, \
+                 a relayed path at {} bit/s)",
+                dest_hash,
+                instance,
+                e,
+                leviculum_core::constants::UNKNOWN_BITRATE_ASSUMPTION_BPS
+            );
+            None
+        }
     }
 }
 
@@ -10312,7 +10337,7 @@ mod interface_retry_state_teardown_tests {
 /// A shared instance client prices its first hop with the daemon's
 /// `first_hop_timeout` answer (leviculum#480), end to end: an in-process
 /// daemon on a real RPC socket, a client attached to it, and the link the
-/// client opens. The core half (`connect_with_first_hop_timeout`) is
+/// client opens or the receipt of a packet it sends (leviculum#485). The core half (`connect_with_first_hop_timeout`) is
 /// pinned in `leviculum-std/tests/link_establishment_timeout_parity.rs`.
 #[cfg(test)]
 mod first_hop_timeout_tests {
@@ -10413,6 +10438,25 @@ mod first_hop_timeout_tests {
     /// is the daemon's own transport identity, as a client sharing the
     /// daemon's storage does.
     async fn client_timeout(tag: &str, same_identity_as_daemon: bool) -> (u64, u16) {
+        client_measure(tag, same_identity_as_daemon, Measure::Link).await
+    }
+
+    /// What [`client_measure`] reads off the client once the path stands.
+    enum Measure {
+        /// The establishment timeout and jitter of a link the client opens.
+        Link,
+        /// The timeout of the receipt for a single packet the client sends
+        /// (leviculum#485); the jitter slot is 0, receipts carry none.
+        Receipt,
+    }
+
+    /// [`client_timeout`], generalised over what the client is asked to
+    /// price: a link or a single packet's receipt.
+    async fn client_measure(
+        tag: &str,
+        same_identity_as_daemon: bool,
+        measure: Measure,
+    ) -> (u64, u16) {
         let identity = Identity::generate(&mut OsRng);
         let instance = format!("firsthop_{tag}_{}", std::process::id());
         let daemon_storage = tempfile::tempdir().expect("daemon storage");
@@ -10469,8 +10513,25 @@ mod first_hop_timeout_tests {
             "the client must have no bitrate of its own for the next hop"
         );
 
-        let handle = client.connect(&dest, &[0x33; 32]).await.expect("connect");
-        let measured = timeout_and_jitter(&client, handle.link_id());
+        let measured = match measure {
+            Measure::Link => {
+                let handle = client.connect(&dest, &[0x33; 32]).await.expect("connect");
+                timeout_and_jitter(&client, handle.link_id())
+            }
+            Measure::Receipt => {
+                let packet_hash = client
+                    .send_single_packet(&dest, b"receipt probe")
+                    .await
+                    .expect("send single packet");
+                let inner = client.inner();
+                let core = inner.lock_recover();
+                let receipt = core
+                    .storage()
+                    .get_receipt(&packet_hash)
+                    .expect("the send must create a receipt");
+                (receipt.timeout_ms, 0)
+            }
+        };
 
         client.stop().await.expect("stop client");
         daemon.stop().await.expect("stop daemon");
@@ -10489,6 +10550,24 @@ mod first_hop_timeout_tests {
             jittered(20_276, jitter),
             "jitter {jitter} permille on a 20 276 ms base; 31 333 ms is the unanswered fallback"
         );
+    }
+
+    /// leviculum#485: the same answer prices a single packet's receipt as
+    /// Python's client prices it (Packet.py:433-434): the daemon's 8 276 ms
+    /// plus 6000 ms per hop on the 2-hop path, 20 276 ms. Before #485 the
+    /// client priced it at 300 bit/s, 31 333 ms.
+    #[tokio::test]
+    async fn shared_instance_client_prices_a_receipt_with_the_daemons_answer() {
+        let (timeout, _) = client_measure("receipt", true, Measure::Receipt).await;
+        assert_eq!(timeout, 20_276, "31 333 ms is the unanswered fallback");
+    }
+
+    /// A receipt the daemon does not answer for keeps the fallback: 13 333
+    /// ms for the hop at 300 bit/s, plus 6000 ms, plus 6000 ms per hop.
+    #[tokio::test]
+    async fn shared_instance_client_receipt_without_an_answer_keeps_the_fallback() {
+        let (timeout, _) = client_measure("receiptnoanswer", false, Measure::Receipt).await;
+        assert_eq!(timeout, 31_333);
     }
 
     /// A client the daemon does not answer (here: one without the daemon's

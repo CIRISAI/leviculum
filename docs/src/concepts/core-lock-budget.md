@@ -25,18 +25,18 @@ anything with the same profile:
 
 | phase | lock | code |
 | --- | --- | --- |
-| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1401` |
+| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1417` |
 | `resource::prepare_resource_send` | **none** | `leviculum-core/src/resource/outgoing.rs:89` |
-| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1436` |
+| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1452` |
 
 Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
 the last returns the retryable `ResourceError::LinkStateChanged` and
 the caller rebuilds once. The std driver calls the three phases itself
-(`leviculum-std/src/driver/mod.rs:3645`).
+(`leviculum-std/src/driver/mod.rs:3602`).
 
 `NodeCore::send_resource` still exists as the composed single call
-(`leviculum-core/src/node/mod.rs:1527`) because no_std and FFI callers
+(`leviculum-core/src/node/mod.rs:1543`) because no_std and FFI callers
 have no lock to hold and no second thread to starve. It is the
 composed form that is dangerous behind the driver, not the code it
 composes.
@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:5283`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:5247`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -243,7 +243,7 @@ The async route is one such path and not the instructive one. Consider
 the `block_on` case the previous wording named as the whole residue: a
 callee that smuggles a `PacketSender` and blocks on `send` does not
 reach the bounded channel at all, because `PacketSender::send`
-(`leviculum-std/src/driver/sender.rs:76-86`) takes the core lock in a
+(`leviculum-std/src/driver/sender.rs:92-107`) takes the core lock in a
 block and releases it *before* its `.await`. It deadlocks one line
 earlier, on the mutex.
 
@@ -258,7 +258,7 @@ check is worth.
 
 53 of them are on `ReticulumNode` — plain synchronous `pub fn`s that
 open by locking the core, of which `has_path`
-(`leviculum-std/src/driver/mod.rs:3127`) is
+(`leviculum-std/src/driver/mod.rs:3085`) is
 `self.inner.lock_recover().has_path(dest_hash)` and entirely typical.
 The other five are on `PacketSender` and `LinkHandle`, which matters
 more than the count suggests: those are the two handles a callee is
@@ -284,7 +284,7 @@ offering one.
 ### The one call the seam hands out that this page forbids
 
 `NodeCore::send_resource` is `pub`
-(`leviculum-core/src/node/mod.rs:1731`) and therefore reachable on the
+(`leviculum-core/src/node/mod.rs:1747`) and therefore reachable on the
 `&mut StdNodeCore` a processor hook holds. It is the 141 ms composed
 call this page opens with — one line, in consumer code, behind the
 driver and under the lock. `PROCESSOR_TICK_BUDGET` reports it 141 ms
@@ -384,8 +384,8 @@ informatively:
 
 | event | where | says |
 | --- | --- | --- |
-| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6073`) | announce handling itself took ≥ 100 ms |
-| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4283`) | an outside thread waited ≥ 250 ms for the core lock |
+| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6083`) | announce handling itself took ≥ 100 ms |
+| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4247`) | an outside thread waited ≥ 250 ms for the core lock |
 | `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1410`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by

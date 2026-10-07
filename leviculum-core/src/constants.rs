@@ -427,6 +427,18 @@ pub const IMPLICIT_PROOF_SIZE: usize = 64;
 /// Default receipt timeout in milliseconds
 pub const RECEIPT_TIMEOUT_DEFAULT_MS: u64 = 30_000;
 
+/// How long a shared instance's `first_hop_timeout` answer prices a packet
+/// receipt for its destination (leviculum#485).
+///
+/// Python's client asks the daemon for every receipt (Packet.py:433-434).
+/// The std driver does the same and records the answer just before the
+/// send that creates the receipt, so in that path the answer is never
+/// older than one send. The expiry bounds the other case: an answer
+/// recorded earlier (a send whose refresh RPC then failed) stops pricing
+/// receipts after one minute, so a daemon's changed path cannot keep a
+/// stale figure alive; past it the receipt falls back to local pricing.
+pub const SHARED_INSTANCE_FIRST_HOP_ANSWER_TTL_MS: u64 = 60_000;
+
 /// Resource constants
 pub const RESOURCE_WINDOW_INITIAL: usize = 4;
 pub const RESOURCE_WINDOW_MIN: usize = 2;

@@ -50,7 +50,7 @@ use crate::constants::{
     MTU, PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_MAX_WIRE_HOPS,
     PATHFINDER_RETRIES, PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS, PATH_REQUEST_MIN_INTERVAL_MS,
     PENDING_LOCAL_PR_EXPIRY_MS, RATCHET_SIZE, RECEIPT_TIMEOUT_DEFAULT_MS, REVERSE_TABLE_EXPIRY_MS,
-    TRUNCATED_HASHBYTES, UNKNOWN_BITRATE_ASSUMPTION_BPS,
+    SHARED_INSTANCE_FIRST_HOP_ANSWER_TTL_MS, TRUNCATED_HASHBYTES, UNKNOWN_BITRATE_ASSUMPTION_BPS,
 };
 
 use crate::announce::{emission_from_random_hash, max_emission_from_blobs, ReceivedAnnounce};
@@ -2895,6 +2895,14 @@ pub struct Transport<C: Clock, S: Storage> {
     /// config key and drives announce bandwidth capping.
     interface_link_profiles: BTreeMap<usize, LinkProfile>,
 
+    /// A shared instance client's record of its daemon's `first_hop_timeout`
+    /// answers: destination → (whole first hop timeout in ms, expiry in
+    /// clock ms). Written by the std driver before a receipt-bearing send,
+    /// read by [`Self::compute_receipt_timeout`]; entries live
+    /// [`SHARED_INSTANCE_FIRST_HOP_ANSWER_TTL_MS`] and are pruned on each
+    /// write. Empty on a node without a daemon (leviculum#485).
+    shared_instance_first_hop_answers: BTreeMap<[u8; TRUNCATED_HASHBYTES], (u64, u64)>,
+
     /// Direct-link announce re-hear evidence per destination (Codeberg
     /// #230), populated ONLY under [`PathChoice::HopsAndLoss`] — with the
     /// default knob this map stays empty and costs nothing. Capped at
@@ -3129,6 +3137,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_egress_control: BTreeMap::new(),
             interface_hw_mtus: BTreeMap::new(),
             interface_link_profiles: BTreeMap::new(),
+            shared_instance_first_hop_answers: BTreeMap::new(),
             direct_link_evidence: BTreeMap::new(),
             local_client_interfaces: BTreeSet::new(),
             shared_instance_interface: None,
@@ -4897,6 +4906,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             + hc::btree_map_bytes(&self.interface_egress_control)
             + hc::btree_map_bytes(&self.interface_hw_mtus)
             + hc::btree_map_bytes(&self.interface_link_profiles)
+            + hc::btree_map_bytes(&self.shared_instance_first_hop_answers)
             + hc::btree_map_bytes(&self.direct_link_evidence)
             + hc::btree_set_bytes(&self.local_client_interfaces)
             + hc::btree_map_bytes(&self.pending_local_path_requests)
@@ -5479,7 +5489,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3908. A destination with no cached
+    /// link-request path uses at transport.rs:3917. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -9532,14 +9542,58 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             .filter(|bps| *bps > 0)
     }
 
+    /// Record a shared instance's `first_hop_timeout` answer for
+    /// `dest_hash`, in whole milliseconds, so the next receipt for that
+    /// destination is priced with it (leviculum#485).
+    ///
+    /// A shared instance client cannot see its daemon's interfaces; Python's
+    /// client asks the daemon for every receipt (Packet.py:433-434,
+    /// Reticulum.py:1607-1625). The answer stands for
+    /// [`SHARED_INSTANCE_FIRST_HOP_ANSWER_TTL_MS`]; expired answers are
+    /// dropped here, so the map holds only destinations sent to within the
+    /// last minute.
+    pub fn record_shared_instance_first_hop_timeout(
+        &mut self,
+        dest_hash: [u8; TRUNCATED_HASHBYTES],
+        first_hop_timeout_ms: u64,
+    ) {
+        let now = self.clock.now_ms();
+        self.shared_instance_first_hop_answers
+            .retain(|_, (_, expires_ms)| *expires_ms > now);
+        self.shared_instance_first_hop_answers.insert(
+            dest_hash,
+            (
+                first_hop_timeout_ms,
+                now.saturating_add(SHARED_INSTANCE_FIRST_HOP_ANSWER_TTL_MS),
+            ),
+        );
+    }
+
+    /// The daemon's recorded `first_hop_timeout` answer for `dest_hash`, if
+    /// one was recorded and has not expired.
+    fn shared_instance_first_hop_answer(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Option<u64> {
+        let now = self.clock.now_ms();
+        self.shared_instance_first_hop_answers
+            .get(dest_hash)
+            .filter(|(_, expires_ms)| *expires_ms > now)
+            .map(|(ms, _)| *ms)
+    }
+
     /// Compute the receipt timeout for a packet sent to a destination.
     ///
     /// Matches the timeout Python's `PacketReceipt.__init__` builds from
     /// `get_first_hop_timeout` (Packet.py:433-434):
     ///   `timeout = first_hop_timeout(dest) + TIMEOUT_PER_HOP * hops`
     ///
-    /// Where `first_hop_timeout = MTU * per_byte_latency + DEFAULT_PER_HOP_TIMEOUT`
-    /// when the next-hop bitrate is known.
+    /// On a shared instance client `first_hop_timeout` is the daemon's
+    /// recorded answer ([`Self::record_shared_instance_first_hop_timeout`]).
+    /// Otherwise it is priced locally:
+    /// `first_hop_timeout = MTU * per_byte_latency + DEFAULT_PER_HOP_TIMEOUT`
+    /// when the next-hop bitrate is known, the `UNKNOWN_BITRATE_ASSUMPTION_BPS`
+    /// guess for a relayed path without one.
     ///
     /// Falls back to `RECEIPT_TIMEOUT_DEFAULT_MS` if no path is known.
     fn compute_receipt_timeout(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> u64 {
@@ -9548,6 +9602,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             None => return RECEIPT_TIMEOUT_DEFAULT_MS,
         };
         let hops = path.hops;
+
+        // Python Packet.py:433-434: get_first_hop_timeout(dest), asked of
+        // the shared instance, + TIMEOUT_PER_HOP * hops_to(dest).
+        if let Some(first_hop_ms) = self.shared_instance_first_hop_answer(dest_hash) {
+            return first_hop_ms + ESTABLISHMENT_TIMEOUT_PER_HOP_MS * (hops as u64);
+        }
 
         // first_hop_timeout: MTU * 8 * 1000 / bitrate + per_hop_timeout
         // (Python: MTU * per_byte_latency + DEFAULT_PER_HOP_TIMEOUT)
@@ -17074,7 +17134,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:6966), a deliberate anti-replay
+            // `random_blobs` (transport.rs:6976), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -27265,6 +27325,87 @@ mod tests {
             // first_hop_extra = 500 * 8 * 1000 / 976 = 4098 ms
             // total = 4098 + 6000 + 6000 * 2 = 22098
             assert_eq!(transport.compute_receipt_timeout(&dest_hash), 22_098);
+        }
+
+        /// leviculum#485: a shared instance client prices a receipt with
+        /// its daemon's `first_hop_timeout` answer plus `TIMEOUT_PER_HOP ×
+        /// hops`, Python's sum (Packet.py:433-434); without an answer, or
+        /// once it expired, the 300 bit/s guess.
+        #[test]
+        fn test_receipt_timeout_uses_shared_instance_answer() {
+            let mut transport = test_transport();
+            let dest_hash = [0xD5; TRUNCATED_HASHBYTES];
+            // The client's view: 2 hops, next hop the daemon's IPC leg,
+            // which reports no bitrate.
+            transport.storage.set_path(
+                dest_hash,
+                crate::storage_types::PathEntry {
+                    hops: 2,
+                    next_hop: Some([0x44; TRUNCATED_HASHBYTES]),
+                    interface_index: 0,
+                    expires_ms: u64::MAX,
+                    random_blobs: alloc::vec::Vec::new(),
+                    via_peer: None,
+                },
+            );
+            // No answer: 500 * 8 * 1000 / 300 + 6000 + 6000 * 2.
+            assert_eq!(transport.compute_receipt_timeout(&dest_hash), 31_333);
+
+            // The daemon answers 8.276 s: 8276 + 6000 * 2.
+            transport.record_shared_instance_first_hop_timeout(dest_hash, 8_276);
+            assert_eq!(transport.compute_receipt_timeout(&dest_hash), 20_276);
+
+            // Another destination's answer does not leak.
+            let other = [0xD6; TRUNCATED_HASHBYTES];
+            transport.storage.set_path(
+                other,
+                crate::storage_types::PathEntry {
+                    hops: 2,
+                    next_hop: Some([0x44; TRUNCATED_HASHBYTES]),
+                    interface_index: 0,
+                    expires_ms: u64::MAX,
+                    random_blobs: alloc::vec::Vec::new(),
+                    via_peer: None,
+                },
+            );
+            assert_eq!(transport.compute_receipt_timeout(&other), 31_333);
+        }
+
+        /// leviculum#485: the recorded answer stands for exactly
+        /// `SHARED_INSTANCE_FIRST_HOP_ANSWER_TTL_MS`, then the receipt is
+        /// priced locally again, and the next write prunes it.
+        #[test]
+        fn test_receipt_timeout_shared_instance_answer_expires() {
+            let mut transport = test_transport();
+            let dest_hash = [0xD7; TRUNCATED_HASHBYTES];
+            transport.storage.set_path(
+                dest_hash,
+                crate::storage_types::PathEntry {
+                    hops: 2,
+                    next_hop: Some([0x44; TRUNCATED_HASHBYTES]),
+                    interface_index: 0,
+                    expires_ms: u64::MAX,
+                    random_blobs: alloc::vec::Vec::new(),
+                    via_peer: None,
+                },
+            );
+            transport.record_shared_instance_first_hop_timeout(dest_hash, 8_276);
+
+            transport
+                .clock
+                .advance(SHARED_INSTANCE_FIRST_HOP_ANSWER_TTL_MS - 1);
+            assert_eq!(transport.compute_receipt_timeout(&dest_hash), 20_276);
+
+            transport.clock.advance(1);
+            assert_eq!(transport.compute_receipt_timeout(&dest_hash), 31_333);
+
+            transport.record_shared_instance_first_hop_timeout([0xD8; TRUNCATED_HASHBYTES], 7_000);
+            assert!(
+                !transport
+                    .shared_instance_first_hop_answers
+                    .contains_key(&dest_hash),
+                "an expired answer must be pruned on the next write"
+            );
         }
 
         #[test]

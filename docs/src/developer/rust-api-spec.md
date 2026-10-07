@@ -70,19 +70,19 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2084` | Stop and flush |
 | `fn is_running(&self) -> bool` — `driver/mod.rs:2416` | Loop state |
 | `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2424` | Make a local destination reachable (consumes it) |
-| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:3447` | Announce a registered destination |
+| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:3404` | Announce a registered destination |
 | `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:2591` | Open a link; returns a pending handle |
-| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:2905` | Writable handle for an already-established inbound link |
-| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:3801` | Single-packet send handle |
-| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:3755` | Send one unreliable datagram |
-| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:2921` | Take the event stream, once |
+| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:2862` | Writable handle for an already-established inbound link |
+| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:3764` | Single-packet send handle |
+| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:3712` | Send one unreliable datagram |
+| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:2878` | Take the event stream, once |
 | `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:2712` | The node's own identity hash |
-| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3127` | Whether a path is known |
-| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:3239` | Hop count to a destination |
-| `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3151` | Send a PATH_REQUEST; result arrives as `PathFound` |
-| `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3136` | Identity learned from an announce (its signing key feeds `connect`) |
-| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3354` | `rnstatus`-style counters |
-| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:3815` | Relay mode flag |
+| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3085` | Whether a path is known |
+| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:3196` | Hop count to a destination |
+| `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3108` | Send a PATH_REQUEST; result arrives as `PathFound` |
+| `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3093` | Identity learned from an announce (its signing key feeds `connect`) |
+| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3311` | `rnstatus`-style counters |
+| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:3779` | Relay mode flag |
 
 The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
 `Node` (`leviculum-std/src/api/mod.rs:238`) — re-projects this surface with core internals
@@ -113,8 +113,8 @@ Send-only async handle for single packets, the single-packet analog of
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn dest_hash(&self) -> &DestinationHash` — `sender.rs:65` | The target destination |
-| `async fn send(&self, data: &[u8]) -> Result<[u8; TRUNCATED_HASHBYTES], Error>` — `sender.rs:76` | Send one unreliable packet; returns the truncated packet hash. A path must already be known |
+| `fn dest_hash(&self) -> &DestinationHash` — `sender.rs:70` | The target destination |
+| `async fn send(&self, data: &[u8]) -> Result<[u8; TRUNCATED_HASHBYTES], Error>` — `sender.rs:92` | Send one unreliable packet; returns the truncated packet hash. A path must already be known |
 
 ### `EventReceiver` and `NodeEvent`
 
@@ -180,13 +180,13 @@ caller must dispatch.
 | `fn new(identity: Identity, config: TransportConfig, proof_strategy: ProofStrategy, max_incoming_resource_size: usize, rng: R, clock: C, storage: S) -> Self` — `node/mod.rs:568` | Construct directly |
 | `fn register_destination(&mut self, dest: Destination)` — `node/mod.rs:629` | Register a local destination |
 | `fn announce_destination(&mut self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> Result<TickOutput, AnnounceError>` — `node/mod.rs:876` | Build and queue an announce |
-| `fn send_single_packet(&mut self, dest_hash: &DestinationHash, data: &[u8]) -> Result<([u8; TRUNCATED_HASHBYTES], TickOutput), SendError>` — `node/mod.rs:1062` | Build an unreliable data packet |
+| `fn send_single_packet(&mut self, dest_hash: &DestinationHash, data: &[u8]) -> Result<([u8; TRUNCATED_HASHBYTES], TickOutput), SendError>` — `node/mod.rs:1078` | Build an unreliable data packet |
 | `fn connect(&mut self, dest_hash: DestinationHash, dest_signing_key: &[u8; 32]) -> (LinkId, bool, TickOutput)` — `node/link_management.rs:252` | Build a link request |
 | `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:693` | Send on an established link |
 | `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:600` | Close a link |
-| `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2264` | Feed received bytes from an interface |
-| `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2492` | Run periodic maintenance (call at the next deadline) |
-| `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2523` | Earliest timer deadline (ms); when to call `handle_timeout` |
+| `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2280` | Feed received bytes from an interface |
+| `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2508` | Run periodic maintenance (call at the next deadline) |
+| `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2539` | Earliest timer deadline (ms); when to call `handle_timeout` |
 
 A node is more often built with `NodeCoreBuilder` (`node/builder.rs:40`), whose
 `fn build<R, Clk, S>(self, rng: R, clock: Clk, storage: S) -> NodeCore<R, Clk, S>`
