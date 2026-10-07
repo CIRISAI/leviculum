@@ -12825,3 +12825,30 @@ mod tests {
         assert!(!has_timeout);
     }
 }
+
+/// Live links by role, overall and per destination: see
+/// [`NodeCore::link_census`] (CIRISEdge#819, leviculum#57). Defined last so
+/// the fork moves no line an upstream citation points at.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkCensus {
+    /// Established links this node dialled.
+    pub initiator: usize,
+    /// Established links peers opened to this node.
+    pub responder: usize,
+    /// Links still establishing.
+    pub pending: usize,
+    /// Per destination, most links first.
+    pub by_destination: Vec<DestinationLinks>,
+}
+
+/// One destination's share of a [`LinkCensus`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestinationLinks {
+    /// For an initiator link the destination dialled; for a responder link
+    /// this node's own destination the peer linked to.
+    pub destination_hash: DestinationHash,
+    pub initiator: usize,
+    pub responder: usize,
+}
+#[cfg(test)]
+mod mvr_link_census;
