@@ -63,6 +63,13 @@ default = []
 # Forwarded so the census gap line in leviculum-std subtracts the measured
 # live bytes; the global allocator itself is installed in src/lnsd.rs.
 heap-accounting = ["leviculum-std/heap-accounting"]
+# Off by default (508). `lnsd` runs on mimalloc instead of the libc
+# allocator: the soak node's resident set was 517 MB over 104 MB live after
+# 3.5 h, the rest kept by musl's mallocng under ~26 000 allocations a second,
+# and this is the build that measures whether another allocator keeps less.
+# With `heap-accounting` as well, the counting shim wraps mimalloc
+# (`heap_accounting::CountingOver`), so the census still reports live bytes.
+alloc-mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = true }
@@ -78,6 +85,8 @@ rand_core.workspace = true
 rmpv.workspace = true
 sha2.workspace = true
 serde_json = "1"
+# `alloc-mimalloc` only; see the feature.
+mimalloc = { version = "0.1", optional = true, default-features = false }
 # `lnstest diag` re-serialises the (secret-redacted) Config to TOML for the bundle.
 toml.workspace = true
 tempfile = "3"

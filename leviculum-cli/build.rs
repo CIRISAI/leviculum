@@ -36,6 +36,13 @@ fn main() {
     } else {
         base
     };
+    // Same rule for the allocator (508): a mimalloc daemon on the soak node
+    // has to be told apart from a mallocng one by `--version` alone.
+    let base = if std::env::var_os("CARGO_FEATURE_ALLOC_MIMALLOC").is_some() {
+        format!("{base}+mimalloc")
+    } else {
+        base
+    };
     let git_hash = git_head_hash();
     let full = format!("{base} ({git_hash})");
     println!("cargo:rustc-env=LEVICULUM_VERSION={full}");

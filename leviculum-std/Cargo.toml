@@ -19,8 +19,10 @@ compression = ["leviculum-core/compression"]
 # live bytes (`heap_accounting::live_bytes`) instead of the modelled total.
 # Only meaningful in a binary that installs `CountingAllocator` as its global
 # allocator, so it is turned on through `leviculum-cli/heap-accounting`, which
-# does both, and not on its own.
-heap-accounting = []
+# does both, and not on its own. It also carries the opt-in call-site sampler
+# (`LEVICULUM_HEAP_SAMPLE`, 508), which needs `backtrace` to walk and name the
+# stacks; a build without the feature does not link it.
+heap-accounting = ["dep:backtrace"]
 # INTERNAL. Enables the `cf_*` test targets, which exist to NOT compile: they
 # are the enforcement of the two prohibitions the core-lock budget places on
 # anything the event loop calls (Codeberg #196). Never enable it in a build you
@@ -101,6 +103,9 @@ leviculum-queue-budget = { path = "../leviculum-nrf/queue-budget" }
 # that build. Never reaches the firmware: leviculum-nrf does not depend on
 # leviculum-std.
 critical-section = { version = "1", features = ["std"] }
+# `heap-accounting` only: the call-site sampler walks the stack without
+# allocating (`trace_unsynchronized`) and names the frames at census time.
+backtrace = { version = "0.3", optional = true }
 
 # md-5 is imported as `use md5::Md5`; cargo-machete flags the hyphenated
 # package name as unused because grepping the sources finds `md5::` but

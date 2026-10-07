@@ -30,10 +30,49 @@ use leviculum_std::Reticulum;
 /// `System` with the layout it arrived with, so a node built with this runs
 /// the same mallocng, takes the same paths and fragments the same way as one
 /// built without it.
-#[cfg(feature = "heap-accounting")]
+#[cfg(all(feature = "heap-accounting", not(feature = "alloc-mimalloc")))]
 #[global_allocator]
 static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
     leviculum_std::heap_accounting::CountingAllocator;
+
+/// mimalloc instead of the libc allocator, under the default-off
+/// `alloc-mimalloc` feature (508). Retention, not an uncounted owner, is what
+/// the soak node's census found between live heap and resident set, and the
+/// allocator is one of the two things that can move it; this is the build
+/// that measures whether it does. Counted, in the same shim, when
+/// `heap-accounting` is on too, so the two variants' censuses compare.
+#[cfg(all(feature = "heap-accounting", feature = "alloc-mimalloc"))]
+#[global_allocator]
+static ALLOC: leviculum_std::heap_accounting::CountingOver<mimalloc::MiMalloc> =
+    leviculum_std::heap_accounting::CountingOver(mimalloc::MiMalloc);
+
+#[cfg(all(not(feature = "heap-accounting"), feature = "alloc-mimalloc"))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// How many sites the sampler's census lists, by count and by bytes.
+#[cfg(feature = "heap-accounting")]
+const SAMPLE_TOP: usize = 20;
+
+/// Read `LEVICULUM_HEAP_SAMPLE` once: a positive n samples every n-th
+/// allocation for the census's call-site table, anything else leaves the
+/// sampler off. Said in the log either way it was asked for, so a census
+/// without the table is not mistaken for one with nothing in it.
+#[cfg(feature = "heap-accounting")]
+fn configure_heap_sampler() {
+    let Some(raw) = std::env::var_os("LEVICULUM_HEAP_SAMPLE") else {
+        return;
+    };
+    match raw.to_str().and_then(|v| v.trim().parse::<usize>().ok()) {
+        Some(n) if n > 0 => {
+            leviculum_std::heap_accounting::set_sample_every(n);
+            info!("Heap sampling: every {n}th allocation records its call site (SIGUSR1 lists the top {SAMPLE_TOP})");
+        }
+        _ => tracing::warn!(
+            "LEVICULUM_HEAP_SAMPLE={raw:?} is not a positive integer; heap sampling stays off"
+        ),
+    }
+}
 
 /// The line that rides beside the dump's `=== Total estimated: ... ===`, so
 /// the model and the measurement are read together and the model stays
@@ -41,13 +80,26 @@ static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
 /// were printed).
 #[cfg(feature = "heap-accounting")]
 fn measured_live_line() -> String {
-    use leviculum_std::heap_accounting::{allocation_count, live_bytes, total_bytes};
-    format!(
-        "=== Measured live: {} bytes ({} allocations, {} bytes handed out) ===\n",
+    use leviculum_std::heap_accounting::{
+        allocation_count, live_bytes, sample_report, total_bytes,
+    };
+    // Named, because the census's Allocator section reads the libc and
+    // cannot tell that the libc's allocator is not the one in use.
+    let allocator = if cfg!(feature = "alloc-mimalloc") {
+        "mimalloc"
+    } else {
+        "system"
+    };
+    let mut line = format!(
+        "=== Measured live: {} bytes ({} allocations, {} bytes handed out, allocator {allocator}) ===\n",
         live_bytes(),
         allocation_count(),
         total_bytes(),
-    )
+    );
+    if let Some(report) = sample_report(SAMPLE_TOP) {
+        line.push_str(&report);
+    }
+    line
 }
 
 #[derive(Parser, Debug)]
@@ -139,7 +191,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Said at startup, because an operator reading a SIGUSR1 dump has to be
     // able to tell which build produced it without diffing two binaries.
     #[cfg(feature = "heap-accounting")]
-    info!("Heap accounting: on, SIGUSR1 reports measured live bytes beside the estimate");
+    {
+        info!("Heap accounting: on, SIGUSR1 reports measured live bytes beside the estimate");
+        configure_heap_sampler();
+    }
+    #[cfg(feature = "alloc-mimalloc")]
+    info!("Allocator: mimalloc");
     if args.service {
         info!("Service mode (-s): logging to stdout for systemd/journald capture");
     }
