@@ -29,13 +29,17 @@
 //! loss is a property of the protocol on a duty-held path (#433), not a
 //! leviculum lifetime bug: our forwarding entry already outlives
 //! Python's by a factor of two on this path. The reverse table is no
-//! second chance either: its entry sits under the request's truncated
-//! packet hash, which the MTU-signalling bytes make distinct from the
-//! link id the proof addresses (and Python's reverse-table proof
-//! transport excludes LRPROOF outright, Transport.py:2244-2256). This
-//! mvr pins the 24 000 ms number, the expiry boundary, the absent
-//! reverse fallback, and the LINK_ENTRY_EXPIRED line the sweep now
-//! emits (the line 480's trace was missing).
+//! second chance either: Python's reverse-table proof transport sits in
+//! the non-LRPROOF branch (Transport.py:2244-2256), and since #485 ours
+//! excludes LRPROOF the same way. Before #485 the exclusion was an
+//! accident of keys: the reverse entry sits under the request's
+//! truncated packet hash, which the MTU-signalling bytes make distinct
+//! from the link id the proof addresses, but a request without them has
+//! the two coincide, and the reverse table handed the late proof back to
+//! the client. This mvr pins the 24 000 ms number, the expiry boundary,
+//! that the late proof is not forwarded with or without signalling
+//! bytes, and the LINK_ENTRY_EXPIRED line the sweep now emits (the line
+//! 480's trace was missing).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -72,8 +76,20 @@ const PYTHON_LIFETIME_MS: u64 = 12_000;
 /// The scripted delay before the proof returns.
 const PROOF_DELAY_MS: u64 = 25_000;
 
+/// 480's shape: the request carried the MTU-signalling bytes.
 #[test]
 fn a_25_s_proof_finds_the_24_s_entry_gone_and_the_expiry_logged() {
+    late_proof_is_dropped(true);
+}
+
+/// The request without signalling bytes: the reverse key and the link id
+/// coincide, and the late LRPROOF is still not forwarded (#485).
+#[test]
+fn a_late_proof_is_not_forwarded_through_the_reverse_table() {
+    late_proof_is_dropped(false);
+}
+
+fn late_proof_is_dropped(signalling: bool) {
     let evlog = init_event_log();
 
     let hands = Arc::new(AtomicU64::new(T0));
@@ -110,16 +126,16 @@ fn a_25_s_proof_finds_the_24_s_entry_gone_and_the_expiry_logged() {
     // daemon undoes the IPC hop, so the entry freezes packet.hops == 0.
     // The 3 trailing MTU-signalling bytes are the real-world shape (480's
     // request had them: alpha logged "Clamped link request MTU from
-    // 262144 to 564"), and they matter here: `Link::calculate_link_id`
-    // strips them, so the link id differs from the request's truncated
-    // packet hash — the key the REVERSE table entry sits under. Without
-    // them the two coincide and the reverse table catches the late proof
-    // by accident (a corner Python never has: its reverse-table proof
-    // transport sits in the non-LRPROOF branch, Transport.py:2244-2256).
+    // 262144 to 564"). `Link::calculate_link_id` strips them, so the link
+    // id differs from the request's truncated packet hash — the key the
+    // REVERSE table entry sits under. Without them the two coincide, the
+    // corner #485 closed.
     let mut lr_data = Vec::with_capacity(X25519_KEY_SIZE * 2 + 3);
     lr_data.extend_from_slice(&[0x11; X25519_KEY_SIZE]);
     lr_data.extend_from_slice(&[0x22; X25519_KEY_SIZE]);
-    lr_data.extend_from_slice(&[0x00, 0x02, 0x34]);
+    if signalling {
+        lr_data.extend_from_slice(&[0x00, 0x02, 0x34]);
+    }
     let request = Packet {
         flags: PacketFlags {
             ifac_flag: false,
@@ -196,15 +212,17 @@ fn a_25_s_proof_finds_the_24_s_entry_gone_and_the_expiry_logged() {
         data: PacketData::Owned(proof_data),
     };
     let len = proof.pack(&mut buf).expect("pack lrproof");
-    // The reverse-table entry for the request sits under the request's
-    // truncated hash, which the signalling bytes make distinct from the
-    // link id the proof is addressed to — so no reverse fallback exists,
-    // as in 480's run (lines 184-188: no forward, local delivery found
-    // "0 links tracked").
-    assert!(
-        transport.storage().get_reverse(&link_id).is_none(),
-        "a signalling-bearing request's reverse entry must not sit under \
-         the link id; if it does, this mvr no longer reproduces 480"
+    // With signalling bytes the reverse entry sits under a key distinct
+    // from the link id, as in 480's run (lines 184-188: no forward, local
+    // delivery found "0 links tracked"). Without them it sits under the
+    // link id itself, so the reverse table could reach the proof; the
+    // assertion below is what keeps it from doing so (#485).
+    assert_eq!(
+        transport.storage().get_reverse(&link_id).is_some(),
+        !signalling,
+        "the reverse entry sits under the link id exactly when the request \
+         carries no signalling bytes; if not, this mvr no longer tests the \
+         corner it names"
     );
     let forwarded_before = transport.stats().packets_forwarded();
     transport
@@ -218,7 +236,9 @@ fn a_25_s_proof_finds_the_24_s_entry_gone_and_the_expiry_logged() {
     assert_eq!(
         transport.stats().packets_forwarded(),
         forwarded_before,
-        "with no entry the proof goes nowhere, exactly 480's drop"
+        "with no link table entry the late LRPROOF goes nowhere, with or \
+         without signalling bytes (signalling={signalling}): Python's \
+         reverse table never transports an LRPROOF (Transport.py:2244-2256)"
     );
 
     // The removal 480's trace could not find is now one event line. The

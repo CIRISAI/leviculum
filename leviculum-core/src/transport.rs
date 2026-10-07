@@ -7924,8 +7924,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // Reverse table routing for regular proofs
-        // (Python Transport.py:2256)
-        {
+        // (Python Transport.py:2256). An LRPROOF never takes it: Python's
+        // reverse table transport sits in the non-LRPROOF branch
+        // (Transport.py:2244-2256), so a late LRPROOF whose link id equals a
+        // reverse key (a request without MTU signalling bytes) is not
+        // forwarded here either (leviculum#485).
+        if packet.context != PacketContext::Lrproof {
             let proof_for_local = self
                 .storage
                 .get_reverse(&dest_hash)
