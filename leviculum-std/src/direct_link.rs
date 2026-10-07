@@ -251,6 +251,12 @@ pub(crate) async fn probe(
 
 // Punch
 
+/// When a new direct interface's announces are repeated, after the one on
+/// registration. The peer finishes punching within about a round trip of
+/// this node, and this interface acks any late punch, so the first repeat
+/// normally lands; the second covers a slow peer.
+const REANNOUNCE_AFTER: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
+
 /// Interval between punch frames, and the whole window. Same as rns-rs, so
 /// the two ends of a mixed pair give up at about the same time.
 const PUNCH_INTERVAL: Duration = Duration::from_millis(100);
@@ -371,6 +377,11 @@ pub(crate) struct DirectLinkRuntime {
     registering: HashMap<InterfaceId, SessionId>,
     /// Live direct interfaces' I/O tasks, by interface index.
     interfaces: HashMap<usize, AbortHandle>,
+    /// Repeats of a new direct interface's announces, due at the instant
+    /// given. The first announce goes out on registration, possibly while
+    /// the peer is still punching, and its punch loop discards anything
+    /// that is not a punch frame (Codex review on #74).
+    reannounce: Vec<(std::time::Instant, usize)>,
     timing: DirectUdpTiming,
 }
 
@@ -383,6 +394,7 @@ impl DirectLinkRuntime {
             tasks: HashMap::new(),
             registering: HashMap::new(),
             interfaces: HashMap::new(),
+            reannounce: Vec::new(),
             timing: DirectUdpTiming::default(),
         }
     }
@@ -514,13 +526,35 @@ impl DirectLinkRuntime {
     /// A handle just got registered; if it was a direct interface, the
     /// session it belongs to.
     pub(crate) fn registered(&mut self, id: InterfaceId) -> Option<SessionId> {
-        self.registering.remove(&id)
+        let session = self.registering.remove(&id)?;
+        let now = std::time::Instant::now();
+        for delay in REANNOUNCE_AFTER {
+            self.reannounce.push((now + delay, id.0));
+        }
+        Some(session)
+    }
+
+    /// Direct interfaces whose announces are due again: still live, and
+    /// past their repeat time.
+    pub(crate) fn take_due_reannounces(&mut self, now: std::time::Instant) -> Vec<usize> {
+        let mut due = Vec::new();
+        self.reannounce.retain(|(at, index)| {
+            if *at <= now {
+                due.push(*index);
+                false
+            } else {
+                true
+            }
+        });
+        due.retain(|index| self.interfaces.contains_key(index));
+        due
     }
 
     /// An interface disconnected; forget its task if it was a direct one.
     pub(crate) fn interface_gone(&mut self, id: InterfaceId) {
         self.interfaces.remove(&id.0);
         self.registering.remove(&id);
+        self.reannounce.retain(|(_, index)| *index != id.0);
     }
 }
 
@@ -592,6 +626,35 @@ mod tests {
             punch(&b, a_addr, &session, &[5u8; 32])
         );
         assert_eq!((ra, rb), (None, None));
+    }
+
+    #[tokio::test]
+    async fn a_new_direct_interface_announces_again_while_it_lives() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut rt = DirectLinkRuntime::new(tx);
+        let live = InterfaceId(41);
+        let gone = InterfaceId(42);
+        for id in [live, gone] {
+            rt.registering.insert(id, [id.0 as u8; 16]);
+            rt.interfaces
+                .insert(id.0, tokio::spawn(async {}).abort_handle());
+            assert!(rt.registered(id).is_some());
+        }
+        rt.interface_gone(gone);
+        let now = std::time::Instant::now();
+        assert!(rt.take_due_reannounces(now).is_empty(), "not yet due");
+        assert_eq!(
+            rt.take_due_reannounces(now + Duration::from_millis(1_500)),
+            vec![live.0],
+            "the first repeat, for the live interface only"
+        );
+        assert_eq!(
+            rt.take_due_reannounces(now + Duration::from_secs(5)),
+            vec![live.0]
+        );
+        assert!(rt
+            .take_due_reannounces(now + Duration::from_secs(60))
+            .is_empty());
     }
 
     fn reticulum(keys: &[(&str, &str)]) -> crate::config::ReticulumConfig {

@@ -72,6 +72,8 @@ struct Pair {
     a_mesh: usize,
     b_mesh: usize,
     link: LinkId,
+    dest: crate::destination::DestinationHash,
+    signing_key: [u8; 32],
     a_events: Vec<NodeEvent>,
     b_events: Vec<NodeEvent>,
 }
@@ -110,6 +112,8 @@ impl Pair {
             a_mesh,
             b_mesh,
             link,
+            dest: dest_hash,
+            signing_key,
             a_events: Vec::new(),
             b_events: Vec::new(),
         };
@@ -737,8 +741,14 @@ fn traffic_over_the_relay_after_the_grace_brings_a_direct_end_back() {
         NodeEvent::MessageReceived { data, .. } if data == b"late"
     )));
     assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    // The packet is authenticated before A decides, so its own proof may
+    // still have left on the direct path; the nudge goes over the relay.
     assert!(
-        a_out.iter().all(|(iface, _)| *iface == Some(pair.a_mesh)),
+        a_out
+            .iter()
+            .filter(|(iface, _)| *iface == Some(pair.a_mesh))
+            .count()
+            >= 1,
         "A answers over the relay now: {a_out:?}"
     );
     assert!(pair
@@ -747,4 +757,116 @@ fn traffic_over_the_relay_after_the_grace_brings_a_direct_end_back() {
         .contains(&DirectLinkJob::CloseInterface {
             interface_index: a_direct
         }));
+}
+
+#[test]
+fn the_stale_ends_nudge_alone_brings_the_peer_back_and_a_forged_keepalive_does_not() {
+    let mut pair = Pair::new();
+    let (a_direct, _) = established(&mut pair);
+    let _ = pair.a.take_direct_link_jobs();
+    let _ = pair.b.take_direct_link_jobs();
+
+    // A forged keepalive for the link, injected on B's relay past the grace:
+    // keepalives are not encrypted, so it proves nothing about the peer.
+    pair.b
+        .transport
+        .clock()
+        .advance(crate::node::FALLBACK_GRACE_MS + 1_000);
+    let forged = pair
+        .a
+        .links
+        .get(&pair.link)
+        .unwrap()
+        .build_keepalive_packet()
+        .unwrap();
+    let _ = pair.b.handle_packet(InterfaceId(pair.b_mesh), &forged);
+    assert!(
+        pair.b.direct_link_interface(&pair.link).is_some(),
+        "an unauthenticated packet must not pull B off its direct path"
+    );
+    // Nor does a channel packet that fails to decrypt: a real one from A,
+    // tampered with on the way.
+    pair.a.transport.clock().advance(1_000);
+    let mut tampered = packets(&pair.a.send_on_link(&pair.link, b"x").unwrap());
+    let last = tampered[0].len() - 1;
+    tampered[0][last] ^= 0x55;
+    let _ = pair.b.handle_packet(InterfaceId(pair.b_mesh), &tampered[0]);
+    assert!(
+        pair.b.direct_link_interface(&pair.link).is_some(),
+        "a packet that does not decrypt must not pull B off its direct path"
+    );
+
+    // A's direct path dies; it goes stale, falls back, and nudges over the
+    // relay. Nothing A sends reaches B except over the relay.
+    let mut nudge = Vec::new();
+    let mut fell_back = false;
+    for _ in 0..600 {
+        pair.a.transport.clock().advance(1_000);
+        let out = pair.a.handle_timeout();
+        fell_back |= out
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::DirectLinkLost { .. }));
+        if fell_back {
+            nudge.extend(
+                sent(&out)
+                    .into_iter()
+                    .filter(|(iface, _)| *iface == Some(pair.a_mesh))
+                    .map(|(_, d)| d),
+            );
+            // The signal may wait a tick in the outbox behind channel pacing.
+            if nudge.len() >= 2 {
+                break;
+            }
+        }
+    }
+    assert!(nudge.len() >= 2, "a keepalive and an authenticated signal");
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    let _ = a_direct;
+
+    // B, still direct, hears the authenticated nudge over the relay and
+    // follows.
+    pair.b.transport.clock().advance(1_000);
+    let (_, ev) = deliver(&mut pair.b, pair.b_mesh, nudge);
+    assert!(ev
+        .iter()
+        .any(|e| matches!(e, NodeEvent::DirectLinkLost { .. })));
+    assert_eq!(pair.b.direct_link_interface(&pair.link), None);
+}
+
+#[test]
+fn a_session_id_in_use_on_another_link_is_refused() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    // A second link between the same two nodes.
+    let (second, _, out) = pair
+        .a
+        .connect(pair.dest, &pair.signing_key)
+        .expect("connect");
+    pair.pump_from_a(packets(&out));
+    pair.a.transport.clock().advance(1_000);
+    pair.b.transport.clock().advance(1_000);
+
+    let request = |session| crate::direct_link::Signal::Request {
+        session,
+        facilitator: facilitator(),
+        initiator_public: a_public(),
+        protocol: ProbeProtocol::Rnsp,
+    };
+    let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
+    assert!(pair
+        .a
+        .send_direct_link_signal(&pair.link, &request([7; 16]), now));
+    assert!(pair
+        .a
+        .send_direct_link_signal(&second, &request([7; 16]), now));
+    let out = pair.a.handle_timeout();
+    pair.pump_from_a(packets(&out));
+    let probes = pair
+        .b
+        .take_direct_link_jobs()
+        .into_iter()
+        .filter(|j| matches!(j, DirectLinkJob::Probe { .. }))
+        .count();
+    assert_eq!(probes, 1, "the reused id must not start a second session");
 }
