@@ -123,6 +123,54 @@ fn link_becomes_a_micron_link_span() {
     assert_eq!(link_span.text, "the docs");
 }
 
+/// The micron target of the single link in a one-paragraph document.
+fn only_link_target(md: &str) -> String {
+    let doc = roundtrip(md);
+    let [Block::Paragraph { line, .. }] = content_blocks(&doc)[..] else {
+        panic!("{md}: expected one paragraph, got {:?}", doc.blocks);
+    };
+    let span = line
+        .spans
+        .iter()
+        .find(|s| s.link.is_some())
+        .unwrap_or_else(|| panic!("{md}: no link in {:?}", line.spans));
+    span.link
+        .as_ref()
+        .map(|l| l.target.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_site_link_reaches_the_same_page_on_the_mesh() {
+    // `/download` is a web path; written into micron unchanged it is a link
+    // no NomadNet client can resolve. Each site route has a mesh twin, and a
+    // page that links to another page has to land on it on both sides.
+    for (md, target) in [
+        ("[Home](/)", ":/page/index.mu"),
+        ("[Download](/download)", ":/page/download.mu"),
+        ("[Blog](/blog)", ":/page/blog.mu"),
+        ("[Lew](/about)", ":/page/about.mu"),
+        ("[Post](/posts/hallo)", ":/page/hallo.mu"),
+        ("[Bild](/files/mast.jpg)", ":/file/mast.jpg"),
+    ] {
+        assert_eq!(only_link_target(md), target, "{md}");
+    }
+    // Everything that is not one of those routes is left as written.
+    for md in [
+        "[x](https://example.com/download)",
+        "[x](/feed.xml)",
+        "[x](/a/b/c)",
+        "[x](/Download)",
+        "[x](relative)",
+    ] {
+        let url = md
+            .trim_start_matches("[x](")
+            .trim_end_matches(')')
+            .to_string();
+        assert_eq!(only_link_target(md), url, "{md}");
+    }
+}
+
 #[test]
 fn styles_inside_link_labels_degrade_to_plain_label_text() {
     let doc = roundtrip("[**bold** label](https://example.com)");

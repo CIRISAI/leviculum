@@ -16,6 +16,7 @@
 //! | `` `inline code` ``     | `` `B333 `` background toggle (see below)     |
 //! | fenced/indented code    | `` `= `` literal block                        |
 //! | `[text](url)`           | `` `[text`url] ``                             |
+//! | `[text](/name)`         | `` `[text`:/page/name.mu] ``, see below       |
 //! | bullet list             | `\u{2022} item` lines, nested lists indented  |
 //! | numbered list           | `1. item` lines, nested lists indented        |
 //! | `---` rule              | `-` divider line                              |
@@ -33,6 +34,11 @@
 //! - inline code: micron has no inline literal, so code is set off with a
 //!   `` `B333 `` background colour toggle (a dark neutral that reads on the
 //!   dark NomadNet default theme) and closed with `` `b ``
+//! - site links: a root-relative link to one of this server's own routes
+//!   (`/`, `/<name>`, `/posts/<slug>`, `/files/<name>`) is a web path no
+//!   NomadNet client can resolve, so it is rewritten to the route's mesh
+//!   twin (`:/page/index.mu`, `:/page/<name>.mu`, `:/page/<slug>.mu`,
+//!   `:/file/<name>`); any other link is left exactly as written
 //! - images: an image naming a file in the file area becomes a link to it
 //!   (`` `[alt`:/file/name] ``), which is the only form micron has; any other
 //!   image (an external URL) stays `[image: alt]` plain text
@@ -555,6 +561,33 @@ fn resolve_file_ref(event: Event<'_>) -> Event<'_> {
         }),
         other => other,
     }
+}
+
+/// The mesh twin of a root-relative link to one of this server's own routes,
+/// or `None` when the link points anywhere else.
+///
+/// A page that links to `/download` means the download page, and on the mesh
+/// that page lives at `:/page/download.mu`; the web path written into micron
+/// unchanged is a link no NomadNet client can follow. Only the shapes the
+/// server actually answers are mapped: `/`, a single slug-shaped name, a post
+/// and a file. Anything else (`/feed.xml`, which has no mesh side, a deeper
+/// path, an external URL) is left for the author to have meant literally.
+fn mesh_link_target(url: &str) -> Option<String> {
+    let path = url.strip_prefix('/')?;
+    if path.is_empty() {
+        return Some(INDEX_MICRON_TARGET.to_string());
+    }
+    if path.starts_with('/') {
+        return None;
+    }
+    let is_name = |s: &str| !s.is_empty() && slugify(s) == s;
+    if let Some(slug) = path.strip_prefix("posts/") {
+        return is_name(slug).then(|| format!(":/page/{slug}.mu"));
+    }
+    if url.starts_with(files::WEB_PREFIX) {
+        return files::file_ref(url).map(|name| files::micron_target(&name));
+    }
+    is_name(path).then(|| format!(":/page/{path}.mu"))
 }
 
 /// Push a Markdown heading down one level.
@@ -1562,7 +1595,8 @@ impl MicronWriter {
             }
             TagEnd::DefinitionList => self.flush_line(),
             TagEnd::Link => {
-                let url = sanitize_link_part(&self.link_url.take().unwrap_or_default());
+                let url = self.link_url.take().unwrap_or_default();
+                let url = sanitize_link_part(&mesh_link_target(&url).unwrap_or(url));
                 let label = sanitize_link_part(self.link_label.trim());
                 let label = if label.is_empty() { url.clone() } else { label };
                 self.push_raw(&format!("`[{label}`{url}]"));

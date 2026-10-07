@@ -256,6 +256,11 @@ on the web and `:/page/<name>.mu` on the mesh.
 | feed                    | `/feed.xml`        | unchanged           |
 | one file                | `/files/<name>`, `/file/<name>` | unchanged |
 
+A page links to another as it would on the web, `[Download](/download)`. On
+the mesh side that link is rewritten to `:/page/download.mu`, and likewise `/`,
+`/posts/<slug>` and `/files/<name>` to their mesh paths, so one text serves
+both sides. Any other link is left as written.
+
 Posts and the feed deliberately do not move: a feed entry is identified by its
 URL, so relocating posts would show every entry again as new in every reader.
 
