@@ -775,11 +775,33 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .min()
     }
 
-    /// Whether a resource transfer is under way on the link, either way.
+    /// Whether the link carries anything sized for its present MTU that the
+    /// direct path could not: a resource transfer under way either way, or a
+    /// channel message still awaiting its proof that is larger than the
+    /// channel can send at `DIRECT_LINK_MTU`.
     fn resources_in_flight(&self, link_id: &LinkId) -> bool {
         self.links.get(link_id).is_some_and(|link| {
-            link.outgoing_resource().is_some() || link.incoming_resource().is_some()
+            link.outgoing_resource().is_some()
+                || link.incoming_resource().is_some()
+                || link.channel().is_some_and(|ch| {
+                    ch.outstanding_exceeds_mtu(crate::direct_link::DIRECT_LINK_MTU)
+                })
         }) || self.assembling_resources.contains_key(link_id)
+    }
+
+    /// Heap held by the direct-link bookkeeping (leviculum#77's census).
+    pub(super) fn direct_link_heap_bytes(&self) -> usize {
+        use crate::heap_census as hc;
+        let d = &self.direct_links;
+        // A signal is fixed-size: its queue's buffer is all it costs.
+        let outbox: usize = d.outbox.values().map(hc::vec_deque_bytes).sum();
+        hc::btree_map_bytes(&d.sessions)
+            + hc::btree_map_bytes(&d.last_proposal_ms)
+            + hc::btree_map_bytes(&d.attached)
+            + hc::btree_map_bytes(&d.deferred)
+            + hc::btree_map_bytes(&d.outbox)
+            + outbox
+            + hc::vec_deque_bytes(&d.jobs)
     }
 
     /// The link is being removed: end its session and retire its interface.
