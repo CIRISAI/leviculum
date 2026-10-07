@@ -578,12 +578,37 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// `if is_initiator`), so an incoming link never acquires an alias and
     /// there is nothing to resolve. If responder-side re-keying is ever
     /// added, this becomes the next stale-id bug.
+    ///
+    /// Only a pending inbound request can be refused. Any other link (one
+    /// already established, or one this node dialled) is closed instead, as
+    /// [`Self::close_link`] would: close packet, `LinkClosed`, counted as a
+    /// close. Silently dropping a live link would leave the completion
+    /// mirror and the lifecycle counters believing it alive (leviculum#77,
+    /// Codex review on #76). Its events go out with the node's next output.
     pub fn reject_link(&mut self, link_id: &LinkId) {
-        let existed = self.links.contains_key(link_id);
-        self.remove_link(link_id);
-        if existed {
+        let Some(link) = self.links.get_mut(link_id) else {
+            return;
+        };
+        if !link.is_initiator() && link.established_at_secs().is_none() {
+            self.remove_link(link_id);
             self.note_link_rejected();
+            return;
         }
+        let is_initiator = link.is_initiator();
+        let destination_hash = *link.destination_hash();
+        if let Ok(close_packet) = link.build_close_packet(&mut self.rng) {
+            link.close();
+            self.route_link_packet(link_id, &close_packet);
+        } else {
+            link.close();
+        }
+        self.remove_link(link_id);
+        self.emit_link_closed(
+            *link_id,
+            LinkCloseReason::Normal,
+            is_initiator,
+            destination_hash,
+        );
     }
 
     /// Close a link gracefully
