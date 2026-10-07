@@ -1777,11 +1777,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let drain_limit = self.channel_delivery_budget.unwrap_or(usize::MAX);
             let drained: Vec<_> = link
                 .channel_mut()
-                .map(|ch| ch.drain_received_limit(drain_limit))
+                .map(|ch| {
+                    ch.drain_received_budgeted(
+                        drain_limit,
+                        crate::direct_link::wire::is_signal_msgtype,
+                    )
+                })
                 .unwrap_or_default();
             if let Some(budget) = &mut self.channel_delivery_budget {
-                // Signals (leviculum#70) cost the sink nothing. The limit above
-                // still counts them, which can only drain less, never more.
+                // Signals (leviculum#70) cost the sink nothing, and the drain
+                // above does not count them against the limit either.
                 let to_host = drained
                     .iter()
                     .filter(|(e, _)| !crate::direct_link::wire::is_signal_msgtype(e.msgtype))
