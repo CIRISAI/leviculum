@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# Publish the nightly's book under the site's /docs/ (Codeberg #260).
+#
+# lev-receive-nightly publishes every nightly asset as a flat file under
+# $RELEASES_ROOT/nightly/<build-id>/, the book among them as
+# leviculum-docs-nightly.tar.gz. This script is the second half: it takes
+# THAT tarball, the one `latest` points at, and makes its HTML tree what
+# https://<site>/docs/ serves:
+#
+#   $WEBROOT/docs -> docs.<digest12>     a symlink, swapped by rename(2)
+#   $WEBROOT/docs.<digest12>/            the unpacked book
+#
+# It extracts into $WEBROOT/docs.new first, judges what landed, and only
+# then moves it under its final name and swaps the `docs` symlink over to
+# it. `ln -s` to a temporary name and `mv -T` over the old link is a
+# rename(2), so a reader sees the old book or the new one and never neither
+# — the same pointer move lev-receive-nightly makes for `latest`. A plain
+# directory cannot be replaced that way: rename(2) refuses to overwrite a
+# non-empty one, and delete-then-rename is a window of 404s.
+#
+# It trusts the tarball no more than the receiver trusts an upload. The
+# refusals, all of which leave the published book exactly as it was:
+#
+#   * no tarball or no .sha256 beside it under nightly/latest/, or either
+#     one not a regular file,
+#   * a .sha256 that is not one line, does not hold a sha256 digest, names
+#     a different file, or does not match the tarball (checked FIRST, before
+#     tar reads a byte of it),
+#   * a member that is not a regular file — directory, symlink, hard link,
+#     device; the book's own builder (scripts/build-docs-tarball.sh) writes
+#     files only, so there is no legitimate other kind to let through,
+#   * a member outside `docs/`: an absolute name, a `..` or `.` component,
+#     an empty component, anything not under `docs/`, a backslash (tar
+#     escapes control characters in a listing that way), or no index.html,
+#   * after extraction, anything in the tree that is not a regular file or a
+#     directory (the listing is what the archive CLAIMS; this is what landed).
+#
+# A refusal is one line on stderr and a non-zero exit. docs.new is removed
+# on every exit path.
+#
+# Re-running with the book already published is a no-op that says so, so
+# this can run after every lev-receive-nightly without counting builds.
+#
+# Environment (all optional; the defaults are the production ones):
+#   RELEASES_ROOT   the tree lev-receive-nightly writes
+#                   (default /var/www/leviculum/releases)
+#   WEBROOT         the directory /docs/ is served from
+#                   (default: the parent of RELEASES_ROOT, since /releases/
+#                   is served from $WEBROOT/releases)
+# A positional argument overrides RELEASES_ROOT.
+#
+# Dependencies: bash, coreutils, tar with gzip. No find, no python — the same
+# small VPS as lev-receive-nightly.
+#
+# Usage:
+#   lev-unpack-docs [RELEASES_ROOT]
+
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+umask 022
+
+PROG="lev-unpack-docs"
+NAME="leviculum-docs-nightly.tar.gz"
+
+die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+say() { printf '[%s] %s\n' "$PROG" "$*"; }
+
+[ $# -le 1 ] || die "usage: ${PROG} [RELEASES_ROOT]"
+RELEASES_ROOT="${1:-${RELEASES_ROOT:-/var/www/leviculum/releases}}"
+[ -d "$RELEASES_ROOT" ] || die "releases root '${RELEASES_ROOT}' is not a directory"
+RELEASES_ROOT="$(cd "$RELEASES_ROOT" && pwd -P)"
+WEBROOT="${WEBROOT:-${RELEASES_ROOT%/*}}"
+[ -d "$WEBROOT" ] || die "web root '${WEBROOT}' is not a directory"
+
+LATEST="$RELEASES_ROOT/nightly/latest"
+SRC="$LATEST/$NAME"
+NEW="$WEBROOT/docs.new"
+LINK="$WEBROOT/docs"
+LINK_TMP=""
+
+# `docs` is this script's symlink. A real directory there was put by hand,
+# and replacing it is not this script's decision to make.
+if [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
+    die "${LINK} exists and is not a symlink; move it away once, then rerun"
+fi
+
+# A docs.new left by a killed run is ours and stale. One run at a time is
+# the caller's to ensure (run it from the same place lev-receive-nightly
+# finishes, not from two crons).
+rm -rf -- "$NEW"
+cleanup() {
+    rm -rf -- "$NEW"
+    [ -z "$LINK_TMP" ] || rm -f -- "$LINK_TMP"
+    return 0
+}
+trap cleanup EXIT
+mkdir -- "$NEW"
+STAGE="$NEW/.stage"
+mkdir -- "$STAGE"
+
+# --- 1. Take a copy, then verify the copy ---------------------------------
+#
+# Copied before anything is checked: lev-receive-nightly can move `latest`
+# while this runs, and the bytes judged must be the bytes unpacked.
+for f in "$SRC" "$SRC.sha256"; do
+    if [ ! -f "$f" ] || [ -L "$f" ]; then
+        die "no regular file ${f}"
+    fi
+done
+cp -- "$SRC" "$STAGE/$NAME" || die "could not copy ${SRC}"
+cp -- "$SRC.sha256" "$STAGE/$NAME.sha256" || die "could not copy ${SRC}.sha256"
+
+[ "$(wc -l <"$STAGE/$NAME.sha256")" -le 1 ] ||
+    die "${NAME}.sha256 holds more than one line"
+want=""
+claimed=""
+IFS=' ' read -r want claimed <"$STAGE/$NAME.sha256" || true
+claimed="${claimed#\*}"
+[[ $want =~ ^[0-9a-f]{64}$ ]] || die "${NAME}.sha256 does not hold a sha256 digest"
+[ "$claimed" = "$NAME" ] || die "${NAME}.sha256 names '${claimed}', not '${NAME}'"
+got="$(sha256sum "$STAGE/$NAME")"
+got="${got%% *}"
+[ "$got" = "$want" ] || die "checksum mismatch for ${NAME}: .sha256 says ${want}, file is ${got}"
+
+DEST_NAME="docs.${got:0:12}"
+if [ "$(readlink "$LINK" 2>/dev/null || true)" = "$DEST_NAME" ] && [ -d "$WEBROOT/$DEST_NAME" ]; then
+    say "unchanged: docs -> ${DEST_NAME} already holds this book"
+    exit 0
+fi
+
+# --- 2. Judge the archive before extracting it ----------------------------
+tar -tzf "$STAGE/$NAME" >"$STAGE/names" 2>"$STAGE/tar-err" ||
+    die "unreadable tarball: $(head -n1 "$STAGE/tar-err")"
+tar -tvzf "$STAGE/$NAME" >"$STAGE/types" 2>/dev/null || die "unreadable tarball"
+[ -s "$STAGE/names" ] || die "empty tarball: no members"
+
+# The type is the first character of `tar -tv`'s mode column; only `-`.
+while IFS= read -r line; do
+    case "$line" in
+    -*) ;;
+    *) die "tarball holds a member that is not a regular file: ${line}" ;;
+    esac
+done <"$STAGE/types"
+
+has_index=0
+while IFS= read -r name; do
+    case "$name" in
+    docs/?*) ;;
+    *) die "tarball member '${name}' lies outside docs/" ;;
+    esac
+    case "$name" in
+    *\\*) die "tarball member '${name}' holds a backslash or an escaped control character" ;;
+    esac
+    rest="${name#docs/}"
+    IFS=/ read -r -a parts <<<"$rest"
+    [ "${#parts[@]}" -ge 1 ] || die "tarball member '${name}' lies outside docs/"
+    for part in "${parts[@]}"; do
+        case "$part" in
+        '' | . | ..) die "tarball member '${name}' lies outside docs/" ;;
+        esac
+    done
+    case "$rest" in
+    */) die "tarball member '${name}' lies outside docs/" ;;
+    esac
+    [ "$rest" != index.html ] || has_index=1
+done <"$STAGE/names"
+[ "$has_index" = 1 ] || die "tarball holds no docs/index.html"
+
+# --- 3. Extract, then judge what landed -----------------------------------
+#
+# The archive's owners and modes are not ours to take.
+TREE="$NEW/tree"
+mkdir -- "$TREE"
+tar -xzf "$STAGE/$NAME" -C "$TREE" --strip-components=1 \
+    --no-same-owner --no-same-permissions 2>"$STAGE/tar-err" ||
+    die "extraction failed: $(head -n1 "$STAGE/tar-err")"
+
+shopt -s globstar dotglob nullglob
+for path in "$TREE"/**; do
+    [ ! -L "$path" ] || die "extracted entry '${path#"$TREE"/}' is a symlink"
+    [ -f "$path" ] || [ -d "$path" ] ||
+        die "extracted entry '${path#"$TREE"/}' is not a regular file"
+done
+shopt -u globstar dotglob nullglob
+[ -f "$TREE/index.html" ] || die "extraction left no index.html"
+
+# --- 4. Publish -----------------------------------------------------------
+chmod -R u=rwX,go=rX "$TREE"
+DEST="$WEBROOT/$DEST_NAME"
+rm -rf -- "${DEST:?}"
+mv -T -- "$TREE" "$DEST" || die "could not move the book to ${DEST}"
+
+old="$(readlink "$LINK" 2>/dev/null || true)"
+LINK_TMP="$WEBROOT/.docs.$$"
+rm -f -- "$LINK_TMP"
+ln -s -- "$DEST_NAME" "$LINK_TMP"
+mv -T -- "$LINK_TMP" "$LINK" ||
+    die "could not point docs at ${DEST_NAME} (the old book still resolves)"
+LINK_TMP=""
+say "docs -> ${DEST_NAME}"
+
+# The previous book, once nothing points at it. Only a name of the shape
+# this script creates, never anything else under the web root.
+if [[ $old =~ ^docs\.[0-9a-f]{12}$ ]] && [ "$old" != "$DEST_NAME" ]; then
+    rm -rf -- "${WEBROOT:?}/${old:?}"
+    say "removed ${old}"
+fi
+say "done"
