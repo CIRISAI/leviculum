@@ -332,9 +332,15 @@ rule has two halves, and the second is the guard on the first:
   lift is pinned by host tests on the real ledger: flat at the cap at
   t0 it holds, nothing inside the rolling hour frees it, and the first
   bin that leaves the hour drops the long-term sum below the cap and
-  reads `duty_hold` false again
+  reads `duty_hold` false again, also when the loop was parked in a
+  receive window across that edge
   (`leviculum-nrf/queue-budget/src/tests.rs`, and the end-to-end mvr in
-  `leviculum-std/tests/mvr/`).
+  `leviculum-std/tests/mvr/`). That holds because the ledger retires
+  every bin a call skipped, not only the bin after the current one as
+  the reference does (`RNode_Firmware.ino:688`, `:698`): a bin no call
+  landed on would otherwise keep an hour-old charge and hold the lock on
+  air spent in the previous hour (leviculum#495). The wire sees none of
+  this.
 
 ## A propagation node leaves half its budget to forwarding
 

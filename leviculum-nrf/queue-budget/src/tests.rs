@@ -776,6 +776,32 @@ fn the_duty_hold_lifts_at_the_first_bin_that_leaves_the_rolling_hour() {
         holds.verdict(t0 as u32, lift as u32).0,
         HoldVerdict::DropStale { .. }
     ));
+
+    // leviculum#495: the loop parked in a receive window across the lift.
+    // The same seed, last updated one bin short of the age-out, next updated
+    // 8 bins later: the 8 bins it skipped hold the first 8 seeded bins, and
+    // each must leave the hour although no call landed on it. Before the
+    // fix only the bin after the landing one was cleared, and the ledger
+    // read CAP_MS - 3_000 here.
+    let mut parked = AirtimeTracker::new();
+    parked.set_lt_limit_u16(100);
+    for i in 0..12u64 {
+        parked.add_airtime(i * AIRTIME_BINLEN_MS, 3_000);
+    }
+    parked.update(t0);
+    parked.update(inside);
+    assert!(parked.is_locked(), "control: still held before the park");
+    let landing = inside + 8 * AIRTIME_BINLEN_MS;
+    parked.update(landing);
+    assert!(
+        !parked.is_locked(),
+        "the lift must not be missed because the loop was parked"
+    );
+    assert_eq!(parked.long_term_airtime_ms(), CAP_MS - 8 * 3_000);
+    let mut parked_holds = DutyHolds::new(MIN_HOLD_MS);
+    parked_holds.observe(true, t0 as u32);
+    parked_holds.observe(parked.is_locked(), landing as u32);
+    assert!(!parked_holds.holding(landing as u32));
 }
 
 /// leviculum#494: the 10 % EU cap, the budget the field relay ran under.

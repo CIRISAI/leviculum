@@ -58,7 +58,7 @@ therefore lives with the airtime and preamble arithmetic in
 is pinned there against a literal float transcription of the reference's
 own three lines over every PHY the reference admits
 (`csma_slot_matches_reference_float`,
-`leviculum-core/src/rnode.rs:3200`).
+`leviculum-core/src/rnode.rs:3235`).
 
 Until Codeberg #147 the firmware had a second one. The CAD retry gate
 counted its backoff in `max(24, airtime(500)/10)` — a tenth of a
@@ -69,7 +69,7 @@ on one busy channel where its RNode neighbours owe at most 58 of theirs.
 The gate now counts in the same slot the draw does
 (`leviculum-nrf/src/lora.rs:2117`), and the before/after figures are
 pinned in `csma_slot_is_no_longer_a_tenth_of_a_500_byte_airtime`
-(`leviculum-core/src/rnode.rs:3286`).
+(`leviculum-core/src/rnode.rs:3321`).
 
 A millisecond constant would have been wrong in both directions. At
 SF12 the clamp is what binds and 12 symbol times would be 393 ms, so

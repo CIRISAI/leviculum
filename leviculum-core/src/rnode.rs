@@ -1839,6 +1839,11 @@ pub struct AirtimeTracker {
     short_term_ms: u32,
     long_term_ms: u32,
     locked: bool,
+    /// Absolute bin number (`now_ms / AIRTIME_BINLEN_MS`, not taken modulo
+    /// the hour) of the last [`add_airtime`](Self::add_airtime) or
+    /// [`update`](Self::update), or `None` before the first. Absolute so a
+    /// gap of a whole hour is told apart from no gap at all.
+    last_bin: Option<u64>,
 }
 
 impl Default for AirtimeTracker {
@@ -1859,6 +1864,7 @@ impl AirtimeTracker {
             short_term_ms: 0,
             long_term_ms: 0,
             locked: false,
+            last_bin: None,
         }
     }
 
@@ -1880,15 +1886,45 @@ impl AirtimeTracker {
         ((now_ms % AIRTIME_LONGTERM_MS) / AIRTIME_BINLEN_MS) as usize
     }
 
+    /// Retire every bin time has rolled past since the last call, up to and
+    /// including the bin after the one `now_ms` falls in.
+    ///
+    /// The reference clears only the next bin (`airtime_bins[nb] = 0`,
+    /// RNode_Firmware.ino:688 and :698), which is sound only while it is
+    /// called at least once per bin: a bin the loop skips keeps the airtime
+    /// it held an hour earlier and is counted again (leviculum#495, a turn
+    /// parked in a receive window skips about 8). So this clears the whole
+    /// skipped range: the bins after the last touched one through the one
+    /// after the current one, at most `AIRTIME_BINS` of them, so a gap of an
+    /// hour or more empties the histogram. The cost is one store per skipped
+    /// bin, two on a call in the same or the next bin. The first call has no
+    /// last bin and clears only the next bin, as the reference does; every
+    /// bin is still zero from [`new`](Self::new) then. A `now_ms` older than
+    /// the last call clears nothing: rolling back would retire live bins.
+    fn retire_skipped_bins(&mut self, now_ms: u64) {
+        let now_bin = now_ms / AIRTIME_BINLEN_MS;
+        let first = match self.last_bin {
+            None => now_bin + 1,
+            Some(last) if now_bin < last => return,
+            Some(last) => last + 1,
+        };
+        let last = now_bin + 1;
+        let count = (last + 1 - first).min(AIRTIME_BINS as u64);
+        for abs in (last + 1 - count)..=last {
+            self.bins[(abs % AIRTIME_BINS as u64) as usize] = 0;
+        }
+        self.last_bin = Some(now_bin);
+    }
+
     /// Record `cost_ms` of on-air time for a frame keyed at `now_ms`
-    /// (RNode_Firmware.ino:685-688). Adds to the current bin and clears the
-    /// next bin so it starts clean when time rolls into it.
+    /// (RNode_Firmware.ino:685-688). Retires the bins time has rolled past
+    /// (see `retire_skipped_bins`) and adds to
+    /// the current bin.
     pub fn add_airtime(&mut self, now_ms: u64, cost_ms: u64) {
+        self.retire_skipped_bins(now_ms);
         let cb = Self::current_bin(now_ms);
-        let nb = (cb + 1) % AIRTIME_BINS;
         let add = cost_ms.min(u16::MAX as u64) as u16;
         self.bins[cb] = self.bins[cb].saturating_add(add);
-        self.bins[nb] = 0;
     }
 
     /// Recompute short-term airtime, long-term airtime, and the lock state for a
@@ -1901,10 +1937,9 @@ impl AirtimeTracker {
     /// the whole 1-hour window. The lock engages when either fraction meets or
     /// exceeds its (non-zero) limit.
     pub fn update(&mut self, now_ms: u64) {
+        self.retire_skipped_bins(now_ms);
         let cb = Self::current_bin(now_ms);
         let pb = (cb + AIRTIME_BINS - 1) % AIRTIME_BINS;
-        let nb = (cb + 1) % AIRTIME_BINS;
-        self.bins[nb] = 0;
 
         self.short_term_ms = self.bins[cb] as u32 + self.bins[pb] as u32;
         self.short_term = self.short_term_ms as f32 / (2.0 * AIRTIME_BINLEN_MS as f32);
@@ -4417,22 +4452,17 @@ mod tests {
         assert_eq!(expected, 8946);
     }
 
-    /// The precondition the replay above silently satisfies, stated as its own
-    /// red-able test: the rolling window only expires correctly while
-    /// [`AirtimeTracker::update`] is reached at least once per bin.
+    /// The rolling window expires whether or not
+    /// [`AirtimeTracker::update`] is reached once per bin.
     ///
-    /// `update` and `add_airtime` each zero exactly ONE bin, the one after the
-    /// current bin (`RNode_Firmware.ino:685-688`, `:693-702`). The reference
-    /// firmware gets away with that because its main loop calls
-    /// `update_airtime()` every iteration; ours calls it only while a frame is
-    /// pending (`lora.rs:1882`, inside `if let Some(frame) = pending_tx`). A
-    /// board whose queue stays empty across more than one bin therefore skips
-    /// the clearing, and an hour later those bins are still carrying the
-    /// previous hour's airtime — counted a second time. The Pocket never hit
-    /// this in the 2026-09-27 capture because its queue was never empty, but
-    /// nothing in the tracker enforces that, so the boundary is pinned here.
+    /// Until leviculum#495, `update` and `add_airtime` each zeroed exactly
+    /// ONE bin, the one after the current bin, as the reference does
+    /// (`RNode_Firmware.ino:685-688`, `:693-702`), so a ledger left alone
+    /// for an hour still carried the charge it took an hour earlier. This
+    /// test pinned that boundary as a precondition; it now pins that the
+    /// boundary is gone.
     #[test]
-    fn hour_window_expires_only_while_update_is_reached_once_per_bin() {
+    fn hour_window_expires_whether_or_not_update_is_reached_every_bin() {
         // One bin's worth of airtime, keyed a full hour before "now".
         let charge = 3000u64;
         let an_hour = AIRTIME_LONGTERM_MS;
@@ -4453,16 +4483,73 @@ mod tests {
             "an hour of bin-edge updates must retire the charge"
         );
 
-        // Idle: nothing calls `update` in between, so the bin is never
-        // cleared and the same 3000 ms is still on the books an hour later.
+        // Idle: nothing calls `update` in between. The one call an hour later
+        // retires every bin it skipped, the charged one among them.
         let mut idle = AirtimeTracker::new();
         idle.add_airtime(0, charge);
         idle.update(an_hour);
         assert_eq!(
-            idle.long_term_airtime_ms() as u64,
-            charge,
-            "a bin nothing swept is still counted a full hour later"
+            idle.long_term_airtime_ms(),
+            0,
+            "a bin that left the hour unswept must not be counted again"
         );
+    }
+
+    /// leviculum#495 mvr: a loop turn parked in a receive window skips about
+    /// 8 bins, and the bins it skipped must leave the hour all the same.
+    ///
+    /// Bin 0 takes 3000 ms at t=0. `update` then runs on every bin edge up to
+    /// bin 478, one rolling hour minus two bins, so bin 0 is the next to age
+    /// out (bin 480 lands on its slot); bin 478 takes a fresh 1000 ms. The
+    /// next call comes 8 bins later, at bin 486. Bin 0's charge is now more
+    /// than an hour old; bin 478's is 8 bins old.
+    ///
+    /// Before the fix that call zeroed only bin 487 (slot 7), so slot 0 kept
+    /// the old 3000 ms and the ledger read 4000. After it, 1000: everything
+    /// from bin 479 through 487 is retired and the fresh charge survives.
+    #[test]
+    fn a_parked_loop_retires_the_bins_it_skipped() {
+        let mut t = AirtimeTracker::new();
+        t.add_airtime(0, 3000);
+        let park_from = AIRTIME_BINS as u64 - 2;
+        for bin in 0..=park_from {
+            t.update(bin * AIRTIME_BINLEN_MS);
+        }
+        t.add_airtime(park_from * AIRTIME_BINLEN_MS, 1000);
+        t.update(park_from * AIRTIME_BINLEN_MS);
+        assert_eq!(
+            t.long_term_airtime_ms(),
+            4000,
+            "control: bin 0 is still inside the hour before the park"
+        );
+
+        t.update((park_from + 8) * AIRTIME_BINLEN_MS);
+        assert_eq!(
+            t.long_term_airtime_ms(),
+            1000,
+            "the 8 skipped bins must be retired: only bin 478's charge is inside the hour"
+        );
+    }
+
+    /// The skip is bounded by the histogram, and time running backwards
+    /// retires nothing. A second call in the same bin also leaves the
+    /// current bin's charge alone.
+    #[test]
+    fn bin_retirement_is_bounded_and_never_runs_backwards() {
+        let mut t = AirtimeTracker::new();
+        t.add_airtime(10 * AIRTIME_BINLEN_MS, 2000);
+        t.add_airtime(10 * AIRTIME_BINLEN_MS + 100, 500);
+        t.update(10 * AIRTIME_BINLEN_MS + 200);
+        assert_eq!(t.long_term_airtime_ms(), 2500, "same bin: nothing retired");
+
+        // An earlier timestamp (a caller whose clock read was taken before
+        // the last charge landed) must not retire the live bins after it.
+        t.update(9 * AIRTIME_BINLEN_MS);
+        assert_eq!(t.long_term_airtime_ms(), 2500);
+
+        // Ten hours of silence: every bin retired, in one bounded sweep.
+        t.update(10 * AIRTIME_LONGTERM_MS);
+        assert_eq!(t.long_term_airtime_ms(), 0);
     }
 
     #[test]
