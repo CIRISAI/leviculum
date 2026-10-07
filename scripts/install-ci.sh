@@ -316,6 +316,19 @@ echo "[install-ci] firmware toolchain: thumbv7em-none-eabihf + flip-link + llvm-
 cargo install --locked cargo-about --version 0.9.2 --features cli
 echo "[install-ci] licence tooling: cargo-about 0.9.2 (just notices / just notices-guard)"
 
+# 6b2. The book renderer (Codeberg #260). The nightly builds docs/ with it
+#     and publishes the result under https://leviculum.network/docs/
+#     (scripts/build-docs-tarball.sh).
+#
+#     Pinned, and THIS line is the pin: build-docs-tarball.sh reads the
+#     version out of it, the nightly's build-amd64 step installs what that
+#     script prints, and a build with any other mdbook refuses. A different
+#     renderer is a different book under the same URL, so bumping it is a
+#     deliberate act here and nowhere else. Keep the line's shape exactly:
+#     the script matches it.
+cargo install --locked mdbook --version 0.4.48
+echo "[install-ci] book renderer: mdbook 0.4.48 (scripts/build-docs-tarball.sh)"
+
 # 6c. ESP32-S3 (Xtensa) firmware toolchain.  ESP32-S3 is an Xtensa part,
 #     not RISC-V, so stock rustc cannot target it at all: there is no
 #     `rustup target add xtensa-esp32s3-none-elf`, and the esp-rs fork of

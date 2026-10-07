@@ -15,6 +15,8 @@
 #   leviculum-heapacct_*_arm64.deb
 # and the lnflash firmware bundle from scripts/lnflash-bundle.sh:
 #   target/lnflash/lnflash-<version>.tar.gz
+# and the rendered book from scripts/build-docs-tarball.sh:
+#   target/docs/leviculum-docs-nightly.tar.gz
 # plus:
 #   git available on PATH
 #   LEVICULUM_BUILD_ID env var (embedded in the per-arch VERSION file)
@@ -34,9 +36,10 @@
 #   dist/<pkg>-nightly-<arch>.tar.gz       + .sha256   (just the binaries)
 # plus the instrumented leviculum package, arm64 only (Codeberg #437):
 #   dist/leviculum-nightly-arm64-heapacct.deb + .sha256
-# plus one source tarball and one lnflash bundle:
+# plus one source tarball, one lnflash bundle and the book:
 #   dist/leviculum-nightly-source.tar.gz   + .sha256
 #   dist/lnflash-nightly-amd64.tar.gz      + .sha256
+#   dist/leviculum-docs-nightly.tar.gz     + .sha256
 # The .deb version lives in the control metadata and the embedded
 # --version string, not in the filename. Binaries are pre-stripped
 # at link time via [profile.release] strip = "debuginfo" in the
@@ -225,6 +228,25 @@ fi
 cp "$lnflash_src" "$DIST/lnflash-nightly-amd64.tar.gz"
 (cd "$DIST" && sha256sum lnflash-nightly-amd64.tar.gz \
     >lnflash-nightly-amd64.tar.gz.sha256)
+
+# The book (Codeberg #260), rendered and packed by
+# scripts/build-docs-tarball.sh in the build-amd64 step: the HTML tree under
+# one top directory docs/, regular files only, which is the layout
+# packaging/site/lev-unpack-docs accepts and nothing else. Copied, not
+# repacked, for the reason the lnflash bundle is: this step has no mdbook,
+# and the archive's layout is that script's contract to keep. Repo-relative
+# like the lnflash bundle, and missing is a failure: a nightly without its
+# manual would leave https://leviculum.network/docs/ on the previous build
+# while every package beside it moved on.
+docs_src="target/docs/leviculum-docs-nightly.tar.gz"
+if [ ! -f "$docs_src" ]; then
+    echo "error: no rendered book at ${docs_src}" >&2
+    echo "       run scripts/build-docs-tarball.sh first" >&2
+    exit 1
+fi
+cp "$docs_src" "$DIST/leviculum-docs-nightly.tar.gz"
+(cd "$DIST" && sha256sum leviculum-docs-nightly.tar.gz \
+    >leviculum-docs-nightly.tar.gz.sha256)
 
 # Source tarball at the same commit as the binaries. git archive
 # emits only tracked files, so vendor/ submodules and target/ never

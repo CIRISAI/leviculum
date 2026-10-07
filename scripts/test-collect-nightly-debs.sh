@@ -164,6 +164,11 @@ EOF
     echo "real lnflash bundle" \
         > "$TREE/target/lnflash/lnflash-${LNFLASH_VERSION}.tar.gz"
 
+    # So is the rendered book (Codeberg #260), for the same reason: it is
+    # scripts/build-docs-tarball.sh's product, not cargo's.
+    mkdir -p "$TREE/target/docs"
+    echo "real docs tarball" > "$TREE/target/docs/leviculum-docs-nightly.tar.gz"
+
     ( cd "$TREE" \
         && git init -q . \
         && git add -A \
@@ -202,7 +207,8 @@ done
 printf '%s\n' leviculum-nightly-arm64-heapacct.deb leviculum-nightly-arm64-heapacct.deb.sha256 \
     >> "$expected"
 printf '%s\n' lnflash-nightly-amd64.tar.gz lnflash-nightly-amd64.tar.gz.sha256 \
-    leviculum-nightly-source.tar.gz leviculum-nightly-source.tar.gz.sha256 >> "$expected"
+    leviculum-nightly-source.tar.gz leviculum-nightly-source.tar.gz.sha256 \
+    leviculum-docs-nightly.tar.gz leviculum-docs-nightly.tar.gz.sha256 >> "$expected"
 sort -o "$expected" "$expected"
 actual="$(find "$TREE/dist" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort)"
 if [ "$actual" != "$(cat "$expected")" ]; then
@@ -274,6 +280,10 @@ grep -q "^version: ${VER_LNPND}\$" "$lpn/VERSION" 2>/dev/null \
 got="$(cat "$TREE/dist/lnflash-nightly-amd64.tar.gz" 2>/dev/null)"
 [ "$got" = "real lnflash bundle" ] || fail "lnflash asset holds '${got}'"
 
+# The book is copied, not rebuilt: this step has no mdbook.
+got="$(cat "$TREE/dist/leviculum-docs-nightly.tar.gz" 2>/dev/null)"
+[ "$got" = "real docs tarball" ] || fail "docs asset holds '${got}'"
+
 # The source tarball is tracked files at HEAD, under one prefix, with no
 # build output in it.
 names="$(tar tzf "$TREE/dist/leviculum-nightly-source.tar.gz" 2>/dev/null)"
@@ -300,6 +310,21 @@ tar -C "$stage" -xzf "$TREE/dist/leviculum-nightly-amd64.tar.gz" 2>/dev/null \
     || fail "leviculum-nightly-amd64.tar.gz is not a readable gzip tarball"
 grep -qxF "rustc: unknown" "$stage/leviculum-nightly-amd64/VERSION" 2>/dev/null \
     || fail "an unstamped compiler is not reported as unknown: $(sed -n '/^rustc/p' "$stage/leviculum-nightly-amd64/VERSION" 2>/dev/null)"
+[ "$failures" -eq "$before" ] || dumpout
+
+# --- Case: the book was not built -----------------------------------------
+#
+# Every other asset is there; only the docs tarball is missing. Publishing
+# without it would leave the site's /docs/ on an older build than the
+# packages beside it, so this is a failure that names the script to run.
+echo "[case] no-docs"
+before=$failures
+setup no-docs
+rm -f "$TREE/target/docs/leviculum-docs-nightly.tar.gz"
+run_collect
+[ "$(rc)" != "0" ] || fail "exit 0 with no rendered book"
+out | grep -q 'build-docs-tarball' \
+    || fail "the failure does not name scripts/build-docs-tarball.sh"
 [ "$failures" -eq "$before" ] || dumpout
 
 # --- Case: nobody stamped the target directory ----------------------------

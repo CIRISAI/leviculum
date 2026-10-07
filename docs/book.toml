@@ -5,5 +5,9 @@ language = "en"
 src = "src"
 
 [output.html]
+# Served under https://leviculum.network/docs/ (scripts/build-docs-tarball.sh,
+# packaging/site/lev-unpack-docs). mdbook uses this only for 404.html, whose
+# links and assets must resolve from whatever path the miss happened at.
+site-url = "/docs/"
 git-repository-url = "https://codeberg.org/Lew_Palm/leviculum"
 edit-url-template = "https://codeberg.org/Lew_Palm/leviculum/src/branch/master/docs/{path}"

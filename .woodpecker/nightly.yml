@@ -31,6 +31,13 @@
 # leviculum stack's; scripts/deb-stamp.sh derives one Debian version per
 # package.
 #
+# The book under docs/ ships as one more tarball, the rendered HTML under a
+# top directory docs/ (Codeberg #260). Its reader-facing home is
+# https://leviculum.network/docs/, where packaging/site/lev-unpack-docs
+# unpacks the copy the site publish delivers:
+#
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-docs-nightly.tar.gz
+#
 # The lnflash firmware bundle is not a package at all — it is the
 # stranger-unpacks-it tarball (one binary, one UF2 per board in
 # scripts/lnflash-bundle.sh's BOARDS list, Nordic's S140 SoftDevice and
@@ -82,6 +89,8 @@ when:
         - 'scripts/deb-stamp.sh'
         - 'scripts/deb-finalize.sh'
         - 'scripts/collect-nightly-debs.sh'
+        - 'scripts/build-docs-tarball.sh'
+        - 'docs/book.toml'
         - 'scripts/md2man.py'
         - 'docs/src/man/**'
         - 'packaging/**'
@@ -180,6 +189,14 @@ steps:
       # Justfile's build-deb-amd64. Spelling the steps out here a second
       # time is what broke the nightly for eight days.
       - bash scripts/build-deb.sh amd64
+      # The book (Codeberg #260): rendered here, staged by `package` as
+      # leviculum-docs-nightly.tar.gz, and unpacked under
+      # https://leviculum.network/docs/ by packaging/site/lev-unpack-docs on
+      # the receiving host. mdbook is pinned in ONE place, the `cargo install`
+      # line in scripts/install-ci.sh; the build script prints that pin, this
+      # line installs it, and a build with any other version refuses.
+      - cargo install --locked mdbook --version "$(bash scripts/build-docs-tarball.sh --print-mdbook-pin)"
+      - bash scripts/build-docs-tarball.sh
 
   build-arm64:
     image: rust:bookworm
