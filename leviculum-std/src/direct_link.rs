@@ -276,9 +276,16 @@ pub(crate) struct Punched {
     pub early: Vec<Vec<u8>>,
 }
 
-/// How many early datagrams a punch keeps; a peer that sends more before
-/// this end finishes is not waiting for anything.
+/// How many early datagrams a punch keeps, and how many bytes in all; a
+/// peer that sends more before this end finishes is not waiting for
+/// anything. Bounded by bytes, not only count, so a peer cannot pin
+/// megabytes per session (Codex review on #78).
 const EARLY_MAX: usize = 64;
+const EARLY_MAX_BYTES: usize = 64 * 1024;
+/// The largest early datagram kept. Once the peer's link is on the direct
+/// path its packets are sized for `DIRECT_LINK_MTU`; anything far larger
+/// is not one of them.
+const EARLY_DATAGRAM_MAX: usize = 2_048;
 
 /// Punch toward `peer` until both directions are proven: a valid punch from
 /// the peer has arrived (so its NAT lets it out to us) and a valid ack for
@@ -293,6 +300,7 @@ pub(crate) async fn punch(
     let mut heard_punch_from: Option<SocketAddr> = None;
     let mut acked_by: Option<SocketAddr> = None;
     let mut early: Vec<Vec<u8>> = Vec::new();
+    let mut early_bytes = 0usize;
     let mut seq: u32 = 0;
     let mut tick = tokio::time::interval(PUNCH_INTERVAL);
     let mut buf = vec![0u8; 65_535];
@@ -319,8 +327,11 @@ pub(crate) async fn punch(
                         if from_peer
                             && wire::punch_frame_kind(frame).is_none()
                             && !frame.is_empty()
+                            && frame.len() <= EARLY_DATAGRAM_MAX
                             && early.len() < EARLY_MAX
+                            && early_bytes + frame.len() <= EARLY_MAX_BYTES
                         {
+                            early_bytes += frame.len();
                             early.push(frame.to_vec());
                         }
                         continue;
@@ -674,6 +685,25 @@ mod tests {
         assert!(ra.is_some());
         let rb = rb.expect("B punches through");
         assert_eq!(rb.early, vec![b"a reticulum packet".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn early_datagrams_are_bounded_by_size() {
+        let a = loopback().await;
+        let b = loopback().await;
+        let (a_addr, b_addr) = (a.local_addr().unwrap(), b.local_addr().unwrap());
+        let session = [3u8; 16];
+        let token = [4u8; 32];
+        // An oversized datagram is not kept; a normal one after it is.
+        a.send_to(&vec![1u8; EARLY_DATAGRAM_MAX + 1], b_addr)
+            .await
+            .unwrap();
+        a.send_to(b"small", b_addr).await.unwrap();
+        let (_, rb) = tokio::join!(
+            punch(&a, b_addr, &session, &token),
+            punch(&b, a_addr, &session, &token)
+        );
+        assert_eq!(rb.expect("punched").early, vec![b"small".to_vec()]);
     }
 
     #[tokio::test(start_paused = true)]
