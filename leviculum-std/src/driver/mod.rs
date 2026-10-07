@@ -5488,6 +5488,13 @@ async fn run_event_loop(
                     }
                 }
 
+                // leviculum#70: repeat a new direct interface's announces
+                // once the peer is surely past its punch loop.
+                for index in direct_links.take_due_reannounces(std::time::Instant::now()) {
+                    let output = inner.lock_recover().handle_interface_up(index);
+                    dispatch_here!(output);
+                }
+
                 // Advance next_poll based on next_deadline_ms
                 let interval = match next {
                     Some(deadline_ms) => {
