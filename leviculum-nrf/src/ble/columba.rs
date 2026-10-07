@@ -30,14 +30,15 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
-    addr_value, dial_preference, identity_hint, judge_supervision_timeout,
-    manufacturer_data_with_hint, parse_peer_advertisement, rotating_address, should_initiate,
-    with_free_slots, CandidateTable, ChurnLedger, ChurnPolicy, ConnParams, ConnParamsAsk,
-    ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision, DialLedger, GattBytes,
-    LedgerPolicy, LinkPhase, LinkRole, LinkUp, Origin, OversizeFrom, OversizeLine, PeerRegistry,
-    ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, GATT_VALUE_MAX, IDENTITY_HINT_LEN,
-    LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS, MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS,
-    SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    addr_value, admit, connect_failure_condemns, dial_preference, identity_hint,
+    judge_supervision_timeout, manufacturer_data_with_hint, parse_peer_advertisement,
+    rotating_address, with_free_slots, AdvReport, CandidateTable, ChurnLedger, ChurnPolicy,
+    ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision,
+    DeadEnds, DialLedger, Exclusion, GattBytes, LedgerPolicy, Ledgers, LinkPhase, LinkRole, LinkUp,
+    Local, Origin, OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent, ScanMode,
+    ScanPhase, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, DEAD_END_SLOTS, DEAD_END_TTL_MS,
+    GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
+    MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -199,7 +200,7 @@ const RETICULUM_SVC_UUID_LE: [u8; 16] = [
 
 /// The FIXED capability bits this node advertises AND feeds into its
 /// own side of the connection decision — one constant so the record on
-/// the air and the [`should_initiate`] input cannot disagree.
+/// the air and the [`leviculum_ble_tx::should_initiate`] input cannot disagree.
 ///
 /// Zero since phase B: [`super`]'s `gap_role_count` now grants one
 /// central role, we can initiate, so `PERIPHERAL_ONLY` (bit 0) is
@@ -208,7 +209,7 @@ const RETICULUM_SVC_UUID_LE: [u8; 16] = [
 ///
 /// The advertised byte is this plus the live free-slot count
 /// ([`capability_record`], #375 item 3). The decision input stays the
-/// bare constant on purpose: [`should_initiate`] reads bit 0 and
+/// bare constant on purpose: [`leviculum_ble_tx::should_initiate`] reads bit 0 and
 /// nothing else, and a rule about who MAY dial must not acquire a
 /// second, time-varying input.
 const LOCAL_CAPS: u8 = 0;
@@ -276,7 +277,7 @@ fn free_peripheral_slots() -> u8 {
 /// [`LEGACY_AD_CAPACITY`]. That is what lets a scanning peer recognise
 /// us across an address rotation BEFORE it spends a dial on us. Also a
 /// hint only, and read for one thing: a peer already linked to us is
-/// not dialled again ([`hint_already_linked`]).
+/// not dialled again ([`PeerRegistry::hint_linked`]).
 ///
 /// The hint is a parameter rather than a global: [`spawn`] is handed
 /// the identity and threads it to the tasks, so there is no second
@@ -1299,6 +1300,9 @@ fn peer_link_up(
             new_usable_mtu,
         } => {
             BLE_LINKS_REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            // A refusal brought no link up; the reset rule leaves the
+            // strict clock alone for it (`PhaseEvent::resets_strict`).
+            note_phase_event(PhaseEvent::LinkRefused);
             let old_conn = HVN_DRAIN
                 .handle_at(old_slot)
                 .unwrap_or(leviculum_ble_tx::NO_CONN_HANDLE);
@@ -1321,29 +1325,38 @@ fn peer_link_up(
             old_data_silence_ms,
             old_usable_mtu,
             new_usable_mtu,
-        } => displace_old_link(DisplacedOld {
-            old_slot,
-            new_slot: slot_index,
-            new_conn: conn_handle,
-            peer_value,
-            peer_id,
-            origin,
-            rule,
-            old_silence_ms,
-            old_data_silence_ms,
-            old_usable_mtu,
-            new_usable_mtu,
-        }),
+        } => {
+            displace_old_link(DisplacedOld {
+                old_slot,
+                new_slot: slot_index,
+                new_conn: conn_handle,
+                peer_value,
+                peer_id,
+                origin,
+                rule,
+                old_silence_ms,
+                old_data_silence_ms,
+                old_usable_mtu,
+                new_usable_mtu,
+            });
+            // A displacement restarts the fallback clock too, as every
+            // link up does (#375). For a rotating phone that reconnects
+            // inside the bound this keeps the board in strict mode for
+            // good: `issue_412_a_rotating_peer_that_keeps_reconnecting_
+            // holds_off_the_fallback` in leviculum_ble_tx::admission.
+            note_phase_event(PhaseEvent::LinkDisplaced);
+        }
         LinkUp::Accepted { first } => {
             if first {
                 super::report_peer_event(super::PeerEvent::Up(peer_id));
             }
+            // A link up in either role restarts the fallback clock
+            // (#375): the board is reachable over BLE again, so the
+            // strict rule gets its full bound before the scanner may
+            // dial against the sort.
+            note_phase_event(PhaseEvent::LinkAccepted);
         }
     }
-    // A link up in either role restarts the fallback clock (#375): the
-    // board is reachable over BLE again, so the strict rule gets its
-    // full bound before the scanner may dial against the sort.
-    note_strict_reset();
     true
 }
 
@@ -1494,7 +1507,7 @@ fn peer_link_down(slot_index: usize) {
 /// used to reset only at identity.
 fn conn_link_up(slot_index: usize, addr_value: u64) {
     LIVE_PEERS.lock(|peers| peers.borrow_mut().conn_up(slot_index, addr_value));
-    note_strict_reset();
+    note_phase_event(PhaseEvent::ConnUp);
 }
 
 /// Clear a connection's address at teardown. The strict phase restarts
@@ -1502,47 +1515,36 @@ fn conn_link_up(slot_index: usize, addr_value: u64) {
 /// before it may dial against the sort.
 fn conn_link_down(slot_index: usize) {
     LIVE_PEERS.lock(|peers| peers.borrow_mut().conn_down(slot_index));
-    note_strict_reset();
+    note_phase_event(PhaseEvent::ConnDown);
 }
 
-/// Whether a live connection was made on this address. Core Spec Vol 6
-/// Part B §4.5 permits one connection per address pair — the initiator
-/// shall not dial an advertiser it is connected to, and the advertiser
-/// shall ignore such a CONNECT_IND — so a dial here can only time out
-/// (5 s on the air, the rig's `BLE_CENTRAL_FAIL … err=Timeout` loop)
-/// and the scanner excludes the address before dialling.
-fn addr_already_linked(addr_value: u64) -> bool {
-    LIVE_PEERS.lock(|peers| peers.borrow().addr_linked(addr_value))
-}
-
-/// Whether the advertiser's identity hint (#412) belongs to a peer we
-/// already hold a live link to — the same exclusion as
-/// [`addr_already_linked`], one level up, where a rotated address
-/// cannot hide.
-///
-/// Without it a linked peer that draws a new address looks like a new
-/// device, wins the fallback class by its low address and takes the
-/// board's ONE central slot, and the duplicate is only found after the
-/// connect, the discovery and the identity read. The rule host-tested
-/// in [`leviculum_ble_tx::PeerRegistry::hint_linked`]; this is the lock
-/// around the firmware's single registry instance.
-///
-/// It reaches exactly as far as the record does, which is our own two
-/// stacks: the corpus night's 7-of-7 was an Android Columba, and
-/// Columba at 6674ae87 advertises the service UUID alone — no
-/// manufacturer record, so no hint, so that phone is dialled exactly
-/// as it was (see [`leviculum_ble_tx::PeerRegistry::hint_linked`]).
-/// What no longer lets it take the slot every time is the window's
-/// fallback order, which stopped ranking by an address its owner
-/// redraws (`leviculum_ble_tx::window`, #412).
-///
-/// A HINT, and used in one direction only: to skip a dial. `None` — an
-/// advertiser that carried no hint — is never a match, so a pre-#412
-/// board and a phone behave exactly as they did. Nothing durable is
-/// keyed on it; admission is still the 16-byte identity handshake.
-fn hint_already_linked(hint: Option<[u8; IDENTITY_HINT_LEN]>) -> bool {
-    LIVE_PEERS.lock(|peers| peers.borrow().hint_linked(hint))
-}
+// The scanner's two exclusions by link, filters three and four of
+// `leviculum_ble_tx::admit` since #496, read under the `LIVE_PEERS`
+// lock in `find_peer_to_initiate`:
+//
+// - BY ADDRESS (`PeerRegistry::addr_linked`). Core Spec Vol 6 Part B
+//   §4.5 permits one connection per address pair — the initiator shall
+//   not dial an advertiser it is connected to, and the advertiser shall
+//   ignore such a CONNECT_IND — so a dial here can only time out (5 s on
+//   the air, the rig's `BLE_CENTRAL_FAIL … err=Timeout` loop) and the
+//   scanner excludes the address before dialling.
+// - BY IDENTITY HINT (#412, `PeerRegistry::hint_linked`), the same
+//   exclusion one level up, where a rotated address cannot hide. Without
+//   it a linked peer that draws a new address looks like a new device,
+//   wins the fallback class by its low address and takes the board's ONE
+//   central slot, and the duplicate is only found after the connect, the
+//   discovery and the identity read. It reaches exactly as far as the
+//   record does, which is our own two stacks: the corpus night's 7-of-7
+//   was an Android Columba, and Columba at 6674ae87 advertises the
+//   service UUID alone — no manufacturer record, so no hint, so that
+//   phone is dialled exactly as it was. What no longer lets it take the
+//   slot every time is the window's fallback order, which stopped
+//   ranking by an address its owner redraws (`leviculum_ble_tx::window`,
+//   #412). A HINT, and used in one direction only: to skip a dial. `None`
+//   — an advertiser that carried no hint — is never a match, so a
+//   pre-#412 board and a phone behave exactly as they did. Nothing
+//   durable is keyed on it; admission is still the 16-byte identity
+//   handshake.
 
 /// The number of distinct live peer identities on the BLE interface
 /// (Codeberg #365) — what the main loop mirrors into the core as the
@@ -1606,17 +1608,20 @@ const CENTRAL_RETRY_BACKOFF_MS: u64 = 5_000;
 // at the 30 %-duty passive scan cadence
 // ([`SCAN_INTERVAL_625US`]/[`SCAN_WINDOW_625US`]).
 
-/// The strict-phase clock behind [`SCAN_FALLBACK_AFTER_MS`]: when the
-/// current strict phase began (in `embassy_time` ticks) and whether the
-/// switch to fallback was already logged for this phase. Reset by
-/// [`note_strict_reset`] — a connection event in either role, a
+/// The strict-phase clock behind
+/// [`leviculum_ble_tx::SCAN_FALLBACK_AFTER_MS`], the board's one
+/// [`ScanPhase`] (the rule is host-tested in
+/// [`leviculum_ble_tx::admission`] since #496): when the current strict
+/// phase began and whether the switch to fallback was already logged for
+/// this phase. Reset by [`note_phase_event`] for every [`PhaseEvent`]
+/// the reset rule names — a connection event in either role, a
 /// teardown, or the strict rule producing a target — and otherwise it
 /// runs whenever the central task is scanning, live links
 /// notwithstanding (the eager spec, #375 part 3). Live links no longer
 /// suspend it: the doomed dial that motivated the quiet spec is
 /// excluded by address before it can leave the scanner
-/// ([`addr_already_linked`], Core Spec Vol 6 Part B §4.5), a failed
-/// fallback dial is backed off by [`RecentDeadEnds`], and the quiet
+/// ([`PeerRegistry::addr_linked`], Core Spec Vol 6 Part B §4.5), a failed
+/// fallback dial is backed off by [`DeadEnds`], and the quiet
 /// suspension itself measurably cost merges —
 /// `ble-tx/tests/graph_formation.rs` puts it at 28 and 78 all-linked
 /// splits per 1000 arrival orders at 10 and 20 boards against eager's
@@ -1624,16 +1629,23 @@ const CENTRAL_RETRY_BACKOFF_MS: u64 = 5_000;
 ///
 /// A blocking mutex over a `Cell`, like [`LIVE_PEERS`]: written from
 /// the peripheral tasks (via [`peer_link_up`]) and read from the
-/// central task's scan callback, and the ticks are 64-bit, which the
-/// target has no atomic for.
-static FALLBACK_CLOCK: BlockingMutex<CriticalSectionRawMutex, Cell<(u64, bool)>> =
-    BlockingMutex::new(Cell::new((0, false)));
+/// central task's scan callback, and the milliseconds are 64-bit, which
+/// the target has no atomic for.
+static FALLBACK_CLOCK: BlockingMutex<CriticalSectionRawMutex, Cell<ScanPhase>> =
+    BlockingMutex::new(Cell::new(ScanPhase::new()));
 
-/// Restart the strict phase: a link came up in either role, or the
-/// strict rule found a permitted peer — either way the board is not
-/// stranded, so the fallback clock starts over.
-fn note_strict_reset() {
-    FALLBACK_CLOCK.lock(|clock| clock.set((Instant::now().as_ticks(), false)));
+/// Hand one [`PhaseEvent`] to the fallback clock, which restarts the
+/// strict phase iff [`PhaseEvent::resets_strict`] says so: a link came
+/// up or went down in either role, or the strict rule found a permitted
+/// peer — either way the board is not stranded, so the clock starts
+/// over.
+fn note_phase_event(event: PhaseEvent) {
+    let now_ms = Instant::now().as_millis();
+    FALLBACK_CLOCK.lock(|clock| {
+        let mut phase = clock.get();
+        phase.note(event, now_ms);
+        clock.set(phase);
+    });
 }
 
 /// The [`ScanMode`] the current strict phase has reached, logging the
@@ -1643,7 +1655,7 @@ fn note_strict_reset() {
 /// pass that never finds a target never *ends* — `central::scan` runs
 /// until its callback accepts a peer — so "the next pass" would never
 /// come for exactly the stranded board the fallback exists for. The
-/// timing stays an input to [`should_initiate`]; the rule itself never
+/// timing stays an input to [`leviculum_ble_tx::should_initiate`]; the rule itself never
 /// measures it.
 ///
 /// Under the eager spec a linked board reaches fallback too — on a
@@ -1651,100 +1663,33 @@ fn note_strict_reset() {
 /// neighbour's address excluded, so no candidate ever opens a window
 /// and nothing is dialled. `BLE_SCAN_FALLBACK` is still logged once
 /// per phase, not once per pass: the `announced` flag only clears at
-/// [`note_strict_reset`], and a board in that state has no connection
+/// [`note_phase_event`], and a board in that state has no connection
 /// events to reset it.
 fn scan_mode_now() -> ScanMode {
     // One lock for the read-check-mark sequence: a reset racing in
     // between two separate locks would be overwritten with the stale
     // phase. The log line itself stays outside the critical section.
-    let announce = FALLBACK_CLOCK.lock(|clock| {
-        let (since_ticks, announced) = clock.get();
-        let elapsed_ms =
-            Duration::from_ticks(Instant::now().as_ticks().saturating_sub(since_ticks)).as_millis();
-        if elapsed_ms < SCAN_FALLBACK_AFTER_MS {
-            return None;
-        }
-        if !announced {
-            clock.set((since_ticks, true));
-            return Some(Some(elapsed_ms));
-        }
-        Some(None)
+    let now_ms = Instant::now().as_millis();
+    let poll = FALLBACK_CLOCK.lock(|clock| {
+        let mut phase = clock.get();
+        let poll = phase.poll(now_ms);
+        clock.set(phase);
+        poll
     });
-    match announce {
-        None => ScanMode::Strict,
-        Some(logged) => {
-            if let Some(elapsed_ms) = logged {
-                crate::log::log_fmt(
-                    "[BLE ] ",
-                    format_args!("BLE_SCAN_FALLBACK after_ms={elapsed_ms}"),
-                );
-            }
-            ScanMode::Fallback
-        }
+    if let Some(elapsed_ms) = poll.announce_ms {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!("BLE_SCAN_FALLBACK after_ms={elapsed_ms}"),
+        );
     }
+    poll.mode
 }
 
-/// How long a dead-end address is skipped: one that carried our own
-/// identity, one whose duplicate handshake was refused for an actively
-/// used old link (#360 — a dial that REPLACES the old link stays
-/// connected and never lands here), or one a fallback dial could not
-/// connect to. Sized to the RPA
-/// rotation timescale (minutes): the
-/// address dies on its own at the peer's next rotation, this just
-/// stops us re-dialling it every scan pass until then — the rig's
-/// pre-#375-part-2 capture shows the alternative, a 5 s timeout dial
-/// at the same address every ~20 s, forever.
-const DEAD_END_TTL: Duration = Duration::from_secs(120);
-
-/// Room for the addresses [`DEAD_END_TTL`] talks about: a revealed
-/// self-link plus a run of failed fallback targets (at most one
-/// failure per ~13 s dial cycle, so eight slots bridge more than one
-/// TTL of them). Overflow reuses the oldest entry — an early re-dial,
-/// not a loss.
-const DEAD_END_SLOTS: usize = 2 * MAX_LINKS;
-
-/// The addresses the scanner must not dial for a while, and when each
-/// was condemned: a self-link revealed post-connect, an address whose
-/// identity we already hold a LIVE link to (#376), and failed fallback
-/// dials (#375 §0 — a fallback target that does not answer a
-/// CONNECT_IND within 5 s is gone or unreachable by rule, and without
-/// this entry the 5 s backoff re-dialled it forever).
-struct RecentDeadEnds {
-    entries: [Option<(u64, Instant)>; DEAD_END_SLOTS],
-}
-
-impl RecentDeadEnds {
-    const fn new() -> Self {
-        Self {
-            entries: [None; DEAD_END_SLOTS],
-        }
-    }
-
-    fn note(&mut self, addr: u64) {
-        let now = Instant::now();
-        // Reuse an expired (or the oldest) entry.
-        let slot = self
-            .entries
-            .iter()
-            .position(|e| e.is_none_or(|(_, at)| now - at >= DEAD_END_TTL))
-            .unwrap_or_else(|| {
-                self.entries
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, e)| e.map_or(Instant::MIN, |(_, at)| at))
-                    .map_or(0, |(i, _)| i)
-            });
-        self.entries[slot] = Some((addr, now));
-    }
-
-    fn contains(&self, addr: u64) -> bool {
-        let now = Instant::now();
-        self.entries
-            .iter()
-            .flatten()
-            .any(|&(a, at)| a == addr && now - at < DEAD_END_TTL)
-    }
-}
+// The dead-end table's TTL and size, `DEAD_END_TTL_MS` (120 s) and
+// `DEAD_END_SLOTS` (8), and the table itself, `DeadEnds`, live in
+// `leviculum_ble_tx::admission` since #496, with the clock a parameter.
+// The size is `2 * MAX_LINKS` by derivation; this keeps the two equal.
+const _: () = assert!(DEAD_END_SLOTS == 2 * MAX_LINKS);
 
 /// The one dead-end table, shared by both roles (#376). It used to be a
 /// local of [`central_task`], which only the dialler could write; a
@@ -1754,10 +1699,10 @@ impl RecentDeadEnds {
 /// A blocking mutex over a `RefCell`, like [`LIVE_PEERS`], because the
 /// scan callback reads it from the central task while a peripheral
 /// session writes it.
-static DEAD_ENDS: BlockingMutex<CriticalSectionRawMutex, RefCell<RecentDeadEnds>> =
-    BlockingMutex::new(RefCell::new(RecentDeadEnds::new()));
+static DEAD_ENDS: BlockingMutex<CriticalSectionRawMutex, RefCell<DeadEnds>> =
+    BlockingMutex::new(RefCell::new(DeadEnds::new()));
 
-/// Condemn an address for [`DEAD_END_TTL`] and say why on one line.
+/// Condemn an address for [`DEAD_END_TTL_MS`] and say why on one line.
 ///
 /// After a duplicate refusal (`reason=dup_refused`) this is what stops
 /// the board re-dialling the same rotated address every scan pass: the
@@ -1767,12 +1712,13 @@ static DEAD_ENDS: BlockingMutex<CriticalSectionRawMutex, RefCell<RecentDeadEnds>
 /// connecting, so that residual dial is inherent — and bounded by this
 /// TTL against the rotation interval.
 fn note_dead_end(addr: u64, reason: &str) {
-    DEAD_ENDS.lock(|table| table.borrow_mut().note(addr));
+    let now_ms = Instant::now().as_millis();
+    DEAD_ENDS.lock(|table| table.borrow_mut().note(addr, now_ms));
     crate::log::log_fmt(
         "[BLE ] ",
         format_args!(
             "BLE_DIAL_DEAD_END addr={addr:012x} reason={reason} ttl_s={}",
-            DEAD_END_TTL.as_secs()
+            DEAD_END_TTL_MS / 1_000
         ),
     );
 }
@@ -1783,7 +1729,7 @@ fn note_dead_end(addr: u64, reason: &str) {
 ///
 /// The two are not alternatives and neither replaces the other. The
 /// address table stops the board re-dialling ONE address for
-/// [`DEAD_END_TTL`]; a Columba was seen under five addresses in four
+/// [`DEAD_END_TTL_MS`]; a Columba was seen under five addresses in four
 /// minutes, so for exactly the peer #412 is about every entry is a
 /// first offence forever. This table survives the rotation, and what it
 /// decides is not a candidate but a CLASS: while a run of wasted dials
@@ -1866,20 +1812,11 @@ fn note_dial_outcome(peer_id: &[u8; 16], session_ms: Option<u64>, reason: &str) 
     }
 }
 
-/// Whether a FALLBACK dial is held right now, logging the reason once
-/// per pause (see [`HELD_LOGGED_FOR`]).
-///
-/// Called from the scan callback and only for a fallback verdict, so a
-/// strict candidate costs nothing here — not even the critical section.
-fn fallback_dial_held() -> bool {
-    let now_ms = Instant::now().as_millis();
-    let until = DIAL_LEDGER.lock(|cell| {
-        let ledger = cell.get();
-        ledger.fallback_held(now_ms).then(|| ledger.held_until_ms())
-    });
-    let Some(until_ms) = until.flatten() else {
-        return false;
-    };
+/// Say that a FALLBACK dial is held right now, once per pause (see
+/// [`HELD_LOGGED_FOR`]). Called from the scan callback when
+/// [`admit`] named the dial ledger ([`Exclusion::LedgerHeld`]) as the
+/// filter that decided.
+fn log_dial_held(until_ms: u64, now_ms: u64) {
     let fresh = HELD_LOGGED_FOR.lock(|cell| {
         if cell.get() == Some(until_ms) {
             return false;
@@ -1896,7 +1833,6 @@ fn fallback_dial_held() -> bool {
             ),
         );
     }
-    true
 }
 
 /// What the board remembers about the peers that keep LEAVING (#417),
@@ -1973,21 +1909,11 @@ fn note_peer_leave(peer_id: &[u8; 16], peer_value: u64, reason: &str) {
     }
 }
 
-/// Whether a FALLBACK dial to a ROTATING-addressed candidate is held
-/// right now (#417), logging the reason once per cooldown. Called from
-/// the scan callback for a fallback verdict whose address rotates, so
-/// a strict candidate and a fixed-addressed one cost nothing here.
-fn churn_dial_held() -> bool {
-    let now_ms = Instant::now().as_millis();
-    let until = CHURN_LEDGER.lock(|cell| {
-        let ledger = cell.get();
-        ledger
-            .rotating_fallback_held(now_ms)
-            .then(|| ledger.held_until_ms())
-    });
-    let Some(until_ms) = until.flatten() else {
-        return false;
-    };
+/// Say that a FALLBACK dial to a ROTATING-addressed candidate is held
+/// right now (#417), once per cooldown. Called from the scan callback
+/// when [`admit`] named the churn ledger ([`Exclusion::ChurnHeld`]) as
+/// the filter that decided.
+fn log_churn_held(until_ms: u64, now_ms: u64) {
     let fresh = CHURN_HELD_LOGGED_FOR.lock(|cell| {
         if cell.get() == Some(until_ms) {
             return false;
@@ -2004,7 +1930,6 @@ fn churn_dial_held() -> bool {
             ),
         );
     }
-    true
 }
 
 /// A dial outcome's session length as the `BLE_DIAL_LEDGER` line prints
@@ -2060,11 +1985,6 @@ impl core::fmt::Display for IdentityHint {
     }
 }
 
-/// Whether the scanner must skip this address (see [`note_dead_end`]).
-fn dead_end(addr: u64) -> bool {
-    DEAD_ENDS.lock(|table| table.borrow().contains(addr))
-}
-
 /// Scan until one advertisement wins an initiate decision, keep
 /// collecting further eligible advertisers for one bounded window
 /// ([`SCAN_WINDOW_COLLECT_MS`]), then return the best candidate — the
@@ -2082,7 +2002,7 @@ fn dead_end(addr: u64) -> bool {
 /// simulation and lnsd use, so the three cannot drift.
 ///
 /// Every connectable PDU carrying the Reticulum service UUID gets a
-/// [`should_initiate`] verdict from the v2.2 sort + v0.3.0 override
+/// [`leviculum_ble_tx::should_initiate`] verdict from the v2.2 sort + v0.3.0 override
 /// (the rule lives host-tested in [`leviculum_ble_tx::peer`]), under
 /// the [`ScanMode`] the fallback clock has reached at that report; the
 /// verdict is logged once per (address, rule) change rather than per
@@ -2121,14 +2041,43 @@ async fn find_peer_to_initiate(
             return false;
         }
         let peer = Address::from_raw(report.peer_addr);
-        let peer_value = addr_value(&peer.bytes());
-        let decision = should_initiate(
-            LOCAL_CAPS,
-            own_addr_value,
-            parsed.caps,
-            peer_value,
-            scan_mode_now(),
-        );
+        // The address type travels with the address (#496): the report
+        // carries it, and `rotating_address` should one day not have to
+        // guess it from the top two bits.
+        let adv = AdvReport {
+            addr: PeerAddr::from_raw(&peer.bytes(), report.peer_addr.addr_type()),
+            caps: parsed.caps,
+            identity_hint: parsed.identity_hint,
+        };
+        let peer_value = adv.addr.value;
+        let mode = scan_mode_now();
+        let now_ms = Instant::now().as_millis();
+        // The verdict and the six filters, host-tested in
+        // `leviculum_ble_tx::admission`; this is the locks around the
+        // board's single instances. The ledgers are `Copy` and are read
+        // out first, so the nested section holds two tables, not four.
+        let dial = DIAL_LEDGER.lock(Cell::get);
+        let churn = CHURN_LEDGER.lock(Cell::get);
+        let admission = LIVE_PEERS.lock(|peers| {
+            DEAD_ENDS.lock(|dead| {
+                admit(
+                    Local {
+                        caps: LOCAL_CAPS,
+                        addr: own_addr_value,
+                    },
+                    &adv,
+                    mode,
+                    &peers.borrow(),
+                    &dead.borrow(),
+                    Ledgers {
+                        dial: &dial,
+                        churn: &churn,
+                    },
+                    now_ms,
+                )
+            })
+        });
+        let decision = admission.decision;
         let free_slots = parsed.free_slots();
         if last_logged.get() != Some((peer_value, decision)) {
             last_logged.set(Some((peer_value, decision)));
@@ -2180,36 +2129,39 @@ async fn find_peer_to_initiate(
                 ),
             );
         }
-        // The third filter is the §4.5 exclusion: a dial to an address
-        // we already hold a connection with can only time out (see
-        // [`addr_already_linked`]), so it never leaves the scanner. The
-        // fourth is the same exclusion keyed by IDENTITY (#412): the
-        // peer that rotated its address is the one the address filter
-        // structurally cannot see, and on a board with one central slot
-        // that dial is the whole outgoing capacity.
-        // The fifth is the dial ledger (#412 part 2): not a property of
-        // this candidate at all, but of what the board's last dials
-        // bought. It can only ever close the FALLBACK class, so it is
-        // evaluated last and only for a fallback verdict — a strict
-        // candidate never pays even the critical section. A window that
-        // holds nothing but held fallback verdicts opens no candidate
-        // and the outgoing slot stays free, which is the whole point:
-        // in the solo window there is no better peer to send it to.
-        // The sixth is the churn ledger (#417), the same shape one
-        // class narrower: it holds only the fallback candidates whose
+        // The six filters, in `admit`'s order: the verdict, the dead
+        // ends, the §4.5 exclusion by address (a dial to an address we
+        // already hold a connection with can only time out, see
+        // `PeerRegistry::addr_linked`), the same exclusion by IDENTITY hint
+        // (#412: the peer that rotated its address is the one the
+        // address filter structurally cannot see, and on a board with
+        // one central slot that dial is the whole outgoing capacity),
+        // the dial ledger (#412 part 2: not a property of this
+        // candidate but of what the board's last dials bought, so it
+        // only ever closes the FALLBACK class), and the churn ledger
+        // (#417, one class narrower: only the fallback candidates whose
         // ADDRESS ROTATES, so a board re-linking to a board through a
-        // fallback dial never pays it — that scope is what the design
-        // table chose, and `graph_formation` measures why.
-        if !decision.initiate()
-            || dead_end(peer_value)
-            || addr_already_linked(peer_value)
-            || hint_already_linked(parsed.identity_hint)
-            || (decision == ConnectDecision::InitiateFallback && fallback_dial_held())
-            || (decision == ConnectDecision::InitiateFallback
-                && rotating_address(peer_value)
-                && churn_dial_held())
-        {
-            return false;
+        // fallback dial never pays it — `graph_formation` measures why).
+        // A window that holds nothing but held fallback verdicts opens
+        // no candidate and the outgoing slot stays free, which is the
+        // whole point: in the solo window there is no better peer to
+        // send it to. The two ledger filters say so once per hold.
+        match admission.outcome {
+            Ok(()) => {}
+            Err(Exclusion::LedgerHeld { until_ms }) => {
+                log_dial_held(until_ms, now_ms);
+                return false;
+            }
+            Err(Exclusion::ChurnHeld { until_ms }) => {
+                log_churn_held(until_ms, now_ms);
+                return false;
+            }
+            Err(
+                Exclusion::NotInitiate
+                | Exclusion::DeadEnd
+                | Exclusion::AddrLinked
+                | Exclusion::HintLinked,
+            ) => return false,
         }
         window
             .borrow_mut()
@@ -2272,7 +2224,7 @@ async fn central_link(
                 "[BLE ] ",
                 format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=connect err={err:?}"),
             );
-            if decision == ConnectDecision::InitiateFallback {
+            if connect_failure_condemns(decision) {
                 note_dead_end(peer_value, "fallback_connect");
             }
             return;
@@ -2750,9 +2702,11 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
                 // fails, the board is still stranded and the next pass
                 // must stay in fallback rather than wait out the bound
                 // again.
-                if decision != ConnectDecision::InitiateFallback {
-                    note_strict_reset();
-                }
+                note_phase_event(if decision == ConnectDecision::InitiateFallback {
+                    PhaseEvent::FallbackTarget
+                } else {
+                    PhaseEvent::StrictTarget
+                });
                 // Once per window that ends in a dial: how many
                 // eligible advertisers the window held and which one
                 // the shared choice elected, under which rule.
