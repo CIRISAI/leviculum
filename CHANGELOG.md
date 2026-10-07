@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
-## [Unreleased] — CIRIS fork
+## [0.30.0+ciris.1] — CIRIS fork
 
 ### Added
 
@@ -35,6 +35,59 @@ git tag, not the version string. -->
     {DirectLinkEstablished, DirectLinkFailed, DirectLinkLost}`.
   - Only propose to a leviculum or rns-rs peer: a Python RNS peer's channel
     stalls behind the unknown signal.
+  - Hardened through five rounds of Codex review on PR #74. Highlights:
+    - The link MTU drops to 1400 when the link moves onto the direct
+      interface.
+    - A one-way failure falls back to the relay, and both ends converge on
+      it after an authenticated nudge.
+    - Only decrypted traffic over the relay can trigger fallback.
+    - Signals pass a full application sink.
+    - A link with a transfer under way moves only once the transfer is
+      done.
+- Link telemetry (leviculum#77, CIRISServer FSD UNIFIED_TELEMETRY).
+  Everything below is on `ReticulumNode`, and most of it on `NodeCore` too:
+  - `link_list()`: every link with its caller-visible id, destination,
+    role, state, age, idle seconds, measured RTT (`None` until sampled) and
+    interface.
+  - `link_census()`: live links by role, overall and per destination
+    (CIRISEdge#819). The initiator keeps a link alive with its keepalives,
+    so a rising initiator count names a node that does not close what it
+    dialled.
+  - `link_lifecycle()`: established by role, closed by `LinkCloseReason`,
+    handshake failures by reason, and requests the application refused.
+    `established - closed_total` equals the live census.
+  - `link_count_check()`, plus an event-loop alarm. If the completion
+    mirror and the core disagree on the established-link count for more
+    than 30 s, a `LINK_MIRROR_DIVERGED` event is raised, once per episode.
+  - `heap_census()`: the core's accounted heap by component, on std hosts.
+  - `publish_metrics()` records 24 catalogued metrics
+    (`leviculum_std::telemetry::METRIC_CATALOG`) through the `metrics` crate
+    facade. There is no exporter dependency; the host installs the recorder.
+    Counters are process totals, so several nodes sum and a late recorder
+    still reads full totals. Every label value is a bounded enumeration.
+    `event_catalog_completeness` now also checks metric names and label
+    keys against the catalogue.
+- A test pinning the invariant CIRISEdge relies on: a resource whose link
+  closes during off-lock assembly fails exactly once, as `LinkClosed`,
+  before the link's `LinkClosed`, and its late result completes nothing.
+
+### Changed
+
+- `reject_link` refuses only a pending inbound request. Any other link is
+  closed the way `close_link` closes it, with a close packet and
+  `LinkClosed`. Before, it dropped the link silently, so the completion
+  mirror and the counters went on treating it as alive.
+
+### Consumer notes
+
+- Additions only; no existing public signature changed. `NodeEvent` (non-
+  exhaustive) gains `DirectLinkEstablished`, `DirectLinkFailed` and
+  `DirectLinkLost`. `leviculum_std::Error` gains `DirectLink`.
+- New dependency in leviculum-std: `metrics` 0.24, with default features
+  off. THIRD-PARTY-NOTICES is regenerated.
+- Direct links are inert unless configured. With the default policy
+  (`reject`) and no facilitator, the node never proposes, refuses every
+  request, and the event loop never looks for direct-link work.
 
 ## [0.29.0+ciris.1] — CIRIS fork
 
