@@ -1,5 +1,5 @@
 #![no_std]
-//! Two decisions the firmware's USB side makes, as pure functions
+//! The decisions the firmware's USB side makes, as pure functions
 //! (leviculum#413, the "Still stranded" list of
 //! `docs/src/concepts/firmware-host-test-seam.md`).
 //!
@@ -26,6 +26,10 @@
 //! past the 2 s lnsd waits per attempt, and lnsd would count a slow apply as
 //! a lost answer rather than a busy one.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+use leviculum_core::envelope::{encode_duty_hold, DutyHoldWire};
 use leviculum_core::rnode::{
     airtime_ms_with_preamble, derive_preamble_symbols, MAX_SINGLE_PAYLOAD,
 };
@@ -206,4 +210,51 @@ pub fn serial_frame_us(bytes: u32, baud: u32) -> u64 {
 /// byte by byte at `baud`, rounded down.
 pub fn frame_timeout_margin(bytes: u32, baud: u32) -> u64 {
     (FRAME_TIMEOUT_MS * 1_000) / serial_frame_us(bytes, baud).max(1)
+}
+
+// ---------------------------------------------------------------------------
+// The duty-hold notice (leviculum#501)
+// ---------------------------------------------------------------------------
+
+/// Which duty-hold frames the transport port sends the host, and when.
+///
+/// The LoRa task raises and lowers `LORA_DUTY_HOLD` at the hold's edges and
+/// wakes the USB task; the USB task asks [`DutyHoldNotice::edge`] whether
+/// the state it reads now is one the host has not been told, and writes the
+/// frame it gets back. A wake that finds no change sends nothing, so a
+/// hold that opened and lifted between two wakes costs no frame and a
+/// spurious wake costs none either. [`DutyHoldNotice::state`] is the
+/// answer that rides behind a media report: the state as it stands,
+/// whatever was sent before.
+///
+/// The firmware boots unheld, and so does this: the first frame a board
+/// sends unsolicited is a `held`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DutyHoldNotice {
+    told_held: bool,
+}
+
+impl DutyHoldNotice {
+    /// A notice for a board that has told nobody anything: not held.
+    pub const fn new() -> Self {
+        Self { told_held: false }
+    }
+
+    /// The `TYPE_DUTY_HOLD` frame for an edge, or `None` when `held` is
+    /// what the host was last told. The state counts as told once the frame
+    /// is handed out, written or not: a host that was absent for the write
+    /// learns it from the media query it sends on attach, not from a retry.
+    pub fn edge(&mut self, held: bool, lt_ms: u32) -> Option<Vec<u8>> {
+        if held == self.told_held {
+            return None;
+        }
+        Some(self.state(held, lt_ms))
+    }
+
+    /// The `TYPE_DUTY_HOLD` frame for the state as it stands, for the
+    /// media-query answer.
+    pub fn state(&mut self, held: bool, lt_ms: u32) -> Vec<u8> {
+        self.told_held = held;
+        encode_duty_hold(&DutyHoldWire { held, lt_ms })
+    }
 }

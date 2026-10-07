@@ -7,6 +7,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use crate::event_log::Scalar;
 use crate::sync_ext::MutexRecover;
 use std::time::Duration;
 
@@ -1361,6 +1362,9 @@ async fn serial_reconnect_task(
                     }
                 }
 
+                // A write failure leaves the io task to find the port dead.
+                ask_duty_hold_state(&mut port, &name).await;
+
                 outgoing_rx = serial_io_task(
                     name.clone(),
                     port,
@@ -1451,6 +1455,15 @@ impl Ingress<'_> {
     /// ingress filter and the rx counter applied. `false` means the
     /// transport channel is gone and the io task must return.
     async fn deliver(&self, data: Vec<u8>) -> bool {
+        // The board's duty-hold notice and the media report it rides
+        // behind (leviculum#501) are interface state, not traffic: they
+        // are taken here and go no further, ahead of the TEST-ONLY range
+        // filter (which judges packets by their hops byte and has no
+        // business with a control frame) and of the rx counter (which
+        // counts what the transport heard).
+        if take_board_state_frame(self.name, self.counters, &data) {
+            return true;
+        }
         if super::test_drop_direct_ingress_frame(
             self.drop_direct_ingress,
             self.name,
@@ -1464,6 +1477,127 @@ impl Ingress<'_> {
             .fetch_add(data.len() as u64, Ordering::Relaxed);
         self.incoming_tx.send(IncomingPacket { data }).await.is_ok()
     }
+}
+
+/// Take one deframed frame if it is board state rather than traffic, and
+/// say whether it was: the board's duty-hold notice
+/// ([`leviculum_core::envelope::TYPE_DUTY_HOLD`], leviculum#501), applied
+/// here, or a media report no media verb was waiting for, which is the
+/// answer to the attach-time question of [`ask_duty_hold_state`] and is
+/// dropped. Handed to the transport, that report would be counted as an
+/// IFAC drop on every attach (`transport.rs`, the non-IFAC branch of
+/// `process_incoming_inner`), a counter runs read as a finding. Anything
+/// else is `false` and travels on unchanged.
+///
+/// The board sends the notice on each edge of its LoRa duty hold and
+/// behind every media report. The flag it sets is the one
+/// lnsd's RNode path sets for a modem's held TX gate
+/// (`InterfaceCounters::duty_hold`): the driver mirrors it into the core,
+/// which relays no transit announce and no path response on a held
+/// interface. A board that knows it cannot carry a link setup thereby
+/// stops the daemon in front of it advertising routes through it.
+///
+/// A notice with a state byte this daemon does not know is swallowed with
+/// a warning and changes nothing: reading it as either state would be a
+/// guess about whether the board can transmit.
+fn take_board_state_frame(name: &str, counters: &InterfaceCounters, data: &[u8]) -> bool {
+    use leviculum_core::envelope;
+    if !envelope::is_envelope(data) {
+        return false;
+    }
+    let Ok(f) = envelope::decode_frame(data) else {
+        return false;
+    };
+    if f.frame_type == envelope::TYPE_MEDIA_REPORT {
+        tracing::debug!("Serial {}: unsolicited media report taken", name);
+        return true;
+    }
+    if f.frame_type != envelope::TYPE_DUTY_HOLD {
+        return false;
+    }
+    match envelope::decode_duty_hold_payload(f.payload) {
+        Some(hold) => {
+            if counters.duty_hold() != hold.held {
+                counters.set_duty_hold(hold.held);
+                log_duty_hold_edge(name, hold.held, u64::from(hold.lt_ms), None);
+            }
+        }
+        None => tracing::warn!(
+            "Serial {}: duty-hold notice with an unknown state, ignored ({} payload bytes)",
+            name,
+            f.payload.len()
+        ),
+    }
+    true
+}
+
+/// The `DUTY_HOLD` event line, the one lnsd's RNode path emits on its gate's
+/// edges (leviculum#493), so one grep reads both topologies. `cause` is set
+/// only on the edge this daemon makes itself, the clear on interface down.
+fn log_duty_hold_edge(name: &str, held: bool, lt_ms: u64, cause: Option<&str>) {
+    let state = if held { "held" } else { "lifted" };
+    match cause {
+        None => tracing::info!(
+            event = "DUTY_HOLD",
+            iface = %Scalar(name),
+            state = state,
+            lt_ms = lt_ms,
+        ),
+        Some(cause) => tracing::info!(
+            event = "DUTY_HOLD",
+            iface = %Scalar(name),
+            state = state,
+            lt_ms = lt_ms,
+            cause = cause,
+        ),
+    }
+}
+
+/// Clear the duty hold when the port goes down (leviculum#501). A hold the
+/// board reported belongs to the session that heard it: nothing is relayed
+/// over a down interface anyway, and the next session learns the state
+/// afresh from [`ask_duty_hold_state`]. Keeping the flag up across a
+/// reconnect would instead keep the interface dark on the word of a board
+/// that may have rebooted unheld. `lt_ms=0` because no ledger reading
+/// comes with this edge; `cause=iface_down` says which edge it is.
+fn clear_duty_hold_on_down(name: &str, counters: &InterfaceCounters) {
+    if counters.duty_hold() {
+        counters.set_duty_hold(false);
+        log_duty_hold_edge(name, false, 0, Some("iface_down"));
+    }
+}
+
+/// Ask a freshly attached board for its duty-hold state (leviculum#501):
+/// one media query, answered with the media report and the
+/// [`leviculum_core::envelope::TYPE_DUTY_HOLD`] notice behind it, both
+/// taken by the io task's ordinary loop ([`take_board_state_frame`]). Not waited on here: the answer is
+/// state the loop applies whenever it arrives, and a board too old to
+/// send it simply leaves the flag down, as it is today.
+///
+/// Sent after the radio bring-up and not before, because the bring-up's
+/// own waits ([`ask_radio_report`]) discard frames they were not waiting
+/// for, and a notice that arrived in one of them would be lost. Safe on a
+/// port with something other than an LNode behind it: five bytes with the
+/// IFAC bit set, which no Reticulum peer without IFAC accepts as a packet
+/// (`envelope.rs`, "Distinguishability").
+async fn ask_duty_hold_state<S>(port: &mut S, name: &str) -> bool
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let mut frame_buf = Vec::new();
+    frame(
+        &leviculum_core::envelope::encode_media_query(),
+        &mut frame_buf,
+    );
+    if let Err(e) = port.write_all(&frame_buf).await {
+        tracing::warn!("Serial {}: duty-hold query write failed: {}", name, e);
+        return false;
+    }
+    if let Err(e) = port.flush().await {
+        tracing::warn!("Serial {}: duty-hold query flush failed: {}", name, e);
+        return false;
+    }
+    true
 }
 
 /// What a board said when asked about its media profile.
@@ -1874,6 +2008,32 @@ fn media_keys(prefix: &str, profile: leviculum_core::envelope::MediaProfileWire)
 /// Returns `outgoing_rx` on port loss for reconnect reuse.
 async fn serial_io_task<S>(
     name: String,
+    port: S,
+    incoming_tx: mpsc::Sender<IncomingPacket>,
+    outgoing_rx: mpsc::Receiver<OutgoingPacket>,
+    counters: Arc<InterfaceCounters>,
+    drop_direct_ingress: bool,
+) -> mpsc::Receiver<OutgoingPacket>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let outgoing_rx = serial_io_loop(
+        name.clone(),
+        port,
+        incoming_tx,
+        outgoing_rx,
+        Arc::clone(&counters),
+        drop_direct_ingress,
+    )
+    .await;
+    // Every way out of the loop is the interface going down.
+    clear_duty_hold_on_down(&name, &counters);
+    outgoing_rx
+}
+
+/// The body of [`serial_io_task`], whose every return is a port loss.
+async fn serial_io_loop<S>(
+    name: String,
     mut port: S,
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
@@ -2266,7 +2426,7 @@ mod tests {
     /// `SerialInterface` block naming one builds, spawns, and puts a value on
     /// the wire that `RadioConfig::from_wire_config` returns `None` for. The
     /// legacy contract for a config the driver cannot take is silence
-    /// (`leviculum-nrf/src/usb.rs:691-712`), so the board stays on the PHY it
+    /// (`leviculum-nrf/src/usb.rs:704-725`), so the board stays on the PHY it
     /// already had while the host's airtime bucket goes on pricing every
     /// frame at the bandwidth it asked for.
     #[test]
@@ -3192,6 +3352,185 @@ mod tests {
         drop(outgoing_tx);
         drop(far);
         let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
+    /// Poll `counters.duty_hold()` until it reads `want`, or fail by name.
+    async fn duty_hold_reaches(counters: &InterfaceCounters, want: bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while counters.duty_hold() != want {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "duty_hold never read {want}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// The `DUTY_HOLD` lines of a capture, in order.
+    fn duty_hold_lines(logs: &str) -> Vec<String> {
+        logs.lines()
+            .filter(|l| l.contains("event=\"DUTY_HOLD\""))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// leviculum#501: a board driven over its serial protocol says when its
+    /// LoRa duty hold opens and lifts, and the interface mirrors it into
+    /// `duty_hold` with one `DUTY_HOLD` line per edge, the RNode path's
+    /// line. The scripted board answers the attach-time media query the
+    /// way the firmware does, report first and the held notice behind it,
+    /// then sends the lift unsolicited, and a duplicate of the lift on top,
+    /// which must change nothing and log nothing.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_board_duty_hold_notice_sets_and_clears_the_flag_with_one_line_each() {
+        use leviculum_core::envelope::{self, DutyHoldWire};
+        let _guard = serial_io_task_test_guard();
+        let (buf, _log_guard) = crate::test_support::log_capture::capture_logs();
+        let (near, mut far) = tokio::io::duplex(1024);
+        let (incoming_tx, mut incoming_rx) = mpsc::channel(8);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(8);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task = tokio::spawn(serial_io_task(
+            "Serial LNode".to_string(),
+            near,
+            incoming_tx,
+            outgoing_rx,
+            Arc::clone(&counters),
+            false,
+        ));
+
+        let send = |payload: Vec<u8>| {
+            let mut out = Vec::new();
+            frame(&payload, &mut out);
+            out
+        };
+        let held = DutyHoldWire {
+            held: true,
+            lt_ms: 36_000,
+        };
+        let lifted = DutyHoldWire {
+            held: false,
+            lt_ms: 35_640,
+        };
+        let mut answer = send(envelope::encode_media_report(
+            &envelope::MediaProfileWire::BOTH,
+            &envelope::MediaProfileWire::BOTH,
+        ));
+        answer.extend(send(envelope::encode_duty_hold(&held)));
+        far.write_all(&answer).await.expect("write held");
+        duty_hold_reaches(&counters, true).await;
+
+        far.write_all(&send(envelope::encode_duty_hold(&lifted)))
+            .await
+            .expect("write lifted");
+        duty_hold_reaches(&counters, false).await;
+        far.write_all(&send(envelope::encode_duty_hold(&lifted)))
+            .await
+            .expect("write lifted again");
+        // A data packet after the notices: once it reaches the transport,
+        // every frame before it has been handled.
+        let packet = vec![0x00u8, 0x01, 0xAA, 0xBB];
+        far.write_all(&send(packet.clone()))
+            .await
+            .expect("write packet");
+        let got = tokio::time::timeout(Duration::from_secs(5), incoming_rx.recv())
+            .await
+            .expect("the packet arrives")
+            .expect("the channel is open");
+        assert_eq!(
+            got.data, packet,
+            "the report and the notices are board state and never reach the transport"
+        );
+        assert!(!counters.duty_hold());
+
+        let lines = duty_hold_lines(&crate::test_support::log_capture::captured(&buf));
+        for line in &lines {
+            eprintln!("{line}");
+        }
+        assert_eq!(lines.len(), 2, "one line per edge: {lines:#?}");
+        assert!(
+            lines[0].contains("iface=Serial_LNode")
+                && lines[0].contains("state=\"held\"")
+                && lines[0].contains("lt_ms=36000"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("state=\"lifted\"") && lines[1].contains("lt_ms=35640"),
+            "{}",
+            lines[1]
+        );
+
+        drop(outgoing_tx);
+        drop(far);
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
+    /// leviculum#501: a hold the board reported ends with the port. The io
+    /// task returns on EOF, the flag comes down, and the line says why,
+    /// so a reconnect starts from what the board says next and not from
+    /// what it said before it went away.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_held_interface_is_cleared_when_the_port_goes_down() {
+        use leviculum_core::envelope::{self, DutyHoldWire};
+        let _guard = serial_io_task_test_guard();
+        let (buf, _log_guard) = crate::test_support::log_capture::capture_logs();
+        let (near, mut far) = tokio::io::duplex(1024);
+        let (incoming_tx, _incoming_rx) = mpsc::channel(8);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(8);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task = tokio::spawn(serial_io_task(
+            "test-down".to_string(),
+            near,
+            incoming_tx,
+            outgoing_rx,
+            Arc::clone(&counters),
+            false,
+        ));
+        let mut out = Vec::new();
+        frame(
+            &envelope::encode_duty_hold(&DutyHoldWire {
+                held: true,
+                lt_ms: 1,
+            }),
+            &mut out,
+        );
+        far.write_all(&out).await.expect("write held");
+        duty_hold_reaches(&counters, true).await;
+
+        drop(far);
+        let _ = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the io task returns on EOF");
+        assert!(!counters.duty_hold(), "a down interface holds nothing");
+        let lines = duty_hold_lines(&crate::test_support::log_capture::captured(&buf));
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        assert!(
+            lines[1].contains("state=\"lifted\"") && lines[1].contains("cause=\"iface_down\""),
+            "{}",
+            lines[1]
+        );
+        drop(outgoing_tx);
+    }
+
+    /// leviculum#501: the attach-time question is the plain media query,
+    /// byte for byte, which every envelope firmware already answers.
+    #[tokio::test]
+    async fn the_attach_question_is_the_media_query() {
+        let (mut near, mut far) = tokio::io::duplex(64);
+        assert!(ask_duty_hold_state(&mut near, "test").await);
+        let mut expected = Vec::new();
+        frame(
+            &leviculum_core::envelope::encode_media_query(),
+            &mut expected,
+        );
+        let mut got = vec![0u8; expected.len()];
+        far.read_exact(&mut got)
+            .await
+            .expect("the query is written");
+        assert_eq!(got, expected);
     }
 
     /// Codeberg #389 mvr (tx counter siblings): once the peer can observe

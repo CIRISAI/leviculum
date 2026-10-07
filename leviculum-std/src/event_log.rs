@@ -388,7 +388,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["dst", "hops", "iface", "suppressed", "reason"],
     },
     // leviculum#493: the RNode TX gate's duty hold as interface state, one
-    // line per edge (`state=held|lifted`, never per turn). While held, the
+    // line per edge (`state=held|lifted`, never per turn). The serial
+    // interface emits the same line from an LNode's `TYPE_DUTY_HOLD` notice
+    // (leviculum#501), plus `cause=iface_down` on the clear it makes itself
+    // when the port goes away. While held, the
     // transport relays no announce and no path response on the interface —
     // those refusals are `ANN_TX_SUPPRESSED reason="duty_hold"
     // closed="duty_hold"` lines — and `lifted` is the visible guarantee the

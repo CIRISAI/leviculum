@@ -193,7 +193,9 @@ pub(crate) struct InterfaceCounters {
     /// Whether this interface's TX gate currently holds frames for
     /// regulatory airtime budget (leviculum#493). Flipped by the RNode TX
     /// task at the hold's edges — a qualifying gate closure per
-    /// [`leviculum_queue_budget::DutyHolds::holding`] — and mirrored into
+    /// [`leviculum_queue_budget::DutyHolds::holding`] — and by the serial
+    /// interface from an LNode's `TYPE_DUTY_HOLD` notice (leviculum#501),
+    /// cleared there when the port goes down; mirrored into
     /// the transport by `push_interface_state`, where it closes announce
     /// and path-response relay on the interface until the hold lifts.
     /// Interfaces without a duty gate never touch it and stay at `false`.

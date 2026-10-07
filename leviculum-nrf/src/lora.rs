@@ -184,6 +184,17 @@ pub static LORA_STALE_DROP_COUNT: core::sync::atomic::AtomicU32 =
 pub static LORA_DUTY_HOLD: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Wakes the USB transport task on each edge of [`LORA_DUTY_HOLD`], so a host
+/// driving this board over its serial protocol hears the hold as a
+/// `TYPE_DUTY_HOLD` frame (leviculum#501). Carries nothing: the USB task
+/// reads the flag and [`LORA_LT_USED_MS`] itself when it wakes, and a
+/// `Signal` coalesces, so a hold that opened and lifted before it ran is
+/// read as the state that stands then — which is what a host has to act on.
+pub static LORA_DUTY_HOLD_EDGE: embassy_sync::signal::Signal<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    (),
+> = embassy_sync::signal::Signal::new();
+
 /// Keyed airtime of the rolling hour, in milliseconds, as of the LoRa task's
 /// last ledger update (leviculum#494).
 ///
@@ -765,6 +776,7 @@ fn start_duty_hold(hold_started: &mut Option<(u64, u32)>, now_ms: u64) {
             LORA_STALE_DROP_COUNT.load(core::sync::atomic::Ordering::Relaxed),
         ));
         LORA_DUTY_HOLD.store(true, core::sync::atomic::Ordering::Relaxed);
+        LORA_DUTY_HOLD_EDGE.signal(());
     }
 }
 
@@ -783,6 +795,7 @@ fn lift_duty_hold(
         return;
     };
     LORA_DUTY_HOLD.store(false, core::sync::atomic::Ordering::Relaxed);
+    LORA_DUTY_HOLD_EDGE.signal(());
     let dropped = LORA_STALE_DROP_COUNT
         .load(core::sync::atomic::Ordering::Relaxed)
         .wrapping_sub(stale_at_start);

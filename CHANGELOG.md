@@ -48,6 +48,17 @@ Toolchain: Rust 1.97.1
   precedent: an interface over its `announce_cap` relays no announce
   (Transport.py:1252-1294).
 
+- A board driven by lnsd over its serial protocol now stops lnsd advertising
+  routes through it while its LoRa duty hold is in force (leviculum#501).
+  The LNode's USB control envelope gains `DUTY_HOLD` (0x8A, board to host,
+  `[state, lt_ms u32 BE]`): the firmware sends it on each edge of the hold
+  and right behind every media report, lnsd asks with a media query each
+  time the port attaches, mirrors it into the interface's `duty_hold`, logs
+  the `DUTY_HOLD iface= state=held|lifted lt_ms=` line its RNode path
+  already emits, and clears it with `cause=iface_down` when the port goes
+  away. USB protocol between our board and our host only; nothing changes
+  on the air.
+
 - An instrumented daemon package for memory censuses (Codeberg #437). The
   nightly publishes `leviculum-nightly-arm64-heapacct.deb` beside the plain
   packages: package `leviculum-heapacct`, version `<plain>+heapacct`, the

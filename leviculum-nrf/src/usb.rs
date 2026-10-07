@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use embassy_time::Duration;
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::{peripherals, usb, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -601,6 +601,16 @@ async fn persist_outcome(
 /// 115200 (`leviculum_usb_policy::frame_timeout_margin`, host-tested).
 const FRAME_TIMEOUT_MS: u64 = leviculum_usb_policy::FRAME_TIMEOUT_MS;
 
+/// The LoRa duty hold as it stands, and the rolling hour's keyed airtime as
+/// the LoRa task last published it, for a `TYPE_DUTY_HOLD` frame.
+fn duty_hold_now() -> (bool, u32) {
+    use core::sync::atomic::Ordering;
+    (
+        crate::lora::LORA_DUTY_HOLD.load(Ordering::Relaxed),
+        crate::lora::LORA_LT_USED_MS.load(Ordering::Relaxed),
+    )
+}
+
 /// Reticulum serial interface task: HDLC-framed bidirectional I/O on USB CDC-ACM.
 ///
 /// Read path: CDC read → HDLC deframe → incoming channel → NodeCore
@@ -621,6 +631,8 @@ async fn retic_serial_task(
     // CDC write pends forever once the host stops reading, and a wedged
     // write here takes the read side down with it.
     let (mut tx, mut rx, control) = cdc.split_with_control();
+    // What the host has been told about the LoRa duty hold (leviculum#501).
+    let mut duty_notice = leviculum_usb_policy::DutyHoldNotice::new();
 
     loop {
         log("SER: wait_connection");
@@ -636,14 +648,15 @@ async fn retic_serial_task(
                 Duration::from_secs(3600)
             };
 
-            match select(
+            match select3(
                 with_timeout(timeout_dur, rx.read_packet(&mut read_buf)),
                 outgoing_rx.receive(),
+                crate::lora::LORA_DUTY_HOLD_EDGE.wait(),
             )
             .await
             {
                 // Read succeeded within timeout
-                Either::First(Ok(Ok(n))) => {
+                Either3::First(Ok(Ok(n))) => {
                     log_u32("SER: USB read", n as u32);
                     let results = deframer.process(&read_buf[..n]);
                     for r in results {
@@ -867,6 +880,17 @@ async fn retic_serial_task(
                                         .await
                                     {
                                         log("SER: media report write failed");
+                                    }
+                                    // The duty hold as it stands, right
+                                    // behind the report (leviculum#501): a
+                                    // host that attached mid-hold heard no
+                                    // edge, and this is how it learns.
+                                    let (held, lt_ms) = duty_hold_now();
+                                    let state = duty_notice.state(held, lt_ms);
+                                    if !write_framed(&mut tx, &control, &state, &mut frame_buf)
+                                        .await
+                                    {
+                                        log("SER: duty-hold state write failed");
                                     }
                                 }
                                 ControlAction::PositionSourceQuery => {
@@ -1218,19 +1242,33 @@ async fn retic_serial_task(
                     }
                 }
                 // USB disconnect
-                Either::First(Ok(Err(_))) => {
+                Either3::First(Ok(Err(_))) => {
                     log("SER: USB disconnect");
                     break;
                 }
                 // Frame timeout
-                Either::First(Err(_)) => {
+                Either3::First(Err(_)) => {
                     if deframer.is_in_frame() {
                         log("SER: frame timeout, reset");
                         deframer.reset();
                     }
                 }
+                // The LoRa duty hold opened or lifted (leviculum#501): tell
+                // the host, which mirrors it into the interface's
+                // `duty_hold` and stops relaying announces into a queue the
+                // board cannot send. Host-gated like every write here; a
+                // frame no host reads is dropped, and the host's media
+                // query on attach recovers the state.
+                Either3::Third(()) => {
+                    let (held, lt_ms) = duty_hold_now();
+                    if let Some(edge) = duty_notice.edge(held, lt_ms) {
+                        if !write_framed(&mut tx, &control, &edge, &mut frame_buf).await {
+                            log("SER: duty-hold edge dropped, no host reading");
+                        }
+                    }
+                }
                 // Outgoing packet to send
-                Either::Second(data) => {
+                Either3::Second(data) => {
                     // Stage 5/6: log first 8 bytes of payload being sent to lnsd
                     let n = data.len().min(8);
                     let mut p8 = [0u8; 8];

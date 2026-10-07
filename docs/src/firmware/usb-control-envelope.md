@@ -67,6 +67,7 @@ Responses (board → host):
 | 0x87 | NODE_NAME_REPORT  | `[flags, mesh_len, mesh…, ble_len, ble…]` — see below |
 | 0x88 | IDENTITY_REPORT   | `[flags, identity(16), probe(16), lxmf(16)]`, 49 B fixed |
 | 0x89 | MGMT_ALLOW_REPORT | `[flags, count, count × identity(16)]` — see below |
+| 0x8A | DUTY_HOLD         | `[state, lt_ms: u32 BE]`, 5 B; state `0x00` lifted, `0x01` held. Unsolicited on each hold edge, and behind every MEDIA_REPORT — see below |
 
 Refusal reasons: `0x01` unknown type, `0x02` malformed, `0x03` value
 refused, `0x04` busy, `0x05` unsupported (the envelope layer knows the
@@ -78,6 +79,37 @@ running (the value is durably on the flash page and applies at the next
 reset, but the carrier it configures did not come up this boot — see
 below). The version in the capability report (`1`) names the envelope framing itself;
 new frame types extend the accepted list without bumping it.
+
+### DUTY_HOLD (0x8A) — the board says when its LoRa queue is held
+
+```text
+[state: u8] [lt_ms: u32 BE]    state 0x00 lifted, 0x01 held
+```
+
+The one board → host frame that is not only an answer (leviculum#501).
+When the regulatory airtime budget runs out, the board's LoRa TX gate
+holds its queue (leviculum#493), and a board driven by `lnsd` over this
+port has to say so, or the daemon in front of it keeps relaying announces
+into a queue that cannot send them, advertising routes through a relay
+that cannot carry the link setups they invite. The firmware sends the
+frame unsolicited on each edge of the hold, and once more right behind
+every answer to MEDIA_QUERY, so a host that attached mid-hold learns the
+state without waiting for the next edge. `lt_ms` is the keyed airtime of
+the rolling hour as the board's ledger last stood.
+
+A second frame after the MEDIA_REPORT rather than a longer report: every
+host already in the field decodes the report strictly at two bytes, and
+skips a frame type it does not know. A state byte other than the two is
+refused by the decoder, never read as lifted; a payload longer than five
+bytes is read by its first five.
+
+`lnsd` asks with one MEDIA_QUERY each time its serial interface attaches,
+after the radio bring-up, mirrors the state into the interface's
+`duty_hold` flag, logs `DUTY_HOLD iface=… state=held|lifted lt_ms=…` on
+each change (the line its RNode path emits), and clears the flag with
+`cause=iface_down` when the port goes away. **This is the USB protocol
+between our board and our host, not the radio**: nothing of it goes on
+the air, and no Python-RNS peer ever sees it.
 
 ### MGMT_ALLOW (0x13) and MGMT_ALLOW_QUERY (0x14) — who may read the board
 

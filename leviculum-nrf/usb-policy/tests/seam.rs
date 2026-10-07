@@ -219,3 +219,58 @@ fn degenerate_inputs_are_answered() {
     assert_eq!(retune_deferral_bound_ms(none), 1);
     assert_eq!(line_coding_rate(&[0xB0, 0x04, 0x00]), None);
 }
+
+// ---------------------------------------------------------------------------
+// The duty-hold notice (leviculum#501)
+// ---------------------------------------------------------------------------
+
+fn decoded(frame: &[u8]) -> leviculum_core::envelope::DutyHoldWire {
+    let f = leviculum_core::envelope::decode_frame(frame).expect("an envelope");
+    assert_eq!(f.frame_type, leviculum_core::envelope::TYPE_DUTY_HOLD);
+    leviculum_core::envelope::decode_duty_hold_payload(f.payload).expect("a duty-hold payload")
+}
+
+/// One frame per edge, held then lifted, each carrying the ledger it was
+/// read at; nothing between the edges and nothing at boot.
+#[test]
+fn the_notice_sends_one_frame_on_each_edge_and_none_between() {
+    let mut notice = DutyHoldNotice::new();
+    assert_eq!(
+        notice.edge(false, 0),
+        None,
+        "a board boots unheld and says nothing"
+    );
+
+    let held = notice
+        .edge(true, 36_000)
+        .expect("the hold opening is an edge");
+    let held = decoded(&held);
+    assert!(held.held);
+    assert_eq!(held.lt_ms, 36_000);
+    assert_eq!(
+        notice.edge(true, 36_100),
+        None,
+        "a wake inside the hold is no edge"
+    );
+
+    let lifted = notice.edge(false, 35_900).expect("the lift is an edge");
+    let lifted = decoded(&lifted);
+    assert!(!lifted.held);
+    assert_eq!(lifted.lt_ms, 35_900);
+    assert_eq!(notice.edge(false, 35_000), None);
+}
+
+/// The media-query answer states the hold as it stands, every time, and
+/// counts as telling: an edge to that same state afterwards sends nothing.
+#[test]
+fn the_query_answer_states_the_hold_and_counts_as_told() {
+    let mut notice = DutyHoldNotice::new();
+    assert!(!decoded(&notice.state(false, 0)).held);
+    assert!(decoded(&notice.state(true, 36_000)).held);
+    assert!(
+        decoded(&notice.state(true, 36_000)).held,
+        "asked twice, answered twice"
+    );
+    assert_eq!(notice.edge(true, 36_000), None);
+    assert!(notice.edge(false, 1).is_some());
+}

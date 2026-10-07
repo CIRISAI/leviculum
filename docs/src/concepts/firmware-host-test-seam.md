@@ -135,6 +135,7 @@ because the list below is what is actually left:
 | Front-end position: never both switch paths at once | `leviculum-rx-arming` (`front_end`) | `1a1ef641`, 2026-10-06 |
 | The 1200-baud touch predicate | `leviculum-usb-policy` | `604b5fae`, 2026-10-06 |
 | Control-envelope answer windows and the deferral bound they cover | `leviculum-usb-policy` | `604b5fae`, 2026-10-06 |
+| The duty-hold notice: one frame per hold edge, and the state behind a media report | `leviculum-usb-policy` (`DutyHoldNotice`) | leviculum#501, 2026-10-07 |
 
 The answer windows moved as constants, not as functions of the
 modulation. What the modulation moves is the delay they must cover, one

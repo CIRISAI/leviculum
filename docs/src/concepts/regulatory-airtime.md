@@ -28,7 +28,7 @@ Our LNode firmware enforces the same way: `AirtimeTracker`
 (`leviculum-core/src/rnode.rs:1832`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
-`leviculum-nrf/src/lora.rs:1889-1976`), continuing to listen so RX is
+`leviculum-nrf/src/lora.rs:1902-1989`), continuing to listen so RX is
 not starved — until the frame has waited so long that keying it would
 be pointless, which is
 [the age rule below](#a-hold-ages-traffic-it-does-not-thin-it).
@@ -311,8 +311,7 @@ rule has two halves, and the second is the guard on the first:
 
 - **While the hold is in force, the interface advertises nothing.**
   The interface reports its hold to the core as a boolean (`duty_hold`,
-  set by the firmware's lock gate and by lnsd's RNode hold path, mirrored
-  like the online flag — the core computes nothing), and the core's
+  mirrored like the online flag — the core computes nothing), and the core's
   announce admission refuses rebroadcasts and path responses alike on a
   held interface, logged as `ANN_TX_SUPPRESSED … closed=duty_hold`. The
   refusal is final, not queued: the destination re-announces on its own
@@ -341,6 +340,28 @@ rule has two halves, and the second is the guard on the first:
   landed on would otherwise keep an hour-old charge and hold the lock on
   air spent in the previous hour (leviculum#495). The wire sees none of
   this.
+
+Three topologies set that boolean, and each from the layer that owns
+the carrier:
+
+1. **The board as a node.** The firmware's own core reads the lock gate's
+   flag (`LORA_DUTY_HOLD`) on every main-loop wake and mirrors it onto its
+   LoRa interface.
+2. **lnsd driving an RNode.** lnsd's RNode interface watches the modem's
+   `CMD_READY` flow control, and a gate closure that qualifies as a hold
+   (`DutyHolds::holding`) raises the flag.
+3. **lnsd driving an LNode over its serial protocol** (leviculum#501). The
+   board's lock gate holds, but the host's interface is a plain serial
+   port with no flow control, so the board tells it: a `DUTY_HOLD` frame
+   on the USB control envelope on each edge, and the current state behind
+   every media report, which lnsd asks for each time the port attaches.
+   lnsd's serial interface sets the flag from it, logs the same
+   `DUTY_HOLD` line as the RNode path, and clears it when the port goes
+   down. Before this, a relay whose modem was locked for 261 s of a 310 s
+   run measured `duty_hold=never ann_suppressed=0` on the host (497): the
+   board knew, and the protocol between board and host had no word for it.
+   The frame is USB protocol between our board and our host
+   (`docs/src/firmware/usb-control-envelope.md`), never on the air.
 
 ## A propagation node leaves half its budget to forwarding
 
