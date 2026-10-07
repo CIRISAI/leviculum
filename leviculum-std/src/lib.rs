@@ -100,3 +100,13 @@ pub use rpc::{
 /// last so the fork moves no line an upstream citation points at.
 pub mod telemetry;
 pub use telemetry::LinkCountCheck;
+
+// The types the telemetry API returns (leviculum#77, CIRISEdge#819), so a
+// consumer of this crate alone can name them. Kept here, last, so the fork
+// moves no line an upstream citation points at.
+pub use leviculum_core::heap_census::NodeHeapCensus;
+pub use leviculum_core::link::LinkState;
+pub use leviculum_core::node::{
+    link_close_reason_name, DestinationLinks, LinkCensus, LinkInfo, LinkLifecycle, LinkRole,
+    LINK_CLOSE_REASONS,
+};
