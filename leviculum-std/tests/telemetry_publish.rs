@@ -8,11 +8,14 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use leviculum_core::link::LinkCloseReason;
-use leviculum_core::node::LinkRole;
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
-use leviculum_std::{EventReceiver, NodeEvent};
+// Named through leviculum_std alone, as a consumer without a direct
+// leviculum-core dependency would (Codex review on PR #76).
+use leviculum_std::{
+    EventReceiver, LinkCensus, LinkCloseReason, LinkCountCheck, LinkInfo, LinkLifecycle, LinkRole,
+    NodeEvent, NodeHeapCensus,
+};
 use metrics::{
     Counter, CounterFn, Gauge, GaugeFn, Histogram, Key, KeyName, Metadata, Recorder, SharedString,
     Unit,
@@ -180,8 +183,13 @@ async fn the_link_telemetry_follows_a_link_through_its_life() {
         "A sees the link"
     );
 
-    // The list, from both ends.
-    let list = b.node.link_list();
+    // The list, from both ends. Every telemetry result is nameable from
+    // leviculum_std alone.
+    let _: LinkCensus = b.node.link_census();
+    let _: LinkLifecycle = b.node.link_lifecycle();
+    let _: NodeHeapCensus = b.node.heap_census();
+    let _: LinkCountCheck = b.node.link_count_check();
+    let list: Vec<LinkInfo> = b.node.link_list();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].link_id, link_id, "the id the application was given");
     assert_eq!(list[0].role, LinkRole::Initiator);
