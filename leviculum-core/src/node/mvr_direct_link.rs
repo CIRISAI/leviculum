@@ -1103,3 +1103,119 @@ fn the_heap_census_counts_direct_link_state() {
         "a running session shows in the links component"
     );
 }
+
+#[test]
+fn a_peer_cannot_propose_again_inside_the_cooldown() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    // A first proposal fails at the punch; the peer proposes again at once.
+    let (session, _) = to_punch(&mut pair);
+    let _ = pair.b.direct_link_punched(&session, None);
+    let _ = pair.b.take_direct_link_jobs();
+    let request = crate::direct_link::Signal::Request {
+        session: [9; 16],
+        facilitator: facilitator(),
+        initiator_public: a_public(),
+        protocol: ProbeProtocol::Rnsp,
+    };
+    pair.a.transport.clock().advance(1_000);
+    pair.b.transport.clock().advance(1_000);
+    let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
+    assert!(pair.a.send_direct_link_signal(&pair.link, &request, now));
+    let out = pair.a.handle_timeout();
+    pair.pump_from_a(packets(&out));
+    assert!(
+        !pair
+            .b
+            .take_direct_link_jobs()
+            .iter()
+            .any(|j| matches!(j, DirectLinkJob::Probe { .. })),
+        "B refuses to probe again inside the cooldown"
+    );
+}
+
+#[test]
+fn a_nudge_inside_the_grace_still_brings_the_peer_back() {
+    let mut pair = Pair::new();
+    let (_, b_direct) = established(&mut pair);
+    // B loses its direct interface a second after the upgrade and nudges.
+    pair.a.transport.clock().advance(1_000);
+    pair.b.transport.clock().advance(1_000);
+    let _ = pair.b.handle_interface_down(InterfaceId(b_direct));
+    let mut nudge = Vec::new();
+    for _ in 0..6 {
+        pair.b.transport.clock().advance(200);
+        let out = pair.b.handle_timeout();
+        nudge.extend(
+            sent(&out)
+                .into_iter()
+                .filter(|(iface, _)| *iface == Some(pair.b_mesh))
+                .map(|(_, d)| d),
+        );
+    }
+    assert!(!nudge.is_empty());
+    let (_, ev) = deliver(&mut pair.a, pair.a_mesh, nudge);
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, NodeEvent::DirectLinkLost { .. })),
+        "the authenticated nudge counts during the grace"
+    );
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+}
+
+#[test]
+fn a_fallback_that_died_before_the_move_is_no_fallback() {
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    // The relay goes while the punch runs.
+    let _ = pair.a.handle_interface_down(InterfaceId(pair.a_mesh));
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let _ = pair.a.direct_link_punched(&session, Some(a_direct));
+    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
+    // So losing the direct path closes the link rather than repointing it
+    // at the dead relay index.
+    let out = pair.a.handle_interface_down(InterfaceId(a_direct));
+    assert!(out
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::LinkClosed { .. })));
+}
+
+#[test]
+fn a_pending_resource_advertisement_holds_the_link_on_the_relay() {
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    pair.b
+        .set_resource_strategy(&pair.link, crate::resource::ResourceStrategy::AcceptApp)
+        .unwrap();
+    pair.a.transport.clock().advance(1_000);
+    let (_, tick) = pair
+        .a
+        .send_resource(&pair.link, &[5u8; 2_000], None, true)
+        .unwrap();
+    let _ = deliver(&mut pair.b, pair.b_mesh, packets(&tick));
+    assert!(pair.b.links.get(&pair.link).unwrap().has_pending_resource());
+    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let _ = pair.b.direct_link_punched(&session, Some(b_direct));
+    assert_eq!(
+        pair.b.direct_link_interface(&pair.link),
+        None,
+        "not while the application has not answered the advertisement"
+    );
+}
+
+#[test]
+fn a_restart_takes_the_old_direct_interface_down_in_full() {
+    let mut pair = Pair::new();
+    let (a_direct, _) = established(&mut pair);
+    assert!(pair.a.transport.interface_name(a_direct).is_some());
+    let out = pair.a.abandon_direct_links();
+    assert!(out
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::InterfaceDown(i) if *i == a_direct)));
+    assert!(
+        pair.a.transport.interface_name(a_direct).is_none(),
+        "transport forgets the interface, not only the link's attachment"
+    );
+}
