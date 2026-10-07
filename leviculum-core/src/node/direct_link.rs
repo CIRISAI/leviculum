@@ -162,6 +162,9 @@ pub(crate) struct DirectLinks {
     outbox: BTreeMap<LinkId, VecDeque<Signal>>,
     /// The interface the link packet being processed arrived on.
     rx_iface: Option<usize>,
+    /// Punched links waiting on the relay for a resource transfer to finish
+    /// before they move: (session, direct interface, proposed).
+    deferred: BTreeMap<LinkId, (SessionId, usize, bool)>,
     jobs: VecDeque<DirectLinkJob>,
 }
 
@@ -317,7 +320,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             .sessions
                             .get(&link_id)
                             .is_some_and(|s| s.role() == Role::Initiator);
-                        self.attach_direct_link(link_id, *session, index, proposed, now_ms);
+                        if self.resources_in_flight(&link_id) {
+                            // A transfer cut for the link's present MTU may
+                            // carry parts no UDP datagram can (Codex review
+                            // on #74): the link moves once it is done.
+                            self.direct_links
+                                .deferred
+                                .insert(link_id, (*session, index, proposed));
+                        } else {
+                            self.attach_direct_link(link_id, *session, index, proposed, now_ms);
+                        }
                     }
                 } else if let Some(index) = interface_index {
                     // The session was no longer punching, so nothing can use
@@ -573,7 +585,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // REQUEST sent after the initiator gave up starts the peer on a
         // session nobody holds (Codex review on #74).
         if let Some(queue) = self.direct_links.outbox.get_mut(&link_id) {
-            queue.retain(|signal| signal.session() != session.id());
+            // A REJECT is the session's last word, not stale initiation: it
+            // stays, so the peer hears the failure instead of timing out.
+            queue.retain(|signal| {
+                signal.session() != session.id() || matches!(signal, Signal::Reject { .. })
+            });
             if queue.is_empty() {
                 self.direct_links.outbox.remove(&link_id);
             }
@@ -726,6 +742,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Time out sessions whose peer or facilitator went quiet.
     pub(super) fn check_direct_link_timeouts(&mut self, now_ms: u64) {
         self.flush_direct_link_outbox(now_ms);
+        let ready: Vec<LinkId> = self
+            .direct_links
+            .deferred
+            .keys()
+            .copied()
+            .filter(|link_id| !self.resources_in_flight(link_id))
+            .collect();
+        for link_id in ready {
+            if let Some((session, index, proposed)) = self.direct_links.deferred.remove(&link_id) {
+                self.attach_direct_link(link_id, session, index, proposed, now_ms);
+            }
+        }
         let due: Vec<(LinkId, Vec<Step>)> = self
             .direct_links
             .sessions
@@ -747,8 +775,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .min()
     }
 
+    /// Whether a resource transfer is under way on the link, either way.
+    fn resources_in_flight(&self, link_id: &LinkId) -> bool {
+        self.links.get(link_id).is_some_and(|link| {
+            link.outgoing_resource().is_some() || link.incoming_resource().is_some()
+        }) || self.assembling_resources.contains_key(link_id)
+    }
+
     /// The link is being removed: end its session and retire its interface.
     pub(super) fn direct_link_link_removed(&mut self, link_id: &LinkId) {
+        if let Some((_, index, _)) = self.direct_links.deferred.remove(link_id) {
+            self.direct_links
+                .jobs
+                .push_back(DirectLinkJob::CloseInterface {
+                    interface_index: index,
+                });
+        }
         if let Some(session) = self.direct_links.sessions.remove(link_id) {
             self.direct_links.jobs.push_back(DirectLinkJob::Release {
                 session: *session.id(),
@@ -776,6 +818,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// before. With no fallback left the link has no route at all, so it is
     /// closed (as `Stale`) rather than pinned to a dead interface.
     pub(super) fn direct_link_interface_down(&mut self, index: usize) {
+        // A punched link still waiting to move never got its direct path.
+        let waiting = self
+            .direct_links
+            .deferred
+            .iter()
+            .find(|(_, (_, i, _))| *i == index)
+            .map(|(link_id, (_, _, proposed))| (*link_id, *proposed));
+        if let Some((link_id, proposed)) = waiting {
+            self.direct_links.deferred.remove(&link_id);
+            self.events.push(NodeEvent::DirectLinkFailed {
+                link_id,
+                failure: Failure::Timeout,
+                proposed,
+            });
+        }
         for attachment in self.direct_links.attached.values_mut() {
             if attachment.previous == Some(index) {
                 attachment.previous = None;
@@ -790,13 +847,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Return a link from its direct interface to its fallback, or close it
     /// when there is none, and report the loss.
     ///
-    /// `retire` is for a fallback this node decides on while the direct
-    /// interface still exists (the link went stale on it, or the peer came
-    /// back over the relay): the interface is closed, and a keepalive goes out
-    /// on the fallback at once, so a peer still on the direct path sees
-    /// traffic arrive over the relay and comes back too (see
-    /// [`Self::direct_link_inbound`]). Without it a one-way failure strands
-    /// the two ends on different paths.
+    /// Every fallback to the relay nudges the peer over it, so a peer still
+    /// on the direct path sees authenticated traffic arrive over the relay and
+    /// comes back too (see [`Self::direct_link_inbound`]); without it a
+    /// one-way failure strands the two ends on different paths. `retire` is
+    /// for a fallback this node decides on while the direct interface still
+    /// exists (the link went stale on it, or the peer came back over the
+    /// relay): that interface is closed as well.
     fn release_direct_attachment(
         &mut self,
         index: usize,
@@ -820,31 +877,33 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         match attachment.previous {
             Some(previous) => {
                 link.set_attached_interface(previous);
+                let nudge = link.build_keepalive_packet().ok();
                 if retire {
-                    let nudge = link.build_keepalive_packet().ok();
                     self.direct_links
                         .jobs
                         .push_back(DirectLinkJob::CloseInterface {
                             interface_index: index,
                         });
-                    if let Some(nudge) = nudge {
-                        self.route_link_packet(&attachment.link_id, &nudge);
-                    }
-                    // The keepalive helps a stale link recover, but it is not
-                    // encrypted, so the peer does not act on it (see
-                    // `direct_link_inbound`). This signal is, and the peer
-                    // ignores it as a protocol message: COMPLETE for a session
-                    // it no longer holds. What it acts on is where the signal
-                    // arrived from.
-                    let now_ms = self.transport.clock().now_ms();
-                    self.send_direct_link_signal(
-                        &attachment.link_id,
-                        &Signal::Complete {
-                            session: attachment.session,
-                        },
-                        now_ms,
-                    );
                 }
+                // Tell the peer, whichever way this end found out: a peer
+                // still on its working direction otherwise stays there while
+                // this end waits on the relay (Codex review on #74). The
+                // keepalive helps a stale link recover but is not encrypted,
+                // so the peer does not act on it (see `direct_link_inbound`).
+                // This signal is, and the peer ignores it as a protocol
+                // message: COMPLETE for a session it no longer holds. What it
+                // acts on is where the signal arrived from.
+                if let Some(nudge) = nudge {
+                    self.route_link_packet(&attachment.link_id, &nudge);
+                }
+                let now_ms = self.transport.clock().now_ms();
+                self.send_direct_link_signal(
+                    &attachment.link_id,
+                    &Signal::Complete {
+                        session: attachment.session,
+                    },
+                    now_ms,
+                );
             }
             None => {
                 // The link goes, so its direct interface must too: the
@@ -945,6 +1004,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     pub fn abandon_direct_links(&mut self) -> crate::transport::TickOutput {
         self.direct_links.jobs.clear();
         self.direct_links.outbox.clear();
+        for (link_id, (_, _, proposed)) in core::mem::take(&mut self.direct_links.deferred) {
+            self.events.push(NodeEvent::DirectLinkFailed {
+                link_id,
+                failure: Failure::Timeout,
+                proposed,
+            });
+        }
         let sessions = core::mem::take(&mut self.direct_links.sessions);
         for (link_id, session) in sessions {
             self.events.push(NodeEvent::DirectLinkFailed {

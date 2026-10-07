@@ -953,3 +953,112 @@ fn a_link_that_went_stale_during_the_punch_is_live_again_when_it_lands() {
         crate::link::LinkState::Active
     );
 }
+
+fn has_mesh_channel_packet(out: &TickOutput, mesh: usize) -> bool {
+    sent(out).iter().any(|(iface, data)| {
+        *iface == Some(mesh)
+            && crate::packet::Packet::unpack(data)
+                .is_ok_and(|p| p.context == crate::packet::PacketContext::Channel)
+    })
+}
+
+#[test]
+fn a_dead_direct_interface_nudges_the_peer_over_the_relay() {
+    let mut pair = Pair::new();
+    let (a_direct, _) = established(&mut pair);
+    pair.a.transport.clock().advance(1_000);
+    let _ = pair.a.handle_interface_down(InterfaceId(a_direct));
+    // The interface-down call returns events only; what it queued for the
+    // wire leaves with the node's next output.
+    let out = pair.a.handle_timeout();
+    assert!(
+        has_mesh_channel_packet(&out, pair.a_mesh) || pair.a.direct_link_outbox_len() == 1,
+        "the authenticated nudge goes out (or waits its turn) over the relay"
+    );
+}
+
+#[test]
+fn a_punched_link_with_a_transfer_under_way_moves_once_it_is_done() {
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    pair.b
+        .set_resource_strategy(&pair.link, crate::resource::ResourceStrategy::AcceptAll)
+        .unwrap();
+    let (_, tick) = pair
+        .a
+        .send_resource(&pair.link, &[7u8; 3_000], None, true)
+        .expect("send_resource");
+    let first = packets(&tick);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let out = pair.a.direct_link_punched(&session, Some(a_direct));
+    assert!(
+        !out.events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::DirectLinkEstablished { .. })),
+        "not while the transfer runs"
+    );
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    // The transfer completes over the relay; the next tick moves the link.
+    pair.pump_from_a(first);
+    pair.advance(2_000);
+    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
+    assert!(pair
+        .a_events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::DirectLinkEstablished { .. })));
+}
+
+#[test]
+fn a_full_sink_still_reproves_a_duplicate_signal() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    // The REQUEST reaches B, but B's proof of it is lost.
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    let _lost = deliver(&mut pair.b, pair.b_mesh, packets(&out));
+    pair.b.set_channel_delivery_budget(Some(0));
+    // A retransmits; B must prove the duplicate although its sink is full.
+    let mut proved = false;
+    for _ in 0..20 {
+        pair.a.transport.clock().advance(500);
+        pair.b.transport.clock().advance(500);
+        let retx = packets(&pair.a.handle_timeout());
+        let (back, _) = deliver(&mut pair.b, pair.b_mesh, retx);
+        if back.iter().any(|d| {
+            crate::packet::Packet::unpack(d)
+                .is_ok_and(|p| p.flags.packet_type == crate::packet::PacketType::Proof)
+        }) {
+            proved = true;
+            break;
+        }
+    }
+    assert!(proved, "the duplicate REQUEST is proved");
+}
+
+#[test]
+fn a_responders_queued_reject_survives_its_session() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    // B's channel is saturated before the REQUEST lands.
+    let mut saturated = false;
+    for _ in 0..64 {
+        if pair.b.send_on_link(&pair.link, b"busy").is_err() {
+            saturated = true;
+            break;
+        }
+    }
+    assert!(saturated);
+    let _ = deliver(&mut pair.b, pair.b_mesh, packets(&out));
+    let _ = pair.b.take_direct_link_jobs();
+    // Its probe fails: the session ends, its REJECT must still go.
+    let _ = pair.b.direct_link_probed(&session, None);
+    assert_eq!(
+        pair.b.direct_link_outbox_len(),
+        1,
+        "the REJECT waits for the channel; the stale ACCEPT does not"
+    );
+}
