@@ -128,12 +128,12 @@ priority = "optional"
 # only real runtime dependency (postinst calls it to create the
 # leviculum system user).
 depends = "adduser"
-# The heap-accounting variant below is the same six binaries under another
-# package name, so the two must never be installed side by side: each
-# conflicts with and replaces the other, and `dpkg -i` of either removes
-# whichever is there (Codeberg #437).
-conflicts = "leviculum-heapacct"
-replaces = "leviculum-heapacct"
+# The heap-accounting variants below are the same six binaries under other
+# package names, so no two of the three may be installed side by side: each
+# conflicts with and replaces the others, and `dpkg -i` of any one removes
+# whichever is there (Codeberg #437, and 508 for the mimalloc one).
+conflicts = "leviculum-heapacct, leviculum-heapacct-mimalloc"
+replaces = "leviculum-heapacct, leviculum-heapacct-mimalloc"
 assets = [
     # cargo-deb only recognises "target/release/..." exactly as a Cargo
     # target path and auto-substitutes the --target triple into it.
@@ -200,8 +200,8 @@ restart-after-upgrade = true
 # second "leviculum" package in target/debian/ makes it delete the plain one
 # it finds there (measured 2026-10-06, the first local build lost it).
 name = "leviculum-heapacct"
-conflicts = "leviculum"
-replaces = "leviculum"
+conflicts = "leviculum, leviculum-heapacct-mimalloc"
+replaces = "leviculum, leviculum-heapacct-mimalloc"
 provides = "leviculum"
 extended-description = """\
 Leviculum is a Rust implementation of the Reticulum network stack,
@@ -212,5 +212,30 @@ binaries, but lnsd counts every allocation, so its SIGUSR1 memory census
 reports measured live heap bytes beside the modelled total. It costs a few
 atomic operations per allocation and exists for memory investigations on a
 field node, not for daily use. It conflicts with and replaces the plain
-leviculum package; installing either one swaps the other out.
+leviculum package and leviculum-heapacct-mimalloc; installing any one of
+them swaps the other out.
+"""
+
+# 508: the same instrumented build on mimalloc instead of the libc allocator
+# (`--features heap-accounting,alloc-mimalloc`), so the soak node can run one
+# census against the other and tell whether the allocator is what keeps the
+# freed memory. The version gets a `+heapacct+mimalloc` suffix, and `lnsd
+# --version` says the same.
+[package.metadata.deb.variants.heapacct-mimalloc]
+name = "leviculum-heapacct-mimalloc"
+conflicts = "leviculum, leviculum-heapacct"
+replaces = "leviculum, leviculum-heapacct"
+provides = "leviculum"
+extended-description = """\
+Leviculum is a Rust implementation of the Reticulum network stack,
+wire-compatible with the Python reference implementation.
+
+This is the heap-accounting build of the leviculum package with lnsd on
+the mimalloc allocator instead of the libc one: the same six binaries,
+but lnsd counts every allocation and its SIGUSR1 memory census reports
+measured live heap bytes, so its numbers compare directly with the
+leviculum-heapacct package's. It exists for memory investigations on a
+field node, not for daily use. It conflicts with and replaces the plain
+leviculum package and leviculum-heapacct; installing any one of them
+swaps the other out.
 """

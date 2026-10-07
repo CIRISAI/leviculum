@@ -31,7 +31,8 @@
 # ziglang on PATH (`just _deb-prereqs` installs both), and python3 for
 # the manual pages. Produces target/debian/*_<arch>.deb, which cargo-deb
 # also hardlinks under target/<triple>/debian/: one per crate, plus
-# leviculum-heapacct, the instrumented variant of the leviculum package.
+# leviculum-heapacct and leviculum-heapacct-mimalloc, the instrumented
+# variants of the leviculum package.
 
 set -euo pipefail
 
@@ -167,11 +168,33 @@ restore_plain_lnsd() {
 }
 trap restore_plain_lnsd EXIT
 
+# The instrumented lnsd has to keep its symbol table: the census's call-site
+# sampler (LEVICULUM_HEAP_SAMPLE, 508) names frames from it at run time, and
+# without it every stack prints as bare addresses. rust-lld keeps .symtab
+# under the profile's `strip = "debuginfo"`, but zig, which links arm64,
+# strips everything for it, so on arm64 the instrumented builds link
+# unstripped: 23.5 MB with the standard library's DWARF instead of 9.7 MB
+# (measured 2026-10-07). Stripping only the DWARF afterwards needs an objcopy
+# this build does not otherwise require: the pinned toolchain's rust-objcopy
+# cannot load its libLLVM, and zig's objcopy has no ELF strip. The DWARF is
+# in no loaded segment, so it costs disk and not resident memory.
+instrumented_env=()
+if [ "$ARCH" = arm64 ]; then
+    instrumented_env=(CARGO_PROFILE_RELEASE_STRIP=none)
+fi
+require_symtab() {
+    grep -qaF '.symtab' "$release_dir/lnsd" || {
+        echo "error: the instrumented lnsd has no symbol table; the heap sampler could not name a frame" >&2
+        exit 1
+    }
+}
+
 # Read off the bytes, not the exit code: an arm64 binary cannot be run here,
 # and the startup line exists only in a heap-accounting build.
 heapacct_marker='Heap accounting: on'
-"${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd \
+env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd \
     --features heap-accounting
+require_symtab
 grep -qaF "$heapacct_marker" "$release_dir/lnsd" || {
     echo "error: lnsd built with --features heap-accounting does not carry the feature" >&2
     exit 1
@@ -181,10 +204,29 @@ cargo deb -p leviculum-cli --variant heapacct --target "$TRIPLE" --no-build --no
     --deb-version "$heapacct_version"
 debs+=("$TARGET/debian/leviculum-heapacct_${heapacct_version}_${ARCH}.deb")
 
+# The same instrumented lnsd on mimalloc (508), so the soak node can hold one
+# census against the other and tell whether the allocator is what keeps the
+# freed memory. `--features heap-accounting,alloc-mimalloc` wraps mimalloc in
+# the counting shim; the binary must carry both startup lines.
+mimalloc_marker='Allocator: mimalloc'
+env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd \
+    --features heap-accounting,alloc-mimalloc
+require_symtab
+for marker in "$heapacct_marker" "$mimalloc_marker"; do
+    grep -qaF "$marker" "$release_dir/lnsd" || {
+        echo "error: lnsd built with --features heap-accounting,alloc-mimalloc lacks '$marker'" >&2
+        exit 1
+    }
+done
+mimalloc_version="$(cat .deb-version-leviculum-cli)+heapacct+mimalloc"
+cargo deb -p leviculum-cli --variant heapacct-mimalloc --target "$TRIPLE" --no-build --no-strip \
+    --deb-version "$mimalloc_version"
+debs+=("$TARGET/debian/leviculum-heapacct-mimalloc_${mimalloc_version}_${ARCH}.deb")
+
 restore_plain_lnsd
 trap - EXIT
-if grep -qaF "$heapacct_marker" "$release_dir/lnsd"; then
-    echo "error: the plain lnsd was not restored after the heap-accounting build" >&2
+if grep -qaF "$heapacct_marker" "$release_dir/lnsd" || grep -qaF "$mimalloc_marker" "$release_dir/lnsd"; then
+    echo "error: the plain lnsd was not restored after the heap-accounting builds" >&2
     exit 1
 fi
 
