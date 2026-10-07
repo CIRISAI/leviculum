@@ -870,3 +870,86 @@ fn a_session_id_in_use_on_another_link_is_refused() {
         .count();
     assert_eq!(probes, 1, "the reused id must not start a second session");
 }
+
+#[test]
+fn an_expired_sessions_held_request_is_never_sent() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    // A's channel is saturated; its REQUEST will have to wait.
+    let mut saturated = false;
+    for _ in 0..64 {
+        if pair.a.send_on_link(&pair.link, b"busy").is_err() {
+            saturated = true;
+            break;
+        }
+    }
+    assert!(saturated);
+    let _ = pair
+        .a
+        .propose_direct_link(&pair.link)
+        .expect("proposal starts");
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let _ = pair.a.direct_link_probed(&session, Some(a_public()));
+    assert_eq!(pair.a.direct_link_outbox_len(), 1, "the REQUEST is held");
+    // Nothing gets through; the proposal times out.
+    for _ in 0..12 {
+        pair.a.transport.clock().advance(1_000);
+        let _ = pair.a.handle_timeout();
+    }
+    assert_eq!(
+        pair.a.direct_link_outbox_len(),
+        0,
+        "the dead session's REQUEST is dropped, not sent later"
+    );
+}
+
+#[test]
+fn a_link_with_no_fallback_that_goes_stale_retires_its_direct_interface() {
+    let mut pair = Pair::new();
+    let (a_direct, _) = established(&mut pair);
+    let _ = pair.a.take_direct_link_jobs();
+    let _ = pair.a.handle_interface_down(InterfaceId(pair.a_mesh));
+    let mut closed = false;
+    for _ in 0..600 {
+        pair.a.transport.clock().advance(1_000);
+        let out = pair.a.handle_timeout();
+        if out
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::LinkClosed { .. }))
+        {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "no route left: the link closes");
+    assert!(pair
+        .a
+        .take_direct_link_jobs()
+        .contains(&DirectLinkJob::CloseInterface {
+            interface_index: a_direct
+        }));
+}
+
+#[test]
+fn a_link_that_went_stale_during_the_punch_is_live_again_when_it_lands() {
+    // The relayed link went quiet while the punch ran (the punch window is
+    // ten seconds; a fast link's stale time can be shorter).
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    pair.a
+        .links
+        .get_mut(&pair.link)
+        .unwrap()
+        .set_state(crate::link::LinkState::Stale);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let out = pair.a.direct_link_punched(&session, Some(a_direct));
+    assert!(out
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::LinkRecovered { .. })));
+    assert_eq!(
+        pair.a.links.get(&pair.link).unwrap().state(),
+        crate::link::LinkState::Active
+    );
+}

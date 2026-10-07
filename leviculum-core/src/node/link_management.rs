@@ -2017,18 +2017,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// retransmit left to wake it, because it was told the packet arrived.
     pub(super) fn drain_ready_channel_messages(&mut self, link_id: LinkId) {
         let limit = self.channel_delivery_budget.unwrap_or(usize::MAX);
-        if limit == 0 {
-            return;
-        }
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
+        // Direct-link signals (leviculum#70) never reach the host sink, so
+        // they drain past a spent limit; order still holds, since draining
+        // stops at the first application message once the limit is spent.
         let drained = link
             .channel_mut()
-            .map(|ch| ch.drain_received_limit(limit))
+            .map(|ch| {
+                ch.drain_received_budgeted(limit, crate::direct_link::wire::is_signal_msgtype)
+            })
             .unwrap_or_default();
         if let Some(budget) = &mut self.channel_delivery_budget {
-            *budget = budget.saturating_sub(drained.len());
+            let to_host = drained
+                .iter()
+                .filter(|(e, _)| !crate::direct_link::wire::is_signal_msgtype(e.msgtype))
+                .count();
+            *budget = budget.saturating_sub(to_host);
         }
         let mut direct_link_signals = Vec::new();
         for (envelope, _proven_on_arrival) in drained {
