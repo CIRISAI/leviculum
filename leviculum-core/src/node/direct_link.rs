@@ -139,6 +139,9 @@ enum SignalSend {
 #[derive(Debug, Clone, Copy)]
 struct Attachment {
     link_id: LinkId,
+    /// The upgrade session that put the link here; named in the fallback
+    /// nudge.
+    session: SessionId,
     previous: Option<usize>,
     /// When the link moved onto the direct interface.
     attached_at_ms: u64,
@@ -157,6 +160,8 @@ pub(crate) struct DirectLinks {
     /// Signals the channel could not take yet (window full or pacing), per
     /// link, in order. Flushed on every tick.
     outbox: BTreeMap<LinkId, VecDeque<Signal>>,
+    /// The interface the link packet being processed arrived on.
+    rx_iface: Option<usize>,
     jobs: VecDeque<DirectLinkJob>,
 }
 
@@ -312,7 +317,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             .sessions
                             .get(&link_id)
                             .is_some_and(|s| s.role() == Role::Initiator);
-                        self.attach_direct_link(link_id, index, proposed, now_ms);
+                        self.attach_direct_link(link_id, *session, index, proposed, now_ms);
                     }
                 } else if let Some(index) = interface_index {
                     // The session was no longer punching, so nothing can use
@@ -342,7 +347,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Move the link onto its new interface and say so.
-    fn attach_direct_link(&mut self, link_id: LinkId, index: usize, proposed: bool, now_ms: u64) {
+    fn attach_direct_link(
+        &mut self,
+        link_id: LinkId,
+        session: SessionId,
+        index: usize,
+        proposed: bool,
+        now_ms: u64,
+    ) {
         let Some(link) = self.links.get_mut(&link_id) else {
             self.direct_links
                 .jobs
@@ -367,6 +379,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             index,
             Attachment {
                 link_id,
+                session,
                 previous,
                 attached_at_ms: now_ms,
             },
@@ -446,8 +459,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             DirectLinkPolicy::AcceptAll => true,
             DirectLinkPolicy::IdentifiedOnly => identified,
         };
+        // A session id is the driver's key for its socket and tasks, so one
+        // already in use anywhere on the node is refused, not just on this
+        // link: a peer must not be able to reuse another link's id and take
+        // over its probe (Codex review on #74).
         let busy = self.direct_links.sessions.contains_key(&link_id)
-            || self.direct_links.interface_of_link(&link_id).is_some();
+            || self.direct_links.interface_of_link(&link_id).is_some()
+            || self
+                .direct_links
+                .sessions
+                .values()
+                .any(|s| s.id() == &session);
         let reject = if !allowed {
             Some(REJECT_POLICY)
         } else if busy {
@@ -566,7 +588,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// busy link, not a reason to give the upgrade up: the signal waits in
     /// the link's outbox behind any already waiting there, and the session's
     /// own phase timer bounds how long that may take.
-    fn send_direct_link_signal(&mut self, link_id: &LinkId, signal: &Signal, now_ms: u64) -> bool {
+    pub(super) fn send_direct_link_signal(
+        &mut self,
+        link_id: &LinkId,
+        signal: &Signal,
+        now_ms: u64,
+    ) -> bool {
         if self
             .direct_links
             .outbox
@@ -636,7 +663,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let Some(link) = self.links.get_mut(link_id) else {
             return SignalSend::Never;
         };
-        if link.state() != LinkState::Active {
+        // Stale too: the fallback nudge goes out on a link that went stale
+        // on its direct path.
+        if !matches!(link.state(), LinkState::Active | LinkState::Stale) {
             return SignalSend::Never;
         }
         let link_mdu = link.mdu();
@@ -782,6 +811,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     if let Some(nudge) = nudge {
                         self.route_link_packet(&attachment.link_id, &nudge);
                     }
+                    // The keepalive helps a stale link recover, but it is not
+                    // encrypted, so the peer does not act on it (see
+                    // `direct_link_inbound`). This signal is, and the peer
+                    // ignores it as a protocol message: COMPLETE for a session
+                    // it no longer holds. What it acts on is where the signal
+                    // arrived from.
+                    let now_ms = self.transport.clock().now_ms();
+                    self.send_direct_link_signal(
+                        &attachment.link_id,
+                        &Signal::Complete {
+                            session: attachment.session,
+                        },
+                        now_ms,
+                    );
                 }
             }
             None => {
@@ -799,7 +842,31 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
-    /// A link packet for `link_id` arrived on interface `iface`.
+    /// A link packet from interface `iface` is about to be processed.
+    pub(super) fn direct_link_rx_begin(&mut self, iface: usize) {
+        self.direct_links.rx_iface = Some(iface);
+    }
+
+    /// The link packet has been processed.
+    pub(super) fn direct_link_rx_end(&mut self) {
+        self.direct_links.rx_iface = None;
+    }
+
+    /// The packet being processed decrypted under `link_id`'s key: it came
+    /// from the peer. Called from the channel path only after a successful
+    /// decrypt; most handlers record liveness before decrypting, so liveness
+    /// is no evidence here.
+    pub(super) fn direct_link_authenticated(&mut self, link_id: &LinkId, now_ms: u64) {
+        if let Some(iface) = self.direct_links.rx_iface {
+            self.direct_link_inbound(link_id, iface, now_ms);
+        }
+    }
+
+    /// An authenticated link packet for `link_id` arrived on interface
+    /// `iface`: one that decrypted under the link key (a channel message;
+    /// a keepalive is not encrypted and never counts). So nobody able to
+    /// inject packets onto the relay can make this node drop a working
+    /// direct path (Codex review on #74).
     ///
     /// If the link is on a direct interface and the packet came over the
     /// relayed interface the link left, the peer has fallen back (its side of
