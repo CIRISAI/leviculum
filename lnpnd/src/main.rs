@@ -25,6 +25,7 @@ use lnpnd::config::{
 };
 use lnpnd::engine::{Engine, EngineConfig, EngineEvent, DEFAULT_ANNOUNCE_INTERVAL_SECS};
 use lnpnd::mailbox::MailboxConfig;
+use tokio::signal::unix::{signal, SignalKind};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -672,12 +673,24 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         }
     });
 
-    // Run until interrupted; the store is durable at every append, so
-    // shutdown has nothing to flush.
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        return failure(format!("signal handling: {error}"));
-    }
-    eprintln!("lnpnd: shutting down");
+    // Run until SIGINT or SIGTERM, and stop the node either way. The
+    // message store is durable at every append and needs no flush, but the
+    // node storage does: `known_destinations` is written on shutdown, so a
+    // SIGTERM left to its default disposition (which is how systemd stops
+    // and restarts the unit) forgot every destination learned in a run
+    // shorter than the hourly crash-protection flush.
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(sigterm) => sigterm,
+        Err(error) => return failure(format!("signal handling: {error}")),
+    };
+    let received = tokio::select! {
+        result = tokio::signal::ctrl_c() => match result {
+            Ok(()) => "SIGINT",
+            Err(error) => return failure(format!("signal handling: {error}")),
+        },
+        _ = sigterm.recv() => "SIGTERM",
+    };
+    eprintln!("lnpnd: shutting down ({received})");
     let _ = node.stop().await;
     drop(printer);
     ExitCode::SUCCESS
