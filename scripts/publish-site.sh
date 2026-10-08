@@ -42,6 +42,18 @@
 #                       the intended setup
 #   LEVICULUM_BUILD_ID  fallback if .build-id is absent
 #
+# Off the forge (517: `just nightly-publish` on the nightly host) the key and
+# the host key come from files rather than from the environment, so the key
+# text never sits in a process environment:
+#   --key-file <path>          the private key; replaces SITE_SSH_KEY
+#   --known-hosts-file <path>  the known_hosts line; replaces SITE_SSH_HOST_KEY
+# Both are read in place of the variable they replace and then go through the
+# same checks; an unreadable file is a failure, not "not configured".
+#
+#   LEVICULUM_PUBLISH_DRY_RUN=1  builds and checks the upload exactly as a real
+#                                run does, says where it would go, and opens
+#                                no connection.
+#
 # Test hook:
 #   scripts/publish-site.sh --tar-only <file>
 # writes exactly the tar it would have piped and makes no ssh call, which is
@@ -50,16 +62,23 @@
 #
 # Usage:
 #   bash scripts/publish-site.sh [--tar-only <file>]
+#                                [--key-file <path>] [--known-hosts-file <path>]
 
 set -euo pipefail
 shopt -s nullglob
 
 TAR_ONLY=""
+KEY_FILE=""
+KNOWN_HOSTS_FILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
-    --tar-only)
-        [ $# -ge 2 ] || { echo "[publish-site] --tar-only needs a file" >&2; exit 1; }
-        TAR_ONLY="$2"
+    --tar-only | --key-file | --known-hosts-file)
+        [ $# -ge 2 ] || { echo "[publish-site] $1 needs a file" >&2; exit 1; }
+        case "$1" in
+        --tar-only) TAR_ONLY="$2" ;;
+        --key-file) KEY_FILE="$2" ;;
+        --known-hosts-file) KNOWN_HOSTS_FILE="$2" ;;
+        esac
         shift 2
         ;;
     *)
@@ -74,6 +93,17 @@ die() { printf '[publish-site] %s\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
+DRY_RUN="${LEVICULUM_PUBLISH_DRY_RUN:-0}"
+
+# A file named on the command line stands for its variable from here on.
+if [ -n "$KEY_FILE" ]; then
+    [ -r "$KEY_FILE" ] || die "--key-file ${KEY_FILE} is not readable"
+    SITE_SSH_KEY="$(cat -- "$KEY_FILE")"
+fi
+if [ -n "$KNOWN_HOSTS_FILE" ]; then
+    [ -r "$KNOWN_HOSTS_FILE" ] || die "--known-hosts-file ${KNOWN_HOSTS_FILE} is not readable"
+    SITE_SSH_HOST_KEY="$(cat -- "$KNOWN_HOSTS_FILE")"
+fi
 
 # --- Is this target configured at all? ------------------------------------
 #
@@ -215,6 +245,15 @@ ssh-ed25519 | ssh-rsa | ecdsa-sha2-* | sk-*) ;;
 esac
 [ -n "${_kh_material:-}" ] || die "SITE_SSH_HOST_KEY carries no key material"
 [ -n "${_kh_host:-}" ] || die "SITE_SSH_HOST_KEY names no host"
+
+if [ "$DRY_RUN" = "1" ]; then
+    say "DRY RUN (LEVICULUM_PUBLISH_DRY_RUN=1): no connection is opened."
+    say "would pipe build ${BUILD_ID} to ${SITE_SSH_TARGET} port ${SITE_SSH_PORT}, host key ${_kh_type} for ${_kh_host}:"
+    for name in "${names[@]}"; do
+        say "  ${name}"
+    done
+    exit 0
+fi
 
 say "uploading to ${SITE_SSH_TARGET} port ${SITE_SSH_PORT}"
 # IdentitiesOnly + IdentityAgent=none: the key we were handed is the only

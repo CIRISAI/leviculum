@@ -70,7 +70,7 @@ while [ $# -gt 0 ]; do
         -o) out="$2"; shift 2;;
         -w) want_code=1; shift 2;;
         -X) method="$2"; shift 2;;
-        -H) shift 2;;
+        -H) case "$2" in Authorization:*) printf '%s\n' "$2" >> "$D/auth";; esac; shift 2;;
         -F) upload="$2"; shift 2;;
         -d) [ "$2" = "@-" ] && stdin_data=1; shift 2;;
         -sS|-s|-S|-f|--fail|--fail-with-body) shift;;
@@ -450,6 +450,47 @@ grep -q 'nightly host down, release cut by hand' "$FAKE_DIR/out" \
     || fail "the reason was not recorded with the build it excused"
 expected=$(find "$TREE/dist" -maxdepth 1 -type f -printf '%f\n' | sort)
 [ "$(asset_names)" = "$expected" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(echo "$expected" | tr '\n' ' ')"
+[ "$failures" -eq "$before" ] || dumplog
+
+# --- Case: dry run --------------------------------------------------------
+#
+# 517: `just nightly-publish` is exercised end to end with
+# LEVICULUM_PUBLISH_DRY_RUN=1, so the knob has to keep its promise: the gate
+# still runs, every asset is named, and the forge sees nothing at all.
+echo "[case] dry-run"
+before=$failures
+setup dry-run
+( cd "$TREE" && PATH="$BIN:$PATH" \
+    CI_REPO="Lew_Palm/leviculum" CI_COMMIT_SHA="deadbeefcafe" \
+    CODEBERG_TOKEN="fixture-token" LEVICULUM_BUILD_ID="fixture-build" \
+    LEVICULUM_PUBLISH_DRY_RUN=1 \
+    bash "$TREE/scripts/publish-nightly.sh" ) > "$FAKE_DIR/out" 2>&1
+echo $? > "$FAKE_DIR/rc"
+[ "$(rc)" = "0" ] || fail "exit $(rc) on a dry run"
+grep -q 'ACCEPTED' "$FAKE_DIR/out" || fail "the dry run skipped the nightly gate"
+grep -q 'would upload leviculum-nightly-amd64.deb ' "$FAKE_DIR/out" || fail "the dry run does not name the assets it would upload"
+grep -qE '^(LOOKUP|CREATE|PATCH|UPLOAD|DELETE)' "$FAKE_DIR/log" && fail "the dry run made a forge request"
+grep -q '^GIT ' "$FAKE_DIR/log" && fail "the dry run moved the tag"
+[ "$(asset_ids)" = "1 2 3 4 5 6 " ] || fail "release holds ids '$(asset_ids)', expected the six previous assets untouched"
+[ "$failures" -eq "$before" ] || dumplog
+
+# --- Case: the token from a file ------------------------------------------
+#
+# 517: on the nightly host there is no Woodpecker secret; the token is a file,
+# read only when CODEBERG_TOKEN is unset, and never printed.
+echo "[case] token-from-file"
+before=$failures
+setup token-file
+printf 'file-token-517\n' > "$FAKE_DIR/token"
+( cd "$TREE" && env -u CODEBERG_TOKEN PATH="$BIN:$PATH" \
+    CI_REPO="Lew_Palm/leviculum" CI_COMMIT_SHA="deadbeefcafe" \
+    LEVICULUM_BUILD_ID="fixture-build" \
+    LEVICULUM_CODEBERG_TOKEN_FILE="$FAKE_DIR/token" \
+    bash "$TREE/scripts/publish-nightly.sh" ) > "$FAKE_DIR/out" 2>&1
+echo $? > "$FAKE_DIR/rc"
+[ "$(rc)" = "0" ] || fail "exit $(rc) with the token in a file"
+grep -qx 'Authorization: token file-token-517' "$FAKE_DIR/auth" || fail "the requests did not carry the token from the file"
+grep -q 'file-token-517' "$FAKE_DIR/out" && fail "the token was printed"
 [ "$failures" -eq "$before" ] || dumplog
 
 echo

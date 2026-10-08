@@ -22,6 +22,15 @@
 #   CODEBERG_TOKEN  — Codeberg API token (Woodpecker secret)
 #   LEVICULUM_BUILD_ID (optional, for release body)
 #
+# Outside Woodpecker (517: `just nightly-publish` on the nightly host) the
+# token comes from a file instead, read only when CODEBERG_TOKEN is unset:
+#   LEVICULUM_CODEBERG_TOKEN_FILE  default ~/.config/codeberg-token
+# It is never printed.
+#
+#   LEVICULUM_PUBLISH_DRY_RUN=1  runs the nightly gate and lists what would be
+#                                uploaded, then stops before the first forge
+#                                request: no release change, no tag push.
+#
 # The compiler that produced the assets is read from .rustc-version, the
 # stamp scripts/deb-stamp.sh leaves in the repo root; this step's image has
 # no rustc to ask.
@@ -30,7 +39,18 @@ set -euo pipefail
 
 : "${CI_REPO:?CI_REPO not set}"
 : "${CI_COMMIT_SHA:?CI_COMMIT_SHA not set}"
-: "${CODEBERG_TOKEN:?CODEBERG_TOKEN not set}"
+DRY_RUN="${LEVICULUM_PUBLISH_DRY_RUN:-0}"
+if [ -z "${CODEBERG_TOKEN:-}" ]; then
+    TOKEN_FILE="${LEVICULUM_CODEBERG_TOKEN_FILE:-${HOME:-}/.config/codeberg-token}"
+    if [ -r "$TOKEN_FILE" ]; then
+        IFS= read -r CODEBERG_TOKEN <"$TOKEN_FILE" || true
+    fi
+fi
+# A dry run makes no authenticated request, so it does not need the token.
+if [ "$DRY_RUN" = "1" ]; then
+    CODEBERG_TOKEN="${CODEBERG_TOKEN:-dry-run-no-token}"
+fi
+: "${CODEBERG_TOKEN:?CODEBERG_TOKEN not set, and no token file at ${TOKEN_FILE:-?}}"
 # The tag push at the end reads the token from the environment via a git
 # credential helper; Woodpecker exports it, a manual caller might not.
 export CODEBERG_TOKEN
@@ -152,6 +172,31 @@ Current build: \`${BUILD_ID}\` (commit \`${CI_COMMIT_SHA}\`, built with \`${RUST
 Verify with \`lnsd --version\` after install.
 EOF
 )
+
+# The assets, listed before the first forge request: an empty dist/ is refused
+# without touching the release, and a dry run has everything it reports.
+shopt -s nullglob
+ASSETS=("$DIST"/*.deb "$DIST"/*.tar.gz "$DIST"/*.sha256)
+shopt -u nullglob
+
+# An empty dist/ empties the release just as thoroughly as a failed upload
+# does, and it is the likelier of the two: a build step that produced nothing
+# still leaves the directory behind.
+if [ "${#ASSETS[@]}" -eq 0 ]; then
+    echo "[publish] dist/ contains no .deb, .tar.gz or .sha256 — nothing to publish."
+    echo "[publish] The release keeps the previous build's assets. Failing the run."
+    exit 1
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+    echo "[publish] DRY RUN (LEVICULUM_PUBLISH_DRY_RUN=1): no forge request is made."
+    echo "[publish] would refresh the body of release tag=${TAG} on ${CI_REPO}, build ${BUILD_ID}"
+    for f in "${ASSETS[@]}"; do
+        echo "[publish]   would upload $(basename "$f") ($(wc -c <"$f") bytes)"
+    done
+    echo "[publish] would delete the assets these replace, then point tag ${TAG} at ${CI_COMMIT_SHA}"
+    exit 0
+fi
 
 # --- Forge requests -------------------------------------------------------
 #
@@ -279,19 +324,6 @@ else
             "$API/repos/$CI_REPO/releases/$release_id" -d @-)
     ok "$status" || die "body refresh failed: HTTP $status"
     replaced_asset_ids=$(echo "$release_json" | jq -r '.assets[].id')
-fi
-
-shopt -s nullglob
-ASSETS=("$DIST"/*.deb "$DIST"/*.tar.gz "$DIST"/*.sha256)
-shopt -u nullglob
-
-# An empty dist/ empties the release just as thoroughly as a failed upload
-# does, and it is the likelier of the two: a build step that produced nothing
-# still leaves the directory behind.
-if [ "${#ASSETS[@]}" -eq 0 ]; then
-    echo "[publish] dist/ contains no .deb, .tar.gz or .sha256 — nothing to publish."
-    echo "[publish] The release keeps the previous build's assets. Failing the run."
-    exit 1
 fi
 
 echo "[publish] uploading ${#ASSETS[@]} new assets"

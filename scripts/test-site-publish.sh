@@ -31,6 +31,8 @@
 #                        0, and opens no connection
 #   sender-part-config   some ssh settings and not others: it fails, names the
 #                        missing ones, and opens no connection
+#   sender-dry-run     key and host key from files, LEVICULUM_PUBLISH_DRY_RUN=1:
+#                        it names the target and every file, opens no connection
 #
 # Every refusal case additionally asserts that the previous `latest` still
 # resolves to the previous build's files, that no new build directory
@@ -665,6 +667,37 @@ grep -q 'NOT CONFIGURED' "$WORK/part-out" &&
 [ ! -e "$WORK/ssh-was-called" ] ||
     fail "sender-part-config: it tried to upload with an incomplete configuration"
 [ "$failures" -eq "$before" ] || sed 's/^/    /' "$WORK/part-out" "$WORK/part-err"
+
+# --- Case: the files, and a dry run ---------------------------------------
+#
+# 517: the nightly host passes the key and the pinned host key as files, and
+# `just nightly-publish` is exercised with LEVICULUM_PUBLISH_DRY_RUN=1. The
+# files have to count as configuration, and the dry run has to stop short of
+# ssh while still naming what it would send and where.
+echo "[case] sender-dry-run"
+before=$failures
+rm -f "$WORK/ssh-was-called"
+printf 'not a real key\n' >"$WORK/dry-id"
+printf '[203.0.113.7]:22222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIfixture\n' >"$WORK/dry-known-hosts"
+(
+    cd "$TREE" &&
+        env -u SITE_SSH_KEY -u SITE_SSH_HOST_KEY \
+            SITE_SSH_TARGET="levsite@203.0.113.7" SITE_SSH_PORT=22222 \
+            LEVICULUM_PUBLISH_DRY_RUN=1 \
+            PATH="$SHIM:$PATH" bash scripts/publish-site.sh \
+            --key-file "$WORK/dry-id" --known-hosts-file "$WORK/dry-known-hosts"
+) >"$WORK/dry-out" 2>"$WORK/dry-err"
+RC=$?
+[ "$RC" -eq 0 ] || fail "sender-dry-run: exit $RC, expected 0"
+grep -q 'DRY RUN' "$WORK/dry-out" || fail "sender-dry-run: the log does not say it is a dry run"
+grep -q 'levsite@203.0.113.7 port 22222' "$WORK/dry-out" ||
+    fail "sender-dry-run: the log does not name the target"
+grep -q '  leviculum-nightly-amd64.deb$' "$WORK/dry-out" ||
+    fail "sender-dry-run: the log does not name the files"
+grep -q 'not a real key' "$WORK/dry-out" "$WORK/dry-err" &&
+    fail "sender-dry-run: the key was printed"
+[ ! -e "$WORK/ssh-was-called" ] || fail "sender-dry-run: it opened a connection"
+[ "$failures" -eq "$before" ] || sed 's/^/    /' "$WORK/dry-out" "$WORK/dry-err"
 
 echo
 if [ "$failures" -ne 0 ]; then
