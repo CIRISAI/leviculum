@@ -114,7 +114,7 @@ setup() {  # <case>
     : > "$FAKE_DIR/log"
     : > "$FAKE_DIR/refs"
     : > "$FAKE_DIR/ancestry"
-    unset LEVICULUM_PUBLISH_WITHOUT_NIGHTLY
+    unset LEVICULUM_PUBLISH_WITHOUT_NIGHTLY LEVICULUM_PUBLISH_FROM_GREEN_RUN
 }
 
 add_ref() {  # <stamp> <sha>
@@ -279,6 +279,36 @@ setup check-override-flag
 run_check_override "1"
 [ "$(rc)" != "0" ] || fail "exit 0 on LEVICULUM_PUBLISH_WITHOUT_NIGHTLY=1"
 grep -q 'not a reason' "$FAKE_DIR/out" || fail "the refusal does not say why '1' is not enough"
+[ "$failures" -eq "$before" ] || dumpout
+
+# --- Case: the night that just went green names this commit ---------------
+# 517: the nightly calls the publish seconds after pushing its ref, and the
+# forge may lag. Accepted without a round trip, for that commit only.
+echo "[case] check/from-green-run"
+before=$failures
+setup check-from-green-run
+run_check_from_run() {
+    ( PATH="$BIN:$PATH" LEVICULUM_PUBLISH_FROM_GREEN_RUN="$1" \
+        bash "$TREE/scripts/check-nightly-green.sh" \
+        --commit "$HEAD_SHA" --remote "fixture://remote" ) > "$FAKE_DIR/out" 2>&1
+    echo $? > "$FAKE_DIR/rc"
+}
+run_check_from_run "$HEAD_SHA"
+[ "$(rc)" = "0" ] || fail "exit $(rc) with LEVICULUM_PUBLISH_FROM_GREEN_RUN equal to the commit"
+grep -q 'just tested green' "$FAKE_DIR/out" || fail "the green-run acceptance did not announce itself"
+grep -q '^GIT ls-remote' "$FAKE_DIR/log" && fail "the green-run acceptance still went to the remote"
+[ "$failures" -eq "$before" ] || dumpout
+
+# --- Case: ...and nothing else --------------------------------------------
+# A green night on one commit says nothing about another; the value is refused,
+# not ignored, even when a ref on the remote would have covered the commit.
+echo "[case] check/from-green-run-other-commit"
+before=$failures
+setup check-from-green-run-other
+add_ref "$STAMP_NOW" "$HEAD_SHA"
+run_check_from_run "$LATER_SHA"
+[ "$(rc)" != "0" ] || fail "exit 0 with LEVICULUM_PUBLISH_FROM_GREEN_RUN naming another commit"
+grep -q 'GREEN-RUN-MISMATCH' "$FAKE_DIR/out" || fail "the refusal does not name GREEN-RUN-MISMATCH"
 [ "$failures" -eq "$before" ] || dumpout
 
 # =========================================================================

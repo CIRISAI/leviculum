@@ -14,13 +14,16 @@
 # `refs/nightly/green/<YYYYMMDDTHHMMSSZ>` at the commit it tested
 # (scripts/nightly-green-ref.sh). This script reads those refs.
 #
-# THREE CONDITIONS, EACH NAMED IN ITS OWN REFUSAL:
+# FOUR CONDITIONS, EACH NAMED IN ITS OWN REFUSAL:
 #
 #   NO-SIGNAL    there is no `refs/nightly/green/*` on the remote at all, or it
 #                could not be read.
 #   NOT-COVERED  no green ref names this commit or a descendant of it — the
 #                nightly has never seen this code.
 #   TOO-OLD      the newest covering ref is older than the staleness bound.
+#   GREEN-RUN-MISMATCH
+#                LEVICULUM_PUBLISH_FROM_GREEN_RUN names another commit than
+#                the one under publish (see below; 517).
 #
 # It FAILS CLOSED and says which. That is the #434 lesson, and #434 is in the
 # same file: a publish input that could not be configured took five weeks of
@@ -120,6 +123,31 @@ if [ -n "$OVERRIDE" ]; then
 fi
 
 [ -n "$COMMIT" ] || refuse NO-SIGNAL "no commit to check — CI_COMMIT_SHA is unset and --commit was not given"
+
+# --- The night that just went green ---------------------------------------
+#
+# 517: `just nightly-publish` runs on the nightly host, in the tree the tier-2
+# nightly tested, seconds after nightly-green-ref.sh pushed the ref for it. The
+# forge may not serve that ref yet when this asks, so the nightly hands its
+# own verdict over directly:
+#
+#   LEVICULUM_PUBLISH_FROM_GREEN_RUN=<full sha the green night tested>
+#
+# It is not an override. It names a commit, and it is accepted only for THAT
+# commit: a value that differs from the one under publish is refused rather
+# than ignored, because it means the caller is publishing something other than
+# what its night tested, which is exactly what this gate exists to stop.
+FROM_RUN="${LEVICULUM_PUBLISH_FROM_GREEN_RUN:-}"
+if [ -n "$FROM_RUN" ]; then
+    if [ "$FROM_RUN" != "$COMMIT" ]; then
+        refuse GREEN-RUN-MISMATCH \
+            "LEVICULUM_PUBLISH_FROM_GREEN_RUN names ${FROM_RUN:0:12}, but the commit under publish is ${COMMIT:0:12}. The green night tested another commit; nothing it said covers this one."
+    fi
+    say "commit    ${COMMIT:0:12}"
+    say "ACCEPTED: ${COMMIT:0:12} is the commit the calling tier-2 nightly just tested green"
+    say "(LEVICULUM_PUBLISH_FROM_GREEN_RUN; its refs/nightly/green/* ref may still be on its way)."
+    exit 0
+fi
 
 if [ -z "$REMOTE" ]; then
     if [ -n "${CI_REPO:-}" ]; then
