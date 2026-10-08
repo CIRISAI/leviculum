@@ -34,7 +34,7 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use leviculum_core::crypto::full_hash;
+use leviculum_core::crypto::full_hash_parts;
 use leviculum_core::discovery::DiscoveredInterfaceRecord;
 use leviculum_core::transport::InterfaceId;
 
@@ -148,6 +148,14 @@ pub(crate) struct AutoConnectManager {
     /// (`Discovery.py:524-531`), counted after that poll's teardown pass so an
     /// interface on its way out is not counted as connectivity we have.
     online: usize,
+    /// Per-tick scratch kept across polls so a steady-state poll reuses its
+    /// capacity instead of allocating (Codeberg #437): the endpoint hash of
+    /// each `live` record by index (`None` where the record is not
+    /// autoconnectable), computed once and read by both passes.
+    record_hashes: Vec<Option<[u8; 32]>>,
+    /// Per-tick scratch: the endpoints still backed by a live autoconnectable
+    /// record, sorted and deduplicated for `binary_search`.
+    live_endpoints: Vec<[u8; 32]>,
 }
 
 /// What the `bootstrap_only` interfaces should do this tick
@@ -173,6 +181,8 @@ impl AutoConnectManager {
             warned_unimplemented: BTreeSet::new(),
             cooldown: BTreeMap::new(),
             online: 0,
+            record_hashes: Vec::new(),
+            live_endpoints: Vec::new(),
         }
     }
 
@@ -214,13 +224,27 @@ impl AutoConnectManager {
 
     /// The endpoint dedup key Python auto-connections are keyed by:
     /// `full_hash(reachable_on + optional(":" + port))` (`Discovery.py:601-606`).
+    ///
+    /// Fed to the digest in parts ([`full_hash_parts`], the streaming form of
+    /// `full_hash`'s SHA-256) with the port's digits written on the stack, so
+    /// the once-a-second poll hashes every record without allocating
+    /// (Codeberg #437). Same bytes in the same order, so the same hash.
     pub(crate) fn endpoint_hash(reachable_on: &str, port: Option<u64>) -> [u8; 32] {
-        let mut spec = String::from(reachable_on);
-        if let Some(p) = port {
-            spec.push(':');
-            spec.push_str(&p.to_string());
+        let Some(mut p) = port else {
+            return full_hash_parts(&[reachable_on.as_bytes()]);
+        };
+        // u64::MAX has 20 decimal digits.
+        let mut digits = [0u8; 20];
+        let mut start = digits.len();
+        loop {
+            start -= 1;
+            digits[start] = b'0' + (p % 10) as u8;
+            p /= 10;
+            if p == 0 {
+                break;
+            }
         }
-        full_hash(spec.as_bytes())
+        full_hash_parts(&[reachable_on.as_bytes(), b":", &digits[start..]])
     }
 
     /// Resolve a record to a `(host, port)` TCP connect target, or `None` if
@@ -260,13 +284,21 @@ impl AutoConnectManager {
             return;
         }
 
-        // Endpoints still backed by a live autoconnectable record.
-        let live_endpoints: BTreeSet<[u8; 32]> = live
-            .iter()
-            .map(Borrow::borrow)
-            .filter(|r| Self::connect_target(r).is_some())
-            .map(|r| Self::endpoint_hash(r.reachable_on.as_deref().unwrap_or(""), r.port))
-            .collect();
+        // Each record's endpoint hash, once per tick, and the endpoints still
+        // backed by a live autoconnectable record. Both buffers are taken out
+        // of `self` for the tick and put back, so their capacity carries over.
+        let mut record_hashes = std::mem::take(&mut self.record_hashes);
+        record_hashes.clear();
+        record_hashes.extend(
+            live.iter().map(Borrow::borrow).map(|r| {
+                Self::connect_target(r).map(|(host, _)| Self::endpoint_hash(host, r.port))
+            }),
+        );
+        let mut live_endpoints = std::mem::take(&mut self.live_endpoints);
+        live_endpoints.clear();
+        live_endpoints.extend(record_hashes.iter().flatten().copied());
+        live_endpoints.sort_unstable();
+        live_endpoints.dedup();
 
         // Teardown pass. Endpoints torn down this tick are not re-spawned in the
         // spawn pass below: for an offline (connection-death) teardown the
@@ -276,7 +308,7 @@ impl AutoConnectManager {
         let mut i = 0;
         while i < self.active.len() {
             let endpoint_hash = self.active[i].endpoint_hash;
-            let record_gone = !live_endpoints.contains(&endpoint_hash);
+            let record_gone = live_endpoints.binary_search(&endpoint_hash).is_err();
             // Distinguished from `record_gone` because only a connection that
             // died (or never came up) says anything about the endpoint; a
             // record that expired says only that its owner stopped announcing.
@@ -325,7 +357,8 @@ impl AutoConnectManager {
 
         // Bounded by the live discovered set: an endpoint nobody advertises any
         // more carries no backoff, and is dialled fresh if it is re-discovered.
-        self.cooldown.retain(|k, _| live_endpoints.contains(k));
+        self.cooldown
+            .retain(|k, _| live_endpoints.binary_search(k).is_ok());
 
         // Connectivity we actually have, read after the teardown pass and
         // before the spawn pass: an interface just detached is gone, and one
@@ -339,7 +372,7 @@ impl AutoConnectManager {
 
         // Spawn pass. `live` is caller-sorted best-first (Python
         // list_discovered_interfaces order), so the cap keeps the best peers.
-        for rec in live.iter().map(Borrow::borrow) {
+        for (rec, record_hash) in live.iter().map(Borrow::borrow).zip(&record_hashes) {
             if self.active.len() >= self.max_interfaces {
                 break;
             }
@@ -347,11 +380,12 @@ impl AutoConnectManager {
             if !rec.transport {
                 continue;
             }
-            let Some((host, port)) = Self::connect_target(rec) else {
+            let (Some((host, port)), Some(endpoint_hash)) =
+                (Self::connect_target(rec), *record_hash)
+            else {
                 self.maybe_warn_unimplemented(rec);
                 continue;
             };
-            let endpoint_hash = Self::endpoint_hash(host, rec.port);
             if torn_this_tick.contains(&endpoint_hash) {
                 continue; // just detached this tick; do not immediately reconnect
             }
@@ -385,6 +419,8 @@ impl AutoConnectManager {
                 });
             }
         }
+        self.record_hashes = record_hashes;
+        self.live_endpoints = live_endpoints;
     }
 
     /// Log (once per endpoint) that a discovered type is recognised but its
@@ -855,6 +891,77 @@ mod tests {
             sp.spawned.len(),
             2,
             "a peer that has been online is re-dialled on the next poll"
+        );
+    }
+
+    /// The allocation-free `endpoint_hash` hashes exactly the bytes of the
+    /// string Python builds (`reachable_on + ":" + str(port)`), so the dedup
+    /// key and the cooldown table key are unchanged.
+    #[test]
+    fn endpoint_hash_matches_the_string_form() {
+        fn string_form(host: &str, port: Option<u64>) -> [u8; 32] {
+            let mut spec = String::from(host);
+            if let Some(p) = port {
+                spec.push(':');
+                spec.push_str(&p.to_string());
+            }
+            leviculum_core::crypto::full_hash(spec.as_bytes())
+        }
+        let pairs: [(&str, Option<u64>); 13] = [
+            ("10.0.0.5", Some(4965)),
+            ("10.0.0.5", Some(0)),
+            ("10.0.0.5", None),
+            ("::", Some(4242)),
+            ("::", Some(0)),
+            ("2001:db8::1", Some(65535)),
+            ("fe80::1%eth0", Some(4242)),
+            ("[2001:db8::2]", Some(1)),
+            ("rns.example.org", Some(9)),
+            ("abcd.b32.i2p", None),
+            ("", Some(10)),
+            ("", None),
+            ("host", Some(u64::MAX)),
+        ];
+        for (host, port) in pairs {
+            assert_eq!(
+                AutoConnectManager::endpoint_hash(host, port),
+                string_form(host, port),
+                "{host:?} {port:?}"
+            );
+        }
+    }
+
+    /// Codeberg #437: with the registry read cached, the poll itself was the
+    /// discovery path's remaining per-second churn: every autoconnectable
+    /// record cost a `String`, a port `to_string` and a possible regrow, twice
+    /// per tick (live set and spawn pass), plus a `BTreeSet` of every live
+    /// endpoint. A steady-state poll over an unchanged list must not allocate
+    /// per record.
+    ///
+    /// The cap is above the record count so the spawn pass walks every record
+    /// (a full cap breaks out of it at once), and every endpoint is already
+    /// connected and online, so nothing is spawned or torn down.
+    #[test]
+    fn a_steady_state_poll_does_not_allocate_per_record() {
+        use crate::rpc::connection::alloc_probe::measure_allocations;
+        let live: Vec<DiscoveredInterfaceRecord> = (0..800u32)
+            .map(|i| {
+                let host = format!("10.{}.{}.{}", i / 65536, (i / 256) % 256, i % 256);
+                backbone_rec("peer", &host, 4965, (i % 251) as u8)
+            })
+            .collect();
+        let mut mgr = AutoConnectManager::new(1000);
+        let mut sp = MockSpawner::default();
+        mgr.poll(&live, 1000.0, &mut sp);
+        mgr.poll(&live, 1001.0, &mut sp);
+        assert_eq!(mgr.active_count(), 800, "every endpoint is connected");
+
+        let ((), allocs) = measure_allocations(|| mgr.poll(&live, 1002.0, &mut sp));
+        assert_eq!(sp.spawned.len(), 800, "nothing is re-spawned");
+        assert!(sp.torn_down.is_empty(), "nothing is torn down");
+        assert!(
+            allocs < 4,
+            "a steady-state poll over 800 records cost {allocs} allocations"
         );
     }
 
