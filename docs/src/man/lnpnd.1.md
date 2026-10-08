@@ -97,7 +97,7 @@ Two defaults differ deliberately from the reference and are wire-legal: `propaga
 
 ## FILES
 
-The config directory keeps lxmd's layout:
+The config directory keeps lxmd's layout. lnpnd started on an lxmd config directory takes over its identity and its message store, so the messages lxmd held for its clients are served from the first start on.
 
 *config*
 :   The configuration file. Created from the example on first daemon start if missing.
@@ -112,7 +112,7 @@ The config directory keeps lxmd's layout:
 :   Destination hashes (one per line) whose messages the daemon's own mailbox drops.
 
 *storage/*
-:   The data directory (unless **--data-dir** moves it): `messagestore/` (the propagation store), `peers/` (the peer table), `messages/` (the daemon's own received mail, one packed-container file per message, readable by the reference's `LXMessage.unpack_from_file`), and the node's client state.
+:   The data directory (unless **--data-dir** moves it): `lxmf/messagestore/` (the propagation store, at the path lxmd keeps it; a store found at the older `messagestore/` is moved there on start), `peers/` (the peer table), `messages/` (the daemon's own received mail, one packed-container file per message, readable by the reference's `LXMessage.unpack_from_file`), and the node's client state.
 
 The Debian package installs the config directory at */etc/lnpnd* and the data directory at */var/lib/lnpnd*, both owned by the `lnpnd` service user. It enables the unit but does not start it: at install time neither an identity nor a configuration is in place, and a daemon started then would mint an address of its own and announce it. Place the identity, then `systemctl start lnpnd`. An upgrade over a running node restarts it and mints nothing; an upgrade over a stopped one leaves it stopped.
 

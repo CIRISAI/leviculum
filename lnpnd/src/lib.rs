@@ -19,7 +19,7 @@
 //! instance exactly like `lnmsg` and `lblogd` do; it does not start a stack
 //! of its own.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder};
@@ -32,6 +32,47 @@ pub mod identity;
 pub mod mailbox;
 pub(crate) mod peering;
 pub(crate) mod validation;
+
+/// Where the message store lives under a data directory, and what the start
+/// did to put it there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageStoreDir {
+    /// `<data-dir>/lxmf/messagestore`, the directory to open.
+    pub path: PathBuf,
+    /// The old `<data-dir>/messagestore` this start moved to `path`.
+    pub moved_from: Option<PathBuf>,
+}
+
+/// The message store directory under `data_dir`, at the path `lxmd` uses.
+///
+/// `lxmd` hands `LXMRouter` `configdir + "/storage"`
+/// (`reference/LXMF/LXMF/Utilities/lxmd.py:338`), the router appends `/lxmf`
+/// (`reference/LXMF/LXMF/LXMRouter.py:130`) and the store `/messagestore`
+/// (`:555`). With lnpnd's default data directory, `<configdir>/storage`,
+/// that makes lnpnd started on an `lxmd` config directory open the store
+/// `lxmd` left there; any other path comes up empty over every message
+/// `lxmd` held for its clients.
+///
+/// Before this, lnpnd kept the store at `<data-dir>/messagestore`. A store
+/// found there is moved to the new path, once, when the new path does not
+/// exist yet; when both exist the new one is used and the old one is left
+/// untouched for the operator.
+pub fn message_store_dir(data_dir: &Path) -> std::io::Result<MessageStoreDir> {
+    let path = data_dir.join("lxmf").join("messagestore");
+    let old = data_dir.join("messagestore");
+    if !old.is_dir() || path.exists() {
+        return Ok(MessageStoreDir {
+            path,
+            moved_from: None,
+        });
+    }
+    std::fs::create_dir_all(data_dir.join("lxmf"))?;
+    std::fs::rename(&old, &path)?;
+    Ok(MessageStoreDir {
+        path,
+        moved_from: Some(old),
+    })
+}
 
 /// The driver configuration the daemon runs on, minus the shared instance
 /// the caller names.

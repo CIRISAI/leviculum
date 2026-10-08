@@ -559,10 +559,18 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         Ok((identity, _)) => identity,
         Err(error) => return failure(error),
     };
-    let store = match FilePropagationStore::open(
-        data_dir.join("messagestore"),
-        effective.store_limit_kb * 1000,
-    ) {
+    let store_dir = match lnpnd::message_store_dir(&data_dir) {
+        Ok(store_dir) => store_dir,
+        Err(error) => return failure(format!("message store: {error}")),
+    };
+    if let Some(old) = &store_dir.moved_from {
+        eprintln!(
+            "lnpnd: message store moved from {} to {}",
+            old.display(),
+            store_dir.path.display()
+        );
+    }
+    let store = match FilePropagationStore::open(&store_dir.path, effective.store_limit_kb * 1000) {
         Ok(store) => store,
         Err(error) => return failure(format!("message store: {error}")),
     };

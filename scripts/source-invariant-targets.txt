@@ -197,6 +197,7 @@ skip  lnpnd           control_permission         # binds sockets under a tokio r
 skip  lnpnd           event_log_analysis         # spawns the lnpnd binary over a temp-dir log
 skip  lnpnd           first_start_identity       # spawns the daemon and inspects what it wrote
 skip  lnpnd           lxmd_identity_takeover     # spawns the daemon against an lxmd identity
+skip  lnpnd           lxmd_messagestore_path     # spawns python3 to have the reference write its store, and its subject is the code
 skip  lnpnd           start_waits_for_daemon     # tokio runtime and a startup race with sleeps
 skip  lnpnd           sigterm_flushes_storage    # spawns the daemon against a shared-instance socket and signals it
 skip  lnpnd           status_default_budget      # tokio runtime with sleeps
