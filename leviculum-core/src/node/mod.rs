@@ -4405,6 +4405,77 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 }
 
+// Declared after the main impl so the line numbers the book cites in it
+// stay where they are.
+impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
+    /// [`send_resource`](Self::send_resource) with the payload STREAMED
+    /// rather than owned (leviculum#388): no metadata, no compression, one
+    /// segment. Identical on the wire to `send_resource(link, data, None,
+    /// false)` over the same bytes; what it does not cost is `data`.
+    ///
+    /// A propagation node's outbound peer sync is the caller: its payload
+    /// is `msgpack([timestamp, [body, …]])` around records already in the
+    /// store, and building it as a buffer held every wanted body and the
+    /// envelope beside the parts cut from it. The source is read twice
+    /// (hash, then encrypt) and must yield the same bytes both times
+    /// ([`ResourceSource`](crate::resource::ResourceSource)).
+    pub fn send_resource_from_source(
+        &mut self,
+        link_id: &LinkId,
+        source: &mut dyn crate::resource::ResourceSource,
+    ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
+        use crate::packet::PacketContext;
+        use crate::resource::outgoing::OutgoingResource;
+        use crate::resource::ResourceError;
+
+        let now_ms = self.transport.clock().now_ms();
+        let link_id = &self.resolve_link_id(link_id);
+        ensure_single_segment_internal_resource_size(source.total_len())?;
+
+        let link = self
+            .links
+            .get(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        if link.has_outgoing_resource() {
+            return Err(ResourceError::TransferInProgress);
+        }
+
+        let outgoing = OutgoingResource::new_from_source(
+            source,
+            &link.resource_crypt_params(),
+            &mut self.rng,
+            now_ms,
+        )?;
+        let resource_hash = *outgoing.resource_hash();
+        let adv_bytes = outgoing.adv_packet().to_vec();
+
+        let link = self
+            .links
+            .get_mut(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        link.set_outgoing_resource(outgoing);
+
+        match link.build_data_packet_with_context(
+            &adv_bytes,
+            PacketContext::ResourceAdv,
+            &mut self.rng,
+        ) {
+            Ok(pkt) => {
+                self.route_link_packet(link_id, &pkt);
+            }
+            Err(e) => {
+                if let Some(link) = self.links.get_mut(link_id) {
+                    link.clear_outgoing_resource();
+                }
+                crate::tracing::debug!("Failed to build streamed resource ADV: {e}");
+                return Err(ResourceError::InvalidRequest);
+            }
+        }
+
+        Ok((resource_hash, self.process_events_and_actions()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::boxed::Box;

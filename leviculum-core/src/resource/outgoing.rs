@@ -616,6 +616,37 @@ impl OutgoingResource {
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
     ) -> Result<Self, ResourceError> {
+        Self::from_source(source, Some(request_id), crypt, rng, now_ms)
+    }
+
+    /// A plain Resource (no request id, not a response) whose payload is
+    /// streamed from `source` (leviculum#388): what
+    /// [`OutgoingResource::new`] builds from a buffer with no metadata and
+    /// no compression, byte for byte, without the buffer.
+    ///
+    /// The path this exists for is a propagation node's outbound peer sync,
+    /// whose payload is `msgpack([timestamp, [body, …]])` around records
+    /// already durable in the store. Built as a buffer it held every wanted
+    /// body, the envelope grown around them and the parts at once; streamed,
+    /// the parts are the only whole copy.
+    pub(crate) fn new_from_source(
+        source: &mut dyn ResourceSource,
+        crypt: &ResourceCryptParams,
+        rng: &mut impl CryptoRngCore,
+        now_ms: u64,
+    ) -> Result<Self, ResourceError> {
+        Self::from_source(source, None, crypt, rng, now_ms)
+    }
+
+    /// The streamed build behind both constructors above: a response when
+    /// `request_id` is given, a plain resource when it is not.
+    fn from_source(
+        source: &mut dyn ResourceSource,
+        request_id: Option<&[u8]>,
+        crypt: &ResourceCryptParams,
+        rng: &mut impl CryptoRngCore,
+        now_ms: u64,
+    ) -> Result<Self, ResourceError> {
         if !crypt.active {
             return Err(ResourceError::LinkNotActive);
         }
@@ -693,7 +724,7 @@ impl OutgoingResource {
             compressed: false,
             split: false,
             is_request: false,
-            is_response: true,
+            is_response: request_id.is_some(),
             has_metadata: false,
         };
         let adv = ResourceAdvertisement {
@@ -705,7 +736,7 @@ impl OutgoingResource {
             original_hash: resource_hash,
             segment_index: 1,
             total_segments: 1,
-            request_id: Some(request_id.to_vec()),
+            request_id: request_id.map(|r| r.to_vec()),
             flags,
             hashmap_data,
         };
@@ -733,7 +764,7 @@ impl OutgoingResource {
             adv_retries: 0,
             last_activity_ms: now_ms,
             advertisement_timeout_ms: None,
-            request_id: Some(request_id.to_vec()),
+            request_id: request_id.map(|r| r.to_vec()),
             adv_packet,
             link_mdu,
             sdu,
@@ -1735,6 +1766,51 @@ mod tests {
             assert_eq!(owned.expected_proof, streamed.expected_proof);
             assert_eq!(owned.transfer_size(), streamed.transfer_size());
             assert_eq!(streamed.uncompressed_size, len as u64);
+        }
+    }
+
+    /// The plain (non-response) streamed build is the owned build of the
+    /// same bytes with no metadata and no compression: same advertisement,
+    /// same parts. A propagation node's peer sync goes out this way
+    /// (leviculum#388) and a Python receiver must not be able to tell.
+    #[test]
+    fn a_plain_source_and_a_buffer_build_the_same_resource() {
+        use crate::resource::source::SliceSource;
+
+        let (link, _) = make_test_link();
+        for len in [0usize, 1, 15, 16, 463, 464, 465, 1000, 3000, 7000] {
+            let data: Vec<u8> = (0..len as u32).map(|i| (i * 53 % 241) as u8).collect();
+
+            let owned = OutgoingResource::new(
+                &data,
+                None,
+                None,
+                &link.resource_crypt_params(),
+                false,
+                &mut FixedRng(0x1234_5678_9ABC_DEF1),
+                9_000,
+            )
+            .unwrap();
+
+            let mut source = SliceSource::new(&data);
+            let streamed = OutgoingResource::new_from_source(
+                &mut source,
+                &link.resource_crypt_params(),
+                &mut FixedRng(0x1234_5678_9ABC_DEF1),
+                9_000,
+            )
+            .unwrap();
+
+            assert_eq!(
+                owned.adv_packet(),
+                streamed.adv_packet(),
+                "advertisement must not reveal which path built it ({len} B)"
+            );
+            assert_eq!(owned.parts, streamed.parts, "parts differ at {len} B");
+            assert_eq!(owned.hashmap, streamed.hashmap);
+            assert_eq!(owned.expected_proof, streamed.expected_proof);
+            assert_eq!(owned.flags, streamed.flags);
+            assert!(!streamed.flags.is_response && !streamed.flags.is_request);
         }
     }
 
