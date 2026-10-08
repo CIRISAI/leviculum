@@ -22,7 +22,6 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::hash::{Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -150,7 +149,13 @@ pub(crate) fn persist_discovered(
     let tmp = dir.join(format!("{filename}.tmp"));
     std::fs::write(&tmp, &encoded)?;
     std::fs::rename(&tmp, &path)?;
-    GENERATION.fetch_add(1, Ordering::Release);
+    let mut generations = GENERATION.lock().unwrap_or_else(|e| e.into_inner());
+    match generations.get_mut(&dir) {
+        Some(generation) => *generation = generation.wrapping_add(1),
+        None => {
+            generations.insert(dir, 1);
+        }
+    }
     Ok(())
 }
 
@@ -179,9 +184,22 @@ fn record_fingerprint(bytes: &[u8]) -> u64 {
 /// records (Codeberg #437).
 pub(crate) type DiscoveredList = Arc<Vec<Arc<DiscoveredInterfaceRecord>>>;
 
-/// Bumped by every [`persist_discovered`], so a listing in this process sees
-/// its own writes at once, whatever the filesystem's timestamp granularity.
-static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Bumped by every [`persist_discovered`], per discovery directory, so a
+/// listing in this process sees its own writes at once, whatever the
+/// filesystem's timestamp granularity.
+///
+/// Per directory, so a write to one registry leaves another one cached (the
+/// test binary keeps hundreds side by side). A mutex rather than an atomic
+/// both for the map and because leviculum-std builds for triples without
+/// 64-bit atomics (`just no-atomic64-gate`). It is held for one map lookup
+/// only, never across file I/O.
+static GENERATION: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+
+/// The write count of `dir` so far, 0 for a directory never written here.
+fn generation_of(dir: &Path) -> u64 {
+    let generations = GENERATION.lock().unwrap_or_else(|e| e.into_inner());
+    generations.get(dir).copied().unwrap_or(0)
+}
 
 /// What [`list_discovered_interfaces`] saw last, per discovery directory
 /// (Codeberg #437).
@@ -419,7 +437,7 @@ pub(crate) fn list_discovered_interfaces(storage_root: &Path, now: f64) -> Disco
     let dir = discovery_dir(storage_root);
     // Read before the directory, so a write racing the scan bumps it past
     // what the cache records and the next listing looks again.
-    let generation = GENERATION.load(Ordering::Acquire);
+    let generation = generation_of(&dir);
     let mut caches = REGISTRY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let dir_mtime = match std::fs::metadata(&dir) {
         Ok(meta) if meta.is_dir() => meta.modified().ok(),
@@ -651,6 +669,30 @@ mod tests {
             second_allocs < 16,
             "an unchanged registry of 800 records cost {second_allocs} allocations \
              on the second read (the first read cost {first_allocs})"
+        );
+    }
+
+    /// A write to one registry does not make another one stale. The write
+    /// counter was process-wide, so any `persist_discovered` (in the test
+    /// binary, any parallel test) sent every cached directory back to the
+    /// files, and the test above went red when a neighbour wrote between its
+    /// two reads.
+    #[test]
+    fn a_write_to_another_registry_leaves_this_one_cached() {
+        use crate::rpc::connection::alloc_probe::measure_allocations;
+        let here = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        settled_registry(here.path(), 50);
+        drop(list_discovered_interfaces(here.path(), 1000.0));
+
+        persist_discovered(elsewhere.path(), &rnode_di("Elsewhere", 0x42), 1, 1000.0).unwrap();
+
+        let (list, allocs) =
+            measure_allocations(|| list_discovered_interfaces(here.path(), 1000.0));
+        assert_eq!(list.len(), 50);
+        assert!(
+            allocs < 16,
+            "a write to another registry cost this one {allocs} allocations on its next read"
         );
     }
 
