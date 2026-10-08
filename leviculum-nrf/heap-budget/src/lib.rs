@@ -266,8 +266,44 @@ pub const SERVE_PEAK_BYTES: usize =
 /// `HEAP_BUDGET_UNFUNDED` line beside it) until it is.
 pub const ROLE_BUDGET_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000
     + 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000
-    + 5 * 1024
+    + ROLE_STRUCTURAL_BYTES
     + SERVE_RESERVE_BYTES;
+
+/// The third term of [`ROLE_BUDGET_BYTES`]: everything structural the role
+/// holds (peer table, offer plan, per-link maps, duplicate cache, queued
+/// store writes). Named so the per-operation peaks ([`peak`]) can say what
+/// the budget leaves for a transient once this and the queued uploads are
+/// spent.
+pub const ROLE_STRUCTURAL_BYTES: usize = 5 * 1024;
+
+/// The board peer-table cap (`PeeringConfig::max_peers`,
+/// `leviculum-nrf/src/pn.rs`), §5's derivation
+/// (`docs/src/concepts/propagation-node-on-a-board.md`, "Our peer record,
+/// and the cap") re-checked against the worst observed free heap (39 308 B,
+/// Pocket, end of the 12.69 h field run): an 8 KiB peering slice gives
+/// `104·N + 6144 ≤ 8192`, N ≤ 19, and 16 keeps margin for the sync round's
+/// own buffers. Asserted below rather than stated in a comment, so moving
+/// the cap or a term of it is a compile error until the derivation agrees.
+///
+/// The 104 B is §5's persisted record. What the table costs in RAM by the
+/// census's own model is [`peak::peer_table_bytes`], which is larger; the
+/// test `the_peer_table_at_the_cap_against_its_slice` prints both.
+pub const BOARD_MAX_PEERS: usize = 16;
+
+/// §5's per-peer record, aligned (`propagation-node-on-a-board.md`).
+pub const PEER_RECORD_BYTES: usize = 104;
+
+/// §5's peering slice of the heap.
+pub const PEERING_SLICE_BYTES: usize = 8 * 1024;
+
+const _: () = assert!(
+    PEER_RECORD_BYTES * BOARD_MAX_PEERS + leviculum_lxmf::peering::OFFER_BYTES_LIMIT
+        <= PEERING_SLICE_BYTES
+);
+// "N ≤ 19": the cap is below the largest N the slice admits, not at it.
+const _: () = assert!(
+    (PEERING_SLICE_BYTES - leviculum_lxmf::peering::OFFER_BYTES_LIMIT) / PEER_RECORD_BYTES == 19
+);
 
 /// Fragmentation reserve in the boot heap budget (#388): heap the
 /// budget leaves unclaimed so the allocator can still serve mid-sized
@@ -469,3 +505,11 @@ pub fn live_serve_cap(boot_cap: usize, free: usize, largest: usize) -> usize {
         SERVE_RESOURCE_SDU,
     )
 }
+
+// The per-operation transient peaks (#388, order 510). Declared last so
+// the line numbers the book cites above stay where they are.
+pub mod peak;
+pub use peak::{
+    flush_peak, inbound_resource_peak, offer_response_peak, role_margin, store_tail_peak,
+    sync_round_peak, upload_peak, FIELD_FAILED_ALLOCATION_BYTES,
+};
