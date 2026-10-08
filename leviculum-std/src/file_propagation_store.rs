@@ -25,7 +25,8 @@
 //! which at worst re-offers them once, and are renamed into our scheme on
 //! that first open, so after it the directory is ours. What we write is
 //! always our own four-component scheme; `lxmd` would index it unchanged,
-//! since it reads only the first three components.
+//! since it reads only the first three components, and a torn temp file of
+//! ours is invisible to both indexers.
 //!
 //! [`open`]: FilePropagationStore::open
 //!
@@ -38,7 +39,7 @@
 //! message, because the client stops retrying. So `append` here is
 //! write-to-temp, `fsync`, rename-into-place, `fsync` the directory — after
 //! it returns, the message survives the plug being pulled, and a cut at any
-//! earlier point leaves only a `.tmp` file the reopen scan ignores. The
+//! earlier point leaves only a `.tmp-` file the reopen scan ignores. The
 //! generic `atomic_write` helper in `crate::storage` deliberately skips the
 //! fsyncs (announce caches and ratchet files tolerate losing the last
 //! seconds); this store must not.
@@ -88,7 +89,7 @@ impl FilePropagationStore {
             };
             // An interrupted append's temp file: not a message, not noise
             // worth a warning either.
-            if name.ends_with(".tmp") {
+            if name.starts_with(TEMP_PREFIX) {
                 continue;
             }
             let Some((transient_id, received_at, stamp_value, sequence)) = parse_name(&name) else {
@@ -257,9 +258,26 @@ fn read_destination(path: &Path) -> Option<[u8; 16]> {
     Some(head)
 }
 
+/// Prefix of the temp file an append writes before the rename.
+const TEMP_PREFIX: &str = ".tmp-";
+
+/// The temp file an append writes before renaming it to `path`:
+/// `.tmp-<hex>_<secs>_<stamp>_<seq>`. The prefix, not a suffix, is the point.
+/// `lxmd` indexes any name whose first `_`-component is 64 hex characters and
+/// never looks at an extension (`enable_propagation`,
+/// `reference/LXMF/LXMF/LXMRouter.py:566-575`), so a torn `<name>.tmp` would
+/// be served by `lxmd` as a message; `.tmp-<hex>` is 69 characters and is not.
+fn temp_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!("{TEMP_PREFIX}{name}"))
+}
+
 /// Write `body` durably: temp file, fsync, rename, fsync the directory.
 fn durable_write(dir: &Path, path: &Path, body: &[u8]) -> Result<(), StorageError> {
-    let temp = path.with_extension("tmp");
+    let temp = temp_path(path);
     let mut file = std::fs::File::create(&temp).map_err(|_| StorageError::Io)?;
     file.write_all(body).map_err(|_| StorageError::Io)?;
     file.sync_all().map_err(|_| StorageError::Io)?;
@@ -486,10 +504,42 @@ mod tests {
         assert_eq!(store.free_space(), 4096 - 300);
     }
 
+    /// `lxmd`'s message-store indexer, restated: a file is indexed iff its
+    /// name split on `_` has at least three components, the second parses
+    /// as a float above zero, the first is 64 characters of hex (the
+    /// transient id, `RNS.Identity.HASHLENGTH//8*2`) and the third parses
+    /// as an int (`enable_propagation`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:566-575`). Nothing else of the
+    /// name is looked at, neither a fourth component nor an extension.
+    fn lxmd_would_index(name: &str) -> bool {
+        let components: Vec<&str> = name.split('_').collect();
+        components.len() >= 3
+            && components[1]
+                .parse::<f64>()
+                .is_ok_and(|received| received > 0.0)
+            && components[0].len() == 64
+            && hex_decode(components[0]).is_some()
+            && components[2].parse::<i64>().is_ok()
+    }
+
+    /// A directory handed back from `lnpnd` to `lxmd` after a power cut
+    /// must not have `lxmd` serve the torn temp file as a message.
+    #[test]
+    fn lxmd_does_not_index_a_torn_temp_file() {
+        let name = FilePropagationStore::entry_name(&[2; 32], 1_789_656_258, 13, 4);
+        assert!(
+            lxmd_would_index(&name),
+            "control: a stored message is indexed"
+        );
+        let torn = temp_path(Path::new(&name));
+        let torn = torn.to_str().expect("utf-8 name");
+        assert!(!lxmd_would_index(torn), "lxmd would index the torn {torn}");
+    }
+
     /// The acceptance case from the batch instruction: a power cut during
     /// an upload leaves a store that reopens with every completed message
-    /// and no partial one. A cut before the rename is a stray `.tmp` file;
-    /// a cut mid-`write(2)` before the rename is a shorter `.tmp` file.
+    /// and no partial one. A cut before the rename is a stray `.tmp-` file;
+    /// a cut mid-`write(2)` before the rename is a shorter `.tmp-` file.
     /// Neither may surface as a message or poison the scan.
     #[test]
     fn a_torn_append_is_invisible_after_reopen() {
@@ -501,15 +551,15 @@ mod tests {
 
         // The moment the power died: a temp file exists, fully or partially
         // written, and was never renamed.
-        let torn = dir
-            .path()
-            .join(FilePropagationStore::entry_name(&[2; 32], 999, 0, 2))
-            .with_extension("tmp");
+        let torn = temp_path(
+            &dir.path()
+                .join(FilePropagationStore::entry_name(&[2; 32], 999, 0, 2)),
+        );
         std::fs::write(&torn, body_for(9, 60)).expect("torn temp file");
-        let torn_short = dir
-            .path()
-            .join(FilePropagationStore::entry_name(&[3; 32], 999, 0, 3))
-            .with_extension("tmp");
+        let torn_short = temp_path(
+            &dir.path()
+                .join(FilePropagationStore::entry_name(&[3; 32], 999, 0, 3)),
+        );
         std::fs::write(&torn_short, [9u8; 7]).expect("short torn temp file");
 
         let store = FilePropagationStore::open(dir.path(), 4096).expect("reopen");
