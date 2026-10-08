@@ -796,15 +796,7 @@ impl PeeringRuntime {
                     duplicate,
                     evicted,
                 } => {
-                    for eviction in &evicted {
-                        tracing::debug!(
-                            event = "PN_EVICT",
-                            tid = short_hex(&eviction.transient_id),
-                            bytes = eviction.size,
-                            age_s = eviction.age_secs,
-                            reason = "displaced",
-                        );
-                    }
+                    crate::engine::log_evictions(&evicted, &self.events);
                     tracing::debug!(
                         event = "PN_ACCEPT",
                         tid = short_hex(&transient_id),

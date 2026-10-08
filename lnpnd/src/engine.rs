@@ -353,6 +353,31 @@ pub(crate) fn log_reject(reason: &'static str, via: &'static str) {
     tracing::debug!(event = "PN_REJECT", reason = reason, via = via);
 }
 
+/// What a cull leaves behind, whichever ingest path caused it: one
+/// `PN_EVICT` debug event per message, and one `EngineEvent::Evicted` the
+/// operator sees at the default log level. Client uploads, maintenance and
+/// peer sync all come through here, so a cull is never logged in two
+/// shapes.
+pub(crate) fn log_evictions(evicted: &[Eviction], events: &std::sync::mpsc::Sender<EngineEvent>) {
+    for eviction in evicted {
+        tracing::debug!(
+            event = "PN_EVICT",
+            tid = short_hex(&eviction.transient_id),
+            bytes = eviction.size,
+            age_s = eviction.age_secs,
+            reason = match eviction.reason {
+                EvictionReason::Expired => "expired",
+                EvictionReason::Displaced => "displaced",
+            },
+        );
+    }
+    if !evicted.is_empty() {
+        let _ = events.send(EngineEvent::Evicted {
+            count: evicted.len(),
+        });
+    }
+}
+
 fn short_hex(bytes: &[u8]) -> String {
     bytes.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
@@ -665,7 +690,7 @@ impl<S: PropagationStore> Engine<S> {
                 duplicate,
                 evicted,
             } => {
-                self.log_evictions(&evicted);
+                log_evictions(&evicted, &self.events);
                 tracing::debug!(
                     event = "PN_ACCEPT",
                     tid = short_hex(&transient_id),
@@ -729,26 +754,6 @@ impl<S: PropagationStore> Engine<S> {
                 });
                 false
             }
-        }
-    }
-
-    fn log_evictions(&self, evicted: &[Eviction]) {
-        for eviction in evicted {
-            tracing::debug!(
-                event = "PN_EVICT",
-                tid = short_hex(&eviction.transient_id),
-                bytes = eviction.size,
-                age_s = eviction.age_secs,
-                reason = match eviction.reason {
-                    EvictionReason::Expired => "expired",
-                    EvictionReason::Displaced => "displaced",
-                },
-            );
-        }
-        if !evicted.is_empty() {
-            self.emit(EngineEvent::Evicted {
-                count: evicted.len(),
-            });
         }
     }
 
@@ -1528,7 +1533,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
 
         if now_ms >= self.next_maintenance_at {
             let evicted = ready.node.tick(unix_secs());
-            self.log_evictions(&evicted);
+            log_evictions(&evicted, &self.events);
             // The store's own line: how full it is against its limit, and
             // -- because it fires on a fixed cadence whether or not any
             // traffic arrived -- the log's liveness heartbeat. A quiet node
@@ -2140,6 +2145,65 @@ mod tests {
             "a node that synced its store to us, one hop out and with a \
              recallable propagation announce, must be a peer"
         );
+    }
+
+    /// A message a peer sync displaces reaches the operator line exactly as
+    /// one a client upload displaces: `EngineEvent::Evicted`, which `main.rs`
+    /// prints as `lnpnd: evicted N message(s)` at the default log level.
+    /// The sync arm used to write only the `PN_EVICT` debug events, so on a
+    /// node whose store fills by peer sync every cull was invisible (528).
+    #[test]
+    fn a_sync_that_displaces_a_message_tells_the_operator() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        // Room for two synced messages, not three.
+        let (mut engine, events) = Engine::new(EngineConfig {
+            identity: leviculum_std::generate_identity(),
+            node_config: PropagationNodeConfig::default(),
+            store: MemoryPropagationStore::new(400),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 400,
+            delivery_limit_kb: 1000,
+        });
+        let start_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, start_ms);
+
+        let link_id = LinkId::new([0x42; 16]);
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        ready.peering.validate_link_for_tests(link_id, [0x24; 16]);
+        let envelope = leviculum_lxmf::PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: vec![
+                synced_message(0x01),
+                synced_message(0x03),
+                synced_message(0x05),
+            ],
+        }
+        .encode();
+        let mut out = TickOutput::empty();
+        engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+        absorb(&mut engine, &mut ready, &mut core, &mut out);
+        let stored = ready.node.store().count().unwrap_or(0);
+        engine.state = State::Ready(ready);
+        assert_eq!(stored, 2, "the third message must displace one");
+
+        let evicted: Vec<usize> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                EngineEvent::Evicted { count } => Some(count),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(evicted, vec![1], "one displaced message, one operator line");
     }
 
     /// The other two ways the same decision can go wrong, both of which the
