@@ -231,12 +231,7 @@ impl Handler for BaudTouchHandler {
             // Post-enable the write must go through the SoC syscalls;
             // pre-enable (this handler can fire before `ble::init` on a
             // fast host) the syscalls fail, and the direct write is legal.
-            let mut sd_enabled: u8 = 0;
-            unsafe {
-                // Legal in every SD state, always returns NRF_SUCCESS.
-                nrf_softdevice_s140::sd_softdevice_is_enabled(&mut sd_enabled);
-            }
-            if sd_enabled != 0 {
+            if softdevice_enabled() {
                 unsafe {
                     // GPREGRET syscalls are bit-mask ops: clear all bits,
                     // then set the UF2 magic.
@@ -364,6 +359,75 @@ fn log_u32(msg: &str, val: u32) {
 
 /// Serial HW_MTU (matches Python SerialInterface)
 const SERIAL_HW_MTU: usize = 564;
+
+/// Whether the S140 SoftDevice is enabled. `sd_softdevice_is_enabled` is
+/// legal in every SoftDevice state and always returns `NRF_SUCCESS`.
+fn softdevice_enabled() -> bool {
+    let mut enabled: u8 = 0;
+    unsafe {
+        nrf_softdevice_s140::sd_softdevice_is_enabled(&mut enabled);
+    }
+    enabled != 0
+}
+
+/// Run the commanded reset: gather what the board knows, and execute the
+/// steps `leviculum_usb_policy::reset_plan` orders, where a host test
+/// asserts them (leviculum#359). Nothing here decides an order or a wait.
+async fn commanded_reset(
+    legacy: bool,
+    tx: &mut cdc_acm::Sender<'static, UsbDriver>,
+    control: &cdc_acm::ControlChanged<'static>,
+    frame_buf: &mut Vec<u8>,
+) {
+    use leviculum_usb_policy::{reset_plan, ResetFacts, ResetStep};
+
+    let commanded = embassy_time::Instant::now();
+    let facts = ResetFacts {
+        softdevice_enabled: softdevice_enabled(),
+        ble_links: crate::ble::HVN_DRAIN.claimed().min(u8::MAX as usize) as u8,
+        host_present: tx.dtr(),
+        since_command_ms: commanded.elapsed().as_millis(),
+    };
+    for step in reset_plan(&facts).steps() {
+        match *step {
+            ResetStep::Announce => crate::log::log_fmt_critical(
+                "[INFO!] ",
+                format_args!(
+                    "[RESET] host-requested reboot sd={} ble_links={} host={}",
+                    u8::from(facts.softdevice_enabled),
+                    facts.ble_links,
+                    u8::from(facts.host_present)
+                ),
+            ),
+            ResetStep::Ack { within_ms } => {
+                let envelope_ack;
+                let ack: &[u8] = if legacy {
+                    &crate::lora::RESET_ACK
+                } else {
+                    envelope_ack = envelope::encode_ack(envelope::TYPE_RESET);
+                    &envelope_ack
+                };
+                let acked = with_timeout(
+                    Duration::from_millis(within_ms),
+                    write_framed(tx, control, ack, frame_buf),
+                )
+                .await;
+                match acked {
+                    Ok(true) => {}
+                    Ok(false) => log("SER: reset ACK write failed"),
+                    Err(_) => log_u32("SER: reset ACK abandoned after ms", within_ms as u32),
+                }
+            }
+            ResetStep::Drain { ms } => {
+                embassy_time::Timer::after(Duration::from_millis(ms)).await;
+            }
+            ResetStep::SystemReset => cortex_m::peripheral::SCB::sys_reset(),
+        }
+    }
+    // Every plan ends in `SystemReset` (asserted on the host). Should one
+    // ever not, a board that acked a reset still performs it.
+    cortex_m::peripheral::SCB::sys_reset();
+}
 
 /// Write one packet on the transport CDC without letting an absent host
 /// wedge the task.
@@ -670,36 +734,17 @@ async fn retic_serial_task(
                                     );
                                     incoming_tx.send(data.clone()).await;
                                 }
-                                // Host-requested reboot: ACK, let the ACK
-                                // drain, then full system reset. The
-                                // duty-cycle histogram, radio config and
-                                // queues all restart from scratch on the
-                                // next boot.
+                                // Host-requested reboot. The duty-cycle
+                                // histogram, radio config and queues all
+                                // restart from scratch on the next boot.
                                 action @ (ControlAction::LegacyReset | ControlAction::Reset) => {
-                                    crate::log::log_fmt_critical(
-                                        "[INFO!] ",
-                                        format_args!("[RESET] host-requested reboot"),
-                                    );
-                                    let acked = if action == ControlAction::LegacyReset {
-                                        write_framed(
-                                            &mut tx,
-                                            &control,
-                                            &crate::lora::RESET_ACK,
-                                            &mut frame_buf,
-                                        )
-                                        .await
-                                    } else {
-                                        let ack = envelope::encode_ack(envelope::TYPE_RESET);
-                                        write_framed(&mut tx, &control, &ack, &mut frame_buf).await
-                                    };
-                                    if !acked {
-                                        log("SER: reset ACK write failed");
-                                    }
-                                    // Give the host time to read the ACK off
-                                    // the wire before the USB device
-                                    // disappears.
-                                    embassy_time::Timer::after(Duration::from_millis(100)).await;
-                                    cortex_m::peripheral::SCB::sys_reset();
+                                    commanded_reset(
+                                        action == ControlAction::LegacyReset,
+                                        &mut tx,
+                                        &control,
+                                        &mut frame_buf,
+                                    )
+                                    .await;
                                 }
                                 ControlAction::LegacyRadioConfig(wire) => {
                                     // The legacy contract: ACK on success,
