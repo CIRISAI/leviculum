@@ -107,9 +107,15 @@ if [ "$(has rustup)" = 1 ]; then
     for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl thumbv7em-none-eabihf; do
         need "rustup target ${triple}" "$(grep -qx "$triple" <<<"$installed" && echo 1 || echo 0)"
     done
+    # The same three places scripts/lnflash-bundle.sh's find_objcopy looks.
     sysroot="$(rustc --print sysroot 2>/dev/null || true)"
-    need "rustup component llvm-tools (llvm-objcopy)" \
-        "$([ -n "$sysroot" ] && find "$sysroot/lib/rustlib" -name llvm-objcopy -type f 2>/dev/null | grep -q . && echo 1 || echo 0)"
+    objcopy=0
+    if [ -n "$sysroot" ] && find "$sysroot/lib/rustlib" -name llvm-objcopy -type f 2>/dev/null | grep -q .; then
+        objcopy=1
+    elif command -v llvm-objcopy >/dev/null 2>&1 || command -v arm-none-eabi-objcopy >/dev/null 2>&1; then
+        objcopy=1
+    fi
+    need "an objcopy: rustup component llvm-tools, or binutils-arm-none-eabi" "$objcopy"
 fi
 [ "$missing" = 0 ] || die "refusing: tools missing (above); nothing was built"
 
