@@ -96,16 +96,16 @@ pub const CHANNEL_BUDGET_BYTES: usize = 2 * QUEUE_DEPTH * INTERFACE_MTU;
 /// The crate default, stated here because the heap budget below sums it.
 pub const BOARD_TRANSFER_LIMIT_KB: u64 = 4;
 
-/// Per-sync limit announced in field 4, kilobytes of 1000 (#388).
-///
-/// Was the crate default of 32 — an appetite this board cannot even
-/// receive: the binaries cap incoming resources at
-/// [`MAX_INCOMING_RESOURCE_BYTES`] (8 KiB), so a peer taking the
-/// 32 KB advertisement at its word watched its sync resource refused at
-/// the resource layer anyway. 8 keeps the announced limit truthful AND
-/// bounds the sync batch (`pn_batch=`) at a size the boot `HEAP_BUDGET`
-/// can carry; a peer with more queued simply syncs in more rounds.
-pub const BOARD_SYNC_LIMIT_KB: u64 = 8;
+/// Per-sync limit announced in field 4, kilobytes of 1000 (#388), DERIVED
+/// since order 511 from what the board can afford to ANSWER: the largest
+/// limit whose answer, an offer response of that many encoded bytes
+/// streamed out of the store, fits the role's sync slice
+/// ([`SYNC_SLICE_BYTES`]) beside two phones' queued uploads with
+/// [`OFFER_RESPONSE_RESERVE_BYTES`] kept clear ([`derive_sync_limit_kb`],
+/// at the end of this file with its arithmetic). Was a stated 8, chosen
+/// for receiving; 510's table showed an 8 KB answer overdrawing the role
+/// by 16 996 B, so peers were told a limit the board could not keep.
+pub const BOARD_SYNC_LIMIT_KB: u64 = derive_sync_limit_kb();
 
 // The announced sync limit must stay receivable, or it is a lie peers
 // pay for with a dead resource transfer. The limit bounds the WIRE
@@ -206,15 +206,15 @@ pub const SERVE_RESERVE_BYTES: usize = 0;
 /// serve is held to ([`budget_serve_cap`]), so the
 /// board answers with what it can afford instead of attempting this
 /// number.
-pub const SERVE_PEAK_BYTES: usize =
-    serve_peak_bytes(BOARD_SYNC_LIMIT_KB as usize * 1000, SERVE_RESOURCE_SDU);
+pub const SERVE_PEAK_BYTES: usize = serve_peak_bytes(SYNC_SLICE_BYTES, SERVE_RESOURCE_SDU);
 
 /// The role's slice of the boot heap budget (`HEAP_BUDGET role=`, #388):
 /// the worst case of the census's `pn_*` terms. Arithmetic:
 ///
-/// * `pn_batch` — one inbound sync's parsed messages, bounded by the
-///   announced [`BOARD_SYNC_LIMIT_KB`] (the batch drains one message per
-///   settle pass, so at most one batch exists);
+/// * [`SYNC_SLICE_BYTES`] — one sync's transient: an inbound batch's
+///   parsed messages (`pn_batch`, bounded by the announced
+///   [`BOARD_SYNC_LIMIT_KB`], which is derived to fit here) or the
+///   streamed answer to one outbound offer;
 /// * `pn_work` — queued upload payloads, one per phone at the announced
 ///   [`BOARD_TRANSFER_LIMIT_KB`], two phones (the #388 field scenario);
 /// * 5 KiB — everything structural: the peer table (§5's `104·16` plus
@@ -238,7 +238,9 @@ pub const SERVE_PEAK_BYTES: usize =
 /// answering one killed a T114 on 2026-09-22 and again on 2026-09-23.
 /// The arithmetic, at today's constants on a T114:
 ///
-/// * announced serve cap `BOARD_SYNC_LIMIT_KB` = 8 KB;
+/// * serve cap at the role's sync slice [`SYNC_SLICE_BYTES`] = 8 KB (the
+///   announced [`BOARD_SYNC_LIMIT_KB`] bounds the serve below that since
+///   order 511, so this is an upper bound, kept for comparison);
 /// * [`SERVE_PEAK_BYTES`] at that cap = **17 264 B**, a bit over twice
 ///   the cap (97 036 B before #384 B1, 48 922 B after it; B2 streamed
 ///   the response out of the store and the four whole copies between
@@ -264,7 +266,7 @@ pub const SERVE_PEAK_BYTES: usize =
 /// [`SERVE_RESERVE_BYTES`] is where it is made, and the boot line
 /// reports the gap (`HEAP_BUDGET … serve= slack= serve_cap=`, and the
 /// `HEAP_BUDGET_UNFUNDED` line beside it) until it is.
-pub const ROLE_BUDGET_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000
+pub const ROLE_BUDGET_BYTES: usize = SYNC_SLICE_BYTES
     + 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000
     + ROLE_STRUCTURAL_BYTES
     + SERVE_RESERVE_BYTES;
@@ -447,7 +449,7 @@ pub const fn budget_serve_cap(node_box: usize) -> usize {
 /// to:
 ///
 /// ```text
-///   BOARD_SYNC_LIMIT_KB · 1000       8 000 B   one inbound sync batch
+///   SYNC_SLICE_BYTES                 8 000 B   one inbound sync batch
 /// + BOARD_TRANSFER_LIMIT_KB · 1000   4 000 B   one queued upload
 /// + budget_per_link()                2 696 B   one more endpoint link
 /// =                                 14 696 B
@@ -463,9 +465,8 @@ pub const fn budget_serve_cap(node_box: usize) -> usize {
 /// than claiming inside it (the node box, the peer table, the store
 /// adapters). Those are already spent when the free heap is read, so
 /// counting them again would charge the serve twice.
-pub const SERVE_MARGIN_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000
-    + BOARD_TRANSFER_LIMIT_KB as usize * 1000
-    + budget_per_link();
+pub const SERVE_MARGIN_BYTES: usize =
+    SYNC_SLICE_BYTES + BOARD_TRANSFER_LIMIT_KB as usize * 1000 + budget_per_link();
 
 // Pinned because the derivation above is the board's whole serve
 // decision: a change to `Link`, to an announced limit or to the sum
@@ -510,6 +511,99 @@ pub fn live_serve_cap(boot_cap: usize, free: usize, largest: usize) -> usize {
 // the line numbers the book cites above stay where they are.
 pub mod peak;
 pub use peak::{
-    flush_peak, inbound_resource_peak, offer_response_peak, role_margin, store_tail_peak,
-    sync_round_peak, upload_peak, FIELD_FAILED_ALLOCATION_BYTES,
+    flush_peak, inbound_resource_peak, offer_response_fits, offer_response_peak, role_margin,
+    store_tail_peak, sync_round_peak, upload_peak, FIELD_FAILED_ALLOCATION_BYTES,
 };
+
+/// The role's slice for one sync's transient (#388, order 511): an inbound
+/// batch (`pn_batch=`) or the answer to one outbound offer, never both at
+/// once on the same round. The first term of [`ROLE_BUDGET_BYTES`], and
+/// what is left of the role's headroom once two phones' queued uploads are
+/// spent. 8 000 B: the stated sync limit it replaces, so the boot budget,
+/// the link count and [`SERVE_MARGIN_BYTES`] do not move; what moves is
+/// the announced limit, which is now derived to fit inside it.
+pub const SYNC_SLICE_BYTES: usize = 8_000;
+
+/// The bound one `/get` fetch response is held to on a board
+/// (`PropagationNodeConfig::serve_limit_bytes`), beside the heap-funded
+/// cap: the role's sync slice, which is what the stated 8 KB sync limit
+/// bounded the serve to before order 511 derived the announced limit from
+/// the outbound answer. Kept apart so a smaller announcement does not
+/// shrink what one client fetch carries (the field mailbox of 24 messages
+/// accounts to 6 552 B and drains in one fetch,
+/// `leviculum-std/tests/mvr/pn_serve_cap_bounds_one_fetch.rs`).
+pub const BOARD_SERVE_LIMIT_BYTES: usize = SYNC_SLICE_BYTES;
+
+/// Heap an offer response leaves clear of the role's headroom: what its
+/// model ([`peak::offer_response_peak`]) does not count, plus the field's
+/// refused allocation.
+///
+/// ```text
+///   FIELD_FAILED_ALLOCATION_BYTES            340 B  the next event's allocation
+/// + 3 × (RESOURCE_ADV_OVERHEAD + 4 × parts)  534 B  the cached advertisement,
+///                                                   its send copy and the
+///                                                   encrypted packet, 11 parts
+/// + 16 blocks × 8 B                          128 B  allocator block headers
+/// =                                        1 002 B  ≤ 1 024
+/// ```
+///
+/// The 11 parts are those of an answer at the derived limit; the test
+/// `the_offer_response_reserve_covers_what_the_model_leaves_out` re-adds
+/// the sum at [`BOARD_SYNC_LIMIT_KB`] so a limit that grows past it fails.
+pub const OFFER_RESPONSE_RESERVE_BYTES: usize = 1_024;
+
+/// Ids one `/offer` carries on a LoRa link, the field's shape: what fits
+/// the standard link MDU (431 B) less the request envelope, the peering
+/// key and the list header (`offer_budget_for_mdu`, `leviculum-lxmf`).
+pub const LORA_OFFER_IDS: usize = (leviculum_core::resource::STANDARD_LINK_MDU
+    - leviculum_lxmf::peering::REQUEST_ENVELOPE_BYTES
+    - leviculum_lxmf::peering::OFFER_KEY_BYTES
+    - 1)
+    / leviculum_lxmf::peering::OFFER_ID_BYTES;
+
+/// [`BOARD_SYNC_LIMIT_KB`]'s derivation: the largest whole kilobyte count
+/// `kb` for which an answer of `kb × 1000` encoded bytes, to a LoRa offer
+/// of [`LORA_OFFER_IDS`] ids answered with an explicit list of all of them
+/// (the larger of the two response shapes), fits
+/// ([`peak::offer_response_fits`]) beside two phones' queued uploads at the
+/// announced per-transfer limit.
+///
+/// The announced limit bounds the wire resource a peer sends (the
+/// reference's packing loop stops strictly below it, see the assertion
+/// after [`BOARD_SYNC_LIMIT_KB`]) and so the inbound batch; deriving it
+/// from the answer makes the board announce only what it could also send
+/// back in one round. Board peers plan their offers to it (`build_offer`);
+/// a Python peer, whose limit is the reference's 10 240 KB, is answered
+/// with the prefix of its want that fits the heap at that moment
+/// (`plan_sync_batch`), the rest on the next round.
+pub const fn derive_sync_limit_kb() -> u64 {
+    let two_uploads = 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000;
+    let mut kb = SYNC_SLICE_BYTES / 1000;
+    while kb > 0 {
+        if peak::offer_response_fits(
+            kb * 1000,
+            LORA_OFFER_IDS,
+            LORA_OFFER_IDS,
+            SERVE_RESOURCE_SDU,
+            two_uploads,
+        ) {
+            return kb as u64;
+        }
+        kb -= 1;
+    }
+    0
+}
+
+// A message at the announced per-transfer limit must be syncable in one
+// round, or a Python peer keeps it unhandled forever: its packing loop
+// drops a message over the transfer limit as handled (`LXMPeer.py:370-373`)
+// but merely skips one whose `24 + size + 16` reaches the sync limit
+// (`:375-376`), every round, without marking it.
+const _: () = assert!(
+    BOARD_SYNC_LIMIT_KB * 1000
+        > BOARD_TRANSFER_LIMIT_KB * 1000
+            + leviculum_lxmf::peering::OFFER_BASE_SIZE
+            + leviculum_lxmf::peering::OFFER_PER_MESSAGE_OVERHEAD
+);
+// And the inbound batch it bounds must fit the slice it is held in.
+const _: () = assert!(BOARD_SYNC_LIMIT_KB as usize * 1000 <= SYNC_SLICE_BYTES);

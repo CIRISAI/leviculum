@@ -74,9 +74,10 @@ const LARGEST_AT_PANIC: usize = 30_320;
 /// `serve_cap=194`), the floor the live reading is taken against.
 const BOOT_CAP: usize = 194;
 
-/// One inbound sync batch at the announced `BOARD_SYNC_LIMIT_KB`
-/// (`leviculum-nrf/heap-budget`).
-const ARRIVING_SYNC_BATCH_BYTES: usize = leviculum_heap_budget::BOARD_SYNC_LIMIT_KB as usize * 1000;
+/// One inbound sync batch, at the role's whole sync slice
+/// (`SYNC_SLICE_BYTES`, `leviculum-nrf/heap-budget`): the margin claims the
+/// slice, which bounds the announced `BOARD_SYNC_LIMIT_KB` from above.
+const ARRIVING_SYNC_BATCH_BYTES: usize = leviculum_heap_budget::SYNC_SLICE_BYTES;
 
 /// One queued upload at the announced `BOARD_TRANSFER_LIMIT_KB`.
 const ARRIVING_UPLOAD_BYTES: usize = leviculum_heap_budget::BOARD_TRANSFER_LIMIT_KB as usize * 1000;

@@ -15,18 +15,26 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
+use leviculum_core::constants::RESOURCE_HASHMAP_LEN;
+use leviculum_core::resource::{ResourceSource, RESOURCE_ADV_OVERHEAD, STANDARD_LINK_MDU};
 use leviculum_heap_budget::peak::{
-    flush_peak, inbound_resource_peak, offer_encoding, offer_response_peak, peer_table_bytes,
-    pushed_capacity, pushed_capacity_from, pushed_peak, pushed_peak_from, role_margin,
-    stable_sort_scratch, store_tail_peak, sync_envelope, sync_round_peak, trimmed_fifo_bytes,
+    buffered_offer_response_peak, flush_peak, inbound_resource_peak, offer_encoding,
+    offer_response_fits, offer_response_peak, peer_table_bytes, pushed_capacity,
+    pushed_capacity_from, pushed_peak, pushed_peak_from, role_margin, stable_sort_scratch,
+    store_tail_peak, sync_envelope, sync_round_peak, transfer_bytes, trimmed_fifo_bytes,
     upload_peak, ByteVec, PEER_BYTES, STORED_MESSAGE_BYTES, TRANSIENT_ID_BYTES,
 };
 use leviculum_heap_budget::{
     BOARD_MAX_PEERS, BOARD_SYNC_LIMIT_KB, BOARD_TRANSFER_LIMIT_KB, FIELD_FAILED_ALLOCATION_BYTES,
-    PEERING_SLICE_BYTES, ROLE_BUDGET_BYTES, ROLE_STRUCTURAL_BYTES, SERVE_RESOURCE_SDU,
+    LORA_OFFER_IDS, OFFER_RESPONSE_RESERVE_BYTES, PEERING_SLICE_BYTES, ROLE_BUDGET_BYTES,
+    ROLE_STRUCTURAL_BYTES, SERVE_RESOURCE_SDU, SYNC_SLICE_BYTES,
 };
-use leviculum_lxmf::peering::{PeerOffer, PeerSyncEnvelope};
-use leviculum_lxmf::propagation_store::StoredMessage;
+use leviculum_lxmf::peering::{
+    offer_budget_for_mdu, offer_encoded_len, offer_reply, plan_sync_batch, OfferPlan, OfferReply,
+    OfferResponse, PeerOffer, PeerSyncEnvelope, SyncBatch, SyncSource,
+};
+use leviculum_lxmf::propagation::TransientId;
+use leviculum_lxmf::propagation_store::{MemoryPropagationStore, PropagationStore, StoredMessage};
 
 // ---------------------------------------------------------------------------
 // A per-thread counting allocator: the test harness runs tests on several
@@ -272,30 +280,105 @@ impl Row {
     }
 }
 
+/// The offer response shapes of 510's table: bodies the peer wants (all
+/// of the plan) and whether it answered with an explicit list (`listed`
+/// ids) or `True` (0).
+fn offer_shapes() -> Vec<(&'static str, Vec<usize>, usize)> {
+    vec![
+        ("1 KB body", vec![1_000], 0),
+        ("link-MDU body", vec![LINK_MDU], 0),
+        (
+            "two 3 960 B bodies: 510's 8 KB board sync",
+            vec![3_960, 3_960],
+            0,
+        ),
+        (
+            "ten 4 KB bodies: a Python peer, a LoRa offer, want all",
+            vec![4_000; 10],
+            0,
+        ),
+        (
+            "ten 4 KB bodies: a Python peer, a LoRa offer, listed",
+            vec![4_000; 10],
+            10,
+        ),
+    ]
+}
+
+/// A store holding `bodies` in append order and the plan offering all of
+/// them, as `build_offer` would for a peer whose limits admit them.
+fn offered_store(bodies: &[usize]) -> (MemoryPropagationStore, OfferPlan) {
+    let mut store = MemoryPropagationStore::new(1 << 20);
+    let mut ids: Vec<TransientId> = Vec::new();
+    for (n, &len) in bodies.iter().enumerate() {
+        let mut id = [0u8; 32];
+        id[0] = n as u8 + 1;
+        store
+            .append(&id, n as u64, 20, &vec![n as u8; len])
+            .unwrap();
+        ids.push(id);
+    }
+    let mut last = 0;
+    store
+        .for_each(&mut |meta| last = last.max(meta.sequence))
+        .unwrap();
+    let plan = OfferPlan {
+        ids,
+        cursor_target: last,
+        skipped_oversize: 0,
+        skipped_low_value: 0,
+    };
+    (store, plan)
+}
+
+/// What the board sends for a peer wanting all of `bodies` (`listed` > 0:
+/// as an explicit list), with `concurrent` held beside it: the board's own
+/// planner asked the budget's own fit test.
+fn answer_of(bodies: &[usize], listed: usize, concurrent: usize) -> SyncBatch {
+    let (store, plan) = offered_store(bodies);
+    let response = if listed > 0 {
+        OfferResponse::Wanted(plan.ids.clone())
+    } else {
+        OfferResponse::WantAll
+    };
+    let OfferReply::Send(wanted) = offer_reply(&response, &plan) else {
+        panic!("a want is a send");
+    };
+    plan_sync_batch(&store, &plan, &wanted, |_, encoded_len| {
+        offer_response_fits(
+            encoded_len,
+            plan.ids.len(),
+            listed,
+            SERVE_RESOURCE_SDU,
+            concurrent,
+        )
+    })
+    .unwrap()
+}
+
 fn field_rows() -> Vec<Row> {
     let sdu = SERVE_RESOURCE_SDU;
     let two = 2 * ONE_UPLOAD;
     let mut rows = Vec::new();
-    // Offer response: what the board sends a peer. The round runs beside
-    // two phones' queued uploads.
-    for (what, bodies, offered) in [
-        ("1 KB body", vec![1_000], 1),
-        ("link-MDU body", vec![LINK_MDU], 1),
-        (
-            "8 KB: a board peer's sync limit, two bodies",
-            vec![3_960, 3_960],
-            2,
-        ),
-        (
-            "ten 4 KB bodies: a Python peer, a LoRa offer",
-            vec![4_000; 10],
-            10,
-        ),
-    ] {
+    // Offer response: what the board sends a peer, through the real
+    // batch planner (`plan_sync_batch`) asking the budget's fit test with
+    // two phones' uploads queued. `wanted` is how many the peer asked for;
+    // the row's inputs say how many the board sends.
+    for (what, bodies, listed) in offer_shapes() {
+        let answer = answer_of(&bodies, listed, two);
         rows.push(Row {
             op: "offer_response",
-            inputs: format!("{what} bodies={bodies:?} offered={offered}"),
-            peak: offer_response_peak(bodies.iter().copied(), offered, sdu),
+            inputs: format!(
+                "{what} wanted={} sent={} sent_bytes={} encoded={} offered={} listed={listed} \
+                 buffered_510={}",
+                bodies.len(),
+                answer.count,
+                answer.payload,
+                answer.encoded_len,
+                bodies.len(),
+                buffered_offer_response_peak(bodies.iter().copied(), bodies.len(), sdu)
+            ),
+            peak: offer_response_peak(answer.encoded_len, bodies.len(), listed, sdu),
             concurrent: two,
             reserve_funded: 0,
         });
@@ -316,15 +399,17 @@ fn field_rows() -> Vec<Row> {
             ONE_UPLOAD,
         ),
         (
-            "8 KB upload: the resource limit",
+            "upload at the announced sync limit",
             BOARD_SYNC_LIMIT_KB as usize * 1000,
             vec![BOARD_SYNC_LIMIT_KB as usize * 1000 - 14],
             ONE_UPLOAD,
         ),
         (
-            "8 KB sync: two bodies",
-            sync_envelope([3_960, 3_960]).len,
-            vec![3_960, 3_960],
+            // The largest pair a reference peer packs under the announced
+            // limit: 24 + 2 × (2 460 + 16) = 4 976 < 5 000 (`LXMPeer.py:376`).
+            "sync at the announced limit: two bodies",
+            sync_envelope([2_460, 2_460]).len,
+            vec![2_460, 2_460],
             two,
         ),
     ] {
@@ -381,15 +466,21 @@ fn the_field_shapes_against_the_role_budget() {
         "PEAK_BUDGET role={ROLE_BUDGET_BYTES} structural={ROLE_STRUCTURAL_BYTES} \
          headroom={headroom}"
     );
-    let expected: [(usize, isize); 16] = [
-        (3_538, 4_462),
-        (1_800, 6_200),
-        (24_996, -16_996),
-        (149_584, -141_584),
+    // The offer rows are the streamed answer since order 511 (510 pinned
+    // 3 538, 1 800, 24 996 and 149 584 here, the last two overdrawn by
+    // 16 996 and 141 584 B; the inputs column prints that figure beside
+    // each row as `buffered_510=`). The two ten body rows send one body
+    // each, the rest waits above the cursor.
+    let expected: [(usize, isize); 17] = [
+        (1_784, 6_216),
+        (1_165, 6_835),
+        (4_984, 3_016),
+        (5_416, 2_584),
+        (5_736, 2_264),
         (2_028, 10_986),
         (890, 11_555),
-        (16_000, 4_000),
-        (15_881, 56),
+        (10_000, 7_000),
+        (9_881, 3_056),
         (4_014, 7_986),
         (1_738, 10_262),
         (15_950, -3_950),
@@ -400,8 +491,7 @@ fn the_field_shapes_against_the_role_budget() {
         (32_832, -24_832),
     ];
     let rows = field_rows();
-    assert_eq!(rows.len(), expected.len());
-    for (row, (peak, margin)) in rows.iter().zip(expected) {
+    for row in &rows {
         println!(
             "PEAK op={} peak={} concurrent={} reserve_funded={} margin={} | {}",
             row.op,
@@ -411,6 +501,9 @@ fn the_field_shapes_against_the_role_budget() {
             row.margin(),
             row.inputs
         );
+    }
+    assert_eq!(rows.len(), expected.len());
+    for (row, (peak, margin)) in rows.iter().zip(expected) {
         assert_eq!(
             (row.peak, row.margin()),
             (peak, margin),
@@ -422,12 +515,12 @@ fn the_field_shapes_against_the_role_budget() {
 }
 
 /// The same rows, asked to fit. Red today, and ignored because making it
-/// green is a design decision, not a fix: which copies to remove first
-/// (pass B, ordered by the reviewer), whether the board refuses a Python
-/// peer's offer it cannot fund, and whether the store tail is walked in
-/// pages instead of collected. Run it with `--ignored` to see what is left.
+/// green is a design decision, not a fix. The offer response rows fit since
+/// order 511 ([`every_offer_response_fits_beside_two_queued_uploads`]
+/// asserts it unignored); what is left is the upload's flush copies and
+/// the store tail collected whole. Run it with `--ignored` to see them.
 #[test]
-#[ignore = "#388: today's overdraws; which reduction lands first is pass B's design decision"]
+#[ignore = "#388: the upload flush and the store tail still overdraw; order 511 fixed the offer response"]
 fn every_field_shape_fits_the_role_budget() {
     let over: Vec<String> = field_rows()
         .iter()
@@ -453,19 +546,34 @@ fn issue_388_the_smallest_inputs_that_leave_less_than_340_bytes() {
     let two = 2 * ONE_UPLOAD;
     let short = |margin: isize| margin < FIELD_FAILED_ALLOCATION_BYTES as isize;
 
-    let offer = |body: usize| role_margin(offer_response_peak([body], 1, sdu), two);
-    let body = (1..=ONE_UPLOAD).find(|&b| short(offer(b)));
+    // The offer response as 510 measured it: one body of 2 334 B was
+    // enough. Streamed (order 511), no single body up to the transfer
+    // limit gets there.
+    let buffered = |body: usize| role_margin(buffered_offer_response_peak([body], 1, sdu), two);
+    let body = (1..=ONE_UPLOAD).find(|&b| short(buffered(b)));
     println!(
-        "ISSUE_388 op=offer_response body={body:?} margin={:?}",
-        body.map(offer)
+        "ISSUE_388 op=offer_response path=buffered_510 body={body:?} margin={:?}",
+        body.map(buffered)
+    );
+    assert_eq!(body, Some(2_334));
+    assert!(!short(buffered(2_333)));
+    let offer = |body: usize| {
+        role_margin(
+            offer_response_peak(sync_envelope([body]).len, 1, 0, sdu),
+            two,
+        )
+    };
+    let streamed = (1..=ONE_UPLOAD).find(|&b| short(offer(b)));
+    println!(
+        "ISSUE_388 op=offer_response path=streamed body={streamed:?} margin_at_transfer_limit={}",
+        offer(ONE_UPLOAD)
     );
     assert_eq!(
-        body,
-        Some(2_334),
-        "one offered body of 2 334 B beside two queued 4 KB uploads leaves {:?} B",
-        body.map(offer)
+        streamed,
+        None,
+        "a streamed answer of one body up to the transfer limit leaves {} B",
+        offer(ONE_UPLOAD)
     );
-    assert!(!short(offer(2_333)));
 
     let upload = |b: usize| role_margin(upload_peak(upload_envelope(b), b, true), ONE_UPLOAD);
     let uploaded = (1..=ONE_UPLOAD).find(|&b| short(upload(b)));
@@ -496,9 +604,10 @@ fn issue_388_the_smallest_inputs_that_leave_less_than_340_bytes() {
     );
 
     // The round as a whole is the larger of its two steps.
+    let encoded = sync_envelope([2_334]).len;
     assert_eq!(
-        sync_round_peak(57, 10, [2_334], sdu),
-        store_tail_peak(57, 10).max(offer_response_peak([2_334], 10, sdu))
+        sync_round_peak(57, 10, encoded, 0, sdu),
+        store_tail_peak(57, 10).max(offer_response_peak(encoded, 10, 0, sdu))
     );
 }
 
@@ -526,4 +635,166 @@ fn the_peer_table_at_the_cap_against_its_slice() {
     );
     assert_eq!(table, 7_152);
     assert!(table <= PEERING_SLICE_BYTES);
+}
+
+// ---------------------------------------------------------------------------
+// The streamed offer response (order 511)
+// ---------------------------------------------------------------------------
+
+/// 510's two red offer rows, answered by the streamed path: every offer
+/// shape fits the role beside two phones' queued uploads, with the reserve
+/// clear. The ten body Python offer is answered with the prefix that fits
+/// and the rest waits above the cursor for the next round.
+#[test]
+fn every_offer_response_fits_beside_two_queued_uploads() {
+    let two = 2 * ONE_UPLOAD;
+    for (what, bodies, listed) in offer_shapes() {
+        let answer = answer_of(&bodies, listed, two);
+        let peak =
+            offer_response_peak(answer.encoded_len, bodies.len(), listed, SERVE_RESOURCE_SDU);
+        let margin = role_margin(peak, two);
+        println!(
+            "OFFER_RESPONSE {what} wanted={} sent={} withheld={} encoded={} peak={peak} \
+             margin={margin} buffered_510={}",
+            bodies.len(),
+            answer.count,
+            answer.withheld,
+            answer.encoded_len,
+            buffered_offer_response_peak(bodies.iter().copied(), bodies.len(), SERVE_RESOURCE_SDU),
+        );
+        assert!(answer.count >= 1, "{what}: at least one body goes out");
+        assert_eq!(answer.count + answer.withheld, bodies.len(), "{what}");
+        assert!(
+            margin >= OFFER_RESPONSE_RESERVE_BYTES as isize,
+            "{what}: margin {margin}"
+        );
+        // Maximal: one more body would not have fitted.
+        if answer.withheld > 0 {
+            let more = sync_envelope(bodies[..=answer.count].iter().copied()).len;
+            assert!(!offer_response_fits(
+                more,
+                bodies.len(),
+                listed,
+                SERVE_RESOURCE_SDU,
+                two
+            ));
+        }
+    }
+}
+
+/// The answer's model against the code it describes, for the parts a host
+/// test reaches: the planner and the streamed source allocate nothing (the
+/// core's scratch is the reader's, here the test's), and the decoded list a
+/// `Wanted` response holds is `listed` exact ids. The parts are the core's
+/// owned-path parts byte for byte
+/// (`a_plain_source_and_a_buffer_build_the_same_resource`,
+/// `leviculum-core/src/resource/outgoing.rs`), priced by [`transfer_bytes`]
+/// as the measured serve mvr prices them.
+#[test]
+fn the_streamed_answer_holds_only_what_the_model_counts() {
+    let bodies = [4_000usize; 10];
+    let (store, plan) = offered_store(&bodies);
+    let wire = OfferResponse::Wanted(plan.ids.clone()).encode();
+    let (response, decoded) = measured_peak(|| OfferResponse::decode(&wire).unwrap());
+    assert_eq!(decoded, 10 * TRANSIENT_ID_BYTES, "listed ids, exact");
+    let OfferReply::Send(wanted) = offer_reply(&response, &plan) else {
+        panic!("send");
+    };
+    let mut scratch = vec![0u8; SERVE_RESOURCE_SDU];
+    let (streamed, held) = measured_peak(|| {
+        let batch = plan_sync_batch(&store, &plan, &wanted, |_, _| true).unwrap();
+        let mut source = SyncSource::new(&store, &plan, wanted, batch, 1.0);
+        let mut total = 0;
+        loop {
+            let n = source.read(&mut scratch).unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        (total, source.total_len())
+    });
+    assert_eq!(streamed.0, streamed.1);
+    assert_eq!(streamed.0, sync_envelope(bodies).len);
+    assert_eq!(held, 0);
+    // The model's terms beside the parts, at that shape.
+    let tid = TRANSIENT_ID_BYTES;
+    let encoded = sync_envelope(bodies).len;
+    assert_eq!(
+        offer_response_peak(encoded, 10, 10, SERVE_RESOURCE_SDU),
+        pushed_capacity(tid, 10) * tid
+            + 10 * tid
+            + SERVE_RESOURCE_SDU
+            + transfer_bytes(encoded, SERVE_RESOURCE_SDU)
+    );
+}
+
+/// The announced sync limit, derived: what it is, that it is the largest
+/// that fits, and the shape it was derived at.
+#[test]
+fn the_announced_sync_limit_is_the_largest_answer_the_role_funds() {
+    let two = 2 * ONE_UPLOAD;
+    let fits = |kb: u64| {
+        offer_response_fits(
+            kb as usize * 1000,
+            LORA_OFFER_IDS,
+            LORA_OFFER_IDS,
+            SERVE_RESOURCE_SDU,
+            two,
+        )
+    };
+    let at = |kb: u64| {
+        role_margin(
+            offer_response_peak(
+                kb as usize * 1000,
+                LORA_OFFER_IDS,
+                LORA_OFFER_IDS,
+                SERVE_RESOURCE_SDU,
+            ),
+            two,
+        )
+    };
+    println!(
+        "SYNC_LIMIT derived_kb={BOARD_SYNC_LIMIT_KB} slice={SYNC_SLICE_BYTES} \
+         reserve={OFFER_RESPONSE_RESERVE_BYTES} lora_ids={LORA_OFFER_IDS} \
+         margin_at_limit={} margin_one_kb_more={}",
+        at(BOARD_SYNC_LIMIT_KB),
+        at(BOARD_SYNC_LIMIT_KB + 1)
+    );
+    assert_eq!(BOARD_SYNC_LIMIT_KB, 5);
+    assert!(fits(BOARD_SYNC_LIMIT_KB));
+    assert!(!fits(BOARD_SYNC_LIMIT_KB + 1));
+    // The ids a LoRa offer carries, as the offer planner counts them.
+    assert_eq!(LORA_OFFER_IDS, 10);
+    assert!(offer_encoded_len(LORA_OFFER_IDS) <= offer_budget_for_mdu(STANDARD_LINK_MDU));
+    assert!(offer_encoded_len(LORA_OFFER_IDS + 1) > offer_budget_for_mdu(STANDARD_LINK_MDU));
+    // The role's headroom beside two uploads is the slice.
+    assert_eq!(
+        ROLE_BUDGET_BYTES - ROLE_STRUCTURAL_BYTES - two,
+        SYNC_SLICE_BYTES
+    );
+}
+
+/// The reserve's arithmetic, re-added at the derived limit: the
+/// advertisement held three times over (cached, send copy, encrypted
+/// packet) at the part count of an answer at the limit, the allocator's
+/// block headers, and the field's refused allocation.
+#[test]
+fn the_offer_response_reserve_covers_what_the_model_leaves_out() {
+    let encoded = BOARD_SYNC_LIMIT_KB as usize * 1000;
+    let transfer = transfer_bytes(encoded, SERVE_RESOURCE_SDU);
+    let parts = leviculum_core::crypto::token_len(
+        leviculum_core::resource::RESOURCE_RANDOM_HASH_SIZE + encoded,
+    )
+    .div_ceil(SERVE_RESOURCE_SDU);
+    let advertisement = RESOURCE_ADV_OVERHEAD + RESOURCE_HASHMAP_LEN * parts;
+    // The parts, their spine and hashmap, the scratch, the plan, the list,
+    // the decoded response: one block each.
+    let blocks = parts + 5;
+    let need = FIELD_FAILED_ALLOCATION_BYTES + 3 * advertisement + blocks * 8;
+    println!(
+        "OFFER_RESERVE parts={parts} advertisement={advertisement} blocks={blocks} need={need} \
+         reserve={OFFER_RESPONSE_RESERVE_BYTES} transfer={transfer}"
+    );
+    assert!(need <= OFFER_RESPONSE_RESERVE_BYTES, "need {need}");
 }

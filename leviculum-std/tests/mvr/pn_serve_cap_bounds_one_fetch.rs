@@ -88,8 +88,8 @@ const BOOT_CAP: usize = 194;
 
 /// Heap the board keeps clear of the serve because it can be claimed
 /// WHILE the serve is in flight (`SERVE_MARGIN_BYTES`,
-/// `leviculum-nrf/heap-budget`): one inbound sync batch at
-/// `BOARD_SYNC_LIMIT_KB` (8 000 B), one queued upload at
+/// `leviculum-nrf/heap-budget`): one inbound sync batch in the role's
+/// `SYNC_SLICE_BYTES` (8 000 B), one queued upload at
 /// `BOARD_TRANSFER_LIMIT_KB` (4 000 B), and one more endpoint link at
 /// `budget_per_link()` — 2 696 B in this tree. It was 2 680 B between
 /// #384 B2, which shrank `Link` by the joined-ciphertext copy
@@ -105,9 +105,14 @@ const BOARD_SERVE_MARGIN_BYTES: usize = leviculum_heap_budget::SERVE_MARGIN_BYTE
 const BOARD_RESOURCE_SDU: usize = leviculum_heap_budget::SERVE_RESOURCE_SDU;
 
 /// The board announces this per-sync limit (`BOARD_SYNC_LIMIT_KB`,
-/// `leviculum-nrf/heap-budget`). It bounds the wire response and did not
-/// bite here: 24 messages account to 6 552 B, well under 8 000.
+/// `leviculum-nrf/heap-budget`), derived since order 511 from the outbound
+/// sync answer; it no longer bounds a fetch on the board.
 const BOARD_SYNC_LIMIT_KB: u64 = leviculum_heap_budget::BOARD_SYNC_LIMIT_KB;
+
+/// What bounds one fetch on the board beside the heap cap
+/// (`BOARD_SERVE_LIMIT_BYTES`, the role's 8 000 B sync slice). It does not
+/// bite here: 24 messages account to 6 552 B.
+const BOARD_SERVE_LIMIT_BYTES: usize = leviculum_heap_budget::BOARD_SERVE_LIMIT_BYTES;
 
 /// The field shape: 24 stored messages, 224 B of servable body each.
 const FIELD_MESSAGES: u8 = 24;
@@ -142,24 +147,25 @@ fn upload(seed: u8) -> Vec<u8> {
 }
 
 /// A node holding `messages` messages for one mailbox, serving to `cap`
-/// accounted bytes per fetch, announcing `sync_limit_kb`.
+/// accounted bytes per fetch, its fetch bounded at `serve_limit_bytes`,
+/// announcing the board's sync limit.
 ///
-/// The announced limit is a parameter because it is a SECOND bound on
-/// the same accounted sum, and the two tests below are about different
-/// ones: the field case runs at the board's own 8 KB announcement (which
-/// does not bite — 24 messages account to 6 552 B), while the
-/// deeper-than-the-cap case has to raise it, or the announced limit
-/// would be what bounds the round and the serve cap would never be
-/// measured.
+/// The serve limit is a parameter because it is a SECOND bound on the
+/// same accounted sum, and the two tests below are about different ones:
+/// the field case runs at the board's own 8 000 B serve limit (which does
+/// not bite — 24 messages account to 6 552 B), while the
+/// deeper-than-the-cap case has to raise it, or the serve limit would be
+/// what bounds the round and the serve cap would never be measured.
 fn mailbox_node(
     cap: usize,
     messages: u8,
-    sync_limit_kb: u64,
+    serve_limit_bytes: usize,
 ) -> (PropagationNode<MemoryPropagationStore>, Vec<TransientId>) {
     let mut role = PropagationNode::new(
         MemoryPropagationStore::new(256 * 1024),
         PropagationNodeConfig {
-            sync_limit_kb,
+            sync_limit_kb: BOARD_SYNC_LIMIT_KB,
+            serve_limit_bytes: Some(serve_limit_bytes),
             serve_cap_bytes: Some(cap),
             ..PropagationNodeConfig::default()
         },
@@ -177,7 +183,7 @@ fn mailbox_node(
 
 /// The field's node: [`FIELD_MESSAGES`] messages, serving to `cap`.
 fn field_node(cap: usize) -> (PropagationNode<MemoryPropagationStore>, Vec<TransientId>) {
-    mailbox_node(cap, FIELD_MESSAGES, BOARD_SYNC_LIMIT_KB)
+    mailbox_node(cap, FIELD_MESSAGES, BOARD_SERVE_LIMIT_BYTES)
 }
 
 /// Serve one fetch for every id in `stored` and report the plan.
@@ -327,7 +333,7 @@ response={} peak={peak} buffered_peak={buffered} block={block} budget={budget}",
 #[test]
 fn a_fetch_past_the_funded_cap_is_served_in_part_and_finished_next_round() {
     let cap = serve_cap_for_peak(FREE_AT_PANIC, BOARD_RESOURCE_SDU);
-    let (mut role, stored) = mailbox_node(cap, DEEP_MAILBOX_MESSAGES, 64);
+    let (mut role, stored) = mailbox_node(cap, DEEP_MAILBOX_MESSAGES, 64_000);
     let mailbox = [7u8; 16];
 
     // Round one: the client asks for all of them.

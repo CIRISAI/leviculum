@@ -369,6 +369,19 @@ pub struct PropagationNodeConfig {
     /// `message_list_response` puts the rest back in `wants`,
     /// `reference/LXMF/LXMF/LXMRouter.py:1607-1644` and `:1576-1596`).
     pub serve_cap_bytes: Option<usize>,
+    /// The bound one fetch response is held to in place of the announced
+    /// per-sync limit, in accounted bytes; `None` (the host) holds it to
+    /// `sync_limit_kb`.
+    ///
+    /// A board announces a sync limit derived from what it can afford to
+    /// SEND a peer in one round (`BOARD_SYNC_LIMIT_KB`,
+    /// `leviculum-nrf/heap-budget`, leviculum#388 order 511), which is
+    /// smaller than what it can afford to serve a client in one fetch;
+    /// the serve is bounded by its own heap arithmetic
+    /// ([`Self::serve_cap_bytes`]) and by this. Wire-neutral: the
+    /// reference bounds a fetch by the client's limit alone, and a shorter
+    /// response is the protocol's normal shape either way.
+    pub serve_limit_bytes: Option<usize>,
 }
 
 impl Default for PropagationNodeConfig {
@@ -382,6 +395,7 @@ impl Default for PropagationNodeConfig {
             name: None,
             message_expiry_secs: MESSAGE_EXPIRY_SECS,
             serve_cap_bytes: None,
+            serve_limit_bytes: None,
         }
     }
 }
@@ -1069,7 +1083,10 @@ impl<S: PropagationStore> PropagationNode<S> {
             TransferLimit::Integer(kb) => (kb as f64) * 1000.0,
             TransferLimit::Float(kb) => kb * 1000.0,
         });
-        let our_limit = (self.config.sync_limit_kb * 1000) as f64;
+        let our_limit = match self.config.serve_limit_bytes {
+            Some(bytes) => bytes as f64,
+            None => (self.config.sync_limit_kb * 1000) as f64,
+        };
         // A third cap, tighter than both when a node's heap plan funds
         // less than it announces (`serve_cap_bytes`): serving a response
         // costs more than its length ([`serve_peak_bytes`]), and a board

@@ -18,9 +18,10 @@
 use leviculum_heap_budget::{
     budget_per_link, budget_reserve, budget_serve_cap, budget_slack, budget_total, live_serve_cap,
     max_endpoint_links, BOARD_SYNC_LIMIT_KB, BOARD_TRANSFER_LIMIT_KB, CHANNEL_BUDGET_BYTES,
-    HEAP_SIZE, INTERFACE_MTU, LINK_BYTES, MAX_INCOMING_RESOURCE_BYTES, MAX_LINKS, QUEUE_DEPTH,
-    ROLE_BUDGET_BYTES, SERVE_MARGIN_BYTES, SERVE_PEAK_BYTES, SERVE_RESERVE_BYTES,
-    SERVE_RESOURCE_SDU, SESSION_BUDGET_BYTES,
+    HEAP_SIZE, INTERFACE_MTU, LINK_BYTES, MAX_INCOMING_RESOURCE_BYTES, MAX_LINKS,
+    OFFER_RESPONSE_RESERVE_BYTES, QUEUE_DEPTH, ROLE_BUDGET_BYTES, SERVE_MARGIN_BYTES,
+    SERVE_PEAK_BYTES, SERVE_RESERVE_BYTES, SERVE_RESOURCE_SDU, SESSION_BUDGET_BYTES,
+    SYNC_SLICE_BYTES,
 };
 use leviculum_lxmf::propagation_node::{serve_largest_block_bytes, serve_peak_bytes};
 
@@ -53,7 +54,15 @@ fn the_derived_constants_have_these_values() {
         ("INTERFACE_MTU", INTERFACE_MTU, 564),
         ("SESSION_BUDGET_BYTES", SESSION_BUDGET_BYTES, 3_948),
         ("CHANNEL_BUDGET_BYTES", CHANNEL_BUDGET_BYTES, 4_512),
-        ("BOARD_SYNC_LIMIT_KB", BOARD_SYNC_LIMIT_KB as usize, 8),
+        // Derived since order 511 (was a stated 8): the largest answer the
+        // role's sync slice funds beside two queued uploads.
+        ("BOARD_SYNC_LIMIT_KB", BOARD_SYNC_LIMIT_KB as usize, 5),
+        ("SYNC_SLICE_BYTES", SYNC_SLICE_BYTES, 8_000),
+        (
+            "OFFER_RESPONSE_RESERVE_BYTES",
+            OFFER_RESPONSE_RESERVE_BYTES,
+            1_024,
+        ),
         (
             "BOARD_TRANSFER_LIMIT_KB",
             BOARD_TRANSFER_LIMIT_KB as usize,

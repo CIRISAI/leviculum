@@ -5,11 +5,13 @@
 //! model: what the role holds BETWEEN events. The allocations that break
 //! it are transient and live inside single operations of
 //! `leviculum-nrf/src/pn.rs`, where no host test reaches: an offer response
-//! holds the wanted bodies and their encoded envelope at once, an inbound
+//! held the wanted bodies and their encoded envelope at once (510), an inbound
 //! resource is decoded while its data is still live, a flush clones each
 //! append body twice. Each function below is the peak of one of them as a
 //! function of its inputs, so the next 340 byte failure is predicted here
-//! instead of found in a field log.
+//! instead of found in a field log. The offer response has been streamed
+//! since order 511; [`offer_response_peak`] is its new shape and
+//! [`buffered_offer_response_peak`] the one 510 measured.
 //!
 //! # What a figure counts
 //!
@@ -297,28 +299,65 @@ pub const fn transfer_bytes(payload: usize, resource_sdu: usize) -> usize {
 }
 
 /// The answer to an `/offer` that wants messages: `Engine::on_offer_response`
-/// (`leviculum-nrf/src/pn.rs`), at the instant `send_resource` cuts the last
-/// part. `bodies` are the stamped lengths read back from the store,
-/// `offered` the ids the plan named.
+/// (`leviculum-nrf/src/pn.rs`), at the instant the core's streamed build
+/// cuts the last part. `encoded_len` is the envelope the batch encodes to
+/// (`SyncBatch::encoded_len`, `leviculum-lxmf/src/peering.rs`), `offered`
+/// the ids the plan named, `listed` the ids of a `Wanted` response (0 for
+/// `True`).
 ///
-/// Live together there, in the order they appear:
+/// Since leviculum#388 order 511 the answer is streamed out of the store
+/// (`SyncSource`, `NodeCore::send_resource_from_source`), and live together
+/// at the peak are only:
 ///
 /// 1. the round's plan in `self.outbound` (`pn_out=`), grown by
-///    `build_offer`'s pushes, and its `plan.clone()`, exact;
-/// 2. the response's id list and the action's: for `Wanted` the decoded list
-///    (`with_capacity`) plus `response_action`'s `collect` (grown by push),
-///    for `WantAll` one exact `plan.ids.clone()`; the larger is counted;
-/// 3. `bodies`, one exact block per `read_body` plus the spine, sized once;
-/// 4. `data = envelope.encode()`, grown by its writes ([`sync_envelope`]),
-///    held while `bodies` still is: at least twice the payload;
-/// 5. the resource's parts ([`transfer_bytes`]), cut from `data`.
+///    `build_offer`'s pushes, borrowed by the answer and never cloned;
+/// 2. the decoded wanted list, `with_capacity(listed)`, borrowed by the
+///    source rather than re-collected;
+/// 3. the core builder's one part of scratch, `min(sdu, len)`;
+/// 4. the resource's parts ([`transfer_bytes`]), the one whole copy.
 ///
-/// Term 4's own growth is a second candidate instant (its old and new block
-/// with 1 to 3 live and no parts yet); the larger of the two is the peak.
-/// Nothing in the path checks the bodies against the peer's announced sync
-/// limit at this point: `build_offer` bounded the plan by it when the round
-/// was planned, from the sizes the store reported then.
-pub fn offer_response_peak<I>(bodies: I, offered: usize, resource_sdu: usize) -> usize
+/// What 510 counted and is gone: `plan.clone()` (the plan is borrowed);
+/// `response_action`'s collected id list (the reply borrows the response,
+/// `offer_reply`); every wanted body and the spine holding them (the source
+/// copies a part's worth of a body at a time straight out of mapped flash,
+/// `read_body_at`); `envelope.encode()` and its growth (the envelope is
+/// framed on the stack as it streams). The source itself allocates nothing
+/// (`the_streamed_answer_holds_no_body_where_the_buffered_one_held_them_all`,
+/// `leviculum-lxmf/tests/peer_sync_batch.rs`).
+///
+/// Not in it, as in
+/// [`serve_peak_bytes`](leviculum_lxmf::propagation_node::serve_peak_bytes):
+/// the advertisement the build caches, its send copy and the packet built
+/// from it, and the allocator's per-block headers. They are what
+/// [`OFFER_RESPONSE_RESERVE_BYTES`](crate::OFFER_RESPONSE_RESERVE_BYTES)
+/// keeps clear.
+pub const fn offer_response_peak(
+    encoded_len: usize,
+    offered: usize,
+    listed: usize,
+    resource_sdu: usize,
+) -> usize {
+    let tid = TRANSIENT_ID_BYTES;
+    let plan = pushed_capacity(tid, offered) * tid;
+    let wanted = listed * tid;
+    let sdu = if resource_sdu == 0 { 1 } else { resource_sdu };
+    let scratch = if sdu < encoded_len {
+        sdu
+    } else if encoded_len < 16 {
+        16
+    } else {
+        encoded_len
+    };
+    plan + wanted + scratch + transfer_bytes(encoded_len, sdu)
+}
+
+/// 510's model of the same answer, buffered: the plan and its clone, the
+/// response's list and `response_action`'s collect, every body and its
+/// spine, and `envelope.encode()` grown around them beside the parts. Kept,
+/// and kept exact, because 510's table and the `[HEAP_PEAK]` lines of boards
+/// running before order 511 are read against it; the test table prints it
+/// beside the streamed figure.
+pub fn buffered_offer_response_peak<I>(bodies: I, offered: usize, resource_sdu: usize) -> usize
 where
     I: IntoIterator<Item = usize> + Clone,
 {
@@ -335,6 +374,25 @@ where
     let growing = held + envelope.peak;
     let sending = held + envelope.capacity + transfer_bytes(envelope.len, resource_sdu);
     max(growing, sending)
+}
+
+/// Whether an answer of `encoded_len` bytes fits what the role has left
+/// beside `concurrent` bytes it holds, with
+/// [`OFFER_RESPONSE_RESERVE_BYTES`](crate::OFFER_RESPONSE_RESERVE_BYTES)
+/// kept clear: the test the board's batch planner asks of every prefix
+/// (`plan_sync_batch`), and the one the announced sync limit is derived
+/// from ([`BOARD_SYNC_LIMIT_KB`](crate::BOARD_SYNC_LIMIT_KB)).
+pub const fn offer_response_fits(
+    encoded_len: usize,
+    offered: usize,
+    listed: usize,
+    resource_sdu: usize,
+    concurrent: usize,
+) -> bool {
+    role_margin(
+        offer_response_peak(encoded_len, offered, listed, resource_sdu),
+        concurrent,
+    ) >= crate::OFFER_RESPONSE_RESERVE_BYTES as isize
 }
 
 /// A completed inbound resource: `Engine::on_inbound_resource`
@@ -424,13 +482,16 @@ pub const fn store_tail_peak(tail: usize, offered: usize) -> usize {
 /// ([`store_tail_peak`]) and its answer ([`offer_response_peak`]). The two
 /// never overlap: `entries` is dropped when the planning step returns, and
 /// the answer arrives on a later event.
-pub fn sync_round_peak<I>(tail: usize, offered: usize, bodies: I, resource_sdu: usize) -> usize
-where
-    I: IntoIterator<Item = usize> + Clone,
-{
+pub const fn sync_round_peak(
+    tail: usize,
+    offered: usize,
+    encoded_len: usize,
+    listed: usize,
+    resource_sdu: usize,
+) -> usize {
     max(
         store_tail_peak(tail, offered),
-        offer_response_peak(bodies, offered, resource_sdu),
+        offer_response_peak(encoded_len, offered, listed, resource_sdu),
     )
 }
 

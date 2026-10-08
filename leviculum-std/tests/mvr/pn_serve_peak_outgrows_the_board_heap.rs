@@ -77,9 +77,11 @@ use crate::alloc_probe;
 /// (`reference/LXMF/LXMF/LXMRouter.py:1489`).
 const GET_REQUEST_PATH: &str = "/get";
 
-/// The board announces this per-sync limit and caps its own fetch
-/// responses at it (`BOARD_SYNC_LIMIT_KB`, `leviculum-nrf/heap-budget`).
-const BOARD_SYNC_LIMIT_KB: u64 = leviculum_heap_budget::BOARD_SYNC_LIMIT_KB;
+/// The board caps its own fetch responses here (`BOARD_SERVE_LIMIT_BYTES`,
+/// `leviculum-nrf/heap-budget`): the role's 8 000 B sync slice, which was
+/// the announced sync limit until order 511 derived that from the outbound
+/// answer.
+const BOARD_SERVE_LIMIT_BYTES: usize = leviculum_heap_budget::BOARD_SERVE_LIMIT_BYTES;
 
 /// The field shape: 24 stored messages, 224 B of body each.
 const FIELD_MESSAGES: u8 = 24;
@@ -200,7 +202,8 @@ fn field_fetch_plan() -> (PropagationNode<MemoryPropagationStore>, FetchPlan) {
     let mut role = PropagationNode::new(
         MemoryPropagationStore::new(64 * 1024),
         PropagationNodeConfig {
-            sync_limit_kb: BOARD_SYNC_LIMIT_KB,
+            sync_limit_kb: leviculum_heap_budget::BOARD_SYNC_LIMIT_KB,
+            serve_limit_bytes: Some(BOARD_SERVE_LIMIT_BYTES),
             ..PropagationNodeConfig::default()
         },
     );
@@ -342,7 +345,7 @@ fn one_fetch_serve_holds_many_copies_of_its_own_response() {
     // the figure.
     let board_peak = peak_resource + response.capacity();
 
-    let cap = (BOARD_SYNC_LIMIT_KB * 1000) as usize;
+    let cap = BOARD_SERVE_LIMIT_BYTES;
     let sdu = leviculum_core::resource::resource_sdu(500);
     let modelled_here = serve_buffered_peak_bytes(response.len(), sdu);
     let modelled_at_cap = serve_buffered_peak_bytes(cap, sdu);
@@ -405,7 +408,7 @@ fn a_streamed_serve_holds_only_the_transfer() {
     let (role, plan) = field_fetch_plan();
     let request_id = [0x5Au8; 16];
     let sdu = leviculum_core::resource::resource_sdu(500);
-    let cap = (BOARD_SYNC_LIMIT_KB * 1000) as usize;
+    let cap = BOARD_SERVE_LIMIT_BYTES;
 
     // What the same answer costs when it is built as bytes first, on
     // this host, for the comparison this test exists to make.

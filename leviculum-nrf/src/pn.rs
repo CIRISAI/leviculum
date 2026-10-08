@@ -156,7 +156,8 @@
 //!                                             one — a LoRa link costs
 //!                                             per_link alone
 //!       + role                                ROLE_BUDGET_BYTES:
-//!           BOARD_SYNC_LIMIT_KB·1000            one inbound sync batch
+//!           SYNC_SLICE_BYTES (8 000)            one sync: an inbound batch
+//!                                               or one streamed answer
 //!         + 2 · BOARD_TRANSFER_LIMIT_KB·1000    two phones' queued uploads
 //!         + 5120                                peer table incl. 64 B keys
 //!                                               per peer (#388 pass 3),
@@ -234,10 +235,11 @@ use leviculum_lxmf::constants::{
 };
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
-    answer_offer, build_offer, offer_budget_for_mdu, peering_key_material, response_action,
-    DeclineReason, DropReason, InboundGate, OfferPlan, OfferResponse, PeerChange, PeerOffer,
-    PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeeringConfig, ResponseAction, SyncPhase,
-    OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_BACKOFF_STEP_SECS, SYNC_INTERVAL_SECS,
+    answer_offer, build_offer, offer_budget_for_mdu, offer_reply, peering_key_material,
+    plan_sync_batch, DeclineReason, DropReason, InboundGate, OfferPlan, OfferReply, OfferResponse,
+    PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeeringConfig,
+    SyncPhase, SyncSource, WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH,
+    SYNC_BACKOFF_STEP_SECS, SYNC_INTERVAL_SECS,
 };
 use leviculum_lxmf::propagation::{
     MessageListResponse, PeerError, PropagationNodeAnnounce, TransientId,
@@ -844,8 +846,12 @@ impl Engine {
             name: Some(name.as_bytes().to_vec()),
             transfer_limit_kb: BOARD_TRANSFER_LIMIT_KB,
             // The announced sync appetite must fit both the resource cap
-            // and the heap budget (#388) — see BOARD_SYNC_LIMIT_KB.
+            // and the heap budget (#388); derived from what the board can
+            // afford to answer (order 511) — see BOARD_SYNC_LIMIT_KB.
             sync_limit_kb: BOARD_SYNC_LIMIT_KB,
+            // The fetch is bounded apart from the announcement, so the
+            // smaller derived limit does not shrink what a client gets.
+            serve_limit_bytes: Some(leviculum_heap_budget::BOARD_SERVE_LIMIT_BYTES),
             // What one fetch may SERVE, from the same boot arithmetic
             // the `HEAP_BUDGET serve_cap=` line prints — the node box is
             // this generic's own size, so the printed number and the
@@ -1609,7 +1615,6 @@ impl Engine {
             return;
         }
         let peer_hash = sync.peer;
-        let plan = sync.plan.clone();
         let response = match OfferResponse::decode(response_data) {
             Ok(response) => response,
             Err(_) => {
@@ -1618,9 +1623,17 @@ impl Engine {
                 return;
             }
         };
-        let action = response_action(&response, &plan);
-        let wanted = match &action {
-            ResponseAction::SendMessages(ids) => ids.len(),
+        // The plan stays in `self.outbound`, borrowed by the reply and by
+        // the source below, never cloned; the reply borrows the response's
+        // wanted list instead of collecting a second one (leviculum#388).
+        let Some(plan) = self.outbound.as_ref().map(|sync| &sync.plan) else {
+            return;
+        };
+        let reply = offer_reply(&response, plan);
+        let offered = plan.ids.len();
+        let plan_target = plan.cursor_target;
+        let wanted_count = match &reply {
+            OfferReply::Send(wanted) => plan.ids.iter().filter(|id| wanted.wants(id)).count(),
             _ => 0,
         };
         if !matches!(response, OfferResponse::Error(_)) {
@@ -1629,13 +1642,13 @@ impl Engine {
                 format_args!(
                     "peer={} dir=out offered={} wanted={}",
                     Hex(&peer_hash),
-                    plan.ids.len(),
-                    wanted
+                    offered,
+                    wanted_count
                 ),
             );
         }
-        match action {
-            ResponseAction::SendMessages(ids) => {
+        match reply {
+            OfferReply::Send(wanted) => {
                 // The transfer is the round's largest airtime by far
                 // (leviculum#494): not started past the share. The cursor
                 // stays, so the next round offers the same messages again.
@@ -1644,49 +1657,12 @@ impl Engine {
                     out.merge(node.close_link(link_id));
                     return;
                 }
-                let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(ids.len());
-                for id in &ids {
-                    if let Ok(Some(body)) = self.role.store().read_body(id) {
-                        bodies.push(body);
-                    }
-                }
-                if bodies.is_empty() {
-                    self.conclude_round(node, &peer_hash, link_id, plan.cursor_target, 0, 0, out);
-                    return;
-                }
-                let envelope = PeerSyncEnvelope {
-                    timestamp: node.emission_secs() as f64,
-                    messages: bodies,
-                };
-                let data = envelope.encode();
-                let peak = leviculum_heap_budget::offer_response_peak(
-                    envelope.messages.iter().map(|body| body.len()),
-                    plan.ids.len(),
-                    SERVE_RESOURCE_SDU,
-                );
-                self.peaks.offer_response = self.peaks.offer_response.max(peak);
-                let total = data.len() as u64;
-                let count = envelope.messages.len();
-                match node.send_resource(link_id, &data, None, true) {
-                    Ok((_, send)) => {
-                        out.merge(send);
-                        if let Some(sync) = self.outbound.as_mut() {
-                            sync.sending = Some((count, total));
-                        }
-                        if let Some(peer) = self.peers.get_mut(&peer_hash) {
-                            peer.state = SyncPhase::ResourceTransferring;
-                        }
-                    }
-                    Err(_) => {
-                        self.finish_round("send_failed", 0, 0);
-                        out.merge(node.close_link(link_id));
-                    }
-                }
+                self.send_sync_batch(node, link_id, &peer_hash, wanted, offered, out);
             }
-            ResponseAction::Concluded => {
-                self.conclude_round(node, &peer_hash, link_id, plan.cursor_target, 0, 0, out);
+            OfferReply::Concluded => {
+                self.conclude_round(node, &peer_hash, link_id, plan_target, 0, 0, out);
             }
-            ResponseAction::Backoff(secs) => {
+            OfferReply::Backoff(secs) => {
                 let next = node.emission_secs().saturating_add(secs);
                 if let Some(peer) = self.peers.get_mut(&peer_hash) {
                     peer.next_sync_attempt = next;
@@ -1694,14 +1670,14 @@ impl Engine {
                 self.finish_round("throttled", 0, 0);
                 out.merge(node.close_link(link_id));
             }
-            ResponseAction::Unpeer => {
+            OfferReply::Unpeer => {
                 self.peers.remove(&peer_hash);
                 let _ = self.peer_store.remove(&peer_hash);
                 self.log_peer("drop", &peer_hash, "no_access");
                 self.outbound = None;
                 out.merge(node.close_link(link_id));
             }
-            ResponseAction::RemineKey => {
+            OfferReply::RemineKey => {
                 if let Some(peer) = self.peers.get_mut(&peer_hash) {
                     peer.peering_key = None;
                 }
@@ -1709,8 +1685,122 @@ impl Engine {
                 self.finish_round("invalid_key", 0, 0);
                 out.merge(node.close_link(link_id));
             }
-            ResponseAction::Retry => {
+            OfferReply::Retry => {
                 self.finish_round("retry", 0, 0);
+                out.merge(node.close_link(link_id));
+            }
+        }
+    }
+
+    /// Answer a want with the bodies the heap affords right now
+    /// (leviculum#388, order 511), streamed out of the store.
+    ///
+    /// The batch is the longest prefix of the want, in plan order, whose
+    /// modelled peak ([`leviculum_heap_budget::offer_response_peak`]) leaves
+    /// [`leviculum_heap_budget::OFFER_RESPONSE_RESERVE_BYTES`] of the role's
+    /// budget beside what the role holds at this moment (queued uploads and
+    /// an inbound batch, the census's `pn_work=` and `pn_batch=`). What it
+    /// stops before stays above the cursor and is offered again next round;
+    /// the derivation of the announced sync limit guarantees that one body
+    /// up to the transfer limit always fits beside two phones' uploads, so a
+    /// round that sends nothing means the role holds more than the budget
+    /// plans for, and it ends without moving the cursor.
+    ///
+    /// No body, no envelope and no id list is built: the source frames the
+    /// envelope on the stack and copies each body a part's worth at a time
+    /// out of mapped flash, and the core's streamed build makes the parts
+    /// the only whole copy (`NodeCore::send_resource_from_source`).
+    fn send_sync_batch<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        link_id: &LinkId,
+        peer_hash: &[u8; 16],
+        wanted: WantedIds<'_>,
+        offered: usize,
+        out: &mut TickOutput,
+    ) where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let listed = match wanted {
+            WantedIds::All => 0,
+            WantedIds::Listed(ids) => ids.len(),
+        };
+        let census = self.heap_census();
+        let concurrent = census.work + census.batch;
+        let Some(plan) = self.outbound.as_ref().map(|sync| &sync.plan) else {
+            return;
+        };
+        let planned = plan_sync_batch(self.role.store(), plan, &wanted, |_, encoded_len| {
+            leviculum_heap_budget::offer_response_fits(
+                encoded_len,
+                offered,
+                listed,
+                SERVE_RESOURCE_SDU,
+                concurrent,
+            )
+        });
+        let Ok(batch) = planned else {
+            self.finish_round("store_error", 0, 0);
+            out.merge(node.close_link(link_id));
+            return;
+        };
+        if batch.withheld > 0 {
+            crate::log::log_fmt(
+                "PN_SYNC_BATCH ",
+                format_args!(
+                    "peer={} sent={} withheld={} bytes={} concurrent={}",
+                    Hex(peer_hash),
+                    batch.count,
+                    batch.withheld,
+                    batch.encoded_len,
+                    concurrent
+                ),
+            );
+        }
+        if batch.count == 0 {
+            if batch.withheld == 0 {
+                // Every wanted body was gone from the store: the buffered
+                // path concluded here too.
+                self.conclude_round(node, peer_hash, link_id, batch.cursor_target, 0, 0, out);
+            } else {
+                self.finish_round("heap_short", 0, 0);
+                out.merge(node.close_link(link_id));
+            }
+            return;
+        }
+        let peak = leviculum_heap_budget::offer_response_peak(
+            batch.encoded_len,
+            offered,
+            listed,
+            SERVE_RESOURCE_SDU,
+        );
+        self.peaks.offer_response = self.peaks.offer_response.max(peak);
+        let timestamp = node.emission_secs() as f64;
+        let sent = match self.outbound.as_ref() {
+            Some(sync) => {
+                let mut source =
+                    SyncSource::new(self.role.store(), &sync.plan, wanted, batch, timestamp);
+                node.send_resource_from_source(link_id, &mut source)
+            }
+            None => return,
+        };
+        match sent {
+            Ok((_, send)) => {
+                out.merge(send);
+                if let Some(sync) = self.outbound.as_mut() {
+                    sync.sending = Some((batch.count, batch.encoded_len as u64));
+                    // A batch that withheld part of the want concludes
+                    // below it, so the rest is offered again.
+                    sync.plan.cursor_target = batch.cursor_target;
+                }
+                if let Some(peer) = self.peers.get_mut(peer_hash) {
+                    peer.state = SyncPhase::ResourceTransferring;
+                }
+            }
+            Err(_) => {
+                self.finish_round("send_failed", 0, 0);
                 out.merge(node.close_link(link_id));
             }
         }

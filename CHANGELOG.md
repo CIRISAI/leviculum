@@ -618,6 +618,16 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A board propagation node answers large offers without running out of heap
+  (leviculum#388). When a peer wanted messages, the board read every wanted
+  body, encoded them into one envelope and cut the transfer from it, all at
+  once: two 4 KB bodies needed 25 KB and a Python peer wanting ten needed
+  150 KB of a 16 KB role budget. The answer is now streamed out of the store
+  a part at a time, the board sends as many of the wanted messages as its
+  heap affords at that moment, and the rest stays queued for the next round.
+  The sync limit a board announces is derived from that budget and drops from
+  8 to 5 KB; client fetches keep their 8 KB bound.
+
 - A phone that keeps reconnecting no longer keeps a board from dialling other
   boards (Codeberg #412). A board dials against the address sort only
   after 30 s of strict scanning, and every link up and every teardown restarted
