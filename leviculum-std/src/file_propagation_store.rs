@@ -6,19 +6,28 @@
 //! content is `lxmf_data || stamp` (`lxmf_propagation`,
 //! `reference/LXMF/LXMF/LXMRouter.py:2512-2515`; re-indexed at startup by
 //! `enable_propagation`, `:565-592`). Three local differences: the timestamp
-//! is written as integer seconds rather than a float (a float IS read back,
-//! which is what a store inherited from `lxmd` carries), the stamp-value
-//! component is
-//! always present (the reference omits it at value 0 and then *skips such
-//! files entirely* when re-indexing, `:568` requires three components — a
-//! quirk, not a behaviour worth importing), and a fourth component carries
-//! the append-order sequence the per-peer sync cursors index
-//! (`docs/src/concepts/propagation-node-on-a-board.md` §5) so cursors stay
-//! valid across a reopen. A three-component name (a part-1 store, or a
-//! directory copied from a reference node) is still read; such entries are
+//! is written as integer seconds rather than a float, the stamp-value
+//! component is always present (the reference omits it at value 0 and then
+//! *skips such files entirely* when re-indexing, `:568` requires three
+//! components — a quirk, not a behaviour worth importing), and a fourth
+//! component carries the append-order sequence the per-peer sync cursors
+//! index (`docs/src/concepts/propagation-node-on-a-board.md` §5) so cursors
+//! stay valid across a reopen.
+//!
+//! The directory is shared with `lxmd` in one direction. `lnpnd` started on
+//! an `lxmd` config directory opens the store `lxmd` left there, so [`open`]
+//! reads the reference's names as well: `<hex>_<received float>` and
+//! `<hex>_<received float>_<stamp_value>`, the receive time truncated to
+//! whole seconds and a missing stamp value read as 0 (two-component files
+//! are served here although `lxmd` itself would never index them again; a
+//! part-1 store of ours is the three-component case too). Such entries are
 //! assigned fresh sequences above every known one, in receive-time order,
-//! which at worst re-offers them once. The directory is not a wire format;
-//! nothing reads it but us.
+//! which at worst re-offers them once, and are renamed into our scheme on
+//! that first open, so after it the directory is ours. What we write is
+//! always our own four-component scheme; `lxmd` would index it unchanged,
+//! since it reads only the first three components.
+//!
+//! [`open`]: FilePropagationStore::open
 //!
 //! # Power-cut safety, and why this store fsyncs
 //!
@@ -112,8 +121,8 @@ impl FilePropagationStore {
                         size: size as u32,
                         received_at,
                         stamp_value,
-                        // Legacy three-component names get a real sequence
-                        // after the scan, below.
+                        // Names without a sequence (part-1 or the
+                        // reference's) get a real one after the scan, below.
                         sequence: sequence.unwrap_or(0),
                     },
                     path,
@@ -194,9 +203,15 @@ fn parse_name(name: &str) -> Option<(TransientId, u64, u8, Option<u64>)> {
     let mut parts = name.split('_');
     let id: TransientId = hex_decode(parts.next()?)?.try_into().ok()?;
     let received_at = parse_received(parts.next()?)?;
-    let stamp_value: u8 = parts.next()?.parse().ok()?;
+    let stamp_value: u8 = match parts.next() {
+        // The reference's name at stamp value 0: it omits the component
+        // (`value_component`, `reference/LXMF/LXMF/LXMRouter.py:2513`).
+        None => return Some((id, received_at, 0, None)),
+        Some(raw) => raw.parse().ok()?,
+    };
     let sequence = match parts.next() {
-        // Part-1 layout: no sequence component yet.
+        // Part-1 layout, or the reference's name with a stamp value: no
+        // sequence component yet.
         None => None,
         Some(raw) => {
             let sequence: u64 = raw.parse().ok()?;
@@ -568,6 +583,77 @@ mod tests {
         let store = FilePropagationStore::open(dir.path(), 8192).expect("reopen 2");
         assert_eq!(seq_of(&store, &[3; 32]), 3);
         assert_eq!(store.newest_sequence().unwrap(), 4);
+    }
+
+    /// The names `lxmd` writes (`LXMRouter.py:2512-2514`): a float receive
+    /// time, and a stamp-value component only when the value is positive.
+    /// Both shapes are indexed and renamed into ours on the first open, so
+    /// a second open finds only four-component names.
+    #[test]
+    fn reference_names_of_both_shapes_are_indexed_and_renamed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let two = format!("{}_1789656258.9376912", hex_encode(&[5u8; 32]));
+        let three = format!("{}_1789656259.25_7", hex_encode(&[6u8; 32]));
+        std::fs::write(dir.path().join(&two), body_for(9, 100)).unwrap();
+        std::fs::write(dir.path().join(&three), body_for(8, 120)).unwrap();
+
+        let store = FilePropagationStore::open(dir.path(), 4096).expect("open");
+        assert_eq!(store.len(), 2);
+        let mut seen = Vec::new();
+        store.for_each(&mut |meta| seen.push(*meta)).unwrap();
+        seen.sort_by_key(|meta| meta.transient_id);
+        assert_eq!(seen[0].transient_id, [5; 32]);
+        assert_eq!(seen[0].received_at, 1_789_656_258);
+        assert_eq!(seen[0].stamp_value, 0, "an absent stamp value is 0");
+        assert_eq!(seen[0].destination_hash, [9; 16]);
+        assert_eq!(seen[1].transient_id, [6; 32]);
+        assert_eq!(seen[1].received_at, 1_789_656_259);
+        assert_eq!(seen[1].stamp_value, 7);
+        // Receive-time order decides the fresh sequences.
+        assert_eq!(seen[0].sequence, 1);
+        assert_eq!(seen[1].sequence, 2);
+        assert_eq!(store.read_body(&[5; 32]).unwrap(), Some(body_for(9, 100)));
+        drop(store);
+
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                FilePropagationStore::entry_name(&[5; 32], 1_789_656_258, 0, 1),
+                FilePropagationStore::entry_name(&[6; 32], 1_789_656_259, 7, 2),
+            ],
+            "the reference's names are gone, ours are in their place"
+        );
+
+        let store = FilePropagationStore::open(dir.path(), 4096).expect("reopen");
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.newest_sequence().unwrap(), 2);
+    }
+
+    /// A name that is neither ours nor the reference's still goes through
+    /// `note_unreadable_entry` and stays where it is.
+    #[test]
+    fn a_name_of_neither_shape_is_left_alone() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let hex = hex_encode(&[5u8; 32]);
+        let odd = [
+            hex.clone(),
+            format!("{hex}_notatime"),
+            format!("{hex}_12.5_x"),
+            format!("{hex}_12_1_2_3"),
+        ];
+        for name in &odd {
+            std::fs::write(dir.path().join(name), body_for(9, 100)).unwrap();
+        }
+        let store = FilePropagationStore::open(dir.path(), 4096).expect("open");
+        assert!(store.is_empty());
+        for name in &odd {
+            assert!(dir.path().join(name).exists(), "{name} must not be moved");
+        }
     }
 
     #[test]

@@ -17,9 +17,10 @@
 //! 1. The receive timestamp in the filename is a Python **float**
 //!    (`time.time()`), not an integer.
 //! 2. At stamp value 0 the reference omits the value component entirely, so
-//!    the name has two components — and its own re-index then skips such
-//!    files (`enable_propagation`, `:565-592`, requires three). Matching
-//!    that is correct: those messages are lost to `lxmd` too.
+//!    the name has two components. Its own re-index then skips such files
+//!    (`enable_propagation`, `:565-592`, requires three), so they are lost
+//!    to `lxmd` across a restart; they are somebody's mail all the same,
+//!    and the takeover serves them (stamp value 0).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -85,19 +86,18 @@ fn lnpnd_reads_a_store_python_lxmd_wrote() {
         return;
     };
 
-    // The three-component names: the messages the reference would itself
-    // recover on restart. Anything fewer and the takeover is a no-op.
-    let expected: Vec<&Written> = written.iter().filter(|w| w.stamp_value > 0).collect();
+    // Every message the reference wrote, the two-component names included.
+    let expected: Vec<&Written> = written.iter().collect();
     assert!(
-        !expected.is_empty(),
-        "the generator must produce at least one message with a non-zero stamp value"
+        written.iter().any(|w| w.stamp_value == 0) && written.iter().any(|w| w.stamp_value > 0),
+        "the generator must produce both name shapes"
     );
 
     let store = FilePropagationStore::open(&store_dir, 10_000_000).expect("the store opens");
     assert_eq!(
         store.len(),
         expected.len(),
-        "every message lxmd could recover must be recovered here too; \
+        "every message lxmd wrote must be recovered here; \
          the store held {} file(s)",
         std::fs::read_dir(&store_dir)
             .map(|d| d.count())
@@ -133,7 +133,7 @@ fn lnpnd_reads_a_store_python_lxmd_wrote() {
     }
 }
 
-/// Reopening must not renumber: a foreign three-component name is assigned a
+/// Reopening must not renumber: a foreign name is assigned a
 /// sequence on first open and that assignment is persisted, or every restart
 /// re-offers the whole store to every peer.
 #[test]

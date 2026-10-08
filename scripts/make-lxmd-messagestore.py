@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Produce a propagation-node message store with the reference's own code.
 
-Writes `<outdir>/storage/messagestore/` exactly as Python `lxmd` leaves it,
+Writes `<outdir>/storage/lxmf/messagestore/` exactly as Python `lxmd` leaves it,
 so `lnpnd`'s store can be pointed at a directory nobody in this repo wrote
 by hand.  A fixture we invent only proves we can read our own idea of the
 format; this one is written by `LXMRouter.lxmf_propagation`, which is the
