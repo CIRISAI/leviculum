@@ -475,7 +475,8 @@ manual setup below. It is statically linked against musl, so it installs on
 Debian 9 and later regardless of host glibc:
 
 ```
-wget https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lblogd-nightly-amd64.deb
+wget https://leviculum.network/releases/nightly/latest/lblogd-nightly-amd64.deb
+# mirror: https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lblogd-nightly-amd64.deb
 sudo apt install ./lblogd-nightly-amd64.deb
 ```
 

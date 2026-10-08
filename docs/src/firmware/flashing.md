@@ -28,7 +28,8 @@ needs no toolchain, no Python, no network, and nothing installed: the
 point of the bundle is that a stranger can unpack it and run it.
 
 ```sh
-wget https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz
+wget https://leviculum.network/releases/nightly/latest/lnflash-nightly-amd64.tar.gz
+# mirror: https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz
 tar xzf lnflash-nightly-amd64.tar.gz
 cd lnflash-*
 sudo ./lnflash

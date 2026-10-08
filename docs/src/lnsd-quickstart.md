@@ -12,8 +12,9 @@ machine.
 
 - Linux, x86_64 or aarch64. (macOS and embedded targets exist but are
   out of scope for the beta `.deb` path.)
-- The nightly `.deb` for your architecture. Download links are on the
-  [releases page](https://codeberg.org/Lew_Palm/leviculum/releases).
+- The nightly `.deb` for your architecture, from
+  <https://leviculum.network/releases/nightly/latest/> (mirror: the
+  [Codeberg release](https://codeberg.org/Lew_Palm/leviculum/releases/tag/nightly)).
   The binaries inside are statically linked against musl, so the
   package installs on Debian ≥ 9 and Ubuntu ≥ 16.04 regardless of host
   glibc.

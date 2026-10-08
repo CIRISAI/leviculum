@@ -1,6 +1,6 @@
 # Leviculum
 
-Leviculum is an independent reimplementation based on the [Reticulum protocol specification](docs/src/appendix/reticulum-specification.md).
+Leviculum is an independent reimplementation based on the [Reticulum protocol specification](https://leviculum.network/docs/appendix/reticulum-specification.html).
 It is wire-compatible with Reticulum and runs on Linux, macOS, and embedded devices.
 
 ## What is Reticulum?
@@ -23,12 +23,21 @@ Leviculum is in active development. The protocol implementation is functionally 
 
 ```sh
 # amd64
-wget https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-amd64.deb
+wget https://leviculum.network/releases/nightly/latest/leviculum-nightly-amd64.deb
+# mirror: https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-amd64.deb
 sudo apt install ./leviculum-nightly-amd64.deb
 
 # arm64
-wget https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-arm64.deb
+wget https://leviculum.network/releases/nightly/latest/leviculum-nightly-arm64.deb
+# mirror: https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-arm64.deb
 sudo apt install ./leviculum-nightly-arm64.deb
+```
+
+To check a download, fetch the `.sha256` beside it and let `sha256sum` compare (the same works for every file below):
+
+```sh
+wget https://leviculum.network/releases/nightly/latest/leviculum-nightly-amd64.deb.sha256
+sha256sum -c leviculum-nightly-amd64.deb.sha256
 ```
 
 Sets up `lnsd` as a systemd service under a dedicated `leviculum` user, with its config directory at `/etc/reticulum`. The directory is mode 2775 (group-writable, setgid), so any user in the `leviculum` group shares it as a single source of truth — no per-user config or extra flags. To opt in:
@@ -40,7 +49,7 @@ sudo usermod -aG leviculum "$USER"
 
 That covers everything: the native Rust clients (`lnstatus`, `lnstest`, `lncp`, `lnprobe`, `lnpath`) talk to lnsd via the shared-instance socket, and Python Reticulum tools (`rnstatus`, `rncp`, `rnpath`, `rnprobe`, Sideband, Nomadnet, …) auto-detect `/etc/reticulum` (per `RNS.Reticulum.__init__`'s standard lookup) and connect through the same socket. If you ever swap lnsd out for the Python `rnsd` daemon, the same configdir keeps working — `lnsd` and `rnsd` are wire- and config-compatible.
 
-The binaries are statically linked against musl, so the package installs on Debian ≥ 9 and Ubuntu ≥ 16.04 (amd64 + arm64) regardless of host glibc. SHA-256 checksums are published alongside every `.deb` with the suffix `.sha256`. The exact build is embedded in the binaries — `lnsd --version` prints e.g. `0.7.1-nightly.20260419-5a5df20`.
+The binaries are statically linked against musl, so the package installs on Debian ≥ 9 and Ubuntu ≥ 16.04 (amd64 + arm64) regardless of host glibc. The exact build is embedded in the binaries — `lnsd --version` prints e.g. `0.7.1-nightly.20260419-5a5df20`.
 
 ### Applications
 
@@ -54,7 +63,7 @@ sudo apt install ./lnomad-nightly-amd64.deb
 sudo apt install ./lblogd-nightly-amd64.deb
 ```
 
-Download them from the same [nightly release](https://codeberg.org/Lew_Palm/leviculum/releases/tag/nightly), as `.deb` or as a userspace `.tar.gz`, for amd64 and arm64. `lnomad` is a plain terminal program. `lblogd` installs and starts a systemd service that serves on `http://127.0.0.1:8180/` until you point it at a domain in `/etc/lblogd/config.toml`. Both need a running Reticulum instance for their mesh side — `lnsd` from the package above, or the Python `rnsd`.
+Download them from the same [nightly directory](https://leviculum.network/releases/nightly/latest/) (mirror: the [Codeberg release](https://codeberg.org/Lew_Palm/leviculum/releases/tag/nightly)), as `.deb` or as a userspace `.tar.gz`, for amd64 and arm64. `lnomad` is a plain terminal program. `lblogd` installs and starts a systemd service that serves on `http://127.0.0.1:8180/` until you point it at a domain in `/etc/lblogd/config.toml`. Both need a running Reticulum instance for their mesh side — `lnsd` from the package above, or the Python `rnsd`.
 
 ### Build from source
 
@@ -112,7 +121,7 @@ cargo test-core      # unit tests
 cargo test-interop   # against Python Reticulum (needs Docker and the submodule)
 ```
 
-See the [installation guide](https://codeberg.org/Lew_Palm/leviculum/src/branch/master/docs/src/guide/installation.md) for all cargo aliases and test levels.
+See the [installation guide](https://leviculum.network/docs/guide/installation.html) for all cargo aliases and test levels.
 
 #### Flashing LoRa hardware (optional)
 
@@ -122,7 +131,8 @@ bundle holding the flasher, one firmware image per supported board, and
 Nordic's S140 SoftDevice with its licence for the board that can need it:
 
 ```sh
-wget https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz
+wget https://leviculum.network/releases/nightly/latest/lnflash-nightly-amd64.tar.gz
+# mirror: https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz
 tar xzf lnflash-nightly-amd64.tar.gz
 cd lnflash-*
 sudo ./lnflash            # add --dry-run first to see what it would do
@@ -150,7 +160,7 @@ deliberately carries no SoftDevice, because every RAK we have met already runs
 a usable one — it stops and tells you what it found rather than flashing into
 a brick. The mechanism, and the board that spent weeks written off
 as bricked, are in
-[docs/src/concepts/lnode-flashing.md](https://codeberg.org/Lew_Palm/leviculum/src/branch/master/docs/src/concepts/lnode-flashing.md).
+[Flashing an LNode](https://leviculum.network/docs/concepts/lnode-flashing.html).
 
 To build the firmware from this checkout instead, install the embedded
 toolchain once — the target itself, `flip-link` (the firmware's linker), and
@@ -200,7 +210,7 @@ pip install --user ziglang
 Report bugs and ask questions at
 <https://codeberg.org/Lew_Palm/leviculum/issues>. When the daemon is
 involved, attach the output of `lnstest diag` (see the
-[quickstart](docs/src/lnsd-quickstart.md) for the exact command). For
+[quickstart](https://leviculum.network/docs/lnsd-quickstart.html) for the exact command). For
 patches, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 A suspected security vulnerability is the one thing that does not belong in

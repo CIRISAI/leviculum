@@ -66,9 +66,12 @@ boards_built() {  # <lnflash-bundle.sh>
 # Node T114") and a guard that has to recognise all five recognises none of
 # them reliably. The backticked key is the same token the bundle, the
 # catalogue and `lnflash --board` use, so there is exactly one spelling to
-# agree on.
+# agree on. A `#` line inside a code fence is a shell comment (the README's
+# "# mirror:" lines), not the heading that ends the section.
 boards_advertised() {  # <README.md>
     awk '
+        /^```/ { fenced = !fenced; next }
+        fenced { next }
         /^#### Flashing LoRa hardware/ { inside = 1; next }
         inside && /^#/ { inside = 0 }
         inside && match($0, /^\| `[a-z0-9_-]+`/) {
