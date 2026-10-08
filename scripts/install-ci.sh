@@ -329,6 +329,21 @@ echo "[install-ci] licence tooling: cargo-about 0.9.2 (just notices / just notic
 cargo install --locked mdbook --version 0.4.48
 echo "[install-ci] book renderer: mdbook 0.4.48 (scripts/build-docs-tarball.sh)"
 
+# 6b3. The nightly packaging toolchain (517). `just nightly-publish` builds
+#     and publishes the nightly on the tier-2 nightly host, so the forge's
+#     build steps' tools live here now: both musl targets, cargo-deb for
+#     the packages, and cargo-zigbuild with a pip-installed ziglang as the
+#     arm64 cross linker (scripts/build-deb.sh). musl-gcc, which links the
+#     amd64 build, is the apt package musl-tools.
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+cargo install --locked cargo-deb
+cargo install --locked cargo-zigbuild
+python3 -c 'import ziglang' 2>/dev/null ||
+    python3 -m pip install --user --break-system-packages ziglang
+command -v musl-gcc >/dev/null 2>&1 ||
+    echo "[install-ci] Hint: sudo apt install musl-tools (needed for the musl .deb builds)"
+echo "[install-ci] nightly packaging: musl targets + cargo-deb + cargo-zigbuild + ziglang (just nightly-publish)"
+
 # 6c. ESP32-S3 (Xtensa) firmware toolchain.  ESP32-S3 is an Xtensa part,
 #     not RISC-V, so stock rustc cannot target it at all: there is no
 #     `rustup target add xtensa-esp32s3-none-elf`, and the esp-rs fork of

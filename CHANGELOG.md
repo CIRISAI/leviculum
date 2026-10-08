@@ -20,6 +20,12 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- The nightly is built and published by `just nightly-publish` on the
+  machine that runs the tier-2 nightly, from the tree that night tested,
+  after a green night (leviculum#517, refs #260). The forge pipeline keeps
+  its test gate and its builds; its publish steps run only when started by
+  hand. `LEVICULUM_PUBLISH_DRY_RUN=1` builds everything and uploads nothing.
+
 - leviculum.network gets a landing page, a download page, a source page and
   a board list (leviculum#498, refs #260), shipped in the lblogd package
   under `/usr/share/lblogd/pages/` and served when `pages_dir` points there;

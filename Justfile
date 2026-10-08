@@ -320,7 +320,7 @@ nrf-shellcheck:
         scripts/check-plain-clone.sh \
         scripts/check-changelog-links.sh \
         scripts/publish-nightly.sh scripts/test-publish-nightly.sh \
-        scripts/publish-site.sh scripts/test-site-publish.sh \
+        scripts/publish-site.sh scripts/test-site-publish.sh scripts/nightly-publish.sh \
         packaging/site/lev-receive-nightly packaging/site/lev-unpack-docs scripts/test-site-unpack-docs.sh scripts/build-docs-tarball.sh \
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh scripts/lnflash-bundle.sh \
@@ -1777,6 +1777,20 @@ deb-heapacct arch="amd64": (_require-cargo-deb) _deb-stamp
 # per-package versions.
 [doc('Build every .deb, both architectures, on one shared build id')]
 build-deb: build-deb-amd64 build-deb-arm64
+
+# The nightly release, built and published from this tree (517). Runs on the
+# tier-2 nightly host after a GRUEN night, with
+# LEVICULUM_PUBLISH_FROM_GREEN_RUN=<the sha it just tested>, and refuses a HEAD
+# no green night covers. Both .deb architectures, the lnflash bundle, the
+# book, dist/, then the site and the forge's rolling release; a second run on
+# the same build id republishes the same dist/ without rebuilding.
+# LEVICULUM_PUBLISH_DRY_RUN=1 builds everything and uploads nothing.
+# Credentials are files: ~/.config/leviculum-site/{id,known_hosts} and
+# ~/.config/codeberg-token. The script's header lists every knob; the flow is
+# in docs/src/development-ci.md.
+[doc('Build the nightly from this tree and publish it (site + forge)')]
+nightly-publish:
+    @bash scripts/nightly-publish.sh
 
 # Structural check on the built .debs: metadata, per-package versions,
 # file layout, conffiles, unit validity, maintainer-script syntax. Needs

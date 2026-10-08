@@ -108,7 +108,7 @@ refs/nightly/green/<YYYYMMDDTHHMMSSZ>  ->  <tested commit>
 ```
 
 and `scripts/publish-nightly.sh` refuses, before it touches the forge,
-any commit those refs do not cover. Three conditions, and a refusal
+any commit those refs do not cover. Four conditions, and a refusal
 always names which one failed:
 
 | Condition | Meaning |
@@ -116,6 +116,7 @@ always names which one failed:
 | `NO-SIGNAL` | there is no `refs/nightly/green/*` on the remote, or it could not be read |
 | `NOT-COVERED` | no green ref names this commit or a descendant of it — no nightly has seen this code |
 | `TOO-OLD` | the newest covering ref is older than the staleness bound (72 h) |
+| `GREEN-RUN-MISMATCH` | `LEVICULUM_PUBLISH_FROM_GREEN_RUN` names another commit than the one under publish (see below) |
 
 The 72 h bound is measured, not assumed: over 2026-08-22..09-22 the
 nightly timer produced 27 runs with a median gap of 24 h, every gap
@@ -127,6 +128,43 @@ is already ~24 h old. 72 h therefore accepts the ordinary day plus one
 missed night and refuses two.
 
 ### What fires the publish
+
+Since 2026-10-08 (Lew's decision, leviculum 517) the nightly is
+published from the nightly host, not from the forge. After a GRUEN
+night, the tier-2 nightly runs `just nightly-publish` in the very tree
+it tested, seconds after it pushed the green ref:
+
+```
+LEVICULUM_PUBLISH_FROM_GREEN_RUN=<tested sha> \
+  just --justfile <tree>/Justfile --working-directory <tree> nightly-publish
+```
+
+`scripts/nightly-publish.sh` checks every tool and credential file
+first, refuses a dirty tree, and asks `scripts/check-nightly-green.sh`
+whether HEAD may go out. `LEVICULUM_PUBLISH_FROM_GREEN_RUN` is accepted
+only when it equals HEAD; it exists because the forge may not yet serve
+the ref the night pushed a moment earlier. Then it runs the scripts the
+forge pipeline ran, in the same order: `deb-stamp.sh`, `build-deb.sh`
+for amd64 and arm64, `lnflash-bundle.sh` with the firmware built,
+`build-docs-tarball.sh`, `collect-nightly-debs.sh` into `dist/`, then
+`publish-site.sh` and `publish-nightly.sh`, each of the two whatever
+the other did. The credentials are files on that host:
+`~/.config/leviculum-site/{id,known_hosts}` (the site target and port
+follow from the pinned `known_hosts` line) and
+`~/.config/codeberg-token`, read only when `CODEBERG_TOKEN` is unset.
+A second run on the same build id (one commit, one UTC day) publishes
+the same `dist/` again rather than rebuilding, because the packages
+are not byte-reproducible and the site refuses a known build id with
+different contents. `LEVICULUM_PUBLISH_DRY_RUN=1` builds everything
+and has both publish scripts say what they would upload, uploading
+nothing.
+
+The forge's `nightly.yml` keeps its gate and its builds on the cron;
+its `package`, `publish` and `publish-site` steps run only on a
+**manual** run started from the Woodpecker UI, the fallback for a night
+the host cannot publish, and go away once the recipe has published
+twice. The rest of this section describes the forge path as it was
+until then.
 
 The publish is fired by the green ref, not by the clock. Since
 2026-09-24 the reviewer host polls the forge every ten minutes and, as
