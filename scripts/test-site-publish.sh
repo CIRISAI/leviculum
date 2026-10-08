@@ -19,7 +19,9 @@
 #   missing-pair       a payload file without its .sha256, and the reverse
 #   empty-upload       an empty stream, and an archive with no payload files
 #   bad-build-id       missing, multi-line, path-shaped, and `latest`
-#   already-published  the same build id twice
+#   republish-identical  the same build twice: done, exit 0, tree untouched
+#   republish-different  the same id, one digest changed: refused, file named
+#   republish-other-set  the same id, a file more or a file fewer: refused
 #   second-build       `latest` swaps, the first build stays downloadable
 #   prune              KEEP+1 builds: the oldest goes, `latest`'s never does
 #   hostile-env        `env -i`, a broken PATH and a hostile IFS: still works
@@ -360,18 +362,89 @@ done
 
 # --- Case: the same build twice -------------------------------------------
 #
-# Re-running a nightly that already published must not half-replace what is
-# already under its URL.
-echo "[case] already-published"
+# A forge that runs two pipelines on one commit uploads the same build twice
+# (2026-10-08: the scheduled and the ref-triggered pipeline on ed0754e4).
+# The second upload is done, not failed, and it touches nothing: not a file,
+# not a mode, not the `latest` link's own mtime.
+#
+# The snapshot lists every entry under the root with its type, mode, mtime,
+# link target and, for a file, its digest. The root itself is left out: every
+# run makes and removes its staging directory there, which moves the root's
+# mtime and nothing a reader can see.
+tree_snapshot() {
+    local path
+    (cd "$ROOT" && find . -mindepth 1 -printf '%y %m %T@ %p -> %l\n' | sort) || return 1
+    for path in $(cd "$ROOT" && find . -type f | sort); do
+        (cd "$ROOT" && sha256sum "$path")
+    done
+}
+
+echo "[case] republish-identical"
 before=$failures
-new_root already-published
+new_root republish-identical
 build_tar "$WORK/first.tar" "$ID1"
 receive "$WORK/first.tar"
-[ "$RC" -eq 0 ] || fail "already-published: the setup upload failed"
+[ "$RC" -eq 0 ] || fail "republish-identical: the setup upload failed"
+tree_snapshot >"$WORK/tree.before"
+# A fresh tar of the same build, as a second pipeline would make it.
+build_tar "$WORK/again.tar" "$ID1"
+receive "$WORK/again.tar"
+[ "$RC" -eq 0 ] || fail "republish-identical: exit $RC, expected 0"
+[ -s "$WORK/err" ] && fail "republish-identical: wrote to stderr: $(cat "$WORK/err")"
+grep -q 'already published, identical' "$WORK/out" ||
+    fail "republish-identical: stdout does not say so: $(cat "$WORK/out")"
+tree_snapshot >"$WORK/tree.after"
+cmp -s "$WORK/tree.before" "$WORK/tree.after" ||
+    fail "republish-identical: the tree changed: $(diff "$WORK/tree.before" "$WORK/tree.after")"
+[ "$failures" -eq "$before" ] || dump
+
+# The same id with one digest changed is a different build under a known
+# URL: refused, the tree as it was, and the message names the file. The
+# changed file is the second one in name order, so naming the first file
+# would not pass.
+echo "[case] republish-different"
+before=$failures
+new_root republish-different
+build_tar "$WORK/first.tar" "$ID1"
 receive "$WORK/first.tar"
-assert_refused already-published "$ID1" "$ID1 "
-grep -q 'already published' "$WORK/err" ||
-    fail "already-published: stderr does not say why: $(cat "$WORK/err")"
+[ "$RC" -eq 0 ] || fail "republish-different: the setup upload failed"
+d="$WORK/stage.$ID1"
+echo "rebuilt" >>"$d/leviculum-nightly-arm64.tar.gz"
+(cd "$d" && sha256sum leviculum-nightly-arm64.tar.gz >leviculum-nightly-arm64.tar.gz.sha256)
+mktar "$WORK/changed.tar" "$d"
+receive "$WORK/changed.tar"
+assert_refused republish-different "$ID1" "$ID1 "
+grep -q "already published at .* with different contents: 'leviculum-nightly-arm64.tar.gz' differs" "$WORK/err" ||
+    fail "republish-different: stderr does not name the file: $(cat "$WORK/err")"
+[ "$(latest_payload)" = "payload of leviculum-nightly-amd64.deb in build $ID1" ] ||
+    fail "republish-different: the file served through latest changed"
+grep -qx "payload of leviculum-nightly-arm64.tar.gz in build $ID1" \
+    "$ROOT/nightly/$ID1/leviculum-nightly-arm64.tar.gz" ||
+    fail "republish-different: the published file was replaced"
+[ "$failures" -eq "$before" ] || dump
+
+# A file the published build does not have is a difference as well, and so
+# is a published file the upload lacks.
+echo "[case] republish-other-set"
+before=$failures
+new_root republish-other-set
+build_tar "$WORK/first.tar" "$ID1"
+receive "$WORK/first.tar"
+[ "$RC" -eq 0 ] || fail "republish-other-set: the setup upload failed"
+d="$WORK/stage.$ID1"
+echo "extra" >"$d/leviculum-nightly-riscv.deb"
+(cd "$d" && sha256sum leviculum-nightly-riscv.deb >leviculum-nightly-riscv.deb.sha256)
+mktar "$WORK/extra.tar" "$d"
+receive "$WORK/extra.tar"
+assert_refused republish-other-set-extra "$ID1" "$ID1 "
+grep -q "'leviculum-nightly-riscv.deb' is not in the published build" "$WORK/err" ||
+    fail "republish-other-set: an extra file is not named: $(cat "$WORK/err")"
+rm -f "$d"/leviculum-nightly-riscv.deb* "$d"/leviculum-nightly-arm64.tar.gz*
+mktar "$WORK/fewer.tar" "$d"
+receive "$WORK/fewer.tar"
+assert_refused republish-other-set-fewer "$ID1" "$ID1 "
+grep -q "'leviculum-nightly-arm64.tar.gz' is published but not in the upload" "$WORK/err" ||
+    fail "republish-other-set: a missing file is not named: $(cat "$WORK/err")"
 [ "$failures" -eq "$before" ] || dump
 
 # --- Case: a second build -------------------------------------------------

@@ -31,7 +31,11 @@
 #   * an empty upload, or one with no payload file in it,
 #   * a missing, multi-line or unsafe `BUILD_ID`, `latest` among them — that
 #     is the name of the pointer symlink,
-#   * a build id that is already published.
+#   * a build id that is already published with different contents.
+#
+# A build id that is already published with the SAME contents (the same
+# checksum files, the same digests) is not a refusal: it is reported as
+# done, exit 0, and nothing is touched.
 #
 # A refusal is one line on stderr and a non-zero exit. Partially-verified
 # files never leave the staging directory, which is removed on every exit
@@ -226,8 +230,51 @@ done
 
 # --- 6. Publish -----------------------------------------------------------
 TARGET="$NIGHTLY/$build_id"
-[ ! -e "$TARGET" ] ||
-    die "build '${build_id}' is already published at ${TARGET}"
+
+# The same build id again. A DIFFERENT build under a known id is refused:
+# that is a download URL changing what it serves. The SAME build again is
+# not that case, and refusing it would turn a correct state into a red
+# pipeline: a forge that runs two pipelines on one commit uploads the same
+# bytes twice. The ids name the commit and every file carries its sha256,
+# so "the same build" is decidable here: the same set of checksum files with
+# the same digests. Then nothing is touched, `latest` included, and the
+# upload is reported done. The published side is this host's own state, so
+# its checksum files are read, not re-verified.
+if [ -e "$TARGET" ]; then
+    differs=""
+    for name in "${entries[@]}"; do
+        case "$name" in
+        *.sha256) ;;
+        *) continue ;;
+        esac
+        if [ ! -f "$TARGET/$name" ]; then
+            differs="'${name%.sha256}' is not in the published build"
+            break
+        fi
+        want=""
+        have=""
+        IFS=' ' read -r want _ <"$PAYLOAD/$name" || true
+        IFS=' ' read -r have _ <"$TARGET/$name" || true
+        if [ "$want" != "$have" ]; then
+            differs="'${name%.sha256}' differs"
+            break
+        fi
+    done
+    if [ -z "$differs" ]; then
+        for path in "$TARGET"/*.sha256; do
+            name="${path##*/}"
+            if [ ! -f "$PAYLOAD/$name" ]; then
+                differs="'${name%.sha256}' is published but not in the upload"
+                break
+            fi
+        done
+    fi
+    if [ -z "$differs" ]; then
+        say "already published, identical: ${build_id} (${payload_files} file(s)), nothing changed"
+        exit 0
+    fi
+    die "build '${build_id}' is already published at ${TARGET} with different contents: ${differs}"
+fi
 
 # Readable by the web server's user, writable by nobody else. The archive's
 # own modes were discarded at extraction; this is the mode the tree has.
