@@ -559,7 +559,10 @@ pub(crate) const fn hw_mtu_for_bitrate(bitrate: i64) -> Option<u32> {
 /// Packet to send out through an interface
 #[derive(Default)]
 pub(crate) struct OutgoingPacket {
-    pub data: Vec<u8>,
+    /// The frame. Shared, not owned: a broadcast hands every interface the
+    /// same allocation (`SharedFrame::share`, 513); a task that needs to
+    /// change the bytes copies them itself.
+    pub data: Arc<[u8]>,
     /// High-priority packets (link requests, proofs, channel data) are sent
     /// before normal-priority packets (announce rebroadcasts) on constrained
     /// interfaces like LoRa. Read by RNode send queue (behind `serial` feature).
@@ -757,26 +760,19 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         peer: Option<&[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]>,
         high_priority: bool,
     ) -> Result<(), InterfaceError> {
-        // Airtime-credit check for constrained interfaces. LoRa-Serial
-        // populates `credit`; TCP/UDP/Local leave it `None` and skip the
-        // charge entirely. See `airtime.rs` for the bucket semantics.
-        if let Some(credit) = &self.credit {
-            let mut c = credit.lock_recover();
-            if c.try_charge(data.len() as u32, now_ms()).is_err() {
-                return Err(InterfaceError::BufferFull);
-            }
-        }
-        match self.outgoing.try_send(OutgoingPacket {
-            data: data.to_vec(),
-            high_priority,
-            peer: peer.copied(),
-        }) {
-            Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(InterfaceError::BufferFull),
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err(InterfaceError::Disconnected)
-            }
-        }
+        // The task outlives this call, so a borrowed frame is copied here,
+        // once, at the boundary.
+        self.enqueue(data.len(), || Arc::from(data), peer, high_priority)
+    }
+    fn try_send_shared(
+        &mut self,
+        frame: &mut leviculum_core::traits::SharedFrame,
+        high_priority: bool,
+    ) -> Result<(), InterfaceError> {
+        // A broadcast: every interface handle takes the one shared frame
+        // instead of a copy each (513).
+        let len = frame.as_bytes().len();
+        self.enqueue(len, || frame.share(), None, high_priority)
     }
 
     fn frame_turnaround_ms(&self) -> u64 {
@@ -799,6 +795,46 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         match &self.credit {
             Some(credit) => credit.lock_recover().earliest_fit_time(size as u32, now_ms),
             None => now_ms,
+        }
+    }
+}
+
+impl leviculum_core::traits::AsInterface for InterfaceHandle {
+    fn as_interface(&mut self) -> &mut dyn leviculum_core::traits::Interface {
+        self
+    }
+}
+
+impl InterfaceHandle {
+    /// Charge the airtime credit for `len` bytes and hand the frame `data`
+    /// yields to the interface task. `data` is only called once the credit
+    /// admits the frame, so a refused frame costs no allocation.
+    fn enqueue(
+        &mut self,
+        len: usize,
+        data: impl FnOnce() -> Arc<[u8]>,
+        peer: Option<&[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]>,
+        high_priority: bool,
+    ) -> Result<(), InterfaceError> {
+        // Airtime-credit check for constrained interfaces. LoRa-Serial
+        // populates `credit`; TCP/UDP/Local leave it `None` and skip the
+        // charge entirely. See `airtime.rs` for the bucket semantics.
+        if let Some(credit) = &self.credit {
+            let mut c = credit.lock_recover();
+            if c.try_charge(len as u32, now_ms()).is_err() {
+                return Err(InterfaceError::BufferFull);
+            }
+        }
+        match self.outgoing.try_send(OutgoingPacket {
+            data: data(),
+            high_priority,
+            peer: peer.copied(),
+        }) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(InterfaceError::BufferFull),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err(InterfaceError::Disconnected)
+            }
         }
     }
 }

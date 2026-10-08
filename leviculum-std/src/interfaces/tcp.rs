@@ -1766,7 +1766,7 @@ mod tests {
         let payload = vec![0x42u8; 1 << 20];
         outgoing_tx
             .send(OutgoingPacket {
-                data: payload,
+                data: payload.into(),
                 high_priority: false,
                 peer: None,
             })

@@ -407,11 +407,11 @@ pub struct EmbeddedStorage {
     /// receipts must outlive newer ones submitted just after them.
     ///
     /// **Insert paths:**
-    /// - `transport.rs:1359`: `create_receipt`: fresh-key (truncated
+    /// - `transport.rs:1370`: `create_receipt`: fresh-key (truncated
     ///   hash of the just-sent packet).
-    /// - `transport.rs:1379`: `create_receipt_with_timeout`: fresh-key
+    /// - `transport.rs:1390`: `create_receipt_with_timeout`: fresh-key
     ///   (same shape as `create_receipt`).
-    /// - `transport.rs:1399`: `mark_receipt_delivered`: re-insert
+    /// - `transport.rs:1410`: `mark_receipt_delivered`: re-insert
     ///   (read existing receipt, clone, mutate `status` to
     ///   `Delivered`, write back under same hash). This is the only
     ///   re-insert path; it benefits from the refresh because an
@@ -918,6 +918,12 @@ impl Storage for EmbeddedStorage {
 
     fn announce_keys(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
         self.announce_table.keys().copied().collect()
+    }
+
+    fn for_each_announce(&self, f: &mut dyn FnMut(&[u8; TRUNCATED_HASHBYTES], &AnnounceEntry)) {
+        for (key, entry) in self.announce_table.iter() {
+            f(key, entry);
+        }
     }
 
     // Announce Cache

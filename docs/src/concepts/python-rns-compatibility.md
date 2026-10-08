@@ -118,13 +118,13 @@ grounds: an application pinned it, it was used within
 `UNUSED_DESTINATION_LINGER` — 6 minutes
 (`reference/Reticulum/RNS/Identity.py:349-352`, the two timeouts at
 `Transport.py:91-92`). We implement the first two and not the third
-(`leviculum-core/src/memory_storage.rs:1226`): our announce cache stores
+(`leviculum-core/src/memory_storage.rs:1232`): our announce cache stores
 the raw announce, not the moment we heard it, so there is no age to
 compare against. The third arm only ever protects a destination nothing
 has asked about, so dropping it a few minutes early costs a path request
 rather than a fact, and clause 3 of the rule is satisfied by the smaller
 resident set. `EmbeddedStorage` goes one further and implements only the
-first (`leviculum-core/src/embedded_storage.rs:1103`), because a board
+first (`leviculum-core/src/embedded_storage.rs:1109`), because a board
 tracks no use-state at all.
 
 ### Pinned deviation: ingress-control default on dial-out links
@@ -318,13 +318,13 @@ The reference behaves this way on every forwarding path:
 Loop-freedom never came from interface suppression. It comes from
 transport_id addressing (only the addressed relay processes a Type2
 transport packet), the hop-count limit, and packet-hash dedup —
-`has_packet_hash` (`leviculum-core/src/transport.rs:3956`) drops a
+`has_packet_hash` (`leviculum-core/src/transport.rs:3967`) drops a
 repeated copy, `add_packet_hash`
-(`leviculum-core/src/transport.rs:4010`) records it.
+(`leviculum-core/src/transport.rs:4021`) records it.
 
 The forwarding decision lives in the media-agnostic core
 (`forward_on_interface_from`,
-`leviculum-core/src/transport.rs:8677`). Whether the relayed echo
+`leviculum-core/src/transport.rs:8700`). Whether the relayed echo
 needs TX spacing on a half-duplex channel is the interface's business
 — see [Interface Isolation](interface-isolation.md).
 

@@ -991,7 +991,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: response.to_vec(),
+                data: response.to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1113,7 +1113,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"client-to-server".to_vec(),
+                data: b"client-to-server".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1130,7 +1130,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"server-to-client".to_vec(),
+                data: b"server-to-client".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1373,7 +1373,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"after-the-restart".to_vec(),
+                data: b"after-the-restart".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1388,7 +1388,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"and-back".to_vec(),
+                data: b"and-back".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1556,7 +1556,7 @@ mod tests {
         // write_all while the frame's head is already at the peer.
         outgoing_tx
             .send(OutgoingPacket {
-                data: vec![0x42u8; 1 << 20],
+                data: vec![0x42u8; 1 << 20].into(),
                 high_priority: false,
                 peer: None,
             })

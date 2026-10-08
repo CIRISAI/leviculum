@@ -260,7 +260,7 @@ where
 
     // TX gating (flow control).
     let mut interface_ready = true;
-    let mut send_queue: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut send_queue: VecDeque<Arc<[u8]>> = VecDeque::new();
     let mut flow_control_locked_at = Instant::now();
 
     loop {
@@ -628,7 +628,7 @@ mod tests {
         a_out_tx
             .send(OutgoingPacket {
                 peer: None,
-                data: payload.clone(),
+                data: payload.clone().into(),
                 high_priority: false,
             })
             .await
@@ -711,7 +711,7 @@ mod tests {
         a_out_tx
             .send(OutgoingPacket {
                 peer: None,
-                data: announce_bytes.clone(),
+                data: announce_bytes.clone().into(),
                 high_priority: false,
             })
             .await
@@ -851,7 +851,7 @@ mod tests {
         a_out_tx
             .send(OutgoingPacket {
                 peer: None,
-                data: announce_bytes.clone(),
+                data: announce_bytes.clone().into(),
                 high_priority: false,
             })
             .await
@@ -898,7 +898,7 @@ mod tests {
         a_out_tx
             .send(OutgoingPacket {
                 peer: None,
-                data: payload.clone(),
+                data: payload.clone().into(),
                 high_priority: false,
             })
             .await
@@ -938,7 +938,7 @@ mod tests {
         out_tx
             .send(OutgoingPacket {
                 peer: None,
-                data: vec![0x42u8; 64 * 1024],
+                data: vec![0x42u8; 64 * 1024].into(),
                 high_priority: false,
             })
             .await

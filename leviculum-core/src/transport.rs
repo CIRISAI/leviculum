@@ -692,8 +692,8 @@ impl core::fmt::Display for DispatchLoss<'_> {
     }
 }
 
-pub fn dispatch_actions(
-    interfaces: &mut [&mut dyn crate::traits::Interface],
+pub fn dispatch_actions<I: crate::traits::AsInterface>(
+    interfaces: &mut [I],
     actions: Vec<Action>,
     ifac_configs: &BTreeMap<usize, IfacConfig>,
 ) -> DispatchResult {
@@ -717,7 +717,11 @@ pub fn dispatch_actions(
                     },
                     None => data,
                 };
-                if let Some(iface_obj) = interfaces.iter_mut().find(|i| i.id() == iface) {
+                if let Some(iface_obj) = interfaces
+                    .iter_mut()
+                    .map(|i| i.as_interface())
+                    .find(|i| i.id() == iface)
+                {
                     // SendPacket = directed traffic (link requests, proofs, channel data)
                     // → high priority on constrained interfaces like LoRa.
                     // `peer` rides along as the delivery hint (Codeberg
@@ -765,7 +769,11 @@ pub fn dispatch_actions(
                 exclude_ifaces,
                 exclude_peer,
             } => {
-                for iface_obj in interfaces.iter_mut() {
+                // One frame for every interface: an interface that must own
+                // the bytes shares it instead of copying it (513).
+                let mut frame = crate::traits::SharedFrame::new(data);
+                for slot in interfaces.iter_mut() {
+                    let iface_obj = slot.as_interface();
                     // The ingress interface. Excluded whole unless the
                     // action also names the link the bytes arrived on, in
                     // which case the interface itself decides which of its
@@ -781,7 +789,7 @@ pub fn dispatch_actions(
                     }
                     let iface_idx = iface_obj.id().0;
                     let wrapped = match ifac_configs.get(&iface_idx) {
-                        Some(cfg) => match cfg.apply_ifac(&data) {
+                        Some(cfg) => match cfg.apply_ifac(frame.as_bytes()) {
                             Ok(wrapped) => Some(wrapped),
                             Err(e) => {
                                 crate::tracing::warn!(
@@ -794,11 +802,14 @@ pub fn dispatch_actions(
                         },
                         None => None,
                     };
-                    let bytes = wrapped.as_deref().unwrap_or(&data);
                     // Broadcast = announce rebroadcasts → normal priority
-                    let result = match spare_one_link {
-                        Some(peer) => iface_obj.try_send_excluding_peer(bytes, peer, false),
-                        None => iface_obj.try_send_prioritized(bytes, false),
+                    let result = match (spare_one_link, wrapped) {
+                        (Some(peer), wrapped) => {
+                            let bytes = wrapped.as_deref().unwrap_or(frame.as_bytes());
+                            iface_obj.try_send_excluding_peer(bytes, peer, false)
+                        }
+                        (None, Some(wrapped)) => iface_obj.try_send_prioritized(&wrapped, false),
+                        (None, None) => iface_obj.try_send_shared(&mut frame, false),
                     };
                     if let Err(e) = result {
                         errors.push((iface_obj.id(), e));
@@ -4555,14 +4566,25 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // further traffic arrives (Python runs should_ingress_limit[_pr] in its
         // periodic jobs loop, Transport.py:941-942). The return value is unused
         // here; only the state transition matters.
-        let ingress_ifaces: Vec<usize> = self.interface_ingress_burst.keys().copied().collect();
-        for iface in ingress_ifaces {
+        //
+        // Walked by key cursor, not a collected key list: this runs on every
+        // poll and the list was an allocation each time (513). The two calls
+        // touch only `iface`'s own burst entry, so the walk sees the same
+        // keys a snapshot would.
+        let mut cursor = self.interface_ingress_burst.keys().next().copied();
+        while let Some(iface) = cursor {
             // Skip interfaces whose ingress control is off (Codeberg #8): they
             // never limit, so their burst state must not advance on the cadence.
             if self.interface_ingress_control(iface) {
                 self.should_ingress_limit(iface);
                 self.should_ingress_limit_pr(iface);
             }
+            use core::ops::Bound::{Excluded, Unbounded};
+            cursor = self
+                .interface_ingress_burst
+                .range((Excluded(iface), Unbounded))
+                .next()
+                .map(|(&next, _)| next);
         }
 
         // Codeberg #87: release held announces on the poll cadence (Python runs
@@ -4705,13 +4727,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // (`schedule_own_announce_retry`) and its local clients'. Gating the
         // deadline but not the scheduler let those entries fire only when
         // some unrelated timer happened to wake the driver first.
-        for key in self.storage.announce_keys() {
-            if let Some(entry) = self.storage.get_announce(&key) {
-                if let Some(retransmit_at) = entry.retransmit_at_ms {
-                    update(retransmit_at);
-                }
+        // Walked by reference: a key list built here on every scan was the
+        // largest allocation by bytes on a relay holding thousands of
+        // announces (513).
+        self.storage.for_each_announce(&mut |_, entry| {
+            if let Some(retransmit_at) = entry.retransmit_at_ms {
+                update(retransmit_at);
             }
-        }
+        });
 
         // Link table expiry deadlines
         if let Some(deadline) = self.storage.earliest_link_deadline(LINK_TIMEOUT_MS) {
@@ -5510,7 +5533,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3934. A destination with no cached
+    /// link-request path uses at transport.rs:3945. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6305,7 +6328,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1553 ran in the
+        // Gate on the already-incremented hops (transport.rs:1564 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -8851,13 +8874,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 Vec::new()
             };
 
-            self.push_broadcast(
-                buf[..len].to_vec(),
-                None,
-                None,
-                exclude_ifaces,
-                Some(ph8(&seed_hash)),
-            );
+            // The packed buffer is the frame; no second copy of it.
+            buf.truncate(len);
+            self.push_broadcast(buf, None, None, exclude_ifaces, Some(ph8(&seed_hash)));
             self.stats.packets_forwarded += 1;
             return true;
         }
@@ -10142,17 +10161,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Used when a Broadcast action is emitted for an announce.
     fn record_outgoing_announce_broadcast(&mut self, except: usize) {
         let now = self.clock.now_ms();
-        let ifaces: Vec<usize> = self
-            .interface_names
-            .keys()
-            .copied()
-            .filter(|&i| i != except)
-            .collect();
-        for iface in ifaces {
-            let deque = self
-                .interface_outgoing_announce_times
-                .entry(iface)
-                .or_default();
+        // Two disjoint fields, so the names are walked in place rather than
+        // collected first: this runs for every announce the scheduler
+        // broadcasts, and the list was an allocation each time (513).
+        let times = &mut self.interface_outgoing_announce_times;
+        for &iface in self.interface_names.keys().filter(|&&i| i != except) {
+            let deque = times.entry(iface).or_default();
             if deque.len() >= ANNOUNCE_FREQ_SAMPLES {
                 deque.pop_front();
             }
@@ -11265,7 +11279,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2460`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2471`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -11871,98 +11885,99 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // interface_hw_mtus as the authoritative "known interfaces" set
         // (populated at driver registration), falling back through the
         // getter's unwrap_or(now) for interfaces without a pushed slot.        // those count as "ready now" and prevent deferral.
-        let keys = self.storage.announce_keys();
-        for dest_hash in keys {
-            if let Some(entry) = self.storage.get_announce(&dest_hash) {
-                // Remove entries that have exceeded retries or local rebroadcast limit
-                if entry.retries > PATHFINDER_RETRIES
-                    || entry.local_rebroadcasts >= LOCAL_REBROADCASTS_MAX
-                {
-                    to_remove.push(dest_hash);
-                    continue;
-                }
+        // Read by reference, mutated after: the scheduler runs on every
+        // poll, and collecting the keys first was an allocation the size of
+        // the table each time (513).
+        self.storage.for_each_announce(&mut |dest_hash, entry| {
+            let dest_hash = *dest_hash;
+            // Remove entries that have exceeded retries or local rebroadcast limit
+            if entry.retries > PATHFINDER_RETRIES
+                || entry.local_rebroadcasts >= LOCAL_REBROADCASTS_MAX
+            {
+                to_remove.push(dest_hash);
+                return;
+            }
 
-                // Retire an entry that will never retransmit once its rate
-                // window has closed. Both conditions above are counters that
-                // only advance when an entry FIRES, so an entry inserted
-                // without a schedule (a leaf node's `enable_transport =
-                // false` arm in handle_announce, and any entry whose retry
-                // was cancelled by a neighbour echo) could never reach
-                // either, and lived until the same destination announced
-                // again — carrying a second full copy of the announce in
-                // `raw_packet` beside `announce_cache` the whole time.
-                //
-                // `announce_rate_limit_ms` is the honest lifetime, not a
-                // guess: the ONLY reader of an unscheduled entry is
-                // handle_announce's rate gate, which compares `now -
-                // timestamp_ms` against exactly this window (and counts
-                // neighbour echoes inside it). Past the window the entry
-                // changes no decision. The reference never creates one at
-                // all — it inserts only under `transport_enabled() or
-                // is_from_local_client` (Transport.py:1886) and pops on the
-                // local-rebroadcast limit (:1731); we keep ours for the
-                // window because we use it as the rate window and Python
-                // uses a separate table for that.
-                if entry.retransmit_at_ms.is_none()
-                    && now.saturating_sub(entry.timestamp_ms) >= self.config.announce_rate_limit_ms
-                {
-                    to_remove.push(dest_hash);
-                    continue;
-                }
+            // Retire an entry that will never retransmit once its rate
+            // window has closed. Both conditions above are counters that
+            // only advance when an entry FIRES, so an entry inserted
+            // without a schedule (a leaf node's `enable_transport =
+            // false` arm in handle_announce, and any entry whose retry
+            // was cancelled by a neighbour echo) could never reach
+            // either, and lived until the same destination announced
+            // again — carrying a second full copy of the announce in
+            // `raw_packet` beside `announce_cache` the whole time.
+            //
+            // `announce_rate_limit_ms` is the honest lifetime, not a
+            // guess: the ONLY reader of an unscheduled entry is
+            // handle_announce's rate gate, which compares `now -
+            // timestamp_ms` against exactly this window (and counts
+            // neighbour echoes inside it). Past the window the entry
+            // changes no decision. The reference never creates one at
+            // all — it inserts only under `transport_enabled() or
+            // is_from_local_client` (Transport.py:1886) and pops on the
+            // local-rebroadcast limit (:1731); we keep ours for the
+            // window because we use it as the rate window and Python
+            // uses a separate table for that.
+            if entry.retransmit_at_ms.is_none()
+                && now.saturating_sub(entry.timestamp_ms) >= self.config.announce_rate_limit_ms
+            {
+                to_remove.push(dest_hash);
+                return;
+            }
 
-                // Check if retransmit is due
-                if let Some(retransmit_at) = entry.retransmit_at_ms {
-                    if retransmit_at <= now && !entry.raw_packet.is_empty() {
-                        // Ask the next-slot backchannel whether the target(s)
-                        // can accept this packet now.
-                        let defer_to: Option<u64> = match entry.target_interface {
-                            Some(idx) => {
-                                let slot = self.next_slot_ms_for_interface(idx, now);
-                                (slot > now).then_some(slot)
-                            }
-                            None => {
-                                // Broadcast: defer only if every registered
-                                // interface reports a future slot. If any is
-                                // ready now, push, the dispatcher filters
-                                // per-interface via try_send_prioritized.
-                                let mut all_future = true;
-                                let mut min_slot = u64::MAX;
-                                let mut any_iface = false;
-                                for &iface_idx in self.interface_hw_mtus.keys() {
-                                    any_iface = true;
-                                    let slot = self.next_slot_ms_for_interface(iface_idx, now);
-                                    if slot <= now {
-                                        all_future = false;
-                                        break;
-                                    }
-                                    if slot < min_slot {
-                                        min_slot = slot;
-                                    }
-                                }
-                                if any_iface && all_future {
-                                    Some(min_slot)
-                                } else {
-                                    None
-                                }
-                            }
-                        };
-
-                        if let Some(slot) = defer_to {
-                            to_defer.push((dest_hash, slot));
-                        } else {
-                            to_rebroadcast.push((
-                                dest_hash,
-                                entry.raw_packet.clone(),
-                                entry.receiving_interface_index,
-                                entry.hops,
-                                entry.block_rebroadcasts,
-                                entry.target_interface,
-                            ));
+            // Check if retransmit is due
+            if let Some(retransmit_at) = entry.retransmit_at_ms {
+                if retransmit_at <= now && !entry.raw_packet.is_empty() {
+                    // Ask the next-slot backchannel whether the target(s)
+                    // can accept this packet now.
+                    let defer_to: Option<u64> = match entry.target_interface {
+                        Some(idx) => {
+                            let slot = self.next_slot_ms_for_interface(idx, now);
+                            (slot > now).then_some(slot)
                         }
+                        None => {
+                            // Broadcast: defer only if every registered
+                            // interface reports a future slot. If any is
+                            // ready now, push, the dispatcher filters
+                            // per-interface via try_send_prioritized.
+                            let mut all_future = true;
+                            let mut min_slot = u64::MAX;
+                            let mut any_iface = false;
+                            for &iface_idx in self.interface_hw_mtus.keys() {
+                                any_iface = true;
+                                let slot = self.next_slot_ms_for_interface(iface_idx, now);
+                                if slot <= now {
+                                    all_future = false;
+                                    break;
+                                }
+                                if slot < min_slot {
+                                    min_slot = slot;
+                                }
+                            }
+                            if any_iface && all_future {
+                                Some(min_slot)
+                            } else {
+                                None
+                            }
+                        }
+                    };
+
+                    if let Some(slot) = defer_to {
+                        to_defer.push((dest_hash, slot));
+                    } else {
+                        to_rebroadcast.push((
+                            dest_hash,
+                            entry.raw_packet.clone(),
+                            entry.receiving_interface_index,
+                            entry.hops,
+                            entry.block_rebroadcasts,
+                            entry.target_interface,
+                        ));
                     }
                 }
             }
-        }
+        });
 
         for hash in to_remove {
             self.storage.remove_announce(&hash);
@@ -17421,7 +17436,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7031), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7054), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -23131,7 +23146,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1553) before
+        // The inbound path increments hops once (transport.rs:1564) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

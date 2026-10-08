@@ -124,8 +124,9 @@ Three things to notice:
    must match the interface's own `id()`, so the core's routing tables and
    broadcast-exclusion stay consistent.
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
-   yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice to
-   `dispatch_actions` (`leviculum-core/src/transport.rs:695`). Broadcast
+   yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice
+   (or a slice of your own interface type, through `AsInterface`) to the
+   generic `dispatch_actions` (`leviculum-core/src/transport.rs:695`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free. Bind what it returns: the `DispatchResult` is
    `#[must_use]` because dropping it discards the retries the core asked for,
@@ -191,13 +192,13 @@ impl Clock for EmbassyClock {
 ```
 
 `now_secs`, `has_elapsed`, and `deadline` have default implementations
-(`leviculum-core/src/traits.rs:471-483`); you only provide `now_ms`. It must be
+(`leviculum-core/src/traits.rs:560-572`); you only provide `now_ms`. It must be
 monotonic.
 
 ### `Interface`
 
 The **send side** of an interface — `id`, `name`, `mtu`, `is_online`, and the
-non-blocking `try_send` (`leviculum-core/src/traits.rs:280`). The receive side is
+non-blocking `try_send` (`leviculum-core/src/traits.rs:354`). The receive side is
 deliberately *not* in the trait: receiving is platform-specific (an interrupt, a
 DMA buffer, an Embassy channel), and you feed received bytes into the core via
 `handle_packet` yourself. `try_send` returns `InterfaceError::BufferFull`
@@ -224,14 +225,14 @@ impl Interface for MyRadio {
 ```
 
 A constrained medium (LoRa) overrides `next_slot_ms`
-(`leviculum-core/src/traits.rs:365`) to report the next airtime-fit time, so the
+(`leviculum-core/src/traits.rs:454`) to report the next airtime-fit time, so the
 core schedules retries against capacity without knowing any radio physics — the
 [interface-isolation rule](choosing-a-layer.md). For a fast link the default
 ("always ready") is correct.
 
 An interface that carries several point-to-point links behind one
 `InterfaceId` (BLE) overrides `try_send_to_peer`
-(`leviculum-core/src/traits.rs:317`): the core passes the 16-byte
+(`leviculum-core/src/traits.rs:406`): the core passes the 16-byte
 identity of the peer it addressed the packet at — the same value the
 interface reports on peer-up/peer-lost — or `None` for a broadcast.
 The interface maps that identity to its own link(s); the core never
@@ -241,10 +242,10 @@ a single-peer interface implements nothing.
 ### `Storage`
 
 Key-value persistence for the path table, link table, announce caches,
-identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:500`). It
+identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:589`). It
 is a large trait; you do not write it from scratch:
 
-- `NoStorage` (`leviculum-core/src/traits.rs:920`) — zero-sized, every lookup
+- `NoStorage` (`leviculum-core/src/traits.rs:1026`) — zero-sized, every lookup
   returns nothing. Use it for a stateless node or a smoke test.
 - `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:91`,
   `EmbeddedStorage::new()` at `:344`) — `heapless`-backed, fixed-capacity, the

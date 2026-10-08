@@ -220,6 +220,80 @@ impl core::fmt::Display for InterfaceKind {
     }
 }
 
+/// What [`dispatch_actions`](crate::transport::dispatch_actions) needs from
+/// an element of its interface slice: the interface behind it.
+///
+/// Implemented for `&mut dyn Interface`, the slice a board builds over its
+/// fixed set of interfaces, and by a driver for the type it already keeps
+/// its interfaces in. The std driver did not have a slice of trait objects
+/// at hand and collected one on every dispatch, one allocation per tick on
+/// a busy daemon (513); handing its own slice avoids that.
+pub trait AsInterface {
+    /// The interface this slot holds.
+    fn as_interface(&mut self) -> &mut dyn Interface;
+}
+
+impl<'a, 'b> AsInterface for &'a mut (dyn Interface + 'b) {
+    fn as_interface(&mut self) -> &mut dyn Interface {
+        &mut **self
+    }
+}
+
+/// One broadcast frame on its way to several interfaces.
+///
+/// `dispatch_actions` hands every interface of a broadcast the same
+/// `SharedFrame`. An interface that only reads the bytes (a board's radio,
+/// the default [`Interface::try_send_shared`]) borrows them through
+/// [`Self::as_bytes`] and the frame is never copied. An interface that has
+/// to own them past the call, like the std driver's channel to its
+/// interface task, takes [`Self::share`]: the first such caller turns the
+/// buffer into one reference-counted allocation, every later one gets a
+/// reference to it. Before this the std side copied the frame once per
+/// interface it went out on, the largest allocation site on a relay with
+/// many TCP peers (513).
+///
+/// `share` needs a pointer-sized atomic, so it does not exist on targets
+/// without one (thumbv6m); there every interface borrows.
+pub struct SharedFrame {
+    repr: SharedFrameRepr,
+}
+
+enum SharedFrameRepr {
+    Owned(Vec<u8>),
+    #[cfg(target_has_atomic = "ptr")]
+    Shared(alloc::sync::Arc<[u8]>),
+}
+
+impl SharedFrame {
+    /// Wrap the frame the core built.
+    pub fn new(data: Vec<u8>) -> Self {
+        Self {
+            repr: SharedFrameRepr::Owned(data),
+        }
+    }
+
+    /// The frame's bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        match &self.repr {
+            SharedFrameRepr::Owned(data) => data,
+            #[cfg(target_has_atomic = "ptr")]
+            SharedFrameRepr::Shared(data) => data,
+        }
+    }
+
+    /// A reference-counted handle to the frame, allocated on the first call
+    /// and shared by every later one.
+    #[cfg(target_has_atomic = "ptr")]
+    pub fn share(&mut self) -> alloc::sync::Arc<[u8]> {
+        let shared: alloc::sync::Arc<[u8]> = match &mut self.repr {
+            SharedFrameRepr::Shared(data) => return alloc::sync::Arc::clone(data),
+            SharedFrameRepr::Owned(data) => core::mem::take(data).into(),
+        };
+        self.repr = SharedFrameRepr::Shared(alloc::sync::Arc::clone(&shared));
+        shared
+    }
+}
+
 /// A network interface that can send packets (sync, non-blocking)
 ///
 /// This trait defines the **send side** of the interface contract. The driver
@@ -292,6 +366,21 @@ pub trait Interface {
     ) -> Result<(), InterfaceError> {
         let _ = high_priority;
         self.try_send(data)
+    }
+
+    /// [`Self::try_send_prioritized`] for a frame the core is broadcasting
+    /// on several interfaces at once.
+    ///
+    /// The default borrows the bytes and sends them like any other frame.
+    /// An interface that must own the bytes overrides it and takes
+    /// [`SharedFrame::share`] instead of copying, so a broadcast costs one
+    /// copy, not one per interface.
+    fn try_send_shared(
+        &mut self,
+        frame: &mut SharedFrame,
+        high_priority: bool,
+    ) -> Result<(), InterfaceError> {
+        self.try_send_prioritized(frame.as_bytes(), high_priority)
     }
 
     /// Try to send a packet the core has already addressed to one peer
@@ -592,6 +681,23 @@ pub trait Storage {
 
     /// Return all destination hashes in the announce table
     fn announce_keys(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]>;
+
+    /// Visit every announce-table entry by reference, in the order
+    /// [`Self::announce_keys`] lists them.
+    ///
+    /// What `announce_keys` followed by one `get_announce` per key reads,
+    /// without the key list: the deadline scan and the rebroadcast
+    /// scheduler walk the whole table on every pass, and on a relay
+    /// holding thousands of announces that list was the largest
+    /// allocation by bytes (513). The default builds the list, so a
+    /// storage that does not override it behaves as before.
+    fn for_each_announce(&self, f: &mut dyn FnMut(&[u8; TRUNCATED_HASHBYTES], &AnnounceEntry)) {
+        for key in self.announce_keys() {
+            if let Some(entry) = self.get_announce(&key) {
+                f(&key, entry);
+            }
+        }
+    }
 
     // Announce Cache
     /// Get cached raw announce bytes for a destination

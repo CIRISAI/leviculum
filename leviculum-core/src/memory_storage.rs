@@ -1030,6 +1030,12 @@ impl Storage for MemoryStorage {
         self.announce_table.keys().copied().collect()
     }
 
+    fn for_each_announce(&self, f: &mut dyn FnMut(&[u8; TRUNCATED_HASHBYTES], &AnnounceEntry)) {
+        for (key, entry) in self.announce_table.iter() {
+            f(key, entry);
+        }
+    }
+
     // Announce Cache
     fn get_announce_cache(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<&Vec<u8>> {
         self.announce_cache.get(dest_hash)

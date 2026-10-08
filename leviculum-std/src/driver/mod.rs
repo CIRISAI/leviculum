@@ -4122,8 +4122,11 @@ enum RxClass {
 }
 
 fn classify_rx(data: &[u8]) -> RxClass {
-    use leviculum_core::packet::{HeaderType, Packet, PacketContext, PacketType};
-    match Packet::unpack(data) {
+    use leviculum_core::packet::{HeaderType, PacketContext, PacketHeader, PacketType};
+    // The header alone, not `Packet::unpack`: it refuses the same frames
+    // and does not copy the payload, one allocation per received packet
+    // saved (513).
+    match PacketHeader::parse(data) {
         Ok(p) => match p.flags.packet_type {
             PacketType::Announce => RxClass::Announce,
             PacketType::Data
@@ -5535,14 +5538,14 @@ fn dispatch_output(
     let drain_now_ms = inner.lock_recover().now_ms();
     drain_retry_queues(retry_queues, registry, drain_now_ms);
 
-    // Dispatch new actions to interfaces (protocol logic in core)
-    let mut ifaces: Vec<&mut dyn leviculum_core::traits::Interface> = registry
-        .handles_mut_slice()
-        .iter_mut()
-        .map(|h| h as &mut dyn leviculum_core::traits::Interface)
-        .collect();
-    let result =
-        leviculum_core::transport::dispatch_actions(&mut ifaces, output.actions, ifac_configs);
+    // Dispatch new actions to interfaces (protocol logic in core). The
+    // registry's own slice, not a collected one: this runs on every tick
+    // (513).
+    let result = leviculum_core::transport::dispatch_actions(
+        registry.handles_mut_slice(),
+        output.actions,
+        ifac_configs,
+    );
 
     // Log dispatch errors.
     //
@@ -5705,10 +5708,13 @@ fn dispatch_output(
     //
     // Its output is dispatched after event forwarding, with the processor
     // detached — see `processor::run_event_tap` for the recursion bound.
-    let tap_events: Vec<&NodeEvent> = drop_events.iter().chain(output.events.iter()).collect();
-    let processor_output =
-        core_processor.and_then(|slot| processor::run_event_tap(slot, inner, &tap_events));
-    drop(tap_events);
+    //
+    // The event list is built only when a processor is registered: without
+    // one it was an allocation per tick that nothing read (513).
+    let processor_output = core_processor.and_then(|slot| {
+        let tap_events: Vec<&NodeEvent> = drop_events.iter().chain(output.events.iter()).collect();
+        processor::run_event_tap(slot, inner, &tap_events)
+    });
     let processor_deadline = processor_output
         .as_ref()
         .and_then(|out| out.next_deadline_ms)
@@ -8899,7 +8905,7 @@ mod tests {
         let frame = out_rx
             .try_recv()
             .expect("the answer must be on the interface before dispatch_output returns");
-        assert_eq!(frame.data, vec![0xEE; 24]);
+        assert_eq!(frame.data, vec![0xEE; 24].into());
     }
 
     /// The recursion bound is one: a processor never sees the events of its own
@@ -9611,7 +9617,7 @@ mod tests {
             .await
             .expect("the loop must dispatch while the flush write is in flight")
             .expect("interface channel open");
-        assert_eq!(frame.data, vec![0xAB; 32]);
+        assert_eq!(frame.data, vec![0xAB; 32].into());
 
         gate.release_tx.send(()).expect("blocked hook receives");
         harness.shutdown_tx.send(true).expect("loop is live");

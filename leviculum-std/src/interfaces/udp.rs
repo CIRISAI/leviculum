@@ -862,7 +862,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: payload.to_vec(),
+                data: payload.to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -880,7 +880,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: payload2.to_vec(),
+                data: payload2.to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -918,7 +918,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"test".to_vec(),
+                data: b"test".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -981,7 +981,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: payload.to_vec(),
+                data: payload.to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1022,7 +1022,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: payload.to_vec(),
+                data: payload.to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1078,7 +1078,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"undeliverable".to_vec(),
+                data: b"undeliverable".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1117,7 +1117,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"outbound".to_vec(),
+                data: b"outbound".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1299,7 +1299,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"into the void".to_vec(),
+                data: b"into the void".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1361,7 +1361,7 @@ mod tests {
                 .outgoing
                 .send(OutgoingPacket {
                     peer: None,
-                    data: b"to old".to_vec(),
+                    data: b"to old".to_vec().into(),
                     high_priority: false,
                 })
                 .await
@@ -1392,7 +1392,7 @@ mod tests {
                 .outgoing
                 .send(OutgoingPacket {
                     peer: None,
-                    data: b"to new".to_vec(),
+                    data: b"to new".to_vec().into(),
                     high_priority: false,
                 })
                 .await

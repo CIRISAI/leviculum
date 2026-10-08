@@ -19,7 +19,7 @@ use crate::announce::{build_announce_payload, AnnounceError};
 use crate::constants::{
     IDENTITY_HASHBYTES, NAME_HASHBYTES, RATCHET_SIZE, TOKEN_KEY_SIZE, TRUNCATED_HASHBYTES,
 };
-use crate::crypto::{decrypt_token, encrypt_token, sha256, truncated_hash};
+use crate::crypto::{decrypt_token, encrypt_token, truncated_hash};
 use crate::identity::{Identity, IdentityError};
 use crate::msgpack::{read_array_len, read_byte, read_msgpack_bin, read_msgpack_str};
 use crate::packet::{
@@ -1055,13 +1055,17 @@ impl Destination {
     /// passes compile-time-constant well-known names. Validate runtime-supplied
     /// components with [`Self::validate_name_components`] first (Codeberg #163).
     pub fn compute_name_hash(app_name: &str, aspects: &[&str]) -> [u8; NAME_HASHBYTES] {
-        let mut full_name = String::from(app_name);
+        // The dotted name is fed to the hasher piece by piece rather than
+        // joined first: same digest, no allocation. The discovery check runs
+        // this for every announce a daemon receives (513).
+        let mut hasher = crate::crypto::StreamHasher::new();
+        hasher.update(app_name.as_bytes());
         for aspect in aspects {
-            full_name.push('.');
-            full_name.push_str(aspect);
+            hasher.update(b".");
+            hasher.update(aspect.as_bytes());
         }
 
-        let hash = sha256(full_name.as_bytes());
+        let hash = hasher.finish_with(&[]);
         let mut name_hash = [0u8; NAME_HASHBYTES];
         name_hash.copy_from_slice(&hash[..NAME_HASHBYTES]);
         name_hash
@@ -1404,6 +1408,28 @@ mod tests {
 
         assert_ne!(hash1, hash2);
         assert_eq!(hash1, hash3);
+    }
+
+    /// The name hash is streamed, not joined first (513); it must stay the
+    /// truncated SHA-256 of the dotted name, aspects or none.
+    #[test]
+    fn name_hash_is_the_hash_of_the_dotted_name() {
+        for (app, aspects, dotted) in [
+            ("lxmf", &["delivery"][..], "lxmf.delivery"),
+            (
+                "rnstransport",
+                &["discovery", "interface"][..],
+                "rnstransport.discovery.interface",
+            ),
+            ("bare", &[][..], "bare"),
+        ] {
+            let full = crate::crypto::sha256(dotted.as_bytes());
+            assert_eq!(
+                Destination::compute_name_hash(app, aspects)[..],
+                full[..NAME_HASHBYTES],
+                "{dotted}"
+            );
+        }
     }
 
     #[test]

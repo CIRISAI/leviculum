@@ -405,6 +405,47 @@ impl Packet {
     /// any deframed packet, including those using a negotiated link MTU
     /// larger than the base protocol MTU (link MTU discovery).
     pub fn unpack(raw: &[u8]) -> Result<Self, PacketError> {
+        let header = PacketHeader::parse(raw)?;
+        Ok(Self {
+            flags: header.flags,
+            hops: header.hops,
+            transport_id: header.transport_id,
+            destination_hash: header.destination_hash,
+            context: header.context,
+            data: PacketData::Owned(raw[header.data_start..].to_vec()),
+        })
+    }
+}
+
+/// Everything [`Packet::unpack`] reads before the payload, parsed without
+/// copying the payload.
+///
+/// `unpack` is this plus the payload copy, so the two accept and refuse
+/// exactly the same frames. A caller that only has to decide what a frame is
+/// (the std driver's receive classifier) parses this instead and saves an
+/// allocation per received packet (513).
+#[derive(Debug, Clone, Copy)]
+pub struct PacketHeader {
+    /// The flags byte, decoded.
+    pub flags: PacketFlags,
+    /// The hop count as received.
+    pub hops: u8,
+    /// The transport id of a Type-2 header, `None` for Type 1.
+    pub transport_id: Option<[u8; TRUNCATED_HASHBYTES]>,
+    /// The destination hash.
+    pub destination_hash: [u8; TRUNCATED_HASHBYTES],
+    /// The context byte.
+    pub context: PacketContext,
+    /// Offset of the payload in the frame.
+    pub data_start: usize,
+}
+
+impl PacketHeader {
+    /// Parse the header of `raw`, failing exactly where [`Packet::unpack`]
+    /// fails.
+    ///
+    /// No upper size limit is enforced, for the reason `unpack` gives.
+    pub fn parse(raw: &[u8]) -> Result<Self, PacketError> {
         // HEADER_MINSIZE includes flags(1) + hops(1) + dest_hash(16) + context(1) = 19 bytes
         if raw.len() < HEADER_MINSIZE {
             return Err(PacketError::TooShort);
@@ -447,16 +488,13 @@ impl Packet {
         let context = PacketContext::from_byte(raw[pos]);
         pos += 1;
 
-        // Data
-        let data = PacketData::Owned(raw[pos..].to_vec());
-
         Ok(Self {
             flags,
             hops,
             transport_id,
             destination_hash,
             context,
-            data,
+            data_start: pos,
         })
     }
 }
@@ -575,9 +613,22 @@ pub fn get_hashable_part(raw: &[u8]) -> alloc::vec::Vec<u8> {
 /// let hash = packet_hash(&raw_packet);
 /// ```
 pub fn packet_hash(raw: &[u8]) -> [u8; 32] {
-    use crate::crypto::sha256;
-    let hashable = get_hashable_part(raw);
-    sha256(&hashable)
+    // The same digest as `sha256(&get_hashable_part(raw))`, fed to the
+    // hasher in two parts instead of copied into a buffer first: every
+    // packet the transport sees is hashed at least once, and the copy was
+    // the second largest allocation site on a busy daemon (513).
+    let Some(&flags) = raw.first() else {
+        return crate::crypto::sha256(&[]);
+    };
+    let data_start = if (flags & FLAG_HEADER_TYPE_MASK) != 0 {
+        2 + TRUNCATED_HASHBYTES
+    } else {
+        2
+    };
+    match raw.get(data_start..) {
+        Some(rest) => crate::crypto::full_hash_parts(&[&[flags & 0x0F], rest]),
+        None => crate::crypto::sha256(&[]),
+    }
 }
 
 /// Compute the truncated packet hash (16 bytes)
@@ -637,6 +688,27 @@ pub fn build_proof_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `packet_hash` streams the hashable part instead of building it
+    /// (513); the digest must stay the one over the built buffer for every
+    /// length either header type can arrive with, the short and empty
+    /// frames included.
+    #[test]
+    fn packet_hash_matches_the_hash_of_the_hashable_part() {
+        for flags in [0x00u8, 0x08, 0x40, 0x51, 0xFF] {
+            for len in 0..48 {
+                let mut raw: alloc::vec::Vec<u8> = (0..len as u8).map(|b| b ^ 0xA5).collect();
+                if let Some(first) = raw.first_mut() {
+                    *first = flags;
+                }
+                assert_eq!(
+                    packet_hash(&raw),
+                    crate::crypto::sha256(&get_hashable_part(&raw)),
+                    "flags {flags:#04x} len {len}"
+                );
+            }
+        }
+    }
 
     /// Every one of the 256 context bytes must survive decode/encode
     /// unchanged (#332). This is what makes an unknown-context packet

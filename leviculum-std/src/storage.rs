@@ -727,6 +727,15 @@ impl leviculum_core::traits::Storage for Storage {
     fn announce_keys(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
         self.inner.announce_keys()
     }
+    fn for_each_announce(
+        &self,
+        f: &mut dyn FnMut(
+            &[u8; TRUNCATED_HASHBYTES],
+            &leviculum_core::storage_types::AnnounceEntry,
+        ),
+    ) {
+        self.inner.for_each_announce(f)
+    }
 
     // Announce Cache
     fn get_announce_cache(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<&Vec<u8>> {

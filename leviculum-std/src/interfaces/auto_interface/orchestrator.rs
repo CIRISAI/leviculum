@@ -1104,7 +1104,7 @@ mod tests {
         outgoing_tx
             .send(OutgoingPacket {
                 peer: None,
-                data: b"test data".to_vec(),
+                data: b"test data".to_vec().into(),
                 high_priority: false,
             })
             .await

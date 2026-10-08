@@ -3566,7 +3566,7 @@ mod tests {
         // head is already at the peer.
         outgoing_tx
             .send(OutgoingPacket {
-                data: vec![0x42u8; 64 * 1024],
+                data: vec![0x42u8; 64 * 1024].into(),
                 high_priority: false,
                 peer: None,
             })

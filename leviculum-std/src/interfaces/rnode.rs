@@ -259,7 +259,7 @@ fn pop_live_frame(
 /// the payload, and when the interface accepted it ([`stamp_ms`]).
 struct VportFrame {
     subint: usize,
-    data: Vec<u8>,
+    data: Arc<[u8]>,
     enqueued_ms: u32,
 }
 
@@ -4130,7 +4130,7 @@ async fn rnode_multi_io_task<S>(
                             send_queue
                                 .iter()
                                 .filter(|queued| queued.subint == subint)
-                                .map(|queued| queued.data.as_slice()),
+                                .map(|queued| &queued.data[..]),
                             &tagged.packet.data,
                             tagged.packet.data.len(),
                         ) {
@@ -4692,7 +4692,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"outbound-over-channel".to_vec(),
+                data: b"outbound-over-channel".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -5092,7 +5092,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: test_data.to_vec(),
+                data: test_data.to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -6035,7 +6035,7 @@ mod tests {
             outgoing_tx
                 .send(OutgoingPacket {
                     peer: None,
-                    data: payload.to_vec(),
+                    data: payload.to_vec().into(),
                     high_priority: true,
                 })
                 .await
@@ -6109,7 +6109,7 @@ mod tests {
         outgoing_tx
             .send(OutgoingPacket {
                 peer: None,
-                data: b"four".to_vec(),
+                data: b"four".to_vec().into(),
                 high_priority: true,
             })
             .await
@@ -6210,7 +6210,7 @@ mod tests {
         outgoing_tx
             .send(OutgoingPacket {
                 peer: None,
-                data: b"announce".to_vec(),
+                data: b"announce".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -6223,7 +6223,7 @@ mod tests {
         outgoing_tx
             .send(OutgoingPacket {
                 peer: None,
-                data: b"linkrequest".to_vec(),
+                data: b"linkrequest".to_vec().into(),
                 high_priority: true,
             })
             .await
@@ -6431,7 +6431,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let directed = || OutgoingPacket {
             peer: None,
-            data: b"ratchet".to_vec(),
+            data: b"ratchet".to_vec().into(),
             high_priority: true,
         };
         outgoing_tx_a
@@ -7662,7 +7662,7 @@ mod tests {
         outgoing_tx
             .send(OutgoingPacket {
                 peer: None,
-                data: payload.to_vec(),
+                data: payload.to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -8070,7 +8070,7 @@ mod tests {
             outgoing_tx
                 .send(OutgoingPacket {
                     peer: None,
-                    data: p.to_vec(),
+                    data: p.to_vec().into(),
                     high_priority: false,
                 })
                 .await
@@ -8387,7 +8387,7 @@ mod tests {
                 subint: 0,
                 packet: OutgoingPacket {
                     peer: None,
-                    data: b"ping0".to_vec(),
+                    data: b"ping0".to_vec().into(),
                     high_priority: false,
                 },
             })
@@ -8419,7 +8419,7 @@ mod tests {
                 subint: 1,
                 packet: OutgoingPacket {
                     peer: None,
-                    data: b"ping1".to_vec(),
+                    data: b"ping1".to_vec().into(),
                     high_priority: false,
                 },
             })
@@ -8510,7 +8510,7 @@ mod tests {
                 subint: 0,
                 packet: OutgoingPacket {
                     peer: None,
-                    data: b"nope".to_vec(),
+                    data: b"nope".to_vec().into(),
                     high_priority: false,
                 },
             })
@@ -8631,7 +8631,7 @@ mod tests {
                         subint,
                         packet: OutgoingPacket {
                             peer: None,
-                            data: data.to_vec(),
+                            data: data.to_vec().into(),
                             high_priority: false,
                         },
                     })
@@ -8801,7 +8801,7 @@ mod tests {
                 subint: 0,
                 packet: OutgoingPacket {
                     peer: None,
-                    data: b"bootstrap".to_vec(),
+                    data: b"bootstrap".to_vec().into(),
                     high_priority: false,
                 },
             })
@@ -8823,7 +8823,7 @@ mod tests {
                     subint: 1,
                     packet: OutgoingPacket {
                         peer: None,
-                        data: format!("v1-{i:03}").into_bytes(),
+                        data: format!("v1-{i:03}").into_bytes().into(),
                         high_priority: false,
                     },
                 })
@@ -8836,7 +8836,7 @@ mod tests {
                     subint: 0,
                     packet: OutgoingPacket {
                         peer: None,
-                        data: format!("v0-{i:03}").into_bytes(),
+                        data: format!("v0-{i:03}").into_bytes().into(),
                         high_priority: false,
                     },
                 })
@@ -9032,7 +9032,7 @@ mod tests {
                     subint,
                     packet: OutgoingPacket {
                         peer: None,
-                        data: payload.to_vec(),
+                        data: payload.to_vec().into(),
                         high_priority: false,
                     },
                 })
@@ -9316,7 +9316,7 @@ mod tests {
             outgoing_tx
                 .send(OutgoingPacket {
                     peer: None,
-                    data: p.to_vec(),
+                    data: p.to_vec().into(),
                     high_priority: false,
                 })
                 .await
@@ -9561,7 +9561,7 @@ mod tests {
             self.outgoing_tx
                 .send(OutgoingPacket {
                     peer: None,
-                    data: payload.to_vec(),
+                    data: payload.to_vec().into(),
                     high_priority: false,
                 })
                 .await
