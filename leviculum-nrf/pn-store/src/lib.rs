@@ -72,7 +72,7 @@ use alloc::vec::Vec;
 
 use leviculum_lxmf::constants::DESTINATION_LENGTH;
 use leviculum_lxmf::peering::{PeerRecord, PeerStore};
-use leviculum_lxmf::propagation_store::{PropagationStore, StoredMessage, MIN_BODY_LEN};
+use leviculum_lxmf::propagation_store::{copy_from, PropagationStore, StoredMessage, MIN_BODY_LEN};
 use leviculum_lxmf::storage::StorageError;
 use leviculum_record_log::{
     crc16_update, record_stride, FLAG_LIVE, FLAG_PURGED, HEADER_LEN, KEY_LEN, MIN_STRIDE,
@@ -364,6 +364,27 @@ impl<R: Region> PropagationStore for PnStore<R> {
             }
         });
         Ok(found)
+    }
+
+    /// A slice of one body copied straight out of mapped flash (or the
+    /// queued append), no allocation: the outbound peer sync streams its
+    /// envelope through this a part at a time (leviculum#388).
+    fn read_body_at(
+        &self,
+        transient_id: &[u8; 32],
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, StorageError> {
+        if let Some(body) = self.pending_append_body(transient_id) {
+            return Ok(Some(copy_from(body, offset, buf)));
+        }
+        let mut copied = None;
+        self.scan_messages(|record| {
+            if record.key == transient_id && copied.is_none() {
+                copied = Some(copy_from(record.body, offset, buf));
+            }
+        });
+        Ok(copied)
     }
 
     /// Queue the purge (or drop a not-yet-flushed append outright).

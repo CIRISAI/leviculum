@@ -89,6 +89,32 @@ pub const fn array_header_len(n: usize) -> usize {
     }
 }
 
+/// [`array()`]'s header as bytes on the stack, and how many of them are
+/// used: a source that streams a msgpack value out of a store frames it
+/// without allocating (leviculum#388). Byte for byte what `rmp` writes.
+pub const fn array_header_bytes(n: usize) -> ([u8; 5], usize) {
+    let b = (n as u32).to_be_bytes();
+    if n < 16 {
+        ([0x90 | n as u8, 0, 0, 0, 0], 1)
+    } else if n < 65_536 {
+        ([0xdc, b[2], b[3], 0, 0], 3)
+    } else {
+        ([0xdd, b[0], b[1], b[2], b[3]], 5)
+    }
+}
+
+/// [`bin_header`] as bytes on the stack, like [`array_header_bytes`].
+pub const fn bin_header_bytes(len: usize) -> ([u8; 5], usize) {
+    let b = (len as u32).to_be_bytes();
+    if len < 256 {
+        ([0xc4, b[3], 0, 0, 0], 2)
+    } else if len < 65_536 {
+        ([0xc5, b[2], b[3], 0, 0], 3)
+    } else {
+        ([0xc6, b[0], b[1], b[2], b[3]], 5)
+    }
+}
+
 pub fn string(out: &mut Vec<u8>, value: &str) {
     let _ = rmp::encode::write_str(out, value);
 }
@@ -525,5 +551,23 @@ mod tests {
         bin_header(&mut split, payload.len());
         split.extend_from_slice(&payload);
         assert_eq!(joined, split);
+    }
+
+    /// The stack header encoders are `rmp`'s writers, byte for byte, at
+    /// every boundary where the form changes.
+    #[test]
+    fn stack_headers_are_what_the_writers_write() {
+        for len in [0usize, 1, 255, 256, 65_535, 65_536, 100_000] {
+            let mut out = alloc::vec::Vec::new();
+            bin_header(&mut out, len);
+            let (bytes, used) = bin_header_bytes(len);
+            assert_eq!(&bytes[..used], &out[..], "bin header for {len}");
+        }
+        for n in [0usize, 1, 15, 16, 65_535, 65_536] {
+            let mut out = alloc::vec::Vec::new();
+            array(&mut out, n);
+            let (bytes, used) = array_header_bytes(n);
+            assert_eq!(&bytes[..used], &out[..], "array header for {n}");
+        }
     }
 }

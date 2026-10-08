@@ -36,6 +36,7 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
 use leviculum_core::identity::Identity;
+use leviculum_core::resource::{ResourceSource, SourceError};
 use leviculum_core::traits::Storage;
 
 use crate::{
@@ -1330,31 +1331,318 @@ pub enum ResponseAction {
 }
 
 /// Map a decoded response to its action.
+///
+/// The collected form of [`offer_reply`]: the wanted ids as their own
+/// list, in plan order. A host engine with heap to spare uses this; the
+/// board answers through [`offer_reply`] and [`plan_sync_batch`], which
+/// build no list (leviculum#388).
 pub fn response_action(response: &OfferResponse, plan: &OfferPlan) -> ResponseAction {
-    match response {
-        OfferResponse::WantNone => ResponseAction::Concluded,
-        OfferResponse::WantAll => ResponseAction::SendMessages(plan.ids.clone()),
-        OfferResponse::Wanted(ids) => {
-            // Only ids we actually offered may be requested back; an id
-            // we never named is ignored rather than served.
-            let wanted: Vec<TransientId> = plan
-                .ids
+    match offer_reply(response, plan) {
+        OfferReply::Send(wanted) => ResponseAction::SendMessages(
+            plan.ids
                 .iter()
-                .filter(|id| ids.contains(id))
+                .filter(|id| wanted.wants(id))
                 .copied()
-                .collect();
-            if wanted.is_empty() {
-                ResponseAction::Concluded
+                .collect(),
+        ),
+        OfferReply::Concluded => ResponseAction::Concluded,
+        OfferReply::Backoff(secs) => ResponseAction::Backoff(secs),
+        OfferReply::Unpeer => ResponseAction::Unpeer,
+        OfferReply::RemineKey => ResponseAction::RemineKey,
+        OfferReply::Retry => ResponseAction::Retry,
+    }
+}
+
+/// Which of a plan's ids an `/offer` response asks for, borrowed from the
+/// response rather than collected (leviculum#388).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WantedIds<'a> {
+    /// `True`: every offered id (`LXMPeer.py:436-440`).
+    All,
+    /// The wanted sublist as the peer sent it (`:442-452`). Only ids the
+    /// plan names count; an id we never offered is ignored, not served.
+    Listed(&'a [TransientId]),
+}
+
+impl WantedIds<'_> {
+    /// Whether the peer asked for `id`. The caller walks the plan, so an
+    /// id outside it is never asked about.
+    pub fn wants(&self, id: &TransientId) -> bool {
+        match self {
+            Self::All => true,
+            Self::Listed(ids) => ids.contains(id),
+        }
+    }
+}
+
+/// [`ResponseAction`] without the wanted list: what the engine must do
+/// with an `/offer` response, the wanted set borrowed from the response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfferReply<'a> {
+    /// Send (some of) these: [`plan_sync_batch`] says which fit.
+    Send(WantedIds<'a>),
+    Concluded,
+    Backoff(u64),
+    Unpeer,
+    RemineKey,
+    Retry,
+}
+
+/// Map a decoded response to its reply, building nothing.
+pub fn offer_reply<'a>(response: &'a OfferResponse, plan: &OfferPlan) -> OfferReply<'a> {
+    match response {
+        OfferResponse::WantNone => OfferReply::Concluded,
+        OfferResponse::WantAll if plan.ids.is_empty() => OfferReply::Concluded,
+        OfferResponse::WantAll => OfferReply::Send(WantedIds::All),
+        OfferResponse::Wanted(ids) => {
+            if plan.ids.iter().any(|id| ids.contains(id)) {
+                OfferReply::Send(WantedIds::Listed(ids))
             } else {
-                ResponseAction::SendMessages(wanted)
+                OfferReply::Concluded
             }
         }
-        OfferResponse::Error(PeerError::Throttled) => {
-            ResponseAction::Backoff(PN_STAMP_THROTTLE_SECS)
+        OfferResponse::Error(PeerError::Throttled) => OfferReply::Backoff(PN_STAMP_THROTTLE_SECS),
+        OfferResponse::Error(PeerError::NoAccess) => OfferReply::Unpeer,
+        OfferResponse::Error(PeerError::InvalidKey) => OfferReply::RemineKey,
+        OfferResponse::Error(_) => OfferReply::Retry,
+    }
+}
+
+/// `[timestamp, [` of the sync envelope before the list header: the outer
+/// `fixarray(2)` and the float64.
+const SYNC_ENVELOPE_HEAD_BYTES: usize = 1 + 9;
+
+/// Length of [`PeerSyncEnvelope::encode`] over `count` bodies whose bins
+/// (header plus payload) sum to `bins`.
+pub const fn sync_envelope_len(count: usize, bins: usize) -> usize {
+    SYNC_ENVELOPE_HEAD_BYTES + msgpack::array_header_len(count) + bins
+}
+
+/// The bodies one answer to an `/offer` sends, decided before a byte of
+/// them is read (leviculum#388).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncBatch {
+    /// Bodies sent: the first `count` wanted ids, in plan order, that the
+    /// store still holds.
+    pub count: usize,
+    /// Plan index one past the last id the batch walked; the source walks
+    /// `plan.ids[..end]`.
+    pub end: usize,
+    /// Sum of the sent bodies' lengths.
+    pub payload: usize,
+    /// Exact length of the envelope the batch encodes to.
+    pub encoded_len: usize,
+    /// Wanted ids still in the store that the batch stopped before.
+    pub withheld: usize,
+    /// Where the peer's cursor lands when the batch concludes: the plan's
+    /// target when nothing is withheld, otherwise just below the first
+    /// withheld id, so the next round offers it again.
+    pub cursor_target: u64,
+}
+
+/// Decide which wanted bodies one answer carries: the longest prefix, in
+/// plan order, for which `fits(count, encoded_len)` holds.
+///
+/// A prefix and not a best fit, because the cursor is a single sequence
+/// number: everything below it must be sent, declined or permanently
+/// skipped, so the batch cannot skip a large body to carry a later small
+/// one. What it stops before stays above the cursor and is offered again
+/// next round; the peer sees an answer smaller than its want, which the
+/// reference's receiver takes as it comes (`offer_request` keeps no
+/// record of what it asked for, `reference/LXMF/LXMF/LXMRouter.py:2318-2329`;
+/// the resource is ingested message by message, `:2381-2410`).
+///
+/// A wanted id the store no longer holds is skipped, as the buffered
+/// path skipped it.
+pub fn plan_sync_batch<S: crate::propagation_store::PropagationStore + ?Sized>(
+    store: &S,
+    plan: &OfferPlan,
+    wanted: &WantedIds<'_>,
+    fits: impl Fn(usize, usize) -> bool,
+) -> Result<SyncBatch, StorageError> {
+    let mut batch = SyncBatch {
+        count: 0,
+        end: 0,
+        payload: 0,
+        encoded_len: sync_envelope_len(0, 0),
+        withheld: 0,
+        cursor_target: plan.cursor_target,
+    };
+    let mut bins = 0usize;
+    for (index, id) in plan.ids.iter().enumerate() {
+        if !wanted.wants(id) {
+            continue;
         }
-        OfferResponse::Error(PeerError::NoAccess) => ResponseAction::Unpeer,
-        OfferResponse::Error(PeerError::InvalidKey) => ResponseAction::RemineKey,
-        OfferResponse::Error(_) => ResponseAction::Retry,
+        let Some(meta) = store.meta(id)? else {
+            continue;
+        };
+        if batch.withheld > 0 {
+            batch.withheld += 1;
+            continue;
+        }
+        let size = meta.size as usize;
+        let next_bins = bins + msgpack::bin_header_len(size) + size;
+        let next_len = sync_envelope_len(batch.count + 1, next_bins);
+        if !fits(batch.count + 1, next_len) {
+            batch.withheld = 1;
+            batch.cursor_target = meta.sequence.saturating_sub(1);
+            continue;
+        }
+        bins = next_bins;
+        batch.count += 1;
+        batch.payload += size;
+        batch.encoded_len = next_len;
+        batch.end = index + 1;
+    }
+    batch.encoded_len = sync_envelope_len(batch.count, bins);
+    Ok(batch)
+}
+
+/// The sync envelope of a [`SyncBatch`] as a byte stream read out of the
+/// store (leviculum#388): `msgpack([timestamp, [body, …]])`
+/// (`reference/LXMF/LXMF/LXMPeer.py:466`), byte for byte what
+/// [`PeerSyncEnvelope::encode`] builds over the same bodies, produced
+/// without the envelope or a whole body ever existing. Headers are framed
+/// on the stack and bodies are copied a buffer at a time with
+/// [`read_body_at`](crate::propagation_store::PropagationStore::read_body_at),
+/// so the source itself holds no heap at all.
+pub struct SyncSource<'a, S: ?Sized> {
+    store: &'a S,
+    plan: &'a OfferPlan,
+    wanted: WantedIds<'a>,
+    batch: SyncBatch,
+    head: [u8; 15],
+    head_len: usize,
+    head_pos: usize,
+    /// Next plan index to look at.
+    index: usize,
+    /// Bodies started so far.
+    started: usize,
+    record_header: [u8; 5],
+    record_len: usize,
+    record_pos: usize,
+    /// The body being streamed and its length.
+    body: Option<(TransientId, usize)>,
+    body_pos: usize,
+}
+
+impl<'a, S: crate::propagation_store::PropagationStore + ?Sized> SyncSource<'a, S> {
+    pub fn new(
+        store: &'a S,
+        plan: &'a OfferPlan,
+        wanted: WantedIds<'a>,
+        batch: SyncBatch,
+        timestamp: f64,
+    ) -> Self {
+        let mut head = [0u8; 15];
+        head[0] = 0x92;
+        head[1] = 0xcb;
+        head[2..10].copy_from_slice(&timestamp.to_bits().to_be_bytes());
+        let (list, used) = msgpack::array_header_bytes(batch.count);
+        head[10..10 + used].copy_from_slice(&list[..used]);
+        Self {
+            store,
+            plan,
+            wanted,
+            batch,
+            head,
+            head_len: 10 + used,
+            head_pos: 0,
+            index: 0,
+            started: 0,
+            record_header: [0; 5],
+            record_len: 0,
+            record_pos: 0,
+            body: None,
+            body_pos: 0,
+        }
+    }
+
+    /// Find the next body of the batch and frame it. `false` at the end.
+    fn load(&mut self) -> Result<bool, SourceError> {
+        if self.started >= self.batch.count {
+            return Ok(false);
+        }
+        while self.index < self.batch.end {
+            let id = self.plan.ids[self.index];
+            self.index += 1;
+            if !self.wanted.wants(&id) {
+                continue;
+            }
+            let Some(meta) = self.store.meta(&id).map_err(|_| SourceError::Unavailable)? else {
+                continue;
+            };
+            let size = meta.size as usize;
+            let (header, used) = msgpack::bin_header_bytes(size);
+            self.record_header = header;
+            self.record_len = used;
+            self.record_pos = 0;
+            self.body = Some((id, size));
+            self.body_pos = 0;
+            self.started += 1;
+            return Ok(true);
+        }
+        // The batch promised more bodies than the store now has: the
+        // advertisement would lie, so the build fails.
+        Err(SourceError::LengthChanged)
+    }
+}
+
+impl<S: crate::propagation_store::PropagationStore + ?Sized> ResourceSource for SyncSource<'_, S> {
+    fn total_len(&self) -> usize {
+        self.batch.encoded_len
+    }
+
+    fn rewind(&mut self) -> Result<(), SourceError> {
+        self.head_pos = 0;
+        self.index = 0;
+        self.started = 0;
+        self.record_len = 0;
+        self.record_pos = 0;
+        self.body = None;
+        self.body_pos = 0;
+        Ok(())
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, SourceError> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.head_pos < self.head_len {
+                let take = core::cmp::min(buf.len(), self.head_len - self.head_pos);
+                buf[..take].copy_from_slice(&self.head[self.head_pos..self.head_pos + take]);
+                self.head_pos += take;
+                return Ok(take);
+            }
+            let Some((id, size)) = self.body else {
+                if !self.load()? {
+                    return Ok(0);
+                }
+                continue;
+            };
+            if self.record_pos < self.record_len {
+                let take = core::cmp::min(buf.len(), self.record_len - self.record_pos);
+                buf[..take]
+                    .copy_from_slice(&self.record_header[self.record_pos..self.record_pos + take]);
+                self.record_pos += take;
+                return Ok(take);
+            }
+            if self.body_pos < size {
+                let want = core::cmp::min(buf.len(), size - self.body_pos);
+                let copied = self
+                    .store
+                    .read_body_at(&id, self.body_pos, &mut buf[..want])
+                    .map_err(|_| SourceError::Unavailable)?
+                    .ok_or(SourceError::Unavailable)?;
+                if copied == 0 {
+                    return Err(SourceError::LengthChanged);
+                }
+                self.body_pos += copied;
+                return Ok(copied);
+            }
+            self.body = None;
+        }
     }
 }
 

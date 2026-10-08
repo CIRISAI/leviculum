@@ -604,3 +604,49 @@ fn free_space_measures_the_region_and_not_the_active_page() {
         );
     });
 }
+
+/// The chunked read the outbound peer sync streams with (leviculum#388)
+/// yields the body `read_body` yields, at every chunk size, from flash and
+/// from the queue alike, and says `None` for an absent id.
+#[test]
+fn read_body_at_reassembles_what_read_body_returns() {
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let mut store = PnStore::new(region.clone(), SECTORS);
+        let mut flushed = msg_body(1, 1_000);
+        for (i, byte) in flushed.iter_mut().enumerate().skip(DESTINATION_LENGTH) {
+            *byte = (i * 13) as u8;
+        }
+        store.append(&key(1), 1000, 12, &flushed).unwrap();
+        flush_messages(&mut store, &region, &mut log);
+        let queued = msg_body(2, 300);
+        store.append(&key(2), 1001, 12, &queued).unwrap();
+
+        for (id, body) in [(key(1), &flushed), (key(2), &queued)] {
+            assert_eq!(store.read_body(&id).unwrap().as_ref(), Some(body));
+            for chunk in [1usize, 7, 464, 4096] {
+                let mut out = Vec::new();
+                let mut buf = vec![0u8; chunk];
+                loop {
+                    let n = store
+                        .read_body_at(&id, out.len(), &mut buf)
+                        .unwrap()
+                        .unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..n]);
+                }
+                assert_eq!(&out, body, "chunk={chunk}");
+            }
+        }
+        let mut buf = [0u8; 8];
+        assert_eq!(store.read_body_at(&key(9), 0, &mut buf).unwrap(), None);
+        assert_eq!(
+            store.read_body_at(&key(1), 5_000, &mut buf).unwrap(),
+            Some(0)
+        );
+    });
+}

@@ -137,6 +137,40 @@ pub trait PropagationStore {
     /// Remove one message. Returns whether it was present.
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError>;
 
+    /// Copy one stored body from byte `offset` into the front of `buf`;
+    /// returns how many bytes were copied (0 at or past the body's end), or
+    /// `None` if the message is absent.
+    ///
+    /// What a source that streams bodies out of the store reads with
+    /// (the outbound peer sync, `SyncSource`, leviculum#388): it never
+    /// holds a whole body. The default reads the whole body and copies a
+    /// slice of it, which costs the allocation this exists to avoid; a
+    /// store whose bodies are addressable in place overrides it (the
+    /// board's mapped flash, `leviculum-nrf/pn-store`, and
+    /// [`MemoryPropagationStore`]).
+    fn read_body_at(
+        &self,
+        transient_id: &TransientId,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, StorageError> {
+        Ok(self
+            .read_body(transient_id)?
+            .map(|body| copy_from(&body, offset, buf)))
+    }
+
+    /// One message's directory entry, or `None` if absent. One directory
+    /// pass by default.
+    fn meta(&self, transient_id: &TransientId) -> Result<Option<StoredMessage>, StorageError> {
+        let mut found = None;
+        self.for_each(&mut |meta| {
+            if found.is_none() && meta.transient_id == *transient_id {
+                found = Some(*meta);
+            }
+        })?;
+        Ok(found)
+    }
+
     /// Bytes still available for message bodies.
     fn free_space(&self) -> u64;
 
@@ -174,6 +208,15 @@ pub trait PropagationStore {
 /// `LXMF_OVERHEAD + STAMP_SIZE`), so this is a defence against misuse of the
 /// trait, not a protocol bound.
 pub const MIN_BODY_LEN: usize = DESTINATION_LENGTH + STAMP_SIZE;
+
+/// Copy `body[offset..]` into the front of `buf`, as much as fits; the
+/// shape of [`PropagationStore::read_body_at`] over a body in memory.
+pub fn copy_from(body: &[u8], offset: usize, buf: &mut [u8]) -> usize {
+    let rest = body.get(offset..).unwrap_or(&[]);
+    let take = core::cmp::min(rest.len(), buf.len());
+    buf[..take].copy_from_slice(&rest[..take]);
+    take
+}
 
 /// In-memory [`PropagationStore`], for tests and transient embedded use.
 ///
@@ -270,6 +313,18 @@ impl PropagationStore for MemoryPropagationStore {
             .entries
             .get(transient_id)
             .map(|entry| entry.body.clone()))
+    }
+
+    fn read_body_at(
+        &self,
+        transient_id: &TransientId,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, StorageError> {
+        Ok(self
+            .entries
+            .get(transient_id)
+            .map(|entry| copy_from(&entry.body, offset, buf)))
     }
 
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError> {
