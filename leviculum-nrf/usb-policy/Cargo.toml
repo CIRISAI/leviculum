@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"
-description = "The 1200-baud touch predicate, the control-envelope answer windows and the duty-hold notice of the firmware's USB side, host-testable"
+description = "The 1200-baud touch predicate, the control-envelope answer windows, the duty-hold notice and the commanded-reset plan of the firmware's USB side, host-testable"
 
 [dependencies]
 # For one function and one constant: the retune deferral bound is the airtime

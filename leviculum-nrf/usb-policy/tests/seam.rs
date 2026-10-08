@@ -274,3 +274,163 @@ fn the_query_answer_states_the_hold_and_counts_as_told() {
     assert_eq!(notice.edge(true, 36_000), None);
     assert!(notice.edge(false, 1).is_some());
 }
+
+// ---------------------------------------------------------------------------
+// The commanded reset (leviculum#359)
+// ---------------------------------------------------------------------------
+
+/// A reset frame just classified, on a board running the SoftDevice with a
+/// host reading the port.
+fn facts() -> ResetFacts {
+    ResetFacts {
+        softdevice_enabled: true,
+        ble_links: 0,
+        host_present: true,
+        since_command_ms: 0,
+    }
+}
+
+fn steps(facts: &ResetFacts) -> Vec<ResetStep> {
+    reset_plan(facts).steps().to_vec()
+}
+
+/// The order the firmware has always run, with the deadline the ack never
+/// had: line, ack, 100 ms, reset.
+const TODAY_WITH_DEADLINE: [ResetStep; 4] = [
+    ResetStep::Announce,
+    ResetStep::Ack { within_ms: 1_000 },
+    ResetStep::Drain { ms: 100 },
+    ResetStep::SystemReset,
+];
+
+#[test]
+fn the_bounds_are_the_numbers_the_host_windows_allow() {
+    assert_eq!(RESET_ACK_WITHIN_MS, 1_000);
+    assert_eq!(RESET_DRAIN_MS, 100);
+    assert_eq!(PERICULUM_RESET_ACK_WINDOW_MS, 2_000);
+    assert_eq!(PERICULUM_REENUM_GONE_WINDOW_MS, 5_000);
+    // `RESET_ACK_WITHIN_MS + RESET_DRAIN_MS < PERICULUM_RESET_ACK_WINDOW_MS`
+    // is a build-time assert in the crate; the plan-level form is below.
+}
+
+/// The census's link-up arm: a board with a BLE link, a host reading. The
+/// link adds no step.
+#[test]
+fn a_board_with_a_link_up_resets_in_todays_order() {
+    for links in 1..=4u8 {
+        let f = ResetFacts {
+            ble_links: links,
+            ..facts()
+        };
+        assert_eq!(steps(&f), TODAY_WITH_DEADLINE, "ble_links={links}");
+    }
+}
+
+/// The census's quiet arm: no link, a host reading.
+#[test]
+fn a_quiet_board_resets_in_todays_order() {
+    assert_eq!(steps(&facts()), TODAY_WITH_DEADLINE);
+}
+
+/// The dead state's reading: a host holds DTR up and never takes the ack.
+/// The plan's waits are all bounded, so the board leaves the bus within
+/// 1.1 s of the command, inside periculum's first ack attempt.
+#[test]
+fn an_ack_that_never_comes_still_ends_in_a_reset_within_the_host_window() {
+    let plan = reset_plan(&facts());
+    assert_eq!(plan.worst_case_ms(), 1_100);
+    assert!(plan.worst_case_ms() < PERICULUM_RESET_ACK_WINDOW_MS);
+    assert!(plan.worst_case_ms() < PERICULUM_REENUM_GONE_WINDOW_MS);
+}
+
+/// No host: nobody can read an ack, so none is written; the drain and the
+/// reset stay.
+#[test]
+fn with_no_host_the_ack_is_not_written() {
+    let f = ResetFacts {
+        host_present: false,
+        ..facts()
+    };
+    assert_eq!(
+        steps(&f),
+        [
+            ResetStep::Announce,
+            ResetStep::Drain { ms: 100 },
+            ResetStep::SystemReset
+        ]
+    );
+    assert_eq!(reset_plan(&f).worst_case_ms(), 100);
+}
+
+/// The ack gets what is left of its window, and nothing once it is spent.
+#[test]
+fn the_ack_gets_what_is_left_of_its_window() {
+    let at = |since_command_ms| {
+        steps(&ResetFacts {
+            since_command_ms,
+            ..facts()
+        })
+    };
+    assert_eq!(at(1).get(1), Some(&ResetStep::Ack { within_ms: 999 }));
+    assert_eq!(at(999).get(1), Some(&ResetStep::Ack { within_ms: 1 }));
+    for spent in [1_000, 1_001, u64::MAX] {
+        assert!(
+            !at(spent).iter().any(|s| matches!(s, ResetStep::Ack { .. })),
+            "since_command_ms={spent}"
+        );
+    }
+}
+
+/// The SoftDevice state adds no step: `sd_nvic_SystemReset` is the same
+/// reset `sys_reset` makes.
+#[test]
+fn the_softdevice_state_does_not_change_the_plan() {
+    for host_present in [false, true] {
+        let on = ResetFacts {
+            host_present,
+            ..facts()
+        };
+        let off = ResetFacts {
+            softdevice_enabled: false,
+            ..on
+        };
+        assert_eq!(steps(&on), steps(&off), "host_present={host_present}");
+    }
+}
+
+/// Every combination: the line first, the reset last, exactly once each,
+/// the drain right before the reset, an ack only before the drain, and no
+/// plan that keeps the board on the bus past the host's ack window.
+#[test]
+fn every_plan_starts_with_the_line_and_ends_in_the_reset() {
+    for softdevice_enabled in [false, true] {
+        for ble_links in [0u8, 1, 4, u8::MAX] {
+            for host_present in [false, true] {
+                for since_command_ms in [0u64, 500, 999, 1_000, 60_000] {
+                    let f = ResetFacts {
+                        softdevice_enabled,
+                        ble_links,
+                        host_present,
+                        since_command_ms,
+                    };
+                    let plan = reset_plan(&f);
+                    let s = plan.steps();
+                    assert_eq!(s.first(), Some(&ResetStep::Announce), "{f:?}");
+                    assert_eq!(s.last(), Some(&ResetStep::SystemReset), "{f:?}");
+                    assert_eq!(
+                        s.get(s.len() - 2),
+                        Some(&ResetStep::Drain { ms: RESET_DRAIN_MS }),
+                        "{f:?}"
+                    );
+                    assert_eq!(
+                        s.iter().filter(|x| **x == ResetStep::SystemReset).count(),
+                        1,
+                        "{f:?}"
+                    );
+                    assert!(plan.worst_case_ms() < PERICULUM_RESET_ACK_WINDOW_MS);
+                    println!("RESET_PLAN {f:?} -> {s:?}");
+                }
+            }
+        }
+    }
+}

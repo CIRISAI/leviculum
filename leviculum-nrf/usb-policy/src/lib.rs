@@ -25,6 +25,14 @@
 //! instead would push `CONFIG_DELIVER_WITHIN_MS + CONFIG_APPLY_WITHIN_MS`
 //! past the 2 s lnsd waits per attempt, and lnsd would count a slow apply as
 //! a lost answer rather than a busy one.
+//!
+//! # The commanded reset
+//!
+//! [`reset_plan`] orders what the firmware does between a reset frame and
+//! `sys_reset` (leviculum#359): the persistent line, the ack with a deadline
+//! ([`RESET_ACK_WITHIN_MS`], derived from periculum's reset waits), the drain,
+//! the reset. The transport task in `usb.rs` runs the steps it is handed and
+//! decides none of them.
 
 extern crate alloc;
 
@@ -257,4 +265,166 @@ impl DutyHoldNotice {
         self.told_held = held;
         encode_duty_hold(&DutyHoldWire { held, lt_ms })
     }
+}
+
+// ---------------------------------------------------------------------------
+// The commanded reset (leviculum#359)
+// ---------------------------------------------------------------------------
+
+/// periculum's per-attempt wait for the reset ack when it holds the port
+/// itself: `reset_lnode` (`periculum/src/runner.rs`) reads for 2 s after each
+/// of its three reset frames before it writes the next one.
+pub const PERICULUM_RESET_ACK_WINDOW_MS: u64 = 2_000;
+
+/// How long periculum gives a reset board to leave the bus
+/// (`REENUM_GONE_WINDOW`, `periculum/src/runner.rs`). On the daemon route
+/// (`reset_lnode_via_daemon`) it is the only evidence there is: lnsd writes
+/// the frame and forgets it, and a board still on the bus when this runs out
+/// is reported `no_reboot`.
+pub const PERICULUM_REENUM_GONE_WINDOW_MS: u64 = 5_000;
+
+/// How long the commanded reset waits for its ack to be taken off the wire
+/// before it resets without it.
+///
+/// The ack is one short HDLC frame, a single 64-byte USB packet, and a host
+/// that reads the port (lnsd always does, periculum does for the 2 s after
+/// its frame) takes it within one USB frame. What the wait has to survive is
+/// a host that holds DTR up and does not read: before the bound, the CDC
+/// write pended for as long as that lasted and the board acked a reset it
+/// then never performed. Half of [`PERICULUM_RESET_ACK_WINDOW_MS`], so that
+/// with [`RESET_DRAIN_MS`] on top the board has left the bus before the
+/// host's first attempt runs out and before it writes a second reset frame
+/// into a board still busy with the first.
+pub const RESET_ACK_WITHIN_MS: u64 = 1_000;
+
+/// How long the USB device stays up after the ack, so the host can read the
+/// ack before the device disappears (the 100 ms the firmware always waited).
+pub const RESET_DRAIN_MS: u64 = 100;
+
+// Ack wait plus drain is the longest a commanded reset stays on the bus, and
+// it has to fit the tightest host window. A build-time check, so widening
+// either fails the firmware build, not only this crate's tests.
+const _: () = assert!(RESET_ACK_WITHIN_MS + RESET_DRAIN_MS < PERICULUM_RESET_ACK_WINDOW_MS);
+const _: () = assert!(PERICULUM_RESET_ACK_WINDOW_MS < PERICULUM_REENUM_GONE_WINDOW_MS);
+
+/// What the firmware knows when a reset frame arrives.
+///
+/// Two facts are inputs because they change the plan: whether a host is
+/// there to read the ack, and how much of the ack window is already spent.
+/// The other two are inputs because the plan answers them with no step,
+/// and that answer is what the host tests pin (see [`reset_plan`]). Not an
+/// input: whether a flash write is in flight. The firmware tracks no such
+/// fact; a reset in the middle of one is what the stores' torn-write
+/// handling is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResetFacts {
+    /// `sd_softdevice_is_enabled` answered non-zero.
+    pub softdevice_enabled: bool,
+    /// BLE connections holding a drain slot (`HVN_DRAIN.claimed()`).
+    pub ble_links: u8,
+    /// DTR is up on the transport port: a process holds it open.
+    pub host_present: bool,
+    /// Milliseconds since the reset frame was classified.
+    pub since_command_ms: u64,
+}
+
+/// One step of the commanded reset, in the order [`reset_plan`] gives them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetStep {
+    /// The critical `[RESET] host-requested reboot` line, into the
+    /// persistent tail. First, because it is the only record a census has
+    /// that this boot ended by command: every later step can hang (the ack)
+    /// or ends the boot (the reset), and a line written after either is a
+    /// line that may never exist.
+    Announce,
+    /// Write the ack, and give up on it after `within_ms`. Before the drain,
+    /// because the drain exists for the ack; bounded, because a host that
+    /// holds DTR up without reading would otherwise keep a board that has
+    /// agreed to reset running indefinitely.
+    Ack {
+        /// What is left of [`RESET_ACK_WITHIN_MS`].
+        within_ms: u64,
+    },
+    /// Keep the USB device up for `ms`. After the ack and also after an ack
+    /// that ran out: an abandoned write may still sit armed on the IN
+    /// endpoint for a host that reads late. It is also the debug writer's
+    /// window to put the `Announce` line on the debug port live.
+    Drain {
+        /// [`RESET_DRAIN_MS`].
+        ms: u64,
+    },
+    /// `SCB::sys_reset()`. Last, and with nothing torn down before it:
+    ///
+    /// - SoftDevice enabled: `sd_nvic_SystemReset` is the CMSIS
+    ///   `NVIC_SystemReset()` and nothing else (`nrf_nvic.h` of S140), the
+    ///   same AIRCR write `sys_reset` makes, so routing through the
+    ///   SoftDevice changes nothing. `sd_softdevice_disable` first would
+    ///   need every BLE task stopped before it, an ordering this firmware
+    ///   has nowhere else, for a hazard nobody has measured.
+    /// - BLE links up: the reset drops them, and each peer sees the
+    ///   supervision timeout it already handles for a board that walks out
+    ///   of range. The reset census ran both arms (link up and quiet board)
+    ///   78 times with no board lost.
+    SystemReset,
+}
+
+/// The ordered steps of a commanded reset, at most four.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResetPlan {
+    steps: [ResetStep; 4],
+    len: usize,
+}
+
+impl ResetPlan {
+    const fn new() -> Self {
+        Self {
+            steps: [ResetStep::SystemReset; 4],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, step: ResetStep) {
+        if let Some(slot) = self.steps.get_mut(self.len) {
+            *slot = step;
+            self.len += 1;
+        }
+    }
+
+    /// The steps in the order the firmware runs them.
+    pub fn steps(&self) -> &[ResetStep] {
+        self.steps.get(..self.len).unwrap_or(&[])
+    }
+
+    /// The longest the plan keeps the board on the bus: every bounded wait
+    /// running out.
+    pub fn worst_case_ms(&self) -> u64 {
+        self.steps()
+            .iter()
+            .map(|step| match step {
+                ResetStep::Ack { within_ms } => *within_ms,
+                ResetStep::Drain { ms } => *ms,
+                ResetStep::Announce | ResetStep::SystemReset => 0,
+            })
+            .sum()
+    }
+}
+
+/// The commanded reset's steps for what the firmware knows now.
+///
+/// Always `Announce` first, `Drain` and `SystemReset` last. In between an
+/// `Ack` when a host is there to read it and the ack window has time left;
+/// with no host the ack has no reader (the DTR gate would refuse the write
+/// anyway), and with the window spent it would only push the reset past the
+/// host's wait. The SoftDevice and the BLE links do not change the plan:
+/// [`ResetStep::SystemReset`] says why.
+pub fn reset_plan(facts: &ResetFacts) -> ResetPlan {
+    let mut plan = ResetPlan::new();
+    plan.push(ResetStep::Announce);
+    let left = RESET_ACK_WITHIN_MS.saturating_sub(facts.since_command_ms);
+    if facts.host_present && left > 0 {
+        plan.push(ResetStep::Ack { within_ms: left });
+    }
+    plan.push(ResetStep::Drain { ms: RESET_DRAIN_MS });
+    plan.push(ResetStep::SystemReset);
+    plan
 }
