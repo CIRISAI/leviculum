@@ -377,13 +377,12 @@ const OUTBOUND_DEADLINE_MS: u64 = 180_000;
 /// `/offer` request timeout, as on the host.
 const OFFER_REQUEST_TIMEOUT_MS: u64 = 60_000;
 
-/// The board peer-table cap, §5's derivation re-checked against the
-/// worst observed free heap (39 308 B, Pocket, end of the 12.69 h field
-/// run): an 8 KiB peering slice gives `104·N + 6144 ≤ 8192`, N ≤ 19, and
-/// 16 keeps margin for the sync round's own buffers. Re-measure on both
-/// bins when the role has run on hardware; the number to compare is the
-/// `[HEAP]` watermark with a full table.
-const BOARD_MAX_PEERS: usize = 16;
+// The board peer-table cap. Its derivation is a const assertion in the
+// heap budget crate now, beside the census model's figure for a full table
+// (`leviculum_heap_budget::BOARD_MAX_PEERS`). Re-measure on both bins when
+// the role has run on hardware; the number to compare is the `[HEAP]`
+// watermark with a full table.
+use leviculum_heap_budget::BOARD_MAX_PEERS;
 
 /// Highest remote peering cost this board will mine a key for. The
 /// reference accepts up to 26 (`MAX_PEERING_COST`,
@@ -402,6 +401,30 @@ pub use leviculum_heap_budget::{
     BOARD_SYNC_LIMIT_KB, BOARD_TRANSFER_LIMIT_KB, ROLE_BUDGET_BYTES, SERVE_PEAK_BYTES,
     SERVE_RESERVE_BYTES, SERVE_RESOURCE_SDU,
 };
+
+/// The transient peaks of the role's operations, the model's figures at the
+/// inputs this board actually saw (#388, order 510): the largest per
+/// operation since boot, printed as `[HEAP_PEAK]` beside the census's
+/// steady state terms (`crate::heap_census::log`). Computed, not measured:
+/// `LlffHeap` has no per-allocation hook, and the arithmetic is what the
+/// host tests pin against the real code (`leviculum-nrf/heap-budget`).
+///
+/// Fed to the census rather than to `debug_assert!`s: the field runs
+/// release builds, where an assertion is not there to see, and a debug
+/// build asserting against the budget would panic on shapes the host tests
+/// already show overdraw. A line in the log names the operation and its
+/// size next to `largest=`, which is what the next post-mortem needs.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EnginePeaks {
+    /// [`leviculum_heap_budget::offer_response_peak`].
+    pub offer_response: usize,
+    /// [`leviculum_heap_budget::inbound_resource_peak`].
+    pub inbound_resource: usize,
+    /// [`leviculum_heap_budget::upload_peak`], accepted uploads.
+    pub upload: usize,
+    /// [`leviculum_heap_budget::store_tail_peak`].
+    pub store_tail: usize,
+}
 
 /// Boot-time spine reservations (#388 step 3), allocated once in
 /// [`Engine::new`] and reused: `VecDeque`/`Vec` never shrink, so the
@@ -757,6 +780,8 @@ pub struct Engine {
     /// one: the engine validates one message at a time either way, and the
     /// slicing changed how long one takes, not how many run.
     grind: Option<Grind>,
+    /// The largest modelled transient per operation since boot.
+    peaks: EnginePeaks,
     /// What the BOOT plan funds one fetch to serve
     /// ([`crate::heap_census::budget_serve_cap`] of this node's own box)
     /// — the floor the serve-time reading is taken against, kept here so
@@ -884,6 +909,7 @@ impl Engine {
             too_large: Vec::with_capacity(TOO_LARGE_SLOTS),
             own_share: OwnShare::new(),
             grind: None,
+            peaks: EnginePeaks::default(),
             serve_boot_cap,
         })
     }
@@ -939,6 +965,11 @@ impl Engine {
             role: self.role.heap_bytes(),
             flush: self.role.store().queued_heap_bytes() + self.peer_store.queued_heap_bytes(),
         }
+    }
+
+    /// The largest modelled transient per operation since boot (#388).
+    pub fn heap_peaks(&self) -> EnginePeaks {
+        self.peaks
     }
 
     /// When the loop should call [`Engine::settle`] again.
@@ -1529,6 +1560,8 @@ impl Engine {
                 return;
             }
         };
+        let tail_peak = leviculum_heap_budget::store_tail_peak(entries.len(), plan.ids.len());
+        self.peaks.store_tail = self.peaks.store_tail.max(tail_peak);
         let Some(sync) = self.outbound.as_mut() else {
             return;
         };
@@ -1626,6 +1659,12 @@ impl Engine {
                     messages: bodies,
                 };
                 let data = envelope.encode();
+                let peak = leviculum_heap_budget::offer_response_peak(
+                    envelope.messages.iter().map(|body| body.len()),
+                    plan.ids.len(),
+                    SERVE_RESOURCE_SDU,
+                );
+                self.peaks.offer_response = self.peaks.offer_response.max(peak);
                 let total = data.len() as u64;
                 let count = envelope.messages.len();
                 match node.send_resource(link_id, &data, None, true) {
@@ -1797,6 +1836,12 @@ impl Engine {
         // resource admission above already gates on `validated_links`
         // (`ResourceAdvertised`), so the two now agree.
         let envelope = PeerSyncEnvelope::decode(data).ok();
+        let decoded = envelope
+            .as_ref()
+            .map_or(&[][..], |envelope| envelope.messages.as_slice());
+        let peak =
+            leviculum_heap_budget::inbound_resource_peak(data.len(), decoded.iter().map(Vec::len));
+        self.peaks.inbound_resource = self.peaks.inbound_resource.max(peak);
         let multi = envelope
             .as_ref()
             .is_some_and(|envelope| envelope.messages.len() > 1);
@@ -2734,6 +2779,12 @@ impl Engine {
                         evicted,
                     } => {
                         self.log_evictions(&evicted);
+                        let peak = leviculum_heap_budget::upload_peak(
+                            data.len(),
+                            size as usize,
+                            !duplicate,
+                        );
+                        self.peaks.upload = self.peaks.upload.max(peak);
                         // The flush still happens here, and `durable=` still
                         // reports it — what it no longer gates is the proof
                         // (#397). A packet proof is a receipt statement, not

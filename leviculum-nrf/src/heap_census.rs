@@ -31,6 +31,19 @@
 //!
 //! (one line on the wire; wrapped here for the page).
 //!
+//! With the propagation role running, a second line follows it:
+//!
+//! ```text
+//! [HEAP_PEAK] offer_response=… inbound_resource=… upload=… store_tail=…
+//!   role_headroom=…
+//! ```
+//!
+//! The census is a steady state; the allocations that broke the field T114
+//! are transients inside single role operations. This line carries the
+//! largest each one has reached since boot, by the model the heap budget
+//! crate pins on the host (`leviculum_heap_budget::peak`), and what the
+//! role budget leaves for a transient beside its structural term.
+//!
 //! `links=`/`n_links=` walk the RETICULUM link table; a BLE peer that
 //! holds only a GATT connection appears in `ble_sessions=` (total, with
 //! `ble_s<slot>=` per drain slot) — the per-connection owner the field
@@ -131,6 +144,10 @@ pub use leviculum_heap_budget::{
 const _: () = assert!(
     core::mem::size_of::<leviculum_core::link::Link>() == leviculum_heap_budget::LINK_BYTES
 );
+// The same for a `Vec` header, the spine term of every per-operation peak
+// (`leviculum_heap_budget::peak`).
+const _: () =
+    assert!(core::mem::size_of::<alloc::vec::Vec<u8>>() == leviculum_heap_budget::peak::VEC_BYTES);
 
 /// Emit the boot `HEAP_BUDGET` line and refuse to run a configuration
 /// whose worst case does not fit the heap (#388 step 4).
@@ -320,4 +337,24 @@ where
             other,
         ),
     );
+    // The transients beside the steady state (#388, order 510): what the
+    // model says each operation peaked at, the largest since boot, and what
+    // the role budget leaves for a transient once its structural term is
+    // spent. A `largest=` below one of these names the operation that can
+    // no longer run.
+    if let Some(engine) = engine {
+        let peaks = engine.heap_peaks();
+        crate::log::log_fmt(
+            "[HEAP_PEAK] ",
+            format_args!(
+                "offer_response={} inbound_resource={} upload={} store_tail={} role_headroom={}",
+                peaks.offer_response,
+                peaks.inbound_resource,
+                peaks.upload,
+                peaks.store_tail,
+                leviculum_heap_budget::ROLE_BUDGET_BYTES
+                    - leviculum_heap_budget::ROLE_STRUCTURAL_BYTES,
+            ),
+        );
+    }
 }
