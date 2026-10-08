@@ -1,5 +1,10 @@
 # Nightly build pipeline for leviculum.
 #
+# Since 2026-10-08 (leviculum 517) the publisher is `just nightly-publish`
+# on the tier-2 nightly host, and this pipeline uploads only on a run
+# started by hand (see PUBLISHER above the `package` step). The asset
+# names and URLs below are the recipe's too: it runs the same scripts.
+#
 # Builds two musl-static .deb packages (amd64 + arm64) and uploads
 # them to a rolling `nightly` release on Codeberg. Assets are
 # overwritten each run, so these download URLs stay stable:
@@ -65,12 +70,17 @@
 # the Woodpecker API as soon as the night pushes a green ref, because a
 # clock-fired run publishes before the signal exists (see "What fires
 # the publish" in docs/src/development-ci.md).
+# Since 517 neither run publishes; the trigger can be retired with the
+# publish steps.
 #
 # Authentication for the publish step uses a Codeberg API token
 # (write:repository scope) supplied via the Woodpecker secret
 # `codeberg_token`. NETRC is only visible inside the clone step,
 # not in user-defined steps, so a manual token is required.
 
+# Since 2026-10-08 the cron publishes nothing (see PUBLISHER below); it
+# keeps the gate and the builds. Until then:
+#
 # Two triggers. The nightly cron is what publishes; the push trigger is
 # a guard, and only builds. Packaging changes were previously unbuildable
 # before merge — `when: event: cron` alone meant a broken manifest first
@@ -81,6 +91,9 @@
 # not pay for a packaging build.
 when:
   - event: cron
+  # A human-started run from the Woodpecker UI. Since 2026-10-08 it is the
+  # only run that publishes from here; see "PUBLISHER" below.
+  - event: manual
   - event: push
     path:
       include:
@@ -247,7 +260,22 @@ steps:
       # rather than on somebody's board.
       - bash scripts/lnflash-bundle.sh
 
-  # Staging and publishing are cron-only. A push build exists to prove
+  # PUBLISHER (Lew, 2026-10-08, leviculum 517): the nightly is published by
+  # `just nightly-publish` on the tier-2 nightly host, run after a GRUEN night
+  # in the tree that night tested (scripts/nightly-publish.sh). Every step of
+  # this pipeline was already a script there; this file contributed the
+  # container, the cron and the secrets, and the cron/trigger pair ran twice on
+  # ed0754e4 that morning, the second site publish refused. So the cron run
+  # below builds and gates and publishes nothing: `package`, `publish` and
+  # `publish-site` run on `event: manual` only, a run started by hand from the
+  # Woodpecker UI, kept as the fallback for a night the host cannot publish.
+  # A switch rather than a deletion, so the fallback stays one click away
+  # until the recipe has published twice; the reviewer removes the three steps
+  # (and their secrets, in the order check-ci-secrets wants) after that. Do not
+  # start a manual run on a day the recipe has published: the site refuses a
+  # second, different build under the same build id.
+  #
+  # Staging and publishing are manual-only (before 517: cron-only). A push build exists to prove
   # the packages still build; letting it reach these two steps would let
   # any packaging commit replace the rolling release with a mid-day
   # build of whatever was just pushed.
@@ -273,7 +301,7 @@ steps:
   package:
     image: debian:bookworm-slim
     when:
-      event: cron
+      event: manual
     commands:
       - apt-get update && apt-get install -y git
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
@@ -282,7 +310,7 @@ steps:
   publish:
     image: debian:bookworm-slim
     when:
-      event: cron
+      event: manual
     environment:
       CODEBERG_TOKEN:
         from_secret: codeberg_token
@@ -401,7 +429,7 @@ steps:
   publish-site:
     image: debian:bookworm-slim
     when:
-      - event: cron
+      - event: manual
         status: [success, failure]
     environment:
       SITE_SSH_TARGET:

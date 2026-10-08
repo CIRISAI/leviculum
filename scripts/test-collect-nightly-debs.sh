@@ -4,7 +4,7 @@
 #
 # The step has had no coverage at all, and that is why the rolling nightly
 # release stood still from 2026-08-24 to 2026-09-18 without anything saying
-# so. `package` and `publish` carry `when: event: cron` in
+# so. `package` and `publish` carry `when: event: cron` (`manual` since 517) in
 # .woodpecker/nightly.yml, so no push gate reaches them; a commit that breaks
 # one is green everywhere a human looks and red only at 02:00, in a log
 # nobody reads. Commit 03e2cb95 replaced a hardcoded target/ with a

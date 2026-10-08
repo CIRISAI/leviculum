@@ -797,7 +797,7 @@ check-publish-nightly-gate:
 
 # The nightly's OTHER cron-only step, driven against a fixture tree.
 #
-# `package` and `publish` both carry `when: event: cron`, so until this
+# `package` and `publish` both carry `when: event: cron` (`manual` since 517), so until this
 # recipe existed exactly half of that pair had coverage and the other half
 # had none. The rolling release stood still from 2026-08-24 to 2026-09-18
 # and every push pipeline over those five weeks was green: 03e2cb95 put a
