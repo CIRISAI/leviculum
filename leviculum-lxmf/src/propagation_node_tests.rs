@@ -402,6 +402,9 @@ fn the_field_fetch_frames_the_allocation_that_killed_the_board() {
         MemoryPropagationStore::new(64 * 1024),
         PropagationNodeConfig {
             sync_limit_kb: 8,
+            // The announced limit bounded the board's fetch that day; a
+            // fetch is bounded by a serve limit now, so it stands in.
+            serve_limit_bytes: Some(8000),
             ..PropagationNodeConfig::default()
         },
     );
@@ -448,11 +451,11 @@ fn the_field_fetch_frames_the_allocation_that_killed_the_board() {
 /// as many as the cap allows.
 #[test]
 fn the_encoded_response_never_outgrows_the_accounted_cap() {
-    for sync_limit_kb in [1u64, 2, 4, 8, 32] {
+    for serve_limit_kb in [1usize, 2, 4, 8, 32] {
         let mut node = PropagationNode::new(
             MemoryPropagationStore::new(256 * 1024),
             PropagationNodeConfig {
-                sync_limit_kb,
+                serve_limit_bytes: Some(serve_limit_kb * 1000),
                 ..PropagationNodeConfig::default()
             },
         );
@@ -479,10 +482,10 @@ fn the_encoded_response_never_outgrows_the_accounted_cap() {
         };
         let response = node.encode_fetch(&plan).unwrap();
         assert_eq!(plan.encoded_len(), response.len());
-        let cap = (sync_limit_kb * 1000) as usize;
+        let cap = serve_limit_kb * 1000;
         assert!(
             response.len() <= cap,
-            "sync_limit_kb={sync_limit_kb}: encoded {} > cap {cap}",
+            "serve_limit_kb={serve_limit_kb}: encoded {} > cap {cap}",
             response.len()
         );
     }
@@ -832,4 +835,54 @@ fn a_cap_below_one_message_serves_nothing_and_loses_nothing() {
         panic!("an empty request is the list form");
     };
     assert_eq!(count, 4, "the node still offers what it cannot yet serve");
+}
+
+/// Ten 3.7 kB messages for one mailbox, fetched by a client whose own
+/// limit is 256 kB, from a node announcing `sync_limit_kb`. The shape of
+/// the periculum cell `lxmf_pn_sync_limit_python_offers` (leviculum#388).
+fn fetch_ten_with(config: PropagationNodeConfig) -> usize {
+    let mut node = PropagationNode::new(MemoryPropagationStore::new(256 * 1024), config);
+    let wants: Vec<TransientId> = (0..10u8)
+        .map(|seed| {
+            accepted_id(&node.handle_upload(&envelope_sized(7, seed, 3700), 0, no_validation))
+        })
+        .collect();
+    let fetch = MessageGetRequest {
+        wants: Some(wants),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(256)),
+    };
+    let GetOutcome::Fetch { plan, .. } = node
+        .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
+        .unwrap()
+    else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    plan.count()
+}
+
+/// A host bounds a fetch by the client's limit alone, as the reference
+/// does (`reference/LXMF/LXMF/LXMRouter.py:1526-1530`): its announced
+/// per-sync limit paces what peers offer it, not what a client may take.
+#[test]
+fn a_host_bounds_a_fetch_by_the_clients_limit_alone() {
+    let served = fetch_ten_with(PropagationNodeConfig {
+        sync_limit_kb: 5,
+        transfer_limit_kb: 4,
+        ..PropagationNodeConfig::default()
+    });
+    assert_eq!(served, 10, "a 256 kB client limit takes all ten at once");
+}
+
+/// A board's serve limit still bounds a fetch: that bound is its heap
+/// arithmetic, not its announce.
+#[test]
+fn a_boards_serve_limit_still_bounds_a_fetch() {
+    let served = fetch_ten_with(PropagationNodeConfig {
+        sync_limit_kb: 5,
+        transfer_limit_kb: 4,
+        serve_limit_bytes: Some(5000),
+        ..PropagationNodeConfig::default()
+    });
+    assert_eq!(served, 1, "a 5000 B serve limit fits one 3.7 kB message");
 }

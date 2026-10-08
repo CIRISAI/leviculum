@@ -346,11 +346,11 @@ pub struct PropagationNodeConfig {
     /// Message expiry. [`MESSAGE_EXPIRY_SECS`] unless a test shortens it.
     pub message_expiry_secs: u64,
     /// Heap-funded bound on ONE fetch response, in accounted bytes — the
-    /// same accounting `sync_limit_kb` is applied in, and always the
-    /// tighter of the two that bites.
+    /// same accounting the client's limit and [`Self::serve_limit_bytes`]
+    /// are applied in, and the tightest of them is the one that bites.
     ///
-    /// `None` on a host, where the announced sync limit is the only
-    /// bound. A board sets it to what its heap plan funds
+    /// `None` on a host, where the client's limit is the only bound. A
+    /// board sets it to what its heap plan funds
     /// ([`serve_cap_for_peak`] of its boot budget's slack,
     /// `heap_census::budget_serve_cap`, `leviculum-nrf`) and raises it
     /// per `/get` to what the live heap funds
@@ -369,9 +369,8 @@ pub struct PropagationNodeConfig {
     /// `message_list_response` puts the rest back in `wants`,
     /// `reference/LXMF/LXMF/LXMRouter.py:1607-1644` and `:1576-1596`).
     pub serve_cap_bytes: Option<usize>,
-    /// The bound one fetch response is held to in place of the announced
-    /// per-sync limit, in accounted bytes; `None` (the host) holds it to
-    /// `sync_limit_kb`.
+    /// The bound one fetch response is held to, in accounted bytes, on top
+    /// of the client's own limit; `None` (the host) adds none.
     ///
     /// A board announces a sync limit derived from what it can afford to
     /// SEND a peer in one round (`BOARD_SYNC_LIMIT_KB`,
@@ -1072,33 +1071,36 @@ impl<S: PropagationStore> PropagationNode<S> {
         }
 
         // The client's transfer limit arrives in kilobytes of 1000 bytes as
-        // element 2 (:1526-1530); our own announced per-sync limit caps the
-        // response as well. The second cap is ours, not the reference's —
-        // wire-compatible under the deviation rule: a response shorter than
-        // the request is the protocol's normal shape (skipped IDs are
-        // re-requested on the next sync, :1547 skips them the same way), and
-        // bounding one response resource at what we advertise as one sync
-        // keeps a slow link's transfer inside the budget the announce names.
+        // element 2 and is the reference's only bound (:1526-1530); a host
+        // holds the response to it and to nothing else of its own. Our
+        // announced per-sync limit paces what peers offer us, not what a
+        // client may take. Two bounds of ours compose with it by `min`,
+        // each only where the node has one, wire-compatible under the
+        // deviation rule: a response shorter than the request is the
+        // protocol's normal shape (skipped IDs are re-requested on the
+        // next sync, :1547 skips them the same way).
+        //
+        // * A board's serve limit (`serve_limit_bytes`), what it can afford
+        //   to serve a client in one fetch.
+        // * The heap cap (`serve_cap_bytes`), tighter when a node's heap
+        //   plan funds less: serving a response costs more than its length
+        //   ([`serve_peak_bytes`]), and a board that answers past what that
+        //   plan funds dies in the transient instead of answering. It
+        //   bounds the same accounted sum the others bound, so the
+        //   dominance argument at [`serve_peak_bytes`] carries over
+        //   unchanged.
         let client_limit = request.transfer_limit_kb.map(|limit| match limit {
             TransferLimit::Integer(kb) => (kb as f64) * 1000.0,
             TransferLimit::Float(kb) => kb * 1000.0,
         });
-        let our_limit = match self.config.serve_limit_bytes {
-            Some(bytes) => bytes as f64,
-            None => (self.config.sync_limit_kb * 1000) as f64,
-        };
-        // A third cap, tighter than both when a node's heap plan funds
-        // less than it announces (`serve_cap_bytes`): serving a response
-        // costs more than its length ([`serve_peak_bytes`]), and a board
-        // that answers past what that plan funds dies in the transient
-        // instead of answering. It bounds the same accounted sum the other
-        // two bound, so the three compose by `min` and the dominance
-        // argument at [`serve_peak_bytes`] carries over unchanged.
-        let our_limit = match self.config.serve_cap_bytes {
-            Some(funded) => our_limit.min(funded as f64),
-            None => our_limit,
-        };
-        let limit = client_limit.map_or(our_limit, |client| client.min(our_limit));
+        let limit = [
+            client_limit,
+            self.config.serve_limit_bytes.map(|bytes| bytes as f64),
+            self.config.serve_cap_bytes.map(|funded| funded as f64),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(f64::INFINITY, f64::min);
 
         // Overheads exactly as the reference budgets them (:1532-1533).
         let per_message_overhead = 16.0;
