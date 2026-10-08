@@ -14,13 +14,17 @@
 //! drops records past `THRESHOLD_REMOVE` (and unknown types) from disk, then
 //! returns the survivors sorted by `(status_code, value, last_heard)` desc. An
 //! undecodable record is skipped and warned about once per record identity
-//! rather than on every pass (Codeberg #157).
+//! rather than on every pass (Codeberg #157). Unlike Python it does not read
+//! an unchanged registry again: the decoded list is cached per directory and
+//! only a record file whose stamp moved is decoded anew (Codeberg #437).
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::hash::{Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use leviculum_core::discovery::DiscoveredInterface;
 use leviculum_core::discovery::DiscoveredInterfaceRecord;
@@ -146,6 +150,7 @@ pub(crate) fn persist_discovered(
     let tmp = dir.join(format!("{filename}.tmp"));
     std::fs::write(&tmp, &encoded)?;
     std::fs::rename(&tmp, &path)?;
+    GENERATION.fetch_add(1, Ordering::Release);
     Ok(())
 }
 
@@ -169,82 +174,272 @@ fn record_fingerprint(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
+/// The registry as a listing returns it: shared, so a read of an unchanged
+/// registry hands out the list it already holds instead of a copy of 773
+/// records (Codeberg #437).
+pub(crate) type DiscoveredList = Arc<Vec<Arc<DiscoveredInterfaceRecord>>>;
+
+/// Bumped by every [`persist_discovered`], so a listing in this process sees
+/// its own writes at once, whatever the filesystem's timestamp granularity.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// What [`list_discovered_interfaces`] saw last, per discovery directory
+/// (Codeberg #437).
+///
+/// The autoconnect branch lists the registry once a second. Re-reading and
+/// re-decoding every record each time was, on the miauhaus soak with 773
+/// records, 72 percent of the node's allocations: about 14 000 a second to
+/// learn that nothing had changed. Python re-reads too
+/// (`Discovery.py:402-447`); nothing on the wire or in the
+/// listing depends on that, so the read is skipped when the directory says
+/// nothing moved.
+static REGISTRY_CACHE: Mutex<BTreeMap<PathBuf, DirCache>> = Mutex::new(BTreeMap::new());
+
+/// How long a cached listing is trusted without looking at the files. The
+/// directory's mtime moves when a record is created, renamed into place or
+/// removed, which is every write this stack makes. It does not move when
+/// another process rewrites a record in place, which is how Python writes
+/// (`open(filepath, "wb")`, `Discovery.py:465` and `:491`); a stack sharing the storage
+/// directory is seen within this interval.
+const REVALIDATE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// A timestamp younger than this, measured from the scan that read it, may
+/// share its clock tick with a change made just after the scan (ext3 and FAT
+/// stamp whole seconds, FAT two). Until every stamp in the directory is older
+/// than this, the next listing looks at the files again.
+const SETTLE: Duration = Duration::from_secs(2);
+
+/// The identity of a record file's contents as the directory reports it. A
+/// record rewritten through a rename is a new inode; one rewritten in place
+/// changes its mtime or length.
+#[derive(Clone, Copy, PartialEq)]
+struct FileStamp {
+    mtime: Option<SystemTime>,
+    len: u64,
+    ino: u64,
+}
+
+impl FileStamp {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let ino = std::os::unix::fs::MetadataExt::ino(meta);
+        #[cfg(not(unix))]
+        let ino = 0;
+        Self {
+            mtime: meta.modified().ok(),
+            len: meta.len(),
+            ino,
+        }
+    }
+}
+
+/// One record file as last decoded.
+enum CachedEntry {
+    Record(Arc<DiscoveredInterfaceRecord>),
+    /// Undecodable, with the fingerprint of the bytes (Codeberg #157).
+    Corrupt(u64),
+}
+
+struct CachedFile {
+    stamp: FileStamp,
+    entry: CachedEntry,
+}
+
+struct DirCache {
+    /// The directory's mtime when the files were last looked at.
+    dir_mtime: Option<SystemTime>,
+    /// [`GENERATION`] when the files were last looked at.
+    generation: u64,
+    /// Every stamp read was older than [`SETTLE`] at the time of the scan.
+    settled: bool,
+    validated_at: Instant,
+    files: BTreeMap<OsString, CachedFile>,
+    sorted: DiscoveredList,
+}
+
+impl DirCache {
+    fn new() -> Self {
+        Self {
+            dir_mtime: None,
+            generation: 0,
+            settled: false,
+            validated_at: Instant::now(),
+            files: BTreeMap::new(),
+            sorted: Arc::new(Vec::new()),
+        }
+    }
+
+    /// Whether the files must be looked at again before the cached list is
+    /// handed out.
+    fn stale(&self, dir_mtime: Option<SystemTime>, generation: u64) -> bool {
+        !self.settled
+            || dir_mtime.is_none()
+            || dir_mtime != self.dir_mtime
+            || generation != self.generation
+            || self.validated_at.elapsed() >= REVALIDATE_INTERVAL
+    }
+
+    /// Stat every record file; decode only the ones whose stamp moved.
+    fn revalidate(&mut self, dir: &Path, dir_mtime: Option<SystemTime>, generation: u64) {
+        let scan_start = SystemTime::now();
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => {
+                *self = Self::new();
+                return;
+            }
+        };
+        let mut newest = dir_mtime;
+        let mut seen: BTreeMap<OsString, CachedFile> = BTreeMap::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Skip our own `.tmp` scratch files and any subdirectories.
+            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                continue;
+            }
+            let meta = match std::fs::metadata(&path) {
+                Ok(m) if m.is_file() => m,
+                _ => continue,
+            };
+            let stamp = FileStamp::of(&meta);
+            newest = newest.max(stamp.mtime);
+            let name = entry.file_name();
+            let file = match self.files.remove(&name) {
+                Some(cached) if cached.stamp == stamp => cached,
+                _ => match decode_record_file(&path) {
+                    Some(entry) => CachedFile { stamp, entry },
+                    // Unreadable: not cached, so the next look tries again.
+                    None => continue,
+                },
+            };
+            seen.insert(name, file);
+        }
+        self.files = seen;
+        self.dir_mtime = dir_mtime;
+        self.generation = generation;
+        self.validated_at = Instant::now();
+        self.settled =
+            newest.is_some_and(|t| t.checked_add(SETTLE).is_some_and(|t| t <= scan_start));
+
+        // Replace the suppression entries for THIS directory with the corrupt
+        // records it holds now. Scoped to `dir` so a concurrent scan of another
+        // storage root (the unit tests, a second daemon instance) cannot silence
+        // or re-arm someone else's records.
+        if let Ok(mut warned) = WARNED_CORRUPT.lock() {
+            warned.retain(|p, _| p.parent() != Some(dir));
+            for (name, file) in &self.files {
+                if let CachedEntry::Corrupt(fingerprint) = file.entry {
+                    warned.insert(dir.join(name), fingerprint);
+                }
+            }
+        }
+    }
+
+    /// Unlink records past `THRESHOLD_REMOVE` (and unknown types), and rebuild
+    /// the sorted list if anything was revalidated or removed. Otherwise only
+    /// re-sort when the age-derived status moved a record out of order.
+    fn assemble(&mut self, dir: &Path, now: f64, rebuild: bool) {
+        let expired: Vec<OsString> = self
+            .files
+            .iter()
+            .filter(|(_, f)| matches!(&f.entry, CachedEntry::Record(r) if r.should_remove(now)))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &expired {
+            // Prune stale/unknown-type records from disk, matching Python.
+            let _ = std::fs::remove_file(dir.join(name));
+            self.files.remove(name);
+        }
+
+        if rebuild || !expired.is_empty() {
+            let mut records: Vec<Arc<DiscoveredInterfaceRecord>> = self
+                .files
+                .values()
+                .filter_map(|f| match &f.entry {
+                    CachedEntry::Record(r) => Some(Arc::clone(r)),
+                    CachedEntry::Corrupt(_) => None,
+                })
+                .collect();
+            records.sort_by(|a, b| listing_order(a, b, now));
+            self.sorted = Arc::new(records);
+        } else if !self
+            .sorted
+            .is_sorted_by(|a, b| listing_order(a, b, now) != std::cmp::Ordering::Greater)
+        {
+            Arc::make_mut(&mut self.sorted).sort_by(|a, b| listing_order(a, b, now));
+        }
+    }
+}
+
+/// `(status_code, value, last_heard)` descending. status_code derives from
+/// the last_heard age at query time, so an order can go stale by the clock
+/// alone.
+fn listing_order(
+    a: &DiscoveredInterfaceRecord,
+    b: &DiscoveredInterfaceRecord,
+    now: f64,
+) -> std::cmp::Ordering {
+    let ka = (a.status(now).code(), a.value, a.last_heard);
+    let kb = (b.status(now).code(), b.value, b.last_heard);
+    kb.partial_cmp(&ka).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Read and decode one record file; `None` when it cannot be read.
+///
+/// An undecodable record is skipped, not unlinked. The reference logs and
+/// continues too (`Discovery.py:442-445`); only its explicit `should_remove`
+/// cases unlink (`:423-425`). Our decoder is the stricter of the two — it
+/// requires fields Python's `msgpack.unpackb` never looks at — so deleting
+/// here would destroy records a Python `rnsd` still serves out of the storage
+/// directory both stacks share (Codeberg #157).
+fn decode_record_file(path: &Path) -> Option<CachedEntry> {
+    let bytes = std::fs::read(path).ok()?;
+    if let Some(record) = DiscoveredInterfaceRecord::decode_msgpack(&bytes) {
+        return Some(CachedEntry::Record(Arc::new(record)));
+    }
+    let fingerprint = record_fingerprint(&bytes);
+    let already_warned = WARNED_CORRUPT
+        .lock()
+        .map(|w| w.get(path) == Some(&fingerprint))
+        .unwrap_or(false);
+    if !already_warned {
+        tracing::warn!("discovery: corrupt record {}, skipping", path.display());
+    }
+    Some(CachedEntry::Corrupt(fingerprint))
+}
+
 /// List persisted discovered interfaces, dropping expired/unknown records from
 /// disk, sorted by `(status_code, value, last_heard)` descending (Python
 /// `list_discovered_interfaces`). `now` is the query wall-clock (Unix seconds).
-pub(crate) fn list_discovered_interfaces(
-    storage_root: &Path,
-    now: f64,
-) -> Vec<DiscoveredInterfaceRecord> {
+///
+/// A registry whose directory has not moved is not read again: the list comes
+/// from [`REGISTRY_CACHE`], and only a record file whose stamp changed is
+/// decoded anew (Codeberg #437).
+pub(crate) fn list_discovered_interfaces(storage_root: &Path, now: f64) -> DiscoveredList {
     let dir = discovery_dir(storage_root);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
+    // Read before the directory, so a write racing the scan bumps it past
+    // what the cache records and the next listing looks again.
+    let generation = GENERATION.load(Ordering::Acquire);
+    let mut caches = REGISTRY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let dir_mtime = match std::fs::metadata(&dir) {
+        Ok(meta) if meta.is_dir() => meta.modified().ok(),
+        _ => {
+            caches.remove(&dir);
+            return Arc::new(Vec::new());
+        }
     };
-
-    let mut records: Vec<DiscoveredInterfaceRecord> = Vec::new();
-    // Corrupt records met on THIS pass, so the suppression table can forget the
-    // ones that are gone (a record deleted and later recreated corrupt warns
-    // again, as it should). Bounded by the number of corrupt files on disk.
-    let mut corrupt_this_pass: BTreeMap<PathBuf, u64> = BTreeMap::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Skip our own `.tmp` scratch files and any subdirectories.
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-            continue;
-        }
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let record = match DiscoveredInterfaceRecord::decode_msgpack(&bytes) {
-            Some(r) => r,
-            None => {
-                // Skipped, not unlinked. The reference logs and continues too
-                // (`Discovery.py:442-445`); only its explicit `should_remove`
-                // cases unlink (`:423-425`). Our decoder is the stricter of the
-                // two — it requires fields Python's `msgpack.unpackb` never
-                // looks at — so deleting here would destroy records a Python
-                // `rnsd` still serves out of the storage directory both stacks
-                // share (Codeberg #157).
-                let fingerprint = record_fingerprint(&bytes);
-                let already_warned = WARNED_CORRUPT
-                    .lock()
-                    .map(|w| w.get(&path) == Some(&fingerprint))
-                    .unwrap_or(false);
-                if !already_warned {
-                    tracing::warn!("discovery: corrupt record {}, skipping", path.display());
-                }
-                corrupt_this_pass.insert(path, fingerprint);
-                continue;
-            }
-        };
-
-        if record.should_remove(now) {
-            // Prune stale/unknown-type records from disk, matching Python.
-            let _ = std::fs::remove_file(&path);
-            continue;
-        }
-        records.push(record);
+    if !caches.contains_key(&dir) {
+        caches.insert(dir.clone(), DirCache::new());
     }
-
-    // Replace the suppression entries for THIS directory with what the pass
-    // actually saw. Scoped to `dir` so a concurrent scan of another storage
-    // root (the unit tests, a second daemon instance) cannot silence or
-    // re-arm someone else's records.
-    if let Ok(mut warned) = WARNED_CORRUPT.lock() {
-        warned.retain(|p, _| p.parent() != Some(dir.as_path()));
-        warned.extend(corrupt_this_pass);
+    let Some(cache) = caches.get_mut(&dir) else {
+        return Arc::new(Vec::new());
+    };
+    let rebuild = cache.stale(dir_mtime, generation);
+    if rebuild {
+        cache.revalidate(&dir, dir_mtime, generation);
     }
-
-    // Sort by (status_code, value, last_heard) descending. status_code derives
-    // from the last_heard age at query time.
-    records.sort_by(|a, b| {
-        let ka = (a.status(now).code(), a.value, a.last_heard);
-        let kb = (b.status(now).code(), b.value, b.last_heard);
-        kb.partial_cmp(&ka).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    records
+    cache.assemble(&dir, now, rebuild);
+    Arc::clone(&cache.sorted)
 }
 
 #[cfg(test)]
@@ -403,5 +598,115 @@ mod tests {
         let list = list_discovered_interfaces(td.path(), 1000.0);
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "High", "higher stamp value sorts first");
+    }
+
+    /// Persist `n` distinct records and [`settle`] the registry.
+    fn settled_registry(root: &Path, n: usize) {
+        for i in 0..n {
+            let mut di = rnode_di(&format!("Node {i}"), 0);
+            di.discovery_hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            persist_discovered(root, &di, 1, 1000.0).unwrap();
+        }
+        settle(root);
+    }
+
+    /// Move the directory's and every file's mtime an hour into the past, so
+    /// the registry looks the way it does on a node between announces rather
+    /// than a moment after a write.
+    fn settle(root: &Path) {
+        let past = SystemTime::now() - std::time::Duration::from_secs(3600);
+        let dir = discovery_dir(root);
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            std::fs::File::options()
+                .write(true)
+                .open(entry.path())
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+        }
+        std::fs::File::open(&dir)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+    }
+
+    /// Codeberg #437: the autoconnect branch reads the registry once a second.
+    /// On the miauhaus soak (773 records) that read was 72 percent of the
+    /// node's allocations, decoding every record to learn that nothing had
+    /// changed. A read of an unchanged registry must not decode anything.
+    #[test]
+    fn unchanged_registry_is_not_decoded_again() {
+        use crate::rpc::connection::alloc_probe::measure_allocations;
+        let td = tempfile::tempdir().unwrap();
+        settled_registry(td.path(), 800);
+
+        let (first, first_allocs) =
+            measure_allocations(|| list_discovered_interfaces(td.path(), 1000.0));
+        assert_eq!(first.len(), 800);
+        drop(first);
+        let (second, second_allocs) =
+            measure_allocations(|| list_discovered_interfaces(td.path(), 1000.0));
+        assert_eq!(second.len(), 800, "the cached read returns every record");
+        assert!(
+            second_allocs < 16,
+            "an unchanged registry of 800 records cost {second_allocs} allocations \
+             on the second read (the first read cost {first_allocs})"
+        );
+    }
+
+    /// The other half of #437: a record written by someone else (no
+    /// `persist_discovered` in this process to bump the generation) is listed
+    /// on the next read, and only that record is decoded. The others are
+    /// stat'ed, not read.
+    #[test]
+    fn a_record_added_behind_the_cache_is_listed_and_decoded_alone() {
+        use crate::rpc::connection::alloc_probe::measure_allocations;
+        let td = tempfile::tempdir().unwrap();
+        settled_registry(td.path(), 800);
+        let (_, full_read) = measure_allocations(|| list_discovered_interfaces(td.path(), 1000.0));
+
+        let mut di = rnode_di("Newcomer", 0xEE);
+        di.value = 30;
+        let record = DiscoveredInterfaceRecord::from_discovered(&di, 1, 1000.0, 1000.0, 1000.0, 0);
+        let dir = discovery_dir(td.path());
+        std::fs::write(
+            dir.join(crate::storage::hex_encode(&di.discovery_hash)),
+            record.encode_msgpack(),
+        )
+        .unwrap();
+
+        let (list, revalidation) =
+            measure_allocations(|| list_discovered_interfaces(td.path(), 1000.0));
+        assert_eq!(list.len(), 801, "the new record is listed");
+        assert_eq!(list[0].name, "Newcomer", "and sorted into place");
+        assert!(
+            revalidation < full_read / 2,
+            "a revalidation that decodes one record cost {revalidation} allocations, \
+             a full read {full_read}"
+        );
+    }
+
+    /// Expiry is decided at query time, so a cached record that ages past
+    /// `THRESHOLD_REMOVE` is dropped and unlinked on the read that sees it
+    /// expire, although nothing on disk changed.
+    #[test]
+    fn a_cached_record_expires_on_the_read_that_sees_it() {
+        use leviculum_core::discovery::THRESHOLD_REMOVE;
+        let td = tempfile::tempdir().unwrap();
+        settled_registry(td.path(), 2);
+        let mut fresh = rnode_di("Fresh", 0x77);
+        fresh.discovery_hash[0] = 0xFF;
+        let later = 1000.0 + THRESHOLD_REMOVE + 10.0;
+        persist_discovered(td.path(), &fresh, 1, later).unwrap();
+        settle(td.path());
+
+        assert_eq!(list_discovered_interfaces(td.path(), 1000.0).len(), 3);
+        // Served from the cache: neither the directory nor the generation
+        // moved since the read above.
+        let list = list_discovered_interfaces(td.path(), later);
+        assert_eq!(list.len(), 1, "the two old records expired");
+        assert_eq!(list[0].name, "Fresh");
+        let on_disk = std::fs::read_dir(discovery_dir(td.path())).unwrap().count();
+        assert_eq!(on_disk, 1, "expired records are unlinked");
     }
 }

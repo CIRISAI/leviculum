@@ -198,7 +198,7 @@ fn build_discovered_interfaces(discovery_storage: Option<&std::path::Path>) -> V
     let records = crate::discovery::list_discovered_interfaces(storage_root, now);
 
     let items = records
-        .into_iter()
+        .iter()
         .map(|r| {
             let status = r.status(now);
             let mut entries: Vec<(HashableValue, Value)> = vec![

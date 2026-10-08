@@ -30,6 +30,7 @@
 //! in the interface layer and the runtime-management logic here, and makes the
 //! spawn/register/teardown lifecycle unit-testable against a mock spawner.
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -251,7 +252,7 @@ impl AutoConnectManager {
     /// configured cap. `now` is wall-clock seconds (for the offline timer).
     pub(crate) fn poll(
         &mut self,
-        live: &[DiscoveredInterfaceRecord],
+        live: &[impl Borrow<DiscoveredInterfaceRecord>],
         now: f64,
         spawner: &mut impl AutoConnectSpawner,
     ) {
@@ -262,6 +263,7 @@ impl AutoConnectManager {
         // Endpoints still backed by a live autoconnectable record.
         let live_endpoints: BTreeSet<[u8; 32]> = live
             .iter()
+            .map(Borrow::borrow)
             .filter(|r| Self::connect_target(r).is_some())
             .map(|r| Self::endpoint_hash(r.reachable_on.as_deref().unwrap_or(""), r.port))
             .collect();
@@ -337,7 +339,7 @@ impl AutoConnectManager {
 
         // Spawn pass. `live` is caller-sorted best-first (Python
         // list_discovered_interfaces order), so the cap keeps the best peers.
-        for rec in live {
+        for rec in live.iter().map(Borrow::borrow) {
             if self.active.len() >= self.max_interfaces {
                 break;
             }
@@ -543,7 +545,7 @@ mod tests {
         assert_eq!(mgr.active_count(), 1);
 
         // Record gone from the live set (expired/removed) -> teardown.
-        mgr.poll(&[], 1100.0, &mut sp);
+        mgr.poll(&[] as &[DiscoveredInterfaceRecord], 1100.0, &mut sp);
         assert_eq!(
             sp.torn_down,
             vec![id],
@@ -884,7 +886,7 @@ mod tests {
         let rec = backbone_rec("Hub", "10.0.0.5", 4965, 1);
 
         // Nothing discovered yet: one seed is attached and stays.
-        mgr.poll(&[], 1000.0, &mut sp);
+        mgr.poll(&[] as &[DiscoveredInterfaceRecord], 1000.0, &mut sp);
         assert_eq!(mgr.bootstrap_action(1), BootstrapAction::Keep);
 
         // Dialled but not yet online -> still not a replacement.
@@ -920,7 +922,7 @@ mod tests {
         assert_eq!(mgr.bootstrap_action(1), BootstrapAction::Detach);
 
         // Seed detached; the record then disappears and the auto-connect with it.
-        mgr.poll(&[], 1002.0, &mut sp);
+        mgr.poll(&[] as &[DiscoveredInterfaceRecord], 1002.0, &mut sp);
         assert_eq!(mgr.active_count(), 0);
         assert_eq!(mgr.bootstrap_action(0), BootstrapAction::ReAttach);
 

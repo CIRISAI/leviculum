@@ -269,7 +269,7 @@ pub(crate) async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 use rand_core::RngCore;
 
 /// Test-only allocator seam: the one global allocator this crate's unit-test
-/// binary installs, and the two questions it answers.
+/// binary installs, and the three questions it answers.
 ///
 /// The defect this file fixes is an allocation, not a read — the length prefix
 /// alone made us allocate, whether or not the payload ever arrived. Asserting
@@ -284,8 +284,13 @@ use rand_core::RngCore;
 /// hundreds of thousands of small allocations, so the largest single one says
 /// nothing about it; the high-water of live bytes says everything.
 ///
-/// Both live here because a process may install exactly one global allocator,
-/// and both obey the standing rule for this investigation: this is a shim in
+/// [`alloc_probe::measure_allocations`] answers the third (Codeberg #437): how
+/// OFTEN a path asks the allocator, which is churn rather than footprint. A
+/// once-a-second registry read that decodes 773 records frees everything it
+/// took, so neither figure above sees it; the call count does.
+///
+/// All three live here because a process may install exactly one global allocator,
+/// and all obey the standing rule for this investigation: this is a shim in
 /// FRONT of `System`, forwarding every call with the layout it arrived with,
 /// so the code under test runs the same allocator through the same paths.
 ///
@@ -314,11 +319,19 @@ pub(crate) mod alloc_probe {
         static LIVE: Cell<usize> = const { Cell::new(0) };
         /// High-water mark of [`LIVE`] since the last `measure_live_peak`.
         static LIVE_PEAK: Cell<usize> = const { Cell::new(0) };
+        /// Allocator calls that handed out memory on this thread since
+        /// arming; `None` on a thread that is not armed, like [`PEAK`].
+        static COUNT: Cell<Option<usize>> = const { Cell::new(None) };
     }
 
     struct PeakProbe;
 
     fn record(size: usize) {
+        let _ = COUNT.try_with(|count| {
+            if let Some(n) = count.get() {
+                count.set(Some(n + 1));
+            }
+        });
         let _ = PEAK.try_with(|peak| {
             if let Some(seen) = peak.get() {
                 if size > seen {
@@ -376,6 +389,17 @@ pub(crate) mod alloc_probe {
         let out = f();
         let peak = PEAK.with(|peak| peak.replace(None)).unwrap_or(0);
         (out, peak)
+    }
+
+    /// Run `f` with the probe armed on this thread; return its result and how
+    /// many allocator calls (alloc, zeroed alloc, realloc) it made. The
+    /// churn question (Codeberg #437): a path that allocates thousands of
+    /// times a second shows up here even when it frees everything again.
+    pub(crate) fn measure_allocations<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        COUNT.with(|count| count.set(Some(0)));
+        let out = f();
+        let count = COUNT.with(|count| count.replace(None)).unwrap_or(0);
+        (out, count)
     }
 
     /// Run `f` and report the most bytes it had live at once, over and above
