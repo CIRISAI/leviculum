@@ -6780,7 +6780,7 @@ fn the_firmwares_admission_decides_the_rig_rooms_dial() {
     };
     let now_ms = 600_000;
     let mut registry: PeerRegistry<4> = PeerRegistry::new();
-    registry.conn_up(0, BOARD_A);
+    registry.conn_up(0, BOARD_A, 0);
     let mut dead_ends = DeadEnds::new();
     dead_ends.note(BOARD_B, now_ms);
     let mut churn = ChurnLedger::new();

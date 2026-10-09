@@ -34,10 +34,10 @@ use leviculum_ble_tx::{
     judge_supervision_timeout, manufacturer_data_with_hint, parse_peer_advertisement,
     with_free_slots, AdvReport, CandidateTable, ChurnLedger, ChurnPolicy, ConnParams,
     ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision, DeadEnds,
-    DialLedger, Exclusion, GattBytes, LedgerPolicy, Ledgers, LinkPhase, LinkRole, LinkUp, Local,
-    Origin, OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent, PhaseNeighbours,
-    ScanMode, ScanPhase, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, DEAD_END_SLOTS,
-    DEAD_END_TTL_MS, GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
+    DialLedger, Exclusion, GattBytes, LedgerPolicy, Ledgers, LinkPhase, LinkRole, LinkUp,
+    LinkVerdict, Local, Origin, OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent,
+    PhaseNeighbours, ScanMode, ScanPhase, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY,
+    DEAD_END_SLOTS, DEAD_END_TTL_MS, GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY,
     MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, PHASE_NEIGHBOUR_SLOTS, SCAN_WINDOW_COLLECT_MS,
     WINDOW_CANDIDATES,
 };
@@ -577,10 +577,13 @@ async fn peripheral_task(
 /// Say what a link actually runs at (#385).
 ///
 /// Except for the peripheral's supervision-timeout request
-/// ([`ask_for_a_survivable_timeout`]), neither stack asks for
-/// connection parameters, so these are the central's choice inherited
-/// whole — and the supervision timeout among them is precisely how
-/// long a disturbance may last before the link dies. On the bench the
+/// ([`ask_for_a_survivable_timeout`]), no peripheral asks for
+/// connection parameters — not the board, not lnsd, not Columba — and
+/// of the centrals only Columba asks for anything after connecting:
+/// once, `CONNECTION_PRIORITY_HIGH`, whose numbers Android chooses
+/// (`BleGattClient.kt`). So these are the central's choice — and
+/// the supervision timeout among them is precisely how long a
+/// disturbance may last before the link dies. On the bench the
 /// values could be read out of the central's kernel because the
 /// central was BlueZ; against a phone the board is the only side that
 /// can be asked, and before this line it was never asked.
@@ -909,6 +912,29 @@ async fn gatt_events(
                     if hold.ready() {
                         tx_ready.signal(());
                     }
+                } else if !handshake_done.get() && data.len() >= FRAGMENT_HEADER_SIZE {
+                    // Payload before the identity (#548): v2.2 makes the
+                    // 16-byte write mandatory and first, so this central
+                    // is not speaking it. Never defragmented, never
+                    // forwarded — before #548 it reached the transport
+                    // with `link_peer = None` — and the connection is
+                    // closed, as Columba's GATT server closes it
+                    // (`BleGattServer.kt` `acceptsRxWrite`): the slot is
+                    // back now rather than at the handshake bound. A
+                    // keepalive before the identity is tolerated, as
+                    // lnsd tolerates it; it buys no time, the handshake
+                    // clock does not read frames.
+                    BLE_PRE_HANDSHAKE_REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    crate::log::log_fmt(
+                        "[BLE ] ",
+                        format_args!(
+                            "BLE_PRE_HANDSHAKE_REFUSE role=peripheral slot={} conn={} len={} action=disconnect",
+                            slot_index,
+                            conn_handle,
+                            data.len()
+                        ),
+                    );
+                    let _ = conn.disconnect();
                 } else if data.len() < FRAGMENT_HEADER_SIZE {
                     // Single-byte keepalive (0x00): nothing to
                     // defragment, but the peer is demonstrably there,
@@ -1160,6 +1186,12 @@ pub(crate) static BLE_LINKS_REFUSED: core::sync::atomic::AtomicU32 =
 pub(crate) static BLE_GATT_OVERSIZE: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
+/// Payload writes refused because they arrived before the 16-byte
+/// identity (#548), for the `BLE_COUNTERS` line's `unidentified=`
+/// field. Each also names itself as a `BLE_PRE_HANDSHAKE_REFUSE` line.
+pub(crate) static BLE_PRE_HANDSHAKE_REFUSED: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
 /// Per-slot displacement latches (#376): [`peer_link_up`] signals the
 /// OLD link's slot when a newer connection of the same identity takes
 /// over, and the session holding that slot tears itself down through
@@ -1184,8 +1216,10 @@ async fn displaced(slot_index: usize, conn_handle: u16) {
 }
 
 /// Resolve when this session's link has delivered NOTHING — no packet
-/// fragment, no keepalive — for [`LINK_TIMEOUT_MS`], returning that
-/// silence: the board's link expiry (#382).
+/// fragment, no keepalive — for [`leviculum_ble_tx::LINK_TIMEOUT_MS`]
+/// (the board's link expiry, #382), or when its connection has not
+/// handshaked within [`leviculum_ble_tx::HANDSHAKE_TIMEOUT_MS`] (#548),
+/// returning which and the evidence.
 ///
 /// The board has no sweep task, so the expiry is an arm of the session
 /// it ends, reading the same liveness clock [`note_heard`] feeds and
@@ -1201,19 +1235,25 @@ async fn displaced(slot_index: usize, conn_handle: u16) {
 /// Columba peer has gone away.
 ///
 /// It sleeps exactly to the earliest instant the link could be over,
-/// so a healthy link costs one wake per [`LINK_TIMEOUT_MS`] and a
+/// so a healthy link costs one wake per [`leviculum_ble_tx::LINK_TIMEOUT_MS`] and a
 /// keepalive-fed one never fires at all. A slot whose identity is not
 /// registered yet — a peripheral connection between the connect event
-/// and the handshake — has no clock to read and is re-checked one
-/// keepalive interval later; the previous tenant's clock is never
-/// mistaken for this link's.
-async fn link_silent(slot_index: usize) -> u64 {
+/// and the handshake — is judged on the connection's age instead, and
+/// ends at [`leviculum_ble_tx::HANDSHAKE_TIMEOUT_MS`] (#548): before
+/// that bound a central that subscribed and never wrote its identity
+/// held the slot for as long as it stayed connected. The previous
+/// tenant's clock is never mistaken for this link's. The decision is
+/// [`PeerRegistry::link_verdict`], host-tested in ble-tx; this arm only
+/// sleeps.
+async fn link_silent(slot_index: usize) -> LinkEnd {
     loop {
         let now_ms = Instant::now().as_millis();
-        match LIVE_PEERS.lock(|peers| peers.borrow().silence_ms(slot_index, now_ms)) {
-            Some(silence_ms) if silence_ms >= LINK_TIMEOUT_MS => return silence_ms,
-            Some(silence_ms) => Timer::after_millis(LINK_TIMEOUT_MS - silence_ms).await,
-            None => Timer::after_millis(KEEPALIVE_INTERVAL_MS).await,
+        match LIVE_PEERS.lock(|peers| peers.borrow().link_verdict(slot_index, now_ms)) {
+            LinkVerdict::Wait(ms) => Timer::after_millis(ms).await,
+            LinkVerdict::Expired(silence_ms) => return LinkEnd::Expired(silence_ms),
+            LinkVerdict::HandshakeOverdue(waited_ms) => {
+                return LinkEnd::HandshakeOverdue(waited_ms)
+            }
         }
     }
 }
@@ -1225,10 +1265,14 @@ enum LinkEnd {
     /// A newer connection of this identity took the peer over (#376);
     /// the displacer has already logged the decision.
     Displaced,
-    /// Nothing was heard on this link for [`LINK_TIMEOUT_MS`] — the
+    /// Nothing was heard on this link for [`leviculum_ble_tx::LINK_TIMEOUT_MS`] — the
     /// silence, in ms, so a capture can tell an expiry from a range
     /// loss and see how far past the bound it ran.
     Expired(u64),
+    /// The connection never wrote its 16-byte identity within
+    /// [`leviculum_ble_tx::HANDSHAKE_TIMEOUT_MS`] (#548) — how long it
+    /// waited. No identity, so no peer to report lost.
+    HandshakeOverdue(u64),
 }
 
 /// One line for an expiry, none for a displacement — that one is
@@ -1236,15 +1280,27 @@ enum LinkEnd {
 /// the displacer with the evidence it decided on. `silence_ms=` is the
 /// expiry's evidence, in the same spelling the duplicate lines'
 /// `old_silence_ms=` uses, so one grep reads both.
+///
+/// A handshake timeout says `BLE_HANDSHAKE_TIMEOUT` with `waited_ms=`,
+/// the connection's age at the bound — the line a rig cell asserts for
+/// "connect, subscribe, never handshake, slot back within 30 s".
 fn log_link_end(role: &str, slot_index: usize, conn_handle: u16, end: LinkEnd) {
-    if let LinkEnd::Expired(silence_ms) = end {
-        crate::log::log_fmt(
+    match end {
+        LinkEnd::Expired(silence_ms) => crate::log::log_fmt(
             "[BLE ] ",
             format_args!(
                 "BLE_LINK_EXPIRE role={} slot={} conn={} silence_ms={}",
                 role, slot_index, conn_handle, silence_ms
             ),
-        );
+        ),
+        LinkEnd::HandshakeOverdue(waited_ms) => crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!(
+                "BLE_HANDSHAKE_TIMEOUT role={} slot={} conn={} waited_ms={}",
+                role, slot_index, conn_handle, waited_ms
+            ),
+        ),
+        LinkEnd::Displaced => {}
     }
 }
 
@@ -1253,7 +1309,7 @@ fn log_link_end(role: &str, slot_index: usize, conn_handle: u16, end: LinkEnd) {
 async fn link_over(slot_index: usize, conn_handle: u16) -> LinkEnd {
     match select(displaced(slot_index, conn_handle), link_silent(slot_index)).await {
         Either::First(()) => LinkEnd::Displaced,
-        Either::Second(silence_ms) => LinkEnd::Expired(silence_ms),
+        Either::Second(end) => end,
     }
 }
 
@@ -1523,7 +1579,8 @@ fn peer_link_down(slot_index: usize) {
 /// identity. A rotating address cannot say who connected, so it waits
 /// for the identity (#504).
 fn conn_link_up(slot_index: usize, addr: PeerAddr) {
-    LIVE_PEERS.lock(|peers| peers.borrow_mut().conn_up(slot_index, addr.value));
+    let now_ms = Instant::now().as_millis();
+    LIVE_PEERS.lock(|peers| peers.borrow_mut().conn_up(slot_index, addr.value, now_ms));
     let neighbour = PHASE_NEIGHBOURS.lock(|seen| seen.borrow_mut().meet_conn(addr));
     note_phase_event(PhaseEvent::ConnUp(neighbour));
 }

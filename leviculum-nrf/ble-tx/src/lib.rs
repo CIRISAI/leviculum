@@ -78,8 +78,8 @@ pub use peer::{
 };
 pub use registry::{
     judge_duplicate, plan_fanout, preferred_ble_role, usable_mtu, BleRole, DataSilence, DupRule,
-    DupVerdict, LinkUp, Origin, PeerRegistry, SlotMask, TxAim, TxFanout, LINK_ABANDONED_MS,
-    LINK_TIMEOUT_MS, MIN_USABLE_MTU,
+    DupVerdict, LinkUp, LinkVerdict, Origin, PeerRegistry, SlotMask, TxAim, TxFanout,
+    HANDSHAKE_TIMEOUT_MS, LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU,
 };
 pub use session_census::{HeldBytes, SessionHeld};
 pub use window::{

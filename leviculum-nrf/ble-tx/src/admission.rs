@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn filter_three_an_address_we_hold_a_connection_on_is_excluded() {
         let mut registry: PeerRegistry<4> = PeerRegistry::new();
-        registry.conn_up(0, BOARD_ABOVE);
+        registry.conn_up(0, BOARD_ABOVE, 0);
         let a = admit(
             LOCAL,
             &report(BOARD_ABOVE, AddrType::RandomStatic, None),
@@ -817,7 +817,7 @@ mod tests {
         dead.note(PHONE_RPA, now_ms);
         let peer = identity(0x33);
         let mut registry: PeerRegistry<4> = PeerRegistry::new();
-        registry.conn_up(0, PHONE_RPA);
+        registry.conn_up(0, PHONE_RPA, 0);
         let _ = registry.link_up(0, peer, Origin::Incoming, 247, now_ms);
         let dial = held_dial_ledger(now_ms);
         let churn = held_churn_ledger(now_ms);

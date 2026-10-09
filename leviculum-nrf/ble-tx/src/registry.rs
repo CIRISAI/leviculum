@@ -70,6 +70,10 @@ pub struct PeerRegistry<const N: usize> {
     local_identity: [u8; 16],
     slots: [Option<[u8; 16]>; N],
     addrs: [Option<u64>; N],
+    /// When the slot's connection was made ([`conn_up`](Self::conn_up))
+    /// — the handshake bound's clock (#548). Meaningless while the slot
+    /// has no address, which is the only time nothing reads it.
+    conn_since_ms: [u64; N],
     last_heard_ms: [u64; N],
     /// When the slot's link last delivered real payload — a fragment
     /// frame, never a keepalive and never the handshake — `None` until
@@ -114,6 +118,33 @@ pub struct PeerRegistry<const N: usize> {
 /// and the same log shows them arriving: only 2 of those 502 links were
 /// ever closed by the silence timer.
 pub const LINK_TIMEOUT_MS: u64 = 3 * KEEPALIVE_INTERVAL_MS;
+
+/// A connection that has not presented its 16-byte identity this long
+/// after the connection event is disconnected (#548): the pre-handshake
+/// bound, on both stacks (lnsd's `LinkTable::expire` over its pending
+/// rows, the firmware session's `link_silent` arm through
+/// [`PeerRegistry::link_verdict`]). One constant, imported by lnsd
+/// rather than duplicated, as [`LINK_TIMEOUT_MS`] is.
+///
+/// v2.2 makes the 16-byte identity the mandatory first write; a
+/// connection that never sends it is not a Reticulum peer, and on a
+/// board with three peripheral slots one such stranger holds a third of
+/// the capacity (#412). 30 s is the reference's
+/// `_pending_identity_timeout`, the value lnsd has expired pending
+/// handshakes on since it had them.
+pub const HANDSHAKE_TIMEOUT_MS: u64 = 30_000;
+
+/// What a session's expiry arm does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkVerdict {
+    /// Nothing is due; ask again this many milliseconds from now.
+    Wait(u64),
+    /// The link delivered nothing for [`LINK_TIMEOUT_MS`]: the silence.
+    Expired(u64),
+    /// The connection never handshaked within [`HANDSHAKE_TIMEOUT_MS`]:
+    /// how long it waited.
+    HandshakeOverdue(u64),
+}
 
 /// Who opened the connection whose duplicate identity is being judged.
 ///
@@ -473,6 +504,7 @@ impl<const N: usize> PeerRegistry<N> {
             local_identity: [0; 16],
             slots: [None; N],
             addrs: [None; N],
+            conn_since_ms: [0; N],
             last_heard_ms: [0; N],
             last_data_ms: [None; N],
             att_mtus: [0; N],
@@ -488,9 +520,11 @@ impl<const N: usize> PeerRegistry<N> {
     }
 
     /// Register a slot's connection address — at the connection event,
-    /// in either role, before any identity is known.
-    pub fn conn_up(&mut self, slot: usize, addr_value: u64) {
+    /// in either role, before any identity is known. `now_ms` starts the
+    /// connection's handshake clock ([`link_verdict`](Self::link_verdict)).
+    pub fn conn_up(&mut self, slot: usize, addr_value: u64, now_ms: u64) {
         self.addrs[slot] = Some(addr_value);
+        self.conn_since_ms[slot] = now_ms;
     }
 
     /// Clear a slot's connection address at teardown (the counterpart
@@ -704,6 +738,42 @@ impl<const N: usize> PeerRegistry<N> {
     pub fn silence_ms(&self, slot: usize, now_ms: u64) -> Option<u64> {
         self.slots[slot]?;
         Some(now_ms.saturating_sub(self.last_heard_ms[slot]))
+    }
+
+    /// What the session's expiry arm does with the slot at `now_ms`
+    /// (`leviculum_nrf::ble::columba::link_silent` sleeps for every
+    /// [`LinkVerdict::Wait`] and ends the link on anything else).
+    ///
+    /// A slot holding an identity is judged on its liveness clock
+    /// ([`silence_ms`](Self::silence_ms), [`LINK_TIMEOUT_MS`]). A slot
+    /// with a connection and no identity is judged on the connection's
+    /// age ([`HANDSHAKE_TIMEOUT_MS`], #548): until then nothing bounded
+    /// it, and a central that subscribed and never wrote its identity
+    /// kept one of the board's peripheral slots for as long as it liked.
+    /// Frames do not move that clock — a keepalive proves the peer is
+    /// there, not who it is. Each wait is exactly the time to the
+    /// earliest instant the verdict could change, so the arm wakes once
+    /// per bound and never spins.
+    pub fn link_verdict(&self, slot: usize, now_ms: u64) -> LinkVerdict {
+        if let Some(silence_ms) = self.silence_ms(slot, now_ms) {
+            return if silence_ms >= LINK_TIMEOUT_MS {
+                LinkVerdict::Expired(silence_ms)
+            } else {
+                LinkVerdict::Wait(LINK_TIMEOUT_MS - silence_ms)
+            };
+        }
+        if self.addrs[slot].is_none() {
+            // No connection registered: nothing to bound. The session
+            // registers its connection before this arm first runs, so
+            // this is a teardown race at most; look again later.
+            return LinkVerdict::Wait(KEEPALIVE_INTERVAL_MS);
+        }
+        let waited_ms = now_ms.saturating_sub(self.conn_since_ms[slot]);
+        if waited_ms >= HANDSHAKE_TIMEOUT_MS {
+            LinkVerdict::HandshakeOverdue(waited_ms)
+        } else {
+            LinkVerdict::Wait(HANDSHAKE_TIMEOUT_MS - waited_ms)
+        }
     }
 
     /// Clear a slot. `Some(identity)` iff that took the identity's LAST
@@ -1436,6 +1506,124 @@ mod tests {
         );
     }
 
+    /// Drive [`PeerRegistry::link_verdict`] the way the firmware's
+    /// `link_silent` arm does — sleep for every `Wait`, ask again —
+    /// feeding `frames` (times a 1-byte keepalive arrives) on the way,
+    /// and return the first verdict that ends the link with the instant
+    /// it was reached. `None` if nothing ends it before `until`.
+    fn drive_expiry(
+        reg: &mut PeerRegistry<4>,
+        slot: usize,
+        mut t: u64,
+        frames: &[u64],
+        until: u64,
+    ) -> Option<(u64, LinkVerdict)> {
+        let mut frames = frames.iter().copied().peekable();
+        while t <= until {
+            match reg.link_verdict(slot, t) {
+                LinkVerdict::Wait(ms) => {
+                    assert!(ms > 0, "a zero wait would spin the session");
+                    let next = t + ms;
+                    // A frame landing during the sleep is heard at its
+                    // own instant, exactly as `note_heard` is called
+                    // from the inbound arm while this one sleeps.
+                    while let Some(f) = frames.next_if(|f| *f <= next) {
+                        reg.note_heard(slot, f);
+                    }
+                    t = next;
+                }
+                end => return Some((t, end)),
+            }
+        }
+        None
+    }
+
+    /// The handshake bound, pinned to lnsd's (`links.rs` imports it).
+    #[test]
+    fn the_handshake_bound_is_thirty_seconds() {
+        assert_eq!(HANDSHAKE_TIMEOUT_MS, 30_000);
+    }
+
+    /// #548 D2: a central that connects, subscribes and never writes its
+    /// 16-byte identity is told to go at exactly 30 s, whatever
+    /// keepalives it sends meanwhile, and once the session tears down
+    /// the slot holds nothing — no address, no identity, no clock.
+    #[test]
+    fn a_central_that_never_handshakes_loses_its_slot_at_the_handshake_bound() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.conn_up(1, 0xC0DE, 1_000);
+        // Keepalives prove presence, not identity: they must not buy time.
+        let keepalives = [2_000, 16_000, 30_000];
+        assert_eq!(
+            drive_expiry(&mut reg, 1, 1_000, &keepalives, 200_000),
+            Some((
+                1_000 + HANDSHAKE_TIMEOUT_MS,
+                LinkVerdict::HandshakeOverdue(HANDSHAKE_TIMEOUT_MS)
+            )),
+            "the session ends exactly at the bound"
+        );
+        assert!(
+            matches!(reg.link_verdict(1, 30_999), LinkVerdict::Wait(1)),
+            "and not a millisecond before it"
+        );
+        // The teardown the firmware runs after any LinkEnd.
+        assert_eq!(reg.link_down(1), None, "no identity, no peer loss");
+        reg.conn_down(1);
+        assert!(!reg.addr_linked(0xC0DE), "the address is free to dial");
+        assert_eq!(reg.peer_count(), 0);
+        assert_eq!(reg.silence_ms(1, 40_000), None);
+    }
+
+    /// #548 D2, the other side of the bound: a central that handshakes
+    /// at 29 s stays, and from then on only the liveness clock decides.
+    #[test]
+    fn a_central_that_handshakes_at_29_s_keeps_its_slot() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.conn_up(1, 0xC0DE, 0);
+        assert!(matches!(reg.link_verdict(1, 0), LinkVerdict::Wait(_)));
+        reg.link_up(1, A, Origin::Incoming, 517, 29_000);
+        assert!(
+            matches!(reg.link_verdict(1, 30_000), LinkVerdict::Wait(_)),
+            "an identified link is past the handshake bound for good"
+        );
+        // Kept alive by keepalives every 15 s, it never ends.
+        let keepalives: [u64; 20] = core::array::from_fn(|i| 29_000 + 15_000 * (i as u64 + 1));
+        assert_eq!(
+            drive_expiry(&mut reg, 1, 29_000, &keepalives, 29_000 + 15_000 * 20),
+            None,
+            "a handshaked, keepalive-fed link is never told to go"
+        );
+        // And a silent one ends by the expiry, never by the handshake bound.
+        let quiet_since = 29_000 + 15_000 * 20;
+        assert_eq!(
+            drive_expiry(&mut reg, 1, quiet_since, &[], quiet_since + 100_000),
+            Some((
+                quiet_since + LINK_TIMEOUT_MS,
+                LinkVerdict::Expired(LINK_TIMEOUT_MS)
+            ))
+        );
+    }
+
+    /// The handshake clock belongs to the connection, not the slot: the
+    /// next tenant starts its own 30 s, and the previous one's age is
+    /// never held against it.
+    #[test]
+    fn a_reconnect_starts_a_fresh_handshake_clock() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.conn_up(0, 0x1111, 0);
+        assert!(matches!(
+            reg.link_verdict(0, HANDSHAKE_TIMEOUT_MS),
+            LinkVerdict::HandshakeOverdue(_)
+        ));
+        reg.link_down(0);
+        reg.conn_down(0);
+        reg.conn_up(0, 0x2222, 100_000);
+        assert!(matches!(
+            reg.link_verdict(0, 100_000 + HANDSHAKE_TIMEOUT_MS - 1),
+            LinkVerdict::Wait(1)
+        ));
+    }
+
     /// A same-slot re-registration must not name its own slot: the
     /// caller would refuse — or tear down — the very connection it just
     /// kept. True in both directions and on both sides of the boundary.
@@ -1574,7 +1762,7 @@ mod tests {
         assert!(!reg.addr_linked(0xC0DE));
 
         // The rig's exact gap: connected, identity not yet presented.
-        reg.conn_up(1, 0xC0DE);
+        reg.conn_up(1, 0xC0DE, 0);
         assert!(reg.addr_linked(0xC0DE), "excluded before any dial");
         assert!(!reg.addr_linked(0xBEEF));
 
@@ -1611,7 +1799,7 @@ mod tests {
         assert!(!reg.hint_linked(Some(identity_hint(&BOARD))));
         assert!(!reg.hint_linked(None));
 
-        reg.conn_up(1, 0xC0DE);
+        reg.conn_up(1, 0xC0DE, 0);
         assert_eq!(
             reg.link_up(1, BOARD, Origin::Incoming, 517, 0),
             LinkUp::Accepted { first: true }
@@ -1656,8 +1844,8 @@ mod tests {
     #[test]
     fn the_hint_covers_every_slot_and_only_identified_ones() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.conn_up(0, 0x1111);
-        reg.conn_up(3, 0x3333);
+        reg.conn_up(0, 0x1111, 0);
+        reg.conn_up(3, 0x3333, 0);
         // Connected, identity not yet presented: the address filter
         // holds this gap, the hint filter has nothing to say.
         assert!(reg.addr_linked(0x1111));
@@ -1696,8 +1884,8 @@ mod tests {
     #[test]
     fn one_teardown_leaves_the_other_connection_linked() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.conn_up(0, 0x1111);
-        reg.conn_up(2, 0x2222);
+        reg.conn_up(0, 0x1111, 0);
+        reg.conn_up(2, 0x2222, 0);
         reg.conn_down(0);
         assert!(!reg.addr_linked(0x1111));
         assert!(reg.addr_linked(0x2222));

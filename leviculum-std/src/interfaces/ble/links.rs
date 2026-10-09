@@ -115,7 +115,9 @@ fn att_mtu_u16(mtu: usize) -> u16 {
 /// A central that connects but never writes its 16-byte identity is
 /// disconnected after this long — the reference's
 /// `_pending_identity_timeout` (`ble-reticulum@07d94130` `BLEInterface.py`, `_pending_identity_timeout`).
-pub(crate) const HANDSHAKE_TIMEOUT_MS: u64 = 30_000;
+/// Imported, like [`LINK_TIMEOUT_MS`], so the board's bound (#548) and
+/// ours are one number.
+pub(crate) use leviculum_ble_tx::HANDSHAKE_TIMEOUT_MS;
 
 /// Our side of a link: `Central` when we initiated the connection,
 /// `Peripheral` when the peer connected to our GATT server.

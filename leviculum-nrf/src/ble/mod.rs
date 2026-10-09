@@ -1129,7 +1129,7 @@ const COUNTERS_PERIOD_SECS: u64 = 30;
 /// and an absence needs a heartbeat to be quotable from a log:
 ///
 /// ```text
-/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n> refused=<n> route_miss=<n> oversize=<n>
+/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n> refused=<n> route_miss=<n> oversize=<n> unidentified=<n>
 /// ```
 ///
 /// `links=` is the number of claimed drain slots — live BLE links.
@@ -1148,6 +1148,9 @@ const COUNTERS_PERIOD_SECS: u64 = 30;
 /// `GATT_VALUE_MAX` (#387), writes and notifications together; each is
 /// also named as its own `BLE_GATT_*_OVERSIZE` line, and every count
 /// here was a board panic before #387.
+/// `unidentified=` counts payload writes refused because they came
+/// before the peer's 16-byte identity (#548); each is also a
+/// `BLE_PRE_HANDSHAKE_REFUSE` line, and its connection was closed.
 /// The two-link acceptance for #255 phase B reads `links=2 unrouted=0`
 /// off this line: both slots claimed, and every HVN drain edge still
 /// found the link that produced it.
@@ -1159,7 +1162,7 @@ async fn counters_task() -> ! {
         crate::log::log_fmt(
             "[BLE ] ",
             format_args!(
-                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={} refused={} route_miss={} oversize={}",
+                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={} refused={} route_miss={} oversize={} unidentified={}",
                 BLE_TX_PACKETS.load(Ordering::Relaxed),
                 BLE_TX_DROPPED.load(Ordering::Relaxed),
                 BLE_TX_DRAIN_WAITS.load(Ordering::Relaxed),
@@ -1169,6 +1172,7 @@ async fn counters_task() -> ! {
                 columba::BLE_LINKS_REFUSED.load(Ordering::Relaxed),
                 BLE_TX_ROUTE_MISSES.load(Ordering::Relaxed),
                 columba::BLE_GATT_OVERSIZE.load(Ordering::Relaxed),
+                columba::BLE_PRE_HANDSHAKE_REFUSED.load(Ordering::Relaxed),
             ),
         );
     }

@@ -1,9 +1,14 @@
 //! What a link actually runs at: connection interval, slave latency
 //! and supervision timeout (Codeberg #385).
 //!
-//! Neither stack asks for connection parameters, so both inherit
-//! whatever the central picks, and until this module nothing wrote the
-//! inherited values down. The parameters are not cosmetic: the
+//! As a peripheral, neither of our stacks asked for connection
+//! parameters (the board's request below came after this module), and
+//! Columba's peripheral asks for none, so a link inherits whatever its
+//! central picks. Columba's CENTRAL does ask, once after connect:
+//! `requestConnectionPriority(CONNECTION_PRIORITY_HIGH)`
+//! (`BleGattClient.kt`, Columba 6674ae87), which leaves the numbers to
+//! Android's mapping of "high". Either way, until this module nothing
+//! wrote the values a link runs at down. The parameters are not cosmetic: the
 //! supervision timeout is exactly how long a disturbance has to last
 //! before the link dies, and the interval bounds how fast anything can
 //! be sent or acknowledged. On the bench the values were readable only
