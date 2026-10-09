@@ -23,7 +23,7 @@
 //! therefore queues the proof hash per link and pops it when the matching
 //! data event is processed; per-link FIFO order is the emission order.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use leviculum_core::node::NodeEvent;
@@ -33,7 +33,7 @@ use leviculum_core::{
     Destination, DestinationHash, DestinationType, Direction, Identity, LinkId, ProofStrategy,
     RequestError, RequestPolicy,
 };
-use leviculum_lxmf::constants::STAMP_SIZE;
+use leviculum_lxmf::constants::{PROPAGATION_LINK_MAX_INACTIVITY_SECS, STAMP_SIZE};
 use leviculum_lxmf::control::{
     encode_control_ack, encode_control_error, ControlNodeStats, CONTROL_ASPECTS, STATS_GET_PATH,
     SYNC_REQUEST_PATH, UNPEER_REQUEST_PATH,
@@ -236,6 +236,11 @@ pub struct Engine<S> {
     events: std::sync::mpsc::Sender<EngineEvent>,
     /// Proof hashes awaiting their data event, per link, in emission order.
     pending_proofs: HashMap<LinkId, VecDeque<[u8; 32]>>,
+    /// Links peers and clients opened to the propagation destination,
+    /// the reference's `active_propagation_links`
+    /// (`reference/LXMF/LXMF/LXMRouter.py:2194`): each is torn down once
+    /// it carries no payload for [`PROPAGATION_LINK_MAX_INACTIVITY_SECS`].
+    inbound_links: HashSet<LinkId>,
     next_announce_at: Option<u64>,
     announce_interval_secs: u64,
     announce_delay_secs: u64,
@@ -396,6 +401,7 @@ impl<S: PropagationStore> Engine<S> {
                 state: State::Unregistered(Box::new(config)),
                 events,
                 pending_proofs: HashMap::new(),
+                inbound_links: HashSet::new(),
                 next_announce_at: None,
                 announce_interval_secs,
                 announce_delay_secs,
@@ -908,6 +914,40 @@ impl<S: PropagationStore> Engine<S> {
         }
     }
 
+    /// Tear down every inbound propagation link that carried no payload
+    /// for more than [`PROPAGATION_LINK_MAX_INACTIVITY_SECS`], as the
+    /// reference's `clean_links` does
+    /// (`reference/LXMF/LXMF/LXMRouter.py:968-974`). Keepalives do not
+    /// count: the core's own watchdog lets them hold a silent link open
+    /// indefinitely, which on a public node fills the link table with
+    /// clients that went quiet.
+    fn close_idle_links(
+        &mut self,
+        core: &mut StdNodeCoreRef<'_>,
+        now_ms: u64,
+        out: &mut TickOutput,
+    ) {
+        let now_secs = now_ms / 1000;
+        let idle: Vec<(LinkId, u64)> = self
+            .inbound_links
+            .iter()
+            .filter_map(|link_id| {
+                let idle_secs = core.link(link_id)?.no_data_for_secs(now_secs)?;
+                (idle_secs > PROPAGATION_LINK_MAX_INACTIVITY_SECS).then_some((*link_id, idle_secs))
+            })
+            .collect();
+        for (link_id, idle_secs) in idle {
+            tracing::debug!(
+                "lnpnd: tearing down inbound link {} after {idle_secs} s without payload",
+                short_hex(link_id.as_bytes()),
+            );
+            // The LinkClosed this raises reaches `on_event`, which clears
+            // the peering state and this set as well.
+            self.inbound_links.remove(&link_id);
+            out.merge(core.close_link(&link_id));
+        }
+    }
+
     fn announce(
         &mut self,
         ready: &mut Ready<S>,
@@ -1356,6 +1396,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 {
                     tracing::warn!("lnpnd: resource strategy: {error:?}");
                 }
+                self.inbound_links.insert(*link_id);
             }
             // Our own sync link to a peer came up.
             NodeEvent::LinkEstablished {
@@ -1526,6 +1567,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
             }
             NodeEvent::LinkClosed { link_id, .. } => {
                 self.pending_proofs.remove(link_id);
+                self.inbound_links.remove(link_id);
                 ready.peering.on_link_closed(link_id);
             }
             _ => {}
@@ -1570,6 +1612,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
         }
 
         self.drain_pending(&mut ready, core, &mut out);
+        self.close_idle_links(core, now_ms, &mut out);
 
         if let Some(mut mailbox) = ready.mailbox.take() {
             mailbox.on_tick(core, now_ms, &mut out);
@@ -2764,6 +2807,78 @@ mod tests {
             "the engine's side must know who is on the link"
         );
         link_id
+    }
+
+    /// An inbound link to the propagation destination that carries no
+    /// payload for `P_LINK_MAX_INACTIVITY` is torn down, as the reference
+    /// tears it down (`clean_links`, `reference/LXMF/LXMF/LXMRouter.py:968-974`).
+    /// The core alone never would: the client's keepalives refresh its
+    /// watchdog, so its own bound (about 211 s on a LAN, the stale time
+    /// plus RTT margin) only catches a peer that went dark, and a client
+    /// that holds a silent link open held a link-table slot forever
+    /// (Codeberg #442).
+    #[test]
+    fn an_idle_inbound_link_is_torn_down_after_the_reference_bound() {
+        use leviculum_lxmf::constants::PROPAGATION_LINK_MAX_INACTIVITY_SECS as BOUND;
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: cost_free(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            peering: PeeringConfig {
+                autopeer: false,
+                ..PeeringConfig::default()
+            },
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+        let (link_id, _, out) = client
+            .connect(destination_hash, &signing_key)
+            .expect("connect");
+        let _ = converse(&mut engine, &mut server, &mut client, out);
+        assert!(
+            server.link(&link_id).is_some_and(|link| link.is_active()),
+            "the link must come up, or the test proves nothing"
+        );
+        // The data clock starts at establishment, in whole core seconds.
+        let established_ms = server.now_ms() / 1000 * 1000;
+
+        let out = engine.on_tick(&mut server, established_ms + BOUND * 1000);
+        assert!(
+            server.link(&link_id).is_some(),
+            "a link idle for exactly the bound stays: the reference tears down strictly above it"
+        );
+        assert!(wire_of(&out).is_empty(), "nothing goes out at the bound");
+
+        let out = engine.on_tick(&mut server, established_ms + (BOUND + 1) * 1000);
+        assert!(
+            server.link(&link_id).is_none(),
+            "a link idle past the bound must be torn down"
+        );
+        let closes = wire_of(&out)
+            .iter()
+            .filter_map(|data| Packet::unpack(data).ok())
+            .filter(|packet| packet.context == leviculum_core::packet::PacketContext::LinkClose)
+            .count();
+        assert_eq!(closes, 1, "the client must hear the teardown");
     }
 
     /// Advertise one propagation resource from `sender` over an identified

@@ -21,6 +21,14 @@ pub const DELIVERY_LIMIT_KB: u64 = 1000;
 /// accepted; the comparison is `size > limit`.
 pub const DELIVERY_LIMIT_BYTES: u64 = DELIVERY_LIMIT_KB * 1000;
 
+/// Seconds without payload after which a propagation node tears down an
+/// inbound link to its propagation destination: Python
+/// `P_LINK_MAX_INACTIVITY` (`reference/LXMF/LXMF/LXMRouter.py:36`),
+/// applied in `clean_links` (`reference/LXMF/LXMF/LXMRouter.py:968-974`)
+/// against `Link.no_data_for()`, which keepalives do not reset. The
+/// teardown is strictly above the bound.
+pub const PROPAGATION_LINK_MAX_INACTIVITY_SECS: u64 = 3 * 60;
+
 pub const DESTINATION_LENGTH: usize = 16;
 pub const SIGNATURE_LENGTH: usize = 64;
 pub const TICKET_LENGTH: usize = 16;

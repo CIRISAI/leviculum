@@ -20,6 +20,8 @@ The daemon attaches to a Reticulum shared instance that is already running -- **
 
 **lnpnd** is a drop-in counterpart to Python's **lxmd**. It reads lxmd's configuration format and key names from an lxmd-shaped config directory, carries the same remote-management interface (an `lxmf.propagation.control` destination answering `/pn/get/stats`, `/pn/peer/sync` and `/pn/peer/unpeer`), and its query verbs print output in lxmd's shape -- `lxmd --status --remote <hash>` works against an lnpnd node, `lnpnd --status --remote <hash>` against a stock lxmd node, and scripts written for one read the other.
 
+As lxmd does, the node tears down a link a client or peer opened to it once it has carried no payload for 180 seconds (`P_LINK_MAX_INACTIVITY`); keepalives do not count, so a client that holds a silent link open does not hold a link-table slot with it.
+
 Like lxmd, the daemon also keeps a mailbox of its own: an LXMF delivery destination on the node identity, announced with the configured display name and stamp cost. Each received message is written to the messages directory in the reference's packed-container file format, and the configured `on_inbound` program runs with the file's path as its argument.
 
 ## OPTIONS

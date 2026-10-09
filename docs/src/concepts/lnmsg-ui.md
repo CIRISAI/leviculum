@@ -158,7 +158,7 @@ and the error string when there is one. In a terminal that is a key press
 on a focused message.
 
 **Never claim a read receipt.** LXMF has no such field
-(`leviculum-lxmf/src/constants.rs:52-78`). Any UI element that suggests one
+(`leviculum-lxmf/src/constants.rs:60-86`). Any UI element that suggests one
 is a lie in the protocol's own terms.
 
 **Say what `Delivered` means, once.** It means the bytes reached the
@@ -266,7 +266,7 @@ labelled as an estimate.
 When the peer advertises a stamp cost, the estimate must include the
 proof-of-work, and that number has to be *measured* first: the crate
 contains no benchmarks, and the cost model (2^cost hashes plus a 3000-round
-workblock, `leviculum-lxmf/src/constants.rs:45`,
+workblock, `leviculum-lxmf/src/constants.rs:53`,
 `leviculum-lxmf/src/stamp.rs:458-466`) predicts scaling but not
 milliseconds on a Pi.
 
@@ -311,7 +311,7 @@ for showing your own address to someone sitting next to you, which NomadNet
 does (`Ctrl-P` in the conversation list).
 
 Constraint: `PAPER_MDU` is 2210 bytes
-(`leviculum-lxmf/src/constants.rs:38`), which is near the practical limit of
+(`leviculum-lxmf/src/constants.rs:46`), which is near the practical limit of
 what a QR code can hold and certainly beyond what a phone camera reads off
 a terminal at normal font sizes. The UI must say when a message is too big
 to be a QR and offer the URI as text instead.

@@ -279,7 +279,7 @@ Discriminants are the Python `LXMessage` constants. Four traps:
    the destination identity. It does not prove an LXMF client parsed them
    and it certainly does not prove a human read them. There is no
    read-receipt field in LXMF at all
-   (`leviculum-lxmf/src/constants.rs:52-78`).
+   (`leviculum-lxmf/src/constants.rs:60-86`).
 4. **`Rejected` is ambiguous.** It means either "the receiver cancelled the
    Resource transfer" (`leviculum-lxmf/src/router.rs:1285-1298`) or "the
    propagation node refused the upload for an insufficient stamp"
@@ -408,7 +408,7 @@ restarts, and must not pretend to.
 - **Paper messages** (`leviculum-lxmf/src/paper.rs`): a message encrypted
   to a destination and rendered as an `lxm://` base64 URI (`to_uri`,
   `leviculum-lxmf/src/paper.rs:172`), capped at `PAPER_MDU = 2210` bytes
-  (`leviculum-lxmf/src/constants.rs:38`). Ingest via
+  (`leviculum-lxmf/src/constants.rs:46`). Ingest via
   `router.ingest_paper(uri)`
   (`ingest_paper`, `leviculum-lxmf/src/router/paper_runtime.rs:17`). No QR
   generation exists; that is the client's job.
@@ -419,7 +419,7 @@ restarts, and must not pretend to.
   (`leviculum-lxmf/src/router.rs:1512`) — and applied when a message is
   enqueued (`leviculum-lxmf/src/router.rs:820`). Expiry 21 days, renew at 14,
   minimum one day between issuances to the same peer
-  (`leviculum-lxmf/src/constants.rs:40-43`). `issue_ticket_field` refuses
+  (`leviculum-lxmf/src/constants.rs:48-51`). `issue_ticket_field` refuses
   with `RouterError::NoWallClock` when the node's clock is implausible
   (`leviculum-lxmf/src/router.rs:681-682`), and can also legitimately
   return `Ok((None, _))` when rate-limited
@@ -428,7 +428,7 @@ restarts, and must not pretend to.
 - **Stamps** (`leviculum-lxmf/src/stamp.rs`): proof-of-work over the
   message ID, cost being required leading zero bits, so expected work is
   2^cost hashes plus a workblock expansion of 3000 rounds
-  (`WORKBLOCK_EXPAND_ROUNDS`, `leviculum-lxmf/src/constants.rs:45`). Costs
+  (`WORKBLOCK_EXPAND_ROUNDS`, `leviculum-lxmf/src/constants.rs:53`). Costs
   above about 40 bits are described in-tree as "already unreachable in
   practice" (`leviculum-lxmf/src/router.rs:1145-1146`). No wall-clock
   benchmark exists in the crate and none was run for this document, so any
@@ -439,7 +439,7 @@ restarts, and must not pretend to.
 
 ### Fields with constants but no codec
 
-`leviculum-lxmf/src/constants.rs:52-78` declares the full LXMF field set
+`leviculum-lxmf/src/constants.rs:60-86` declares the full LXMF field set
 including `FIELD_THREAD (0x08)`, `FIELD_RENDERER (0x0F)`,
 `FIELD_REPLY_TO (0x30)`, `FIELD_REPLY_QUOTE (0x31)`,
 `FIELD_REACTION (0x40)` and `FIELD_COMMENT (0x41)`, but only files, image
@@ -780,7 +780,7 @@ not a list of open work.
    `Display`. Every user-facing string is the client's to write, and two
    clients will word them differently.
 9. **No typed codecs for reply, thread, reaction or renderer fields**
-   (`leviculum-lxmf/src/constants.rs:60-78`), so each client hand-rolls
+   (`leviculum-lxmf/src/constants.rs:68-86`), so each client hand-rolls
    msgpack for the same wire structures. This is a compatibility risk more
    than an ergonomics one.
 10. **Codeberg #203** (`StampExecutor::generate` returns a `!Send` future)

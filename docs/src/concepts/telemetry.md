@@ -29,7 +29,7 @@ and receipts. A peer that does not know the field sees a message with no
 text, which is the correct failure — subject to the empty-content rule
 below.
 
-The field numbers are LXMF's (`leviculum-lxmf/src/constants.rs:52-78`).
+The field numbers are LXMF's (`leviculum-lxmf/src/constants.rs:60-86`).
 Three matter here: `FIELD_TELEMETRY` (0x02) carries one node's readings,
 `FIELD_TELEMETRY_STREAM` (0x03) carries many nodes' readings collected
 by a third party, and `FIELD_COMMANDS` (0x09) carries the request that
