@@ -70,7 +70,7 @@ The fifth is different. One configured `BLEInterface` section is one
 Reticulum interface and one broadcast domain (`BLEInterface`,
 `leviculum-std/src/interfaces/ble/mod.rs:5`). Every outbound packet
 goes through one planner that decides which links get a copy
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:898`, driven
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:901`, driven
 from `send_packet`,
 `leviculum-std/src/interfaces/ble/mod.rs:1029`). Since Codeberg #376 the
 core supplies the addressee: a path entry carries the identity it was
@@ -132,7 +132,7 @@ including when the dial never connected at all (`CentralGone`,
 `leviculum-std/src/interfaces/ble/bluez.rs:400`), and the orchestrator
 restarts the strict scan phase on that event (`CentralGone`,
 `leviculum-std/src/interfaces/ble/mod.rs:827`, into `note_reset`,
-`leviculum-std/src/interfaces/ble/links.rs:1470`). The firmware restarts
+`leviculum-std/src/interfaces/ble/links.rs:1473`). The firmware restarts
 its strict phase only when a new neighbour links or the strict rule finds
 a target (`note_phase_event`, `leviculum-nrf/src/ble/columba.rs:1685`,
 under the reset rule `PhaseEvent::resets_strict` in
@@ -204,7 +204,7 @@ That is not a criticism of it — the Columba wire spec has one notify
 characteristic, and no software layer can conjure a second one. It is
 the reason "the reference spawns children, so we should" is not an
 argument here. Our own planner is explicit about the same limit
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:898`).
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:901`).
 
 The firmware is the exception, and it cuts the other way: the
 SoftDevice's notification takes a connection handle, so a board *can*
@@ -324,9 +324,9 @@ parent to lean on. Measured against the tree, not assumed:
 | Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:297`) | **medium** — contention is on the air | parent |
 | Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:2772`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:3030`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
 | Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:3056`) | **medium** | parent |
-| Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:958`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1426`) | **medium** — one adapter | parent |
+| Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:958`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1429`) | **medium** — one adapter | parent |
 | IFAC | **medium** — it is a property of the configured section | parent |
-| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1540`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:369`) | child, mostly |
+| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1543`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:369`) | child, mostly |
 | Negotiated MTU and fragmentation state | **link** | child |
 | Keepalive and expiry timers | **link** | child |
 | Byte counters | **link** | child |
@@ -380,7 +380,7 @@ cleanest behaviour of the four, and it is a real scenario: a rotated-
 address reconnect holds two links to one identity for a moment. Under
 C and D there is one interface and one path entry; the planner takes
 the first link it finds for that identity
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:898`), and a
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:901`), and a
 peer loss is reported only when the *last* link for that identity dies
 (`knows_identity`, `leviculum-std/src/interfaces/ble/links.rs:503`).
 The observable difference is which of two equally good links carries

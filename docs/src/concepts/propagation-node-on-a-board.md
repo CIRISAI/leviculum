@@ -549,7 +549,7 @@ shows a 183-byte packet fragmenting into 2 and a 275-byte packet also
 into 2, which brackets the payload per fragment to 138 to 182 bytes and
 the MTU to 146 to 190 — consistent with the 185 default
 (`DEFAULT_MTU`, `leviculum-core/src/framing/ble.rs:89`;
-`payload_per_fragment`, `leviculum-core/src/framing/ble.rs:107`). At
+`payload_per_fragment`, `leviculum-core/src/framing/ble.rs:112`). At
 177 bytes per fragment a 304-byte message is 2 notifications, so the
 full region is 352 notifications.
 

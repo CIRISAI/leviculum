@@ -92,6 +92,11 @@ pub const MAX_MTU: usize = 517;
 /// ATT protocol header overhead subtracted from MTU.
 pub const ATT_HEADER_SIZE: usize = 3;
 
+/// Length of the identity handshake a Columba central writes: its 16-byte
+/// identity hash, bare, no fragment header. The phone's detector goes by
+/// length alone (see [`fragment_packet`]), so no frame we emit may have it.
+pub const HANDSHAKE_FRAME_LEN: usize = 16;
+
 /// Timeout for incomplete fragment reassembly (milliseconds).
 /// Sliding window: reset on each received fragment.
 pub const REASSEMBLY_TIMEOUT_MS: u64 = 30_000;
@@ -109,18 +114,51 @@ pub const fn payload_per_fragment(mtu: usize) -> usize {
     mtu.saturating_sub(overhead)
 }
 
+/// Payload bytes of an END fragment that would make it
+/// [`HANDSHAKE_FRAME_LEN`] long.
+const HANDSHAKE_PAYLOAD: usize = HANDSHAKE_FRAME_LEN - FRAGMENT_HEADER_SIZE;
+
+/// How `data_len` bytes split at `ppf` payload bytes a fragment:
+/// the fragment count, and where the boundary before the last fragment
+/// sits when it is not the plain `(count - 1) * ppf`.
+///
+/// The plain split fills every fragment but the last. When that would
+/// leave the last fragment [`HANDSHAKE_PAYLOAD`] bytes (a 16-byte frame,
+/// which the Columba phone eats as an identity handshake, see
+/// [`fragment_packet`]), the boundary moves one byte EARLIER: the
+/// second-to-last fragment gives a byte to the END, which goes out as a
+/// 17-byte frame. Earlier rather than later because the fragment before
+/// the END is already full and cannot take a byte, and the count stays
+/// the same. A lone 11-byte packet has no earlier fragment to give, so
+/// its last byte becomes an END of its own (frames of 15 and 6 bytes).
+/// A real Reticulum packet is never that short (19 bytes of header at
+/// least); the split keeps the rule without exceptions.
+///
+/// Below ATT 21 (`ppf <= 12`) a full fragment is itself 16 bytes or
+/// shorter and no single move helps; those MTUs are under the BLE floor
+/// of 23 and keep the plain split.
+fn fragment_layout(data_len: usize, ppf: usize) -> (usize, Option<usize>) {
+    if ppf == 0 || data_len == 0 {
+        return (1, None);
+    }
+    let count = data_len.div_ceil(ppf);
+    let last = data_len - (count - 1) * ppf;
+    if last != HANDSHAKE_PAYLOAD {
+        (count, None)
+    } else if count == 1 {
+        (2, Some(data_len - 1))
+    } else if ppf > HANDSHAKE_PAYLOAD + 1 {
+        (count, Some(data_len - (HANDSHAKE_PAYLOAD + 1)))
+    } else {
+        (count, None)
+    }
+}
+
 /// Number of fragments needed to send `data_len` bytes at the given BLE MTU.
 ///
 /// Always returns at least 1 (a zero-length packet produces one fragment).
 pub fn fragment_count(data_len: usize, mtu: usize) -> usize {
-    let ppf = payload_per_fragment(mtu);
-    if ppf == 0 {
-        return 1; // degenerate MTU, send an empty single fragment
-    }
-    if data_len == 0 {
-        return 1;
-    }
-    data_len.div_ceil(ppf)
+    fragment_layout(data_len, payload_per_fragment(mtu)).0
 }
 
 /// Build the 5-byte header for fragment `index` of `total` fragments.
@@ -152,25 +190,43 @@ pub fn build_fragment_header(index: usize, total: usize) -> [u8; FRAGMENT_HEADER
 
 /// Get the payload slice for fragment `index` from `data`.
 ///
-/// Returns the byte range of `data` that belongs to this fragment.
+/// Returns the byte range of `data` that belongs to this fragment, after
+/// the END rebalancing [`fragment_packet`] describes.
 pub fn fragment_payload(data: &[u8], index: usize, mtu: usize) -> &[u8] {
     let ppf = payload_per_fragment(mtu);
-    if ppf == 0 {
+    let (count, last_cut) = fragment_layout(data.len(), ppf);
+    if ppf == 0 || index >= count {
         return &[];
     }
-    let start = index * ppf;
-    let end = (start + ppf).min(data.len());
-    if start >= data.len() {
-        &[]
-    } else {
-        &data[start..end]
+    let mut start = (index * ppf).min(data.len());
+    let mut end = (start + ppf).min(data.len());
+    if let Some(cut) = last_cut {
+        if index == count - 2 {
+            end = cut;
+        } else if index == count - 1 {
+            start = cut;
+            end = data.len();
+        }
     }
+    &data[start..end]
 }
 
 /// Fragment a Reticulum packet into BLE fragments (convenience, uses alloc).
 ///
 /// Each returned `Vec<u8>` is a complete fragment: 5-byte header + payload,
 /// ready to write to the BLE TX characteristic.
+///
+/// No fragment is ever [`HANDSHAKE_FRAME_LEN`] (16) bytes long. The Columba
+/// phone runs its identity-handshake detector on every inbound frame before
+/// reassembly and consumes any 16-byte one, identity already known or not
+/// (`ble-reticulum/src/ble_reticulum/BLEInterface.py:1189-1206`, called at
+/// `:1289`), so a 16-byte END would lose its whole packet. Every fragment
+/// but the END is full, so the END is the only one that can land there, at
+/// lengths of 11 mod the payload size; the boundary before it then moves
+/// by one byte (`fragment_layout`). The reference reassembler joins
+/// payloads in sequence order and has no size expectation
+/// (`BLEFragmentation.py` `_reassemble`), so the moved boundary is still
+/// its framing.
 pub fn fragment_packet(data: &[u8], mtu: usize) -> Vec<Vec<u8>> {
     let total = fragment_count(data.len(), mtu);
     let mut fragments = Vec::with_capacity(total);
@@ -814,5 +870,84 @@ mod tests {
         assert_eq!(payload_per_fragment(MAX_MTU), 509);
         assert_eq!(payload_per_fragment(8), 0); // MTU too small
         assert_eq!(payload_per_fragment(0), 0);
+    }
+
+    /// Reassemble `frames` by the reference reassembler's rules
+    /// (`BLEFragmentation.py` `receive_fragment`/`_reassemble`): a `!BHH`
+    /// header, only START/CONTINUE/END, the type fixed by position, one
+    /// `total` across the packet, payloads joined in sequence order with
+    /// no size expectation. Written out here rather than through
+    /// [`BleDefragmenter`], which is more lenient (it takes LONE).
+    fn reference_reassemble(frames: &[Vec<u8>]) -> Vec<u8> {
+        let total = frames.len();
+        let mut out = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            assert!(frame.len() >= FRAGMENT_HEADER_SIZE);
+            let expected_type = if i == 0 {
+                0x01
+            } else if i == total - 1 {
+                0x03
+            } else {
+                0x02
+            };
+            assert_eq!(frame[0], expected_type, "type of fragment {i}/{total}");
+            assert_eq!(u16::from_be_bytes([frame[1], frame[2]]) as usize, i);
+            assert_eq!(u16::from_be_bytes([frame[3], frame[4]]) as usize, total);
+            out.extend_from_slice(&frame[FRAGMENT_HEADER_SIZE..]);
+        }
+        out
+    }
+
+    /// No frame is ever 16 bytes long (#547, D1 of the 545 audit).
+    ///
+    /// The Columba phone runs its identity-handshake detector on every
+    /// inbound frame before reassembly and consumes any 16-byte one as a
+    /// handshake, identity known or not
+    /// (`ble-reticulum/src/ble_reticulum/BLEInterface.py:1189-1206`, called
+    /// at `:1289`). A 16-byte END
+    /// therefore never reaches its reassembler and the whole packet is
+    /// lost; at ATT 185 that was every packet of 188, 365, 542... bytes.
+    /// Swept over every packet length to 600 and every usable MTU the
+    /// registry allows (20 to 512, i.e. ATT 23 to 515), each result also
+    /// reassembled by the reference's rules and frame-bounded by the MTU.
+    #[test]
+    fn no_frame_is_ever_handshake_sized() {
+        for usable in 20..=512usize {
+            let mtu = usable + ATT_HEADER_SIZE;
+            for len in 1..=600usize {
+                let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+                let frames = fragment_packet(&data, mtu);
+                assert_eq!(frames.len(), fragment_count(len, mtu));
+                for (i, frame) in frames.iter().enumerate() {
+                    assert_ne!(
+                        frame.len(),
+                        HANDSHAKE_FRAME_LEN,
+                        "len {len} at ATT {mtu}: fragment {i} of {} is handshake-sized",
+                        frames.len()
+                    );
+                    assert!(frame.len() <= usable, "len {len} at ATT {mtu}");
+                    assert_eq!(
+                        &frame[FRAGMENT_HEADER_SIZE..],
+                        fragment_payload(&data, i, mtu)
+                    );
+                }
+                assert_eq!(
+                    reference_reassemble(&frames),
+                    data,
+                    "len {len} at ATT {mtu}"
+                );
+            }
+        }
+    }
+
+    /// The case the audit named: 188 bytes at ATT 185 used to end in an
+    /// 11-byte END. The boundary moves one byte earlier, so the END
+    /// carries 12 and the fragment count stays 2.
+    #[test]
+    fn a_188_byte_packet_ends_in_a_17_byte_frame() {
+        let data = vec![0xA5u8; 188];
+        let frames = fragment_packet(&data, DEFAULT_MTU);
+        let lens: Vec<usize> = frames.iter().map(Vec::len).collect();
+        assert_eq!(lens, vec![181, 17]);
     }
 }

@@ -702,7 +702,10 @@ impl LinkTable {
     /// 16-byte frame is ordinary fragment traffic, the firmware's
     /// rig-proven reading (columba.rs gates on `!handshake_done`) — the
     /// reference consumes *every* 16-byte frame from a known address,
-    /// which would eat a real 16-byte tail fragment at small MTUs.
+    /// which would eat a real 16-byte tail fragment at any MTU, for
+    /// packet lengths of 11 mod the fragment payload. Our own
+    /// fragmenter never emits one (`fragment_packet`, #547); a peer
+    /// running the reference's fragmenter does.
     pub(crate) fn peripheral_frame(
         &mut self,
         addr: Addr,
