@@ -204,8 +204,8 @@ pub struct PeeringConfig {
     /// `autopeer_maxdepth` (`LXMRouter.py:45`).
     pub autopeer_maxdepth: u8,
     /// `peering_cost` — what WE require of an inbound `/offer` key.
-    /// Default 0 (Lead decision); the reference clamps only its
-    /// propagation cost, never the peering cost (`LXMRouter.py:137`).
+    /// Default 1, the cost a default node announces (Lead, 2026-09-12;
+    /// why not 0: [`crate::PropagationNodeConfig::peering_cost`]).
     pub peering_cost: u8,
     /// `remote_peering_cost_max` — above this we refuse to peer
     /// (`LXMRouter.py:2005-2010`).
@@ -226,7 +226,9 @@ impl Default for PeeringConfig {
             max_peers: MAX_PEERS_DEFAULT,
             autopeer: AUTOPEER_DEFAULT,
             autopeer_maxdepth: AUTOPEER_MAXDEPTH_DEFAULT,
-            peering_cost: 0,
+            // What a default node announces (`PropagationNodeConfig`),
+            // so the key demanded of an inbound peer is the one asked for.
+            peering_cost: leviculum_core::pn_config_store::DEFAULT_PEERING_COST,
             remote_peering_cost_max: REMOTE_PEERING_COST_MAX_DEFAULT,
             max_inbound_syncs: MAX_INBOUND_SYNCS_DEFAULT,
             from_static_only: false,

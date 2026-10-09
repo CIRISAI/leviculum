@@ -1075,7 +1075,9 @@ so the grind is bounded by configuration. The SHA-256 throughput
 figure that pins this table's real column is §4's owed measurement,
 still owed here.
 
-Our own announced peering cost defaults to 0, the same policy as the
+Our own announced peering cost defaulted to 0 when this was written,
+and defaults to 1 since the Lead's decision of 2026-09-12 because of the
+peer-side quirk below. 0 stays a legal setting, the same policy as the
 stamp cost and this time without even a reference counter-argument:
 the `PROPAGATION_COST_MIN` clamp applies to the propagation cost only
 (`LXMRouter.py:137`); the peering cost is passed through unclamped, so

@@ -353,12 +353,13 @@ autopeer_maxdepth = 4
 
 # propagation_sync_max_accepted_size = 10240
 
-# The stamp cost required to deliver messages via this node. lnpnd's
-# default is 0 (no proof-of-work required); lxmd never announces
-# below 13. Announcing 0 is wire-legal and honoured by reference
-# clients.
+# The stamp cost required to deliver messages via this node. The
+# default is 13, lxmd's own floor: a stock peer only offers messages
+# whose stamp clears its cost minus flexibility, so a store accepted
+# at 13 travels through every default peer. Lower is wire-legal; 0
+# accepts uploads without proof-of-work.
 
-# propagation_stamp_cost_target = 0
+# propagation_stamp_cost_target = 13
 
 # How far below the target a stamp from another propagation node may
 # fall and still be accepted.
@@ -366,12 +367,11 @@ autopeer_maxdepth = 4
 # propagation_stamp_cost_flexibility = 3
 
 # The peering key value required of nodes that want to deliver
-# messages to this one. lnpnd's default is 0; note that a stock lxmd
-# peer can never sync TOWARD a node announcing peering cost 0 (its
-# peering_key_ready short-circuits on a falsy cost), so set at least
-# 1 if stock nodes should push messages here.
+# messages to this one. The default is 1, the cheapest cost a stock
+# lxmd peer acts on: it never syncs toward a node announcing 0 (its
+# peering_key_ready short-circuits on a falsy cost).
 
-# peering_cost = 0
+# peering_cost = 1
 
 # The maximum peering cost of remote nodes this node will mine a
 # peering key for.

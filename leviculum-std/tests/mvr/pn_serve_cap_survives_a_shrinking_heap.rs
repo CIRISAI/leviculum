@@ -155,6 +155,8 @@ fn planned_at_cap(cap: usize) -> (PropagationNode<MemoryPropagationStore>, Fetch
             // halves and neither would measure the margin.
             sync_limit_kb: 64,
             serve_cap_bytes: Some(cap),
+            // Placeholder stamps: the shipped cost of 13 would reject them.
+            stamp_cost: 0,
             ..PropagationNodeConfig::default()
         },
     );

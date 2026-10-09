@@ -204,6 +204,8 @@ fn field_fetch_plan() -> (PropagationNode<MemoryPropagationStore>, FetchPlan) {
         PropagationNodeConfig {
             sync_limit_kb: leviculum_heap_budget::BOARD_SYNC_LIMIT_KB,
             serve_limit_bytes: Some(BOARD_SERVE_LIMIT_BYTES),
+            // Placeholder stamps: the shipped cost of 13 would reject them.
+            stamp_cost: 0,
             ..PropagationNodeConfig::default()
         },
     );

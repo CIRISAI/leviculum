@@ -1056,3 +1056,16 @@ fn sync_batch_wire_size_never_exceeds_announced_limit() {
         );
     }
 }
+
+/// The peering cost this table demands of an inbound peer is the one the
+/// node announces: 1 by default (Lead, 2026-09-12). A table demanding 0
+/// behind an announce of 1 would accept keys the announce asked for and
+/// keys it did not.
+#[test]
+fn the_default_peering_cost_is_the_announced_one() {
+    assert_eq!(PeeringConfig::default().peering_cost, 1);
+    assert_eq!(
+        PeeringConfig::default().peering_cost,
+        crate::PropagationNodeConfig::default().peering_cost
+    );
+}

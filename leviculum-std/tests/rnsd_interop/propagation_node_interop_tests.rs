@@ -84,7 +84,11 @@ impl PnHost {
 
         let role = PropagationNode::new(
             MemoryPropagationStore::new(64 * 1024),
-            PropagationNodeConfig::default(),
+            // Cost 0: the Python clients here upload without grinding.
+            PropagationNodeConfig {
+                stamp_cost: 0,
+                ..PropagationNodeConfig::default()
+            },
         );
         let stream = connect_to_daemon(daemon).await;
         Self {

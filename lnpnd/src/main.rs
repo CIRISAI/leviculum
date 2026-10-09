@@ -134,14 +134,15 @@ struct Args {
     name: Option<String>,
 
     /// Propagation stamp cost announced to clients (config:
-    /// propagation_stamp_cost_target). 0 accepts uploads without
-    /// proof-of-work; the Python reference never announces below 13,
-    /// announcing lower is wire-legal and honoured.
+    /// propagation_stamp_cost_target). Default 13, the Python
+    /// reference's own floor; 0 accepts uploads without proof-of-work,
+    /// announcing below 13 is wire-legal and honoured.
     #[arg(long)]
     stamp_cost: Option<u8>,
 
     /// Peering cost announced to would-be peer nodes (config:
-    /// peering_cost).
+    /// peering_cost). Default 1: a stock lxmd peer never syncs toward a
+    /// node announcing 0.
     #[arg(long)]
     peering_cost: Option<u8>,
 
@@ -424,17 +425,19 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             file.get_u64("propagation", "propagation_sync_max_accepted_size")?
                 .unwrap_or(32),
         ),
+        // Unset costs are the role's own defaults, 13 / 3 / 1 (Lead,
+        // 2026-09-12), one source with the board's.
         stamp_cost: args.stamp_cost.unwrap_or(
             file.get_u8("propagation", "propagation_stamp_cost_target")?
-                .unwrap_or(0),
+                .unwrap_or(leviculum_lxmf::PropagationNodeConfig::default().stamp_cost),
         ),
         stamp_cost_flexibility: file
             .get_u8("propagation", "propagation_stamp_cost_flexibility")?
-            .unwrap_or(3),
+            .unwrap_or(leviculum_lxmf::PropagationNodeConfig::default().stamp_cost_flexibility),
         peering_cost: args
             .peering_cost
             .or(file.get_u8("propagation", "peering_cost")?)
-            .unwrap_or(0),
+            .unwrap_or(leviculum_lxmf::PropagationNodeConfig::default().peering_cost),
         remote_peering_cost_max: args
             .remote_peering_cost_max
             .or(file.get_u8("propagation", "remote_peering_cost_max")?)
@@ -971,6 +974,42 @@ mod tests {
                 0x16, 0x1d
             ]]
         );
+    }
+
+    /// A config that names no cost runs the Lead's decision of 2026-09-12:
+    /// stamp cost 13 with flexibility 3, peering cost 1. Peering cost 0
+    /// would leave every stock lxmd peer unable to sync toward us
+    /// (`peering_key_ready` returns false on a falsy cost,
+    /// `reference/LXMF/LXMF/LXMPeer.py:228`). The mailbox's own stamp cost
+    /// is a different knob and keeps lxmd's 12.
+    #[test]
+    fn an_unset_cost_resolves_to_the_decided_default() {
+        let file = RawConfig::parse(PUBLIC_NODE_CONFIG).expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        let effective = resolve(&args, &file).expect("resolves");
+        assert_eq!(
+            [
+                effective.stamp_cost,
+                effective.stamp_cost_flexibility,
+                effective.peering_cost
+            ],
+            [13, 3, 1]
+        );
+        assert_eq!(effective.mailbox_stamp_cost, 12);
+    }
+
+    /// The commented-out template lines show the value an unset key
+    /// resolves to, so an operator who uncomments one changes nothing.
+    #[test]
+    fn the_template_shows_the_resolved_cost_defaults() {
+        let template = lnpnd::config::EXAMPLE_CONFIG;
+        for line in [
+            "# propagation_stamp_cost_target = 13",
+            "# propagation_stamp_cost_flexibility = 3",
+            "# peering_cost = 1",
+        ] {
+            assert!(template.contains(line), "template lacks `{line}`");
+        }
     }
 
     /// `[propagation] announce_at_start` is not acted on — lnpnd announces

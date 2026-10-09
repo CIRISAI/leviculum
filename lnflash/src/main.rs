@@ -1592,6 +1592,37 @@ mod tests {
             .contains("cannot be used with"));
     }
 
+    /// The help names the defaults a board boots without a record, which
+    /// are `StoredPnConfig::DEFAULT`; the two must not drift apart.
+    #[test]
+    fn the_cost_help_names_the_boards_defaults() {
+        use clap::CommandFactory;
+        use leviculum_core::pn_config_store::StoredPnConfig;
+        let command = Cli::command();
+        let help = |id: &str| -> String {
+            let arg = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .expect("the option exists");
+            arg.get_long_help()
+                .or(arg.get_help())
+                .map(|text| text.to_string())
+                .unwrap_or_default()
+        };
+        let stamp = format!("the default is {},", StoredPnConfig::DEFAULT.stamp_cost);
+        let peering = format!("the default is {} ", StoredPnConfig::DEFAULT.peering_cost);
+        assert!(
+            help("stamp_cost").contains(&stamp),
+            "{}",
+            help("stamp_cost")
+        );
+        assert!(
+            help("peering_cost").contains(&peering),
+            "{}",
+            help("peering_cost")
+        );
+    }
+
     #[test]
     fn the_storm_session_is_not_combinable_with_the_other_sessions() {
         // It ends the run after talking to the boards, like every other

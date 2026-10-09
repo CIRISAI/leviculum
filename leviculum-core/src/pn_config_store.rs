@@ -140,6 +140,20 @@ pub fn decode_pn_config(buf: &[u8]) -> Option<StoredPnConfig> {
 mod tests {
     use super::*;
 
+    /// What a board with no record boots and announces, and what a
+    /// `--stamp-cost`-only frame keeps for the peering cost: the Lead's
+    /// decision of 2026-09-12.
+    #[test]
+    fn a_board_without_a_record_runs_the_decided_costs() {
+        assert_eq!(
+            StoredPnConfig::DEFAULT,
+            StoredPnConfig {
+                stamp_cost: 13,
+                peering_cost: 1,
+            }
+        );
+    }
+
     #[test]
     fn the_costs_round_trip() {
         for stamp in [0u8, 1, 13, 26, 254] {

@@ -324,22 +324,23 @@ pub struct PropagationNodeConfig {
     /// `reference/LXMF/LXMF/LXMRouter.py:2220-2224`).
     pub sync_limit_kb: u64,
     /// Announce field 5\[0\]: the propagation stamp cost clients mine to.
-    /// Default 0: accepted without work, user-settable. The reference clamps
-    /// its own to ≥13 (`PROPAGATION_COST_MIN`,
-    /// `reference/LXMF/LXMF/LXMRouter.py:52`, applied at `:137`); announcing
-    /// below that is wire-legal and honoured — a peer's accepted cost is
-    /// `max(0, cost − flexibility)` — and is this project's chosen policy
-    /// (concept paper §1, "We would be the first to advertise cheap").
+    /// Default 13 (Lead, 2026-09-12), the reference's own floor
+    /// (`PROPAGATION_COST_MIN`, `reference/LXMF/LXMF/LXMRouter.py:52`,
+    /// applied at `:137`): a stock peer offers only messages whose stored
+    /// stamp value clears its cost minus flexibility
+    /// (`reference/LXMF/LXMF/LXMPeer.py:331`, `:340`), so a store accepted
+    /// at 13 travels through every default peer. User-settable; announcing
+    /// below 13 is wire-legal and honoured.
     pub stamp_cost: u8,
     /// Announce field 5\[1\]: how far below our cost a stamp may fall and
     /// still be accepted (`PROPAGATION_COST_FLEX`,
     /// `reference/LXMF/LXMF/LXMRouter.py:53`, default 3).
     pub stamp_cost_flexibility: u8,
     /// Announce field 5\[2\]: the peering cost another node mines to `/offer`
-    /// us batches. Default 0 under the same policy as `stamp_cost`; unlike
-    /// the propagation cost, the reference applies **no lower clamp** to its
-    /// peering cost (`LXMRouter.py:137` clamps `propagation_cost` only), so
-    /// 0 here conflicts with nothing in the reference.
+    /// us batches. Default 1 (Lead, 2026-09-12), not 0: 0 is wire-legal,
+    /// but a stock peer's `peering_key_ready` returns false on a falsy cost
+    /// (`reference/LXMF/LXMF/LXMPeer.py:228`), so it would never sync
+    /// toward us. One bit of work is the cheapest cost it acts on.
     pub peering_cost: u8,
     /// Announce metadata: the node's display name, UTF-8.
     pub name: Option<Vec<u8>>,
@@ -388,9 +389,15 @@ impl Default for PropagationNodeConfig {
         Self {
             transfer_limit_kb: 4,
             sync_limit_kb: 32,
-            stamp_cost: 0,
+            // The Lead's decision of 2026-09-12, one source with the
+            // board's persisted defaults: 13 is the reference's own
+            // announce floor, and peering cost 1 rather than 0 because a
+            // stock peer's `peering_key_ready` returns false on a falsy
+            // cost (`reference/LXMF/LXMF/LXMPeer.py:228`), so it would
+            // never sync toward us.
+            stamp_cost: leviculum_core::pn_config_store::DEFAULT_STAMP_COST,
             stamp_cost_flexibility: 3,
-            peering_cost: 0,
+            peering_cost: leviculum_core::pn_config_store::DEFAULT_PEERING_COST,
             name: None,
             message_expiry_secs: MESSAGE_EXPIRY_SECS,
             serve_cap_bytes: None,

@@ -13,15 +13,23 @@ use leviculum_core::crypto::full_hash;
 
 const DAY: u64 = 24 * 60 * 60;
 
+/// The default config at stamp cost 0, so the behaviour tests below
+/// exercise dedup, limits, eviction and serving without grinding stamps.
+/// The shipped default costs 13
+/// ([`the_default_config_announces_the_decided_costs`]).
+fn cost_free() -> PropagationNodeConfig {
+    PropagationNodeConfig {
+        stamp_cost: 0,
+        ..PropagationNodeConfig::default()
+    }
+}
+
 fn node(capacity: u64) -> PropagationNode<MemoryPropagationStore> {
-    PropagationNode::new(
-        MemoryPropagationStore::new(capacity),
-        PropagationNodeConfig::default(),
-    )
+    PropagationNode::new(MemoryPropagationStore::new(capacity), cost_free())
 }
 
 /// A syntactically valid upload envelope for `destination`, unique per
-/// `seed`, with an arbitrary stamp (the default config costs 0).
+/// `seed`, with an arbitrary stamp (the [`node`] helper costs 0).
 fn envelope(destination: u8, seed: u8) -> Vec<u8> {
     envelope_sized(destination, seed, 120)
 }
@@ -315,17 +323,39 @@ fn the_resource_gate_follows_the_announced_sync_limit() {
 
 #[test]
 fn announce_defaults_are_the_concept_papers_numbers() {
-    let node = node(64 * 1024);
+    let node = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig::default(),
+    );
     let announce = PropagationNodeAnnounce::decode(&node.announce_app_data(1_700_000_000)).unwrap();
     assert!(!announce.legacy_support);
     assert!(announce.enabled);
     assert_eq!(announce.timebase, 1_700_000_000);
     assert_eq!(announce.transfer_limit_kb, 4);
     assert_eq!(announce.sync_limit_kb, 32);
-    assert_eq!(announce.stamp_cost, 0);
-    assert_eq!(announce.stamp_cost_flexibility, 3);
-    assert_eq!(announce.peering_cost, 0);
     assert!(announce.metadata.is_empty());
+}
+
+/// Field 5 of a default node's own announce is the Lead's decision of
+/// 2026-09-12: stamp cost 13 with flexibility 3, peering cost 1. Peering
+/// cost 0 would be wire-legal and dead: a stock peer's
+/// `peering_key_ready` returns false on a falsy cost
+/// (`reference/LXMF/LXMF/LXMPeer.py:228`) and its sync never pushes to us.
+#[test]
+fn the_default_config_announces_the_decided_costs() {
+    let node = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig::default(),
+    );
+    let announce = PropagationNodeAnnounce::decode(&node.announce_app_data(1_700_000_000)).unwrap();
+    assert_eq!(
+        [
+            announce.stamp_cost,
+            announce.stamp_cost_flexibility,
+            announce.peering_cost
+        ],
+        [13, 3, 1]
+    );
 }
 
 /// The board's deferred-durability path: a store flush that failed after
@@ -405,7 +435,7 @@ fn the_field_fetch_frames_the_allocation_that_killed_the_board() {
             // The announced limit bounded the board's fetch that day; a
             // fetch is bounded by a serve limit now, so it stands in.
             serve_limit_bytes: Some(8000),
-            ..PropagationNodeConfig::default()
+            ..cost_free()
         },
     );
     let wants: Vec<TransientId> = (0..24)
@@ -456,7 +486,7 @@ fn the_encoded_response_never_outgrows_the_accounted_cap() {
             MemoryPropagationStore::new(256 * 1024),
             PropagationNodeConfig {
                 serve_limit_bytes: Some(serve_limit_kb * 1000),
-                ..PropagationNodeConfig::default()
+                ..cost_free()
             },
         );
         let smallest = crate::constants::LXMF_OVERHEAD + 1;
@@ -597,7 +627,7 @@ fn a_funded_cap_serves_a_subset_and_keeps_the_rest() {
         PropagationNodeConfig {
             sync_limit_kb: 8,
             serve_cap_bytes: Some(cap),
-            ..PropagationNodeConfig::default()
+            ..cost_free()
         },
     );
     let wants: Vec<TransientId> = (0..8u8)
@@ -677,7 +707,7 @@ fn a_streamed_fetch_is_the_encoded_fetch() {
             MemoryPropagationStore::new(256 * 1024),
             PropagationNodeConfig {
                 sync_limit_kb: 64,
-                ..PropagationNodeConfig::default()
+                ..cost_free()
             },
         );
         let wants: Vec<TransientId> = (0..count as u8)
@@ -791,7 +821,7 @@ fn a_cap_below_one_message_serves_nothing_and_loses_nothing() {
         PropagationNodeConfig {
             sync_limit_kb: 8,
             serve_cap_bytes: Some(88),
-            ..PropagationNodeConfig::default()
+            ..cost_free()
         },
     );
     let wants: Vec<TransientId> = (0..4u8)
@@ -869,7 +899,7 @@ fn a_host_bounds_a_fetch_by_the_clients_limit_alone() {
     let served = fetch_ten_with(PropagationNodeConfig {
         sync_limit_kb: 5,
         transfer_limit_kb: 4,
-        ..PropagationNodeConfig::default()
+        ..cost_free()
     });
     assert_eq!(served, 10, "a 256 kB client limit takes all ten at once");
 }
@@ -882,7 +912,7 @@ fn a_boards_serve_limit_still_bounds_a_fetch() {
         sync_limit_kb: 5,
         transfer_limit_kb: 4,
         serve_limit_bytes: Some(5000),
-        ..PropagationNodeConfig::default()
+        ..cost_free()
     });
     assert_eq!(served, 1, "a 5000 B serve limit fits one 3.7 kB message");
 }

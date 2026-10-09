@@ -1602,6 +1602,16 @@ mod tests {
         )
     }
 
+    /// The role's default config at stamp cost 0: these tests sync and
+    /// upload messages carrying placeholder stamps, which the shipped
+    /// default of 13 would reject as invalid.
+    pub(super) fn cost_free() -> PropagationNodeConfig {
+        PropagationNodeConfig {
+            stamp_cost: 0,
+            ..PropagationNodeConfig::default()
+        }
+    }
+
     fn engine_with(
         control_allowed: Vec<[u8; 16]>,
         mailbox: Option<MailboxConfig>,
@@ -1611,7 +1621,7 @@ mod tests {
     ) {
         Engine::new(EngineConfig {
             identity: leviculum_std::generate_identity(),
-            node_config: PropagationNodeConfig::default(),
+            node_config: cost_free(),
             store: MemoryPropagationStore::new(64_000),
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
@@ -2042,7 +2052,7 @@ mod tests {
     ) {
         Engine::new(EngineConfig {
             identity: leviculum_std::generate_identity(),
-            node_config: PropagationNodeConfig::default(),
+            node_config: cost_free(),
             store: MemoryPropagationStore::new(64_000),
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
@@ -2175,7 +2185,7 @@ mod tests {
         // Room for two synced messages, not three.
         let (mut engine, events) = Engine::new(EngineConfig {
             identity: leviculum_std::generate_identity(),
-            node_config: PropagationNodeConfig::default(),
+            node_config: cost_free(),
             store: MemoryPropagationStore::new(400),
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
@@ -2459,10 +2469,11 @@ mod inbound_sync_slices {
     use leviculum_lxmf::propagation_store::StoredMessage;
     use leviculum_lxmf::storage::StorageError;
     use leviculum_lxmf::{
-        MemoryPeerStore, MemoryPropagationStore, PeerSyncEnvelope, PropagationNodeConfig,
-        PropagationStore, TransientId,
+        MemoryPeerStore, MemoryPropagationStore, PeerSyncEnvelope, PropagationStore, TransientId,
     };
     use leviculum_std::driver::{CoreProcessor as _, StdClock, StdStorage, PROCESSOR_TICK_BUDGET};
+
+    use super::tests::cost_free;
 
     use super::{Engine, EngineConfig, EngineEvent, State, PERSIST_PER_HOOK};
 
@@ -2555,7 +2566,7 @@ mod inbound_sync_slices {
         let appends = Arc::new(AtomicUsize::new(0));
         let (mut engine, events) = Engine::new(EngineConfig {
             identity: leviculum_std::generate_identity(),
-            node_config: PropagationNodeConfig::default(),
+            node_config: cost_free(),
             store: ModelledStore {
                 inner: MemoryPropagationStore::new(10_000_000),
                 appends: Arc::clone(&appends),

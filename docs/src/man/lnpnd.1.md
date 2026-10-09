@@ -91,7 +91,7 @@ Keys accepted but not acted on, so a config file shared with lxmd parses cleanly
 `sequential_pn_stamp_validation`, `static_peers_bypass_sequential`
 :   Stamp validation in lnpnd always runs sequentially on one worker thread, in arrival order, for every peer. The reference's toggles choose between parallel and sequential validation; lnpnd's single worker is the sequential behaviour, so `yes` is already the case and `no` has nothing to switch on.
 
-Two defaults differ deliberately from the reference and are wire-legal: `propagation_stamp_cost_target` defaults to 0 (accept uploads without proof-of-work; lxmd never announces below 13) and `peering_cost` defaults to 0. Note that a stock lxmd peer can never sync *toward* a node announcing peering cost 0 -- its `peering_key_ready` short-circuits on a falsy cost -- so nodes that want stock peers to push messages to them should announce at least 1.
+The three announced costs default to `propagation_stamp_cost_target = 13`, `propagation_stamp_cost_flexibility = 3` and `peering_cost = 1`, the same as a board's propagation node. 13 is the reference's own floor (`PROPAGATION_COST_MIN`; lxmd's default is 16), so a store accepted here travels through every default peer. Peering cost 1 rather than 0, because a stock lxmd peer never syncs toward a node announcing 0: its `peering_key_ready` returns false on a falsy cost (`LXMPeer.py:228`). The reference's default peering cost is 18. The mailbox's `[lxmf] stamp_cost` is a separate knob and keeps lxmd's default of 12.
 
 `enable_node = no` is refused: the propagation node is what lnpnd is. For a mailbox-only daemon use lxmd; for a client, **lnmsg**.
 

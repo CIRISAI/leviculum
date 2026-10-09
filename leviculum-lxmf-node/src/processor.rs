@@ -964,11 +964,19 @@ impl LxmfHelperProcessor {
             self.emitter.error("propagation node already enabled");
             return;
         }
+        // The interop helper keeps the costs its scenarios were written
+        // against, 0 and 0, rather than the role's shipped 13 / 1: a cell
+        // that wants costs names them as `pn_enable` options.
         let mut node_config = PropagationNodeConfig {
             name: Some(self.config.display_name.clone()),
+            stamp_cost: 0,
+            peering_cost: 0,
             ..PropagationNodeConfig::default()
         };
-        let mut peering = PeeringConfig::default();
+        let mut peering = PeeringConfig {
+            peering_cost: 0,
+            ..PeeringConfig::default()
+        };
         // 5 MB, the limit the interop harness gives the Python control
         // node (`set_message_storage_limit(megabytes=5)`).
         let mut store_limit: u64 = 5_000_000;
