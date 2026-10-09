@@ -95,6 +95,8 @@ Keys accepted but not acted on, so a config file shared with lxmd parses cleanly
 
 The three announced costs default to `propagation_stamp_cost_target = 13`, `propagation_stamp_cost_flexibility = 3` and `peering_cost = 1`, the same as a board's propagation node. 13 is the reference's own floor (`PROPAGATION_COST_MIN`; lxmd's default is 16), so a store accepted here travels through every default peer. Peering cost 1 rather than 0, because a stock lxmd peer never syncs toward a node announcing 0: its `peering_key_ready` returns false on a falsy cost (`LXMPeer.py:228`). The reference's default peering cost is 18. The mailbox's `[lxmf] stamp_cost` is a separate knob and keeps lxmd's default of 12.
 
+`autopeer_maxdepth` defaults to 6, the value lxmd's generated config carries, so stock nodes in the field run it; the LXMF router's own code default is 4. At 4 a stock node five or six hops away peers with lnpnd and is declined in turn, so messages flow from it to lnpnd only. A board's propagation node keeps 4.
+
 `enable_node = no` is refused: the propagation node is what lnpnd is. For a mailbox-only daemon use lxmd; for a client, **lnmsg**.
 
 ## FILES

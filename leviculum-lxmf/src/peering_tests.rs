@@ -1316,3 +1316,13 @@ fn a_recalled_announce_fills_a_static_entry_once() {
         PeerChange::Declined(DeclineReason::AlreadyPeered)
     );
 }
+
+/// The board peers four hops deep, the router's code default
+/// (`reference/LXMF/LXMF/LXMRouter.py:45`): `leviculum-nrf`'s propagation
+/// role builds its table from `PeeringConfig::default()`. lnpnd runs 6,
+/// lxmd's generated config (leviculum#442 D10), by its own default.
+#[test]
+fn the_board_default_autopeer_depth_stays_four() {
+    assert_eq!(AUTOPEER_MAXDEPTH_DEFAULT, 4);
+    assert_eq!(PeeringConfig::default().autopeer_maxdepth, 4);
+}

@@ -282,6 +282,15 @@ pub fn default_config_dir() -> PathBuf {
     PathBuf::from(".lnpnd")
 }
 
+/// lnpnd's autopeer depth when the config names none: 6, the value lxmd's
+/// generated config carries (`reference/LXMF/LXMF/Utilities/lxmd.py:995`)
+/// and so the one stock nodes in the field run, not the router's code
+/// default of 4 (`reference/LXMF/LXMF/LXMRouter.py:45`). At 4 a stock node
+/// five or six hops away peers with us and we decline it, so messages flow
+/// from it to us only (leviculum#442 D10, Lew 2026-10-09). A board keeps 4
+/// ([`leviculum_lxmf::peering::AUTOPEER_MAXDEPTH_DEFAULT`]).
+pub const DEFAULT_AUTOPEER_MAXDEPTH: u8 = 6;
+
 /// Our example config: `lxmd --exampleconfig`'s keys
 /// (`__default_lxmd_config__`, `reference/LXMF/LXMF/Utilities/lxmd.py:957-1178`)
 /// with this daemon's defaults and the differences called out where they
@@ -331,9 +340,12 @@ announce_at_start = yes
 autopeer = yes
 
 # The maximum peering depth (in hops) for
-# automatically peered nodes.
+# automatically peered nodes. 6 is what
+# lxmd's generated config uses, so a stock
+# node that far away peers with us and we
+# with it.
 
-autopeer_maxdepth = 4
+autopeer_maxdepth = 6
 
 # The maximum amount of storage to use for
 # the propagation node message store,

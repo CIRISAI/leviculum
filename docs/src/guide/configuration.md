@@ -338,7 +338,7 @@ Serial keys:
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `port` | string | unset | Serial device path, e.g. `/dev/ttyACM0`. (`port` (`ini_config.rs:523`); `InterfaceConfig::port` (`config.rs:479-480`)) |
+| `port` | string | unset | Serial device path, e.g. `/dev/ttyACM0`. (`port` (`ini_config.rs:523`); `InterfaceConfig::port` (`config.rs:549-550`)) |
 | `speed` / `baudrate` | u32 | unset | Serial baud rate (either spelling). (`speed` (`ini_config.rs:645`); `InterfaceConfig::speed` (`config.rs:551-552`)) |
 | `databits` | u8 | unset | Data bits. (`databits` (`ini_config.rs:646`); `InterfaceConfig::databits` (`config.rs:553-554`)) |
 | `parity` | string | unset | `none`, `even`, or `odd`. (`parity` (`ini_config.rs:647`); `InterfaceConfig::parity` (`config.rs:555-556`)) |

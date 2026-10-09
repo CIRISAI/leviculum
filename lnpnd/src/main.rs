@@ -426,7 +426,7 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
         autopeer_maxdepth: args
             .autopeer_maxdepth
             .or(file.get_u8("propagation", "autopeer_maxdepth")?)
-            .unwrap_or(4),
+            .unwrap_or(lnpnd::config::DEFAULT_AUTOPEER_MAXDEPTH),
         store_limit_kb: args.store_limit_kb.unwrap_or(
             file.get_u64("propagation", "message_storage_limit")?
                 .map(|megabytes| megabytes * 1000)
@@ -1051,8 +1051,20 @@ mod tests {
         assert_eq!(effective.mailbox_stamp_cost, 12);
     }
 
-    /// The commented-out template lines show the value an unset key
-    /// resolves to, so an operator who uncomments one changes nothing.
+    /// A config that names no autopeer depth peers six hops deep, the depth
+    /// lxmd's generated config carries (`lxmd.py:995`), not the router's
+    /// code default of 4 (leviculum#442 D10).
+    #[test]
+    fn an_unset_autopeer_depth_resolves_to_six() {
+        let file = RawConfig::parse("[propagation]\nenable_node = yes\n").expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        let effective = resolve(&args, &file).expect("resolves");
+        assert_eq!(effective.autopeer_maxdepth, 6);
+        assert_eq!(lnpnd::config::DEFAULT_AUTOPEER_MAXDEPTH, 6);
+    }
+
+    /// The template lines show the value an unset key resolves to, so an
+    /// operator who uncomments one changes nothing.
     #[test]
     fn the_template_shows_the_resolved_cost_defaults() {
         let template = lnpnd::config::EXAMPLE_CONFIG;
@@ -1060,6 +1072,7 @@ mod tests {
             "# propagation_stamp_cost_target = 13",
             "# propagation_stamp_cost_flexibility = 3",
             "# peering_cost = 1",
+            "\nautopeer_maxdepth = 6\n",
         ] {
             assert!(template.contains(line), "template lacks `{line}`");
         }
