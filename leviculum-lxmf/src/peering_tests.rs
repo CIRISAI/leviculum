@@ -1069,3 +1069,83 @@ fn the_default_peering_cost_is_the_announced_one() {
         crate::PropagationNodeConfig::default().peering_cost
     );
 }
+
+// ---- static peers from the configuration (541) ----
+
+fn static_table(static_peers: Vec<[u8; 16]>) -> PeerTable {
+    PeerTable::new(PeeringConfig {
+        static_peers,
+        ..PeeringConfig::default()
+    })
+}
+
+/// The reference's `enable_propagation` order: the persisted table first,
+/// then an entry for each static peer still missing, then a path request
+/// for every static peer never heard, restored or new
+/// (`reference/LXMF/LXMF/LXMRouter.py:615-642`).
+#[test]
+fn activation_creates_missing_static_entries_and_names_the_unheard() {
+    let mut table = static_table(vec![[1; 16], [2; 16], [3; 16]]);
+    // [2] was heard before the restart and persisted.
+    let mut heard = Peer::from_announce([2; 16], &announce(100), true, 500);
+    heard.cursor = 4;
+    table.restore(vec![PeerRecord::of(&heard)]);
+
+    assert_eq!(table.activate_static_peers(), vec![[1; 16], [3; 16]]);
+    assert_eq!(table.len(), 3);
+    assert_eq!(table.static_peers_unheard(), vec![[1; 16], [3; 16]]);
+    let restored = table.get(&[2; 16]).unwrap();
+    assert!(restored.announce_known && restored.cursor == 4);
+    let configured = table.get(&[1; 16]).unwrap();
+    assert!(configured.is_static && !configured.announce_known);
+    // A second activation changes nothing.
+    assert!(table.activate_static_peers().is_empty());
+}
+
+/// An entry without announce facts is never due: the reference postpones
+/// a peer whose stamp costs are unknown (`LXMPeer.py:271-282`).
+#[test]
+fn a_static_entry_without_facts_is_never_due() {
+    let mut table = static_table(vec![[1; 16]]);
+    table.activate_static_peers();
+    assert_eq!(table.next_due(1_000, 5, None), None);
+}
+
+/// The first path response fills the entry in (`Handlers.py:68-70`) even
+/// at timebase 0, which a clockless board announcing at uptime 0 sends;
+/// a second path response after that adds nothing.
+#[test]
+fn the_first_path_response_fills_a_static_entry_and_makes_it_due() {
+    let mut table = static_table(vec![[1; 16]]);
+    table.activate_static_peers();
+    assert_eq!(
+        table.handle_announce([1; 16], &announce(0), None, 50, true),
+        PeerChange::Updated
+    );
+    let peer = table.get(&[1; 16]).unwrap();
+    assert!(peer.announce_known);
+    assert_eq!((peer.last_heard, peer.peering_cost), (50, 18));
+    assert!(table.static_peers_unheard().is_empty());
+    assert_eq!(table.next_due(1_000, 5, None), Some([1; 16]));
+    assert_eq!(
+        table.handle_announce([1; 16], &announce(10), None, 60, true),
+        PeerChange::Declined(DeclineReason::PathResponse)
+    );
+}
+
+/// A recalled announce fills a static entry still without facts, and a
+/// filled entry is then an ordinary known peer to the sync path.
+#[test]
+fn a_recalled_announce_fills_a_static_entry_once() {
+    let mut table = static_table(vec![[1; 16]]);
+    table.activate_static_peers();
+    assert_eq!(
+        table.handle_inbound_sync([1; 16], &announce(100), None, 50),
+        PeerChange::Updated
+    );
+    assert!(table.get(&[1; 16]).unwrap().announce_known);
+    assert_eq!(
+        table.handle_inbound_sync([1; 16], &announce(101), None, 60),
+        PeerChange::Declined(DeclineReason::AlreadyPeered)
+    );
+}

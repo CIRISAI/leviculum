@@ -297,6 +297,14 @@ pub struct Peer {
     pub cursor: u64,
     /// From the static list: never culled, never declined by the cap.
     pub is_static: bool,
+    /// Whether the announce facts above (costs, limits, timebase) came from
+    /// an announce, live, path response or recalled. Only a static entry
+    /// created from the configuration ([`PeerTable::activate_static_peers`])
+    /// starts without them, the reference's `LXMPeer` with
+    /// `peering_cost = None` (`reference/LXMF/LXMF/LXMPeer.py:182`). Such an
+    /// entry is never synced (`stamp_costs_known`, `LXMPeer.py:271`) and
+    /// never persisted: the configuration recreates it on every start.
+    pub announce_known: bool,
     /// Runtime transport phase, never persisted.
     pub state: SyncPhase,
 }
@@ -324,6 +332,34 @@ impl Peer {
             sync_backoff_secs: 0,
             cursor: 0,
             is_static,
+            announce_known: true,
+            state: SyncPhase::Idle,
+        }
+    }
+
+    /// A static peer the configuration names and nobody has heard yet: the
+    /// reference's bare `LXMPeer(self, static_peer)`
+    /// (`reference/LXMF/LXMF/LXMRouter.py:637`), every announce fact unknown
+    /// and `last_heard` 0 until its first announce or path response fills
+    /// them in.
+    fn configured(destination_hash: [u8; DESTINATION_LENGTH]) -> Self {
+        Self {
+            destination_hash,
+            identity_hash: None,
+            public_keys: None,
+            peering_key: None,
+            transfer_limit_kb: 0,
+            sync_limit_kb: 0,
+            stamp_cost: 0,
+            stamp_cost_flexibility: 0,
+            peering_cost: 0,
+            peering_timebase: 0,
+            last_heard: 0,
+            next_sync_attempt: 0,
+            sync_backoff_secs: 0,
+            cursor: 0,
+            is_static: true,
+            announce_known: false,
             state: SyncPhase::Idle,
         }
     }
@@ -510,6 +546,8 @@ impl PeerRecord {
             sync_backoff_secs: 0,
             cursor: self.cursor,
             is_static: self.is_static,
+            // Only entries with announce facts are persisted.
+            announce_known: true,
             state: SyncPhase::Idle,
         }
     }
@@ -674,6 +712,36 @@ impl PeerTable {
         }
     }
 
+    /// Give every configured static peer a table entry, the reference's
+    /// order at `enable_propagation`: the persisted table first
+    /// ([`Self::restore`]), then an `LXMPeer` for each static hash still
+    /// missing (`reference/LXMF/LXMF/LXMRouter.py:633-637`). Returns the
+    /// hashes it created; [`Self::static_peers_unheard`] says which to ask
+    /// a path for.
+    pub fn activate_static_peers(&mut self) -> Vec<[u8; DESTINATION_LENGTH]> {
+        let mut created = Vec::new();
+        for hash in &self.config.static_peers {
+            if !self.peers.contains_key(hash) {
+                self.peers.insert(*hash, Peer::configured(*hash));
+                created.push(*hash);
+            }
+        }
+        created
+    }
+
+    /// Static peers never heard, whose path the reference requests at
+    /// activation, restored and newly created alike
+    /// (`last_heard == 0`, `reference/LXMF/LXMF/LXMRouter.py:619-620`,
+    /// `:638-642`). Their first path response then fills them in
+    /// ([`Self::handle_announce`]).
+    pub fn static_peers_unheard(&self) -> Vec<[u8; DESTINATION_LENGTH]> {
+        self.peers
+            .values()
+            .filter(|peer| peer.is_static && peer.last_heard == 0)
+            .map(|peer| peer.destination_hash)
+            .collect()
+    }
+
     /// The highest stamp value any peer requires of a message before it
     /// will take it in an offer. When this is above zero the accept path
     /// computes true stamp values even at our own cost 0 (§5's
@@ -817,7 +885,17 @@ impl PeerTable {
         hops: Option<u8>,
         now: u64,
     ) -> PeerChange {
-        if self.peers.contains_key(&destination_hash) {
+        // A static entry still waiting for its announce facts is the one
+        // known peer this path may fill in. The reference skips every hash
+        // already in its table here (`LXMRouter.py:2355`), so its own static
+        // entry waits for an announce or a path response; filling it from
+        // the recalled announce that proves the peer is syncing to us is
+        // the same data `handle_announce` would take, a sync round sooner.
+        if self
+            .peers
+            .get(&destination_hash)
+            .is_some_and(|peer| peer.announce_known)
+        {
             return PeerChange::Declined(DeclineReason::AlreadyPeered);
         }
         if announce.peering_cost > self.config.remote_peering_cost_max as u64 {
@@ -865,8 +943,13 @@ impl PeerTable {
         now: u64,
     ) -> PeerChange {
         if let Some(peer) = self.peers.get_mut(&destination_hash) {
-            // Only a newer timebase updates (`LXMRouter.py:2016`).
-            if announce.timebase > peer.peering_timebase {
+            // Only a newer timebase updates (`LXMRouter.py:2016`). An entry
+            // without announce facts takes the first announce whatever its
+            // timebase: the reference compares against `peering_timebase =
+            // 0` (`LXMPeer.py:188`), which a clockless board announcing at
+            // uptime 0 would not beat.
+            if !peer.announce_known || announce.timebase > peer.peering_timebase {
+                peer.announce_known = true;
                 peer.peering_timebase = announce.timebase;
                 peer.last_heard = now;
                 peer.sync_backoff_secs = 0;
@@ -953,7 +1036,8 @@ impl PeerTable {
         last: Option<[u8; DESTINATION_LENGTH]>,
     ) -> Option<[u8; DESTINATION_LENGTH]> {
         let due = |peer: &Peer| {
-            peer.state == SyncPhase::Idle
+            peer.announce_known
+                && peer.state == SyncPhase::Idle
                 && now >= peer.next_sync_attempt
                 && peer.cursor < newest_sequence
         };
