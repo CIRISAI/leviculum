@@ -675,6 +675,19 @@ impl PeeringRuntime {
         })
     }
 
+    /// Throttle an identified client whose upload resource carried an
+    /// invalid stamp: its `/offer`s answer `ERROR_THROTTLED` for
+    /// `PN_STAMP_THROTTLE` (`propagation_resource_concluded`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2447-2454`).
+    pub(crate) fn throttle_invalid_upload(&mut self, identity: &Identity) {
+        let remote_hash = Self::propagation_hash_of(identity);
+        self.gate.throttle(remote_hash, unix_secs());
+        tracing::debug!(
+            "lnpnd: client {} sent an invalid stamp, throttled",
+            full_hex(&remote_hash)
+        );
+    }
+
     /// Track an accepted inbound resource for `max_inbound_syncs`.
     pub(crate) fn on_inbound_resource_accepted(&mut self, link_id: &LinkId) {
         if self.validated_links.contains_key(link_id) {
@@ -697,6 +710,12 @@ impl PeeringRuntime {
     #[cfg(test)]
     pub(crate) fn validate_link_for_tests(&mut self, link_id: LinkId, peer: [u8; 16]) {
         self.validated_links.insert(link_id, peer);
+    }
+
+    /// Whether the `/offer` gate throttles `remote_hash` at `now`.
+    #[cfg(test)]
+    pub(crate) fn is_throttled_for_tests(&self, remote_hash: &[u8; 16], now: u64) -> bool {
+        self.gate.is_throttled(remote_hash, now)
     }
 
     /// One peer's record, for tests that assert on its facts and phase.

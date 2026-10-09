@@ -720,9 +720,21 @@ impl<S: PropagationStore> Engine<S> {
                 true
             }
             UploadOutcome::InvalidStamp { reject } => {
+                // A resource from an identified remote throttles it for
+                // PN_STAMP_THROTTLE, as the reference throttles any such
+                // transfer (reference/LXMF/LXMF/LXMRouter.py:2447-2454); the
+                // raw-packet path rejects without throttling (:2257-2260).
+                // Read the identity before the close below forgets it.
+                if via == "resource" {
+                    if let Some(identity) = core.get_remote_identity(link_id) {
+                        ready.peering.throttle_invalid_upload(identity);
+                    }
+                }
                 // The reference packs [ERROR_INVALID_STAMP] into a raw link
                 // packet and tears the link down
-                // (reference/LXMF/LXMF/LXMRouter.py:2257-2260).
+                // (reference/LXMF/LXMF/LXMRouter.py:2257-2260). Kept on the
+                // resource path too: a Python client decodes it and stops
+                // retrying.
                 if let Ok((_, send)) = core.send_packet_on_link(link_id, &reject) {
                     out.merge(send);
                 }
@@ -2723,6 +2735,37 @@ mod tests {
         panic!("the exchange did not fall silent");
     }
 
+    /// Bring up a link from `client` to the engine's propagation
+    /// destination and identify it as `sender`, asserting both steps
+    /// landed on the engine's side.
+    fn identified_link(
+        engine: &mut Engine<MemoryPropagationStore>,
+        server: &mut leviculum_std::driver::StdNodeCore,
+        client: &mut leviculum_std::driver::StdNodeCore,
+        destination_hash: DestinationHash,
+        signing_key: &[u8; 32],
+        sender: &Identity,
+    ) -> LinkId {
+        let (link_id, _, out) = client
+            .connect(destination_hash, signing_key)
+            .expect("connect");
+        let (events, _) = converse(engine, server, client, out);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, NodeEvent::LinkEstablished { .. })),
+            "the link must come up, or the test proves nothing: {events:?}"
+        );
+        let out = client.identify_link(&link_id, sender).expect("identify");
+        let _ = converse(engine, server, client, out);
+        assert_eq!(
+            server.get_remote_identity(&link_id).map(|id| *id.hash()),
+            Some(*sender.hash()),
+            "the engine's side must know who is on the link"
+        );
+        link_id
+    }
+
     /// Advertise one propagation resource from `sender` over an identified
     /// link to a `from_static_only` engine listing `static_peers`, and
     /// report whether the engine's side requested it (accept) or cancelled
@@ -2760,22 +2803,13 @@ mod tests {
             _ => panic!("engine must be ready"),
         };
 
-        let (link_id, _, out) = client
-            .connect(destination_hash, &signing_key)
-            .expect("connect");
-        let (events, _) = converse(&mut engine, &mut server, &mut client, out);
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, NodeEvent::LinkEstablished { .. })),
-            "the link must come up, or the test proves nothing: {events:?}"
-        );
-        let out = client.identify_link(&link_id, sender).expect("identify");
-        let _ = converse(&mut engine, &mut server, &mut client, out);
-        assert_eq!(
-            server.get_remote_identity(&link_id).map(|id| *id.hash()),
-            Some(*sender.hash()),
-            "the engine's side must know who is on the link"
+        let link_id = identified_link(
+            &mut engine,
+            &mut server,
+            &mut client,
+            destination_hash,
+            &signing_key,
+            sender,
         );
 
         let upload = vec![0x5a; 2_000];
@@ -2815,6 +2849,125 @@ mod tests {
             requested && !cancelled,
             "a static peer's resource must be accepted \
              (requested={requested} cancelled={cancelled})"
+        );
+    }
+
+    /// An identified client whose upload resource carried an invalid stamp
+    /// is throttled for `PN_STAMP_THROTTLE`, exactly as a peer's sync is:
+    /// the reference throttles any identified remote of a resource transfer
+    /// with invalid stamps (`propagation_resource_concluded`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2447-2454`), and its next `/offer`
+    /// answers `ERROR_THROTTLED` (`offer_request`, `:2286-2291`). Without
+    /// it the remote can resubmit at link rate, each attempt a full stamp
+    /// validation on this node.
+    #[test]
+    fn an_invalid_stamp_upload_throttles_its_identified_sender() {
+        use leviculum_lxmf::peering::PN_STAMP_THROTTLE_SECS;
+        use leviculum_lxmf::{OfferResponse, PeerSyncEnvelope};
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let (mut engine, events) = Engine::new(EngineConfig {
+            identity,
+            // A real cost: the placeholder stamp below cannot meet it.
+            node_config: PropagationNodeConfig::default(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+
+        let sender = leviculum_std::generate_identity();
+        let link_id = identified_link(
+            &mut engine,
+            &mut server,
+            &mut client,
+            destination_hash,
+            &signing_key,
+            &sender,
+        );
+        // Big enough that it rides a resource, not a link packet.
+        let mut message = vec![0x5au8; 1_200];
+        message.extend_from_slice(&[0x5b; STAMP_SIZE]);
+        let upload = PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: vec![message],
+        }
+        .encode();
+        let (_, out) = client
+            .send_resource(&link_id, &upload, None, false)
+            .expect("advertise");
+        let _ = converse(&mut engine, &mut server, &mut client, out);
+        await_validation(&mut engine);
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let mut out = TickOutput::empty();
+        absorb(&mut engine, &mut ready, &mut server, &mut out);
+        assert!(
+            events.try_iter().any(|event| matches!(
+                &event,
+                EngineEvent::Rejected { detail } if detail == "invalid stamp"
+            )),
+            "the placeholder stamp must fail validation, or the test proves nothing"
+        );
+        let now = unix_secs();
+
+        // The same identity comes back on a fresh link and offers.
+        engine.state = State::Ready(ready);
+        let second = identified_link(
+            &mut engine,
+            &mut server,
+            &mut client,
+            destination_hash,
+            &signing_key,
+            &sender,
+        );
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let response = ready
+            .peering
+            .answer_offer_request(&mut server, &ready.node, &second, &[]);
+        assert_eq!(
+            OfferResponse::decode(&response).ok(),
+            Some(OfferResponse::Error(PeerError::Throttled)),
+            "an /offer right after an invalid-stamp upload must be throttled"
+        );
+        let remote_hash = *Destination::compute_destination_hash(
+            &Destination::compute_name_hash(APP_NAME, &[PROPAGATION_ASPECT]),
+            sender.hash(),
+        )
+        .as_bytes();
+        assert!(
+            ready
+                .peering
+                .is_throttled_for_tests(&remote_hash, now + PN_STAMP_THROTTLE_SECS - 1),
+            "the throttle must last PN_STAMP_THROTTLE"
+        );
+        assert!(
+            !ready
+                .peering
+                .is_throttled_for_tests(&remote_hash, now + PN_STAMP_THROTTLE_SECS + 1),
+            "and no longer"
         );
     }
 }

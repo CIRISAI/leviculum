@@ -68,8 +68,8 @@ node's control destination: the request runs over a Link, the remote's
 identity hash is taken from that link, and it is checked against an
 allow list before any verb is answered — with a typed refusal, not
 silence, when it is absent or unlisted (`answer_control`,
-`lnpnd/src/engine.rs:999`; the check itself at
-`lnpnd/src/engine.rs:1012`). The list is operator configuration
+`lnpnd/src/engine.rs:1011`; the check itself at
+`lnpnd/src/engine.rs:1024`). The list is operator configuration
 (`control_allowed`, `lnpnd/src/config.rs:534`) and the node's own
 identity is always on it. Codeberg #384 part 4 built that because the
 reference has it; stage 1 needs exactly the same shape for a different
