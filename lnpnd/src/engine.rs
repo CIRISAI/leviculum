@@ -1591,6 +1591,7 @@ mod tests {
 
     use leviculum_core::node::NodeCoreBuilder;
     use leviculum_core::packet::{Packet, PacketType};
+    use leviculum_lxmf::peering::{SyncPhase, SYNC_INTERVAL_SECS};
     use leviculum_lxmf::{MemoryPeerStore, MemoryPropagationStore};
     use leviculum_std::driver::{CoreProcessor as _, StdClock, StdStorage};
 
@@ -2432,6 +2433,189 @@ mod tests {
                 if expected == 0 { "not" } else { "" }
             );
         }
+    }
+
+    /// The path requests in one tick's output: Data broadcasts whose
+    /// payload starts with the requested destination hash.
+    fn path_requests_for(out: &TickOutput, destination: &[u8; 16]) -> usize {
+        out.actions
+            .iter()
+            .filter_map(|action| match action {
+                leviculum_core::transport::Action::Broadcast { data, .. } => {
+                    Packet::unpack(data).ok()
+                }
+                _ => None,
+            })
+            .filter(|packet| {
+                packet.flags.packet_type == PacketType::Data
+                    && packet.data.as_slice().starts_with(destination)
+            })
+            .count()
+    }
+
+    fn peer_phase(
+        engine: &Engine<MemoryPropagationStore>,
+        destination: &[u8; 16],
+    ) -> Option<(SyncPhase, u64, u8)> {
+        match &engine.state {
+            State::Ready(ready) => ready
+                .peering
+                .peer_for_tests(destination)
+                .map(|peer| (peer.state, peer.last_heard, peer.stamp_cost)),
+            _ => panic!("engine must be ready"),
+        }
+    }
+
+    /// A static peering whose peer has never been heard: one stored message
+    /// for it, and the engine's first tick already taken. Returns the
+    /// peer's hash and the announce it would put on the air.
+    fn static_engine_with_a_message(
+        core: &mut leviculum_std::driver::StdNodeCore,
+    ) -> (
+        Engine<MemoryPropagationStore>,
+        [u8; 16],
+        Vec<u8>,
+        TickOutput,
+    ) {
+        let (remote, packet) = propagation_announce(core.emission_secs(), 0);
+        let (mut engine, _events) = peering_engine(PeeringConfig {
+            // Autopeering off: whatever peers the remote here is the static
+            // list, nothing else.
+            autopeer: false,
+            static_peers: vec![remote],
+            ..PeeringConfig::default()
+        });
+        let start_ms = core.now_ms();
+        let first = engine.on_tick(core, start_ms);
+        match &mut engine.state {
+            State::Ready(ready) => ready
+                .node
+                .store_mut()
+                .append(&[0x77; 32], 1, 0, &synced_message(0x31))
+                .expect("a message for the peer"),
+            _ => panic!("engine must be ready"),
+        }
+        (engine, remote, packet, first)
+    }
+
+    /// 541: a configured static peer that was never heard is in the table
+    /// and asked for from the first tick. The reference creates an
+    /// `LXMPeer` for every static peer missing from the restored table and
+    /// requests its path when `last_heard == 0`, inside `enable_propagation`
+    /// (`reference/LXMF/LXMF/LXMRouter.py:633-642`); before this, an entry
+    /// only appeared when the peer announced on its own, up to six hours.
+    #[test]
+    fn a_static_peer_is_in_the_table_and_asked_for_from_the_first_tick() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, remote, packet, first) = static_engine_with_a_message(&mut core);
+
+        assert_eq!(
+            peer_count(&engine),
+            1,
+            "the static peer must be in the table before it is ever heard"
+        );
+        assert_eq!(
+            path_requests_for(&first, &remote),
+            1,
+            "the first tick must request the never-heard static peer's path"
+        );
+
+        // Its announce facts are unknown, so no round may start: the
+        // reference postpones a peer whose stamp costs are not yet known
+        // (`stamp_costs_known`, `reference/LXMF/LXMF/LXMPeer.py:271-282`)
+        // rather than mine a key at a cost nobody announced. The stack
+        // knows its identity (heard off the role), so nothing but that
+        // rule keeps the round from mining.
+        hear_announce_off_the_role(&mut core, &packet);
+        let later = core.now_ms() + (SYNC_INTERVAL_SECS + 1) * 1000;
+        let _ = engine.on_tick(&mut core, later);
+        assert_eq!(
+            peer_phase(&engine, &remote).map(|(phase, ..)| phase),
+            Some(SyncPhase::Idle),
+            "a static peer with unknown costs must not start a round"
+        );
+    }
+
+    /// The first path response for a never-heard static peer fills in its
+    /// facts (`not is_path_response or static_peer.last_heard == 0`,
+    /// `reference/LXMF/LXMF/Handlers.py:68-70`), and the next scheduler pass
+    /// starts a round toward it.
+    #[test]
+    fn a_static_peers_first_path_response_fills_it_and_a_round_begins() {
+        use leviculum_core::packet::PacketContext;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, remote, announce, _first) = static_engine_with_a_message(&mut core);
+
+        let mut packet = Packet::unpack(&announce).expect("unpack the announce");
+        packet.context = PacketContext::PathResponse;
+        let mut buf = vec![0u8; 600];
+        let len = packet.pack(&mut buf).expect("repack the announce");
+        let delivered = core.handle_packet(leviculum_core::InterfaceId(0), &buf[..len]);
+        for event in &delivered.events {
+            let _ = engine.on_event(&mut core, event);
+        }
+        let (_, last_heard, stamp_cost) =
+            peer_phase(&engine, &remote).expect("the static peer must still be there");
+        assert!(last_heard > 0, "the path response must mark it heard");
+        assert_eq!(stamp_cost, 16, "the path response must fill in its costs");
+
+        let later = core.now_ms() + (SYNC_INTERVAL_SECS + 1) * 1000;
+        let _ = engine.on_tick(&mut core, later);
+        assert_ne!(
+            peer_phase(&engine, &remote).map(|(phase, ..)| phase),
+            Some(SyncPhase::Idle),
+            "the filled static peer must be synced on the next pass"
+        );
+    }
+
+    /// The same, when the static peer syncs to us before any path response
+    /// arrives: its recalled announce fills the entry
+    /// (`propagation_resource_concluded`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2355-2375`, which the reference
+    /// itself skips for any hash already in its table, a never-heard static
+    /// entry included), and a round toward it begins.
+    #[test]
+    fn a_static_peers_recalled_announce_fills_it_and_a_round_begins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, remote, announce, _first) = static_engine_with_a_message(&mut core);
+        hear_announce_off_the_role(&mut core, &announce);
+
+        let link_id = LinkId::new([0x43; 16]);
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        ready.peering.validate_link_for_tests(link_id, remote);
+        let envelope = leviculum_lxmf::PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: vec![synced_message(0x41)],
+        }
+        .encode();
+        let mut out = TickOutput::empty();
+        engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+        await_validation(&mut engine);
+        absorb(&mut engine, &mut ready, &mut core, &mut out);
+        engine.state = State::Ready(ready);
+
+        let (_, last_heard, stamp_cost) =
+            peer_phase(&engine, &remote).expect("the static peer must still be there");
+        assert!(last_heard > 0, "the recalled announce must mark it heard");
+        assert_eq!(
+            stamp_cost, 16,
+            "the recalled announce must fill in its costs"
+        );
+
+        let later = core.now_ms() + (SYNC_INTERVAL_SECS + 1) * 1000;
+        let _ = engine.on_tick(&mut core, later);
+        assert_ne!(
+            peer_phase(&engine, &remote).map(|(phase, ..)| phase),
+            Some(SyncPhase::Idle),
+            "the filled static peer must be synced on the next pass"
+        );
     }
 }
 

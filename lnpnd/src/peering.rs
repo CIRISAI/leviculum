@@ -185,6 +185,11 @@ pub(crate) struct PeeringRuntime {
     /// pass, ahead of the round-robin (`peer_sync_request` calls the
     /// peer's own `sync()`, `reference/LXMF/LXMF/LXMRouter.py:852`).
     forced_next: Option<[u8; 16]>,
+    /// Static peers whose path the first tick requests: never heard, so
+    /// their announce facts are unknown (`reference/LXMF/LXMF/LXMRouter.py:638-642`).
+    /// Construction has no core to send through; the first tick is the
+    /// same pass that builds this runtime.
+    static_paths_pending: Vec<[u8; 16]>,
     events: std::sync::mpsc::Sender<EngineEvent>,
 }
 
@@ -201,7 +206,13 @@ impl PeeringRuntime {
             Ok(records) => table.restore(records),
             Err(error) => tracing::warn!("lnpnd: peer store load failed: {error}"),
         }
-        Self {
+        // The reference's order (`enable_propagation`,
+        // `reference/LXMF/LXMF/LXMRouter.py:615-642`): the persisted table,
+        // then an entry for every static peer still missing, then a path
+        // request for each static peer never heard.
+        let activated = table.activate_static_peers();
+        let static_paths_pending = table.static_peers_unheard();
+        let runtime = Self {
             table,
             gate: InboundGate::default(),
             peer_store,
@@ -218,8 +229,13 @@ impl PeeringRuntime {
             unpeered_incoming: 0,
             unpeered_rx_bytes: 0,
             forced_next: None,
+            static_paths_pending,
             events,
+        };
+        for destination_hash in &activated {
+            runtime.log_peer("add", destination_hash, "static");
         }
+        runtime
     }
 
     pub(crate) fn peer_count(&self) -> usize {
@@ -270,8 +286,7 @@ impl PeeringRuntime {
         peer.cursor = 0;
         peer.next_sync_attempt = 0;
         peer.sync_backoff_secs = 0;
-        let record = PeerRecord::of(peer);
-        self.persist(&record);
+        self.persist_peer(destination_hash);
         // Make the next tick schedule immediately.
         self.next_sync_at_ms = 0;
         true
@@ -406,8 +421,15 @@ impl PeeringRuntime {
         }
     }
 
+    /// Persist one peer's record. A static entry without announce facts is
+    /// not written: the record cannot say "unknown", and the configuration
+    /// recreates the entry on every start.
     fn persist_peer(&mut self, destination_hash: &[u8; 16]) {
-        if let Some(peer) = self.table.get(destination_hash) {
+        if let Some(peer) = self
+            .table
+            .get(destination_hash)
+            .filter(|peer| peer.announce_known)
+        {
             let record = PeerRecord::of(peer);
             self.persist(&record);
         }
@@ -657,6 +679,15 @@ impl PeeringRuntime {
     #[cfg(test)]
     pub(crate) fn validate_link_for_tests(&mut self, link_id: LinkId, peer: [u8; 16]) {
         self.validated_links.insert(link_id, peer);
+    }
+
+    /// One peer's record, for tests that assert on its facts and phase.
+    #[cfg(test)]
+    pub(crate) fn peer_for_tests(
+        &self,
+        destination_hash: &[u8; 16],
+    ) -> Option<&leviculum_lxmf::peering::Peer> {
+        self.table.get(destination_hash)
     }
 
     /// Classify a completed inbound resource and, when it is a validated
@@ -916,17 +947,22 @@ impl PeeringRuntime {
         // a `None` from `recall_app_data` (`:2356`).
         let app_data = core.recall_app_data(&destination);
         let hops = core.hops_to(&destination);
-        match self
-            .table
-            .handle_inbound_sync_recalled(remote_hash, app_data.as_deref(), hops, now)
-        {
-            PeerChange::Added => {}
+        // `Updated` is a configured static entry this sync filled in; any
+        // other known peer is declined as already peered.
+        let action = match self.table.handle_inbound_sync_recalled(
+            remote_hash,
+            app_data.as_deref(),
+            hops,
+            now,
+        ) {
+            PeerChange::Added => "add",
+            PeerChange::Updated => "refresh",
             PeerChange::Declined(reason) => {
                 self.log_decline(&remote_hash, reason);
                 return;
             }
-            _ => return,
-        }
+            PeerChange::Dropped(_) => return,
+        };
         // The keys, as the announce path captures them (#388 pass 3): from
         // the link we are being synced over when it is still up, from the
         // identity cache otherwise. Without them the peering-key material
@@ -943,7 +979,7 @@ impl PeeringRuntime {
         // reader grepping `PN_PEER` sees how each peer got in, and
         // `inbound_sync` is the vocabulary `PN_SYNC dir=in` already uses, so
         // the cause and its trace share a word.
-        self.log_peer("add", &remote_hash, "inbound_sync");
+        self.log_peer(action, &remote_hash, "inbound_sync");
         self.persist_peer(&remote_hash);
     }
 
@@ -959,6 +995,14 @@ impl PeeringRuntime {
         out: &mut TickOutput,
     ) {
         self.harvest_mining();
+
+        for destination in std::mem::take(&mut self.static_paths_pending) {
+            tracing::debug!(
+                "lnpnd: path request for never-heard static peer {}",
+                full_hex(&destination)
+            );
+            out.merge(core.request_path(&DestinationHash::new(destination)));
+        }
 
         if let Some(sync) = &self.outbound {
             if now_ms > sync.deadline_ms {
@@ -987,10 +1031,14 @@ impl PeeringRuntime {
         // A control-triggered sync outranks the round-robin, like the
         // reference's `peer.sync()` call from `peer_sync_request`
         // (`reference/LXMF/LXMF/LXMRouter.py:852`).
+        // Not a static entry still waiting for its announce facts: the
+        // reference postpones that sync (`stamp_costs_known`,
+        // `reference/LXMF/LXMF/LXMPeer.py:271-282`) rather than mine a key
+        // at a cost nobody announced.
         let forced = self
             .forced_next
             .take()
-            .filter(|hash| self.table.get(hash).is_some());
+            .filter(|hash| self.table.get(hash).is_some_and(|peer| peer.announce_known));
         let Some(destination) =
             forced.or_else(|| self.table.next_due(now, newest, self.last_synced))
         else {
