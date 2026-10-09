@@ -2074,6 +2074,22 @@ mod tests {
         panic!("the store queue did not drain");
     }
 
+    /// Move every deferred validation onto the store queue, waiting for the
+    /// worker as the driver's next hook would. Bounded, so a worker that
+    /// never answers fails the test instead of hanging it.
+    fn await_validation(engine: &mut Engine<MemoryPropagationStore>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while engine.validation.busy() {
+            match engine.validation.try_recv() {
+                Some(done) => engine.pending.push_back(Pending::from_validated(done)),
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(1))
+                }
+                None => panic!("the validation worker did not answer"),
+            }
+        }
+    }
+
     fn peer_count(engine: &Engine<MemoryPropagationStore>) -> usize {
         match &engine.state {
             State::Ready(ready) => ready.peering.peer_count(),
@@ -2265,6 +2281,99 @@ mod tests {
             0,
             "neither a client nor a node outside autopeer_maxdepth may be peered by a sync"
         );
+    }
+
+    /// 538: every refused candidate leaves a `PN_PEER action=decline` line
+    /// naming why. The field case: after a restart the announce is still
+    /// recallable but the path is gone, so `hops_to` answers `None`, the sync
+    /// is declined as too deep, and until now nothing in lnpnd's log said
+    /// so. The second sync comes from a node we already peer, which must stay
+    /// silent: it is every sync from every peer.
+    #[test]
+    fn a_declined_sync_says_why_and_a_known_peer_says_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, events) = peering_engine(PeeringConfig {
+            autopeer_maxdepth: 1,
+            ..PeeringConfig::default()
+        });
+        let start_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, start_ms);
+
+        // Recallable, but with no path: the state a restart leaves behind.
+        // Once the known node below is a peer, stamp values are computed,
+        // so both syncs go through the validation worker.
+        let (pathless, packet) = propagation_announce(core.emission_secs(), 0);
+        hear_announce_off_the_role(&mut core, &packet);
+        assert!(core.remove_path(&pathless), "the path must have existed");
+        assert!(
+            core.recall_app_data(&DestinationHash::new(pathless))
+                .is_some(),
+            "the announce must still be recallable, or this is the client case"
+        );
+        assert_eq!(core.hops_to(&DestinationHash::new(pathless)), None);
+        // A node peered by its live announce.
+        let (known, packet) = propagation_announce(core.emission_secs(), 0);
+        let delivered = core.handle_packet(leviculum_core::InterfaceId(0), &packet);
+        for event in &delivered.events {
+            let _ = engine.on_event(&mut core, event);
+        }
+        assert_eq!(peer_count(&engine), 1, "the known node must be a peer");
+        let _ = events.try_iter().count();
+
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        enable_log_dispatch();
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut out = TickOutput::empty();
+            for (index, remote) in [pathless, known].into_iter().enumerate() {
+                let link_id = LinkId::new([0x70 + index as u8; 16]);
+                ready.peering.validate_link_for_tests(link_id, remote);
+                let envelope = leviculum_lxmf::PeerSyncEnvelope {
+                    timestamp: 1.0,
+                    messages: vec![synced_message(0x20 + index as u8)],
+                }
+                .encode();
+                engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+                await_validation(&mut engine);
+                absorb(&mut engine, &mut ready, &mut core, &mut out);
+            }
+        });
+        let stored = ready.node.store().count().unwrap_or(0);
+        engine.state = State::Ready(ready);
+        let log = capture.unquoted();
+        assert_eq!(stored, 2, "both syncs must have landed: {log}");
+        let declines: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("PN_PEER") && line.contains("action=decline"))
+            .collect();
+        assert_eq!(declines.len(), 1, "one decline line, got: {declines:?}");
+        assert!(
+            declines[0].contains(&format!("peer={}", hex::encode(pathless)))
+                && declines[0].contains("reason=too_deep"),
+            "the pathless node must be declined as too_deep: {}",
+            declines[0]
+        );
+        let operator: Vec<(&'static str, [u8; 16], &'static str)> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                EngineEvent::Peer {
+                    action,
+                    destination_hash,
+                    reason,
+                } => Some((action, destination_hash, reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(operator, vec![("decline", pathless, "too_deep")]);
     }
 
     /// The opposite error on the same rule: a path response is an answer to

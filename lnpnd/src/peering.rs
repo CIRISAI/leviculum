@@ -433,6 +433,29 @@ impl PeeringRuntime {
         });
     }
 
+    /// One `PN_PEER action=decline` line per refused candidate, so "it syncs
+    /// into me and I do not peer it" is answered by the log alone (538: a
+    /// recalled announce with no path declined as `too_deep`, and nothing
+    /// said so). The vocabulary is stable, like the drop reasons'.
+    ///
+    /// `AlreadyPeered` stays silent: it is every sync from a peer we already
+    /// have, so a line for it would bury the declines that mean something.
+    /// `PathResponse` uses the same event rather than a trace line of its
+    /// own, so one grep covers every refusal.
+    fn log_decline(&self, destination_hash: &[u8; 16], reason: DeclineReason) {
+        let reason = match reason {
+            DeclineReason::AlreadyPeered => return,
+            DeclineReason::TableFull => "table_full",
+            DeclineReason::CostTooHigh => "cost_too_high",
+            DeclineReason::AutopeerOff => "autopeer_off",
+            DeclineReason::TooDeep => "too_deep",
+            DeclineReason::Disabled => "disabled",
+            DeclineReason::PathResponse => "path_response",
+            DeclineReason::NotANode => "not_a_node",
+        };
+        self.log_peer("decline", destination_hash, reason);
+    }
+
     /// The remote's `lxmf.propagation` destination hash from its link
     /// identity, derived as the reference derives it
     /// (`offer_request`, `reference/LXMF/LXMF/LXMRouter.py:2269-2271`).
@@ -520,17 +543,7 @@ impl PeeringRuntime {
                     },
                 );
             }
-            PeerChange::Declined(reason) => {
-                if reason == DeclineReason::TableFull {
-                    self.log_peer("decline", &destination_hash, "table_full");
-                }
-                if reason == DeclineReason::PathResponse {
-                    tracing::trace!(
-                        "lnpnd: propagation announce for {} arrived as a path response; not peering",
-                        short_hex(&destination_hash),
-                    );
-                }
-            }
+            PeerChange::Declined(reason) => self.log_decline(&destination_hash, reason),
         }
     }
 
@@ -903,12 +916,16 @@ impl PeeringRuntime {
         // a `None` from `recall_app_data` (`:2356`).
         let app_data = core.recall_app_data(&destination);
         let hops = core.hops_to(&destination);
-        if self
+        match self
             .table
             .handle_inbound_sync_recalled(remote_hash, app_data.as_deref(), hops, now)
-            != PeerChange::Added
         {
-            return;
+            PeerChange::Added => {}
+            PeerChange::Declined(reason) => {
+                self.log_decline(&remote_hash, reason);
+                return;
+            }
+            _ => return,
         }
         // The keys, as the announce path captures them (#388 pass 3): from
         // the link we are being synced over when it is still up, from the
