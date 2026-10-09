@@ -267,10 +267,15 @@ use rand_core::CryptoRngCore;
 /// running-versus-configured split the media profile keeps, because a
 /// `--stamp-cost` mid-run must not silently change what the role already
 /// announced.
-static RUNNING_STAMP: AtomicU8 = AtomicU8::new(0);
-static RUNNING_PEERING: AtomicU8 = AtomicU8::new(0);
-static CONFIGURED_STAMP: AtomicU8 = AtomicU8::new(0);
-static CONFIGURED_PEERING: AtomicU8 = AtomicU8::new(0);
+///
+/// They start at the Lead's defaults, not 0: the serial task answers
+/// frames from USB bring-up on, before [`load_config_at_boot`] seeds
+/// them, and a `--stamp-cost` frame in that window would otherwise fill
+/// its kept peering cost from here and persist 0.
+static RUNNING_STAMP: AtomicU8 = AtomicU8::new(StoredPnConfig::DEFAULT.stamp_cost);
+static RUNNING_PEERING: AtomicU8 = AtomicU8::new(StoredPnConfig::DEFAULT.peering_cost);
+static CONFIGURED_STAMP: AtomicU8 = AtomicU8::new(StoredPnConfig::DEFAULT.stamp_cost);
+static CONFIGURED_PEERING: AtomicU8 = AtomicU8::new(StoredPnConfig::DEFAULT.peering_cost);
 
 /// Store fill for the display, updated by the engine's stats pass:
 /// live message records in the region.
