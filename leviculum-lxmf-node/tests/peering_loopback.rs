@@ -119,8 +119,12 @@ async fn two_nodes_autopeer_and_sync_a_stored_message() {
         helpers[0].events, helpers[1].events
     );
     assert!(
-        helpers[0].seen("lxmf_pn_peer"),
-        "the peer add must be reported"
+        helpers[0]
+            .events
+            .iter()
+            .any(|event| event.name == "lxmf_pn_peer" && event.field("action") == Some("add")),
+        "the peer add must be reported, not just a decline: {:?}",
+        helpers[0].events
     );
 
     // A client uploads one message for the recipient into node A.
@@ -537,8 +541,14 @@ async fn peering_disabled_leaves_the_message_at_the_node_it_was_uploaded_to() {
         helpers[1].events
     );
     for (name, helper) in [("A", &helpers[0]), ("B", &helpers[1])] {
+        // A decline line (`reason=autopeer_off`, 538) is the disabled
+        // peering saying so; only an add would be a peer.
         assert!(
-            !helper.seen("lxmf_pn_peer"),
+            !helper
+                .events
+                .iter()
+                .any(|event| event.name == "lxmf_pn_peer"
+                    && event.field("action") != Some("decline")),
             "node {name} must never report a peer add: {:?}",
             helper.events
         );
