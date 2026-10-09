@@ -30,7 +30,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
-    addr_value, admit, connect_failure_condemns, dial_preference, identity_hint,
+    addr_value, admit, connect_failure_condemns, dial_preference, fragment_mtu, identity_hint,
     judge_supervision_timeout, manufacturer_data_with_hint, parse_peer_advertisement,
     with_free_slots, AdvReport, CandidateTable, ChurnLedger, ChurnPolicy, ConnParams,
     ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision, DeadEnds,
@@ -1010,7 +1010,10 @@ async fn gatt_events(
                         }
                     }
                     serve_tx_gap(&tx_gap, conn_handle).await;
-                    let fragments = ble_framing::fragment_packet(&packet, ble_framing::DEFAULT_MTU);
+                    // Sized for this link's negotiated MTU, read per
+                    // packet (#547).
+                    let fragments =
+                        ble_framing::fragment_packet(&packet, fragment_mtu(conn.att_mtu()));
                     notify_fragments(
                         conn,
                         drain,
@@ -2589,13 +2592,15 @@ async fn run_central_session(
                     // #388 census, as on the peripheral pump.
                     let held_bytes = packet.capacity();
                     serve_tx_gap(&tx_gap, conn.handle().unwrap_or(u16::MAX)).await;
-                    let fragments = ble_framing::fragment_packet(&packet, ble_framing::DEFAULT_MTU);
+                    // Sized for this link's negotiated MTU (#547).
+                    let fragments =
+                        ble_framing::fragment_packet(&packet, fragment_mtu(conn.att_mtu()));
                     let mut sent = 0usize;
                     let mut torn = false;
                     for (index, fragment) in fragments.iter().enumerate() {
                         let Some(value) = GattData::new(fragment.as_slice()) else {
-                            // Unreachable: DEFAULT_MTU fragments are
-                            // narrower than the characteristic's
+                            // Unreachable: `fragment_mtu` caps every
+                            // fragment at the characteristic's
                             // GATT_VALUE_MAX.
                             // Reported all the same — this used to be a
                             // bare `return`, i.e. exactly the silent

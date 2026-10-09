@@ -53,6 +53,30 @@ pub const GATT_VALUE_MAX: usize = ATT_MTU - ATT_HEADER_SIZE;
 // silently becoming too small again.
 const _: () = assert!(GATT_VALUE_MAX == FRAGMENT_HEADER_SIZE + payload_per_fragment(ATT_MTU));
 
+/// The ATT MTU to hand `fragment_packet` for a link whose SoftDevice
+/// reports `att_mtu` (#547, D8 of the 545 audit).
+///
+/// The phone sizes its fragmenter from the link's negotiated usable MTU
+/// (`ble-reticulum/src/ble_reticulum/BLEInterface.py:1134`) and lnsd per link
+/// (`links.rs`, `fragment_packet(packet, link.mtu)`); the board used a
+/// fixed 185 on every link. Against our 256 grant that split every
+/// packet of 178 to 248 bytes, an announce among them, in two where one
+/// fits; against a link still at the un-negotiated 23 it built 182-byte
+/// frames no ATT PDU on that link can carry.
+///
+/// Routed through [`usable_mtu`](crate::registry::usable_mtu), the
+/// peer's own clamp, so a link that has not exchanged yet sizes at the
+/// floor (usable 20, ATT 23); capped at our [`ATT_MTU`] grant so a
+/// fragment can never outgrow [`GATT_VALUE_MAX`].
+pub const fn fragment_mtu(att_mtu: u16) -> usize {
+    let mtu = crate::registry::usable_mtu(att_mtu) as usize + ATT_HEADER_SIZE;
+    if mtu > ATT_MTU {
+        ATT_MTU
+    } else {
+        mtu
+    }
+}
+
 /// A bounded byte value from a GATT peer whose construction cannot
 /// fail: at most `N` bytes are kept, and the length the peer actually
 /// put on the wire is carried alongside so [`Self::oversize`] can turn
@@ -246,6 +270,40 @@ mod tests {
         assert_eq!(
             notify.to_string(),
             "BLE_GATT_NOTIFY_OVERSIZE conn=2 len=494 max=253"
+        );
+    }
+
+    /// #547 D8: the board fragments for the link it is on. A 200-byte
+    /// packet is one fragment at our ATT 256 grant (two at the old fixed
+    /// 185), and a link still at the un-negotiated ATT 23 gets frames an
+    /// ATT-23 PDU can carry (20 bytes), not 182-byte ones.
+    #[test]
+    fn fragments_are_sized_for_the_links_mtu() {
+        use leviculum_core::framing::ble::{fragment_packet, DEFAULT_MTU};
+
+        let packet = [0x5Au8; 200];
+        assert_eq!(fragment_packet(&packet, DEFAULT_MTU).len(), 2, "before");
+
+        let at_256 = fragment_packet(&packet, fragment_mtu(256));
+        assert_eq!(at_256.len(), 1);
+        assert_eq!(at_256[0].len(), 205);
+
+        let at_23 = fragment_packet(&packet, fragment_mtu(23));
+        assert_eq!(at_23.len(), 200usize.div_ceil(15));
+        assert!(at_23.iter().all(|f| f.len() <= 20));
+    }
+
+    /// Below the floor reads as the floor, above the grant as the grant.
+    #[test]
+    fn fragment_mtu_is_clamped_to_the_floor_and_our_grant() {
+        assert_eq!(fragment_mtu(0), 23);
+        assert_eq!(fragment_mtu(23), 23);
+        assert_eq!(fragment_mtu(185), 185);
+        assert_eq!(fragment_mtu(256), ATT_MTU);
+        assert_eq!(fragment_mtu(517), ATT_MTU);
+        assert_eq!(
+            FRAGMENT_HEADER_SIZE + payload_per_fragment(fragment_mtu(517)),
+            GATT_VALUE_MAX
         );
     }
 }

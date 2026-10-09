@@ -551,7 +551,11 @@ the MTU to 146 to 190 — consistent with the 185 default
 (`DEFAULT_MTU`, `leviculum-core/src/framing/ble.rs:89`;
 `payload_per_fragment`, `leviculum-core/src/framing/ble.rs:112`). At
 177 bytes per fragment a 304-byte message is 2 notifications, so the
-full region is 352 notifications.
+full region is 352 notifications. That field log predates #547: the
+board fragmented at the fixed 185 on every link then, and now sizes
+fragments from each link's negotiated MTU (`fragment_mtu`,
+`leviculum-nrf/ble-tx/src/gatt_bytes.rs`), 248 bytes per fragment at
+the 256 ceiling. A 304-byte message is still 2 notifications there.
 
 **The sustained notification rate is still not measured and this page
 will not invent it.** The field run carried sparse traffic — the

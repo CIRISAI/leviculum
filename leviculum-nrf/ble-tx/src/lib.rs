@@ -68,7 +68,9 @@ pub use conn_params::{
 pub use dial_ledger::{DialLedger, LedgerPolicy, Noted, LEDGER_SLOTS};
 pub use drain::{DrainRouter, DrainSlot, NO_CONN_HANDLE};
 pub use gap::{effective_tx_gap_ms, TxGap, DEFAULT_TX_GAP_MS};
-pub use gatt_bytes::{GattBytes, OversizeFrom, OversizeLine, ATT_MTU, GATT_VALUE_MAX};
+pub use gatt_bytes::{
+    fragment_mtu, GattBytes, OversizeFrom, OversizeLine, ATT_MTU, GATT_VALUE_MAX,
+};
 pub use hold::TxHold;
 pub use peer::{
     addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, PeerAdvertisement,
