@@ -50,56 +50,16 @@ static ALLOC: leviculum_std::heap_accounting::CountingOver<mimalloc::MiMalloc> =
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// How many sites the sampler's census lists, by count and by bytes.
-#[cfg(feature = "heap-accounting")]
-const SAMPLE_TOP: usize = 20;
-
-/// Read `LEVICULUM_HEAP_SAMPLE` once: a positive n samples every n-th
-/// allocation for the census's call-site table, anything else leaves the
-/// sampler off. Said in the log either way it was asked for, so a census
-/// without the table is not mistaken for one with nothing in it.
-#[cfg(feature = "heap-accounting")]
-fn configure_heap_sampler() {
-    let Some(raw) = std::env::var_os("LEVICULUM_HEAP_SAMPLE") else {
-        return;
-    };
-    match raw.to_str().and_then(|v| v.trim().parse::<usize>().ok()) {
-        Some(n) if n > 0 => {
-            leviculum_std::heap_accounting::set_sample_every(n);
-            info!("Heap sampling: every {n}th allocation records its call site (SIGUSR1 lists the top {SAMPLE_TOP})");
-        }
-        _ => tracing::warn!(
-            "LEVICULUM_HEAP_SAMPLE={raw:?} is not a positive integer; heap sampling stays off"
-        ),
-    }
-}
-
-/// The line that rides beside the dump's `=== Total estimated: ... ===`, so
-/// the model and the measurement are read together and the model stays
-/// checkable (it is only knowable that it over-reports by 1.92x because both
-/// were printed).
+/// The line `heap_accounting::measured_live_line` prints, with this
+/// binary's allocator named: only the binary knows which one it installed.
 #[cfg(feature = "heap-accounting")]
 fn measured_live_line() -> String {
-    use leviculum_std::heap_accounting::{
-        allocation_count, live_bytes, sample_report, total_bytes,
-    };
-    // Named, because the census's Allocator section reads the libc and
-    // cannot tell that the libc's allocator is not the one in use.
     let allocator = if cfg!(feature = "alloc-mimalloc") {
         "mimalloc"
     } else {
         "system"
     };
-    let mut line = format!(
-        "=== Measured live: {} bytes ({} allocations, {} bytes handed out, allocator {allocator}) ===\n",
-        live_bytes(),
-        allocation_count(),
-        total_bytes(),
-    );
-    if let Some(report) = sample_report(SAMPLE_TOP) {
-        line.push_str(&report);
-    }
-    line
+    leviculum_std::heap_accounting::measured_live_line(allocator)
 }
 
 #[derive(Parser, Debug)]
@@ -193,7 +153,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "heap-accounting")]
     {
         info!("Heap accounting: on, SIGUSR1 reports measured live bytes beside the estimate");
-        configure_heap_sampler();
+        leviculum_std::heap_accounting::configure_sampler_from_env();
     }
     #[cfg(feature = "alloc-mimalloc")]
     info!("Allocator: mimalloc");

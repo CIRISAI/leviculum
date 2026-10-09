@@ -31,10 +31,13 @@
 //!
 //! # Users
 //!
-//! `heap-gap-bench` installs it always; `lnsd` installs it under its
-//! default-off `heap-accounting` feature, for a field node that reports
-//! measured live bytes instead of an estimate. The same feature carries the
-//! opt-in call-site sampler (`LEVICULUM_HEAP_SAMPLE`, see `sample`).
+//! `heap-gap-bench` installs it always; `lnsd` and `lnpnd` install it under
+//! their default-off `heap-accounting` features, for a field node that
+//! reports measured live bytes instead of an estimate. The same feature
+//! carries the opt-in call-site sampler (`LEVICULUM_HEAP_SAMPLE`, see
+//! `sample`), and the two pieces both daemons print from it,
+//! `configure_sampler_from_env` and `measured_live_line`, live here so
+//! the two dumps cannot drift apart in shape (550).
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -459,7 +462,7 @@ mod sample {
 }
 
 /// Turn the call-site sampler on (every `n`-th allocation) or off (0).
-/// `lnsd` calls it once at startup from `LEVICULUM_HEAP_SAMPLE`.
+/// [`configure_sampler_from_env`] calls it once at startup.
 #[cfg(feature = "heap-accounting")]
 pub fn set_sample_every(n: usize) {
     sample::EVERY.store(n, Ordering::Relaxed);
@@ -470,6 +473,52 @@ pub fn set_sample_every(n: usize) {
 #[cfg(feature = "heap-accounting")]
 pub fn sample_report(top: usize) -> Option<String> {
     sample::report(top)
+}
+
+/// How many sites the sampler's census lists, by count and by bytes.
+#[cfg(feature = "heap-accounting")]
+pub const SAMPLE_TOP: usize = 20;
+
+/// Read `LEVICULUM_HEAP_SAMPLE` once: a positive n samples every n-th
+/// allocation for the census's call-site table, anything else leaves the
+/// sampler off. Said in the log either way it was asked for, so a census
+/// without the table is not mistaken for one with nothing in it.
+#[cfg(feature = "heap-accounting")]
+pub fn configure_sampler_from_env() {
+    let Some(raw) = std::env::var_os("LEVICULUM_HEAP_SAMPLE") else {
+        return;
+    };
+    match raw.to_str().and_then(|v| v.trim().parse::<usize>().ok()) {
+        Some(n) if n > 0 => {
+            set_sample_every(n);
+            tracing::info!("Heap sampling: every {n}th allocation records its call site (SIGUSR1 lists the top {SAMPLE_TOP})");
+        }
+        _ => tracing::warn!(
+            "LEVICULUM_HEAP_SAMPLE={raw:?} is not a positive integer; heap sampling stays off"
+        ),
+    }
+}
+
+/// The line that rides beside the dump's `=== Total estimated: ... ===`, so
+/// the model and the measurement are read together and the model stays
+/// checkable (it is only knowable that it over-reports by 1.92x because both
+/// were printed), followed by the sampler's table when the sampler is on.
+///
+/// `allocator` is named by the caller, because the census's Allocator
+/// section reads the libc and cannot tell that the libc's allocator is not
+/// the one in use; only the binary that installs the global allocator knows.
+#[cfg(feature = "heap-accounting")]
+pub fn measured_live_line(allocator: &str) -> String {
+    let mut line = format!(
+        "=== Measured live: {} bytes ({} allocations, {} bytes handed out, allocator {allocator}) ===\n",
+        live_bytes(),
+        allocation_count(),
+        total_bytes(),
+    );
+    if let Some(report) = sample_report(SAMPLE_TOP) {
+        line.push_str(&report);
+    }
+    line
 }
 
 #[cfg(test)]

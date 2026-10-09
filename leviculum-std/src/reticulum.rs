@@ -102,58 +102,70 @@ impl Reticulum {
 
     /// Return a diagnostic dump of memory usage including process RSS
     pub fn diagnostic_dump(&self) -> String {
-        let mut dump = self.node.diagnostic_dump();
-
-        // The event-log sink's hand-off queue is std-side state the core
-        // census cannot see (Codeberg #399). Bounded at 8192 lines, so a
-        // large pending count is a stalled writer, not a leak; `dropped`
-        // is the running loss the file also reports as EVENT_LOG_DROPPED.
-        match crate::event_log::sink_status() {
-            Some((pending, dropped)) => {
-                // ~96 bytes per formatted line, the size the writer's
-                // batch buffer was estimated at before 509 made it reused.
-                dump.push_str(&format!(
-                    "event_log_sink: {} pending lines, {} dropped, estimated {} bytes (queue cap 8192)\n",
-                    pending,
-                    dropped,
-                    pending * 96
-                ));
-            }
-            None => dump.push_str("event_log_sink: inactive\n"),
-        }
-
-        // Read RSS from /proc/self/statm (Linux only)
-        if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
-            if let Some(rss_pages) = statm.split_whitespace().nth(1) {
-                if let Ok(pages) = rss_pages.parse::<u64>() {
-                    let rss_bytes = pages * 4096;
-                    dump.push_str(&format!("=== Process RSS: {} bytes ===\n", rss_bytes));
-                    // The number #399 was opened on: what the resident set
-                    // holds that no census line accounts for. Printed by
-                    // the dump itself so a soak journal says where the
-                    // bytes are NOT, instead of only that they exist.
-                    let estimated = parse_estimated_total(&dump);
-                    if let Some(estimated) = estimated {
-                        dump.push_str(&format!(
-                            "=== Census gap (RSS - estimated): {} bytes ===\n",
-                            rss_bytes.saturating_sub(estimated)
-                        ));
-                    }
-                    // #437: the gap line alone cannot say whether the
-                    // missing bytes are allocator retention or a live owner
-                    // nobody counts; the allocator's books, the mapping
-                    // histogram and the thread count can.
-                    dump.push_str(&crate::proc_memory::census_sections(rss_bytes, estimated));
-                }
-            }
-        }
-        dump
+        compose_diagnostic_dump(self.node.diagnostic_dump())
     }
 
     /// Take the event receiver (can only be called once)
     pub fn take_event_receiver(&mut self) -> Option<EventReceiver> {
         self.node.take_event_receiver()
     }
+}
+
+/// The SIGUSR1 dump a daemon prints: the core census (`core_dump`, from
+/// [`crate::ReticulumNode::diagnostic_dump`]) followed by the std-side state
+/// the core cannot see, the resident set and the gap arithmetic.
+///
+/// A free function and not only [`Reticulum::diagnostic_dump`], because
+/// lnpnd holds a bare [`crate::ReticulumNode`] and has to print the same
+/// shape lnsd does: periculum's soak census parses both with one parser
+/// (550).
+pub fn compose_diagnostic_dump(core_dump: String) -> String {
+    let mut dump = core_dump;
+
+    // The event-log sink's hand-off queue is std-side state the core
+    // census cannot see (Codeberg #399). Bounded at 8192 lines, so a
+    // large pending count is a stalled writer, not a leak; `dropped`
+    // is the running loss the file also reports as EVENT_LOG_DROPPED.
+    match crate::event_log::sink_status() {
+        Some((pending, dropped)) => {
+            // ~96 bytes per formatted line, the size the writer's
+            // batch buffer was estimated at before 509 made it reused.
+            dump.push_str(&format!(
+                "event_log_sink: {} pending lines, {} dropped, estimated {} bytes (queue cap 8192)\n",
+                pending,
+                dropped,
+                pending * 96
+            ));
+        }
+        None => dump.push_str("event_log_sink: inactive\n"),
+    }
+
+    // Read RSS from /proc/self/statm (Linux only)
+    if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+        if let Some(rss_pages) = statm.split_whitespace().nth(1) {
+            if let Ok(pages) = rss_pages.parse::<u64>() {
+                let rss_bytes = pages * 4096;
+                dump.push_str(&format!("=== Process RSS: {} bytes ===\n", rss_bytes));
+                // The number #399 was opened on: what the resident set
+                // holds that no census line accounts for. Printed by
+                // the dump itself so a soak journal says where the
+                // bytes are NOT, instead of only that they exist.
+                let estimated = parse_estimated_total(&dump);
+                if let Some(estimated) = estimated {
+                    dump.push_str(&format!(
+                        "=== Census gap (RSS - estimated): {} bytes ===\n",
+                        rss_bytes.saturating_sub(estimated)
+                    ));
+                }
+                // #437: the gap line alone cannot say whether the
+                // missing bytes are allocator retention or a live owner
+                // nobody counts; the allocator's books, the mapping
+                // histogram and the thread count can.
+                dump.push_str(&crate::proc_memory::census_sections(rss_bytes, estimated));
+            }
+        }
+    }
+    dump
 }
 
 /// Pull the number out of the core dump's `=== Total estimated: N bytes ===`
