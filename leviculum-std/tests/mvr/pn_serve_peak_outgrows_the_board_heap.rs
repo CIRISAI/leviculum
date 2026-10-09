@@ -206,6 +206,8 @@ fn field_fetch_plan() -> (PropagationNode<MemoryPropagationStore>, FetchPlan) {
             serve_limit_bytes: Some(BOARD_SERVE_LIMIT_BYTES),
             // Placeholder stamps: the shipped cost of 13 would reject them.
             stamp_cost: 0,
+            // The board skips the stamp value at cost 0.
+            always_compute_stamp_value: false,
             ..PropagationNodeConfig::default()
         },
     );

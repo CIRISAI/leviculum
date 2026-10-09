@@ -41,8 +41,16 @@ fn envelope_sized(destination: u8, seed: u8, lxmf_len: usize) -> Vec<u8> {
     PropagationUpload::single(1_700_000_000.0, lxmf_data, [0xEE; STAMP_SIZE]).encode()
 }
 
+/// The validator at cost 0, where any stamp is valid: a host measures the
+/// true value of every stamp (leviculum#442 D6), and these placeholder
+/// stamps measure to 0.
+fn stamp_of_value_zero(_: &TransientId, _: &[u8; STAMP_SIZE]) -> Option<u16> {
+    Some(0)
+}
+
+/// The board's validator at cost 0 with no demanding peer: never called.
 fn no_validation(_: &TransientId, _: &[u8; STAMP_SIZE]) -> Option<u16> {
-    panic!("stamp validation must not run at cost 0");
+    panic!("a board must not validate at cost 0 while no peer demands a value");
 }
 
 fn accepted_id(outcome: &UploadOutcome) -> TransientId {
@@ -57,7 +65,7 @@ fn an_upload_is_stored_and_a_repeat_is_a_proven_duplicate() {
     let mut node = node(64 * 1024);
     let bytes = envelope(7, 1);
 
-    let first = node.handle_upload(&bytes, 100, no_validation);
+    let first = node.handle_upload(&bytes, 100, stamp_of_value_zero);
     let transient_id = accepted_id(&first);
     match &first {
         UploadOutcome::Accepted {
@@ -84,7 +92,7 @@ fn an_upload_is_stored_and_a_repeat_is_a_proven_duplicate() {
 
     // A duplicate is accepted (so the caller proves it) but not stored
     // twice.
-    let again = node.handle_upload(&bytes, 200, no_validation);
+    let again = node.handle_upload(&bytes, 200, stamp_of_value_zero);
     match again {
         UploadOutcome::Accepted { duplicate, .. } => assert!(duplicate),
         other => panic!("{other:?}"),
@@ -103,7 +111,7 @@ fn a_multi_message_transfer_is_the_peer_sync_form() {
     crate::msgpack::bin(&mut bytes, &[0u8; 160]);
     crate::msgpack::bin(&mut bytes, &[1u8; 160]);
     assert_eq!(
-        node.handle_upload(&bytes, 0, no_validation),
+        node.handle_upload(&bytes, 0, stamp_of_value_zero),
         UploadOutcome::PeerSyncForm
     );
 }
@@ -145,9 +153,10 @@ fn a_stamp_below_the_cost_is_rejected_with_the_python_signal() {
 #[test]
 fn get_list_returns_only_the_callers_mailbox_smallest_first() {
     let mut node = node(64 * 1024);
-    let big = accepted_id(&node.handle_upload(&envelope_sized(7, 1, 300), 0, no_validation));
-    let small = accepted_id(&node.handle_upload(&envelope_sized(7, 2, 120), 0, no_validation));
-    let _other = node.handle_upload(&envelope(9, 3), 0, no_validation);
+    let big = accepted_id(&node.handle_upload(&envelope_sized(7, 1, 300), 0, stamp_of_value_zero));
+    let small =
+        accepted_id(&node.handle_upload(&envelope_sized(7, 2, 120), 0, stamp_of_value_zero));
+    let _other = node.handle_upload(&envelope(9, 3), 0, stamp_of_value_zero);
 
     let outcome = node
         .handle_get(
@@ -172,7 +181,7 @@ fn get_list_returns_only_the_callers_mailbox_smallest_first() {
 fn fetch_serves_unstamped_bodies_and_deletes_only_on_confirmation() {
     let mut node = node(64 * 1024);
     let bytes = envelope(7, 1);
-    let transient_id = accepted_id(&node.handle_upload(&bytes, 0, no_validation));
+    let transient_id = accepted_id(&node.handle_upload(&bytes, 0, stamp_of_value_zero));
     let stored = node.store().read_body(&transient_id).unwrap().unwrap();
 
     // Fetch: the body arrives without the trailing stamp, and nothing is
@@ -219,7 +228,7 @@ fn fetch_serves_unstamped_bodies_and_deletes_only_on_confirmation() {
     // A retry of the original upload after the drain is a duplicate, not a
     // re-acceptance (locally_processed_transient_ids,
     // reference/LXMF/LXMF/LXMRouter.py:2496).
-    match node.handle_upload(&bytes, 10, no_validation) {
+    match node.handle_upload(&bytes, 10, stamp_of_value_zero) {
         UploadOutcome::Accepted { duplicate, .. } => assert!(duplicate),
         other => panic!("{other:?}"),
     }
@@ -229,7 +238,7 @@ fn fetch_serves_unstamped_bodies_and_deletes_only_on_confirmation() {
 #[test]
 fn a_stranger_cannot_fetch_or_purge_someone_elses_mail() {
     let mut node = node(64 * 1024);
-    let transient_id = accepted_id(&node.handle_upload(&envelope(7, 1), 0, no_validation));
+    let transient_id = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
 
     let steal = MessageGetRequest {
         wants: Some(vec![transient_id]),
@@ -252,8 +261,9 @@ fn a_stranger_cannot_fetch_or_purge_someone_elses_mail() {
 #[test]
 fn the_transfer_limit_bounds_one_response_and_skips_rather_than_stops() {
     let mut node = node(64 * 1024);
-    let big = accepted_id(&node.handle_upload(&envelope_sized(7, 1, 1000), 0, no_validation));
-    let small = accepted_id(&node.handle_upload(&envelope_sized(7, 2, 120), 0, no_validation));
+    let big = accepted_id(&node.handle_upload(&envelope_sized(7, 1, 1000), 0, stamp_of_value_zero));
+    let small =
+        accepted_id(&node.handle_upload(&envelope_sized(7, 2, 120), 0, stamp_of_value_zero));
 
     // 1 kB budget: the 1000-byte body plus its 32-byte stamp and the 24 + 16
     // structural overhead (reference/LXMF/LXMF/LXMRouter.py:1532-1533)
@@ -276,8 +286,8 @@ fn the_transfer_limit_bounds_one_response_and_skips_rather_than_stops() {
 #[test]
 fn expiry_purges_only_what_is_older_than_thirty_days() {
     let mut node = node(64 * 1024);
-    let old = accepted_id(&node.handle_upload(&envelope(7, 1), 0, no_validation));
-    let fresh = accepted_id(&node.handle_upload(&envelope(7, 2), 20 * DAY, no_validation));
+    let old = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
+    let fresh = accepted_id(&node.handle_upload(&envelope(7, 2), 20 * DAY, stamp_of_value_zero));
 
     let evicted = node.tick(31 * DAY);
     assert_eq!(evicted.len(), 1);
@@ -291,12 +301,12 @@ fn expiry_purges_only_what_is_older_than_thirty_days() {
 fn a_full_store_displaces_by_age_times_size() {
     // Room for roughly two field-sized messages.
     let mut node = node(340);
-    let oldest = accepted_id(&node.handle_upload(&envelope(7, 1), 0, no_validation));
-    let newer = accepted_id(&node.handle_upload(&envelope(7, 2), 9 * DAY, no_validation));
+    let oldest = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
+    let newer = accepted_id(&node.handle_upload(&envelope(7, 2), 9 * DAY, stamp_of_value_zero));
 
     // Same size, so the weight is decided by age (get_weight,
     // reference/LXMF/LXMF/LXMRouter.py:1062): the oldest goes.
-    let outcome = node.handle_upload(&envelope(7, 3), 10 * DAY, no_validation);
+    let outcome = node.handle_upload(&envelope(7, 3), 10 * DAY, stamp_of_value_zero);
     match &outcome {
         UploadOutcome::Accepted {
             duplicate, evicted, ..
@@ -365,13 +375,13 @@ fn the_default_config_announces_the_decided_costs() {
 fn a_forgotten_id_is_accepted_again_as_new() {
     let mut node = node(64 * 1024);
     let bytes = envelope(7, 1);
-    let transient_id = accepted_id(&node.handle_upload(&bytes, 100, no_validation));
+    let transient_id = accepted_id(&node.handle_upload(&bytes, 100, stamp_of_value_zero));
 
     // Simulate the failed flush: the body never became durable.
     assert!(node.store_mut().purge(&transient_id).unwrap());
     node.forget_processed(&transient_id);
 
-    match node.handle_upload(&bytes, 101, no_validation) {
+    match node.handle_upload(&bytes, 101, stamp_of_value_zero) {
         UploadOutcome::Accepted { duplicate, .. } => assert!(!duplicate),
         other => panic!("expected acceptance, got {other:?}"),
     }
@@ -391,11 +401,13 @@ fn a_time_seed_does_not_mass_expire_uptime_era_records() {
     let mut seeded = node(64 * 1024);
     // Stored while the calendar was still birth-anchored: the build floor
     // plus a few seconds of uptime.
-    let early = accepted_id(&seeded.handle_upload(&envelope(7, 1), floor + 300, no_validation));
+    let early =
+        accepted_id(&seeded.handle_upload(&envelope(7, 1), floor + 300, stamp_of_value_zero));
     // The seed: the calendar jumps from the birth era to real time.
     seeded.note_calendar_jump(floor + 300);
     // Stored after the seed, long enough ago to be genuinely expired.
-    let old = accepted_id(&seeded.handle_upload(&envelope(7, 2), floor + 365 * DAY, no_validation));
+    let old =
+        accepted_id(&seeded.handle_upload(&envelope(7, 2), floor + 365 * DAY, stamp_of_value_zero));
 
     let now = floor + 365 * DAY + 40 * DAY;
     let evicted = seeded.tick(now);
@@ -406,7 +418,7 @@ fn a_time_seed_does_not_mass_expire_uptime_era_records() {
     // Within one clockless boot, expiry still works: same epoch on both
     // sides of the comparison, and no jump reported.
     let mut clockless = node(64 * 1024);
-    let stored = accepted_id(&clockless.handle_upload(&envelope(7, 3), floor, no_validation));
+    let stored = accepted_id(&clockless.handle_upload(&envelope(7, 3), floor, stamp_of_value_zero));
     let evicted = clockless.tick(floor + 31 * DAY);
     assert_eq!(evicted.len(), 1);
     assert_eq!(evicted[0].transient_id, stored);
@@ -440,7 +452,7 @@ fn the_field_fetch_frames_the_allocation_that_killed_the_board() {
     );
     let wants: Vec<TransientId> = (0..24)
         .map(|seed| {
-            accepted_id(&node.handle_upload(&envelope_sized(7, seed, 224), 0, no_validation))
+            accepted_id(&node.handle_upload(&envelope_sized(7, seed, 224), 0, stamp_of_value_zero))
         })
         .collect();
 
@@ -495,7 +507,7 @@ fn the_encoded_response_never_outgrows_the_accounted_cap() {
                 accepted_id(&node.handle_upload(
                     &envelope_sized(7, seed, smallest),
                     0,
-                    no_validation,
+                    stamp_of_value_zero,
                 ))
             })
             .collect();
@@ -632,7 +644,7 @@ fn a_funded_cap_serves_a_subset_and_keeps_the_rest() {
     );
     let wants: Vec<TransientId> = (0..8u8)
         .map(|seed| {
-            accepted_id(&node.handle_upload(&envelope_sized(7, seed, 160), 0, no_validation))
+            accepted_id(&node.handle_upload(&envelope_sized(7, seed, 160), 0, stamp_of_value_zero))
         })
         .collect();
 
@@ -712,7 +724,11 @@ fn a_streamed_fetch_is_the_encoded_fetch() {
         );
         let wants: Vec<TransientId> = (0..count as u8)
             .map(|seed| {
-                accepted_id(&node.handle_upload(&envelope_sized(7, seed, body), 0, no_validation))
+                accepted_id(&node.handle_upload(
+                    &envelope_sized(7, seed, body),
+                    0,
+                    stamp_of_value_zero,
+                ))
             })
             .collect();
         let fetch = MessageGetRequest {
@@ -782,7 +798,7 @@ fn a_record_purged_under_a_plan_fails_the_stream() {
 
     let mut node = node(64 * 1024);
     let wants: Vec<TransientId> = (0..3u8)
-        .map(|seed| accepted_id(&node.handle_upload(&envelope(7, seed), 0, no_validation)))
+        .map(|seed| accepted_id(&node.handle_upload(&envelope(7, seed), 0, stamp_of_value_zero)))
         .collect();
     let fetch = MessageGetRequest {
         wants: Some(wants.clone()),
@@ -825,7 +841,7 @@ fn a_cap_below_one_message_serves_nothing_and_loses_nothing() {
         },
     );
     let wants: Vec<TransientId> = (0..4u8)
-        .map(|seed| accepted_id(&node.handle_upload(&envelope(7, seed), 0, no_validation)))
+        .map(|seed| accepted_id(&node.handle_upload(&envelope(7, seed), 0, stamp_of_value_zero)))
         .collect();
 
     let fetch = MessageGetRequest {
@@ -874,7 +890,7 @@ fn fetch_ten_with(config: PropagationNodeConfig) -> usize {
     let mut node = PropagationNode::new(MemoryPropagationStore::new(256 * 1024), config);
     let wants: Vec<TransientId> = (0..10u8)
         .map(|seed| {
-            accepted_id(&node.handle_upload(&envelope_sized(7, seed, 3700), 0, no_validation))
+            accepted_id(&node.handle_upload(&envelope_sized(7, seed, 3700), 0, stamp_of_value_zero))
         })
         .collect();
     let fetch = MessageGetRequest {
@@ -915,4 +931,79 @@ fn a_boards_serve_limit_still_bounds_a_fetch() {
         ..cost_free()
     });
     assert_eq!(served, 1, "a 5000 B serve limit fits one 3.7 kB message");
+}
+
+/// leviculum#442 D6: a host at stamp cost 0 stores the TRUE value of what
+/// it accepts, even before any peer demands one, as the reference does
+/// (`validate_pn_stamp` expands the workblock at target cost 0 too,
+/// `reference/LXMF/LXMF/LXStamper.py:95`). Stored as 0, the message would
+/// be skipped forever by every stock peer that later joins
+/// (`reference/LXMF/LXMF/LXMPeer.py:340`, min 16 - 3 here).
+#[test]
+fn a_host_at_cost_zero_offers_what_it_took_before_its_first_demanding_peer() {
+    let mut node = PropagationNode::new(MemoryPropagationStore::new(64 * 1024), cost_free());
+    // No peer in the table: the engine says no peer demands values.
+    node.set_compute_stamp_value(false);
+    assert!(
+        node.compute_stamp_value(),
+        "a host computes stamp values from the start"
+    );
+
+    let outcome = node.handle_upload(&envelope(7, 1), 100, |_, _| Some(20));
+    let transient_id = accepted_id(&outcome);
+    match outcome {
+        UploadOutcome::Accepted { stamp_value, .. } => assert_eq!(stamp_value, 20),
+        other => panic!("{other:?}"),
+    }
+
+    // Now a stock peer at min cost 13 is admitted.
+    let announce = crate::propagation::PropagationNodeAnnounce {
+        legacy_support: false,
+        timebase: 1,
+        enabled: true,
+        transfer_limit_kb: 256,
+        sync_limit_kb: 10_240,
+        stamp_cost: 16,
+        stamp_cost_flexibility: 3,
+        peering_cost: 18,
+        metadata: vec![],
+    };
+    let mut table = crate::peering::PeerTable::new(crate::peering::PeeringConfig::default());
+    let _ = table.handle_announce([1; 16], &announce, Some(2), 200, false);
+    let peer = table.get(&[1; 16]).expect("the announce peers the node");
+    assert_eq!(peer.min_accepted_cost(), 13);
+
+    let mut entries = Vec::new();
+    node.store()
+        .for_each(&mut |entry| entries.push(*entry))
+        .unwrap();
+    let plan = crate::peering::build_offer(peer, &entries, crate::peering::OFFER_BYTES_LIMIT)
+        .expect("the stored message is offerable");
+    assert_eq!(plan.ids, vec![transient_id]);
+    assert_eq!(plan.skipped_low_value, 0);
+}
+
+/// The board keeps the saving (leviculum#442 D6): at cost 0 with no
+/// demanding peer it skips the workblock and stores value 0.
+#[test]
+fn a_board_at_cost_zero_skips_the_stamp_value_until_a_peer_demands_one() {
+    let mut node = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig {
+            always_compute_stamp_value: false,
+            ..cost_free()
+        },
+    );
+    assert!(!node.compute_stamp_value());
+    let outcome = node.handle_upload(&envelope(7, 1), 100, no_validation);
+    match outcome {
+        UploadOutcome::Accepted { stamp_value, .. } => assert_eq!(stamp_value, 0),
+        other => panic!("{other:?}"),
+    }
+    node.set_compute_stamp_value(true);
+    let outcome = node.handle_upload(&envelope(7, 2), 100, |_, _| Some(20));
+    match outcome {
+        UploadOutcome::Accepted { stamp_value, .. } => assert_eq!(stamp_value, 20),
+        other => panic!("{other:?}"),
+    }
 }

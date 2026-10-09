@@ -390,6 +390,17 @@ pub struct PropagationNodeConfig {
     /// The host that enforces the policy at the door owns the static list
     /// and sets this from the same knob.
     pub from_static_only: bool,
+    /// Compute and store every accepted message's true stamp value, even
+    /// at our own cost 0 and before any peer demands one, as the reference
+    /// does (`validate_pn_stamp` expands the workblock at target cost 0
+    /// too, `reference/LXMF/LXMF/LXStamper.py:95`). True on a host
+    /// (leviculum#442 D6, Lew 2026-10-09): stored as 0, what the node took
+    /// before its first demanding peer is skipped by every stock peer
+    /// forever (`reference/LXMF/LXMF/LXMPeer.py:340`). A board sets false
+    /// and computes only while a peer demands it
+    /// ([`PropagationNode::set_compute_stamp_value`]), saving the
+    /// workblock expansion per message.
+    pub always_compute_stamp_value: bool,
 }
 
 impl Default for PropagationNodeConfig {
@@ -411,6 +422,7 @@ impl Default for PropagationNodeConfig {
             serve_cap_bytes: None,
             serve_limit_bytes: None,
             from_static_only: false,
+            always_compute_stamp_value: true,
         }
     }
 }
@@ -748,7 +760,9 @@ pub struct PropagationNode<S> {
     /// propagation-node-on-a-board.md` §5: the offering side drops ids
     /// whose stored value is below the peer's minimum,
     /// `reference/LXMF/LXMF/LXMPeer.py:340`, and the record tag is written
-    /// once at accept, so the decision is per-message at accept time).
+    /// once at accept, so the decision is per-message at accept time). A
+    /// host computes them regardless
+    /// ([`PropagationNodeConfig::always_compute_stamp_value`]).
     compute_stamp_value: bool,
     /// The calendar estimate this node last held before its calendar jumped
     /// to real time, or 0 on a node whose calendar never was birth-anchored
@@ -793,13 +807,17 @@ impl<S: PropagationStore> PropagationNode<S> {
 
     /// See the field: while set, the accept path asks `validate` for the
     /// true stamp value even at accepted cost 0 (validation at cost 0
-    /// cannot fail, so this only fills the stored value).
+    /// cannot fail, so this only fills the stored value). Clearing it
+    /// does not stop a host computing them
+    /// ([`PropagationNodeConfig::always_compute_stamp_value`]).
     pub fn set_compute_stamp_value(&mut self, compute: bool) {
         self.compute_stamp_value = compute;
     }
 
+    /// Whether the accept path computes true stamp values at cost 0: on a
+    /// host always, on a board while a peer demands them.
     pub fn compute_stamp_value(&self) -> bool {
-        self.compute_stamp_value
+        self.config.always_compute_stamp_value || self.compute_stamp_value
     }
 
     pub fn store(&self) -> &S {
@@ -883,17 +901,21 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// from either the raw-link-packet or the single-message resource path.
     ///
     /// `validate` is called only when [`Self::min_accepted_cost`] is above
-    /// zero (or [`Self::set_compute_stamp_value`] demands true values for
-    /// peering), with the transient ID and the 32-byte stamp; it returns the
+    /// zero (or [`Self::compute_stamp_value`] asks for true values: always
+    /// on a host, on a board while a peer demands them), with the transient ID and the 32-byte stamp; it returns the
     /// stamp's value if valid at that cost (`validate_pn_stamp`,
     /// `reference/LXMF/LXMF/LXStamper.py:84-96`, over the
     /// [`crate::constants::WORKBLOCK_EXPAND_ROUNDS_PN`]-round workblock) or
-    /// `None`. At cost 0 the work is skipped entirely and the stored stamp
-    /// value is 0 — the reference expands the workblock even then to record
-    /// the true value (`LXStamper.py:95`); ours is a deviation that touches
-    /// no wire byte and only the local value used when offering to peers
-    /// (`reference/LXMF/LXMF/LXMPeer.py:340`), which part 2's design accounts
-    /// for (concept paper §5).
+    /// `None`. At cost 0 a host still computes the true value, as the
+    /// reference does (`LXStamper.py:95`), so that every message it took
+    /// is offerable to a peer that joins later
+    /// (`reference/LXMF/LXMF/LXMPeer.py:340`, leviculum#442 D6). A board
+    /// ([`PropagationNodeConfig::always_compute_stamp_value`] false) skips
+    /// the work at cost 0 while no peer demands a value and stores 0: a
+    /// deviation that touches no wire byte and only the local value used
+    /// when offering to peers, which part 2's design accounts for (concept
+    /// paper §5); what it took before its first demanding peer is then
+    /// never offered to a stock peer.
     pub fn handle_upload(
         &mut self,
         envelope: &[u8],
@@ -951,7 +973,7 @@ impl<S: PropagationStore> PropagationNode<S> {
         validate: impl FnOnce(&TransientId, &[u8; STAMP_SIZE]) -> Option<u16>,
     ) -> UploadOutcome {
         let min_cost = self.min_accepted_cost();
-        let stamp_value = if min_cost == 0 && !self.compute_stamp_value {
+        let stamp_value = if min_cost == 0 && !self.compute_stamp_value() {
             0
         } else {
             match validate(&transient_id, stamp) {

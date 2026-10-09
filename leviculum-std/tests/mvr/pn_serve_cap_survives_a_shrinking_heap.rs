@@ -157,6 +157,8 @@ fn planned_at_cap(cap: usize) -> (PropagationNode<MemoryPropagationStore>, Fetch
             serve_cap_bytes: Some(cap),
             // Placeholder stamps: the shipped cost of 13 would reject them.
             stamp_cost: 0,
+            // The board skips the stamp value at cost 0.
+            always_compute_stamp_value: false,
             ..PropagationNodeConfig::default()
         },
     );

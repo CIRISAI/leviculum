@@ -1915,6 +1915,31 @@ mod tests {
         engine.state = State::Ready(ready);
     }
 
+    /// leviculum#442 D6: a peerless host computes true stamp values at cost
+    /// 0 from the start. The engine clears the peer-demand flag while no
+    /// peer requires a value; that must not stop the host computing them,
+    /// or what it accepts before its first demanding peer is stored at 0
+    /// and never offered to a stock peer (`LXMPeer.py:340`).
+    #[test]
+    fn a_peerless_host_computes_stamp_values_at_cost_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events) = engine_with(Vec::new(), None);
+        let start_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, start_ms);
+        match &mut engine.state {
+            State::Ready(ready) => {
+                assert_eq!(ready.min_cost, 0);
+                assert!(!ready.peering.requires_stamp_values());
+                ready
+                    .node
+                    .set_compute_stamp_value(ready.peering.requires_stamp_values());
+                assert!(ready.node.compute_stamp_value());
+            }
+            _ => panic!("engine must be ready"),
+        }
+    }
+
     /// leviculum#384 part 4 regression (conformance red
     /// `lxmf_pn_store_full_inbound`): the reference peer tears its sync
     /// link down the moment its transfer concludes, while the stamps are
@@ -2140,6 +2165,9 @@ mod tests {
         core: &mut leviculum_std::driver::StdNodeCore,
         out: &mut TickOutput,
     ) {
+        // A host computes stamp values at cost 0 too (leviculum#442 D6), so
+        // every ingest goes through the worker first.
+        await_validation(engine);
         for _ in 0..10_000 {
             let Some(pending) = engine.pending.pop_front() else {
                 return;
@@ -2152,7 +2180,7 @@ mod tests {
     /// Move every deferred validation onto the store queue, waiting for the
     /// worker as the driver's next hook would. Bounded, so a worker that
     /// never answers fails the test instead of hanging it.
-    fn await_validation(engine: &mut Engine<MemoryPropagationStore>) {
+    pub(super) fn await_validation<S: PropagationStore>(engine: &mut Engine<S>) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while engine.validation.busy() {
             match engine.validation.try_recv() {
@@ -3352,6 +3380,8 @@ mod inbound_sync_slices {
         // follows is only the storing of it.
         engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
         engine.state = State::Ready(ready);
+        // The verdicts first: the hooks below measure the storing alone.
+        super::tests::await_validation(&mut engine);
 
         let mut worst_hold = Duration::ZERO;
         let mut worst_slice = 0usize;

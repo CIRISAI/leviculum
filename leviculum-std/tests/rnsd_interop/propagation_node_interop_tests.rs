@@ -87,6 +87,8 @@ impl PnHost {
             // Cost 0: the Python clients here upload without grinding.
             PropagationNodeConfig {
                 stamp_cost: 0,
+                // This role never offers to a peer, so it needs no values.
+                always_compute_stamp_value: false,
                 ..PropagationNodeConfig::default()
             },
         );

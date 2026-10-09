@@ -866,6 +866,9 @@ impl Engine {
             // `/get` re-reads it against the heap the board has at that
             // moment (`SERVE_CAP`, `answer_get_work`).
             serve_cap_bytes: Some(serve_boot_cap),
+            // The board saves the workblock expansion at cost 0 while no
+            // peer demands a value (leviculum#442 D6); the host computes.
+            always_compute_stamp_value: false,
             ..PropagationNodeConfig::default()
         };
         let mut role = PropagationNode::new(store, role_config);
