@@ -17,10 +17,10 @@
 //! not atomic: the cap is read when the `/get` comes off the work queue
 //! and the path holds the transfer live across several awaits, and in
 //! that window the engine still admits an inbound sync batch (8 000 B),
-//! an upload (4 000 B) and one more endpoint link (2 696 B) — every one
+//! an upload (4 000 B) and one more endpoint link (2 712 B) — every one
 //! of them already priced by the heap census, every one of them able to
-//! start while a serve runs. The margined cap is 7 252 B (26 messages),
-//! and the margin-free one costs 25 099 + 14 680 = 39 779 B against
+//! start while a serve runs. The margined cap is 7 240 B (26 messages),
+//! and the margin-free one costs 25 099 + 14 712 = 39 811 B against
 //! 30 380 B of heap once those arrivals land.
 //!
 //! The numbers moved with #384 B2 — the same heap funded 4 954 B before
@@ -70,9 +70,9 @@ const FREE_AT_PANIC: usize = 30_380;
 /// same instant (`… largest=30320`).
 const LARGEST_AT_PANIC: usize = 30_320;
 
-/// What the boot plan funds on that board (`HEAP_BUDGET … slack=720` →
-/// `serve_cap=194`), the floor the live reading is taken against.
-const BOOT_CAP: usize = 194;
+/// What the boot plan funds on that board (`HEAP_BUDGET … slack=656` →
+/// `serve_cap=170`), the floor the live reading is taken against.
+const BOOT_CAP: usize = 170;
 
 /// One inbound sync batch, at the role's whole sync slice
 /// (`SYNC_SLICE_BYTES`, `leviculum-nrf/heap-budget`): the margin claims the
@@ -83,7 +83,7 @@ const ARRIVING_SYNC_BATCH_BYTES: usize = leviculum_heap_budget::SYNC_SLICE_BYTES
 const ARRIVING_UPLOAD_BYTES: usize = leviculum_heap_budget::BOARD_TRANSFER_LIMIT_KB as usize * 1000;
 
 /// One more endpoint link, at the firmware's own `budget_per_link()`
-/// (2 696 B in this tree).
+/// (2 712 B in this tree).
 const ARRIVING_LINK_BYTES: usize = leviculum_heap_budget::budget_per_link();
 
 /// The margin the firmware takes off before it spends a live reading

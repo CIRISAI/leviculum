@@ -39,7 +39,7 @@
 //! through the real path
 //! (`a_streamed_serve_holds_only_the_transfer`,
 //! `pn_serve_peak_outgrows_the_board_heap.rs`). The cap the live heap
-//! funds goes from 2 540 B (nine messages) to 7 252 B (all 24, with room
+//! funds goes from 2 540 B (nine messages) to 7 240 B (all 24, with room
 //! for two more), and the free heap a single-sync drain needs falls from
 //! 54 848 B to 28 992 B — below the 30 380 B the board had.
 //!
@@ -77,21 +77,23 @@ const FREE_AT_PANIC: usize = 30_380;
 /// a serve is one allocation and only this figure prices it.
 const LARGEST_AT_PANIC: usize = 30_320;
 
-/// What the BOOT plan funds on that same board (`HEAP_BUDGET … slack=720`
-/// → `serve_cap=194`, `heap_census::budget_serve_cap`,
-/// `leviculum-nrf`): 194 B, about the smallest LXMF message the store
+/// What the BOOT plan funds on that same board (`HEAP_BUDGET … slack=656`
+/// → `serve_cap=170`, `heap_census::budget_serve_cap`,
+/// `leviculum-nrf`): 170 B, about the smallest LXMF message the store
 /// takes and well under a field one, so a board held to it lists 24
 /// messages and serves none of them. It was 88 B before the serve was
 /// streamed; the floor moved a little, and it is still not what makes
 /// the board serve.
-const BOOT_CAP: usize = 194;
+const BOOT_CAP: usize = 170;
 
 /// Heap the board keeps clear of the serve because it can be claimed
 /// WHILE the serve is in flight (`SERVE_MARGIN_BYTES`,
 /// `leviculum-nrf/heap-budget`): one inbound sync batch in the role's
 /// `SYNC_SLICE_BYTES` (8 000 B), one queued upload at
 /// `BOARD_TRANSFER_LIMIT_KB` (4 000 B), and one more endpoint link at
-/// `budget_per_link()` — 2 696 B in this tree. It was 2 680 B between
+/// `budget_per_link()` — 2 712 B in this tree, since `Link` keeps the data
+/// clock an idle inbound link is torn down by (`last_data`, #442); 2 696 B
+/// before that. It was 2 680 B between
 /// #384 B2, which shrank `Link` by the joined-ciphertext copy
 /// `OutgoingResource` kept beside its parts, and the two `u64`s a link
 /// now records off its first hop (#36/#374): `frame_turnaround_ms`, then
@@ -121,7 +123,7 @@ const FIELD_BODY_BYTES: usize = 224;
 /// A mailbox deeper than any cap this heap funds, for the two tests
 /// about what happens when the mail does NOT fit. 80 messages against a
 /// margin-free cap of 14 296 B (52 messages) and a margined one of
-/// 7 252 B (26): both bite, and the difference between them is
+/// 7 240 B (26): both bite, and the difference between them is
 /// measurable. The field's own 24 no longer are — which is the point of
 /// this order and the reason these two tests stopped using them.
 const DEEP_MAILBOX_MESSAGES: u8 = 80;
@@ -247,8 +249,8 @@ fn the_field_mailbox_drains_in_one_fetch_where_the_buffered_serve_managed_nine()
         BOARD_RESOURCE_SDU,
     );
     assert_eq!(
-        live_cap, 7_252,
-        "the heap the board had funds 7 252 B of fetch response"
+        live_cap, 7_240,
+        "the heap the board had funds 7 240 B of fetch response"
     );
 
     let (mut role, stored) = field_node(live_cap);
@@ -449,13 +451,13 @@ fn a_fetch_past_the_funded_cap_is_served_in_part_and_finished_next_round() {
 /// plan feared — and the margin is what keeps that from being the panic
 /// again.
 ///
-/// The boot plan is every term at its maximum at once: 720 B of slack,
-/// 194 B of funded response. A stored field message is 256 B stamped, so
+/// The boot plan is every term at its maximum at once: 656 B of slack,
+/// 170 B of funded response. A stored field message is 256 B stamped, so
 /// a board held to the floor lists 24 messages and serves **none** of
 /// them, which is what this test's first half measures. The heap that
-/// board actually stood on funds 7 252 B — the whole mailbox.
+/// board actually stood on funds 7 240 B — the whole mailbox.
 ///
-/// **7 252, not 14 296.** The margin-free cap is what the same heap
+/// **7 240, not 14 296.** The margin-free cap is what the same heap
 /// funds with nothing left over, and
 /// `pn_serve_cap_survives_a_shrinking_heap` measures what spending it
 /// costs: the serve fits the instant it is computed and overruns the
@@ -467,7 +469,7 @@ fn a_boot_cap_below_one_message_is_raised_by_the_heap_the_board_has() {
     let boot_plan = fetch_all(&mut booted, &stored);
     assert!(
         boot_plan.is_empty() && boot_plan.encoded_len() < 8,
-        "a 194 B cap cannot fit a 256 B message: served {} in {} B",
+        "a 170 B cap cannot fit a 256 B message: served {} in {} B",
         boot_plan.count(),
         boot_plan.encoded_len()
     );
@@ -499,11 +501,11 @@ served={} of {FIELD_MESSAGES} response={}",
         plan.encoded_len(),
     );
 
-    assert_eq!(live_cap, 7_252);
+    assert_eq!(live_cap, 7_240);
     assert_eq!(
         plan.count(),
         usize::from(FIELD_MESSAGES),
-        "7 252 B of accounted cap is 24 B of preamble and 24 messages at \
+        "7 240 B of accounted cap is 24 B of preamble and 24 messages at \
          272 B each (24 + 24Â·272 = 6 552, and a 27th would be 7 368)"
     );
     assert!(

@@ -188,7 +188,7 @@ const _: () =
 ///   plan DOES fund, and the bound the role serves to. The deficit line
 ///   says the announced cap is unaffordable; this one says what is
 ///   affordable instead, and a `serve_cap` below one stored message
-///   (194 B at the T114's 720 B of slack) means the BOOT plan alone
+///   (170 B at the T114's 656 B of slack) means the BOOT plan alone
 ///   would have the board list mail it will not serve. It is a floor:
 ///   [`live_serve_cap`] raises it to what the heap actually has at
 ///   each `/get`, and only a board whose live heap is also that tight
