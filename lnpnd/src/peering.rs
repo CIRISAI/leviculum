@@ -27,8 +27,9 @@ use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
     answer_offer, build_offer, offer_budget_for_mdu, peering_key_material, response_action,
     DeclineReason, DropReason, InboundGate, OfferPlan, OfferResponse, PeerChange, PeerOffer,
-    PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeeringConfig, ResponseAction, SyncPhase,
-    OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_BACKOFF_STEP_SECS, SYNC_INTERVAL_SECS,
+    PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeerTraffic, PeeringConfig, ResponseAction,
+    SyncPhase, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, ROTATION_INTERVAL_SECS,
+    SYNC_BACKOFF_STEP_SECS, SYNC_INTERVAL_SECS,
 };
 use leviculum_lxmf::propagation::PeerError;
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
@@ -54,6 +55,19 @@ fn short_hex(bytes: &[u8]) -> String {
 
 fn full_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The `PN_PEER action=drop` reason vocabulary, the firmware's spelling
+/// (`leviculum-nrf/src/pn.rs`): one grep reads both stacks.
+fn drop_reason_name(reason: DropReason) -> &'static str {
+    match reason {
+        DropReason::Disabled => "disabled",
+        DropReason::OutOfDepth => "out_of_depth",
+        DropReason::CostRaised => "cost_raised",
+        DropReason::Unreachable => "unreachable",
+        DropReason::NoAccess => "no_access",
+        DropReason::Rotation => "rotation",
+    }
 }
 
 fn unix_secs() -> u64 {
@@ -136,24 +150,6 @@ pub(crate) enum InboundSyncStart {
     Batch(InboundSync),
 }
 
-/// Per-peer traffic counters for the control stats — runtime state, not
-/// persisted, exactly like the reference's own counters, which reset with
-/// the sync state on restore (`LXMPeer.from_bytes` rebuilds them from the
-/// persisted dict; ours restart at zero and the stats say so honestly).
-#[derive(Debug, Clone, Copy, Default)]
-struct PeerTraffic {
-    offered: u64,
-    outgoing: u64,
-    incoming: u64,
-    rx_bytes: u64,
-    tx_bytes: u64,
-    last_sync_attempt: u64,
-    /// The last round's outcome: the reference's `alive` flips true when
-    /// a sync link comes up and false when an attempt outlives the last
-    /// answer (`reference/LXMF/LXMF/LXMPeer.py:280`, `:328`, `:514`).
-    alive: bool,
-}
-
 pub(crate) struct PeeringRuntime {
     table: PeerTable,
     gate: InboundGate,
@@ -173,7 +169,14 @@ pub(crate) struct PeeringRuntime {
     mining: Option<MiningJob>,
     last_synced: Option<[u8; 16]>,
     next_sync_at_ms: u64,
-    /// Runtime traffic counters per peer, for the control stats.
+    /// When the next rotation pass runs; booked one
+    /// [`ROTATION_INTERVAL_SECS`] after the first tick, the reference's
+    /// first pass after start (`reference/LXMF/LXMF/LXMRouter.py:905`).
+    next_rotation_at_ms: Option<u64>,
+    /// Traffic counters per peer, for the control stats and for rotation.
+    /// Persisted with the peer's record, as the reference persists them
+    /// (`LXMPeer.to_bytes`, `reference/LXMF/LXMF/LXMPeer.py:154-159`):
+    /// written at the end of every round, restored at start.
     traffic: HashMap<[u8; 16], PeerTraffic>,
     /// Peer display names from announce metadata (`PN_META_NAME`), for
     /// the control stats; runtime-only, like the counters.
@@ -202,8 +205,14 @@ impl PeeringRuntime {
     ) -> Self {
         let our_identity_hash = *our_identity.hash();
         let mut table = PeerTable::new(config);
+        let mut traffic = HashMap::new();
         match peer_store.load_all() {
-            Ok(records) => table.restore(records),
+            Ok(records) => {
+                for record in &records {
+                    traffic.insert(record.destination_hash, record.traffic);
+                }
+                table.restore(records);
+            }
             Err(error) => tracing::warn!("lnpnd: peer store load failed: {error}"),
         }
         // The reference's order (`enable_propagation`,
@@ -224,7 +233,8 @@ impl PeeringRuntime {
             mining: None,
             last_synced: None,
             next_sync_at_ms: 0,
-            traffic: HashMap::new(),
+            next_rotation_at_ms: None,
+            traffic,
             names: HashMap::new(),
             unpeered_incoming: 0,
             unpeered_rx_bytes: 0,
@@ -323,6 +333,59 @@ impl PeeringRuntime {
         }
         self.log_peer("drop", destination_hash, "control");
         true
+    }
+
+    /// One rotation pass (`rotate_peers`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2060-2126`; the rule is
+    /// [`PeerTable::rotate`]'s): unpeer the lowest-acceptance peers of a
+    /// full table so newcomers find a slot. Each drop is logged
+    /// `PN_PEER action=drop reason=rotation` and leaves the store, its
+    /// counters with it.
+    pub(crate) fn rotate_peers<S: PropagationStore>(
+        &mut self,
+        node: &PropagationNode<S>,
+        now: u64,
+    ) {
+        let unhandled = self.unhandled_counts(node);
+        let traffic = &self.traffic;
+        let dropped = self.table.rotate(
+            now,
+            |hash| traffic.get(hash).copied().unwrap_or_default(),
+            |hash| unhandled.get(hash).copied().unwrap_or(0),
+        );
+        for hash in &dropped {
+            self.forget(hash);
+            self.traffic.remove(hash);
+            self.names.remove(hash);
+            if self.forced_next == Some(*hash) {
+                self.forced_next = None;
+            }
+            self.log_peer("drop", hash, drop_reason_name(DropReason::Rotation));
+        }
+    }
+
+    /// [`Self::unhandled_toward`] for every peer in one pass over the store.
+    fn unhandled_counts<S: PropagationStore>(
+        &self,
+        node: &PropagationNode<S>,
+    ) -> HashMap<[u8; 16], u64> {
+        let cursors: Vec<([u8; 16], u64)> = self
+            .table
+            .iter()
+            .map(|peer| (peer.destination_hash, peer.cursor))
+            .collect();
+        let mut counts: HashMap<[u8; 16], u64> = HashMap::new();
+        let walked = node.store().for_each(&mut |meta| {
+            for (hash, cursor) in &cursors {
+                if meta.sequence > *cursor {
+                    *counts.entry(*hash).or_default() += 1;
+                }
+            }
+        });
+        if let Err(error) = walked {
+            tracing::warn!("lnpnd: store walk for rotation failed: {error}");
+        }
+        counts
     }
 
     /// Messages accepted over sync links from nodes not in the peer table
@@ -430,7 +493,14 @@ impl PeeringRuntime {
             .get(destination_hash)
             .filter(|peer| peer.announce_known)
         {
-            let record = PeerRecord::of(peer);
+            let record = PeerRecord {
+                traffic: self
+                    .traffic
+                    .get(destination_hash)
+                    .copied()
+                    .unwrap_or_default(),
+                ..PeerRecord::of(peer)
+            };
             self.persist(&record);
         }
     }
@@ -555,17 +625,10 @@ impl PeeringRuntime {
             }
             PeerChange::Dropped(reason) => {
                 self.forget(&destination_hash);
-                self.log_peer(
-                    "drop",
-                    &destination_hash,
-                    match reason {
-                        DropReason::Disabled => "disabled",
-                        DropReason::OutOfDepth => "out_of_depth",
-                        DropReason::CostRaised => "cost_raised",
-                        DropReason::Unreachable => "unreachable",
-                        DropReason::NoAccess => "no_access",
-                    },
-                );
+                // The reference forgets an unpeered `LXMPeer` with its
+                // counters; a later re-peering starts from zero.
+                self.traffic.remove(&destination_hash);
+                self.log_peer("drop", &destination_hash, drop_reason_name(reason));
             }
             PeerChange::Declined(reason) => self.log_decline(&destination_hash, reason),
         }
@@ -929,6 +992,7 @@ impl PeeringRuntime {
             let traffic = self.traffic_mut(&remote_hash);
             traffic.incoming += accepted as u64;
             traffic.rx_bytes += bytes;
+            self.persist_peer(&remote_hash);
         } else {
             // A key-validated sender we do not peer back with — the
             // reference's unpeered bucket (`LXMRouter.py:2437-2440`).
@@ -1075,6 +1139,18 @@ impl PeeringRuntime {
             }
         }
 
+        // On its own cadence, whether or not a round is in flight: the
+        // reference's job loop runs `rotate_peers` regardless of syncs
+        // (`reference/LXMF/LXMF/LXMRouter.py:905-906`), and a peer mid-round
+        // is exempt inside the pass.
+        let next_rotation = *self
+            .next_rotation_at_ms
+            .get_or_insert(now_ms + ROTATION_INTERVAL_SECS * 1000);
+        if now_ms >= next_rotation {
+            self.next_rotation_at_ms = Some(now_ms + ROTATION_INTERVAL_SECS * 1000);
+            self.rotate_peers(node, unix_secs());
+        }
+
         if self.outbound.is_some() || self.mining.is_some() || now_ms < self.next_sync_at_ms {
             return;
         }
@@ -1085,7 +1161,7 @@ impl PeeringRuntime {
             self.forget(&dropped);
             self.traffic.remove(&dropped);
             self.names.remove(&dropped);
-            self.log_peer("drop", &dropped, "unreachable");
+            self.log_peer("drop", &dropped, drop_reason_name(DropReason::Unreachable));
         }
         node.set_compute_stamp_value(self.requires_stamp_values());
 
@@ -1660,8 +1736,10 @@ impl PeeringRuntime {
         bytes: u64,
     ) {
         // The attempt outlived the answer: the reference's liveness rule
-        // (`reference/LXMF/LXMF/LXMPeer.py:280`).
+        // (`reference/LXMF/LXMF/LXMPeer.py:280`). Persisted with the
+        // round's other counters, which rotation reads after a restart.
         self.traffic_mut(peer_hash).alive = false;
+        self.persist_peer(peer_hash);
         if let Some(sync) = self.outbound.as_mut() {
             sync.concluded = true;
         }
@@ -1684,5 +1762,121 @@ impl PeeringRuntime {
         if let Some(peer) = self.table.get_mut(peer_hash) {
             peer.state = SyncPhase::Idle;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use leviculum_core::node::NodeCoreBuilder;
+    use leviculum_lxmf::peering::MAX_PEERS_DEFAULT;
+    use leviculum_lxmf::{MemoryPeerStore, MemoryPropagationStore};
+    use leviculum_std::driver::{StdClock, StdStorage};
+
+    /// A persisted peer as the file store would hand it back: heard just
+    /// now, synced before, alive, offered 10 and took `outgoing`.
+    fn record(hash: [u8; 16], outgoing: u64, now: u64) -> PeerRecord {
+        PeerRecord {
+            destination_hash: hash,
+            identity_hash: None,
+            public_keys: None,
+            peering_key: None,
+            transfer_limit_kb: 256,
+            sync_limit_kb: 10_240,
+            stamp_cost: 0,
+            stamp_cost_flexibility: 0,
+            peering_cost: 0,
+            peering_timebase: 1,
+            last_heard: now,
+            cursor: 0,
+            is_static: false,
+            traffic: PeerTraffic {
+                offered: 10,
+                outgoing,
+                last_sync_attempt: now,
+                alive: true,
+                ..PeerTraffic::default()
+            },
+        }
+    }
+
+    /// 557: a full table rotates on the tick, the way the reference rotates
+    /// (`rotate_peers` every `JOB_ROTATE_INTERVAL`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:879`, `:905-906`). The table comes
+    /// back from the store, so the acceptance rates it ranks by are the
+    /// persisted ones; nothing happens before the interval, and the pass
+    /// then drops the two lowest-acceptance peers as `reason=rotation`,
+    /// keeps the static peer whose rate is worse still, and frees two
+    /// slots.
+    #[test]
+    fn a_restored_full_table_rotates_out_its_two_lowest_acceptance_peers_on_the_tick() {
+        let now = unix_secs();
+        let static_peer = [200; 16];
+        let mut store = MemoryPeerStore::default();
+        let mut persisted = record(static_peer, 0, now);
+        persisted.is_static = true;
+        store.save(&persisted).expect("memory store");
+        for n in 1..=19u8 {
+            let outgoing = match n {
+                5 => 1,
+                12 => 2,
+                _ => 9,
+            };
+            store
+                .save(&record([n; 16], outgoing, now))
+                .expect("memory store");
+        }
+        let (events_tx, events) = std::sync::mpsc::channel();
+        let mut runtime = PeeringRuntime::new(
+            PeeringConfig {
+                static_peers: vec![static_peer],
+                ..PeeringConfig::default()
+            },
+            Box::new(store),
+            leviculum_std::generate_identity(),
+            events_tx,
+        );
+        assert_eq!(runtime.peer_count(), MAX_PEERS_DEFAULT);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(dir.path()).expect("storage under a fresh temp dir"),
+        );
+        let mut node = PropagationNode::new(
+            MemoryPropagationStore::new(64_000),
+            leviculum_lxmf::PropagationNodeConfig::default(),
+        );
+        let mut out = TickOutput::empty();
+        let start = core.now_ms();
+        let interval_ms = ROTATION_INTERVAL_SECS * 1000;
+        runtime.on_tick(&mut core, &mut node, start, &mut out);
+        runtime.on_tick(&mut core, &mut node, start + interval_ms - 1, &mut out);
+        assert_eq!(
+            runtime.peer_count(),
+            MAX_PEERS_DEFAULT,
+            "no pass before the interval"
+        );
+
+        runtime.on_tick(&mut core, &mut node, start + interval_ms, &mut out);
+
+        let drops: Vec<([u8; 16], &'static str)> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                EngineEvent::Peer {
+                    action: "drop",
+                    destination_hash,
+                    reason,
+                } => Some((destination_hash, reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drops, vec![([5; 16], "rotation"), ([12; 16], "rotation")]);
+        let peers = runtime.peers();
+        assert_eq!(peers.len(), MAX_PEERS_DEFAULT - 2);
+        assert!(peers.contains(&static_peer), "a static peer never rotates");
+        assert!(!peers.contains(&[5; 16]) && !peers.contains(&[12; 16]));
     }
 }

@@ -87,6 +87,23 @@ pub const PN_STAMP_THROTTLE_SECS: u64 = 180;
 /// `sync_peers`, `LXMRouter.py:2136-2140`; static peers exempt).
 pub const MAX_UNREACHABLE_SECS: u64 = 14 * 24 * 60 * 60;
 
+/// Share of `max_peers` that rotation keeps free for newcomers, at least
+/// one slot (`ROTATION_HEADROOM_PCT`, `reference/LXMF/LXMF/LXMRouter.py:47`;
+/// applied at `:2062-2063`). See [`PeerTable::rotate`].
+pub const ROTATION_HEADROOM_PCT: usize = 10;
+
+/// Rotation only unpeers a peer that accepted less than this share of what
+/// it was offered, in percent (`ROTATION_AR_MAX = 0.5`,
+/// `reference/LXMF/LXMF/LXMRouter.py:48`; applied at `:2119`).
+pub const ROTATION_AR_MAX_PCT: u64 = 50;
+
+/// Cadence of peer rotation: the reference runs `rotate_peers` every
+/// `JOB_ROTATE_INTERVAL = 56 × JOB_PEERINGEST_INTERVAL` passes of
+/// `PROCESSING_INTERVAL`, 56 × 6 × 4 s = 22 min 24 s
+/// (`reference/LXMF/LXMF/LXMRouter.py:879`, `:878`, `:31`; applied at
+/// `:905-906`).
+pub const ROTATION_INTERVAL_SECS: u64 = 56 * 6 * 4;
+
 /// Backoff added per link-establishment attempt, cleared when the link
 /// comes up (`SYNC_BACKOFF_STEP`, `reference/LXMF/LXMF/LXMPeer.py:45`;
 /// added at `:321-322`, cleared at `:330` and `:541`).
@@ -480,6 +497,37 @@ impl Peer {
     }
 }
 
+/// Per-peer traffic statistics, the counters the reference keeps on each
+/// `LXMPeer` (`reference/LXMF/LXMF/LXMPeer.py:186`, `:200-204`) and persists
+/// with it (`to_bytes`, `:141`, `:154-159`; restored by `from_bytes`,
+/// `:100-112`). Rotation ranks peers by them ([`PeerTable::rotate`]), so
+/// they survive a restart here too: an acceptance rate that started from
+/// zero on every start would make a restarted node rotate on nothing.
+///
+/// Kept beside the table rather than in [`Peer`]: the host engine owns
+/// them, and the board's table, which does not rotate, does not carry
+/// them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PeerTraffic {
+    /// Messages offered to this peer, counted when it answered the offer
+    /// (`LXMPeer.py:475`, `:516`).
+    pub offered: u64,
+    /// Messages transferred to this peer (`LXMPeer.py:517`).
+    pub outgoing: u64,
+    /// Messages received from this peer.
+    pub incoming: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    /// Unix seconds of the last outbound sync attempt, 0 for never
+    /// (`LXMPeer.py:269`): rotation postpones while too many peers are
+    /// still untested.
+    pub last_sync_attempt: u64,
+    /// The last round's outcome: true when a sync link came up, false when
+    /// an attempt outlived the last answer (`LXMPeer.py:280`, `:328`,
+    /// `:514`).
+    pub alive: bool,
+}
+
 /// The persistable subset of a [`Peer`], what [`PeerStore`] carries.
 ///
 /// What the trait demands of the board's record log (part 3): upsert is
@@ -506,6 +554,10 @@ pub struct PeerRecord {
     pub last_heard: u64,
     pub cursor: u64,
     pub is_static: bool,
+    /// The peer's traffic statistics. [`Self::of`] starts them at zero; a
+    /// host that keeps them fills them in before saving. The board's record
+    /// log does not store them and restores zero.
+    pub traffic: PeerTraffic,
 }
 
 impl PeerRecord {
@@ -524,6 +576,7 @@ impl PeerRecord {
             last_heard: peer.last_heard,
             cursor: peer.cursor,
             is_static: peer.is_static,
+            traffic: PeerTraffic::default(),
         }
     }
 
@@ -614,18 +667,23 @@ pub enum DropReason {
     /// The peer answered `/offer` with `ERROR_NO_ACCESS`
     /// (`LXMPeer.py:416-419`).
     NoAccess,
+    /// Unpeered by [`PeerTable::rotate`] to keep headroom for newcomers
+    /// (`rotate_peers`, `LXMRouter.py:2060-2126`).
+    Rotation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeclineReason {
-    /// **The documented cap policy: first heard wins.** A full table
-    /// declines new candidates, exactly the reference's behaviour
-    /// (`LXMRouter.py:2032`); slots free deterministically when a peer is
-    /// culled after [`MAX_UNREACHABLE_SECS`], unpeers, or leaves the
-    /// role. No announce-time eviction: an eviction contest on every
-    /// announce would let any newcomer churn the table, and the
-    /// reference's acceptance-rate rotation needs the statistics we
-    /// deliberately do not keep.
+    /// The table is at `max_peers`. A full table declines new candidates,
+    /// exactly the reference's behaviour (`LXMRouter.py:2032`); slots free
+    /// when a peer is culled after [`MAX_UNREACHABLE_SECS`], unpeers, leaves
+    /// the role, or is rotated out. Rotation is the reference's answer to a
+    /// growing mesh ([`PeerTable::rotate`], every
+    /// [`ROTATION_INTERVAL_SECS`]): it keeps [`ROTATION_HEADROOM_PCT`] of
+    /// the table free by unpeering the peers that accept least of what they
+    /// are offered, so a newcomer declined here gets a slot by the next
+    /// pass. No announce-time eviction: an eviction contest on every
+    /// announce would let any newcomer churn the table.
     TableFull,
     /// Its peering cost exceeds `remote_peering_cost_max`
     /// (`LXMRouter.py:2010`).
@@ -1025,6 +1083,116 @@ impl PeerTable {
             .collect();
         for hash in &dropped {
             self.peers.remove(hash);
+        }
+        dropped
+    }
+
+    /// Rotate the table (`rotate_peers`, `reference/LXMF/LXMF/LXMRouter.py:2060-2126`):
+    /// unpeer the peers that accept least of what they are offered, so a full
+    /// table keeps [`ROTATION_HEADROOM_PCT`] of its slots for newcomers.
+    /// Returns the unpeered hashes, in the order they were dropped.
+    ///
+    /// `traffic` answers each peer's counters ([`PeerTraffic`]), `unhandled`
+    /// how many stored messages it has not been offered yet — the
+    /// reference's `unhandled_message_count`, here the store entries above
+    /// the peer's cursor. The host calls this every
+    /// [`ROTATION_INTERVAL_SECS`].
+    ///
+    /// The rule, step by step as the reference takes it:
+    /// - headroom is `max(1, ⌊max_peers × ROTATION_HEADROOM_PCT / 100⌋)`,
+    ///   and the pass drops at most `len − (max_peers − headroom)`, only
+    ///   while more than one peer would remain (`:2062-2064`);
+    /// - as many never-synced peers as headroom slots postpone the pass, so
+    ///   newcomers get a round before anyone is judged (`:2066-2074`);
+    /// - if any peer has nothing unhandled, only those form the pool
+    ///   (`:2076-2084`);
+    /// - static peers and peers mid-round are exempt; an alive peer never
+    ///   offered anything is not judged, an unreachable one is, at
+    ///   acceptance 0 (`:2086-2097`). The reference's
+    ///   `prioritise_rotating_unreachable_peers` defaults off (`:167`), and
+    ///   so both kinds share the pool (`:2099-2105`), unreachable first;
+    /// - ascending by acceptance `outgoing / offered`, the lowest go, each
+    ///   only if below [`ROTATION_AR_MAX_PCT`] (`:2107-2121`).
+    ///
+    /// Ties keep destination-hash order where the reference keeps dict
+    /// order, and the comparisons are exact integer ones where the reference
+    /// compares a percentage rounded to two places; neither is visible on
+    /// the wire. A peer still mining its peering key counts as mid-round
+    /// (the reference has no such state; dropping it would orphan the
+    /// worker's result). Each drop is the reference's own `unpeer` with the
+    /// current time (`:2120`, `:2049-2058`).
+    pub fn rotate(
+        &mut self,
+        now: u64,
+        traffic: impl Fn(&[u8; DESTINATION_LENGTH]) -> PeerTraffic,
+        unhandled: impl Fn(&[u8; DESTINATION_LENGTH]) -> u64,
+    ) -> Vec<[u8; DESTINATION_LENGTH]> {
+        let max_peers = self.config.max_peers;
+        let headroom = core::cmp::max(1, max_peers * ROTATION_HEADROOM_PCT / 100);
+        let required = self
+            .peers
+            .len()
+            .saturating_sub(max_peers.saturating_sub(headroom));
+        if required == 0 || self.peers.len() - required <= 1 {
+            return Vec::new();
+        }
+
+        let untested = self
+            .peers
+            .keys()
+            .filter(|hash| traffic(hash).last_sync_attempt == 0)
+            .count();
+        if untested >= headroom {
+            return Vec::new();
+        }
+
+        let fully_synced: Vec<&Peer> = self
+            .peers
+            .values()
+            .filter(|peer| unhandled(&peer.destination_hash) == 0)
+            .collect();
+        let pool: Vec<&Peer> = if fully_synced.is_empty() {
+            self.peers.values().collect()
+        } else {
+            fully_synced
+        };
+
+        let mut unresponsive = Vec::new();
+        let mut waiting = Vec::new();
+        for peer in pool {
+            if peer.is_static || peer.state != SyncPhase::Idle {
+                continue;
+            }
+            let counters = traffic(&peer.destination_hash);
+            if !counters.alive {
+                unresponsive.push((peer.destination_hash, counters));
+            } else if counters.offered > 0 {
+                waiting.push((peer.destination_hash, counters));
+            }
+        }
+        let mut drop_pool = unresponsive;
+        drop_pool.extend(waiting);
+
+        // `outgoing / offered`, 0 when nothing was offered, compared by
+        // cross-multiplication so no float enters the board's build.
+        let ratio = |counters: &PeerTraffic| -> (u128, u128) {
+            if counters.offered == 0 {
+                (0, 1)
+            } else {
+                (counters.outgoing as u128, counters.offered as u128)
+            }
+        };
+        drop_pool.sort_by(|(_, a), (_, b)| {
+            let ((a_num, a_den), (b_num, b_den)) = (ratio(a), ratio(b));
+            (a_num * b_den).cmp(&(b_num * a_den))
+        });
+
+        let mut dropped = Vec::new();
+        for (hash, counters) in drop_pool.into_iter().take(required) {
+            let (num, den) = ratio(&counters);
+            if num * 100 < den * ROTATION_AR_MAX_PCT as u128 && self.unpeer(&hash, now).is_some() {
+                dropped.push(hash);
+            }
         }
         dropped
     }

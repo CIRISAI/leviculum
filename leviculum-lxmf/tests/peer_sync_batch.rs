@@ -102,6 +102,7 @@ fn python_peer() -> Peer {
         last_heard: 0,
         cursor: 0,
         is_static: false,
+        traffic: Default::default(),
     }
     .into_peer()
 }

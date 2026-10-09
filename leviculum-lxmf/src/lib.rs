@@ -75,8 +75,8 @@ pub use paper::{PaperError, PaperMessage};
 pub use peering::{
     answer_offer, build_offer, offer_reply, peering_key_material, plan_sync_batch, response_action,
     DeclineReason, DropReason, InboundGate, MemoryPeerStore, OfferPlan, OfferReply, OfferResponse,
-    Peer, PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeeringConfig,
-    ResponseAction, SyncBatch, SyncPhase, SyncSource, WantedIds, OFFER_REQUEST_PATH,
+    Peer, PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeerTraffic,
+    PeeringConfig, ResponseAction, SyncBatch, SyncPhase, SyncSource, WantedIds, OFFER_REQUEST_PATH,
 };
 pub use propagation::{
     MessageGetRequest, MessageGetResponse, MessageListResponse, MetadataEntry, PeerError,

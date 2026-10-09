@@ -347,6 +347,7 @@ fn full_peer(n: u8, cursor: u64) -> PeerRecord {
         last_heard: 1_700_000_100 + n as u64,
         cursor,
         is_static: n.is_multiple_of(2),
+        traffic: Default::default(),
     }
 }
 

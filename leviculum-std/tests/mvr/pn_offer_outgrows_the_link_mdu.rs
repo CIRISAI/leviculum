@@ -90,6 +90,7 @@ fn peer_at(cursor: u64) -> Peer {
         last_heard: 1,
         cursor,
         is_static: false,
+        traffic: Default::default(),
     }
     .into_peer()
 }

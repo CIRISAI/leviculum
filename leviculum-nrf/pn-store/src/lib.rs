@@ -581,6 +581,9 @@ pub fn decode_peer_record(body: &[u8]) -> Option<PeerRecord> {
         last_heard: le64(87),
         cursor: le64(95),
         is_static: flags & PEER_FLAG_STATIC != 0,
+        // The board does not rotate its table, so the log does not keep
+        // the host's traffic statistics (`PeerRecord::traffic`).
+        traffic: Default::default(),
     })
 }
 

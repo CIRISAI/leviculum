@@ -98,6 +98,173 @@ fn the_cap_declines_new_peers_first_heard_wins() {
     );
 }
 
+/// A full default table (20 peers, the static one among them) for the
+/// rotation tests: every peer tested, alive, offered 10 and took 9.
+fn full_table_for_rotation() -> (PeerTable, BTreeMap<[u8; 16], PeerTraffic>) {
+    let mut table = PeerTable::new(PeeringConfig {
+        static_peers: vec![[200; 16]],
+        ..PeeringConfig::default()
+    });
+    let mut traffic = BTreeMap::new();
+    assert_eq!(
+        table.handle_announce([200; 16], &announce(1), Some(1), 0, false),
+        PeerChange::Added
+    );
+    for n in 1..=19u8 {
+        assert_eq!(
+            table.handle_announce([n; 16], &announce(1), Some(1), 0, false),
+            PeerChange::Added
+        );
+    }
+    assert_eq!(table.len(), MAX_PEERS_DEFAULT);
+    for hash in [[200; 16]].into_iter().chain((1..=19u8).map(|n| [n; 16])) {
+        traffic.insert(
+            hash,
+            PeerTraffic {
+                offered: 10,
+                outgoing: 9,
+                last_sync_attempt: 500,
+                alive: true,
+                ..PeerTraffic::default()
+            },
+        );
+    }
+    (table, traffic)
+}
+
+fn rotate_with(
+    table: &mut PeerTable,
+    traffic: &BTreeMap<[u8; 16], PeerTraffic>,
+    unhandled: &BTreeMap<[u8; 16], u64>,
+) -> Vec<[u8; 16]> {
+    table.rotate(
+        1000,
+        |hash| traffic.get(hash).copied().unwrap_or_default(),
+        |hash| unhandled.get(hash).copied().unwrap_or(0),
+    )
+}
+
+/// 557: a full table rotates the way the reference rotates
+/// (`rotate_peers`, `LXMRouter.py:2060-2126`). Headroom at 20 peers is
+/// two slots, so the two lowest-acceptance dynamic peers go; the static
+/// peer, worst of all, stays; and the newcomer the full table declined is
+/// admitted after the pass.
+#[test]
+fn a_full_table_rotates_out_its_two_lowest_acceptance_peers() {
+    let (mut table, mut traffic) = full_table_for_rotation();
+    traffic.get_mut(&[5; 16]).unwrap().outgoing = 1;
+    traffic.get_mut(&[12; 16]).unwrap().outgoing = 2;
+    traffic.get_mut(&[200; 16]).unwrap().outgoing = 0;
+    assert_eq!(
+        table.handle_announce([100; 16], &announce(1), Some(1), 900, false),
+        PeerChange::Declined(DeclineReason::TableFull)
+    );
+
+    let dropped = rotate_with(&mut table, &traffic, &BTreeMap::new());
+
+    assert_eq!(dropped, vec![[5; 16], [12; 16]]);
+    assert!(table.get(&[5; 16]).is_none());
+    assert!(table.get(&[12; 16]).is_none());
+    assert!(
+        table.get(&[200; 16]).is_some(),
+        "a static peer never rotates"
+    );
+    assert_eq!(table.len(), MAX_PEERS_DEFAULT - 2);
+    assert_eq!(
+        table.handle_announce([100; 16], &announce(1), Some(1), 1000, false),
+        PeerChange::Added
+    );
+}
+
+/// Only a peer below `ROTATION_AR_MAX` goes (`LXMRouter.py:2119`): a table
+/// whose peers all take at least half of what they are offered stays full.
+#[test]
+fn rotation_spares_peers_at_or_above_half_acceptance() {
+    let (mut table, mut traffic) = full_table_for_rotation();
+    traffic.get_mut(&[5; 16]).unwrap().outgoing = 5;
+    traffic.get_mut(&[12; 16]).unwrap().outgoing = 4;
+
+    assert_eq!(
+        rotate_with(&mut table, &traffic, &BTreeMap::new()),
+        vec![[12; 16]]
+    );
+    assert_eq!(table.len(), MAX_PEERS_DEFAULT - 1);
+}
+
+/// Below the headroom line there is nothing to do (`:2063-2064`): 18 of 20
+/// leaves the two headroom slots free already.
+#[test]
+fn rotation_leaves_a_table_with_headroom_alone() {
+    let (mut table, mut traffic) = full_table_for_rotation();
+    assert!(table.remove(&[18; 16]));
+    assert!(table.remove(&[19; 16]));
+    traffic.get_mut(&[5; 16]).unwrap().outgoing = 0;
+
+    assert!(rotate_with(&mut table, &traffic, &BTreeMap::new()).is_empty());
+    assert_eq!(table.len(), MAX_PEERS_DEFAULT - 2);
+}
+
+/// As many never-synced peers as headroom slots postpone the pass
+/// (`:2066-2074`): newcomers get their first round before anyone is judged.
+#[test]
+fn untested_peers_postpone_rotation() {
+    let (mut table, mut traffic) = full_table_for_rotation();
+    traffic.get_mut(&[5; 16]).unwrap().outgoing = 0;
+    traffic.get_mut(&[7; 16]).unwrap().last_sync_attempt = 0;
+    traffic.get_mut(&[8; 16]).unwrap().last_sync_attempt = 0;
+
+    assert!(rotate_with(&mut table, &traffic, &BTreeMap::new()).is_empty());
+
+    traffic.get_mut(&[8; 16]).unwrap().last_sync_attempt = 500;
+    assert_eq!(
+        rotate_with(&mut table, &traffic, &BTreeMap::new()),
+        vec![[5; 16]]
+    );
+}
+
+/// When some peers are fully synced, only they form the pool
+/// (`:2076-2084`); and an alive peer never offered anything is not judged
+/// (`:2091-2095`), while an unreachable one is, at acceptance 0.
+#[test]
+fn rotation_draws_from_fully_synced_peers_and_skips_the_never_offered() {
+    let (mut table, mut traffic) = full_table_for_rotation();
+    // Worst acceptance, but still owed messages: outside the pool.
+    traffic.get_mut(&[3; 16]).unwrap().outgoing = 0;
+    let unhandled = BTreeMap::from([([3; 16], 4u64)]);
+    // Alive and never offered anything: not a candidate.
+    *traffic.get_mut(&[4; 16]).unwrap() = PeerTraffic {
+        last_sync_attempt: 500,
+        alive: true,
+        ..PeerTraffic::default()
+    };
+    // Unreachable and never offered anything: acceptance 0, a candidate.
+    *traffic.get_mut(&[6; 16]).unwrap() = PeerTraffic {
+        last_sync_attempt: 500,
+        alive: false,
+        ..PeerTraffic::default()
+    };
+    traffic.get_mut(&[9; 16]).unwrap().outgoing = 3;
+
+    assert_eq!(
+        rotate_with(&mut table, &traffic, &unhandled),
+        vec![[6; 16], [9; 16]]
+    );
+}
+
+/// A peer mid-round is not judged (`peer.state == LXMPeer.IDLE`, `:2090`).
+#[test]
+fn rotation_skips_a_peer_mid_round() {
+    let (mut table, mut traffic) = full_table_for_rotation();
+    traffic.get_mut(&[5; 16]).unwrap().outgoing = 0;
+    traffic.get_mut(&[12; 16]).unwrap().outgoing = 1;
+    table.get_mut(&[5; 16]).unwrap().state = SyncPhase::RequestSent;
+
+    assert_eq!(
+        rotate_with(&mut table, &traffic, &BTreeMap::new()),
+        vec![[12; 16]]
+    );
+}
+
 #[test]
 fn a_static_peer_bypasses_the_cap_and_the_depth_and_survives_the_cull() {
     let mut table = PeerTable::new(PeeringConfig {

@@ -1447,6 +1447,10 @@ impl Engine {
                         DropReason::CostRaised => "cost_raised",
                         DropReason::Unreachable => "unreachable",
                         DropReason::NoAccess => "no_access",
+                        // The board does not rotate (`PeerTable::rotate`
+                        // runs on the host's tick); named for the shared
+                        // vocabulary.
+                        DropReason::Rotation => "rotation",
                     },
                 );
             }

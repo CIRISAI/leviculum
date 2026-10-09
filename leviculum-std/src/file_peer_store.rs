@@ -19,7 +19,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use leviculum_lxmf::msgpack;
-use leviculum_lxmf::peering::{PeerRecord, PeerStore};
+use leviculum_lxmf::peering::{PeerRecord, PeerStore, PeerTraffic};
 use leviculum_lxmf::storage::StorageError;
 
 /// A peer table in one msgpack file.
@@ -96,12 +96,19 @@ impl PeerStore for FilePeerStore {
     }
 }
 
-const RECORD_FIELDS: usize = 13;
+const RECORD_FIELDS: usize = 14;
+
+/// Field count before the peer's traffic statistics were persisted (557);
+/// records of this arity still decode, counters at zero.
+const RECORD_FIELDS_NO_TRAFFIC: usize = 13;
 
 /// Field count before the peer's public keys were persisted (#388 pass
 /// 3); records of this arity still decode, keys absent, so an upgrade
 /// keeps its peer table.
 const RECORD_FIELDS_LEGACY: usize = 12;
+
+/// Elements of the traffic array, the order of [`PeerTraffic`]'s fields.
+const TRAFFIC_FIELDS: usize = 7;
 
 fn encode_records(records: &[PeerRecord]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -134,6 +141,15 @@ fn encode_records(records: &[PeerRecord]) -> Vec<u8> {
             Some(keys) => msgpack::bin(&mut out, keys),
             None => msgpack::nil(&mut out),
         }
+        let traffic = &record.traffic;
+        msgpack::array(&mut out, TRAFFIC_FIELDS);
+        msgpack::uint(&mut out, traffic.offered);
+        msgpack::uint(&mut out, traffic.outgoing);
+        msgpack::uint(&mut out, traffic.incoming);
+        msgpack::uint(&mut out, traffic.rx_bytes);
+        msgpack::uint(&mut out, traffic.tx_bytes);
+        msgpack::uint(&mut out, traffic.last_sync_attempt);
+        msgpack::bool(&mut out, traffic.alive);
     }
     out
 }
@@ -147,7 +163,13 @@ fn decode_records(bytes: &[u8]) -> Option<Vec<PeerRecord>> {
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         let fields = msgpack::array_len(bytes, &mut position).ok()?;
-        if fields != RECORD_FIELDS && fields != RECORD_FIELDS_LEGACY {
+        if ![
+            RECORD_FIELDS,
+            RECORD_FIELDS_NO_TRAFFIC,
+            RECORD_FIELDS_LEGACY,
+        ]
+        .contains(&fields)
+        {
             return None;
         }
         let destination_hash: [u8; 16] = msgpack::read_bin(bytes, &mut position)
@@ -203,6 +225,22 @@ fn decode_records(bytes: &[u8]) -> Option<Vec<PeerRecord>> {
                     .ok()?,
             )
         };
+        let traffic = if fields == RECORD_FIELDS {
+            if msgpack::array_len(bytes, &mut position).ok()? != TRAFFIC_FIELDS {
+                return None;
+            }
+            PeerTraffic {
+                offered: msgpack::read_uint(bytes, &mut position).ok()?,
+                outgoing: msgpack::read_uint(bytes, &mut position).ok()?,
+                incoming: msgpack::read_uint(bytes, &mut position).ok()?,
+                rx_bytes: msgpack::read_uint(bytes, &mut position).ok()?,
+                tx_bytes: msgpack::read_uint(bytes, &mut position).ok()?,
+                last_sync_attempt: msgpack::read_uint(bytes, &mut position).ok()?,
+                alive: msgpack::read_bool(bytes, &mut position).ok()?,
+            }
+        } else {
+            PeerTraffic::default()
+        };
         records.push(PeerRecord {
             destination_hash,
             identity_hash,
@@ -217,6 +255,7 @@ fn decode_records(bytes: &[u8]) -> Option<Vec<PeerRecord>> {
             last_heard,
             cursor,
             is_static,
+            traffic,
         });
     }
     Some(records)
@@ -241,6 +280,15 @@ mod tests {
             last_heard: 2000,
             cursor: 7,
             is_static: seed == 3,
+            traffic: PeerTraffic {
+                offered: 10 + seed as u64,
+                outgoing: 4,
+                incoming: 2,
+                rx_bytes: 900,
+                tx_bytes: 1800,
+                last_sync_attempt: 1500,
+                alive: seed == 2,
+            },
         }
     }
 
@@ -263,6 +311,32 @@ mod tests {
         assert_eq!(records[0].cursor, 99);
         assert_eq!(records[0].peering_key, Some(([2; 32], 18)));
         assert!(records[1].is_static);
+        // The counters rotation ranks by survive the restart, as the
+        // reference's do (`LXMPeer.to_bytes`, `LXMPeer.py:154-159`).
+        assert_eq!(records[0].traffic, record(2).traffic);
+        assert_eq!(records[1].traffic, record(3).traffic);
+    }
+
+    /// A file written before the traffic statistics were persisted still
+    /// loads, counters at zero: an upgrade keeps its peer table.
+    #[test]
+    fn a_record_without_traffic_decodes_with_zero_counters() {
+        let zeroed = PeerRecord {
+            traffic: PeerTraffic::default(),
+            ..record(2)
+        };
+        let mut bytes = encode_records(&[zeroed]);
+        // The traffic array is the record's last element: its header, six
+        // zero uints and a bool, one byte each.
+        bytes.truncate(bytes.len() - (1 + TRAFFIC_FIELDS));
+        // Outer fixarray of 1, then the record's fixarray header.
+        assert_eq!(bytes[1], 0x90 | RECORD_FIELDS as u8);
+        bytes[1] = 0x90 | RECORD_FIELDS_NO_TRAFFIC as u8;
+
+        let records = decode_records(&bytes).expect("a 13-field record decodes");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].traffic, PeerTraffic::default());
+        assert_eq!(records[0].cursor, 7);
     }
 
     #[test]
