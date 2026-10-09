@@ -30,7 +30,7 @@ your own allocator. The reference firmware `leviculum-nrf` targets
 ## The sans-IO contract
 
 The core is a state machine with exactly three ways in, and one way out. The way
-out is always a `TickOutput` (`leviculum-core/src/transport.rs:531`), carrying
+out is always a `TickOutput` (`leviculum-core/src/transport.rs:537`), carrying
 `actions` to perform, `events` that occurred, and `next_deadline_ms`, the time at
 which you must next tick the timer. It is `#[must_use]`: dropping it loses
 outbound packets and events.
@@ -126,7 +126,7 @@ Three things to notice:
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice
    (or a slice of your own interface type, through `AsInterface`) to the
-   generic `dispatch_actions` (`leviculum-core/src/transport.rs:695`). Broadcast
+   generic `dispatch_actions` (`leviculum-core/src/transport.rs:701`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free. Bind what it returns: the `DispatchResult` is
    `#[must_use]` because dropping it discards the retries the core asked for,

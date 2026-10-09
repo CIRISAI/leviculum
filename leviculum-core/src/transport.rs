@@ -109,6 +109,12 @@ const PATH_ENTRIES_DUMP_INTERVAL_MS: u64 = 5 * 60 * 1000;
 /// The reasoning for the value is on `handle_announce`.
 const ANNOUNCE_SLOW_MS: u64 = 100;
 
+/// Draw ordinal of the announce-cap release delay
+/// (`Transport::cap_release_draw_ms`). The rebroadcast schedule uses
+/// `retries + 1` for its ordinals, a handful of small numbers; this one sits
+/// far above them so the release never repeats a rebroadcast draw.
+const CAP_RELEASE_DRAW: u8 = 0xCA;
+
 /// Ingress-control burst thresholds (Codeberg #87; Python Interface.py:75-84).
 /// Interfaces younger than this window use the stricter "new" frequency
 /// thresholds (Python IC_NEW_TIME = 2 hours).
@@ -5533,7 +5539,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3945. A destination with no cached
+    /// link-request path uses at transport.rs:3951. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6328,7 +6334,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1564 ran in the
+        // Gate on the already-incremented hops (transport.rs:1570 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -10321,6 +10327,39 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.deterministic_jitter_ms(&seed, max_ms)
     }
 
+    /// The rebroadcast delay a capped interface adds to its next release
+    /// (leviculum#560), drawn when the cap is armed by the announce it just
+    /// emitted.
+    ///
+    /// Without it the release instant is `now + wait_ms`, and `wait_ms`
+    /// depends on nothing but the frame length and the bitrate: two relays
+    /// with saturated caps on one channel emit on two grids of the same
+    /// period and keep, for their whole backlog, the offset their first
+    /// emissions happened to draw (`lora_dual_cluster_rust` on 3032da10:
+    /// eight pairs within 1.1 ms, two of them collided). The reference
+    /// locks the same way: `process_announce_queue` re-arms a
+    /// `threading.Timer(wait_time, ...)` at exactly the holdoff
+    /// (Interface.py:345-358). This is a deviation from it, under all three
+    /// clauses: the wire is untouched; a peer sees the same announces, later
+    /// by at most one draw, and the cap's budget is spent no faster; and it
+    /// breaks a lock that turned a coin toss into a standing collision.
+    ///
+    /// The draw is the one an uncapped rebroadcast gets
+    /// ([`Self::announce_wait_ms`] under [`Self::announce_jitter_max_ms`],
+    /// `[0, max(PATHFINDER_RW_MS, JITTER_AIRTIME_FACTOR x worst airtime))`),
+    /// under its own ordinal [`CAP_RELEASE_DRAW`] so it never repeats the
+    /// rebroadcast draw of the same announce. It is not collision avoidance
+    /// in the transport: the transport already randomises when it emits an
+    /// announce, and the cap must not quantise that draw away again.
+    fn cap_release_draw_ms(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES], raw: &[u8]) -> u64 {
+        self.announce_wait_ms(
+            dest_hash,
+            raw,
+            CAP_RELEASE_DRAW,
+            self.announce_jitter_max_ms(),
+        )
+    }
+
     /// Compute a frequency (Hz) from a timestamp deque, mirroring Python's
     /// Interface.incoming/outgoing_*_frequency() (Interface.py:279-321):
     /// `hz = n / (now - oldest)`, with ONE decayed sample popped per read once
@@ -11279,7 +11318,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2471`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2477`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -12294,6 +12333,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             .map(|a| emission_from_random_hash(a.random_hash()))
             .unwrap_or(0);
 
+        // Drawn once: every capped interface this announce leaves on arms its
+        // next release with it (leviculum#560).
+        let release_draw = if capped_ifaces.is_empty() {
+            0
+        } else {
+            self.cap_release_draw_ms(&packet.destination_hash, &raw)
+        };
+
         for iface_idx in &capped_ifaces {
             if blocked.contains(iface_idx) {
                 ann_suppressed.push((
@@ -12319,7 +12366,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let tx_bits = raw.len() as u64 * 8;
                 let cap_bps = cap.bitrate_bps as u64 * cap.announce_cap_percent as u64 / 100;
                 let wait_ms = (tx_bits * 1000).checked_div(cap_bps).unwrap_or(0);
-                cap.allowed_at_ms = now + wait_ms;
+                cap.allowed_at_ms = now + wait_ms + release_draw;
                 ann_tx_ifaces.push((*iface_idx, announce_tx_occasion(packet.hops, true)));
             } else if cap.queue.len() >= self.config.max_queued_announces {
                 // Queue full: the announce is dropped on this interface.
@@ -12488,7 +12535,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
                 sends.push((*iface_idx, entry.raw, entry.dst, entry.hops, entry.peer));
 
-                // Compute holdoff for next announce
+                // Compute holdoff for next announce; the release draw is
+                // added below, once the cap map is no longer borrowed.
                 let tx_bits = raw_len as u64 * 8;
                 let cap_bps = cap.bitrate_bps as u64 * cap.announce_cap_percent as u64 / 100;
                 let wait_ms = (tx_bits * 1000).checked_div(cap_bps).unwrap_or(0);
@@ -12497,6 +12545,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         for (iface_idx, raw, dst, hops, peer) in sends {
+            // leviculum#560: without this the queue drains on a fixed grid.
+            let release_draw = self.cap_release_draw_ms(&dst, &raw);
+            if let Some(cap) = self.interface_announce_caps.get_mut(&iface_idx) {
+                cap.allowed_at_ms += release_draw;
+            }
             self.push_packet(iface_idx, raw, None, peer);
             self.record_outgoing_announce(iface_idx);
             // OBS-1: a previously cap-suppressed announce is now actually sent.
@@ -12635,7 +12688,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let raw = buf[..len].to_vec();
 
             // The #402 cap, the same arithmetic as
-            // `broadcast_announce_with_caps`.
+            // `broadcast_announce_with_caps`, release draw included (#560).
+            let release_draw = self.cap_release_draw_ms(&dest_hash, &raw);
             if let Some(cap) = self.interface_announce_caps.get_mut(&interface_index) {
                 if now < cap.allowed_at_ms {
                     let emitted = ReceivedAnnounce::from_packet(&parsed)
@@ -12673,7 +12727,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let tx_bits = raw.len() as u64 * 8;
                 let cap_bps = cap.bitrate_bps as u64 * cap.announce_cap_percent as u64 / 100;
                 let wait_ms = (tx_bits * 1000).checked_div(cap_bps).unwrap_or(0);
-                cap.allowed_at_ms = now + wait_ms;
+                cap.allowed_at_ms = now + wait_ms + release_draw;
             }
 
             self.push_packet(interface_index, raw, None, Some(*peer));
@@ -14124,10 +14178,19 @@ mod tests {
             hops: u8,
             context: crate::packet::PacketContext,
         ) -> (Vec<u8>, [u8; TRUNCATED_HASHBYTES]) {
+            make_announce_raw_for_identity(Identity::generate(&mut OsRng), hops, context)
+        }
+
+        /// [`make_announce_raw`] for a given identity, so a test can feed
+        /// two transports the very same announce bytes.
+        fn make_announce_raw_for_identity(
+            identity: Identity,
+            hops: u8,
+            context: crate::packet::PacketContext,
+        ) -> (Vec<u8>, [u8; TRUNCATED_HASHBYTES]) {
             use crate::destination::{Destination, DestinationType, Direction};
             use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
 
-            let identity = Identity::generate(&mut OsRng);
             let dest = Destination::new(
                 Some(identity),
                 Direction::In,
@@ -17436,7 +17499,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7054), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7060), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -19134,6 +19197,9 @@ mod tests {
         /// `tx_time = len*8/bitrate` then `wait = tx_time/announce_cap` (a
         /// fraction, e.g. 0.02); ours is `wait_ms = len*8*1000/(bitrate*cap%/100)`,
         /// the same value. Asserted against the real sent-announce length.
+        /// Since leviculum#560 the release adds one rebroadcast draw on top
+        /// (`Transport::cap_release_draw_ms`), recomputed here: the holdoff
+        /// itself is still Python's, the release is later by the draw.
         #[test]
         fn announce_cap_holdoff_matches_python_formula() {
             let mut transport = make_transport_enabled();
@@ -19143,7 +19209,7 @@ mod tests {
             let bitrate: u64 = 1000;
             transport.register_interface_bitrate(1, bitrate as u32);
 
-            let (raw1, _dh1) = make_announce_raw(1, PacketContext::None);
+            let (raw1, dh1) = make_announce_raw(1, PacketContext::None);
             transport.process_incoming(0, &raw1).unwrap();
             transport
                 .clock
@@ -19153,13 +19219,16 @@ mod tests {
             let actions = transport.drain_actions();
             let _ = transport.drain_events();
 
-            let sent_len = actions
+            let sent = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data.len()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data.clone()),
                     _ => None,
                 })
                 .expect("announce should be sent on the capped interface");
+            let sent_len = sent.len();
+            let draw = transport.cap_release_draw_ms(&dh1, &sent);
+            assert!(draw < transport.announce_jitter_max_ms());
 
             // Python-derived spacing for this bitrate + default 2% cap.
             let cap_bps = bitrate * DEFAULT_ANNOUNCE_CAP_PERCENT as u64 / 100;
@@ -19168,8 +19237,9 @@ mod tests {
             let cap = transport.interface_announce_caps.get(&1).unwrap();
             assert_eq!(
                 cap.allowed_at_ms,
-                send_time + expected_wait,
-                "holdoff must equal Python tx_time/announce_cap for bitrate={bitrate}"
+                send_time + expected_wait + draw,
+                "holdoff must equal Python tx_time/announce_cap for bitrate={bitrate}, \
+                 plus the release draw"
             );
         }
 
@@ -19232,17 +19302,30 @@ mod tests {
             transport.poll();
             let actions2 = transport.drain_actions();
             let _ = transport.drain_events();
+            let sent2: Vec<&Vec<u8>> = actions2
+                .iter()
+                .filter_map(|a| match a {
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(
-                actions2
-                    .iter()
-                    .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1))
-                    .count(),
+                sent2.len(),
                 1,
                 "second announce should be sent once the default holdoff expired"
             );
+            // The release draw (leviculum#560) stays under the jitter window,
+            // which is less than `jitter_step`, so the third offer below
+            // still lands after the short holdoff. It is drawn from the
+            // announce that went out, which need not be raw2: the first
+            // announce's own retry is due by now too, and which of the two
+            // takes the free cap follows the order of their random hashes.
+            let sent_dst = Packet::unpack(sent2[0]).unwrap().destination_hash;
+            let draw = transport.cap_release_draw_ms(&sent_dst, sent2[0]);
+            assert!(draw < transport.announce_jitter_max_ms());
             assert_eq!(
                 transport.interface_announce_caps[&1].allowed_at_ms,
-                send_time + wait_full,
+                send_time + wait_full + draw,
                 "holdoff must be recomputed from the runtime cap, not the \
                  registration default"
             );
@@ -19480,32 +19563,37 @@ mod tests {
         }
 
         /// lora_dual_cluster_rust, red on 3032da10 (2026-10-09 10:18): two
-        /// relays with a saturated announce cap keep, for every queued
-        /// announce, the phase their first capped emission drew.
+        /// relays with a saturated announce cap must NOT keep, for every
+        /// queued announce, the phase their first capped emission drew
+        /// (leviculum#560).
         ///
-        /// The drain re-arms `allowed_at_ms = now + wait_ms`, and `wait_ms`
-        /// depends on nothing but the frame length and the bitrate. Two hubs
-        /// on one channel, each with a backlog of equal-sized transit
-        /// announces, therefore emit on two grids of the same period, offset
-        /// by whatever their first emission happened to be. In the red run
-        /// that was 0.6 ms: hub_a and hub_b put eight announce pairs on the
-        /// air every 31.149 s, each pair within 1.1 ms, and the only thing
-        /// left between the two frames was the RNode interface's acquisition
-        /// jitter (16 slots of 24 ms at SF7/BW62.5). Two pairs drew the same
-        /// or adjacent slots, both modems keyed (`LORA_TX_ACCOUNT
-        /// verdict=keyed` 12 ms apart at 10:16:00.43) and neither heard the
-        /// other. One of the lost frames was hub_b's only emission of the
-        /// b1 probe announce, and hub_a, reached over a FULL-mode TCP
-        /// interface, rightly does not forward a path request for an unknown
-        /// destination (Transport.py:3006-3043), so a1 never got a path. The
-        /// green run on f4863a6f had the same lock at a 135 ms offset.
+        /// Before #560 the drain re-armed `allowed_at_ms = now + wait_ms`,
+        /// and `wait_ms` depends on nothing but the frame length and the
+        /// bitrate. Two hubs on one channel, each with a backlog of
+        /// equal-sized transit announces, therefore emitted on two grids of
+        /// the same period, offset by whatever their first emission happened
+        /// to be. In the red run that was 0.6 ms: hub_a and hub_b put eight
+        /// announce pairs on the air every 31.149 s, each pair within 1.1 ms,
+        /// and the only thing left between the two frames was the RNode
+        /// interface's acquisition jitter (16 slots of 24 ms at SF7/BW62.5).
+        /// Two pairs drew the same or adjacent slots, both modems keyed
+        /// (`LORA_TX_ACCOUNT verdict=keyed` 12 ms apart at 10:16:00.43) and
+        /// neither heard the other. One of the lost frames was hub_b's only
+        /// emission of the b1 probe announce, and hub_a, reached over a
+        /// FULL-mode TCP interface, rightly does not forward a path request
+        /// for an unknown destination (Transport.py:3006-3043), so a1 never
+        /// got a path. The green run on f4863a6f had the same lock at a
+        /// 135 ms offset. bbdbd7b4 pinned that lock; this is its negation.
         ///
-        /// This pins the lock rather than a fix: it is the arithmetic every
-        /// pair of the red run followed. A change that de-phases the drain
-        /// is expected to turn the equality below into a spread, and this
-        /// test then states the new contract instead.
+        /// The contract now: every release lands one bare holdoff plus one
+        /// rebroadcast draw (`Transport::cap_release_draw_ms`) after the
+        /// previous one, the draw inside the rebroadcast window; and two
+        /// hubs relaying the very same backlog, first emissions 1 ms apart,
+        /// drift apart by at least that window over the backlog instead of
+        /// holding the 1 ms. Hub and announce identities are fixed keys, so
+        /// the draws, and with them the spread, are the same on every run.
         #[test]
-        fn saturated_caps_keep_the_phase_of_their_first_emission() {
+        fn saturated_caps_do_not_keep_the_phase_of_their_first_emission() {
             use crate::rnode::{announce_cap_bitrate_bps, derive_preamble_symbols};
 
             const BACKLOG: usize = 7;
@@ -19515,36 +19603,57 @@ mod tests {
             let bps = announce_cap_bitrate_bps(62_500, 7, 5, derive_preamble_symbols(7, 5, 62_500));
             assert!(bps > 0, "premise: this PHY has a computable airtime");
 
-            // One relay: an uncapped side that hears a backlog of transit
-            // announces, and a capped radio they leave on. Returns the
-            // instants of the first BACKLOG emissions on the radio, driving
-            // the clock to each `next_deadline` like the daemon does.
-            let emissions = |offset_ms: u64| -> Vec<u64> {
-                let mut transport = make_transport_enabled();
+            // The flood both hubs hear: the same announce bytes on each.
+            let backlog: Vec<Vec<u8>> = (0..BACKLOG)
+                .map(|i| {
+                    let identity = Identity::from_private_key_bytes(&[0x60 + i as u8; 64])
+                        .expect("64 key bytes");
+                    make_announce_raw_for_identity(identity, 1, PacketContext::None).0
+                })
+                .collect();
+
+            // One relay: an uncapped side that hears the backlog, and a capped
+            // radio it leaves on. Returns (instant, frame length) of the first
+            // BACKLOG emissions on the radio, driving the clock to each
+            // `next_deadline` like the daemon does, plus the cap's effective
+            // bitrate and the rebroadcast window.
+            let emissions = |hub_key: u8, offset_ms: u64| -> (Vec<(u64, usize)>, u64, u64) {
+                let identity =
+                    Identity::from_private_key_bytes(&[hub_key; 64]).expect("64 key bytes");
+                let config = TransportConfig {
+                    enable_transport: true,
+                    ..TransportConfig::default()
+                };
+                let mut transport = Transport::new(
+                    config,
+                    MockClock::new(TEST_TIME_MS),
+                    MemoryStorage::with_defaults(),
+                    identity,
+                );
                 let _ = transport.register_interface(Box::new(MockInterface::new("tcp", 1)));
                 let _ = transport.register_interface(Box::new(MockInterface::new("rnode", 2)));
                 transport.register_interface_bitrate(1, bps);
 
                 transport.clock.advance(offset_ms);
-                for _ in 0..BACKLOG {
-                    let (raw, _) = make_announce_raw(1, PacketContext::None);
-                    transport.process_incoming(0, &raw).unwrap();
+                for raw in &backlog {
+                    transport.process_incoming(0, raw).unwrap();
                 }
                 let _ = transport.drain_actions();
                 let _ = transport.drain_events();
 
                 // Every rebroadcast is due after one jitter window; the first
                 // takes the free cap, the rest join its queue.
-                transport
-                    .clock
-                    .advance(transport.announce_jitter_max_ms() + 100);
+                let window = transport.announce_jitter_max_ms();
+                transport.clock.advance(window + 100);
                 let mut sent = Vec::new();
                 for _ in 0..10_000 {
                     transport.poll();
                     let now = transport.clock.now_ms();
                     for action in transport.drain_actions() {
-                        if matches!(action, Action::SendPacket { iface, .. } if iface.0 == 1) {
-                            sent.push(now);
+                        if let Action::SendPacket { iface, data, .. } = action {
+                            if iface.0 == 1 {
+                                sent.push((now, data.len()));
+                            }
                         }
                     }
                     let _ = transport.drain_events();
@@ -19558,36 +19667,52 @@ mod tests {
                     transport.clock.advance(deadline.saturating_sub(now).max(1));
                 }
                 sent.truncate(BACKLOG);
-                sent
+                let cap = &transport.interface_announce_caps[&1];
+                let cap_bps = cap.bitrate_bps as u64 * cap.announce_cap_percent as u64 / 100;
+                (sent, cap_bps, window)
             };
 
-            let hub_a = emissions(0);
-            let hub_b = emissions(1);
+            let (hub_a, cap_bps, window) = emissions(0x11, 0);
+            let (hub_b, _, _) = emissions(0x22, 1);
             assert_eq!(hub_a.len(), BACKLOG, "hub_a drained its backlog: {hub_a:?}");
             assert_eq!(hub_b.len(), BACKLOG, "hub_b drained its backlog: {hub_b:?}");
-
-            let period = hub_a[1] - hub_a[0];
-            assert!(
-                period > 30_000,
-                "premise: at {bps} bps one announce holds the cap for about 31 s, \
-                 got {period} ms"
+            assert_eq!(
+                hub_b[0].0 - hub_a[0].0,
+                1,
+                "premise: the first emissions are 1 ms apart, as close as the \
+                 red run's 0.6 ms: a={hub_a:?} b={hub_b:?}"
             );
-            for k in 1..BACKLOG {
-                assert_eq!(
-                    hub_a[k] - hub_a[k - 1],
-                    period,
-                    "the drain emits on a fixed grid: {hub_a:?}"
-                );
+
+            for (name, hub) in [("hub_a", &hub_a), ("hub_b", &hub_b)] {
+                for k in 1..BACKLOG {
+                    let (prev_at, prev_len) = hub[k - 1];
+                    let holdoff = (prev_len as u64 * 8 * 1000) / cap_bps;
+                    assert!(
+                        holdoff > 30_000,
+                        "premise: at {bps} bps one announce holds the cap for about \
+                         31 s, got {holdoff} ms"
+                    );
+                    let draw = (hub[k].0 - prev_at).checked_sub(holdoff);
+                    assert!(
+                        draw.is_some_and(|d| d < window),
+                        "{name} release {k}: one holdoff ({holdoff} ms) plus a draw \
+                         under the {window} ms rebroadcast window, got {:?} ms \
+                         after the previous release: {hub:?}",
+                        hub[k].0 - prev_at
+                    );
+                }
             }
-            for k in 0..BACKLOG {
-                assert_eq!(
-                    hub_b[k] - hub_a[k],
-                    1,
-                    "emission {k}: the 1 ms the first emissions drew holds for \
-                     the whole backlog ({} s): a={hub_a:?} b={hub_b:?}",
-                    (hub_a[BACKLOG - 1] - hub_a[0]) / 1000
-                );
-            }
+
+            let offsets: Vec<i64> = (0..BACKLOG)
+                .map(|k| hub_b[k].0 as i64 - hub_a[k].0 as i64)
+                .collect();
+            let spread = offsets.iter().max().unwrap() - offsets.iter().min().unwrap();
+            assert!(
+                spread >= window as i64,
+                "the two hubs' offsets spread by at least one rebroadcast window \
+                 ({window} ms) over {BACKLOG} emissions instead of holding their \
+                 first 1 ms; offsets {offsets:?} spread only {spread} ms"
+            );
         }
 
         /// Codeberg #402, the board's side of the same boundary, asserted
@@ -23257,7 +23382,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1564) before
+        // The inbound path increments hops once (transport.rs:1570) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

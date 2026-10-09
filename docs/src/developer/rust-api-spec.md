@@ -196,7 +196,7 @@ A node is more often built with `NodeCoreBuilder` (`node/builder.rs:40`), whose
 ### Core `TickOutput` and `Action`
 
 `TickOutput` is what every core method returns. Defined at
-`leviculum-core/src/transport.rs:148`. It is `#[must_use]` — dropping it silently
+`leviculum-core/src/transport.rs:154`. It is `#[must_use]` — dropping it silently
 loses outbound packets and events.
 
 | Field | Type | Source |
@@ -205,7 +205,7 @@ loses outbound packets and events.
 | `events` | `Vec<NodeEvent>` — application-visible events | `transport.rs:152` |
 | `next_deadline_ms` | `Option<u64>` — when to next call `handle_timeout` | `transport.rs:155` |
 
-`Action` is the I/O the driver performs, defined at `leviculum-core/src/transport.rs:123`:
+`Action` is the I/O the driver performs, defined at `leviculum-core/src/transport.rs:129`:
 
 | Variant | Fields | Source |
 |---------|--------|--------|
