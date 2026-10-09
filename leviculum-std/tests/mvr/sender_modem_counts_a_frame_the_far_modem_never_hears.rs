@@ -86,6 +86,54 @@
 //! listening on the channel decides it, which is a rig measurement, not a
 //! desk one.
 //!
+//! THE LISTENER DECIDED IT: THE RECEIVING MODEM. The listened twin
+//! `bench_single_pair_slow_ca_rnode_only_listened` has lost one frame per
+//! red, and the third radio (`ear`, which never keys) decoded every lost
+//! frame it was seated for. Both are proofs, so the modem that dropped them
+//! is the one on the node called `sender` (t-beam-2, 5896004228, RNode
+//! 1.85). The sender-side branch above (the frame never radiated) is
+//! refuted for both, and they split the receiving-side branch into two
+//! shapes:
+//!
+//! ```text
+//! 2026-10-09 09:43, run on 3032da10 (hw-vollauf4-3032da10.log line 9400)
+//! 09:43:53.164 receiver TX 115 bytes to serial      <- proof 1ee6e59280ba2c14
+//! 09:43:55.164 receiver CHTM airtime_short=11.61     (keyed)
+//! 09:43:55.183 ear      LISTEN_RX len=115 rssi=-31 snr=8.25
+//! 09:43:52.842 sender   CHTM channel_load_short=0.00 airtime_short=13.00
+//! 09:43:53.911 sender   CHTM channel_load_short=18.68
+//! 09:43:55.650 sender   CHTM channel_load_short=33.24
+//!   ... no CMD_DATA, no LORA_RX_ORPHAN ...
+//!
+//! 2026-10-05 19:40, run on 871cb3f9 (hw-vollauf4-871cb3f9.log)
+//! 19:40:05.829 receiver CHTM airtime_short=11.61     (keyed)
+//! 19:40:05.848 ear      LISTEN_RX len=115 rssi=-42 snr=8
+//! 19:40:03.429 sender   CHTM channel_load_short=13.00
+//!   ... 13.00 in every report through 19:40:09.826 ...
+//! ```
+//!
+//! On 10-05 the sender's carrier sampler moved by nothing beyond its own
+//! airtime: it was deaf to a frame a third radio decoded at -42 dBm, which
+//! is the shape of the 09-23 probe above. On 10-09 it was not deaf. The
+//! sampler rose by 20.24 pp on the lost proof, against 20.04 pp on the
+//! proof it DID decode 30 s later. That is the whole frame, not a
+//! preamble the radio gave up on at the header. Then the firmware sent
+//! neither the RSSI stat that comes before every decoded frame nor the
+//! frame itself, so this was not a frame lost on the serial hop either
+//! (`LORA_RX_ORPHAN` in `interfaces/rnode.rs` names that case and stayed
+//! silent). A frame the SX127x tracks to its end and then never reports
+//! leaves the firmware in exactly three silent ways. The radio's payload
+//! CRC error (`reference/RNode_Firmware/sx127x.cpp:490`) is one. The other
+//! two are the ESP32 build's packet malloc and queue failures
+//! (`RNode_Firmware.ino:465,478`). None of the three is below our host.
+//!
+//! The losses are rare: one frame in 33 to 35 per red run, and green runs
+//! in between (f4863a6f on 2026-10-06). Nothing our code does lies between
+//! the modem keying the frame and the far modem failing to hand it up. What
+//! is still open is a property of that modem pair under RNode 1.85, and
+//! the shape that keeps the rest of the attribution falsifiable is pinned
+//! below.
+//!
 //! WHAT THIS FILE PINS, so that the attribution stays falsifiable: the
 //! arithmetic that makes those two readings evidence. If the mirrored
 //! firmware constants or the airtime model drift, these numbers stop matching
@@ -301,6 +349,64 @@ fn the_far_modem_carrier_sampler_could_not_have_missed_the_slow_frame() {
         reports * worst_gap_ms > 3 * AIRTIME_BINLEN_MS,
         "the zero run covers {} ms, against a {AIRTIME_BINLEN_MS} ms window",
         reports * worst_gap_ms
+    );
+}
+
+/// The 2026-10-09 listened red, as arithmetic: the modem that dropped the
+/// proof held its carrier for as long as it did for a proof it decoded, and
+/// far longer than a frame abandoned at its header would have held it. So
+/// the radio tracked the lost frame to its end, and the loss sits after
+/// demodulation and before the RSSI stat (see the module header).
+#[test]
+fn the_dropped_proof_was_tracked_to_its_end_by_the_modem_that_dropped_it() {
+    let symbol_ms = (1u64 << SLOW_SF) as f64 / SLOW_BW as f64 * 1000.0;
+    let proof_cost =
+        firmware_airtime_cost_ms(PROOF_WRITTEN, SLOW_BW, SLOW_SF, SLOW_CR, slow_preamble());
+    assert_pct(
+        11.61,
+        short_airtime_pct(proof_cost),
+        "SF10 proof: the receiver node's modem keyed 0.00 -> 11.61 at 09:43:55.164",
+    );
+
+    // `channel_load_short` is `local_channel_util + airtime`
+    // (`RNode_Firmware.ino:1458-1459`), so the sender's own 13.00 is the floor
+    // both readings stand on.
+    let own_airtime = 13.00;
+    let lost = 33.24 - own_airtime; // 09:43:52.842 -> 09:43:55.650
+    let decoded = 33.04 - own_airtime; // 09:44:22.968 -> 09:44:26.370
+
+    // Both reports' 7500 ms windows hold the whole frame: the lost one ended at
+    // the listener at 09:43:55.183, the decoded one reached the host at
+    // 09:44:25.512.
+    let heard_frame = channel_util_pct(proof_cost);
+    assert!(
+        (heard_frame - 23.22).abs() < 0.01,
+        "a whole SF10 proof is {heard_frame:.2}% of the sampler window"
+    );
+    assert!(lost <= heard_frame && decoded <= heard_frame);
+
+    // A radio that gives up on a frame at its header (sync word and SFD,
+    // 4.25 symbols, plus the 8 explicit-header symbols) holds the carrier
+    // flag for the preamble and header only.
+    let header_end_ms = (slow_preamble() as f64 + 4.25 + 8.0) * symbol_ms;
+    let header_only = channel_util_pct(header_end_ms);
+    assert!(
+        (header_only - 3.30).abs() < 0.01,
+        "preamble and header are {header_only:.2}% of the window"
+    );
+    assert!(
+        lost > 5.0 * header_only,
+        "the lost proof held the carrier for {lost:.2} pp, so the radio did not \
+         abandon it at the header ({header_only:.2} pp)"
+    );
+
+    // And it held it as long as the decoded one, to within the length of the
+    // preamble alone: a difference of 0.20 pp is 15 ms, two symbols.
+    let preamble_pct = channel_util_pct(slow_preamble() as f64 * symbol_ms);
+    assert!(
+        (lost - decoded).abs() < preamble_pct,
+        "lost {lost:.2} pp against decoded {decoded:.2} pp, the preamble alone \
+         is {preamble_pct:.2} pp"
     );
 }
 
