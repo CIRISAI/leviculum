@@ -458,7 +458,9 @@ impl PeeringRuntime {
     /// One `PN_PEER action=decline` line per refused candidate, so "it syncs
     /// into me and I do not peer it" is answered by the log alone (538: a
     /// recalled announce with no path declined as `too_deep`, and nothing
-    /// said so). The vocabulary is stable, like the drop reasons'.
+    /// said so; since 556 the sync's link stands in for a missing path, see
+    /// [`Self::peer_from_recalled_announce`]). The vocabulary is stable,
+    /// like the drop reasons'.
     ///
     /// `AlreadyPeered` stays silent: it is every sync from a peer we already
     /// have, so a line for it would bury the declines that mean something.
@@ -791,10 +793,11 @@ impl PeeringRuntime {
         // the worker this may run after the peer already tore its link down
         // (see the doc comment above), and the captured hash outlives that.
         let link_identity = core.get_remote_identity(link_id).cloned();
+        let link_hops = core.link(link_id).map(|link| link.hops());
         let remote_of_link =
             validated_peer.or_else(|| link_identity.as_ref().map(Self::propagation_hash_of));
         if let Some(remote) = remote_of_link {
-            self.peer_from_recalled_announce(core, remote, link_identity.as_ref(), now);
+            self.peer_from_recalled_announce(core, remote, link_identity.as_ref(), link_hops, now);
         }
 
         let Some(remote_hash) = validated_peer else {
@@ -970,11 +973,33 @@ impl PeeringRuntime {
     /// which survives both the role change and a restart; our equivalent is
     /// [`NodeCore::recall_app_data`](leviculum_core::NodeCore::recall_app_data)
     /// over the announce cache (Codeberg #417).
+    ///
+    /// # Depth: the path, or the link the sync came over
+    ///
+    /// Here we deviate from the reference. It reads the depth from the path
+    /// table alone, and `Transport.hops_to` answers `PATHFINDER_M` (128) for
+    /// a destination with no path
+    /// (`reference/Reticulum/RNS/Transport.py:2643-2650`), so the check at
+    /// `LXMRouter.py:2365` declines it. After every restart the path to a
+    /// neighbour that announced before it is gone while its announce is
+    /// still recallable, and for up to six hours that neighbour's syncs
+    /// land and ours never go back (leviculum#420, 538 made it visible as
+    /// `PN_PEER action=decline reason=too_deep`). A node syncing into us has
+    /// just proven its reachability over a link, and the link knows its hop
+    /// count ([`Link::hops`](leviculum_core::link::Link::hops), the
+    /// `LINK_ESTAB hops=` of the log), so `link_hops` stands in when no path
+    /// is known; a known path still wins. The depth rule itself holds: a
+    /// link longer than `autopeer_maxdepth` is declined as before. Wire
+    /// unchanged; the semantic difference is that we peer back sooner than
+    /// a Python node would (decision: Lew, 2026-10-09, 556). `link_hops` is
+    /// `None` when the link is already gone, since validation runs on a
+    /// worker and may conclude after the peer tore it down.
     fn peer_from_recalled_announce(
         &mut self,
         core: &Core,
         remote_hash: [u8; 16],
         link_identity: Option<&Identity>,
+        link_hops: Option<u8>,
         now: u64,
     ) {
         let destination = DestinationHash::new(remote_hash);
@@ -983,7 +1008,7 @@ impl PeeringRuntime {
         // as `DeclineReason::NotANode`, the reference's own failed guard on
         // a `None` from `recall_app_data` (`:2356`).
         let app_data = core.recall_app_data(&destination);
-        let hops = core.hops_to(&destination);
+        let hops = core.hops_to(&destination).or(link_hops);
         // `Updated` is a configured static entry this sync filled in; any
         // other known peer is declined as already peered.
         let action = match self.table.handle_inbound_sync_recalled(

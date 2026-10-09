@@ -2362,7 +2362,8 @@ mod tests {
     /// naming why. The field case: after a restart the announce is still
     /// recallable but the path is gone, so `hops_to` answers `None`, the sync
     /// is declined as too deep, and until now nothing in lnpnd's log said
-    /// so. The second sync comes from a node we already peer, which must stay
+    /// so. The link ids here are not in the core, so no link hop count
+    /// stands in for the path either (556 covers that case below). The second sync comes from a node we already peer, which must stay
     /// silent: it is every sync from every peer.
     #[test]
     fn a_declined_sync_says_why_and_a_known_peer_says_nothing() {
@@ -2449,6 +2450,105 @@ mod tests {
             })
             .collect();
         assert_eq!(operator, vec![("decline", pathless, "too_deep")]);
+    }
+
+    /// 556: the sibling of the test above, over a real link. After a
+    /// restart the path is gone, but the node syncing into us is on a link,
+    /// and the link knows how far away it is. A link inside
+    /// `autopeer_maxdepth` peers the node as `inbound_sync`; a link beyond
+    /// it is still declined `too_deep`, so the depth rule is read off the
+    /// link rather than switched off.
+    #[test]
+    fn a_pathless_node_syncing_over_a_link_is_judged_by_the_links_hops() {
+        for (link_hops, expected) in [(1u8, ("add", "inbound_sync")), (2, ("decline", "too_deep"))]
+        {
+            let server_dir = tempfile::tempdir().expect("tempdir");
+            let client_dir = tempfile::tempdir().expect("tempdir");
+            let mut server = core(server_dir.path());
+            let mut client = core(client_dir.path());
+            let identity = leviculum_std::generate_identity();
+            let signing_key = identity.ed25519_verifying().to_bytes();
+            let (mut engine, events) = Engine::new(EngineConfig {
+                identity,
+                node_config: cost_free(),
+                store: MemoryPropagationStore::new(64_000),
+                announce_interval_secs: 3600,
+                announce_delay_secs: 0,
+                peering: PeeringConfig {
+                    autopeer_maxdepth: 1,
+                    ..PeeringConfig::default()
+                },
+                peer_store: Box::new(MemoryPeerStore::default()),
+                control_allowed: Vec::new(),
+                auth_allowed: None,
+                mailbox: None,
+                store_limit_bytes: 64_000,
+                delivery_limit_kb: 1000,
+            });
+            let start = server.now_ms();
+            let _ = engine.on_tick(&mut server, start);
+            let destination_hash = match &engine.state {
+                State::Ready(ready) => ready.destination_hash,
+                _ => panic!("engine must be ready"),
+            };
+
+            // Recallable, but with no path: the state a restart leaves.
+            let (pathless, packet) = propagation_announce(server.emission_secs(), 0);
+            hear_announce_off_the_role(&mut server, &packet);
+            assert!(server.remove_path(&pathless), "the path must have existed");
+            assert_eq!(server.hops_to(&DestinationHash::new(pathless)), None);
+
+            let (link_id, _, out) = client
+                .connect(destination_hash, &signing_key)
+                .expect("connect");
+            let _ = converse(&mut engine, &mut server, &mut client, out);
+            server
+                .link_mut(&link_id)
+                .filter(|link| link.is_active())
+                .expect("the link must come up, or the test proves nothing")
+                .set_hops(link_hops);
+            let _ = events.try_iter().count();
+
+            let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+                State::Ready(ready) => ready,
+                _ => panic!("engine must be ready"),
+            };
+            ready.peering.validate_link_for_tests(link_id, pathless);
+            let envelope = leviculum_lxmf::PeerSyncEnvelope {
+                timestamp: 1.0,
+                messages: vec![synced_message(0x30)],
+            }
+            .encode();
+            let mut out = TickOutput::empty();
+            engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+            await_validation(&mut engine);
+            absorb(&mut engine, &mut ready, &mut server, &mut out);
+            let stored = ready.node.store().count().unwrap_or(0);
+            engine.state = State::Ready(ready);
+            assert_eq!(stored, 1, "the sync must have landed");
+
+            let operator: Vec<(&'static str, [u8; 16], &'static str)> = events
+                .try_iter()
+                .filter_map(|event| match event {
+                    EngineEvent::Peer {
+                        action,
+                        destination_hash,
+                        reason,
+                    } => Some((action, destination_hash, reason)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                operator,
+                vec![(expected.0, pathless, expected.1)],
+                "a link of {link_hops} hops at autopeer_maxdepth 1"
+            );
+            assert_eq!(
+                peer_count(&engine),
+                usize::from(expected.0 == "add"),
+                "a link of {link_hops} hops at autopeer_maxdepth 1"
+            );
+        }
     }
 
     /// The opposite error on the same rule: a path response is an answer to

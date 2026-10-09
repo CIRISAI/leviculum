@@ -878,6 +878,15 @@ impl PeerTable {
     /// `handle_announce` would drop, and where it would add, it adds through
     /// the very same private `admit` — which is what makes a peer discovered
     /// by sync indistinguishable from one discovered by announce.
+    ///
+    /// `hops` is the caller's depth to the sender, `None` when it has none.
+    /// The reference reads only the path table (`Transport.hops_to`, which
+    /// answers `PATHFINDER_M` for an unknown path), so after a restart a
+    /// recalled neighbour is too deep until its next announce. lnpnd
+    /// deviates and passes the hop count of the link the sync arrived over
+    /// when no path is known (556, leviculum#420): the sender just proved
+    /// its distance on that link. This function compares whatever it is
+    /// given against `autopeer_maxdepth` either way.
     pub fn handle_inbound_sync(
         &mut self,
         destination_hash: [u8; DESTINATION_LENGTH],
