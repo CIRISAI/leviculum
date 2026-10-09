@@ -1513,7 +1513,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
-        link.record_inbound(now_secs);
+        link.record_keepalive_inbound(now_secs);
         let data = packet.data.as_slice();
         if let Ok(should_echo) = link.process_keepalive(data) {
             // Initiator side: a valid responder echo (should_echo == false) reset

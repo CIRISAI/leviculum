@@ -433,6 +433,11 @@ pub struct Link {
     /// first uptime second, where the monotonic clock still reads 0), so the
     /// latter is not wrongly treated as never-active by stale detection.
     had_inbound: bool,
+    /// Time payload last crossed the link inbound, keepalives excluded
+    /// (timestamp in seconds); `None` before establishment. Python's
+    /// `Link.last_data` (`Link.py:978-980`), the clock an application's
+    /// idle teardown reads (`Link.no_data_for`, `Link.py:671-675`).
+    last_data: Option<u64>,
     /// Time of last outbound packet (timestamp in seconds)
     last_outbound: u64,
     /// Last time we sent a keepalive (timestamp in seconds)
@@ -595,6 +600,7 @@ impl Link {
             stale_time_secs: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR,
             last_inbound: 0,
             had_inbound: false,
+            last_data: None,
             last_outbound: 0,
             last_keepalive: 0,
             keepalives_sent: 0,
@@ -732,6 +738,7 @@ impl Link {
             stale_time_secs: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR,
             last_inbound: 0,
             had_inbound: false,
+            last_data: None,
             last_outbound: 0,
             last_keepalive: 0,
             keepalives_sent: 0,
@@ -1542,6 +1549,21 @@ impl Link {
     pub fn record_inbound(&mut self, now_secs: u64) {
         self.last_inbound = now_secs;
         self.had_inbound = true;
+        self.last_data = Some(now_secs);
+    }
+
+    /// Record an inbound keepalive: it keeps the link alive but is not
+    /// payload, so the data clock stays where it was (`Link.py:979`).
+    pub fn record_keepalive_inbound(&mut self, now_secs: u64) {
+        self.last_inbound = now_secs;
+        self.had_inbound = true;
+    }
+
+    /// Seconds since payload last crossed the link inbound, keepalives
+    /// excluded, or `None` before establishment: Python's
+    /// `Link.no_data_for()` (`Link.py:671-675`).
+    pub fn no_data_for_secs(&self, now_secs: u64) -> Option<u64> {
+        self.last_data.map(|at| now_secs.saturating_sub(at))
     }
 
     /// Record an outbound packet timestamp
@@ -1570,6 +1592,7 @@ impl Link {
         self.established_at = Some(now_secs);
         self.last_inbound = now_secs;
         self.had_inbound = true;
+        self.last_data = Some(now_secs);
     }
 
     /// Get the keepalive interval in seconds
@@ -3989,6 +4012,26 @@ mod tests {
 
         // Just verify no panic - internal fields not exposed
         assert!(link.established_at.is_some());
+    }
+
+    /// The data clock behind an application's idle teardown: establishment
+    /// starts it, payload resets it, a keepalive does not
+    /// (`Link.py:978-980`). A keepalive that reset it would keep an idle
+    /// propagation link open forever (Codeberg #442).
+    #[test]
+    fn keepalives_do_not_reset_the_data_clock() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        assert_eq!(link.no_data_for_secs(100), None);
+
+        link.mark_established(100);
+        assert_eq!(link.no_data_for_secs(150), Some(50));
+
+        link.record_keepalive_inbound(200);
+        assert_eq!(link.no_data_for_secs(250), Some(150));
+
+        link.record_inbound(260);
+        assert_eq!(link.no_data_for_secs(270), Some(10));
     }
 
     // MTU Negotiation Tests
