@@ -1763,12 +1763,12 @@ build-deb-arm64: (_require-cargo-deb) _deb-stamp
     @bash scripts/build-deb.sh arm64
 
 # The heap-accounting variants of the leviculum package (#437; 508 added the
-# mimalloc one), for one architecture. Both build-deb-* recipes produce them
+# mimalloc one) and of the lnpnd package (550), for one architecture. Both build-deb-* recipes produce them
 # beside the plain packages, because scripts/build-deb.sh always does; this
 # recipe exists so asking for the instrumented builds by name does not mean
 # knowing that; the script's closing `produced:` lines name the packages.
 # The nightly publishes the arm64 leviculum-heapacct only.
-[doc('Build the heap-accounting leviculum .debs (and the plain ones too)')]
+[doc('Build the heap-accounting leviculum and lnpnd .debs (plain too)')]
 deb-heapacct arch="amd64": (_require-cargo-deb) _deb-stamp
     @bash scripts/build-deb.sh {{arch}}
 

@@ -200,6 +200,7 @@ skip  lnpnd           lxmd_identity_takeover     # spawns the daemon against an 
 skip  lnpnd           lxmd_messagestore_path     # spawns python3 to have the reference write its store, and its subject is the code
 skip  lnpnd           start_waits_for_daemon     # tokio runtime and a startup race with sleeps
 skip  lnpnd           sigterm_flushes_storage    # spawns the daemon against a shared-instance socket and signals it
+skip  lnpnd           sigusr1_census             # spawns the daemon against a shared-instance socket and signals it for its census
 skip  lnpnd           status_default_budget      # tokio runtime with sleeps
 skip  lnpnd           status_under_transport_load # tokio runtime, local instance sockets, an announce storm and minute-scale timeouts
 skip  nmea0183        parsing                    # sentence corpus in-process; subject is the parser

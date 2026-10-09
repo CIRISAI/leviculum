@@ -116,6 +116,14 @@ The config directory keeps lxmd's layout. lnpnd started on an lxmd config direct
 
 The Debian package installs the config directory at */etc/lnpnd* and the data directory at */var/lib/lnpnd*, both owned by the `lnpnd` service user. It enables the unit but does not start it: at install time neither an identity nor a configuration is in place, and a daemon started then would mint an address of its own and announce it. Place the identity, then `systemctl start lnpnd`. An upgrade over a running node restarts it and mints nothing; an upgrade over a stopped one leaves it stopped.
 
+## SIGNALS
+
+**SIGINT**, **SIGTERM**
+:   Graceful shutdown: the node storage is flushed before the daemon exits.
+
+**SIGUSR1**
+:   Print the memory census to stderr, the same dump **lnsd**(1) prints on the same signal (see DIAGNOSTIC DUMP there). In a build with the `heap-accounting` feature (the `lnpnd-heapacct` package, whose `--version` ends in `+heapacct`) the `gap:` line subtracts the measured live heap bytes and a `=== Measured live ===` line follows; with `LEVICULUM_HEAP_SAMPLE=<n>` set at startup it also lists the top allocation call sites. A plain build prints `live n/a` there.
+
 ## EVENTS
 
 With `LEVICULUM_EVENT_LOG=<path>` set, the daemon appends one structured line per accepted upload (`PN_ACCEPT`), rejected upload (`PN_REJECT`, with a fixed `reason` word), mailbox request (`PN_GET`), eviction (`PN_EVICT`), peer-table change (`PN_PEER`), offer round (`PN_OFFER`), sync round (`PN_SYNC`) and own-mailbox delivery (`PN_MAILBOX`), plus a `PN_STORE` line every 8 minutes carrying store size against the limit. `PN_STORE` fires whether or not traffic arrived, so it is also the log's liveness heartbeat: a quiet node and a dead one are otherwise the same absence of lines.

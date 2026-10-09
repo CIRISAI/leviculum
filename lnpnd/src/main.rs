@@ -27,10 +27,27 @@ use lnpnd::engine::{Engine, EngineConfig, EngineEvent, DEFAULT_ANNOUNCE_INTERVAL
 use lnpnd::mailbox::MailboxConfig;
 use tokio::signal::unix::{signal, SignalKind};
 
+/// Measured live heap, under the default-off `heap-accounting` feature
+/// (550): the same counting shim lnsd installs (`leviculum-cli/src/lnsd.rs`),
+/// for the same reason. It only counts and forwards to `System`, so the
+/// node runs the allocator it would run without it.
+#[cfg(feature = "heap-accounting")]
+#[global_allocator]
+static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
+    leviculum_std::heap_accounting::CountingAllocator;
+
+/// `--version`, with `+heapacct` in an instrumented build: the soak node's
+/// journal and `dpkg -l` must not be the only places that tell the two
+/// apart, which is lnsd's rule (`leviculum-cli/build.rs`) too.
+#[cfg(feature = "heap-accounting")]
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+heapacct");
+#[cfg(not(feature = "heap-accounting"))]
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Parser, Debug)]
 #[command(
     name = "lnpnd",
-    version,
+    version = VERSION,
     about = "LXMF propagation node daemon for Reticulum",
     long_about = "Runs an LXMF propagation node (a store-and-forward mailbox) \
                   on a running Reticulum shared instance.\n\n\
@@ -542,6 +559,15 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     } else {
         leviculum_std::event_log::install_global_subscriber(loglevel_filter(level));
     }
+    // Said at startup, as lnsd does, so a SIGUSR1 dump can be traced to the
+    // build that printed it.
+    #[cfg(feature = "heap-accounting")]
+    {
+        tracing::info!(
+            "Heap accounting: on, SIGUSR1 reports measured live bytes beside the estimate"
+        );
+        leviculum_std::heap_accounting::configure_sampler_from_env();
+    }
 
     let data_dir = args
         .data_dir
@@ -691,21 +717,47 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     // SIGTERM left to its default disposition (which is how systemd stops
     // and restarts the unit) forgot every destination learned in a run
     // shorter than the hourly crash-protection flush.
+    //
+    // SIGUSR1 prints the memory census, lnsd's signal for lnsd's dump and in
+    // lnsd's shape (`leviculum_std::reticulum::compose_diagnostic_dump`), so
+    // periculum's soak census reads either daemon with one parser (550). On
+    // stderr, which is where every other line of this daemon goes.
     let mut sigterm = match signal(SignalKind::terminate()) {
         Ok(sigterm) => sigterm,
         Err(error) => return failure(format!("signal handling: {error}")),
     };
-    let received = tokio::select! {
-        result = tokio::signal::ctrl_c() => match result {
-            Ok(()) => "SIGINT",
-            Err(error) => return failure(format!("signal handling: {error}")),
-        },
-        _ = sigterm.recv() => "SIGTERM",
+    let mut sigusr1 = match signal(SignalKind::user_defined1()) {
+        Ok(sigusr1) => sigusr1,
+        Err(error) => return failure(format!("signal handling: {error}")),
+    };
+    let received = loop {
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => match result {
+                Ok(()) => break "SIGINT",
+                Err(error) => return failure(format!("signal handling: {error}")),
+            },
+            _ = sigterm.recv() => break "SIGTERM",
+            _ = sigusr1.recv() => eprint!("{}", census_dump(&node)),
+        }
     };
     eprintln!("lnpnd: shutting down ({received})");
     let _ = node.stop().await;
     drop(printer);
     ExitCode::SUCCESS
+}
+
+/// The SIGUSR1 dump: the composed census, then the measured live line in a
+/// build that can measure it. Written in one piece, because periculum tells
+/// a fresh dump from the last by its `gap:` line and reads each section as
+/// the last line of its kind.
+fn census_dump(node: &leviculum_std::ReticulumNode) -> String {
+    #[allow(unused_mut)]
+    let mut dump = leviculum_std::reticulum::compose_diagnostic_dump(node.diagnostic_dump());
+    #[cfg(feature = "heap-accounting")]
+    dump.push_str(&leviculum_std::heap_accounting::measured_live_line(
+        "system",
+    ));
+    dump
 }
 
 fn report(event: EngineEvent, messages_dir: &Path, on_inbound: Option<&str>) {

@@ -51,6 +51,10 @@ priority = "optional"
 # Python rnsd is equally valid.
 depends = "adduser"
 recommends = "leviculum"
+# The heap-accounting variant below is the same package with an
+# instrumented binary, so the two swap each other out on install (550).
+conflicts = "lnpnd-heapacct"
+replaces = "lnpnd-heapacct"
 assets = [
     # cargo-deb only recognises "target/release/..." exactly as a Cargo
     # target path and auto-substitutes the --target triple into it. Any
@@ -95,6 +99,43 @@ enable = true
 # script is deliberately outside every test tier.
 start = false
 restart-after-upgrade = true
+
+# 550: the instrumented build for memory censuses on the soak node, not for
+# daily use. Same unit, same service user, same maintainer scripts; only the
+# binary is rebuilt with `--features heap-accounting` (scripts/build-deb.sh),
+# so its SIGUSR1 census carries measured live bytes. Built with `cargo deb
+# --variant heapacct`; the version gets a `+heapacct` suffix there, and
+# `lnpnd --version` says the same. Named explicitly for the reason
+# leviculum-cli's variants are: cargo-deb keeps the base name otherwise and
+# deletes the plain package it finds under the same name.
+[package.metadata.deb.variants.heapacct]
+name = "lnpnd-heapacct"
+conflicts = "lnpnd"
+replaces = "lnpnd"
+provides = "lnpnd"
+extended-description = """\
+lnpnd runs an LXMF propagation node -- a store-and-forward mailbox on a
+Reticulum mesh, and a drop-in counterpart to Python's lxmd.
+
+This is the heap-accounting build of the lnpnd package: the same daemon,
+but it counts every allocation, so its SIGUSR1 memory census reports
+measured live heap bytes beside the modelled total. It costs a few atomic
+operations per allocation and exists for memory investigations on a field
+node, not for daily use. It conflicts with and replaces the plain lnpnd
+package; installing either one swaps the other out.
+"""
+
+# Off by default, like lnsd's (leviculum-cli/Cargo.toml): with it, lnpnd
+# installs `leviculum_std::heap_accounting::CountingAllocator` as its global
+# allocator, and the SIGUSR1 dump gains the measured live-bytes line and a
+# gap line that subtracts it (550). lnpnd is the daemon that will hold the
+# public store for weeks, and VmData alone cannot tell a table that grows by
+# design from a leak.
+#
+#   cargo build --release -p lnpnd --features heap-accounting
+[features]
+default = []
+heap-accounting = ["leviculum-std/heap-accounting"]
 
 [dependencies]
 # The propagation-node role, the store trait, and the wire codecs.

@@ -32,7 +32,7 @@
 # the manual pages. Produces target/debian/*_<arch>.deb, which cargo-deb
 # also hardlinks under target/<triple>/debian/: one per crate, plus
 # leviculum-heapacct and leviculum-heapacct-mimalloc, the instrumented
-# variants of the leviculum package.
+# variants of the leviculum package, and lnpnd-heapacct, lnpnd's.
 
 set -euo pipefail
 
@@ -157,16 +157,24 @@ done
 # put back once the variant is packaged. `rm` before `cp`, never `cp` over:
 # release/lnsd is a hardlink into deps/, and writing through it would put
 # plain bytes into the cached instrumented artefact.
+#
+# lnpnd gets the same treatment for its own heapacct variant (550), below the
+# two lnsd ones, so both plain binaries are saved and put back together.
 release_dir="$TARGET/$TRIPLE/release"
-plain_lnsd="$(mktemp)"
-cp "$release_dir/lnsd" "$plain_lnsd"
-restore_plain_lnsd() {
-    rm -f "$release_dir/lnsd"
-    cp "$plain_lnsd" "$release_dir/lnsd"
-    chmod 755 "$release_dir/lnsd"
-    rm -f "$plain_lnsd"
+instrumented_bins=(lnsd lnpnd)
+plain_dir="$(mktemp -d)"
+for bin in "${instrumented_bins[@]}"; do
+    cp "$release_dir/$bin" "$plain_dir/$bin"
+done
+restore_plain_bins() {
+    for bin in "${instrumented_bins[@]}"; do
+        rm -f "$release_dir/$bin"
+        cp "$plain_dir/$bin" "$release_dir/$bin"
+        chmod 755 "$release_dir/$bin"
+    done
+    rm -rf "$plain_dir"
 }
-trap restore_plain_lnsd EXIT
+trap restore_plain_bins EXIT
 
 # The instrumented lnsd has to keep its symbol table: the census's call-site
 # sampler (LEVICULUM_HEAP_SAMPLE, 508) names frames from it at run time, and
@@ -183,8 +191,9 @@ if [ "$ARCH" = arm64 ]; then
     instrumented_env=(CARGO_PROFILE_RELEASE_STRIP=none)
 fi
 require_symtab() {
-    grep -qaF '.symtab' "$release_dir/lnsd" || {
-        echo "error: the instrumented lnsd has no symbol table; the heap sampler could not name a frame" >&2
+    local bin="${1:-lnsd}"
+    grep -qaF '.symtab' "$release_dir/$bin" || {
+        echo "error: the instrumented $bin has no symbol table; the heap sampler could not name a frame" >&2
         exit 1
     }
 }
@@ -223,10 +232,30 @@ cargo deb -p leviculum-cli --variant heapacct-mimalloc --target "$TRIPLE" --no-b
     --deb-version "$mimalloc_version"
 debs+=("$TARGET/debian/leviculum-heapacct-mimalloc_${mimalloc_version}_${ARCH}.deb")
 
-restore_plain_lnsd
+# lnpnd under `--features heap-accounting` (550), so the soak node's
+# propagation daemon reports measured live bytes the way its lnsd does. Its
+# own package, a variant of lnpnd's, because the daemon ships with its own
+# unit and service user; lnpnd's build carries the same startup line.
+env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" -p lnpnd --bin lnpnd \
+    --features heap-accounting
+require_symtab lnpnd
+grep -qaF "$heapacct_marker" "$release_dir/lnpnd" || {
+    echo "error: lnpnd built with --features heap-accounting does not carry the feature" >&2
+    exit 1
+}
+lnpnd_heapacct_version="$(cat .deb-version-lnpnd)+heapacct"
+cargo deb -p lnpnd --variant heapacct --target "$TRIPLE" --no-build --no-strip \
+    --deb-version "$lnpnd_heapacct_version"
+debs+=("$TARGET/debian/lnpnd-heapacct_${lnpnd_heapacct_version}_${ARCH}.deb")
+
+restore_plain_bins
 trap - EXIT
 if grep -qaF "$heapacct_marker" "$release_dir/lnsd" || grep -qaF "$mimalloc_marker" "$release_dir/lnsd"; then
     echo "error: the plain lnsd was not restored after the heap-accounting builds" >&2
+    exit 1
+fi
+if grep -qaF "$heapacct_marker" "$release_dir/lnpnd"; then
+    echo "error: the plain lnpnd was not restored after the heap-accounting build" >&2
     exit 1
 fi
 
