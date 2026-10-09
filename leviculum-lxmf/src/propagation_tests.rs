@@ -275,8 +275,9 @@ fn host_reports_the_multi_message_form_distinctly_from_a_bad_length() {
 
 /// Trailing bytes after the envelope are accepted on purpose: `LXMRouter`
 /// unpacks with `RNS.vendor.umsgpack.unpackb`
-/// (reference/LXMF/LXMF/LXMRouter.py:14), which ignores them. The strict
-/// `finish()` in this module's other decoders is the divergence, not this.
+/// (reference/LXMF/LXMF/LXMRouter.py:14), which ignores them. Where a
+/// decoder here still calls `finish()` on reference-produced bytes, that is
+/// the divergence, not this.
 #[test]
 fn host_upload_decode_ignores_trailing_bytes_as_umsgpack_does() {
     let mut wire = PropagationUpload::single(
@@ -288,6 +289,49 @@ fn host_upload_decode_ignores_trailing_bytes_as_umsgpack_does() {
     let clean = PropagationUpload::decode(&wire).expect("well-formed envelope");
     wire.push(0xc0); // nil, the way a padded Resource body can arrive
     assert_eq!(PropagationUpload::decode(&wire), Ok(clean));
+}
+
+/// A `/get` with more than three elements is served: `message_get_request`
+/// reads `data[0]`, `data[1]` and, when `len(data) >= 3`, `data[2]`, and
+/// never looks further (reference/LXMF/LXMF/LXMRouter.py:1489-1534).
+#[test]
+fn host_get_decode_ignores_extra_elements_as_the_reference_does() {
+    let mut wire = Vec::new();
+    msgpack::array(&mut wire, 4);
+    msgpack::nil(&mut wire);
+    msgpack::nil(&mut wire);
+    msgpack::uint(&mut wire, 1000);
+    msgpack::nil(&mut wire);
+    assert_eq!(
+        MessageGetRequest::decode(&wire),
+        Ok(MessageGetRequest {
+            wants: None,
+            haves: None,
+            transfer_limit_kb: Some(TransferLimit::Integer(1000)),
+        })
+    );
+}
+
+/// A propagation announce followed by a stray byte decodes: the reference
+/// unpacks announce app data with `RNS.vendor.umsgpack.unpackb`
+/// (reference/LXMF/LXMF/LXMF.py:150, used at :224-248), which ignores what
+/// follows the value.
+#[test]
+fn propagation_announce_decode_ignores_trailing_bytes_as_umsgpack_does() {
+    let announce = PropagationNodeAnnounce {
+        legacy_support: false,
+        timebase: 1_700_000_000,
+        enabled: true,
+        transfer_limit_kb: 256,
+        sync_limit_kb: 10_240,
+        stamp_cost: 16,
+        stamp_cost_flexibility: 3,
+        peering_cost: 18,
+        metadata: Vec::new(),
+    };
+    let mut wire = announce.encode().expect("encode");
+    wire.push(0xc0);
+    assert_eq!(PropagationNodeAnnounce::decode(&wire), Ok(announce));
 }
 
 /// The upload length guard sits exactly where Python's does.

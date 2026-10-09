@@ -137,8 +137,8 @@ impl PropagationUpload {
         let (unstamped, stamp) = stamped.split_at(stamped.len() - STAMP_SIZE);
         let mut propagation_stamp = [0u8; STAMP_SIZE];
         propagation_stamp.copy_from_slice(stamp);
-        // No `finish()` here, unlike every other decoder in this module, and
-        // that is deliberate rather than an omission. `LXMRouter` unpacks this
+        // No `finish()` here, unlike most decoders in this module, and that
+        // is deliberate rather than an omission. `LXMRouter` unpacks this
         // envelope with `RNS.vendor.umsgpack.unpackb`
         // (reference/LXMF/LXMF/LXMRouter.py:14), which ignores bytes after the
         // decoded value; pip `msgpack` would raise, but LXMRouter does not use
@@ -411,21 +411,28 @@ impl MessageGetRequest {
     }
 
     /// Decode a client's `/get` request — the propagation-node HOST side of
-    /// the exchange (leviculum#38). Exact inverse of the encoders used by
+    /// the exchange (leviculum#38). Inverse of the encoders used by
     /// [`MessageGetRequest::list`] / [`MessageGetRequest::acknowledge`].
+    ///
+    /// Elements past the third are skipped: `message_get_request` reads
+    /// `data[0]`, `data[1]` and, when `len(data) >= 3`, `data[2]`, and
+    /// never looks further (reference/LXMF/LXMF/LXMRouter.py:1489-1534).
     pub fn decode(bytes: &[u8]) -> Result<Self, PropagationError> {
         let mut position = 0;
         let count = msgpack::array_len(bytes, &mut position)?;
-        if !(2..=3).contains(&count) {
+        if count < 2 {
             return Err(PropagationError::InvalidLength);
         }
         let wants = decode_optional_ids(bytes, &mut position)?;
         let haves = decode_optional_ids(bytes, &mut position)?;
-        let transfer_limit_kb = if count == 3 {
+        let transfer_limit_kb = if count >= 3 {
             Some(decode_transfer_limit(bytes, &mut position)?)
         } else {
             None
         };
+        for _ in 3..count {
+            msgpack::skip(bytes, &mut position)?;
+        }
         finish(bytes, position)?;
         Ok(Self {
             wants,
@@ -580,7 +587,10 @@ impl PropagationNodeAnnounce {
         for _ in 7..field_count {
             msgpack::skip(bytes, &mut position)?;
         }
-        finish(bytes, position)?;
+        // No `finish()`, for the reason `PropagationUpload::decode` gives:
+        // the reference unpacks announce app data with
+        // `RNS.vendor.umsgpack.unpackb` (reference/LXMF/LXMF/LXMF.py:150,
+        // used at :224-248), which ignores bytes after the decoded value.
         Ok(Self {
             legacy_support,
             timebase,

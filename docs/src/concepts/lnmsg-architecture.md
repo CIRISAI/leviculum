@@ -314,7 +314,7 @@ Node discovery is automatic from announces (`remember_announce`,
 announce arm at `:733-742`), and the decoded announce carries `enabled`,
 `transfer_limit_kb`, `sync_limit_kb`, `stamp_cost`, `peering_cost` and
 `metadata` (`PropagationNodeAnnounce`,
-`leviculum-lxmf/src/propagation.rs:513-525`), all of which are directly
+`leviculum-lxmf/src/propagation.rs:520-532`), all of which are directly
 displayable. `select_outbound_propagation_node` with `None` auto-ranks by
 route, hops, peering cost and stamp cost
 (`leviculum-lxmf/src/router/propagation_runtime.rs:1161-1196`).
