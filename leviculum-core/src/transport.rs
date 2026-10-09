@@ -19479,6 +19479,117 @@ mod tests {
             );
         }
 
+        /// lora_dual_cluster_rust, red on 3032da10 (2026-10-09 10:18): two
+        /// relays with a saturated announce cap keep, for every queued
+        /// announce, the phase their first capped emission drew.
+        ///
+        /// The drain re-arms `allowed_at_ms = now + wait_ms`, and `wait_ms`
+        /// depends on nothing but the frame length and the bitrate. Two hubs
+        /// on one channel, each with a backlog of equal-sized transit
+        /// announces, therefore emit on two grids of the same period, offset
+        /// by whatever their first emission happened to be. In the red run
+        /// that was 0.6 ms: hub_a and hub_b put eight announce pairs on the
+        /// air every 31.149 s, each pair within 1.1 ms, and the only thing
+        /// left between the two frames was the RNode interface's acquisition
+        /// jitter (16 slots of 24 ms at SF7/BW62.5). Two pairs drew the same
+        /// or adjacent slots, both modems keyed (`LORA_TX_ACCOUNT
+        /// verdict=keyed` 12 ms apart at 10:16:00.43) and neither heard the
+        /// other. One of the lost frames was hub_b's only emission of the
+        /// b1 probe announce, and hub_a, reached over a FULL-mode TCP
+        /// interface, rightly does not forward a path request for an unknown
+        /// destination (Transport.py:3006-3043), so a1 never got a path. The
+        /// green run on f4863a6f had the same lock at a 135 ms offset.
+        ///
+        /// This pins the lock rather than a fix: it is the arithmetic every
+        /// pair of the red run followed. A change that de-phases the drain
+        /// is expected to turn the equality below into a spread, and this
+        /// test then states the new contract instead.
+        #[test]
+        fn saturated_caps_keep_the_phase_of_their_first_emission() {
+            use crate::rnode::{announce_cap_bitrate_bps, derive_preamble_symbols};
+
+            const BACKLOG: usize = 7;
+
+            // The cell's own PHY, and so the cell's own announce-cap bitrate
+            // (the daemon logged 2380 bps for it).
+            let bps = announce_cap_bitrate_bps(62_500, 7, 5, derive_preamble_symbols(7, 5, 62_500));
+            assert!(bps > 0, "premise: this PHY has a computable airtime");
+
+            // One relay: an uncapped side that hears a backlog of transit
+            // announces, and a capped radio they leave on. Returns the
+            // instants of the first BACKLOG emissions on the radio, driving
+            // the clock to each `next_deadline` like the daemon does.
+            let emissions = |offset_ms: u64| -> Vec<u64> {
+                let mut transport = make_transport_enabled();
+                let _ = transport.register_interface(Box::new(MockInterface::new("tcp", 1)));
+                let _ = transport.register_interface(Box::new(MockInterface::new("rnode", 2)));
+                transport.register_interface_bitrate(1, bps);
+
+                transport.clock.advance(offset_ms);
+                for _ in 0..BACKLOG {
+                    let (raw, _) = make_announce_raw(1, PacketContext::None);
+                    transport.process_incoming(0, &raw).unwrap();
+                }
+                let _ = transport.drain_actions();
+                let _ = transport.drain_events();
+
+                // Every rebroadcast is due after one jitter window; the first
+                // takes the free cap, the rest join its queue.
+                transport
+                    .clock
+                    .advance(transport.announce_jitter_max_ms() + 100);
+                let mut sent = Vec::new();
+                for _ in 0..10_000 {
+                    transport.poll();
+                    let now = transport.clock.now_ms();
+                    for action in transport.drain_actions() {
+                        if matches!(action, Action::SendPacket { iface, .. } if iface.0 == 1) {
+                            sent.push(now);
+                        }
+                    }
+                    let _ = transport.drain_events();
+                    if sent.len() >= BACKLOG {
+                        break;
+                    }
+                    let Some(deadline) = transport.next_deadline() else {
+                        break;
+                    };
+                    let now = transport.clock.now_ms();
+                    transport.clock.advance(deadline.saturating_sub(now).max(1));
+                }
+                sent.truncate(BACKLOG);
+                sent
+            };
+
+            let hub_a = emissions(0);
+            let hub_b = emissions(1);
+            assert_eq!(hub_a.len(), BACKLOG, "hub_a drained its backlog: {hub_a:?}");
+            assert_eq!(hub_b.len(), BACKLOG, "hub_b drained its backlog: {hub_b:?}");
+
+            let period = hub_a[1] - hub_a[0];
+            assert!(
+                period > 30_000,
+                "premise: at {bps} bps one announce holds the cap for about 31 s, \
+                 got {period} ms"
+            );
+            for k in 1..BACKLOG {
+                assert_eq!(
+                    hub_a[k] - hub_a[k - 1],
+                    period,
+                    "the drain emits on a fixed grid: {hub_a:?}"
+                );
+            }
+            for k in 0..BACKLOG {
+                assert_eq!(
+                    hub_b[k] - hub_a[k],
+                    1,
+                    "emission {k}: the 1 ms the first emissions drew holds for \
+                     the whole backlog ({} s): a={hub_a:?} b={hub_b:?}",
+                    (hub_a[BACKLOG - 1] - hub_a[0]) / 1000
+                );
+            }
+        }
+
         /// Codeberg #402, the board's side of the same boundary, asserted
         /// where it can run.
         ///
