@@ -389,7 +389,9 @@ autopeer_maxdepth = 4
 # static_peers = e17f833c4ddf8890dd3a79a6fea8161d, 5a2d0029b6e5ec87020abaea0d746da4
 
 # Only accept incoming propagation messages from configured static
-# peers.
+# peers. The node then announces itself closed, so other nodes
+# neither peer with it nor select it, and it refuses a message
+# upload or sync from anyone else before any of it is transferred.
 
 # from_static_only = False
 

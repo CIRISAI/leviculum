@@ -541,6 +541,12 @@ impl<S: PropagationStore> Engine<S> {
             None => None,
         };
 
+        // The static-only policy has one knob, the peering config's: the
+        // role announces it, the peering runtime enforces it.
+        let node_config = PropagationNodeConfig {
+            from_static_only: peering.from_static_only,
+            ..node_config
+        };
         let mut node = PropagationNode::new(store, node_config);
         let min_cost = node.min_accepted_cost();
         let peering = PeeringRuntime::new(peering, peer_store, identity_copy, self.events.clone());
@@ -1421,12 +1427,15 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 }
             }
             // An upload too big for one link packet arrives as a resource;
-            // refuse before transfer when it exceeds the announced per-sync
-            // limit (reference/LXMF/LXMF/LXMRouter.py:2220-2224).
+            // refuse before transfer when a static-only node does not know
+            // the sender as a static peer, or when it exceeds the announced
+            // per-sync limit, in that order
+            // (reference/LXMF/LXMF/LXMRouter.py:2206-2224).
             NodeEvent::ResourceAdvertised {
                 link_id, data_size, ..
             } if Self::owns_link(core, &ready, link_id) => {
-                let accept = ready.node.accepts_resource_of(*data_size);
+                let accept = ready.peering.admits_resource_on(core, link_id)
+                    && ready.node.accepts_resource_of(*data_size);
                 let verdict = if accept {
                     ready.peering.on_inbound_resource_accepted(link_id);
                     core.accept_resource(link_id)
@@ -2615,6 +2624,197 @@ mod tests {
             peer_phase(&engine, &remote).map(|(phase, ..)| phase),
             Some(SyncPhase::Idle),
             "the filled static peer must be synced on the next pass"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 542: a closed node says so in its announce and at its door
+    // ------------------------------------------------------------------
+
+    /// A node peering from static peers only announces field 2 = false,
+    /// as the reference does (`node_state = propagation_node and not
+    /// from_static_only`, `reference/LXMF/LXMF/LXMRouter.py:326`): strangers
+    /// then neither autopeer nor select it, and existing autopeers unpeer it
+    /// (`reference/LXMF/LXMF/Handlers.py:98-99`). An open node still says
+    /// true.
+    #[test]
+    fn a_static_only_node_announces_itself_closed() {
+        use leviculum_lxmf::PropagationNodeAnnounce;
+
+        for from_static_only in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut core = core(dir.path());
+            let (mut engine, _events) = peering_engine(PeeringConfig {
+                from_static_only,
+                ..PeeringConfig::default()
+            });
+            let start = core.now_ms();
+            let out = engine.on_tick(&mut core, start + 1);
+            let destination_hash = match &engine.state {
+                State::Ready(ready) => ready.destination_hash,
+                _ => panic!("engine must be ready"),
+            };
+            let app_data = wire_of(&out)
+                .into_iter()
+                .find(|raw| {
+                    Packet::unpack(raw).is_ok_and(|packet| {
+                        packet.flags.packet_type == PacketType::Announce
+                            && packet.destination_hash == *destination_hash.as_bytes()
+                    })
+                })
+                .and_then(|raw| leviculum_core::cached_announce_app_data(&raw))
+                .expect("the propagation destination announces at start");
+            let decoded = PropagationNodeAnnounce::decode(&app_data).expect("our app data decodes");
+            assert_eq!(
+                decoded.enabled, !from_static_only,
+                "from_static_only = {from_static_only} must announce field 2 = {}",
+                !from_static_only
+            );
+        }
+    }
+
+    /// Every wire packet one output puts on the air.
+    fn wire_of(out: &TickOutput) -> Vec<Vec<u8>> {
+        out.actions
+            .iter()
+            .map(|action| match action {
+                leviculum_core::transport::Action::SendPacket { data, .. }
+                | leviculum_core::transport::Action::Broadcast { data, .. } => data.clone(),
+            })
+            .collect()
+    }
+
+    /// Ship the client's first output to the engine's core and play the
+    /// exchange out until both sides fall silent. Every event the engine's
+    /// core raises goes through the engine, as the driver routes it.
+    /// Returns the client's events and every packet the engine's side sent.
+    fn converse(
+        engine: &mut Engine<MemoryPropagationStore>,
+        server: &mut leviculum_std::driver::StdNodeCore,
+        client: &mut leviculum_std::driver::StdNodeCore,
+        first: TickOutput,
+    ) -> (Vec<NodeEvent>, Vec<Packet>) {
+        let mut client_events = first.events.clone();
+        let mut server_sent = Vec::new();
+        let mut toward_server = wire_of(&first);
+        for _ in 0..64 {
+            if toward_server.is_empty() {
+                return (client_events, server_sent);
+            }
+            let mut toward_client = Vec::new();
+            for data in toward_server.drain(..) {
+                let out = server.handle_packet(leviculum_core::InterfaceId(0), &data);
+                toward_client.extend(wire_of(&out));
+                for event in &out.events {
+                    toward_client.extend(wire_of(&engine.on_event(server, event)));
+                }
+            }
+            server_sent.extend(
+                toward_client
+                    .iter()
+                    .filter_map(|data| Packet::unpack(data).ok()),
+            );
+            for data in toward_client {
+                let out = client.handle_packet(leviculum_core::InterfaceId(0), &data);
+                client_events.extend(out.events.iter().cloned());
+                toward_server.extend(wire_of(&out));
+            }
+        }
+        panic!("the exchange did not fall silent");
+    }
+
+    /// Advertise one propagation resource from `sender` over an identified
+    /// link to a `from_static_only` engine listing `static_peers`, and
+    /// report whether the engine's side requested it (accept) or cancelled
+    /// it (reject) before a byte of it moved.
+    fn advertise_to_a_closed_node(sender: &Identity, static_peers: Vec<[u8; 16]>) -> (bool, bool) {
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: cost_free(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            peering: PeeringConfig {
+                autopeer: false,
+                from_static_only: true,
+                static_peers,
+                ..PeeringConfig::default()
+            },
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+
+        let (link_id, _, out) = client
+            .connect(destination_hash, &signing_key)
+            .expect("connect");
+        let (events, _) = converse(&mut engine, &mut server, &mut client, out);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, NodeEvent::LinkEstablished { .. })),
+            "the link must come up, or the test proves nothing: {events:?}"
+        );
+        let out = client.identify_link(&link_id, sender).expect("identify");
+        let _ = converse(&mut engine, &mut server, &mut client, out);
+        assert_eq!(
+            server.get_remote_identity(&link_id).map(|id| *id.hash()),
+            Some(*sender.hash()),
+            "the engine's side must know who is on the link"
+        );
+
+        let upload = vec![0x5a; 2_000];
+        let (_, out) = client
+            .send_resource(&link_id, &upload, None, false)
+            .expect("advertise");
+        let (_, sent) = converse(&mut engine, &mut server, &mut client, out);
+        let requested = sent
+            .iter()
+            .any(|packet| packet.context == leviculum_core::packet::PacketContext::ResourceReq);
+        let cancelled = sent
+            .iter()
+            .any(|packet| packet.context == leviculum_core::packet::PacketContext::ResourceRcl);
+        (requested, cancelled)
+    }
+
+    /// A node peering from static peers only refuses a resource from a link
+    /// whose identity is not a static peer before a byte moves, and still
+    /// takes one from a static peer: `propagation_resource_advertised`
+    /// checks the remote identity, then the static list, then the size
+    /// (`reference/LXMF/LXMF/LXMRouter.py:2206-2224`).
+    #[test]
+    fn a_static_only_node_takes_resources_from_static_peers_alone() {
+        let stranger = leviculum_std::generate_identity();
+        let (requested, cancelled) = advertise_to_a_closed_node(&stranger, vec![[0x24; 16]]);
+        assert!(
+            cancelled && !requested,
+            "a stranger's resource must be rejected at the advertisement \
+             (requested={requested} cancelled={cancelled})"
+        );
+
+        let peer = leviculum_std::generate_identity();
+        let name_hash = Destination::compute_name_hash(APP_NAME, &[PROPAGATION_ASPECT]);
+        let peer_hash = *Destination::compute_destination_hash(&name_hash, peer.hash()).as_bytes();
+        let (requested, cancelled) = advertise_to_a_closed_node(&peer, vec![peer_hash]);
+        assert!(
+            requested && !cancelled,
+            "a static peer's resource must be accepted \
+             (requested={requested} cancelled={cancelled})"
         );
     }
 }

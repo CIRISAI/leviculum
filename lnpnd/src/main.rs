@@ -194,7 +194,8 @@ struct Args {
     #[arg(long)]
     max_inbound_syncs: Option<usize>,
 
-    /// Accept /offer only from static peers (config: from_static_only).
+    /// Peer with static peers only: announce the node closed, and refuse
+    /// offers and uploads from anyone else (config: from_static_only).
     #[arg(long)]
     from_static_only: bool,
 }

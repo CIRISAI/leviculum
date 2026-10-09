@@ -146,7 +146,7 @@ const DEFAULT_LOGLEVEL: u8 = 4;
 ///
 /// tracing has no notice/verbose/extreme, so notice folds into info, verbose
 /// into debug and extreme into trace. The third copy of this ladder
-/// (`leviculum-cli/src/lnsd.rs:353`, `lnpnd/src/config.rs:458`); kept local
+/// (`leviculum-cli/src/lnsd.rs:353`, `lnpnd/src/config.rs:460`); kept local
 /// because this batch is scoped to this crate, and cited from here so a later
 /// consolidation into `leviculum-std` finds all three.
 fn loglevel_filter(level: u8) -> &'static str {
@@ -160,7 +160,7 @@ fn loglevel_filter(level: u8) -> &'static str {
 }
 
 /// The config level shifted by the CLI's net verbosity, clamped to the RNS
-/// range — `lnpnd`'s arithmetic (`lnpnd/src/main.rs:258`). `RUST_LOG` is not
+/// range — `lnpnd`'s arithmetic (`lnpnd/src/main.rs:259`). `RUST_LOG` is not
 /// consulted here: `install_global_subscriber` gives it precedence over
 /// whatever default we hand it.
 fn effective_level(config_loglevel: Option<u8>, verbose: u8, quiet: u8) -> u8 {

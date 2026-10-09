@@ -382,6 +382,14 @@ pub struct PropagationNodeConfig {
     /// reference bounds a fetch by the client's limit alone, and a shorter
     /// response is the protocol's normal shape either way.
     pub serve_limit_bytes: Option<usize>,
+    /// The node peers from its static peers only. Announce field 2 then
+    /// says false, as the reference's does (`node_state = propagation_node
+    /// and not from_static_only`, `reference/LXMF/LXMF/LXMRouter.py:326`):
+    /// strangers neither autopeer nor select a closed node, and its
+    /// existing autopeers unpeer it (`reference/LXMF/LXMF/Handlers.py:98-99`).
+    /// The host that enforces the policy at the door owns the static list
+    /// and sets this from the same knob.
+    pub from_static_only: bool,
 }
 
 impl Default for PropagationNodeConfig {
@@ -402,6 +410,7 @@ impl Default for PropagationNodeConfig {
             message_expiry_secs: MESSAGE_EXPIRY_SECS,
             serve_cap_bytes: None,
             serve_limit_bytes: None,
+            from_static_only: false,
         }
     }
 }
@@ -832,8 +841,9 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// The seven-field announce app-data, exactly as the reference builds it
     /// (`get_propagation_node_app_data`,
     /// `reference/LXMF/LXMF/LXMRouter.py:324-336`): field 0 legacy `False`,
-    /// field 1 the current timebase, field 2 `True` (the role is live and
-    /// serves strangers), fields 3 and 4 the limits, field 5
+    /// field 1 the current timebase, field 2 whether the node is open to
+    /// strangers (`False` when [`PropagationNodeConfig::from_static_only`]),
+    /// fields 3 and 4 the limits, field 5
     /// `[stamp_cost, flexibility, peering_cost]`, field 6 the metadata map
     /// with the name under [`PN_META_NAME`].
     pub fn announce_app_data(&self, now_secs: u64) -> Vec<u8> {
@@ -846,7 +856,7 @@ impl<S: PropagationStore> PropagationNode<S> {
         let announce = PropagationNodeAnnounce {
             legacy_support: false,
             timebase: now_secs,
-            enabled: true,
+            enabled: !self.config.from_static_only,
             transfer_limit_kb: self.config.transfer_limit_kb,
             sync_limit_kb: self.config.sync_limit_kb,
             stamp_cost: self.config.stamp_cost as u64,

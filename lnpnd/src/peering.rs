@@ -657,6 +657,24 @@ impl PeeringRuntime {
         response.encode()
     }
 
+    /// Whether a resource advertised on `link_id` passes the static-only
+    /// policy (`propagation_resource_advertised`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2206-2218`): an open node takes
+    /// anyone, a closed one only an identified link whose propagation
+    /// destination is a static peer. Checked before a byte moves; the
+    /// `/offer` gate is too late for an upload that never offers.
+    pub(crate) fn admits_resource_on(&self, core: &Core, link_id: &LinkId) -> bool {
+        let config = self.table.config();
+        if !config.from_static_only {
+            return true;
+        }
+        core.get_remote_identity(link_id).is_some_and(|identity| {
+            config
+                .static_peers
+                .contains(&Self::propagation_hash_of(identity))
+        })
+    }
+
     /// Track an accepted inbound resource for `max_inbound_syncs`.
     pub(crate) fn on_inbound_resource_accepted(&mut self, link_id: &LinkId) {
         if self.validated_links.contains_key(link_id) {
