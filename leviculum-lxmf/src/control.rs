@@ -46,7 +46,7 @@ pub const CONTROL_ASPECTS: [&str; 2] = ["propagation", "control"];
 /// the reference reports for a peer it has no path to
 /// (`compile_stats` fills `network_distance` from `Transport.hops_to`,
 /// `reference/LXMF/LXMF/LXMRouter.py:793`; the sentinel is
-/// `reference/Reticulum/RNS/Transport.py:97`).
+/// `reference/Reticulum/RNS/Transport.py:63`).
 pub const HOPS_UNKNOWN: u64 = 128;
 
 /// One peer's entry in the stats response — the fields `compile_stats`

@@ -78,7 +78,7 @@ pub const MAX_INBOUND_SYNCS_DEFAULT: usize = 3;
 /// How long a peer that sent invalid stamps is throttled, and how long a
 /// throttled peer defers its next sync
 /// (`PN_STAMP_THROTTLE`, `reference/LXMF/LXMF/LXMRouter.py:63`; applied at
-/// `:2445-2450` on the node side and `LXMPeer.py:421-424` on the peer
+/// `:2450-2452` on the node side and `LXMPeer.py:421-424` on the peer
 /// side).
 pub const PN_STAMP_THROTTLE_SECS: u64 = 180;
 
@@ -904,7 +904,7 @@ impl PeerTable {
         let is_static = self.config.static_peers.contains(&destination_hash);
         if !is_static {
             // `pn_config[2]`, `self.autopeer`, `hops_to <= autopeer_maxdepth`
-            // (`LXMRouter.py:2364`), in the reference's own order.
+            // (`LXMRouter.py:2365`), in the reference's own order.
             if !announce.enabled {
                 return PeerChange::Declined(DeclineReason::Disabled);
             }
@@ -1222,7 +1222,7 @@ impl PeerSyncEnvelope {
 
 /// Inbound `/offer` gate state: which peers are throttled and until when
 /// (`throttled_peers`, `reference/LXMF/LXMF/LXMRouter.py:2286-2291`,
-/// `:2445-2450`; expired entries cleaned in `clean_throttled_peers`,
+/// `:2450-2452`; expired entries cleaned in `clean_throttled_peers`,
 /// `:1136`).
 #[derive(Debug, Default)]
 pub struct InboundGate {
@@ -1264,7 +1264,7 @@ impl InboundGate {
     }
 
     /// Throttle a peer that shipped invalid stamps
-    /// (`LXMRouter.py:2445-2450`).
+    /// (`LXMRouter.py:2450-2452`).
     pub fn throttle(&mut self, remote_hash: [u8; DESTINATION_LENGTH], now: u64) {
         self.throttled
             .insert(remote_hash, now + PN_STAMP_THROTTLE_SECS);

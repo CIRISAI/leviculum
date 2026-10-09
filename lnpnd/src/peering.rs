@@ -928,7 +928,7 @@ impl PeeringRuntime {
             traffic.rx_bytes += bytes;
         } else {
             // A key-validated sender we do not peer back with — the
-            // reference's unpeered bucket (`LXMRouter.py:2496-2506`).
+            // reference's unpeered bucket (`LXMRouter.py:2437-2440`).
             self.unpeered_incoming += accepted as u64;
             self.unpeered_rx_bytes += bytes;
         }
