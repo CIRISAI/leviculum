@@ -238,8 +238,7 @@ use leviculum_lxmf::peering::{
     answer_offer, build_offer, offer_budget_for_mdu, offer_reply, peering_key_material,
     plan_sync_batch, DeclineReason, DropReason, InboundGate, OfferPlan, OfferReply, OfferResponse,
     PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeeringConfig,
-    SyncPhase, SyncSource, WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH,
-    SYNC_BACKOFF_STEP_SECS, SYNC_INTERVAL_SECS,
+    SyncPhase, SyncSource, WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_INTERVAL_SECS,
 };
 use leviculum_lxmf::propagation::{
     MessageListResponse, PeerError, PropagationNodeAnnounce, TransientId,
@@ -2647,8 +2646,7 @@ impl Engine {
             out.merge(node.request_path(&DestinationHash::new(destination)));
             return;
         };
-        peer.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
-        peer.next_sync_attempt = now + peer.sync_backoff_secs;
+        peer.book_sync_attempt(now);
         peer.state = SyncPhase::LinkEstablishing;
         let (link_id, _, core_out) =
             match node.connect(DestinationHash::new(destination), &signing_key) {

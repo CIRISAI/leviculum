@@ -381,12 +381,32 @@ impl Peer {
         }
     }
 
+    /// A sync round is about to dial this peer: book the deferral the
+    /// reference books before every link attempt
+    /// (`reference/LXMF/LXMF/LXMPeer.py:321-322`). The accumulator grows one
+    /// [`SYNC_BACKOFF_STEP_SECS`] per attempt and the peer is next due
+    /// `now` plus the whole accumulator, so a peer whose link never comes
+    /// up is retried 12, 24, 36 minutes apart. `now` is the emission clock
+    /// in seconds, the one [`PeerTable::next_due`] compares against.
+    ///
+    /// Booked BEFORE the dial so that every way the attempt can end without
+    /// a link (refused by the link cap, never answered, torn down) is
+    /// already deferred; [`note_link_established`](Self::note_link_established)
+    /// and [`release_yielded_round`](Self::release_yielded_round) are the two
+    /// ways it is taken back. The board's engine (`leviculum-nrf/src/pn.rs`,
+    /// `start_round`) calls this; no rig cell exercises the accumulation,
+    /// because none holds a peer unreachable (leviculum#413).
+    pub fn book_sync_attempt(&mut self, now: u64) {
+        self.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
+        self.next_sync_attempt = now + self.sync_backoff_secs;
+    }
+
     /// The sync link to this peer came up.
     ///
     /// The round that opened the link booked a deferral before dialling
-    /// — `sync_backoff_secs += SYNC_BACKOFF_STEP_SECS`, then
-    /// `next_sync_attempt = now + sync_backoff_secs`
-    /// (`reference/LXMF/LXMF/LXMPeer.py:321-322`). The moment the peer
+    /// ([`book_sync_attempt`](Self::book_sync_attempt): `sync_backoff_secs
+    /// += SYNC_BACKOFF_STEP_SECS`, then `next_sync_attempt = now +
+    /// sync_backoff_secs`, `reference/LXMF/LXMF/LXMPeer.py:321-322`). The moment the peer
     /// answers, that booking has been disproved: the peer is reachable.
     /// The reference clears the accumulator here (`:330`, `:541`) but
     /// leaves the deferral it already wrote in place, so a round that

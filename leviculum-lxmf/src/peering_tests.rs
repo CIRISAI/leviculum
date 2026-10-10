@@ -582,6 +582,63 @@ fn next_due_walks_hash_order_and_honours_backoff_and_cursor() {
 /// frame. Clearing `sync_backoff_secs` alone does not release the peer —
 /// the deferral is a second field, already written — so the board held a
 /// stored message for twelve minutes with the peer one hop away.
+/// The booking `start_round` makes before every dial, moved out of the
+/// board's engine (leviculum#413): a peer whose link never comes up is
+/// deferred one step more on every attempt, measured from the attempt, and
+/// is due again exactly when the accumulated deferral has run out. No rig
+/// cell holds a peer unreachable, so this is the only place that sees it.
+#[test]
+fn every_unanswered_sync_attempt_defers_the_peer_one_backoff_step_longer() {
+    let mut table = table();
+    table.handle_announce([1; 16], &announce(1), Some(1), 0, false);
+    let mut now = 100;
+    for attempt in 1..=3u64 {
+        {
+            let peer = table.get_mut(&[1; 16]).unwrap();
+            peer.book_sync_attempt(now);
+            assert_eq!(peer.sync_backoff_secs, attempt * SYNC_BACKOFF_STEP_SECS);
+            assert_eq!(
+                peer.next_sync_attempt,
+                now + attempt * SYNC_BACKOFF_STEP_SECS
+            );
+            // The link never came up; the round ends and the peer idles.
+            peer.state = SyncPhase::Idle;
+        }
+        let due_at = now + attempt * SYNC_BACKOFF_STEP_SECS;
+        assert_eq!(
+            table.next_due(due_at - 1, 5, None),
+            None,
+            "attempt {attempt}: not due inside its deferral"
+        );
+        assert_eq!(
+            table.next_due(due_at, 5, None),
+            Some([1; 16]),
+            "attempt {attempt}: due once the deferral has run out"
+        );
+        now = due_at;
+    }
+}
+
+/// The two ways a booking is taken back, each against a fresh booking: a
+/// link that came up clears it whole, a yield hands back exactly the step
+/// this attempt booked and keeps what earlier attempts earned.
+#[test]
+fn a_sync_booking_is_cleared_by_a_link_and_handed_back_by_a_yield() {
+    let mut table = table();
+    table.handle_announce([1; 16], &announce(1), Some(1), 0, false);
+    let peer = table.get_mut(&[1; 16]).unwrap();
+    peer.book_sync_attempt(100);
+    peer.book_sync_attempt(200);
+    peer.note_link_established();
+    assert_eq!((peer.sync_backoff_secs, peer.next_sync_attempt), (0, 0));
+
+    peer.book_sync_attempt(300);
+    peer.book_sync_attempt(400);
+    peer.release_yielded_round();
+    assert_eq!(peer.sync_backoff_secs, SYNC_BACKOFF_STEP_SECS);
+    assert_eq!(peer.next_sync_attempt, 0);
+}
+
 #[test]
 fn a_round_whose_link_came_up_is_not_held_for_a_whole_backoff_step() {
     let mut table = table();
@@ -591,8 +648,7 @@ fn a_round_whose_link_came_up_is_not_held_for_a_whole_backoff_step() {
     {
         let peer = table.get_mut(&[1; 16]).unwrap();
         // What `start_round` books before it dials (LXMPeer.py:321-322).
-        peer.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
-        peer.next_sync_attempt = now + peer.sync_backoff_secs;
+        peer.book_sync_attempt(now);
         // Nothing is due while the round is in flight, whatever the
         // booking says.
         peer.state = SyncPhase::LinkEstablishing;
@@ -620,8 +676,7 @@ fn a_round_whose_link_came_up_is_not_held_for_a_whole_backoff_step() {
     // never comes up never reaches `note_link_established`.
     {
         let peer = table.get_mut(&[1; 16]).unwrap();
-        peer.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
-        peer.next_sync_attempt = now + peer.sync_backoff_secs;
+        peer.book_sync_attempt(now);
         peer.state = SyncPhase::Idle;
     }
     assert_eq!(table.next_due(now + SYNC_INTERVAL_SECS, 5, None), None);
@@ -646,8 +701,7 @@ fn a_round_that_yields_on_the_duty_share_books_no_backoff_step() {
         // One earlier round the peer never answered: 12 minutes earned.
         peer.sync_backoff_secs = SYNC_BACKOFF_STEP_SECS;
         // What `start_round` books before it dials: 24 minutes now.
-        peer.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
-        peer.next_sync_attempt = now + peer.sync_backoff_secs;
+        peer.book_sync_attempt(now);
         peer.state = SyncPhase::LinkEstablishing;
     }
 
