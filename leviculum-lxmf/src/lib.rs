@@ -39,6 +39,7 @@ extern crate std;
 
 extern crate alloc;
 
+pub mod active_delivery;
 pub mod announce;
 pub mod attachments;
 pub mod constants;

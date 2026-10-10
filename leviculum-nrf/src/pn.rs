@@ -230,6 +230,7 @@ use leviculum_core::transport::{TickOutput, TimeSource};
 use leviculum_core::{
     Destination, DestinationHash, DestinationType, Direction, LinkId, ProofStrategy, RequestError,
 };
+use leviculum_lxmf::active_delivery::{after_failed_push, ActiveCandidate, AfterFailedPush};
 use leviculum_lxmf::constants::{
     STAMP_SIZE, WORKBLOCK_EXPAND_ROUNDS_PEERING, WORKBLOCK_EXPAND_ROUNDS_PN,
 };
@@ -1330,20 +1331,18 @@ impl Engine {
                     let active = self.active.take();
                     self.next_active_at_ms = node.now_ms().saturating_add(ACTIVE_GAP_MS);
                     if let Some(active) = active {
-                        let attempts_left = active.attempts_left.saturating_sub(1);
-                        if attempts_left == 0 {
-                            crate::log::log_fmt(
+                        match after_failed_push(active.attempts_left) {
+                            AfterFailedPush::GiveUp => crate::log::log_fmt(
                                 "PN_DELIVER ",
                                 format_args!("gave_up dst={}", Hex(&active.destination)),
-                            );
-                        } else {
-                            self.resend_active(
+                            ),
+                            AfterFailedPush::Resend { attempts_left } => self.resend_active(
                                 node,
                                 active.transient_id,
                                 active.destination,
                                 attempts_left,
                                 out,
-                            );
+                            ),
                         }
                     }
                 }
@@ -2121,17 +2120,12 @@ impl Engine {
         if self.active.is_some() || node.now_ms() < self.next_active_at_ms {
             return;
         }
-        let mut candidate: Option<StoredMessage> = None;
-        let too_large = &self.too_large;
-        let _ = self.role.store().for_each(&mut |meta| {
-            if &meta.destination_hash == destination
-                && !too_large.contains(&meta.transient_id)
-                && candidate.is_none_or(|held| meta.sequence < held.sequence)
-            {
-                candidate = Some(*meta);
-            }
-        });
-        let Some(meta) = candidate else {
+        let mut candidate = ActiveCandidate::new(*destination, &self.too_large);
+        let _ = self
+            .role
+            .store()
+            .for_each(&mut |meta| candidate.consider(meta));
+        let Some(meta) = candidate.best() else {
             return;
         };
         self.resend_active(node, meta.transient_id, *destination, ACTIVE_ATTEMPTS, out);
