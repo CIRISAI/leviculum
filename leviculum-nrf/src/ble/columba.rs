@@ -34,12 +34,12 @@ use leviculum_ble_tx::{
     judge_supervision_timeout, manufacturer_data_with_hint, parse_peer_advertisement,
     with_free_slots, AdvReport, CandidateTable, ChurnLedger, ChurnPolicy, ConnParams,
     ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision, DeadEnds,
-    DialLedger, Exclusion, GattBytes, LedgerPolicy, Ledgers, LinkPhase, LinkRole, LinkUp,
-    LinkVerdict, Local, Origin, OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent,
-    PhaseNeighbours, ScanMode, ScanPhase, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY,
-    DEAD_END_SLOTS, DEAD_END_TTL_MS, GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY,
-    MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, PHASE_NEIGHBOUR_SLOTS, SCAN_WINDOW_COLLECT_MS,
-    WINDOW_CANDIDATES,
+    DialBackoff, DialFailure, DialLedger, Exclusion, GattBytes, LedgerPolicy, Ledgers, LinkPhase,
+    LinkRole, LinkUp, LinkVerdict, Local, Origin, OversizeFrom, OversizeLine, PeerAddr,
+    PeerRegistry, PhaseEvent, PhaseNeighbours, ScanMode, ScanPhase, TxGap, ADV_BYTES_USED,
+    CAP_PERIPHERAL_ONLY, DEAD_END_SLOTS, DEAD_END_TTL_MS, DIAL_BACKOFF_BASE_MS, DIAL_BACKOFF_SLOTS,
+    GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, MANUFACTURER_DATA_HINT_LEN,
+    PERIPH_SLOTS, PHASE_NEIGHBOUR_SLOTS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -905,6 +905,9 @@ async fn gatt_events(
                     }
                     link_peer.set(Some(peer_id));
                     handshake_done.set(true);
+                    // A handshake in either role ends the address's
+                    // backoff run (579).
+                    note_dial_success(peer_value);
                     last_keepalive.set(Instant::now());
                     let mut hold = tx_hold.get();
                     hold.note_handshake();
@@ -1101,7 +1104,13 @@ async fn gatt_events(
                     note_peer_leave(&peer_id, peer, "expiry_peripheral");
                 }
             }
+            // #548's timeout says this peer will not handshake: its
+            // address is not dialled back on the next pass (579).
+            let overdue = matches!(end, LinkEnd::HandshakeOverdue(_));
             log_link_end("peripheral", slot_index, conn_handle, end);
+            if overdue {
+                note_dial_failure(peer_value, DialFailure::NoHandshake);
+            }
             let _ = conn.disconnect();
         }
         Either4::First(_) | Either4::Second(_) => {}
@@ -1683,8 +1692,11 @@ const SCAN_WINDOW_625US: u32 = 48;
 const CONNECT_TIMEOUT_10MS: u16 = 500;
 
 /// Pause after a session ended or an attempt failed, before the next
-/// scan pass. Keeps a refusing/vanishing peer from being hammered.
-const CENTRAL_RETRY_BACKOFF_MS: u64 = 5_000;
+/// scan pass. Keeps a refusing/vanishing peer from being hammered; the
+/// address that failed is held longer by [`DIAL_BACKOFF`] when the
+/// failure named the peer (579). The shared crate's base, which lnsd
+/// pauses too.
+const CENTRAL_RETRY_BACKOFF_MS: u64 = DIAL_BACKOFF_BASE_MS;
 
 // The fallback bound itself, `SCAN_FALLBACK_AFTER_MS` (30 s), lives in
 // `leviculum_ble_tx::window` since #375 part 2 — lnsd runs the same
@@ -1807,6 +1819,39 @@ const _: () = assert!(DEAD_END_SLOTS == 2 * MAX_LINKS);
 /// session writes it.
 static DEAD_ENDS: BlockingMutex<CriticalSectionRawMutex, RefCell<DeadEnds>> =
     BlockingMutex::new(RefCell::new(DeadEnds::new()));
+
+/// The per-address dial backoff (579), shared by both roles like
+/// [`DEAD_ENDS`]: the central books its give-ups, a peripheral session
+/// books #548's handshake timeout, a handshake in either role clears
+/// the address, and the scan callback reads it. The rule is
+/// `leviculum_ble_tx::DialBackoff`, host-tested; lnsd runs the same one.
+static DIAL_BACKOFF: BlockingMutex<
+    CriticalSectionRawMutex,
+    RefCell<DialBackoff<DIAL_BACKOFF_SLOTS>>,
+> = BlockingMutex::new(RefCell::new(DialBackoff::new()));
+
+/// Book a give-up at `addr` in [`DIAL_BACKOFF`] and say what it booked:
+/// `BLE_DIAL_BACKOFF`, lnsd's line with the same keys.
+fn note_dial_failure(addr: u64, failure: DialFailure) {
+    let now_ms = Instant::now().as_millis();
+    let booked = DIAL_BACKOFF.lock(|b| b.borrow_mut().note_failure(addr, failure, now_ms));
+    crate::log::log_fmt(
+        "[BLE ] ",
+        format_args!(
+            "BLE_DIAL_BACKOFF addr={addr:012x} failure={} strikes={} backoff_ms={} until_ms={}",
+            failure.as_str(),
+            booked.strikes,
+            booked.until_ms.saturating_sub(now_ms),
+            booked.until_ms,
+        ),
+    );
+}
+
+/// A handshake with `addr` completed, in either role: its backoff run
+/// is over (579).
+fn note_dial_success(addr: u64) {
+    DIAL_BACKOFF.lock(|b| b.borrow_mut().note_success(addr));
+}
 
 /// Condemn an address for [`DEAD_END_TTL_MS`] and say why on one line.
 ///
@@ -2161,6 +2206,9 @@ async fn find_peer_to_initiate(
         let peer_value = adv.addr.value;
         let mode = scan_mode_now();
         let now_ms = Instant::now().as_millis();
+        // The sighting feeds the dial backoff's absence reset (579),
+        // whatever the verdict; the hold itself is read below.
+        let held = DIAL_BACKOFF.lock(|b| b.borrow_mut().sighted(peer_value, now_ms));
         // The verdict and the six filters, host-tested in
         // `leviculum_ble_tx::admission`; this is the locks around the
         // board's single instances. The ledgers are `Copy` and are read
@@ -2256,6 +2304,27 @@ async fn find_peer_to_initiate(
         // whole point: in the solo window there is no better peer to
         // send it to. The two ledger filters say so once per hold.
         match admission.outcome {
+            // The seventh filter, after the six of `admit` (579): an
+            // address whose last dial failed is held by the shared
+            // backoff, which says so once per hold, with lnsd's keys.
+            Ok(()) if held.is_some() => {
+                if let Some(hold) =
+                    DIAL_BACKOFF.lock(|b| b.borrow_mut().announce(peer_value, now_ms))
+                {
+                    crate::log::log_fmt(
+                        "[BLE ] ",
+                        format_args!(
+                            "BLE_SCAN_DECISION addr={:012x} hint={} rule=backoff until_ms={} in_ms={} strikes={} initiate=0",
+                            peer_value,
+                            IdentityHint(parsed.identity_hint),
+                            hold.until_ms,
+                            hold.until_ms.saturating_sub(now_ms),
+                            hold.strikes,
+                        ),
+                    );
+                }
+                return false;
+            }
             Ok(()) => {}
             Err(Exclusion::LedgerHeld { until_ms }) => {
                 log_dial_held(until_ms, now_ms);
@@ -2314,12 +2383,17 @@ async fn find_peer_to_initiate(
 /// every ~20 s forever), while a failed strict dial keeps only the
 /// short backoff, because the sort will keep electing that peer and a
 /// two-minute hole toward it would cost real links.
+///
+/// Returns what a give-up before the session said about the peer
+/// (579), `None` when the handshake went through or the dial ended for
+/// a reason of our own (a refused duplicate, a self-link, a full drain
+/// table): the caller books it in [`DIAL_BACKOFF`].
 async fn central_link(
     sd: &'static Softdevice,
     own_identity: &[u8; 16],
     peer: Address,
     decision: ConnectDecision,
-) {
+) -> Option<DialFailure> {
     // The address with the type the SoftDevice reports for it, which
     // the churn arming reads when this link ends (#506).
     let typed_peer = peer_addr(&peer);
@@ -2347,7 +2421,7 @@ async fn central_link(
             if connect_failure_condemns(decision) {
                 note_dead_end(peer_value, "fallback_connect");
             }
-            return;
+            return Some(DialFailure::Transport);
         }
     };
     log_conn_params(
@@ -2368,7 +2442,13 @@ async fn central_link(
                 format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=discover err={err:?}"),
             );
             let _ = conn.disconnect();
-            return;
+            // No service, or one without the Columba characteristics:
+            // not a Columba peer. Anything else is the link's.
+            return Some(match err {
+                gatt_client::DiscoverError::ServiceNotFound
+                | gatt_client::DiscoverError::ServiceIncomplete => DialFailure::NotColumba,
+                _ => DialFailure::Transport,
+            });
         }
     };
     let peer_id = match client.identity_read().await {
@@ -2379,7 +2459,12 @@ async fn central_link(
                 format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=identity err={err:?}"),
             );
             let _ = conn.disconnect();
-            return;
+            // An identity of the wrong size is no Columba identity, as
+            // lnsd reads it.
+            return Some(match err {
+                gatt_client::ReadError::Truncated => DialFailure::NotColumba,
+                _ => DialFailure::Transport,
+            });
         }
     };
     // Null-hypothesis check first: an unexpected identity may be us
@@ -2393,7 +2478,7 @@ async fn central_link(
         );
         note_dead_end(peer_value, "self_link");
         let _ = conn.disconnect();
-        return;
+        return None;
     }
     // An identity we already hold is decided by [`peer_link_up`] below,
     // once the slot exists: this dial wins only over a link the peer
@@ -2411,7 +2496,7 @@ async fn central_link(
     // holding it is what makes "claimed slot" mean "live link".
     let Some(conn_handle) = conn.handle() else {
         crate::warn!("BLE: central connection without a handle, dropping it");
-        return;
+        return Some(DialFailure::Transport);
     };
     let Some((slot_index, _drain)) = HVN_DRAIN.claim_indexed(conn_handle) else {
         crate::log::log_fmt(
@@ -2423,7 +2508,7 @@ async fn central_link(
             ),
         );
         let _ = conn.disconnect();
-        return;
+        return None;
     };
     // This link's outbound queue; stale packets are the previous
     // tenant's, drained BEFORE the registry entry so a displacement's
@@ -2455,7 +2540,7 @@ async fn central_link(
         let _ = conn.disconnect();
         conn_link_down(slot_index);
         HVN_DRAIN.release(conn_handle);
-        return;
+        return None;
     }
 
     // The session clock the ledger judges this dial by. Started where
@@ -2465,7 +2550,7 @@ async fn central_link(
     // is what the dial BOUGHT.
     let session_from = Instant::now();
 
-    run_central_session(
+    let failure = run_central_session(
         &conn,
         &client,
         own_identity,
@@ -2497,10 +2582,12 @@ async fn central_link(
     super::defrag_held_set(slot_index, 0);
     super::session_held_reset(slot_index);
     HVN_DRAIN.release(conn_handle);
+    failure
 }
 
 /// Subscribe, handshake, then pump both directions until either side
-/// ends the link. The mirror of [`gatt_events`], with the roles
+/// ends the link. Returns what a give-up before the handshake said
+/// about the peer (579), `None` once the handshake went through. The mirror of [`gatt_events`], with the roles
 /// swapped: inbound is the peer's TX notifications, outbound writes the
 /// peer's RX characteristic.
 async fn run_central_session(
@@ -2511,7 +2598,7 @@ async fn run_central_session(
     slot_index: usize,
     conn_handle: u16,
     peer: PeerAddr,
-) {
+) -> Option<DialFailure> {
     let peer_value = peer.value;
     // Subscribe to the peer's TX before announcing ourselves, so
     // nothing the peer sends in response to the handshake can fall into
@@ -2522,7 +2609,7 @@ async fn run_central_session(
             format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=subscribe err={err:?}"),
         );
         let _ = conn.disconnect();
-        return;
+        return Some(DialFailure::Transport);
     }
     // The identity handshake: our 16-byte identity hash as the first
     // write, which is how the peripheral — who never scans — learns who
@@ -2532,7 +2619,7 @@ async fn run_central_session(
     let Some(handshake) = GattData::new(own_identity) else {
         // Unreachable (16 <= GATT_VALUE_MAX), but a truncated handshake
         // must not go on the air as a valid-looking write.
-        return;
+        return None;
     };
     if let Err(err) = client.rx_write(&handshake).await {
         crate::log::log_fmt(
@@ -2540,8 +2627,14 @@ async fn run_central_session(
             format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=handshake err={err:?}"),
         );
         let _ = conn.disconnect();
-        return;
+        // The peer answered our identity with an ATT error: it will not
+        // handshake. A dropped link says nothing about it.
+        return Some(match err {
+            gatt_client::WriteError::Gatt(_) => DialFailure::NoHandshake,
+            _ => DialFailure::Transport,
+        });
     }
+    note_dial_success(peer_value);
     crate::log::log_fmt(
         "[BLE ] ",
         format_args!(
@@ -2778,6 +2871,7 @@ async fn run_central_session(
         }
         Either4::First(_) | Either4::Second(_) => {}
     }
+    None
 }
 
 /// The scanner/initiator task: the peripheral task's counterpart, one
@@ -2849,7 +2943,10 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
                         addr_value(&peer.bytes())
                     ),
                 );
-                central_link(sd, &identity_hash, peer, decision).await;
+                let peer_value = addr_value(&peer.bytes());
+                if let Some(failure) = central_link(sd, &identity_hash, peer, decision).await {
+                    note_dial_failure(peer_value, failure);
+                }
             }
             // Unreachable in practice — a window only closes after its
             // first candidate — but an empty one is a plain rescan,

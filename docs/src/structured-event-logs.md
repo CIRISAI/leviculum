@@ -340,7 +340,21 @@ decision line print twice): `reason=no_service_uuid` is a device that lists no
 Columba service and carries no Columba record, and
 `reason=record_without_service_uuid` one that carries our record while
 BlueZ's stored `UUIDs` lack the service, the #443 signature of a
-device object poisoned by an earlier connection (577).  Its link lifecycle is
+device object poisoned by an earlier connection (577).  A dial that
+gave up is booked in the per-address backoff both stacks share
+(`leviculum_ble_tx::DialBackoff`, 579) and says so as `BLE_DIAL_BACKOFF
+iface=<name> addr=<a> failure=transport|not_columba|no_handshake
+strikes=<n> backoff_ms=<n> until_ms=<n>`: a transport failure (connect
+failed, setup timed out) pauses the address a flat 5 s, a failure that
+names the peer (no Columba GATT layout, the identity write refused, or
+#548's pre-handshake timeout on a connection it made to us) doubles its
+pause from 10 s to the 120 s cap; a handshake in either role, or an
+absence from the sightings longer than the cap, ends the run.  While
+the hold stands, a sighting the verdict would dial prints, once per
+hold, `BLE_SCAN_DECISION addr=<a> hint=<hex8|unknown> initiate=0
+rule=backoff until_ms=<n> in_ms=<n> strikes=<n>`; `until_ms` is on the
+interface's own clock (milliseconds since it came up).  The firmware
+prints both lines with the same keys, on its uptime clock.  Its link lifecycle is
 `BLE_LINK_UP` / `BLE_LINK_DOWN` (with `role=central|peripheral` and
 `peer=<hex8>`, the same hex the firmware logs and the `LN-<hex8>`
 name carries), the admission decisions are the firmware's

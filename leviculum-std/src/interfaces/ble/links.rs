@@ -1205,6 +1205,7 @@ pub(crate) struct ScanDrop {
 pub(crate) struct ScanLineGate {
     decided: std::collections::HashMap<Addr, ScanDecision>,
     dropped: std::collections::HashMap<Addr, ScanDrop>,
+    backed_off: std::collections::HashMap<Addr, u64>,
 }
 
 impl ScanLineGate {
@@ -1220,6 +1221,14 @@ impl ScanLineGate {
     /// address was last decided.
     pub(crate) fn dropped(&mut self, addr: Addr, drop: ScanDrop) -> bool {
         self.dropped.insert(addr, drop) != Some(drop)
+    }
+
+    /// Record a dial backoff held at `addr` until `until_ms`; `true`
+    /// when its `BLE_SCAN_DECISION rule=backoff` line is due, i.e. the
+    /// deadline is new (579). Each failure books a new deadline, so a
+    /// hold prints once, however often the address is sighted in it.
+    pub(crate) fn backed_off(&mut self, addr: Addr, until_ms: u64) -> bool {
+        self.backed_off.insert(addr, until_ms) != Some(until_ms)
     }
 }
 
@@ -2450,6 +2459,39 @@ mod tests {
         assert_eq!(dropped.reason, DropReason::RecordWithoutService);
         assert_eq!(dropped.reason.as_str(), "record_without_service_uuid");
         assert_eq!(dropped.identity_hint, Some([0x5E; 4]));
+    }
+
+    /// 579: a dial backoff's `rule=backoff` line prints once per hold:
+    /// every sighting inside it is silent, a new deadline logs, a
+    /// backoff line leaves the decision ledger alone, and another
+    /// address keeps its own state.
+    #[test]
+    fn the_scan_line_gate_logs_a_backoff_once_per_deadline() {
+        let decision = ScanDecision {
+            decision: ConnectDecision::InitiateLowerAddress,
+            caps: 0,
+            caps_record: false,
+            free_slots: None,
+            identity_hint: None,
+        };
+        let mut gate = ScanLineGate::default();
+        assert!(gate.decided(ADDR_2, decision));
+        assert!(gate.backed_off(ADDR_2, 12_000), "the first hold logs");
+        for _ in 0..5 {
+            assert!(
+                !gate.backed_off(ADDR_2, 12_000),
+                "sightings in it are silent"
+            );
+        }
+        assert!(
+            gate.backed_off(ADDR_2, 34_000),
+            "the next failure's hold logs"
+        );
+        assert!(
+            !gate.decided(ADDR_2, decision),
+            "the unchanged decision stays silent across holds"
+        );
+        assert!(gate.backed_off(ADDR_3, 12_000), "another address");
     }
 
     /// 577: the scan lines are rate-limited per address and change. A

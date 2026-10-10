@@ -527,6 +527,32 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_SCAN_DECISION",
         required_keys: &["addr", "caps", "caps_record", "initiate", "pref", "rule"],
     },
+    // The dial backoff's hold on an address the verdict would dial
+    // (579): `rule="backoff"`, once per hold, with the deadline on the
+    // interface's clock, the time left, and the peer failures in a row.
+    // A shape of its own: the hold is not a verdict and carries none of
+    // the record's fields. The firmware prints the same keys.
+    EventSchema {
+        name: "BLE_SCAN_DECISION",
+        required_keys: &[
+            "addr", "hint", "initiate", "rule", "until_ms", "in_ms", "strikes",
+        ],
+    },
+    // A dial that gave up, booked in the shared per-address backoff
+    // (579): `failure` is `transport` (flat 5 s), `not_columba` or
+    // `no_handshake` (doubling from 10 s to the 120 s cap); `strikes`
+    // the peer failures in a row, `backoff_ms` the pause this booked.
+    EventSchema {
+        name: "BLE_DIAL_BACKOFF",
+        required_keys: &[
+            "iface",
+            "addr",
+            "failure",
+            "strikes",
+            "backoff_ms",
+            "until_ms",
+        ],
+    },
     // A sighting the scan decision discarded as no Columba peer (577):
     // `reason` is `no_service_uuid` or `record_without_service_uuid`,
     // the second the #443 signature (our record, but a stored device

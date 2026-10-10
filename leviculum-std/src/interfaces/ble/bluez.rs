@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::links::{IdentityHash, SERVICE_UUID_U128};
 use super::{Ev, LINK_QUEUE_DEPTH};
 use crate::event_log::Scalar;
-use leviculum_ble_tx::{AddrType, COMPANY_ID};
+use leviculum_ble_tx::{AddrType, DialFailure, COMPANY_ID};
 
 /// The Columba GATT service and its three characteristics
 /// (BLE_PROTOCOL_v2.2 §GATT Service Structure).
@@ -384,40 +384,70 @@ pub(crate) struct CentralTask {
 
 impl CentralTask {
     pub(crate) async fn run(self) {
-        match tokio::time::timeout(SETUP_TIMEOUT, self.establish()).await {
-            Ok(Ok(Some(session))) => self.session_loop(session).await,
+        let failure = match tokio::time::timeout(SETUP_TIMEOUT, self.establish()).await {
+            Ok(Ok(Some(session))) => {
+                self.session_loop(session).await;
+                None
+            }
             Ok(Ok(None)) => {
                 // Admission refused; the orchestrator logged why.
+                None
             }
             Ok(Err(e)) => {
-                tracing::debug!("BLE {}: central {} failed: {e}", self.iface, self.addr);
+                tracing::debug!(
+                    "BLE {}: central {} failed: {} ({})",
+                    self.iface,
+                    self.addr,
+                    e.source,
+                    e.failure.as_str()
+                );
+                Some(e.failure)
             }
             Err(_) => {
                 tracing::debug!("BLE {}: central {} setup timed out", self.iface, self.addr);
+                Some(DialFailure::Transport)
             }
-        }
+        };
         if let Ok(device) = self.adapter.device(self.addr) {
             let _ = device.disconnect().await;
         }
-        let _ = self.ev_tx.send(Ev::CentralGone { addr: self.addr }).await;
+        let _ = self
+            .ev_tx
+            .send(Ev::CentralGone {
+                addr: self.addr,
+                failure,
+            })
+            .await;
     }
 
-    async fn establish(&self) -> bluer::Result<Option<CentralSession>> {
-        let device = self.adapter.device(self.addr)?;
-        if !device.is_connected().await? {
-            device.connect().await?;
+    async fn establish(&self) -> Result<Option<CentralSession>, SetupError> {
+        // Everything up to the layout check is the air's business: a
+        // connect that fails, a discovery the link drops under. Only the
+        // two answers below are the peer's (579).
+        let transport = SetupError::with(DialFailure::Transport);
+        let device = self.adapter.device(self.addr).map_err(transport)?;
+        if !device.is_connected().await.map_err(transport)? {
+            device.connect().await.map_err(transport)?;
         }
+        self.layout_and_handshake(&device).await
+    }
+
+    async fn layout_and_handshake(
+        &self,
+        device: &bluer::Device,
+    ) -> Result<Option<CentralSession>, SetupError> {
+        let transport = SetupError::with(DialFailure::Transport);
 
         // `Device::services` waits for BlueZ's ServicesResolved itself.
         let mut tx_char = None;
         let mut rx_char = None;
         let mut id_char = None;
-        for service in device.services().await? {
-            if service.uuid().await? != SERVICE_UUID {
+        for service in device.services().await.map_err(transport)? {
+            if service.uuid().await.map_err(transport)? != SERVICE_UUID {
                 continue;
             }
-            for characteristic in service.characteristics().await? {
-                match characteristic.uuid().await? {
+            for characteristic in service.characteristics().await.map_err(transport)? {
+                match characteristic.uuid().await.map_err(transport)? {
                     u if u == TX_UUID => tx_char = Some(characteristic),
                     u if u == RX_UUID => rx_char = Some(characteristic),
                     u if u == IDENTITY_UUID => id_char = Some(characteristic),
@@ -426,17 +456,17 @@ impl CentralTask {
             }
         }
         let (Some(tx_char), Some(rx_char), Some(id_char)) = (tx_char, rx_char, id_char) else {
-            return Err(missing_gatt());
+            return Err(SetupError::not_columba());
         };
 
         // Identity first: admission is decided before any subscription
         // or handshake touches the peer's session state (the firmware
         // orders it the same way).
-        let identity_bytes = id_char.read().await?;
+        let identity_bytes = id_char.read().await.map_err(transport)?;
         let identity: IdentityHash = identity_bytes
             .as_slice()
             .try_into()
-            .map_err(|_| missing_gatt())?;
+            .map_err(|_| SetupError::not_columba())?;
         // BlueZ ≥ 5.62 exposes the exchanged ATT MTU as a characteristic
         // property; on anything older fall back to the BLE 4.0 floor,
         // the reference's final fallback too.
@@ -463,7 +493,7 @@ impl CentralTask {
 
         // Subscribe before the handshake so nothing the peer sends lands
         // in an unsubscribed gap.
-        let notify_stream = tx_char.notify().await?;
+        let notify_stream = tx_char.notify().await.map_err(transport)?;
 
         // The 16-byte identity handshake, written WITH response
         // (BLE_PROTOCOL_v2.2 §Identity Handshake: a Write Request).
@@ -475,7 +505,10 @@ impl CentralTask {
                     ..Default::default()
                 },
             )
-            .await?;
+            .await
+            // The peer answered our identity with an error: it will not
+            // handshake (579).
+            .map_err(SetupError::with(DialFailure::NoHandshake))?;
 
         Ok(Some(CentralSession {
             notify_stream: Box::pin(notify_stream),
@@ -558,10 +591,29 @@ struct CentralSession {
     rx_char: bluer::gatt::remote::Characteristic,
 }
 
-fn missing_gatt() -> bluer::Error {
-    bluer::Error {
-        kind: bluer::ErrorKind::ServicesUnresolved,
-        message: "Columba GATT layout not found on peer".to_string(),
+/// Why a central setup gave up: the BlueZ error, and what it says about
+/// the peer (579).
+struct SetupError {
+    failure: DialFailure,
+    source: bluer::Error,
+}
+
+impl SetupError {
+    /// A `map_err` adapter that tags a BlueZ error with `failure`.
+    fn with(failure: DialFailure) -> impl Fn(bluer::Error) -> Self + Copy {
+        move |source| Self { failure, source }
+    }
+
+    /// The peer serves no Columba layout, or an identity of the wrong
+    /// length in it.
+    fn not_columba() -> Self {
+        Self {
+            failure: DialFailure::NotColumba,
+            source: bluer::Error {
+                kind: bluer::ErrorKind::ServicesUnresolved,
+                message: "Columba GATT layout not found on peer".to_string(),
+            },
+        }
     }
 }
 

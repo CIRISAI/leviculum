@@ -44,7 +44,7 @@ use super::{
     ReadySignal,
 };
 use crate::event_log::Scalar;
-use leviculum_ble_tx::{dial_preference, AddrType};
+use leviculum_ble_tx::{dial_preference, AddrType, DialBackoff, DialFailure};
 use leviculum_core::traits::{InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
 use links::{
@@ -60,8 +60,14 @@ const BLE_BUFFER_SIZE: usize = 256;
 const LINK_QUEUE_DEPTH: usize = 32;
 
 /// Reconnect/backoff after a failed or ended central session, the
-/// firmware's `SESSION_BACKOFF`.
-const SESSION_BACKOFF_MS: u64 = 5_000;
+/// firmware's `SESSION_BACKOFF`. A failure that names the peer as no
+/// Columba peer books more, from the shared [`DialBackoff`] (579).
+const SESSION_BACKOFF_MS: u64 = leviculum_ble_tx::DIAL_BACKOFF_BASE_MS;
+
+/// Room in the host's [`DialBackoff`]: a PC sits in rooms with many
+/// more advertisers than a board's eight slots cover, and an evicted
+/// address only loses its run, so this is generous, not exact.
+const DIAL_BACKOFF_HOST_SLOTS: usize = 64;
 
 /// How long an address that presented a duplicate or our own identity is
 /// not redialled, the firmware's `DEAD_END_TTL`.
@@ -173,7 +179,14 @@ pub(crate) enum Ev {
     CentralFrame { addr: Address, data: Vec<u8> },
     /// A central-role task ended (connect failure, session end, or the
     /// admission said no). Always the task's last event.
-    CentralGone { addr: Address },
+    ///
+    /// `failure` is what a give-up before the session said about the
+    /// peer (579), `None` when a session ran or the admission refused:
+    /// the backoff the orchestrator books reads it.
+    CentralGone {
+        addr: Address,
+        failure: Option<DialFailure>,
+    },
 }
 
 /// Spawn the Columba BLE interface. Never fails at build time: BlueZ
@@ -412,6 +425,11 @@ impl BleTask {
         // part 3). Seeded from entropy; tests seed the queue directly.
         let mut dial_queue = DialQueue::new(rand_core::RngCore::next_u64(&mut rand_core::OsRng));
         let mut backoff_until: HashMap<Addr, u64> = HashMap::new();
+        // The per-address run behind a failed dial (579), the board's
+        // table: it decides how long `backoff_until` holds an address
+        // after a give-up, and the sightings below feed its absence
+        // reset.
+        let mut dial_backoff: DialBackoff<DIAL_BACKOFF_HOST_SLOTS> = DialBackoff::new();
         // BLE_SCAN_DECISION and BLE_SCAN_DROPPED are logged once per
         // (address, decision) and (address, drop) change, not per
         // sighting — a waiting peer advertises several times a second
@@ -509,6 +527,7 @@ impl BleTask {
                         &mut central_pipes,
                         &mut dial_queue,
                         &mut backoff_until,
+                        &mut dial_backoff,
                         &mut scan_lines,
                         &mut churn,
                         &mut link_addr_types,
@@ -581,6 +600,16 @@ impl BleTask {
                             self.name, Address(addr)
                         );
                         disconnect_quietly(&adapter, addr).await;
+                        // #548's timeout says the peer will not
+                        // handshake: its address is not dialled back
+                        // on the next sighting (579).
+                        self.book_dial_failure(
+                            &mut dial_backoff,
+                            &mut backoff_until,
+                            addr,
+                            DialFailure::NoHandshake,
+                            now,
+                        );
                     }
                     backoff_until.retain(|_, until| *until > now);
                     link_addr_types.retain(|addr, _| table.knows_addr(addr));
@@ -615,6 +644,7 @@ impl BleTask {
         central_pipes: &mut HashMap<Addr, CentralPipe>,
         dial_queue: &mut DialQueue,
         backoff_until: &mut HashMap<Addr, u64>,
+        dial_backoff: &mut DialBackoff<DIAL_BACKOFF_HOST_SLOTS>,
         scan_lines: &mut links::ScanLineGate,
         churn: &mut links::ChurnGate,
         link_addr_types: &mut HashMap<Addr, AddrType>,
@@ -646,6 +676,9 @@ impl BleTask {
                         // A connection event in either role restarts
                         // the strict phase (#375 §0).
                         scheduler.note_reset(now);
+                        // A handshake in either role ends the address's
+                        // backoff run (579).
+                        dial_backoff.note_success(links::addr_value_display(&addr.0));
                         let addr_type = bluez::addr_type(adapter, addr).await;
                         if let Some(addr_type) = addr_type {
                             link_addr_types.insert(addr.0, addr_type);
@@ -761,6 +794,9 @@ impl BleTask {
                     .opts
                     .initiate_only
                     .allows(&addr.0, decision.identity_hint);
+                // The sighting feeds the dial backoff's absence reset
+                // and reads its hold (579), whatever the verdict.
+                let held = dial_backoff.sighted(links::addr_value_display(&addr.0), now);
                 if scan_lines.decided(addr.0, decision) {
                     tracing::info!(
                         event = "BLE_SCAN_DECISION",
@@ -795,6 +831,25 @@ impl BleTask {
                         );
                     }
                 }
+                // A backed-off address that the verdict would dial says
+                // so once per hold (579): the line a room reads to see
+                // a stranger left alone, and why until when. `until_ms`
+                // is on this interface's clock, the one `now` runs on.
+                if let Some(until_ms) = held.filter(|_| decision.decision.initiate()) {
+                    if scan_lines.backed_off(addr.0, until_ms) {
+                        let value = links::addr_value_display(&addr.0);
+                        tracing::info!(
+                            event = "BLE_SCAN_DECISION",
+                            addr = %hex12(&addr.0),
+                            hint = %links::hint_str(decision.identity_hint),
+                            initiate = 0u8,
+                            rule = "backoff",
+                            until_ms = until_ms,
+                            in_ms = until_ms.saturating_sub(now),
+                            strikes = dial_backoff.strikes(value),
+                        );
+                    }
+                }
                 // `knows_identity_hint` is the address filter above it
                 // keyed by IDENTITY (#412): a peer that rotated its
                 // address advertises as a stranger, and dialling it
@@ -825,6 +880,7 @@ impl BleTask {
                     || table.knows_identity_hint(decision.identity_hint)
                     || dial_queue.knows(&addr.0)
                     || backoff_until.get(&addr.0).is_some_and(|until| *until > now)
+                    || held.is_some()
                     || self.churn_held(churn, &addr.0, addr_type, decision.decision, now)
                 {
                     return;
@@ -874,6 +930,7 @@ impl BleTask {
                         // still fires at the session's end; its release
                         // is then a no-op.
                         dial_queue.release(&addr.0, now);
+                        dial_backoff.note_success(links::addr_value_display(&addr.0));
                         let addr_type = bluez::addr_type(adapter, addr).await;
                         if let Some(addr_type) = addr_type {
                             link_addr_types.insert(addr.0, addr_type);
@@ -930,7 +987,7 @@ impl BleTask {
                 }
                 self.log_abandon_reports(table);
             }
-            Ev::CentralGone { addr } => {
+            Ev::CentralGone { addr, failure } => {
                 // A dial or link ended either way: fresh strict phase,
                 // as the firmware resets its clock at teardown. A setup
                 // that timed out or failed frees the queue's slot here
@@ -943,10 +1000,43 @@ impl BleTask {
                     forget_device(adapter, addr.0).await;
                     self.report_peer_lost(table, identity).await;
                 }
-                let until = backoff_until.entry(addr.0).or_insert(0);
-                *until = (*until).max(now + SESSION_BACKOFF_MS);
+                match failure {
+                    Some(failure) => {
+                        self.book_dial_failure(dial_backoff, backoff_until, addr.0, failure, now);
+                    }
+                    None => {
+                        let until = backoff_until.entry(addr.0).or_insert(0);
+                        *until = (*until).max(now + SESSION_BACKOFF_MS);
+                    }
+                }
             }
         }
+    }
+
+    /// Book a dial that gave up at `addr` in the shared backoff (579)
+    /// and hold the address until the deadline it chose: the flat base
+    /// for a transport failure, a doubling run for one that named the
+    /// peer. Logs `BLE_DIAL_BACKOFF` with the run.
+    fn book_dial_failure(
+        &self,
+        dial_backoff: &mut DialBackoff<DIAL_BACKOFF_HOST_SLOTS>,
+        backoff_until: &mut HashMap<Addr, u64>,
+        addr: Addr,
+        failure: DialFailure,
+        now: u64,
+    ) {
+        let booked = dial_backoff.note_failure(links::addr_value_display(&addr), failure, now);
+        let until = backoff_until.entry(addr).or_insert(0);
+        *until = (*until).max(booked.until_ms);
+        tracing::info!(
+            event = "BLE_DIAL_BACKOFF",
+            iface = %Scalar(&self.name),
+            addr = %hex12(&addr),
+            failure = failure.as_str(),
+            strikes = booked.strikes,
+            backoff_ms = booked.until_ms.saturating_sub(now),
+            until_ms = booked.until_ms,
+        );
     }
 
     /// Close the scheduler's collection window if its bound has passed
