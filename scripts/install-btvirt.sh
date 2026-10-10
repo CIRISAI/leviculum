@@ -17,9 +17,21 @@
 # stall, so a bench provisioned either way measures the emulator's bug and
 # calls it a mesh finding. (periculum #49.)
 #
+# AND WHY THE UPSTREAM FIX IS NOT ENOUGH ON ITS OWN
+#
+# btvirt reports a legacy advertiser only at two instants: when a scanner
+# enables scanning and when the advertiser enables advertising. Real radios
+# advertise every interval, so on stock btvirt a scan window sees a peer only
+# if the peer was advertising at the instant the window opened, and a test
+# that bounds a re-sighting measures the emulator's phase: measured
+# 2026-10-10, a redial guard test was red 4 of 5 runs without btmon attached
+# and green 5 of 5 with it. A local patch (scripts/patches/, tag
+# `adv-every-interval`, its header carries the measurement) re-sends the
+# report every advertising interval; it is applied after the upstream fix.
+#
 # WHAT IT LEAVES BEHIND, AND WHY THE SIDECAR IS NOT OPTIONAL
 #
-#   /usr/local/bin/btvirt             the patched emulator
+#   /usr/local/bin/btvirt             the emulator, both patches applied
 #   /usr/local/bin/btvirt.provenance  what it was built from, one line
 #
 # periculum's ble_room runner prints the sidecar's first non-comment line as
@@ -29,11 +41,11 @@
 # difference between a result and an anecdote. Keep the line's shape: the
 # runner quotes at most 160 characters of it.
 #
-# Idempotent: a host whose installed binary already carries the patch -- by
-# md5 against the recorded one, or by the sidecar naming the commit -- is left
-# untouched, so `just install-ci` stays a one-command re-run. So is a source
-# tree that already has the fix, which is how a future bluez shipping it is
-# handled: see patch_state below.
+# Idempotent: a host whose sidecar names both patches is left untouched, so
+# `just install-ci` stays a one-command re-run; a sidecar naming the upstream
+# fix alone is a bench provisioned before the local patch existed, and is
+# rebuilt. So is a source tree that already has a fix, which is how a future
+# bluez shipping it is handled: see patch_state below.
 #
 # Usage:
 #   bash scripts/install-btvirt.sh             build + install if needed
@@ -64,6 +76,12 @@ PATCH_SHORT=4ff7deaf8c
 PATCH_SUBJECT="emulator: use the handle of the receiving side"
 PATCH_FILE="$REPO_DIR/scripts/patches/bluez-${PATCH_SHORT}-emulator-receiving-side-handle.patch"
 
+# The local patch, cut against the tree the upstream one leaves behind and
+# applied after it. It has no sha, so its tag is what the sidecar names.
+LOCAL_PATCH_TAG=adv-every-interval
+LOCAL_PATCH_SUBJECT="emulator: report a legacy advertiser every advertising interval"
+LOCAL_PATCH_FILE="$REPO_DIR/scripts/patches/bluez-local-emulator-legacy-adv-every-interval.patch"
+
 say() { echo "[install-btvirt] $*"; }
 
 # The sidecar's `origin=`: first non-empty, non-comment line, exactly the line
@@ -76,14 +94,24 @@ origin_line() {
     echo "$line"
 }
 
-# Does this host already hold the patched emulator? Two independent answers,
-# either sufficient: the sidecar names the commit, or the binary is
-# byte-identical to one a previous run recorded.
+# Does this host already hold the patched emulator? The sidecar has to name
+# the upstream commit; check() also holds the binary to the md5 it records.
 provenance_names_patch() {
     local line
     line=$(origin_line) || return 1
     case "$line" in
         *"$PATCH_SHORT"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# And the local patch, by its tag. Separate from the above so that --check
+# can say which of the two a bench lacks.
+provenance_names_local_patch() {
+    local line
+    line=$(origin_line) || return 1
+    case "$line" in
+        *"$LOCAL_PATCH_TAG"*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -125,7 +153,13 @@ check() {
     if ! provenance_names_patch; then
         say "UNPATCHED: $PROVENANCE does not name $PATCH_SHORT"
         say "           origin=\"$line\""
-        say "           expected: bluez <version> + upstream $PATCH_SHORT ($PATCH_SUBJECT); ..."
+        say "           expected: bluez <version> + upstream $PATCH_SHORT + local $LOCAL_PATCH_TAG; ..."
+        return 1
+    fi
+    if ! provenance_names_local_patch; then
+        say "WITHOUT $LOCAL_PATCH_TAG: $PROVENANCE names $PATCH_SHORT but not the local patch"
+        say "           origin=\"$line\""
+        say "           ($LOCAL_PATCH_SUBJECT); run: bash scripts/install-btvirt.sh"
         return 1
     fi
     if [ "$PROVENANCE" -ot "$BTVIRT_BIN" ]; then
@@ -167,15 +201,18 @@ check() {
 #   appliable  a stock tree the patch fits.
 #   no         neither. Refuse: building an unknown emulator is the failure
 #              this whole script exists to prevent.
+#
+# Both patches go through it, in order, each judged against the tree the one
+# before it left.
 patch_state() {
-    local srcdir="$1" logdir="$2"
+    local srcdir="$1" logdir="$2" file="$3"
     if (cd "$srcdir" && patch -p1 --reverse --forward --dry-run \
-            <"$PATCH_FILE" >"$logdir/patch-reverse.log" 2>&1); then
+            <"$file" >"$logdir/patch-reverse.log" 2>&1); then
         echo applied
         return 0
     fi
     if (cd "$srcdir" && patch -p1 --forward --dry-run \
-            <"$PATCH_FILE" >"$logdir/patch-forward.log" 2>&1); then
+            <"$file" >"$logdir/patch-forward.log" 2>&1); then
         echo appliable
         return 0
     fi
@@ -183,19 +220,20 @@ patch_state() {
     return 0
 }
 
-# Put the fix into $srcdir, or say why it cannot be. Returns 0 exactly when
+# Put a fix into $srcdir, or say why it cannot be. Returns 0 exactly when
 # the tree carries the patch afterwards -- freshly applied or already there.
+# apply_patch <srcdir> <logdir> <patch file> <name> <subject>
 apply_patch() {
-    local srcdir="$1" logdir="$2" state
-    state=$(patch_state "$srcdir" "$logdir")
+    local srcdir="$1" logdir="$2" file="$3" name="$4" subject="$5" state
+    state=$(patch_state "$srcdir" "$logdir" "$file")
     case "$state" in
         applied)
-            say "$PATCH_SHORT is already in this source tree; leaving it alone"
+            say "$name is already in this source tree; leaving it alone"
             return 0
             ;;
         appliable)
-            say "applying $PATCH_SHORT ($PATCH_SUBJECT)"
-            if ! (cd "$srcdir" && patch -p1 --forward <"$PATCH_FILE" \
+            say "applying $name ($subject)"
+            if ! (cd "$srcdir" && patch -p1 --forward <"$file" \
                     >"$logdir/patch.log" 2>&1); then
                 say "ERROR: the patch passed its dry-run and then failed"
                 sed 's/^/[install-btvirt]   /' "$logdir/patch.log"
@@ -205,7 +243,7 @@ apply_patch() {
             return 0
             ;;
         *)
-            say "ERROR: $PATCH_SHORT neither applies here nor is applied already"
+            say "ERROR: $name neither applies here nor is applied already"
             sed 's/^/[install-btvirt]   /' "$logdir/patch-forward.log"
             say "       refresh scripts/patches/ against this bluez, or pin the source"
             return 1
@@ -228,10 +266,25 @@ apply_patch() {
 # question needs the real source and is answered by patch_state at
 # provisioning time; it was answered by hand on 2026-09-27 against this
 # bench's two bluez-5.82 trees, stock (appliable) and 325's (applied).
+#
+# The local patch is cut against the upstream patch's post-image, so its
+# fixture is that tree with the local patch's pre-image written over it at
+# the lines its hunks declare (`make_fixture <dest> <patch> overlay`). The
+# two patches' hunks touch disjoint line ranges of the synthesised file, and
+# the self-test asserts the upstream post-image survives the overlay.
 make_fixture() {
-    local dest="$1"
+    local dest="$1" file="${2:-$PATCH_FILE}" mode="${3:-new}" base=
     mkdir -p "$dest/emulator" || return 1
-    awk '
+    if [ "$mode" = overlay ]; then
+        base="$dest/emulator/btdev.c.base"
+        mv "$dest/emulator/btdev.c" "$base" || return 1
+    fi
+    awk -v base="$base" '
+        BEGIN {
+            if (base != "")
+                while ((getline line < base) > 0)
+                    pre[++max] = line
+        }
         /^--- a\/emulator\/btdev\.c$/ { seen = 1; next }
         !seen { next }
         /^@@ / {
@@ -254,7 +307,8 @@ make_fixture() {
             for (i = 1; i <= max; i++)
                 print (i in pre) ? pre[i] : "\t/* not part of any hunk */"
         }
-    ' "$PATCH_FILE" >"$dest/emulator/btdev.c" || return 1
+    ' "$file" >"$dest/emulator/btdev.c" || return 1
+    [ -z "$base" ] || rm -f "$base"
     [ -s "$dest/emulator/btdev.c" ]
 }
 
@@ -267,8 +321,8 @@ provenance_text() {
     local version="$1" md5="$2" today="$3"
     printf '%s\n%s\n%s\n' \
         "# written by scripts/install-btvirt.sh on $today" \
-        "# source: apt-get source bluez ($version), patch -p1 < $(basename "$PATCH_FILE") ($PATCH_SHA)" \
-        "bluez $version + upstream $PATCH_SHORT ($PATCH_SUBJECT); built $today, md5 $md5"
+        "# source: apt-get source bluez ($version), patch -p1 < $(basename "$PATCH_FILE") ($PATCH_SHA), then < $(basename "$LOCAL_PATCH_FILE")" \
+        "bluez $version + upstream $PATCH_SHORT + local $LOCAL_PATCH_TAG; built $today, md5 $md5"
 }
 
 SUDO=""
@@ -286,7 +340,8 @@ need_sudo() {
 
 install_btvirt() {
     # Idempotence, checked before anything is fetched or compiled.
-    if [ -x "$BTVIRT_BIN" ] && provenance_names_patch; then
+    if [ -x "$BTVIRT_BIN" ] && provenance_names_patch \
+            && provenance_names_local_patch; then
         local line
         line=$(origin_line)
         say "already patched, nothing to do"
@@ -294,10 +349,13 @@ install_btvirt() {
         return 0
     fi
 
-    if ! [ -r "$PATCH_FILE" ]; then
-        say "ERROR: vendored patch missing: $PATCH_FILE"
-        return 1
-    fi
+    local f
+    for f in "$PATCH_FILE" "$LOCAL_PATCH_FILE"; do
+        if ! [ -r "$f" ]; then
+            say "ERROR: vendored patch missing: $f"
+            return 1
+        fi
+    done
 
     # Prerequisites this script may not conjure. Each one warns with the exact
     # command and returns 0: btvirt is an optional test dependency, and an
@@ -349,7 +407,10 @@ install_btvirt() {
     DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y \
         libreadline-dev python3-docutils >"$workdir/apt-install.log" 2>&1 || true
 
-    if ! apply_patch "$srcdir" "$workdir"; then
+    if ! apply_patch "$srcdir" "$workdir" "$PATCH_FILE" "$PATCH_SHORT" \
+            "$PATCH_SUBJECT" \
+        || ! apply_patch "$srcdir" "$workdir" "$LOCAL_PATCH_FILE" \
+            "$LOCAL_PATCH_TAG" "$LOCAL_PATCH_SUBJECT"; then
         say "       the source above is bluez $version"
         return 1
     fi
@@ -431,8 +492,9 @@ self_test() {
     }
 
     write_good_note() {
-        printf '# a comment the reader must skip\n\nbluez 5.82-1.1 + upstream %s (%s); built 2026-09-27, md5 %s\n' \
-            "$PATCH_SHORT" "$PATCH_SUBJECT" "$(md5sum "$bin" | cut -d' ' -f1)" >"$note"
+        printf '# a comment the reader must skip\n\nbluez 5.82-1.1 + upstream %s (%s) + local %s; built 2026-10-10, md5 %s\n' \
+            "$PATCH_SHORT" "$PATCH_SUBJECT" "$LOCAL_PATCH_TAG" \
+            "$(md5sum "$bin" | cut -d' ' -f1)" >"$note"
     }
 
     ok() { say "  ok   $1"; }
@@ -458,10 +520,11 @@ self_test() {
             bad "could not synthesise a source tree from $PATCH_FILE"
         else
             local state
-            state=$(patch_state "$src" "$logs")
+            state=$(patch_state "$src" "$logs" "$PATCH_FILE")
             is appliable "$state" "stock tree reads as appliable"
 
-            if apply_patch "$src" "$logs" >/dev/null 2>&1; then
+            if apply_patch "$src" "$logs" "$PATCH_FILE" "$PATCH_SHORT" \
+                    "$PATCH_SUBJECT" >/dev/null 2>&1; then
                 ok "the patch applies"
             else
                 bad "the patch does not apply to its own pre-image"
@@ -492,9 +555,10 @@ self_test() {
             # case. Recognised, left alone, and NOT applied twice.
             local before after
             before=$(md5sum "$src/emulator/btdev.c" | cut -d' ' -f1)
-            state=$(patch_state "$src" "$logs")
+            state=$(patch_state "$src" "$logs" "$PATCH_FILE")
             is applied "$state" "patched tree reads as applied"
-            if apply_patch "$src" "$logs" >/dev/null 2>&1; then
+            if apply_patch "$src" "$logs" "$PATCH_FILE" "$PATCH_SHORT" \
+                    "$PATCH_SUBJECT" >/dev/null 2>&1; then
                 ok "a tree that already has the fix is accepted"
             else
                 bad "a tree that already has the fix is rejected"
@@ -507,13 +571,56 @@ self_test() {
             local trimmed="$scratch/trimmed"
             mkdir -p "$trimmed/emulator"
             head -600 "$src/emulator/btdev.c" >"$trimmed/emulator/btdev.c"
-            state=$(patch_state "$trimmed" "$logs")
+            state=$(patch_state "$trimmed" "$logs" "$PATCH_FILE")
             is no "$state" "an unrelated tree reads as no"
-            if apply_patch "$trimmed" "$logs" >/dev/null 2>&1; then
+            if apply_patch "$trimmed" "$logs" "$PATCH_FILE" "$PATCH_SHORT" \
+                    "$PATCH_SUBJECT" >/dev/null 2>&1; then
                 bad "an unrelated tree was accepted"
             else
                 ok "an unrelated tree is refused"
             fi
+
+            # The local patch, on the tree the upstream one left behind.
+            # A stock tree (no upstream fix) must refuse it: it is cut
+            # against the upstream post-image and the step applies the two
+            # in order, never the local one alone.
+            if ! make_fixture "$src" "$LOCAL_PATCH_FILE" overlay; then
+                bad "could not overlay $LOCAL_PATCH_FILE on the patched tree"
+            else
+                state=$(patch_state "$src" "$logs" "$LOCAL_PATCH_FILE")
+                is appliable "$state" "upstream-patched tree takes $LOCAL_PATCH_TAG"
+                if apply_patch "$src" "$logs" "$LOCAL_PATCH_FILE" \
+                        "$LOCAL_PATCH_TAG" "$LOCAL_PATCH_SUBJECT" \
+                        >/dev/null 2>&1; then
+                    ok "the local patch applies"
+                else
+                    bad "the local patch does not apply to its own pre-image"
+                fi
+                # What it does, by its post-image: the interval kept from
+                # Set Advertising Parameters, the timer started at enable,
+                # and the timer stopped at teardown.
+                for want in \
+                        'dev->le_adv_min_interval = le16_to_cpu(cmd->min_interval);' \
+                        'le_adv_broadcast_start(dev);' \
+                        'le_adv_broadcast_stop(btdev);'; do
+                    if grep -qF "$want" "$src/emulator/btdev.c"; then
+                        ok "locally patched tree carries: $want"
+                    else
+                        bad "locally patched tree lacks: $want"
+                    fi
+                done
+                # The overlay must not have clobbered the upstream fix.
+                if grep -qF 'cc.handle = cpu_to_le16(conn->link->handle);' \
+                        "$src/emulator/btdev.c"; then
+                    ok "the upstream fix survives the local patch"
+                else
+                    bad "the upstream fix is gone after the local patch"
+                fi
+                state=$(patch_state "$src" "$logs" "$LOCAL_PATCH_FILE")
+                is applied "$state" "locally patched tree reads as applied"
+            fi
+            state=$(patch_state "$trimmed" "$logs" "$LOCAL_PATCH_FILE")
+            is no "$state" "an unrelated tree refuses $LOCAL_PATCH_TAG"
         fi
     fi
 
@@ -529,8 +636,13 @@ self_test() {
         bad "sidecar comment does not name $PATCH_SHA"
     fi
     origin=$(echo "$text" | sed -n 3p)
+    if echo "$text" | sed -n 2p | grep -qF "$(basename "$LOCAL_PATCH_FILE")"; then
+        ok "sidecar comment names the local patch file"
+    else
+        bad "sidecar comment does not name $(basename "$LOCAL_PATCH_FILE")"
+    fi
     if echo "$origin" | grep -qE \
-        "^bluez 5\.82-1\.1 \+ upstream $PATCH_SHORT \(.*\); built 2026-09-27, md5 [0-9a-f]{32}$"
+        "^bluez 5\.82-1\.1 \+ upstream $PATCH_SHORT \+ local $LOCAL_PATCH_TAG; built 2026-09-27, md5 [0-9a-f]{32}$"
     then
         ok "origin line has the shape periculum reads"
     else
@@ -556,6 +668,13 @@ self_test() {
     printf 'bluez 5.82 stock\n' >"$note"
     expect 1 "origin line that does not name the patch"
 
+    # A bench provisioned before the local patch: the upstream fix alone,
+    # md5 and mtime honest. It must fail, or the room would keep measuring
+    # the emulator's advertising phase on it.
+    printf 'bluez 5.82-1.1 + upstream %s (%s); built 2026-09-27, md5 %s\n' \
+        "$PATCH_SHORT" "$PATCH_SUBJECT" "$(md5sum "$bin" | cut -d' ' -f1)" >"$note"
+    expect 1 "origin line naming the upstream fix without $LOCAL_PATCH_TAG"
+
     write_good_note
     expect 0 "patched sidecar describing this binary"
 
@@ -574,8 +693,9 @@ self_test() {
     expect 0 "rewritten sidecar after the reinstall"
 
     # The round trip: the writer's own output, for this very binary, is what
-    # --check accepts. The two shapes in this file -- the one a human wrote
-    # on the bench 2026-09-27 (above) and this generated one -- both pass.
+    # --check accepts. The two shapes in this file -- the hand-written one
+    # above, which also carries the upstream subject, and this generated
+    # one -- both pass.
     provenance_text "5.82-1.1" "$(md5sum "$bin" | cut -d' ' -f1)" \
         "$(date +%Y-%m-%d)" >"$note"
     expect 0 "sidecar as provenance_text writes it"

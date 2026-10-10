@@ -1,0 +1,157 @@
+Local bluez patch, not upstream. Applied by scripts/install-btvirt.sh to the
+`apt-get source bluez` tree AFTER bluez-4ff7deaf8c-emulator-receiving-side-
+handle.patch, whose post-image it is cut against, before building
+emulator/btvirt.
+
+  tag:      adv-every-interval (the name the provenance sidecar carries)
+  subject:  emulator: report a legacy advertiser every advertising interval
+  cut:      2026-10-10, against bluez 5.82-1.1 (Debian) + 4ff7deaf8c, 5 hunks
+  files:    emulator/btdev.c only
+
+WHAT IT CHANGES
+
+btvirt sends a legacy LE Advertising Report at exactly two instants: when a
+scanner enables scanning (cmd_set_scan_enable_complete, one report per
+advertiser that is advertising then) and when an advertiser enables
+advertising (le_set_adv_enable_complete, one report per controller that is
+scanning then). Between those instants the emulated air is silent. This patch
+adds a timer per advertising controller, started at LE Set Advertise Enable
+and stopped at disable, reset, connection or teardown, that re-sends the same
+report (and the scan response, for an active scanner) to every scanning
+controller once per advertising interval. The interval is the advertiser's
+configured Advertising_Interval_Min (units of 0.625 ms, at least 20 ms), or
+100 ms when Set Advertising Parameters was never sent. The kernel's default
+is 0x0800, so a bluetoothd advertiser repeats every 1280 ms. Duplicate
+filtering is not modelled, as the two enable-instant reports never modelled
+it either: the host's own dedupe sees the repeats. Extended advertising
+already repeats on its own timer (ext_adv_broadcast) and is untouched, as is
+everything 4ff7deaf8c changes.
+
+WHY
+
+Real radios advertise every interval, so a scan window that overlaps one
+hears the advertiser. On btvirt a scan window heard it only if it was
+advertising at the instant scanning was enabled, so every test that bounds a
+re-sighting measured the emulator's phase rather than the daemon. Measured
+2026-10-10 (leviculum order 577): a guard test for a redial after a failed
+dial was red 4 of 5 runs without btmon attached and green 5 of 5 with it,
+because attaching btmon moved the instants.
+
+THE MEASUREMENT (periculum order 590, 2026-10-10, artefacts /home/lew/ci/p590)
+
+Two controllers on one btvirt, a bluetoothd advertiser (interval 1280 ms)
+and a scanner opening three 5 s LE discovery windows, btmon on both:
+
+  binary              window 1   window 2   window 3   (ADV_IND reports)
+  4ff7deaf8c only     1          1          1          all at scan enable
+  + this patch        5          5          4          1280 ms apart
+
+On the patched binary: 577's guard test 5 of 5 green without btmon,
+ble_returning_peer_resight 3 of 3 green, periculum
+regression/ble_room_departure 3 of 3 green with rejoin_ms 8579, 5462, 5102.
+Built binary md5 bbcd9427bf1cf23c6416de088f9b4ccb.
+
+patch(1) ignores this header.
+
+--- a/emulator/btdev.c
++++ b/emulator/btdev.c
+@@ -214,6 +214,8 @@
+ 	uint8_t  le_adv_direct_addr_type;
+ 	uint8_t  le_adv_direct_addr[6];
+ 	uint8_t  le_adv_filter_policy;
++	uint16_t le_adv_min_interval;
++	unsigned int le_adv_broadcast_id;
+ 	uint8_t  le_scan_data[31];
+ 	uint8_t  le_scan_data_len;
+ 	uint8_t  le_scan_enable;
+@@ -3437,6 +3439,7 @@
+ 	dev->le_adv_direct_addr_type = cmd->direct_addr_type;
+ 	memcpy(dev->le_adv_direct_addr, cmd->direct_addr, 6);
+ 	dev->le_adv_filter_policy = cmd->filter_policy;
++	dev->le_adv_min_interval = le16_to_cpu(cmd->min_interval);
+ 
+ 	status = BT_HCI_ERR_SUCCESS;
+ 
+@@ -3628,6 +3631,60 @@
+ 	return NULL;
+ }
+ 
++/* A real advertiser repeats its PDU every advertising interval, and a
++ * scanner hears it in any window that overlaps one. Without this the
++ * emulator reports a legacy advertiser only at the two enable instants
++ * above, so a scan window sees it only if it was advertising at the
++ * instant scanning was enabled.
++ */
++static unsigned int le_adv_interval_ms(const struct btdev *btdev)
++{
++	unsigned int interval;
++
++	/* Advertising parameters never set: 100 ms */
++	if (!btdev->le_adv_min_interval)
++		return 100;
++
++	/* Advertising_Interval_Min is in units of 0.625 ms, at least 20 ms */
++	interval = btdev->le_adv_min_interval * 5 / 8;
++	if (interval < 20)
++		interval = 20;
++
++	return interval;
++}
++
++static bool le_adv_broadcast(void *user_data)
++{
++	struct btdev *btdev = user_data;
++
++	/* Disabled by command, reset or connection since the last interval */
++	if (!btdev->le_adv_enable) {
++		btdev->le_adv_broadcast_id = 0;
++		return false;
++	}
++
++	le_set_adv_enable_complete(btdev);
++
++	return true;
++}
++
++static void le_adv_broadcast_stop(struct btdev *btdev)
++{
++	if (!btdev->le_adv_broadcast_id)
++		return;
++
++	timeout_remove(btdev->le_adv_broadcast_id);
++	btdev->le_adv_broadcast_id = 0;
++}
++
++static void le_adv_broadcast_start(struct btdev *btdev)
++{
++	le_adv_broadcast_stop(btdev);
++	btdev->le_adv_broadcast_id = timeout_add(le_adv_interval_ms(btdev),
++							le_adv_broadcast,
++							btdev, NULL);
++}
++
+ static int cmd_set_adv_enable(struct btdev *dev, const void *data, uint8_t len)
+ {
+ 	const struct bt_hci_cmd_le_set_ext_adv_enable *cmd = data;
+@@ -3676,8 +3733,11 @@
+ 	cmd_complete(dev, BT_HCI_CMD_LE_SET_ADV_ENABLE, &status,
+ 						sizeof(status));
+ 
+-	if (!status && dev->le_adv_enable)
++	if (!status && dev->le_adv_enable) {
+ 		le_set_adv_enable_complete(dev);
++		le_adv_broadcast_start(dev);
++	} else if (!dev->le_adv_enable)
++		le_adv_broadcast_stop(dev);
+ 
+ 	return 0;
+ }
+@@ -7382,6 +7442,8 @@
+ 	if (btdev->inquiry_id > 0)
+ 		timeout_remove(btdev->inquiry_id);
+ 
++	le_adv_broadcast_stop(btdev);
++
+ 	bt_crypto_unref(btdev->crypto);
+ 	del_btdev(btdev);
+ 

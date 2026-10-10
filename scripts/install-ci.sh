@@ -180,8 +180,11 @@ fi
 # every room from the second concurrent link (N >= 3). So the build is not a
 # hint in a comment any more: scripts/install-btvirt.sh fetches the bluez
 # source matching this host, applies the vendored upstream fix
-# (scripts/patches/, commit 4ff7deaf8c), builds emulator/btvirt, installs it,
-# and writes the provenance sidecar the room prints as `origin=`. It is
+# (scripts/patches/, commit 4ff7deaf8c) and then the local patch that makes a
+# legacy advertiser repeat every interval (tag adv-every-interval: stock
+# btvirt reports it only at the scan-enable and advertise-enable instants, so
+# re-sightings measured the emulator's phase), builds emulator/btvirt,
+# installs it, and writes the provenance sidecar the room prints as `origin=`. It is
 # idempotent and it warns rather than fails when a prerequisite (deb-src,
 # sudo, a compiler) is missing -- only the BLE bench needs any of this. A
 # source tree that already carries the fix is recognised and left alone, so

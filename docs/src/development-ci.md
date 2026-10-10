@@ -516,16 +516,34 @@ under the sender's handle, so every room stalls from the second
 concurrent link (N >= 3) and the emulator's bug is measured as a mesh
 finding. Upstream commit `4ff7deaf8c` fixes it; with it the ladder is
 green to N = 16, which is the emulator's own `MAX_BTDEV_ENTRIES`
-ceiling. `just install-ci` therefore builds btvirt itself
+ceiling.
+
+The fix is not the only thing a stock build gets wrong. btvirt reports a
+legacy advertiser only at two instants, when a scanner enables scanning
+and when the advertiser enables advertising, where a real radio repeats
+its advertisement every interval. On stock btvirt a scan window therefore
+sees a peer only if the peer was advertising at the instant the window
+opened, and any test that bounds a re-sighting measures the emulator's
+phase: a redial guard test was red 4 of 5 runs without `btmon` attached
+and green 5 of 5 with it (2026-10-10). A local patch, tag
+`adv-every-interval`, re-sends the report every advertising interval
+(1280 ms for a `bluetoothd` advertiser); its header in `scripts/patches/`
+carries the before/after trace and the runs that justify it.
+
+`just install-ci` therefore builds btvirt itself
 (`scripts/install-btvirt.sh`): it fetches the bluez source matching this
-host, applies the vendored patch from `scripts/patches/`, and installs
-the binary together with a provenance sidecar,
-`/usr/local/bin/btvirt.provenance`, whose first non-comment line every
-room prints as `origin=`:
+host, applies the vendored upstream patch and then the local one from
+`scripts/patches/`, and installs the binary together with a provenance
+sidecar, `/usr/local/bin/btvirt.provenance`, whose first non-comment line
+every room prints as `origin=`:
 
 ```
-BLE_ROOM_BTVIRT bin=/usr/local/bin/btvirt bytes=895400 origin="bluez 5.82-1.1 + upstream 4ff7deaf8c (emulator: use the handle of the receiving side); built 2026-09-27, md5 11f1de0c2b097787824cd6335ef676bc"
+BLE_ROOM_BTVIRT bin=/usr/local/bin/btvirt bytes=896800 origin="bluez 5.82-1.1 + upstream 4ff7deaf8c + local adv-every-interval; built 2026-10-10, md5 bbcd9427bf1cf23c6416de088f9b4ccb"
 ```
+
+A sidecar that names `4ff7deaf8c` without `adv-every-interval` is a bench
+provisioned before the local patch; `--check` fails it and the installer
+rebuilds it.
 
 A room with no sidecar still runs and says `origin=unrecorded`, which
 is a result nobody can attribute afterwards. Verify a bench without
@@ -538,9 +556,9 @@ service, `cap_net_raw` on `btmon`) are listed in
 `scripts/install-ci.sh` at the btvirt step; nothing can provision them
 for you.
 
-The patch is applied by content, not by version number. Before touching
-the source tree the script asks `patch --dry-run` which of three states
-it is in: the fix reverse-applies cleanly (already there — leave it
+Each patch is applied by content, not by version number, the local one
+against the tree the upstream one left. Before touching the source tree
+the script asks `patch --dry-run` which of three states it is in: the fix reverse-applies cleanly (already there — leave it
 alone), it applies forward (stock — apply it), or neither (refuse,
 rather than build an emulator nobody can name). No released bluez known
 here carries the fix yet, 5.82 being the newest and the commit dated
@@ -549,8 +567,8 @@ and need no change to this script.
 
 Both halves run with no root, no network and no compiler under `just
 btvirt-selftest` (in `guards` and `fast`, 0.12 s): the patch step
-against a bluez source tree synthesised from the vendored patch's own
-pre-image, and the provenance checker against each way the sidecar can
+against a bluez source tree synthesised from the vendored patches' own
+pre-images, and the provenance checker against each way the sidecar can
 lie. What the synthesised tree cannot answer is whether the patch still
 fits *Debian's* bluez — a patch and a fixture derived from it drift
 together — and that is what `patch --dry-run` answers at provisioning
