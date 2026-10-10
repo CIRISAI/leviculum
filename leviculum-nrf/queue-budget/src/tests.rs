@@ -928,3 +928,122 @@ fn half_the_real_ledger_stops_own_traffic_while_the_lock_stays_open() {
         OWN_TRAFFIC_SHARE_PERMILLE
     ));
 }
+
+// ---------------------------------------------------------------------
+// HoldEdge: the LoRa task's own hold edges (leviculum#493, moved #413)
+// ---------------------------------------------------------------------
+
+/// The hold opens on the first held turn and on no later one: every later
+/// held turn of the same hold returns false, so the firmware signals the
+/// core and the host once, and the lift measures from the FIRST turn.
+#[test]
+fn a_hold_opens_once_and_the_lift_measures_from_the_first_held_turn() {
+    let mut edge = HoldEdge::new();
+    assert!(!edge.is_open());
+    assert!(edge.open(10_000, 3), "the first held turn opens the hold");
+    assert!(edge.is_open());
+    assert!(!edge.open(20_000, 5), "a later held turn is not an edge");
+    assert!(!edge.open(30_000, 7), "nor is a sweep inside the same hold");
+    assert_eq!(
+        edge.lift(70_000, 9),
+        Some(HoldLift {
+            held_for_ms: 60_000,
+            dropped_stale: 6,
+        }),
+        "held from the opening turn, drops counted from the opening total"
+    );
+}
+
+/// The lift is an edge too: once, and never without a hold. A `Key` verdict
+/// on an unheld queue, the ordinary case, reports nothing.
+#[test]
+fn a_lift_happens_once_and_never_without_a_hold() {
+    let mut edge = HoldEdge::new();
+    assert_eq!(edge.lift(5_000, 0), None, "no hold, no lift line");
+    edge.open(5_000, 0);
+    assert!(edge.lift(6_000, 0).is_some());
+    assert_eq!(edge.lift(7_000, 0), None, "the second Key turn is silent");
+    assert!(!edge.is_open());
+    assert!(edge.open(8_000, 0), "a new hold opens after a lift");
+}
+
+/// The stale-drop total is the firmware's wrapping `u32` atomic, so the
+/// difference across its wrap is still the number of drops.
+#[test]
+fn the_lift_counts_drops_across_the_counter_wrap() {
+    let mut edge = HoldEdge::new();
+    edge.open(0, u32::MAX - 1);
+    assert_eq!(edge.lift(1_000, 2).map(|lift| lift.dropped_stale), Some(4));
+}
+
+/// The idle-turn lift, branch by branch: only an open hold, with nothing
+/// pending and the lock disengaged.
+#[test]
+fn an_idle_turn_lifts_only_an_open_hold_with_nothing_pending_and_no_lock() {
+    let closed = HoldEdge::new();
+    assert!(!closed.lifts_when_idle(false, false), "no hold to lift");
+    let mut open = HoldEdge::new();
+    open.open(0, 0);
+    assert!(
+        !open.lifts_when_idle(true, false),
+        "a pending frame lifts on its own Key verdict instead"
+    );
+    assert!(!open.lifts_when_idle(false, true), "still locked");
+    assert!(!open.lifts_when_idle(true, true));
+    assert!(open.lifts_when_idle(false, false));
+}
+
+/// The inputs `lora_duty_lock_lawful_default` would produce if it ran long
+/// enough to see a lift, which it cannot (its header, "WHY THE LIFT IS NOT
+/// HERE"): a 1 % cap spent flat, the hold opened on a held frame, idle turns
+/// inside the hour that must not lift, and the first freed bin that must.
+/// The core's real ledger drives the lock, as in the firmware's task.
+#[test]
+fn the_hold_edge_lifts_on_the_first_idle_turn_after_the_rolling_hour_frees_a_bin() {
+    use leviculum_core::rnode::{AirtimeTracker, AIRTIME_BINLEN_MS, AIRTIME_LONGTERM_MS};
+
+    let mut ledger = AirtimeTracker::new();
+    ledger.set_lt_limit_u16(100);
+    for i in 0..12u64 {
+        ledger.add_airtime(i * AIRTIME_BINLEN_MS, 3_000);
+    }
+    let t0 = 12 * AIRTIME_BINLEN_MS;
+    ledger.update(t0);
+    assert!(ledger.is_locked(), "control: flat at the cap");
+
+    let mut edge = HoldEdge::new();
+    // The held frame's turn: Hold verdict, the hold opens.
+    let enqueued = (t0 - 1_000) as u32;
+    assert!(matches!(
+        hold_verdict(enqueued, t0 as u32, ledger.is_locked()),
+        HoldVerdict::Hold { .. }
+    ));
+    assert!(edge.open(t0, 0));
+    // The frame ages out under the lock: swept, the hold stays open.
+    let swept_at = t0 + u64::from(HOLD_MAX_AGE_MS) + 1_000;
+    ledger.update(swept_at);
+    assert!(matches!(
+        hold_verdict(enqueued, swept_at as u32, ledger.is_locked()),
+        HoldVerdict::DropStale { .. }
+    ));
+    assert!(!edge.open(swept_at, 1), "the sweep is inside the open hold");
+
+    // Idle turns inside the hour: nothing pending, still locked, no lift.
+    let inside = AIRTIME_LONGTERM_MS - 2 * AIRTIME_BINLEN_MS;
+    ledger.update(inside);
+    assert!(!edge.lifts_when_idle(false, ledger.is_locked()));
+
+    // The first bin that leaves the rolling hour frees the lock, and the
+    // next idle turn lifts.
+    let freed = AIRTIME_LONGTERM_MS - AIRTIME_BINLEN_MS;
+    ledger.update(freed);
+    assert!(edge.lifts_when_idle(false, ledger.is_locked()));
+    assert_eq!(
+        edge.lift(freed, 1),
+        Some(HoldLift {
+            held_for_ms: freed - t0,
+            dropped_stale: 1,
+        })
+    );
+    assert!(!edge.lifts_when_idle(false, ledger.is_locked()), "once");
+}

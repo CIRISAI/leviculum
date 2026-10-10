@@ -432,6 +432,81 @@ impl DutyHolds {
     }
 }
 
+/// The edges of the firmware's own duty hold (leviculum#493): when the LoRa
+/// task opens one, when it lifts it, and what the lift reports.
+///
+/// The task owns the radio and reads the airtime lock directly, so it needs
+/// no [`DutyHolds`] inference; what it has to get right is the EDGE. The hold
+/// opens on the first turn the gate holds or sweeps a frame and on no later
+/// one, and it lifts exactly once: on a [`HoldVerdict::Key`], or on a turn
+/// with nothing to send and the lock disengaged ([`Self::lifts_when_idle`]).
+/// Each edge is what the firmware turns into the core's `duty_hold` mirror
+/// and the USB `TYPE_DUTY_HOLD` frame, so a second open would re-signal a
+/// hold the host already knows and a lift that never came would leave the
+/// core refusing announces on a budget that has returned.
+///
+/// No rig cell sees the lift: a fresh ledger frees nothing for an hour
+/// (`periculum/hardware/lora_duty_lock_lawful_default.toml`, "WHY THE LIFT
+/// IS NOT HERE"), which is why the edge lives here and not inline in the
+/// task (leviculum#413).
+///
+/// Milliseconds as `u64` uptime and the stale-drop counter as the `u32` the
+/// firmware's atomic holds; the counter difference is taken wrappingly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HoldEdge {
+    /// When the open hold began, and the stale-drop total at that moment.
+    started: Option<(u64, u32)>,
+}
+
+/// What a lift reports on the firmware's `[LORA] hold lifted` line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoldLift {
+    /// How long the board held, from the opening turn to this one.
+    pub held_for_ms: u64,
+    /// How many queued frames the hold aged into stale drops meanwhile.
+    pub dropped_stale: u32,
+}
+
+impl HoldEdge {
+    /// No hold open.
+    pub const fn new() -> Self {
+        Self { started: None }
+    }
+
+    /// Whether a hold is open.
+    pub const fn is_open(&self) -> bool {
+        self.started.is_some()
+    }
+
+    /// The gate held or swept a frame at `now_ms`. True iff this opened the
+    /// hold, which is the one turn the caller raises its flag and signals.
+    pub fn open(&mut self, now_ms: u64, stale_total: u32) -> bool {
+        if self.started.is_some() {
+            return false;
+        }
+        self.started = Some((now_ms, stale_total));
+        true
+    }
+
+    /// Close the hold if one is open. `Some` iff this was the lift, carrying
+    /// what the lift line states; `None` on every turn no hold was open.
+    pub fn lift(&mut self, now_ms: u64, stale_total: u32) -> Option<HoldLift> {
+        let (since_ms, stale_at_start) = self.started.take()?;
+        Some(HoldLift {
+            held_for_ms: now_ms.saturating_sub(since_ms),
+            dropped_stale: stale_total.wrapping_sub(stale_at_start),
+        })
+    }
+
+    /// Whether an idle turn lifts the hold: one is open, no frame is
+    /// pending, and the lock has disengaged. A turn with a frame pending
+    /// leaves the lift to that frame's [`HoldVerdict::Key`], so the lift is
+    /// stated before the frame that proves it.
+    pub const fn lifts_when_idle(&self, frame_pending: bool, locked: bool) -> bool {
+        self.is_open() && !frame_pending && !locked
+    }
+}
+
 /// The share of the lawful long-term airtime budget a propagation node's
 /// OWN originated traffic may use, in permille: half (Lew, 2026-10-07,
 /// leviculum#433, #384).

@@ -767,14 +767,15 @@ impl AnnounceCap {
 
 /// Open a duty hold if none is in force (leviculum#493): remember when and
 /// at what stale-drop total, and raise [`LORA_DUTY_HOLD`] for the core
-/// mirror. No line of its own — the existing `[LORA_AIRTIME_LOCK] … holding`
-/// line already states every hold turn, the first one included.
-fn start_duty_hold(hold_started: &mut Option<(u64, u32)>, now_ms: u64) {
-    if hold_started.is_none() {
-        *hold_started = Some((
-            now_ms,
-            LORA_STALE_DROP_COUNT.load(core::sync::atomic::Ordering::Relaxed),
-        ));
+/// mirror. The edge is [`leviculum_queue_budget::HoldEdge::open`],
+/// host-tested (leviculum#413). No line of its own — the existing
+/// `[LORA_AIRTIME_LOCK] … holding` line already states every hold turn, the
+/// first one included.
+fn start_duty_hold(hold: &mut leviculum_queue_budget::HoldEdge, now_ms: u64) {
+    if hold.open(
+        now_ms,
+        LORA_STALE_DROP_COUNT.load(core::sync::atomic::Ordering::Relaxed),
+    ) {
         LORA_DUTY_HOLD.store(true, core::sync::atomic::Ordering::Relaxed);
         LORA_DUTY_HOLD_EDGE.signal(());
     }
@@ -782,30 +783,30 @@ fn start_duty_hold(hold_started: &mut Option<(u64, u32)>, now_ms: u64) {
 
 /// Close a duty hold, if one is in force (leviculum#493): lower
 /// [`LORA_DUTY_HOLD`] and state the lift ONCE, on the edge — not per turn,
-/// which is what taking the start state out of the slot guarantees. The
+/// which is what [`leviculum_queue_budget::HoldEdge::lift`] guarantees. The
 /// line carries what the next reader of a dark-relay capture needs: the
 /// ledger the lock re-opened at, how long the board advertised nothing, and
 /// how many queued frames the hold aged into stale drops meanwhile.
 fn lift_duty_hold(
-    hold_started: &mut Option<(u64, u32)>,
+    hold: &mut leviculum_queue_budget::HoldEdge,
     airtime: &leviculum_core::rnode::AirtimeTracker,
     now_ms: u64,
 ) {
-    let Some((since_ms, stale_at_start)) = hold_started.take() else {
+    let Some(lift) = hold.lift(
+        now_ms,
+        LORA_STALE_DROP_COUNT.load(core::sync::atomic::Ordering::Relaxed),
+    ) else {
         return;
     };
     LORA_DUTY_HOLD.store(false, core::sync::atomic::Ordering::Relaxed);
     LORA_DUTY_HOLD_EDGE.signal(());
-    let dropped = LORA_STALE_DROP_COUNT
-        .load(core::sync::atomic::Ordering::Relaxed)
-        .wrapping_sub(stale_at_start);
     crate::log::log_fmt(
         "[LORA] ",
         format_args!(
             "hold lifted lt_ms={} held_for_ms={} dropped_stale={}",
             airtime.long_term_airtime_ms(),
-            now_ms.saturating_sub(since_ms),
-            dropped
+            lift.held_for_ms,
+            lift.dropped_stale
         ),
     );
 }
@@ -1771,10 +1772,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     // The duty hold's start, if one is in force (leviculum#493): the uptime
     // the lock gate first held or swept a frame at, and the stale-drop total
     // as of that moment, so the lift edge can state how long the board was
-    // dark and what the hold cost. `None` is the only state in which
-    // `LORA_DUTY_HOLD` reads false; the two are flipped together at the
-    // edges and nowhere else.
-    let mut hold_started: Option<(u64, u32)> = None;
+    // dark and what the hold cost. A closed edge (`!is_open()`) is the only
+    // state in which `LORA_DUTY_HOLD` reads false; the two are flipped
+    // together at the edges and nowhere else.
+    let mut hold_started = leviculum_queue_budget::HoldEdge::new();
 
     loop {
         // Take a new on-air spacing before anything is keyed this
@@ -1843,7 +1844,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             airtime.long_term_airtime_ms(),
             core::sync::atomic::Ordering::Relaxed,
         );
-        if hold_started.is_some() && pending_tx.is_none() && !airtime.is_locked() {
+        if hold_started.lifts_when_idle(pending_tx.is_some(), airtime.is_locked()) {
             lift_duty_hold(&mut hold_started, &airtime, now_ms);
         }
         if mute_lease.expired_at(now_ms).is_some() {
