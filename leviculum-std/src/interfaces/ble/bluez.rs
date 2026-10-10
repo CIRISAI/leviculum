@@ -488,7 +488,7 @@ impl CentralTask {
             .await
             .unwrap_or(leviculum_core::framing::ble::MIN_MTU);
 
-        let (frames_tx, frames_rx) = mpsc::channel(LINK_QUEUE_DEPTH);
+        let (frames_tx, frames_rx) = super::census::packet_queue(LINK_QUEUE_DEPTH);
         let (ack_tx, ack_rx) = oneshot::channel();
         let sent = self
             .ev_tx
@@ -600,7 +600,7 @@ impl CentralTask {
 
 struct CentralSession {
     notify_stream: std::pin::Pin<Box<dyn futures::Stream<Item = Vec<u8>> + Send>>,
-    frames_rx: mpsc::Receiver<Vec<Vec<u8>>>,
+    frames_rx: super::census::PacketRx,
     rx_char: bluer::gatt::remote::Characteristic,
 }
 

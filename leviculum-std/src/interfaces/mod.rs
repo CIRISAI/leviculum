@@ -16,6 +16,7 @@ pub mod auto_interface;
 #[cfg(target_os = "linux")]
 pub(crate) mod ble;
 pub(crate) mod byte_channel;
+pub(crate) mod census;
 pub use byte_channel::ByteChannelHandle;
 pub mod hdlc;
 pub(crate) mod i2p;
@@ -181,6 +182,9 @@ pub(crate) struct InterfaceCounters {
     pub tx_unaccounted: Counter64,
     speed: std::sync::Mutex<SpeedState>,
     radio: std::sync::Mutex<Option<RadioStats>>,
+    /// The owning task's latest census of its own tables (597), `None` for
+    /// an interface that publishes none. See [`census`].
+    census: std::sync::Mutex<Option<census::InterfaceCensus>>,
     /// Live carrier state, flipped by the owning interface task at its
     /// connect boundaries (L-0020). Interfaces without a carrier state
     /// machine (UDP, server listeners, local IPC) never touch it and stay
@@ -221,6 +225,7 @@ impl InterfaceCounters {
                 cached_txs: 0.0,
             }),
             radio: std::sync::Mutex::new(None),
+            census: std::sync::Mutex::new(None),
             online: AtomicBool::new(true),
             duty_hold: AtomicBool::new(false),
         }
@@ -270,6 +275,17 @@ impl InterfaceCounters {
     /// Snapshot the latest radio stats, or `None` for non-radio interfaces.
     pub(crate) fn radio_stats(&self) -> Option<RadioStats> {
         *self.radio.lock_recover()
+    }
+
+    /// Publish the owning task's census of its own tables (597), replacing
+    /// the last one; `None` withdraws it (the tables are gone).
+    pub(crate) fn publish_census(&self, census: Option<census::InterfaceCensus>) {
+        *self.census.lock_recover() = census;
+    }
+
+    /// The latest published census, `None` when the task publishes none.
+    pub(crate) fn census(&self) -> Option<census::InterfaceCensus> {
+        self.census.lock_recover().clone()
     }
 
     /// Sample current byte counters and recompute cached speeds.

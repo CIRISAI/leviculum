@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:5272`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:5296`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -385,7 +385,7 @@ informatively:
 | event | where | says |
 | --- | --- | --- |
 | `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6151`) | announce handling itself took ≥ 100 ms |
-| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4266`) | an outside thread waited ≥ 250 ms for the core lock |
+| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4290`) | an outside thread waited ≥ 250 ms for the core lock |
 | `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1540`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by

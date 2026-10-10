@@ -226,6 +226,20 @@ pub(crate) struct Link {
     last_keepalive_tx_ms: u64,
 }
 
+/// One live link's figures for the interface census (597).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LinkCensus {
+    pub(crate) identity: IdentityHash,
+    pub(crate) addr: Addr,
+    pub(crate) role: Role,
+    /// Fragments the reassembly in progress holds, 0 when idle.
+    pub(crate) defrag_fragments: usize,
+    /// Bytes they pin ([`BleDefragmenter::held_bytes`]).
+    pub(crate) defrag_bytes: usize,
+    /// Bytes of the parked out-of-order tail, 0 when none is parked.
+    pub(crate) parked_tail_bytes: usize,
+}
+
 /// Why a link was (not) admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Admission {
@@ -855,6 +869,41 @@ impl LinkTable {
         }
     }
 
+    /// Every live link's census figures (597), in table order.
+    pub(crate) fn link_census(&self) -> impl Iterator<Item = LinkCensus> + '_ {
+        self.links.iter().map(|l| LinkCensus {
+            identity: l.identity,
+            addr: l.addr,
+            role: l.role,
+            defrag_fragments: l.defrag.pending_fragments(),
+            defrag_bytes: l.defrag.held_bytes(),
+            parked_tail_bytes: l.oo_tail.as_ref().map_or(0, Vec::capacity),
+        })
+    }
+
+    /// Link slots the table's `Vec` holds allocated, live or spare (597).
+    pub(crate) fn link_slots(&self) -> usize {
+        self.links.capacity()
+    }
+
+    /// Pending handshakes (597): `(entries, bytes)`, the bytes being the
+    /// `Vec`'s allocated slots.
+    pub(crate) fn pending_census(&self) -> (usize, usize) {
+        (
+            self.pending.len(),
+            self.pending.capacity() * std::mem::size_of::<Pending>(),
+        )
+    }
+
+    /// Abandonment reports not yet taken by the driver (597): `(entries,
+    /// bytes)`, the bytes being the `Vec`'s allocated slots.
+    pub(crate) fn abandon_report_census(&self) -> (usize, usize) {
+        (
+            self.abandon_reports.len(),
+            self.abandon_reports.capacity() * std::mem::size_of::<(IdentityHash, u32, u32)>(),
+        )
+    }
+
     /// Drain the queued reassembly-loss reports (#373); the driver turns
     /// each into one `BLE_RX_ABANDON` line.
     pub(crate) fn take_abandon_reports(&mut self) -> Vec<(IdentityHash, u32, u32)> {
@@ -1229,6 +1278,18 @@ impl ScanLineGate {
     /// hold prints once, however often the address is sighted in it.
     pub(crate) fn backed_off(&mut self, addr: Addr, until_ms: u64) -> bool {
         self.backed_off.insert(addr, until_ms) != Some(until_ms)
+    }
+
+    /// The three ledgers' census rows (597). None of them forgets an
+    /// address, so on a host in a room of rotating addresses they grow
+    /// with every address ever sighted: exactly what a soak has to see.
+    pub(crate) fn census_rows(&self) -> [crate::interfaces::census::CensusRow; 3] {
+        use crate::interfaces::census::hash_map_row;
+        [
+            hash_map_row("scan_line_decided", &self.decided),
+            hash_map_row("scan_line_dropped", &self.dropped),
+            hash_map_row("scan_line_backed_off", &self.backed_off),
+        ]
     }
 }
 
@@ -1728,6 +1789,12 @@ impl ChurnGate {
         self.policy
     }
 
+    /// Identities the ledger currently remembers (597). The ledger is a
+    /// fixed array, so this counts occupancy, not memory.
+    pub(crate) fn remembered(&self) -> usize {
+        self.ledger.occupied()
+    }
+
     /// Record one DEPARTURE: a session with `identity` ended by the
     /// peer's own leaving — silence until the expiry swept it, or a
     /// replacement by its next connection. `addr` is the address the
@@ -1843,6 +1910,15 @@ pub(crate) struct DialQueue {
 }
 
 impl DialQueue {
+    /// Queued dials (597): `(entries, bytes)`, the bytes being the `Vec`'s
+    /// allocated slots. The one in flight is not queued.
+    pub(crate) fn census(&self) -> (usize, usize) {
+        (
+            self.queue.len(),
+            self.queue.capacity() * std::mem::size_of::<QueuedDial>(),
+        )
+    }
+
     pub(crate) fn new(seed: u64) -> Self {
         Self {
             rng: Xorshift64::new(seed),

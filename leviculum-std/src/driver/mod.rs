@@ -3780,9 +3780,33 @@ impl ReticulumNode {
         )
     }
 
-    /// Return a diagnostic dump of all protocol state memory usage
+    /// Return a diagnostic dump of all protocol state memory usage: the core
+    /// census, then every interface that publishes a census of its own tables
+    /// (597) as a `--- <kind>/<iface> ---` section, counted into the
+    /// `=== Total estimated ===` line.
     pub fn diagnostic_dump(&self) -> String {
-        self.inner.lock_recover().diagnostic_dump()
+        // The counters map first, released before the node lock, so the two
+        // locks never nest (the order `interface_stats` keeps too).
+        let published: Vec<(usize, crate::interfaces::census::InterfaceCensus)> = self
+            .iface_stats_map
+            .lock_recover()
+            .iter()
+            .filter_map(|(id, counters)| counters.census().map(|c| (*id, c)))
+            .collect();
+        let inner = self.inner.lock_recover();
+        let sections: Vec<crate::interfaces::census::CensusSection> = published
+            .into_iter()
+            .map(|(id, census)| crate::interfaces::census::CensusSection {
+                kind: inner.interface_kind(id).as_str(),
+                iface: inner
+                    .interface_name(id)
+                    .map_or_else(|| id.to_string(), str::to_string),
+                census,
+            })
+            .collect();
+        let core_dump = inner.diagnostic_dump();
+        drop(inner);
+        crate::interfaces::census::splice_into_dump(core_dump, &sections)
     }
 
     /// Check if transport mode (relay/routing) is enabled
@@ -7169,6 +7193,54 @@ mod tests {
             None,
             "with no bitrate there is no cap entry to hold a share"
         );
+    }
+
+    /// 597: a census an interface publishes on its counters reaches the
+    /// node's dump as its own section, and the dump's one estimated total
+    /// (the gap line's `tracked`) grows by exactly that census's total.
+    #[test]
+    fn a_published_interface_census_joins_the_dump_and_its_total() {
+        use crate::interfaces::census::{CensusRow, InterfaceCensus};
+        fn total(dump: &str) -> u64 {
+            dump.split("=== Total estimated: ")
+                .nth(1)
+                .and_then(|r| r.split_whitespace().next())
+                .and_then(|v| v.parse().ok())
+                .expect("total line")
+        }
+        let td = tempfile::tempdir().expect("tempdir");
+        let node = ReticulumNodeBuilder::new()
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync failed");
+        let before = node.diagnostic_dump();
+        assert!(!before.contains("Interfaces estimated"), "{before}");
+
+        let counters = Arc::new(crate::interfaces::InterfaceCounters::new());
+        counters.publish_census(Some(InterfaceCensus {
+            rows: vec![CensusRow {
+                name: "links_central",
+                entries: 1,
+                raw: 300,
+                estimated: 300,
+                model: "size_of Link",
+            }],
+            detail: Vec::new(),
+        }));
+        node.iface_stats_map
+            .lock_recover()
+            .insert(7, Arc::clone(&counters));
+        let after = node.diagnostic_dump();
+        assert!(after.contains("--- unknown/7 ---\nlinks_central: 1 entries, raw 300 bytes, estimated 300 bytes (size_of Link)\n"), "{after}");
+        assert!(
+            after.contains("=== Interfaces estimated: 300 bytes ===\n"),
+            "{after}"
+        );
+        assert_eq!(total(&after), total(&before) + 300, "{after}");
+
+        // A withdrawn census (the session ended) leaves no section.
+        counters.publish_census(None);
+        assert!(!node.diagnostic_dump().contains("unknown/7"));
     }
 
     /// Default builder leaves the event channel enabled. The first

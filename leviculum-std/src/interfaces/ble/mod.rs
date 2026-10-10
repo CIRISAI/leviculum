@@ -27,6 +27,7 @@
 //! host-tested crate), both driven from [`links`].
 
 pub(crate) mod bluez;
+pub(crate) mod census;
 pub(crate) mod links;
 
 use std::collections::HashMap;
@@ -172,7 +173,7 @@ pub(crate) enum Ev {
         addr: Address,
         identity: IdentityHash,
         mtu: usize,
-        frames: mpsc::Sender<Vec<Vec<u8>>>,
+        frames: census::PacketTx,
         ack: oneshot::Sender<bool>,
     },
     /// A notification arrived on a central-role link.
@@ -273,7 +274,7 @@ struct BleTask {
 /// Orchestrator-side state for one central-role link's TX pipe. One
 /// message = one packet's fragments (see [`Ev::CentralIdentity`]).
 struct CentralPipe {
-    frames: mpsc::Sender<Vec<Vec<u8>>>,
+    frames: census::PacketTx,
 }
 
 /// The advertisement as it currently stands: BlueZ's handle (dropping it
@@ -303,7 +304,10 @@ impl BleTask {
         // session is live at that moment answers it.
         let mut teardown_rx = Some(teardown_rx);
         loop {
-            match self.session(&mut outgoing_rx, &mut teardown_rx).await {
+            let ended = self.session(&mut outgoing_rx, &mut teardown_rx).await;
+            // The session's tables died with it (597).
+            self.counters.publish_census(None);
+            match ended {
                 Ok(()) => return, // interface detached
                 Err(e) => {
                     tracing::warn!(
@@ -445,6 +449,23 @@ impl BleTask {
         // table's links on every tick.
         let mut link_addr_types: HashMap<Addr, AddrType> = HashMap::new();
 
+        // Published once before the first tick, so a dump taken in the
+        // first second already names this interface's (empty) tables.
+        self.counters.publish_census(Some(
+            census::BleState {
+                table: &table,
+                central_pipes: &central_pipes,
+                notifiers: &notifiers,
+                dial_queue: &dial_queue,
+                backoff_until: &backoff_until,
+                dial_backoff: &dial_backoff,
+                scan_lines: &scan_lines,
+                churn: &churn,
+                link_addr_types: &link_addr_types,
+            }
+            .census(),
+        ));
+
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -565,8 +586,7 @@ impl BleTask {
                     }
                     for addr in ka.central {
                         if let Some(pipe) = central_pipes.get(&addr) {
-                            let _ = pipe
-                                .frames
+                            pipe.frames
                                 .try_send(vec![vec![leviculum_core::framing::ble::KEEPALIVE_BYTE]]);
                         }
                     }
@@ -627,6 +647,22 @@ impl BleTask {
                     // Expiry can free a slot, and a failed re-register
                     // gets its retry here.
                     self.reconcile_advertising(&adapter, &table, &mut adv).await;
+                    // The census of this task's own tables (597), read by
+                    // the SIGUSR1 dump: at most one tick old.
+                    self.counters.publish_census(Some(
+                        census::BleState {
+                            table: &table,
+                            central_pipes: &central_pipes,
+                            notifiers: &notifiers,
+                            dial_queue: &dial_queue,
+                            backoff_until: &backoff_until,
+                            dial_backoff: &dial_backoff,
+                            scan_lines: &scan_lines,
+                            churn: &churn,
+                            link_addr_types: &link_addr_types,
+                        }
+                        .census(),
+                    ));
                 }
             }
         }
@@ -1298,7 +1334,7 @@ impl BleTask {
             // One try_send per packet: it lands whole or not at all, so
             // a full queue can no longer tear the peer's reassembly
             // with a partial fragment stream.
-            if pipe.frames.try_send(frags).is_ok() {
+            if pipe.frames.try_send(frags) {
                 delivered = true;
             } else {
                 self.counters.tx_queue_drops.fetch_add(1, Ordering::Relaxed);

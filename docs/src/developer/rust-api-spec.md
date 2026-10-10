@@ -82,7 +82,7 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3117` | Send a PATH_REQUEST; result arrives as `PathFound` |
 | `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3102` | Identity learned from an announce (its signing key feeds `connect`) |
 | `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3320` | `rnstatus`-style counters |
-| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:3788` | Relay mode flag |
+| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:3812` | Relay mode flag |
 
 The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
 `Node` (`leviculum-std/src/api/mod.rs:238`) — re-projects this surface with core internals
