@@ -539,9 +539,9 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         ],
     },
     // A dial that gave up, booked in the shared per-address backoff
-    // (579): `failure` is `transport` (flat 5 s), `not_columba` or
-    // `no_handshake` (doubling from 10 s to the 120 s cap); `strikes`
-    // the peer failures in a row, `backoff_ms` the pause this booked.
+    // (579): `failure` is `transport` (flat 5 s); `not_columba`,
+    // `no_handshake`, `no_object` (595) double from 10 s to the 120 s cap;
+    // `strikes` the peer failures in a row, `backoff_ms` the pause booked.
     EventSchema {
         name: "BLE_DIAL_BACKOFF",
         required_keys: &[

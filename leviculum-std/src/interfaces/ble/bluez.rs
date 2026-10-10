@@ -422,12 +422,25 @@ impl CentralTask {
 
     async fn establish(&self) -> Result<Option<CentralSession>, SetupError> {
         // Everything up to the layout check is the air's business: a
-        // connect that fails, a discovery the link drops under. Only the
-        // two answers below are the peer's (579).
-        let transport = SetupError::with(DialFailure::Transport);
-        let device = self.adapter.device(self.addr).map_err(transport)?;
-        if !device.is_connected().await.map_err(transport)? {
-            device.connect().await.map_err(transport)?;
+        // connect that fails, a discovery the link drops under. Only a
+        // device object that is gone (595) and the two answers below
+        // are the peer's (579).
+        let device = self
+            .adapter
+            .device(self.addr)
+            .map_err(SetupError::with(DialFailure::Transport))?;
+        let connect = async {
+            if !device.is_connected().await? {
+                device.connect().await?;
+            }
+            Ok::<(), bluer::Error>(())
+        };
+        if let Err(source) = connect.await {
+            let adapter_present = self.adapter.is_powered().await.is_ok();
+            return Err(SetupError {
+                failure: connect_failure(&source, adapter_present),
+                source,
+            });
         }
         self.layout_and_handshake(&device).await
     }
@@ -591,6 +604,24 @@ struct CentralSession {
     rx_char: bluer::gatt::remote::Characteristic,
 }
 
+/// What a BlueZ error at the connect step says about the peer (595).
+///
+/// `NotFound` is D-Bus `UnknownObject`: the device object is gone.
+/// BlueZ removes a temporary device whose last advertisement was
+/// non-connectable when the discovery window stops (bluez-5.82
+/// `src/adapter.c`, `discovery_cleanup`), and the dial comes after the
+/// window, so a broadcaster fails here every time, at once. That is the
+/// address's doing and books as a peer failure. Unless the adapter
+/// object is gone too (`adapter_present` false, 589's run 1): then
+/// every object is, and it says nothing about the peer. Anything else,
+/// a connect that timed out or was refused on the air, stays transport.
+fn connect_failure(source: &bluer::Error, adapter_present: bool) -> DialFailure {
+    match source.kind {
+        bluer::ErrorKind::NotFound if adapter_present => DialFailure::NoObject,
+        _ => DialFailure::Transport,
+    }
+}
+
 /// Why a central setup gave up: the BlueZ error, and what it says about
 /// the peer (579).
 struct SetupError {
@@ -628,6 +659,42 @@ mod tests {
     const PEER: IdentityHash = [0xA1; 16];
     const ADDR: Address = Address([0xC0, 0x00, 0x00, 0x00, 0x00, 0x01]);
     const MTU: usize = 185;
+
+    /// The error bluer hands back for a D-Bus error reply, built the way
+    /// bluer builds it (`impl From<dbus::Error> for bluer::Error`).
+    fn bluez_reply(name: &str, message: &str) -> bluer::Error {
+        bluer::Error::from(dbus::Error::new_custom(name, message))
+    }
+
+    /// 595: a dial at an address whose device object is gone (D-Bus
+    /// `UnknownObject`, what 579's strangers drew) is the peer's
+    /// failure; with the adapter gone too it is not, and a connect the
+    /// air refused or timed out stays transport.
+    #[test]
+    fn a_dial_without_an_object_is_a_peer_failure() {
+        let gone = bluez_reply(
+            "org.freedesktop.DBus.Error.UnknownObject",
+            "Method \"Connect\" with signature \"\" on interface \"org.bluez.Device1\" doesn't exist",
+        );
+        assert_eq!(gone.kind, bluer::ErrorKind::NotFound);
+        assert_eq!(
+            gone.to_string(),
+            "the target object was either not present or removed",
+            "the message 579's log printed"
+        );
+        assert_eq!(connect_failure(&gone, true), DialFailure::NoObject);
+        assert_eq!(connect_failure(&gone, false), DialFailure::Transport);
+
+        // bluetoothd's own connect failures (bluez-5.82 `src/error.h`,
+        // `btd_error_failed`): the air's, not the peer's.
+        for message in ["le-connection-timeout", "le-connection-abort-by-local"] {
+            let air = bluez_reply("org.bluez.Error.Failed", message);
+            assert_eq!(air.kind, bluer::ErrorKind::Failed);
+            assert_eq!(connect_failure(&air, true), DialFailure::Transport);
+        }
+        let busy = bluez_reply("org.bluez.Error.InProgress", "In Progress");
+        assert_eq!(connect_failure(&busy, true), DialFailure::Transport);
+    }
 
     /// What BlueZ and bluer build for one AcquireWrite: a SEQPACKET pair
     /// (bluer-0.17.4 `gatt/mod.rs` `make_socket_pair`). The first half

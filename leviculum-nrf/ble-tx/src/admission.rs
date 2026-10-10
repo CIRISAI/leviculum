@@ -245,6 +245,14 @@ pub enum DialFailure {
     /// our identity write, or (#548) it connected to us and never wrote
     /// its own within the bound.
     NoHandshake,
+    /// The address has no object to dial (595): lnsd's BlueZ removed it
+    /// between the sighting and the dial, which it does to a temporary
+    /// device whose last advertisement was non-connectable when the
+    /// discovery window stops (bluez-5.82 `src/adapter.c`,
+    /// `discovery_cleanup`). A broadcaster, not a peer. Its own variant
+    /// rather than [`NotColumba`](Self::NotColumba), so the log line
+    /// says which.
+    NoObject,
 }
 
 impl DialFailure {
@@ -255,6 +263,7 @@ impl DialFailure {
             Self::Transport => "transport",
             Self::NotColumba => "not_columba",
             Self::NoHandshake => "no_handshake",
+            Self::NoObject => "no_object",
         }
     }
 
@@ -1509,6 +1518,25 @@ mod tests {
         h.note_failure(PHONE_RPA, DialFailure::NoHandshake, 0);
         let second = h.note_failure(PHONE_RPA, DialFailure::NotColumba, 10_000);
         assert_eq!((second.strikes, second.until_ms), (2, 30_000));
+    }
+
+    /// 595: a dial that found no object books like a peer failure,
+    /// doubling, and a handshake with the address clears the run.
+    #[test]
+    fn a_dial_without_an_object_doubles_and_a_success_resets_it() {
+        assert!(DialFailure::NoObject.says_peer());
+        let mut b: DialBackoff<DIAL_BACKOFF_SLOTS> = DialBackoff::new();
+        let first = b.note_failure(BOARD_ABOVE, DialFailure::NoObject, 0);
+        assert_eq!((first.strikes, first.until_ms), (1, 10_000));
+        let second = b.note_failure(BOARD_ABOVE, DialFailure::NoObject, 12_000);
+        assert_eq!((second.strikes, second.until_ms), (2, 32_000));
+        let third = b.note_failure(BOARD_ABOVE, DialFailure::NoObject, 34_000);
+        assert_eq!((third.strikes, third.until_ms), (3, 74_000));
+        b.note_success(BOARD_ABOVE);
+        assert_eq!(b.strikes(BOARD_ABOVE), 0);
+        assert_eq!(b.held_until(BOARD_ABOVE, 35_000), None);
+        let fresh = b.note_failure(BOARD_ABOVE, DialFailure::NoObject, 36_000);
+        assert_eq!((fresh.strikes, fresh.until_ms), (1, 46_000));
     }
 
     /// 579: a transport failure books the flat 5 s, every time, and
