@@ -111,6 +111,18 @@ where
         self.map.iter().map(|(k, s)| (k, &s.value))
     }
 
+    /// The entries whose key sorts strictly after `after` (all of them for
+    /// `None`), in key order. A caller that walks a large table in slices
+    /// resumes from the last key it saw, so each slice costs what it returns
+    /// and not what came before it.
+    pub fn iter_after(&self, after: Option<&K>) -> impl Iterator<Item = (&K, &V)> {
+        use core::ops::Bound;
+        let lower = after.map_or(Bound::Unbounded, Bound::Excluded);
+        self.map
+            .range((lower, Bound::Unbounded))
+            .map(|(k, s)| (k, &s.value))
+    }
+
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.map.keys()
     }
@@ -249,6 +261,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iter_after_resumes_past_the_last_key_in_key_order() {
+        let mut m: BoundedMap<u32, u32> = BoundedMap::new(8);
+        for k in [5, 1, 4, 2, 3] {
+            m.insert(k, k * 10);
+        }
+        let all: Vec<u32> = m.iter_after(None).map(|(k, _)| *k).collect();
+        assert_eq!(
+            all,
+            [1, 2, 3, 4, 5],
+            "None walks the whole map in key order"
+        );
+        let rest: Vec<(u32, u32)> = m.iter_after(Some(&2)).map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(
+            rest,
+            [(3, 30), (4, 40), (5, 50)],
+            "the cursor key itself is excluded"
+        );
+        assert_eq!(
+            m.iter_after(Some(&5)).count(),
+            0,
+            "past the last key nothing is left"
+        );
+        assert_eq!(
+            m.iter_after(Some(&0)).count(),
+            5,
+            "a cursor that is not in the map still resumes by order"
+        );
+    }
 
     #[test]
     fn a_full_map_accepts_the_new_entry_and_drops_the_oldest() {

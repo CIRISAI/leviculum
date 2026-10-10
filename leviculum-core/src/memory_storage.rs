@@ -530,6 +530,16 @@ impl MemoryStorage {
         self.known_identities.iter()
     }
 
+    /// The known identities whose destination hash sorts after `after`, in
+    /// hash order: the persistence walk in slices, one short core-lock hold
+    /// per slice (leviculum#563).
+    pub fn known_identities_after(
+        &self,
+        after: Option<&[u8; TRUNCATED_HASHBYTES]>,
+    ) -> impl Iterator<Item = (&[u8; TRUNCATED_HASHBYTES], &Identity)> {
+        self.known_identities.iter_after(after)
+    }
+
     /// Rotate packet cache: current becomes prev, fresh empty set takes its place
     fn rotate_packet_cache(&mut self) {
         core::mem::swap(&mut self.packet_cache, &mut self.packet_cache_prev);
