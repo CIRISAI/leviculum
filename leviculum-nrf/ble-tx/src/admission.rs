@@ -344,6 +344,14 @@ impl<const N: usize> DialBackoff<N> {
         Self { entries: [None; N] }
     }
 
+    /// Addresses the table currently holds a run for, for a host census
+    /// (leviculum 597). The table is fixed-size; this is occupancy, and
+    /// it counts an entry forgotten by absence until its slot is reused.
+    #[must_use]
+    pub fn occupied(&self) -> usize {
+        self.entries.iter().filter(|e| e.is_some()).count()
+    }
+
     fn find(&self, addr: u64) -> Option<usize> {
         self.entries
             .iter()
@@ -852,6 +860,20 @@ mod tests {
 
     fn identity(byte: u8) -> [u8; 16] {
         [byte; 16]
+    }
+
+    /// leviculum 597: the host census counts the addresses with a run,
+    /// and a success frees its entry.
+    #[test]
+    fn occupied_counts_the_addresses_with_a_run() {
+        let mut b: DialBackoff<4> = DialBackoff::new();
+        assert_eq!(b.occupied(), 0);
+        b.note_failure(BOARD_ABOVE, DialFailure::NotColumba, 0);
+        b.note_failure(PHONE_RPA, DialFailure::NoHandshake, 0);
+        b.note_failure(PHONE_RPA, DialFailure::NoHandshake, 10);
+        assert_eq!(b.occupied(), 2);
+        b.note_success(BOARD_ABOVE);
+        assert_eq!(b.occupied(), 1);
     }
 
     /// The admission against an empty board: nothing linked, nothing

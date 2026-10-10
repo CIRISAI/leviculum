@@ -197,6 +197,13 @@ impl ChurnLedger {
         }
     }
 
+    /// Identities the table currently remembers, for a host census
+    /// (leviculum 597). The table is fixed-size; this is occupancy.
+    #[must_use]
+    pub fn occupied(&self) -> usize {
+        self.entries.iter().filter(|e| e.is_some()).count()
+    }
+
     /// Record one departure of a ROTATING-addressed peer, against the
     /// identity behind whatever address it left on. The caller filters
     /// (see the module docs): a static-addressed session's end must
@@ -318,6 +325,17 @@ mod tests {
 
     fn identity(tag: u8) -> [u8; 16] {
         [tag; 16]
+    }
+
+    /// leviculum 597: the host census counts remembered identities.
+    #[test]
+    fn occupied_counts_the_remembered_identities() {
+        let mut ledger = ChurnLedger::new();
+        assert_eq!(ledger.occupied(), 0);
+        ledger.note_leave(POLICY, &identity(1), 0);
+        ledger.note_leave(POLICY, &identity(1), ROTATE_MS);
+        ledger.note_leave(POLICY, &identity(2), ROTATE_MS);
+        assert_eq!(ledger.occupied(), 2);
     }
 
     /// The rule itself: a run of `leave_run` departures inside the
