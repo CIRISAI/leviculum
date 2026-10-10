@@ -147,6 +147,7 @@ skip  leviculum-micron parser_tests              # reads README.mu for snippets,
 skip  leviculum-proxy log_backpressure           # spawns the proxy binary
 skip  leviculum-proxy proxy_control              # binds sockets under a tokio runtime
 skip  leviculum-std   ble_link_gap_floor         # btvirt + two lnsd + bluetoothd; an #[ignore]d measurement grid, run by name
+skip  leviculum-std   ble_returning_peer_resight # btvirt + two lnsd + bluetoothd; the #[ignore]d #443 reproduction, run by name
 skip  leviculum-std   cf_await_in_processor      # compile-fail fixture, empty without its feature; check-processor-seam owns it
 skip  leviculum-std   cf_dispatch_from_handle    # compile-fail fixture; check-processor-seam owns it
 skip  leviculum-std   cf_drop_dispatch_result    # compile-fail fixture; check-processor-seam owns it

@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 
 use leviculum_core::traits::{InterfaceError, InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use self::airtime::AirtimeCredit;
 
@@ -723,7 +723,22 @@ pub(crate) struct InterfaceHandle {
     /// ready interfaces (UDP, server listeners, local IPC) ship as
     /// pre-signaled.  Read by `ReticulumNode::wait_for_interface_ready`.
     pub ready: Arc<ReadySignal>,
+    /// Carrier-teardown hook (#443 follow-on): the shutdown drain
+    /// (`run_event_loop` Branch 4) fires it after the outgoing flush and
+    /// waits — bounded — for the ack, so an interface whose CARRIER
+    /// holds peer-visible connection state can close it while the
+    /// runtime still polls its task. A BLE link a dying daemon leaves
+    /// open costs every peer BlueZ's deferred-disconnect delay
+    /// (measured 2.3-2.5 s on btvirt) before they learn of the
+    /// departure; a socket dies with the process, so every socket-backed
+    /// interface ships `None`.
+    pub teardown: Option<CarrierTeardown>,
 }
+
+/// One interface's carrier-teardown hook: the driver sends the ack
+/// channel, the interface task closes its carrier state and acks. See
+/// [`InterfaceHandle::teardown`].
+pub(crate) type CarrierTeardown = oneshot::Sender<oneshot::Sender<()>>;
 
 impl leviculum_core::traits::Interface for InterfaceHandle {
     fn id(&self) -> InterfaceId {
@@ -977,6 +992,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
             ready: ReadySignal::ready_immediate(),
+            teardown: None,
         };
         (handle, out_rx)
     }

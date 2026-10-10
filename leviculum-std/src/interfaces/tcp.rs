@@ -286,6 +286,7 @@ pub(crate) fn spawn_tcp_interface_from_stream(
         // hand the handle to the registry, the underlying TCP stream
         // already exists and is bidirectionally usable.
         ready: ReadySignal::ready_immediate(),
+        teardown: None,
     }
 }
 
@@ -537,6 +538,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
         counters,
         credit: None,
         ready,
+        teardown: None,
     }
 }
 

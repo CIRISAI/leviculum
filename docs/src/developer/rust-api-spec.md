@@ -61,28 +61,28 @@ returns `self`.
 
 ### `ReticulumNode`
 
-The running node. Defined at `leviculum-std/src/driver/mod.rs:1319`; re-exported
+The running node. Defined at `leviculum-std/src/driver/mod.rs:1328`; re-exported
 as `leviculum_std::ReticulumNode`. Selected methods:
 
 | Signature | Purpose |
 |-----------|---------|
-| `async fn start(&mut self) -> Result<(), Error>` — `driver/mod.rs:1558` | Spawn the event loop, bring interfaces up |
-| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2084` | Stop and flush |
-| `fn is_running(&self) -> bool` — `driver/mod.rs:2416` | Loop state |
-| `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2424` | Make a local destination reachable (consumes it) |
-| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:3404` | Announce a registered destination |
-| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:2591` | Open a link; returns a pending handle |
-| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:2862` | Writable handle for an already-established inbound link |
-| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:3764` | Single-packet send handle |
-| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:3712` | Send one unreliable datagram |
-| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:2878` | Take the event stream, once |
+| `async fn start(&mut self) -> Result<(), Error>` — `driver/mod.rs:1567` | Spawn the event loop, bring interfaces up |
+| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2093` | Stop and flush |
+| `fn is_running(&self) -> bool` — `driver/mod.rs:2425` | Loop state |
+| `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2433` | Make a local destination reachable (consumes it) |
+| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:3413` | Announce a registered destination |
+| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:2600` | Open a link; returns a pending handle |
+| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:2871` | Writable handle for an already-established inbound link |
+| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:3773` | Single-packet send handle |
+| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:3721` | Send one unreliable datagram |
+| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:2887` | Take the event stream, once |
 | `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:2712` | The node's own identity hash |
-| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3085` | Whether a path is known |
-| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:3196` | Hop count to a destination |
-| `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3108` | Send a PATH_REQUEST; result arrives as `PathFound` |
-| `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3093` | Identity learned from an announce (its signing key feeds `connect`) |
-| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3311` | `rnstatus`-style counters |
-| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:3779` | Relay mode flag |
+| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3094` | Whether a path is known |
+| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:3205` | Hop count to a destination |
+| `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3117` | Send a PATH_REQUEST; result arrives as `PathFound` |
+| `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3102` | Identity learned from an announce (its signing key feeds `connect`) |
+| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3320` | `rnstatus`-style counters |
+| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:3788` | Relay mode flag |
 
 The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
 `Node` (`leviculum-std/src/api/mod.rs:238`) — re-projects this surface with core internals
@@ -119,13 +119,13 @@ Send-only async handle for single packets, the single-packet analog of
 ### `EventReceiver` and `NodeEvent`
 
 `EventReceiver` is the merged event stream, defined at
-`leviculum-std/src/driver/mod.rs:379`. It internally fronts a lossless control
+`leviculum-std/src/driver/mod.rs:388`. It internally fronts a lossless control
 plane and a droppable data plane (Codeberg #71), draining control first.
 
 | Signature | Purpose |
 |-----------|---------|
-| `async fn recv(&mut self) -> Option<NodeEvent>` — `driver/mod.rs:436` | Next event, control plane prioritized; `None` once shut down. Cancel-safe |
-| `fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError>` — `driver/mod.rs:476` | Non-blocking receive |
+| `async fn recv(&mut self) -> Option<NodeEvent>` — `driver/mod.rs:445` | Next event, control plane prioritized; `None` once shut down. Cancel-safe |
+| `fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError>` — `driver/mod.rs:485` | Non-blocking receive |
 
 `NodeEvent` is the event enum, defined in core at
 `leviculum-core/src/node/event.rs:45` and re-exported as

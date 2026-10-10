@@ -3550,6 +3550,7 @@ where
         // channel is open, the firmware probe answered, and the radio is
         // configured (L-0024).
         ready,
+        teardown: None,
     }
 }
 
@@ -4499,6 +4500,7 @@ pub(crate) fn spawn_rnode_multi_interface(
             counters: Arc::clone(&counters),
             credit: None,
             ready: super::ReadySignal::ready_immediate(),
+            teardown: None,
         });
 
         // Relay this vport's outgoing packets into the shared merged channel,

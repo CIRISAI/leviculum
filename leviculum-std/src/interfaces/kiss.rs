@@ -444,6 +444,7 @@ pub(crate) fn spawn_kiss_interface(config: KissInterfaceConfig) -> InterfaceHand
         // the airtime), so no airtime budget — "always ready" like plain serial.
         credit: None,
         ready: super::ReadySignal::ready_immediate(),
+        teardown: None,
     }
 }
 

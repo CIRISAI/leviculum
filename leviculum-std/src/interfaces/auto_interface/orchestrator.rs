@@ -827,6 +827,7 @@ fn handle_discovery_packet(
         // socket pair already exists by the time this handle is
         // constructed, so the interface is ready immediately.
         ready: crate::interfaces::ReadySignal::ready_immediate(),
+        teardown: None,
     };
 
     let now = Instant::now();

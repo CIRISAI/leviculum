@@ -404,6 +404,7 @@ fn spawn_local_interface_from_stream(
         // is called (server-accepted), so the interface is ready
         // immediately.
         ready: super::ReadySignal::ready_immediate(),
+        teardown: None,
     }
 }
 
@@ -627,6 +628,7 @@ pub(crate) fn spawn_local_client(config: LocalClientConfig) -> Result<InterfaceH
         // ready immediately. The signal is idempotent and stays ready
         // across reconnects, like the TCP client's.
         ready: super::ReadySignal::ready_immediate(),
+        teardown: None,
     })
 }
 

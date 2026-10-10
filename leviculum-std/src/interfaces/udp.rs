@@ -369,6 +369,7 @@ fn spawn_udp_interface_inner(
         // UDP sockets are bound before the handle is returned;
         // immediate-ready.
         ready: super::ReadySignal::ready_immediate(),
+        teardown: None,
     })
 }
 

@@ -94,6 +94,16 @@
 # changes; nothing in the release path re-measures it.
 1    -p leviculum-std --test ble_link_gap_floor
 
+# ble_returning_peer_resight (2026-10-10, #443): the minimal reproduction of
+# the returning-peer blindness — a killed-and-restarted lnsd on the same
+# controller must be re-dialled by its lower-address neighbour. Needs the
+# patched btvirt, /dev/vhci and the system bluetoothd (host-global Bluetooth
+# state, the ble_room lock class), so no tier can run it. Run by name with
+# `cargo test -p leviculum-std --test ble_returning_peer_resight -- --ignored
+# --nocapture` whenever the scan/sighting path or the link-down paths change;
+# periculum's ble_room_departure cell covers the full three-node scenario.
+1    -p leviculum-std --test ble_returning_peer_resight
+
 # measure_propagation_stamp_at_cost_13 is a proof-of-work timing sample, not
 # an assertion: its runtime is a coin-flip distribution and only means
 # anything in --release on the host it runs on, by hand. Run manually before

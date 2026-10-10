@@ -1,7 +1,7 @@
 # The Core Lock Budget
 
 The async driver owns exactly one `NodeCore` behind one mutex
-(`leviculum-std/src/driver/mod.rs:1321`). Every packet the node decrypts,
+(`leviculum-std/src/driver/mod.rs:1330`). Every packet the node decrypts,
 routes, forwards or emits passes through it. It is the narrowest point
 in the stack, and the rule that follows from that is:
 
@@ -33,7 +33,7 @@ Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
 the last returns the retryable `ResourceError::LinkStateChanged` and
 the caller rebuilds once. The std driver calls the three phases itself
-(`leviculum-std/src/driver/mod.rs:3602`).
+(`leviculum-std/src/driver/mod.rs:3611`).
 
 `NodeCore::send_resource` still exists as the composed single call
 (`leviculum-core/src/node/mod.rs:1543`) because no_std and FFI callers
@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:5247`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:5261`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -258,7 +258,7 @@ check is worth.
 
 53 of them are on `ReticulumNode` — plain synchronous `pub fn`s that
 open by locking the core, of which `has_path`
-(`leviculum-std/src/driver/mod.rs:3085`) is
+(`leviculum-std/src/driver/mod.rs:3094`) is
 `self.inner.lock_recover().has_path(dest_hash)` and entirely typical.
 The other five are on `PacketSender` and `LinkHandle`, which matters
 more than the count suggests: those are the two handles a callee is
@@ -385,7 +385,7 @@ informatively:
 | event | where | says |
 | --- | --- | --- |
 | `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6133`) | announce handling itself took ≥ 100 ms |
-| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4251`) | an outside thread waited ≥ 250 ms for the core lock |
+| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4260`) | an outside thread waited ≥ 250 ms for the core lock |
 | `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1505`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by

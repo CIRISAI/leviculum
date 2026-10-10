@@ -953,6 +953,19 @@ impl LinkTable {
         self.links.len()
     }
 
+    /// Every address this table holds a connection to — handshaked links
+    /// and pending handshakes alike. The shutdown teardown disconnects
+    /// each of them (#443 follow-on): a connection the dying daemon
+    /// leaves open is only released by the peer's BlueZ deferred
+    /// disconnect, seconds later.
+    pub(crate) fn connected_addrs(&self) -> Vec<Addr> {
+        self.links
+            .iter()
+            .map(|l| l.addr)
+            .chain(self.pending.iter().map(|p| p.addr))
+            .collect()
+    }
+
     /// Which links are due a keepalive at `now_ms`; marks them sent.
     ///
     /// The notify pipe reaches every subscribed central at once, so one
@@ -1929,6 +1942,29 @@ mod tests {
             local_name(&hash).as_bytes(),
             leviculum_ble_tx::device_name(&hash)
         );
+    }
+
+    /// The shutdown teardown's worklist (#443 follow-on): every address
+    /// the table holds a connection to — handshaked links of either role
+    /// AND handshakes still pending — because each of those is an open
+    /// carrier connection the peer would otherwise only see released by
+    /// its own BlueZ's deferred disconnect.
+    #[test]
+    fn connected_addrs_lists_links_and_pending_handshakes() {
+        let mut t = table();
+        assert!(t.connected_addrs().is_empty());
+        let (adm, _) = t.admit(ID_A, ADDR_1, Role::Peripheral, 100, 0);
+        assert_eq!(adm, Admission::Accept);
+        let (adm, _) = t.admit(ID_B, ADDR_2, Role::Central, 100, 0);
+        assert_eq!(adm, Admission::Accept);
+        // A connected central that never wrote its identity: pending.
+        assert!(matches!(
+            t.peripheral_frame(ADDR_3, 100, &[0u8], 0),
+            Inbound::Keepalive
+        ));
+        let mut addrs = t.connected_addrs();
+        addrs.sort_unstable();
+        assert_eq!(addrs, vec![ADDR_1, ADDR_2, ADDR_3]);
     }
 
     /// The peer-loss report decision (Codeberg #365): a removal that

@@ -210,6 +210,13 @@ pub(crate) fn spawn_ble_interface(
         ingress_control: None,
     };
 
+    // The carrier-teardown hook (#443 follow-on): BLE links are
+    // peer-visible carrier state a dying process does not take with it —
+    // the peer's BlueZ releases them by its own deferred disconnect,
+    // seconds later — so the driver's shutdown drain asks this task to
+    // close them while the runtime still polls it.
+    let (teardown_tx, teardown_rx) = oneshot::channel();
+
     let task = BleTask {
         id,
         name,
@@ -220,7 +227,7 @@ pub(crate) fn spawn_ble_interface(
         counters: Arc::clone(&counters),
         ready: Arc::clone(&ready),
     };
-    tokio::spawn(task.run(outgoing_rx));
+    tokio::spawn(task.run(outgoing_rx, teardown_rx));
 
     InterfaceHandle {
         info,
@@ -229,6 +236,7 @@ pub(crate) fn spawn_ble_interface(
         counters,
         credit: None,
         ready,
+        teardown: Some(teardown_tx),
     }
 }
 
@@ -273,9 +281,16 @@ struct Advertised {
 }
 
 impl BleTask {
-    async fn run(self, mut outgoing_rx: mpsc::Receiver<OutgoingPacket>) {
+    async fn run(
+        self,
+        mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
+        teardown_rx: oneshot::Receiver<oneshot::Sender<()>>,
+    ) {
+        // Held across session retries: the hook fires once, whichever
+        // session is live at that moment answers it.
+        let mut teardown_rx = Some(teardown_rx);
         loop {
-            match self.session(&mut outgoing_rx).await {
+            match self.session(&mut outgoing_rx, &mut teardown_rx).await {
                 Ok(()) => return, // interface detached
                 Err(e) => {
                     tracing::warn!(
@@ -290,9 +305,14 @@ impl BleTask {
     }
 
     /// One BlueZ session: set up both roles, then run the event loop
-    /// until the daemon drops the interface (`Ok`) or the adapter goes
-    /// away (`Err` → retried by [`run`]).
-    async fn session(&self, outgoing_rx: &mut mpsc::Receiver<OutgoingPacket>) -> bluer::Result<()> {
+    /// until the daemon drops the interface (`Ok`), asks for carrier
+    /// teardown (`Ok`), or the adapter goes away (`Err` → retried by
+    /// [`run`]).
+    async fn session(
+        &self,
+        outgoing_rx: &mut mpsc::Receiver<OutgoingPacket>,
+        teardown_rx: &mut Option<oneshot::Receiver<oneshot::Sender<()>>>,
+    ) -> bluer::Result<()> {
         let session = bluer::Session::new().await?;
         let adapter = match &self.opts.adapter {
             Some(name) => session.adapter(name)?,
@@ -432,6 +452,50 @@ impl BleTask {
                     )
                     .await;
                 }
+                ack = async {
+                    match teardown_rx.as_mut() {
+                        Some(rx) => rx.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // The driver's shutdown drain (or, on the error arm,
+                    // a dropped hook) asks for carrier teardown: close
+                    // every connection deliberately, while the runtime
+                    // still polls this task, and leave this adapter the
+                    // fresh device state #443 wants the next daemon on
+                    // this controller to meet. What this CANNOT buy is a
+                    // faster peer notice: bluetoothd paces every
+                    // teardown — a client's `Disconnect`, a
+                    // `RemoveDevice` of a connected device, and its own
+                    // cleanup when the client just dies — through the
+                    // same ~2 s deferred-disconnect machinery, so the
+                    // peers' `BLE_LINK_DOWN` stays at 2.0-3.0 s after
+                    // SIGTERM whichever of the three happens (measured
+                    // on btvirt, all three ways). Each call is bounded
+                    // and its reply dropped: the request is on the
+                    // D-Bus connection's write path the moment the call
+                    // starts, bluetoothd executes it without us, and
+                    // waiting out its timer would only trip the
+                    // driver's teardown bound.
+                    *teardown_rx = None;
+                    let addrs = table.connected_addrs();
+                    tracing::info!(
+                        "BLE {}: teardown, closing {} connection(s)",
+                        self.name,
+                        addrs.len()
+                    );
+                    for addr in addrs {
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(50),
+                            forget_device(&adapter, addr),
+                        )
+                        .await;
+                    }
+                    if let Ok(ack) = ack {
+                        let _ = ack.send(());
+                    }
+                    return Ok(());
+                }
                 ev = ev_rx.recv() => {
                     let Some(ev) = ev else { return Ok(()) };
                     self.handle_event(
@@ -506,6 +570,7 @@ impl BleTask {
                         self.log_link_down(&identity, role, "timeout");
                         central_pipes.remove(&addr);
                         disconnect_quietly(&adapter, addr).await;
+                        forget_device(&adapter, addr).await;
                         backoff_until.insert(addr, now + SESSION_BACKOFF_MS);
                         self.report_peer_lost(&table, identity).await;
                     }
@@ -625,6 +690,7 @@ impl BleTask {
                 if let Some((identity, _, role)) = table.remove_peripheral_by_addr(&addr.0) {
                     scheduler.note_reset(now);
                     self.log_link_down(&identity, role, "disconnected");
+                    forget_device(adapter, addr.0).await;
                     self.report_peer_lost(table, identity).await;
                 }
             }
@@ -849,6 +915,7 @@ impl BleTask {
                 central_pipes.remove(&addr.0);
                 if let Some((identity, _, role)) = table.remove_by_addr(&addr.0) {
                     self.log_link_down(&identity, role, "disconnected");
+                    forget_device(adapter, addr.0).await;
                     self.report_peer_lost(table, identity).await;
                 }
                 let until = backoff_until.entry(addr.0).or_insert(0);
@@ -1406,6 +1473,30 @@ async fn disconnect_quietly(adapter: &bluer::Adapter, addr: Addr) {
     if let Ok(device) = adapter.device(Address(addr)) {
         let _ = device.disconnect().await;
     }
+}
+
+/// Drop BlueZ's stored `Device1` object for a peer whose link just went
+/// down (#443).
+///
+/// bluetoothd resolves a connected peer's GATT services into the
+/// device's `UUIDs` property and drops them from it again when the
+/// unpaired peer disconnects, while the object itself — once connected,
+/// no longer temporary — is never cleaned up. From then on every scan
+/// window re-offers the stored object (adv reports arrive, RSSI and
+/// `ManufacturerData` update), but the probe's `UUIDs` read answers a
+/// list without the Columba service, so `decide_from_scan` discards the
+/// sighting as a non-peer and a daemon that returns on its old address
+/// is never dialled again. Measured on btvirt (2026-10-10, three runs,
+/// btmon + full D-Bus monitor): `UUIDs` was `[1800, 1801, 180a,
+/// 37145b00…]` while linked and `[1800, 1801, 180a]` ever after.
+///
+/// Removing the object makes the peer's next advertisement recreate it
+/// from the air — advertised UUIDs, fresh record, RSSI — the state a
+/// never-met peer starts from. We never bond, so nothing kept is lost.
+/// The removal can race the peer's own reconnect; that dial fails its
+/// setup once and the peer retries after its backoff.
+async fn forget_device(adapter: &bluer::Adapter, addr: Addr) {
+    let _ = adapter.remove_device(Address(addr)).await;
 }
 
 /// `peer=` value: leading 4 identity-hash bytes as hex, the same hex the

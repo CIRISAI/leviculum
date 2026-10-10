@@ -494,6 +494,7 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
         credit,
         // Serial-port readiness mirrors RNode (see note there).
         ready: super::ReadySignal::ready_immediate(),
+        teardown: None,
     }
 }
 

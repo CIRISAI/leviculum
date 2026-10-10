@@ -98,6 +98,7 @@ where
         // Reliable stream, no radio physics → no airtime budget (like TCP/pipe).
         credit: None,
         ready,
+        teardown: None,
     }
 }
 

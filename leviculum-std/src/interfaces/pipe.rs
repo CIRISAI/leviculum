@@ -116,6 +116,7 @@ pub(crate) fn spawn_pipe_interface(mut config: PipeInterfaceConfig) -> Interface
         // no airtime budget — "always ready" like TCP/UDP/Local.
         credit: None,
         ready,
+        teardown: None,
     }
 }
 

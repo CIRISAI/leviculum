@@ -167,12 +167,21 @@ const SHUTDOWN_FLUSH_MARGIN: Duration = Duration::from_millis(25);
 /// wire or semantic change).
 const AUTOCONNECT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Total wall-clock budget for the carrier-teardown acks on shutdown
+/// (leviculum#443 follow-on). After the outgoing flush, Branch 4 fires every
+/// interface's [`CarrierTeardown`] hook and waits up to this long, shared
+/// across all of them, for the acks — long enough for a BLE interface's
+/// handful of D-Bus `Disconnect` round trips (single-digit milliseconds
+/// each), bounded so a wedged carrier cannot hang shutdown.
+const CARRIER_TEARDOWN_BOUND: Duration = Duration::from_millis(250);
+
 /// Total wall-clock budget the `Drop` path waits for the event loop to finish
 /// its graceful drain+flush before aborting the runtime. Slightly larger than
-/// the loop's own `SHUTDOWN_FLUSH_BOUND` + `SHUTDOWN_FLUSH_MARGIN` so the
-/// bounded flush can complete; the wait early-exits the instant the runner
-/// finishes, so a clean teardown costs only a few milliseconds.
-const DROP_FLUSH_BOUND: Duration = Duration::from_millis(400);
+/// the loop's own `SHUTDOWN_FLUSH_BOUND` + `SHUTDOWN_FLUSH_MARGIN` +
+/// `CARRIER_TEARDOWN_BOUND` so the bounded flush and teardown can complete;
+/// the wait early-exits the instant the runner finishes, so a clean teardown
+/// costs only a few milliseconds.
+const DROP_FLUSH_BOUND: Duration = Duration::from_millis(700);
 
 /// Sender half of the split control/data node-event channels (Codeberg #71).
 ///
@@ -4821,6 +4830,11 @@ async fn run_event_loop(
                     // to pop and write_all them to the socket before the runtime
                     // aborts the tasks.
                     flush_outgoing_on_shutdown(&registry).await;
+                    // Carrier teardown, after the flush so the closing
+                    // interfaces have nothing left to send: an interface whose
+                    // carrier holds peer-visible connection state (BLE links)
+                    // closes it now, while the runtime still polls its task.
+                    teardown_carriers_on_shutdown(&mut registry).await;
                     // Join any in-flight storage flush before breaking: stop()
                     // runs the synchronous shutdown flush the moment the runner
                     // joins, and an unjoined background write could rename an
@@ -5470,6 +5484,38 @@ async fn flush_outgoing_on_shutdown(registry: &InterfaceRegistry) {
     // packet, but the last write_all may still be in flight. Yield a short
     // margin so it completes before the runtime aborts the task.
     tokio::time::sleep(SHUTDOWN_FLUSH_MARGIN).await;
+}
+
+/// Fire every interface's carrier-teardown hook and wait — bounded by one
+/// shared [`CARRIER_TEARDOWN_BOUND`] deadline — for the acks (leviculum#443
+/// follow-on; see [`crate::interfaces::InterfaceHandle::teardown`]). A BLE
+/// link left open at process death is only released by the peer's BlueZ
+/// deferred disconnect, 2.3-2.5 s later on btvirt; closed here it is gone
+/// before the runtime aborts the task. Returns immediately when no interface
+/// registered a hook, which is every configuration without one.
+async fn teardown_carriers_on_shutdown(registry: &mut InterfaceRegistry) {
+    let mut acks = Vec::new();
+    for handle in registry.handles_mut_slice().iter_mut() {
+        if let Some(hook) = handle.teardown.take() {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            if hook.send(ack_tx).is_ok() {
+                acks.push((handle.info.name.clone(), ack_rx));
+            }
+        }
+    }
+    if acks.is_empty() {
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + CARRIER_TEARDOWN_BOUND;
+    for (name, ack) in acks {
+        if tokio::time::timeout_at(deadline, ack).await.is_err() {
+            tracing::warn!(
+                "carrier teardown bound ({} ms) reached waiting on {name}",
+                CARRIER_TEARDOWN_BOUND.as_millis(),
+            );
+            return;
+        }
+    }
 }
 
 /// The deadline the driver schedules against when the core's own output and
@@ -6505,6 +6551,7 @@ mod tests {
                 counters: Arc::new(InterfaceCounters::new()),
                 credit: None,
                 ready: crate::interfaces::ReadySignal::ready_immediate(),
+                teardown: None,
             }
         }
 
@@ -7267,6 +7314,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         });
 
         let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
@@ -8051,6 +8099,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: None, // always-ready
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         });
         let mut retry_queues = BTreeMap::new();
         retry_queues
@@ -8106,6 +8155,7 @@ mod tests {
                 counters: Arc::new(InterfaceCounters::new()),
                 credit: Some(Arc::new(Mutex::new(credit))),
                 ready: crate::interfaces::ReadySignal::ready_immediate(),
+                teardown: None,
             });
         }
         // Both queues carry a full-MTU packet, both heads are
@@ -8178,6 +8228,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: Some(Arc::new(Mutex::new(saturated))),
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         });
 
         // Plain handle (iface_idx=2), credit = None (always ready).
@@ -8205,6 +8256,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         });
 
         // Queue one packet on each interface.
@@ -8261,6 +8313,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         });
         let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
         let queue = retry_queues.entry(0).or_default();
@@ -8336,6 +8389,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: Some(Arc::new(Mutex::new(lora_credit))),
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         };
 
         let (_plain_inc_tx, plain_inc_rx) = tokio::sync::mpsc::channel(4);
@@ -8362,6 +8416,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         };
         registry.register(lora_handle);
         registry.register(plain_handle);
@@ -8440,6 +8495,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: Some(Arc::new(Mutex::new(credit))),
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         };
         registry.register(handle);
 
@@ -8498,6 +8554,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         };
         registry.register(handle);
 
@@ -8556,6 +8613,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: Some(credit.clone()),
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         };
         registry.register(handle);
 
@@ -8830,6 +8888,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         });
         out_rx
     }
@@ -9534,6 +9593,7 @@ mod tests {
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
             ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
         });
 
         let (action_tx, action_rx) = mpsc::channel(8);

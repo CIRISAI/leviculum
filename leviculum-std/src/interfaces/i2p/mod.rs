@@ -224,6 +224,7 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
         counters,
         credit: None,
         ready,
+        teardown: None,
     }
 }
 
@@ -552,6 +553,7 @@ fn spawn_i2p_accepted(
         counters,
         credit: None,
         ready: ReadySignal::ready_immediate(),
+        teardown: None,
     }
 }
 
