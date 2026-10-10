@@ -1238,6 +1238,22 @@ pub(crate) struct ScanDrop {
     pub(crate) identity_hint: Option<[u8; IDENTITY_HINT_LEN]>,
 }
 
+/// How long the scan line ledgers keep an address nobody has sighted
+/// (602, #446): 579's [`DIAL_BACKOFF_CAP_MS`](leviculum_ble_tx::DIAL_BACKOFF_CAP_MS),
+/// the longest hold any line can be about, and the absence after which
+/// [`DialBackoff`](leviculum_ble_tx::DialBackoff) itself forgets a run.
+/// A peer that keeps advertising is sighted every scan cycle (a 2 s
+/// window every 5 s), and one that stops for a dial or a handshake (30 s
+/// bound) is back long before this, so an unchanged decision does not
+/// print twice (575); a phone's rotated-away address is gone after it.
+pub(crate) const SCAN_LINE_RETENTION_MS: u64 = leviculum_ble_tx::DIAL_BACKOFF_CAP_MS;
+
+/// How many addresses the scan line ledgers hold at most (602): the
+/// host's [`DialBackoff`](leviculum_ble_tx::DialBackoff) room, which is
+/// sized for the rooms a PC sits in. A busier room evicts the address
+/// sighted longest ago, and the cost of that is one line printed again.
+pub(crate) const SCAN_LINE_SLOTS: usize = 64;
+
 /// The rate limit of the scan path's two log lines, `BLE_SCAN_DECISION`
 /// and `BLE_SCAN_DROPPED`: one line per address and change, not per
 /// sighting, because a waiting peer advertises several times a second
@@ -1250,45 +1266,97 @@ pub(crate) struct ScanDrop {
 /// ledger forgets an address when it is decided, so a peer dropped,
 /// decided and dropped again — a device object that lost the service
 /// twice — names each drop.
+///
+/// Every entry is an address's, and the gate forgets the address (602,
+/// #446): each call is a sighting and refreshes it, the interface's tick
+/// calls [`Self::forget_absent`], and [`SCAN_LINE_SLOTS`] bounds it. A
+/// forgotten address that returns prints its lines again, as a peer
+/// that came back should (568).
 #[derive(Debug, Default)]
 pub(crate) struct ScanLineGate {
     decided: std::collections::HashMap<Addr, ScanDecision>,
     dropped: std::collections::HashMap<Addr, ScanDrop>,
     backed_off: std::collections::HashMap<Addr, u64>,
+    /// The last sighting of every address the three ledgers hold.
+    seen: std::collections::HashMap<Addr, u64>,
 }
 
 impl ScanLineGate {
-    /// Record a decision for `addr`; `true` when `BLE_SCAN_DECISION` is
-    /// due, i.e. it differs from the last decision recorded there.
-    pub(crate) fn decided(&mut self, addr: Addr, decision: ScanDecision) -> bool {
+    /// Record a decision for `addr` sighted at `now_ms`; `true` when
+    /// `BLE_SCAN_DECISION` is due, i.e. it differs from the last decision
+    /// recorded there.
+    pub(crate) fn decided(&mut self, addr: Addr, decision: ScanDecision, now_ms: u64) -> bool {
+        self.sighted(addr, now_ms);
         self.dropped.remove(&addr);
         self.decided.insert(addr, decision) != Some(decision)
     }
 
-    /// Record a drop for `addr`; `true` when `BLE_SCAN_DROPPED` is due,
-    /// i.e. it differs from the last drop recorded there since the
-    /// address was last decided.
-    pub(crate) fn dropped(&mut self, addr: Addr, drop: ScanDrop) -> bool {
+    /// Record a drop for `addr` sighted at `now_ms`; `true` when
+    /// `BLE_SCAN_DROPPED` is due, i.e. it differs from the last drop
+    /// recorded there since the address was last decided.
+    pub(crate) fn dropped(&mut self, addr: Addr, drop: ScanDrop, now_ms: u64) -> bool {
+        self.sighted(addr, now_ms);
         self.dropped.insert(addr, drop) != Some(drop)
     }
 
-    /// Record a dial backoff held at `addr` until `until_ms`; `true`
-    /// when its `BLE_SCAN_DECISION rule=backoff` line is due, i.e. the
-    /// deadline is new (579). Each failure books a new deadline, so a
-    /// hold prints once, however often the address is sighted in it.
-    pub(crate) fn backed_off(&mut self, addr: Addr, until_ms: u64) -> bool {
+    /// Record a dial backoff held at `addr` until `until_ms`, sighted at
+    /// `now_ms`; `true` when its `BLE_SCAN_DECISION rule=backoff` line is
+    /// due, i.e. the deadline is new (579). Each failure books a new
+    /// deadline, so a hold prints once, however often the address is
+    /// sighted in it.
+    pub(crate) fn backed_off(&mut self, addr: Addr, until_ms: u64, now_ms: u64) -> bool {
+        self.sighted(addr, now_ms);
         self.backed_off.insert(addr, until_ms) != Some(until_ms)
     }
 
-    /// The three ledgers' census rows (597). None of them forgets an
-    /// address, so on a host in a room of rotating addresses they grow
-    /// with every address ever sighted: exactly what a soak has to see.
-    pub(crate) fn census_rows(&self) -> [crate::interfaces::census::CensusRow; 3] {
+    /// Note a sighting of `addr`. A new address in a full gate takes the
+    /// place of the one sighted longest ago.
+    fn sighted(&mut self, addr: Addr, now_ms: u64) {
+        if !self.seen.contains_key(&addr) && self.seen.len() >= SCAN_LINE_SLOTS {
+            let stalest = self
+                .seen
+                .iter()
+                .min_by_key(|(_, seen_ms)| **seen_ms)
+                .map(|(addr, _)| *addr);
+            if let Some(stalest) = stalest {
+                self.forget(&stalest);
+            }
+        }
+        self.seen.insert(addr, now_ms);
+    }
+
+    /// Forget every address not sighted for longer than
+    /// [`SCAN_LINE_RETENTION_MS`] at `now_ms`; the interface's 1 s tick
+    /// calls it.
+    pub(crate) fn forget_absent(&mut self, now_ms: u64) {
+        let absent: Vec<Addr> = self
+            .seen
+            .iter()
+            .filter(|(_, seen_ms)| now_ms.saturating_sub(**seen_ms) > SCAN_LINE_RETENTION_MS)
+            .map(|(addr, _)| *addr)
+            .collect();
+        for addr in &absent {
+            self.forget(addr);
+        }
+    }
+
+    fn forget(&mut self, addr: &Addr) {
+        self.seen.remove(addr);
+        self.decided.remove(addr);
+        self.dropped.remove(addr);
+        self.backed_off.remove(addr);
+    }
+
+    /// The ledgers' census rows (597): the three line ledgers and the
+    /// sightings that bound them, each at most [`SCAN_LINE_SLOTS`] and
+    /// none holding an address absent past [`SCAN_LINE_RETENTION_MS`].
+    pub(crate) fn census_rows(&self) -> [crate::interfaces::census::CensusRow; 4] {
         use crate::interfaces::census::hash_map_row;
         [
             hash_map_row("scan_line_decided", &self.decided),
             hash_map_row("scan_line_dropped", &self.dropped),
             hash_map_row("scan_line_backed_off", &self.backed_off),
+            hash_map_row("scan_line_seen", &self.seen),
         ]
     }
 }
@@ -2652,23 +2720,138 @@ mod tests {
             identity_hint: None,
         };
         let mut gate = ScanLineGate::default();
-        assert!(gate.decided(ADDR_2, decision));
-        assert!(gate.backed_off(ADDR_2, 12_000), "the first hold logs");
+        assert!(gate.decided(ADDR_2, decision, 0));
+        assert!(gate.backed_off(ADDR_2, 12_000, 0), "the first hold logs");
         for _ in 0..5 {
             assert!(
-                !gate.backed_off(ADDR_2, 12_000),
+                !gate.backed_off(ADDR_2, 12_000, 0),
                 "sightings in it are silent"
             );
         }
         assert!(
-            gate.backed_off(ADDR_2, 34_000),
+            gate.backed_off(ADDR_2, 34_000, 0),
             "the next failure's hold logs"
         );
         assert!(
-            !gate.decided(ADDR_2, decision),
+            !gate.decided(ADDR_2, decision, 0),
             "the unchanged decision stays silent across holds"
         );
-        assert!(gate.backed_off(ADDR_3, 12_000), "another address");
+        assert!(gate.backed_off(ADDR_3, 12_000, 0), "another address");
+    }
+
+    /// 602 (#446): the scan line ledgers forget. 500 addresses, one
+    /// sighting each, leave at most [`SCAN_LINE_SLOTS`] behind (the
+    /// stalest go first); once the retention passes without a sighting
+    /// the tick forgets them all, a fresh sighting is the only entry, and
+    /// the census rows say so. A forgotten address that returns logs its
+    /// decision again.
+    #[test]
+    fn the_scan_line_gate_forgets_an_address_it_has_not_seen() {
+        let decision = ScanDecision {
+            decision: ConnectDecision::InitiateLowerAddress,
+            caps: 0,
+            caps_record: false,
+            free_slots: None,
+            identity_hint: None,
+        };
+        let drop = ScanDrop {
+            reason: DropReason::NoServiceUuid,
+            identity_hint: None,
+        };
+        let addr = |i: u32| -> Addr {
+            let b = i.to_be_bytes();
+            [0x4A, 0x00, b[0], b[1], b[2], b[3]]
+        };
+        let rows = |gate: &ScanLineGate| -> Vec<(&'static str, u64)> {
+            gate.census_rows()
+                .iter()
+                .map(|row| (row.name, row.entries))
+                .collect()
+        };
+        let mut gate = ScanLineGate::default();
+        for i in 0..500u32 {
+            let now = u64::from(i) * 10;
+            assert!(gate.decided(addr(i), decision, now));
+            assert!(gate.backed_off(addr(i), now + 5_000, now));
+            assert!(gate.dropped(addr(i), drop, now));
+        }
+        let bound = SCAN_LINE_SLOTS as u64;
+        assert_eq!(
+            rows(&gate),
+            [
+                ("scan_line_decided", bound),
+                ("scan_line_dropped", bound),
+                ("scan_line_backed_off", bound),
+                ("scan_line_seen", bound),
+            ],
+            "the count bound holds while every address is fresh"
+        );
+        assert!(
+            !gate.decided(addr(499), decision, 4_990),
+            "the freshest address survived the eviction"
+        );
+        assert!(
+            gate.decided(addr(0), decision, 4_990),
+            "the stalest was evicted, so it logs again"
+        );
+
+        // Only 499 and 0, sighted at 4 990 ms, are inside the retention.
+        let later = 4_990 + SCAN_LINE_RETENTION_MS;
+        gate.forget_absent(later);
+        assert_eq!(
+            rows(&gate),
+            [
+                ("scan_line_decided", 2),
+                ("scan_line_dropped", 0),
+                ("scan_line_backed_off", 1),
+                ("scan_line_seen", 2),
+            ],
+            "an address is kept for exactly the retention (both were decided \
+             since their drop, so no drop is left)"
+        );
+        gate.forget_absent(later + 1);
+        assert_eq!(
+            rows(&gate),
+            [
+                ("scan_line_decided", 0),
+                ("scan_line_dropped", 0),
+                ("scan_line_backed_off", 0),
+                ("scan_line_seen", 0),
+            ],
+            "the tick past the retention forgets every absent address"
+        );
+        assert!(gate.decided(addr(7), decision, later + 2));
+        assert_eq!(
+            rows(&gate),
+            [
+                ("scan_line_decided", 1),
+                ("scan_line_dropped", 0),
+                ("scan_line_backed_off", 0),
+                ("scan_line_seen", 1),
+            ]
+        );
+    }
+
+    /// A sighting refreshes an address, so one that keeps advertising
+    /// is never forgotten and its unchanged decision never logs twice
+    /// (575's no-repeat rule), however long it stays.
+    #[test]
+    fn the_scan_line_gate_keeps_an_address_that_stays() {
+        let decision = ScanDecision {
+            decision: ConnectDecision::InitiateLowerAddress,
+            caps: 0,
+            caps_record: false,
+            free_slots: None,
+            identity_hint: None,
+        };
+        let mut gate = ScanLineGate::default();
+        assert!(gate.decided(ADDR_2, decision, 0));
+        let mut now = 0;
+        while now < 10 * SCAN_LINE_RETENTION_MS {
+            now += 7_000;
+            gate.forget_absent(now);
+            assert!(!gate.decided(ADDR_2, decision, now), "at {now} ms");
+        }
     }
 
     /// 577: the scan lines are rate-limited per address and change. A
@@ -2689,20 +2872,26 @@ mod tests {
         let decision = decide_from_scan(&ADDR_1, &ADDR_2, true, None, ScanMode::Strict)
             .expect("service offered");
         let mut gate = ScanLineGate::default();
-        assert!(gate.dropped(ADDR_2, no_service), "first drop logs");
-        assert!(!gate.dropped(ADDR_2, no_service), "the same drop is silent");
-        assert!(!gate.dropped(ADDR_2, no_service), "and stays silent");
-        assert!(gate.dropped(ADDR_2, stale), "a new reason logs");
-        assert!(!gate.dropped(ADDR_2, stale));
-        assert!(gate.decided(ADDR_2, decision), "the first decision logs");
-        assert!(gate.dropped(ADDR_2, stale), "a drop after a decision logs");
+        assert!(gate.dropped(ADDR_2, no_service, 0), "first drop logs");
         assert!(
-            !gate.decided(ADDR_2, decision),
+            !gate.dropped(ADDR_2, no_service, 0),
+            "the same drop is silent"
+        );
+        assert!(!gate.dropped(ADDR_2, no_service, 0), "and stays silent");
+        assert!(gate.dropped(ADDR_2, stale, 0), "a new reason logs");
+        assert!(!gate.dropped(ADDR_2, stale, 0));
+        assert!(gate.decided(ADDR_2, decision, 0), "the first decision logs");
+        assert!(
+            gate.dropped(ADDR_2, stale, 0),
+            "a drop after a decision logs"
+        );
+        assert!(
+            !gate.decided(ADDR_2, decision, 0),
             "an unchanged decision after a drop is silent"
         );
-        assert!(!gate.decided(ADDR_2, decision));
+        assert!(!gate.decided(ADDR_2, decision, 0));
         assert!(
-            gate.dropped(ADDR_3, stale),
+            gate.dropped(ADDR_3, stale, 0),
             "another address has its own state"
         );
     }

@@ -774,6 +774,7 @@ impl BleTask {
                     }
                     backoff_until.retain(|_, until| *until > now);
                     link_addr_types.retain(|addr, _| table.knows_addr(addr));
+                    scan_lines.forget_absent(now);
                     // A collection window whose bound passed without a
                     // further sighting closes on the tick.
                     self.dial_window_choice(
@@ -952,7 +953,7 @@ impl BleTask {
                         // `UUIDs` lost the service reads exactly like a
                         // stranger here, and that silence cost #443 its
                         // first hour.
-                        if scan_lines.dropped(addr.0, dropped) {
+                        if scan_lines.dropped(addr.0, dropped, now) {
                             tracing::debug!(
                                 event = "BLE_SCAN_DROPPED",
                                 iface = %Scalar(&self.name),
@@ -977,7 +978,7 @@ impl BleTask {
                 // The sighting feeds the dial backoff's absence reset
                 // and reads its hold (579), whatever the verdict.
                 let held = dial_backoff.sighted(links::addr_value_display(&addr.0), now);
-                if scan_lines.decided(addr.0, decision) {
+                if scan_lines.decided(addr.0, decision, now) {
                     tracing::info!(
                         event = "BLE_SCAN_DECISION",
                         addr = %hex12(&addr.0),
@@ -1016,7 +1017,7 @@ impl BleTask {
                 // a stranger left alone, and why until when. `until_ms`
                 // is on this interface's clock, the one `now` runs on.
                 if let Some(until_ms) = held.filter(|_| decision.decision.initiate()) {
-                    if scan_lines.backed_off(addr.0, until_ms) {
+                    if scan_lines.backed_off(addr.0, until_ms, now) {
                         let value = links::addr_value_display(&addr.0);
                         tracing::info!(
                             event = "BLE_SCAN_DECISION",

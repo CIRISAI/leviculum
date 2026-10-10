@@ -19,7 +19,8 @@
 //! | `dial_queue` | dials waiting to start | the `Vec`'s slots |
 //! | `backoff_until` | addresses held from dialling | `HashMap` capacity |
 //! | `dial_backoff` | addresses with a failure run | the fixed table |
-//! | `scan_line_decided`, `_dropped`, `_backed_off` | addresses ever logged | `HashMap` capacity |
+//! | `scan_line_decided`, `_dropped`, `_backed_off` | addresses logged, absent at most 120 s, at most 64 (602) | `HashMap` capacity |
+//! | `scan_line_seen` | the last sighting of each of those addresses | `HashMap` capacity |
 //! | `churn_ledger` | identities remembered | the fixed table |
 //! | `link_addr_types` | handshaked addresses' types | `HashMap` capacity |
 //! | `owed_removals` | device removals an adapter loss could swallow (600) | `BTreeSet` entries + `VecDeque` slots |
@@ -341,8 +342,8 @@ mod tests {
         let mut dial_backoff: DialBackoff<8> = DialBackoff::new();
         dial_backoff.note_failure(7, DialFailure::NotColumba, 0);
         let mut scan_lines = ScanLineGate::default();
-        scan_lines.backed_off([2u8; 6], 10);
-        scan_lines.backed_off([3u8; 6], 10);
+        scan_lines.backed_off([2u8; 6], 10, 0);
+        scan_lines.backed_off([3u8; 6], 10, 0);
         let notifiers = Vec::new();
         let dial_queue = DialQueue::new(1);
         let churn = ChurnGate::new(crate::interfaces::ble::links::CHURN_POLICY);
@@ -378,6 +379,7 @@ mod tests {
         assert_eq!(find(&census, "dial_backoff").entries, 1);
         assert_eq!(find(&census, "scan_line_backed_off").entries, 2);
         assert_eq!(find(&census, "scan_line_decided").entries, 0);
+        assert_eq!(find(&census, "scan_line_seen").entries, 2);
         assert_eq!(find(&census, "churn_ledger").entries, 0);
 
         // Raw bytes are entries' bytes: an empty growable collection has
