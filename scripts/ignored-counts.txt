@@ -104,6 +104,15 @@
 # periculum's ble_room_departure cell covers the full three-node scenario.
 1    -p leviculum-std --test ble_returning_peer_resight
 
+# ble_adapter_return (2026-10-10, 600): the minimal reproduction of the deaf
+# interface after its adapter's D-Bus object vanished and returned (btvirt
+# stopped and restarted under two linked lnsd). Needs the patched btvirt,
+# /dev/vhci and the system bluetoothd (host-global Bluetooth state, the
+# ble_room lock class), so no tier can run it. Run by name with
+# `cargo test -p leviculum-std --test ble_adapter_return -- --ignored
+# --nocapture` whenever the BLE session lifecycle or the scan task changes.
+1    -p leviculum-std --test ble_adapter_return
+
 # measure_propagation_stamp_at_cost_13 is a proof-of-work timing sample, not
 # an assertion: its runtime is a coin-flip distribution and only means
 # anything in --release on the host it runs on, by hand. Run manually before
