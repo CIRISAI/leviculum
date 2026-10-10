@@ -591,6 +591,7 @@ async fn udp_io_task(
                             if incoming_tx
                                 .send(IncomingPacket {
                                     data: buf[..len].to_vec(),
+                                    peer: None,
                                 })
                                 .await
                                 .is_err()

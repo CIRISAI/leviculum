@@ -3634,14 +3634,24 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// (leviculum#29 stage 2; see `verify_announce_packet`). The flag only
     /// skips the redundant Ed25519 re-verify for THIS packet; a non-announce
     /// packet ignores it.
+    ///
+    /// `peer` is the peer link the bytes arrived through, exactly as
+    /// [`Self::process_incoming_from_peer`] takes it; `None` on every
+    /// carrier without peer links (Codeberg #573: the std driver's only
+    /// ingest path, so a host BLE interface's peer reaches the core here).
     pub fn process_incoming_precomputed(
         &mut self,
         interface_index: usize,
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
         raw: &[u8],
         precomputed_hash: Option<[u8; 32]>,
         announce_verified: bool,
     ) -> Result<(), TransportError> {
-        self.process_incoming_inner(interface_index, raw, precomputed_hash, announce_verified)
+        self.ingress_peer = peer;
+        let result =
+            self.process_incoming_inner(interface_index, raw, precomputed_hash, announce_verified);
+        self.ingress_peer = None;
+        result
     }
 
     /// Like [`process_incoming`](Self::process_incoming), additionally
@@ -5539,7 +5549,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3951. A destination with no cached
+    /// link-request path uses at transport.rs:3961. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -7267,6 +7277,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             * MS_PER_SECOND),
                     destination_hash: dest_hash,
                     peer_signing_key,
+                    // #573: both peers are known here, the arrival's and
+                    // the path's, so a repeat of this link's traffic can
+                    // name its peer as path-table traffic does (#376).
+                    received_peer: self.ingress_peer,
+                    next_hop_peer: via_peer,
                 },
             );
 
@@ -7945,6 +7960,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         // from, not the guessed anchor.
                         if reanchor {
                             entry.next_hop_interface_index = interface_index;
+                            entry.next_hop_peer = self.ingress_peer;
                         }
                     }
                 }
@@ -7985,19 +8001,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     Some(interface_index),
                     &mut forwarded,
                     ph8(&cache_hash),
-                    // No #376 hint: the link table names an interface, not
-                    // the peer behind it, so this repeat keeps the pre-#376
-                    // every-live-link behaviour on a multi-peer carrier.
-                    //
-                    // Knowable, not free: both interfaces are learned while
-                    // relaying the LinkRequest, when `ingress_peer` names
-                    // the peer for the initiator side — so a `LinkEntry`
-                    // could carry a peer PER DIRECTION (measured: entry 88
-                    // B, one more peer field at most 112 B, times the
-                    // firmware's 8 link slots). Two fields and a direction
-                    // argument is a batch of its own, and it is the same
-                    // class as this one, not a different one.
-                    None,
+                    // The #376 hint for a link-table repeat (#573): the
+                    // peer the entry stored for the side this proof goes to.
+                    link_entry.forward_peer(target_iface, self.ingress_peer.as_ref()),
                 );
             } else if packet.context == PacketContext::Lrproof {
                 crate::tracing::debug!(
@@ -8055,10 +8061,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             // one more field on `ReverseEntry` (measured: 24
                             // B, at most 48 B with a peer, times the
                             // firmware's 16 reverse slots) would let a
-                            // relayed proof take the initiator's link alone.
-                            // Next step for #376, together with the link
-                            // table above; this batch carries the peer for
-                            // proofs a node makes ITSELF.
+                            // relayed proof take the initiator's link alone,
+                            // as the link table above does since #573.
                             None,
                         );
                     }
@@ -8391,10 +8395,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     Some(interface_index),
                     &mut forwarded,
                     ph8(&full_packet_hash),
-                    // Link-table repeat: interface known, peer not.
-                    // Same knowable-but-not-stored case as the LRPROOF
-                    // repeat above; see the note there.
-                    None,
+                    // The #376 hint for a link-table repeat (#573): every
+                    // resource part and message a relay carries takes this
+                    // arm, and without the peer a multi-peer interface
+                    // copies it onto the sender's own link too.
+                    link_entry.forward_peer(target_iface, self.ingress_peer.as_ref()),
                 );
             }
 
@@ -17499,7 +17504,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7060), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7070), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -17632,6 +17637,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -17665,6 +17672,8 @@ mod tests {
                     proof_timeout_ms: proof_timeout,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -17696,6 +17705,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -17733,6 +17744,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -17816,6 +17829,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -18596,6 +18611,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -18666,6 +18683,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: Some(peer_ed25519),
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -18746,6 +18765,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: Some(peer_ed25519),
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -18809,7 +18830,9 @@ mod tests {
                     validated: false,
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
-                    peer_signing_key: None, // No key available
+                    peer_signing_key: None, // No key available,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -18893,6 +18916,8 @@ mod tests {
                     proof_timeout_ms: now,
                     destination_hash: dest,
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -18949,6 +18974,8 @@ mod tests {
                     proof_timeout_ms: now,
                     destination_hash: dest,
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -20837,6 +20864,8 @@ mod tests {
                     proof_timeout_ms: now + 900_000,
                     destination_hash: [0x00; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -20921,6 +20950,8 @@ mod tests {
                     proof_timeout_ms: now + 900_000,
                     destination_hash: [0x00; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -21003,6 +21034,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -21484,6 +21517,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -21520,6 +21555,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -21574,6 +21611,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -22634,6 +22673,8 @@ mod tests {
                     proof_timeout_ms: u64::MAX,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -25870,6 +25911,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -25920,6 +25963,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -26011,6 +26056,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -26546,6 +26593,8 @@ mod tests {
                     proof_timeout_ms: now + 1000,
                     destination_hash: dest_hash,
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -26601,6 +26650,8 @@ mod tests {
                     proof_timeout_ms: now + 1000,
                     destination_hash: dest_hash,
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -26650,6 +26701,8 @@ mod tests {
                     proof_timeout_ms: now + 1000,
                     destination_hash: dest_hash,
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -26702,6 +26755,8 @@ mod tests {
                     proof_timeout_ms: now + 1000,
                     destination_hash: dest_hash,
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -26741,6 +26796,8 @@ mod tests {
                     proof_timeout_ms: now + 1000,
                     destination_hash: dest_hash,
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -26791,6 +26848,8 @@ mod tests {
                     proof_timeout_ms: now + 1000,
                     destination_hash: dest_hash,
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -26921,6 +26980,8 @@ mod tests {
                     proof_timeout_ms: now + 1000,
                     destination_hash: dest_hash,
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -26986,6 +27047,8 @@ mod tests {
                     proof_timeout_ms: now + 1000,
                     destination_hash: dest_hash,
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -28051,6 +28114,8 @@ mod tests {
                     proof_timeout_ms: now + 30_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -28912,6 +28977,8 @@ mod tests {
                     proof_timeout_ms: TEST_TIME_MS + 60_000,
                     destination_hash: [0xBBu8; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -29027,6 +29094,8 @@ mod tests {
                     proof_timeout_ms: TEST_TIME_MS + 60_000,
                     destination_hash: [0xBBu8; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
 
@@ -35122,6 +35191,8 @@ mod table_export_tests {
                 proof_timeout_ms: T0 + 5_000,
                 destination_hash: [0x03u8; TRUNCATED_HASHBYTES],
                 peer_signing_key: None,
+                received_peer: None,
+                next_hop_peer: None,
             },
         );
 

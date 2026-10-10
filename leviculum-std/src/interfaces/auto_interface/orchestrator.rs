@@ -564,8 +564,10 @@ where
                 if let Some(peer) = lookup_key.and_then(|k| peers.get_mut(&k)) {
                     peer.last_heard = Instant::now();
                     peer.counters.rx_bytes.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    // A per-peer sub-interface: the interface IS the peer.
                     match peer.incoming_tx.try_send(IncomingPacket {
                         data: data.to_vec(),
+                        peer: None,
                     }) {
                         Ok(()) => {}
                         Err(mpsc::error::TrySendError::Full(_)) => {

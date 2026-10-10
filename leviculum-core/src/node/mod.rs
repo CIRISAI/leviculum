@@ -60,6 +60,8 @@ mod mvr_bidir_transfer;
 #[cfg(test)]
 mod mvr_ble_cull_identity_mismatch;
 #[cfg(test)]
+mod mvr_ble_link_table_delivery_hint;
+#[cfg(test)]
 mod mvr_ble_peer_loss_reroute;
 #[cfg(test)]
 mod mvr_ble_peer_up_announce;
@@ -2356,6 +2358,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         data: &[u8],
         pre: PrecomputedRx,
     ) -> crate::transport::TickOutput {
+        self.handle_packet_precomputed_from_peer(iface, None, data, pre)
+    }
+
+    /// [`handle_packet_precomputed`](Self::handle_packet_precomputed),
+    /// naming the peer link the bytes arrived through as
+    /// [`handle_packet_from_peer`](Self::handle_packet_from_peer) does
+    /// (Codeberg #573). The std driver ingests every packet here, so this
+    /// is where a host multi-peer interface's peer reaches the core: path
+    /// entries learn their `via_peer` and relayed links their per-side
+    /// peers from it, and without it lnsd's BLE interface never sees a
+    /// delivery hint at all.
+    pub fn handle_packet_precomputed_from_peer(
+        &mut self,
+        iface: crate::transport::InterfaceId,
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
+        data: &[u8],
+        pre: PrecomputedRx,
+    ) -> crate::transport::TickOutput {
         // The plaintext memo is consumed downstream of the transport, at the
         // Single-destination decrypt site inside the event pipeline. Stage it
         // on the node for the duration of this call; take-once semantics plus
@@ -2365,6 +2385,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.pending_single_dest_plaintext = pre.single_dest_plaintext;
         if let Err(e) = self.transport.process_incoming_precomputed(
             iface.0,
+            peer,
             data,
             pre.packet_hash,
             pre.announce_verified,

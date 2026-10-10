@@ -634,7 +634,10 @@ impl BleTask {
                 // arm free of a second borrow.
                 let accept_listed = table.accept_only_len();
                 match table.peripheral_frame(addr.0, mtu, &data, now) {
-                    Inbound::Packet(packet) => self.deliver(packet).await,
+                    Inbound::Packet(packet) => {
+                        let peer = table.link_by_addr(&addr.0).map(|l| l.identity);
+                        self.deliver(packet, peer).await
+                    }
                     Inbound::HandshakeComplete {
                         identity,
                         displaced,
@@ -897,7 +900,10 @@ impl BleTask {
                     .rx_bytes
                     .fetch_add(data.len() as u64, Ordering::Relaxed);
                 match table.central_frame(addr.0, &data, now) {
-                    Inbound::Packet(packet) => self.deliver(packet).await,
+                    Inbound::Packet(packet) => {
+                        let peer = table.link_by_addr(&addr.0).map(|l| l.identity);
+                        self.deliver(packet, peer).await
+                    }
                     Inbound::Error => {
                         tracing::debug!("BLE {}: bad fragment from {} dropped", self.name, addr);
                     }
@@ -1210,8 +1216,16 @@ impl BleTask {
         }
     }
 
-    async fn deliver(&self, packet: Vec<u8>) {
-        let _ = self.incoming_tx.send(IncomingPacket { data: packet }).await;
+    /// Hand one reassembled packet to the driver, naming the peer link it
+    /// arrived through (Codeberg #573): the identity this link presented
+    /// in the handshake, the same value [`Self::send_packet`] gets back as
+    /// a delivery hint. Without it the core learns no `via_peer` and keeps
+    /// no peer per relayed link, and every routed packet floods.
+    async fn deliver(&self, packet: Vec<u8>, peer: Option<IdentityHash>) {
+        let _ = self
+            .incoming_tx
+            .send(IncomingPacket { data: packet, peer })
+            .await;
     }
 
     /// Report a peer loss to the driver loop, unless the identity still

@@ -4112,6 +4112,9 @@ fn retire_from_inventory(
 /// One inbound packet plus everything precomputed OFF the node lock for it.
 struct PreparedRx {
     iface: InterfaceId,
+    /// The peer link the packet arrived through (Codeberg #573), copied
+    /// from [`IncomingPacket::peer`]; `None` on single-peer carriers.
+    peer: Option<[u8; 16]>,
     data: Vec<u8>,
     pre: leviculum_core::node::PrecomputedRx,
     /// The off-lock decrypt failed against the cached key snapshot — evict it
@@ -4159,6 +4162,7 @@ fn prepare_cheap(iface: InterfaceId, data: Vec<u8>) -> PreparedRx {
     };
     PreparedRx {
         iface,
+        peer: None,
         data,
         pre,
         evict_decryptor_for: None,
@@ -4175,6 +4179,7 @@ fn precompute_announce(iface: InterfaceId, data: Vec<u8>) -> PreparedRx {
         .unwrap_or(false);
     PreparedRx {
         iface,
+        peer: None,
         data,
         pre: leviculum_core::node::PrecomputedRx {
             packet_hash: Some(packet_hash),
@@ -4202,6 +4207,7 @@ fn precompute_single_dest(
     let failed = decrypted.is_none();
     PreparedRx {
         iface,
+        peer: None,
         data,
         pre: leviculum_core::node::PrecomputedRx {
             packet_hash: Some(packet_hash),
@@ -4448,8 +4454,12 @@ async fn run_event_loop(
                 // packet unproofed and the sender retransmits. Daemon-mode
                 // nodes (`without_events()`) have no sink and no limit.
                 core.set_channel_delivery_budget(event_sink.as_ref().map(EventSink::data_capacity));
-                let output =
-                    core.handle_packet_precomputed(prepared.iface, &prepared.data, prepared.pre);
+                let output = core.handle_packet_precomputed_from_peer(
+                    prepared.iface,
+                    prepared.peer,
+                    &prepared.data,
+                    prepared.pre,
+                );
                 let now_ms = core.now_ms();
                 (output, now_ms)
             };
@@ -4544,7 +4554,7 @@ async fn run_event_loop(
                         // IFAC-protected interfaces skip precompute — core
                         // rewrites their bytes, invalidating anything computed
                         // here.
-                        let prepared = if ifac_configs.contains_key(&iface_id.0) {
+                        let mut prepared = if ifac_configs.contains_key(&iface_id.0) {
                             prepare_cheap(iface_id, pkt.data)
                         } else {
                             match classify_rx(&pkt.data) {
@@ -4576,6 +4586,7 @@ async fn run_event_loop(
                                 RxClass::Cheap => prepare_cheap(iface_id, pkt.data),
                             }
                         };
+                        prepared.peer = pkt.peer;
                         apply_inbound!(prepared);
                     }
                     RecvEvent::Disconnected(iface_id) => {
@@ -9766,6 +9777,7 @@ mod tests {
             ._in_tx
             .send(crate::interfaces::IncomingPacket {
                 data: buf[..len].to_vec(),
+                peer: None,
             })
             .await
             .expect("loop is live");
@@ -9788,6 +9800,65 @@ mod tests {
         .expect("the announce must be processed while the flush write is in flight");
 
         gate.release_tx.send(()).expect("blocked hook receives");
+        harness.shutdown_tx.send(true).expect("loop is live");
+        harness.loop_handle.await.expect("loop exits cleanly");
+    }
+
+    /// Codeberg #573: the driver's ingest hands the core the peer link an
+    /// interface named on the packet. Before it, the loop called
+    /// `handle_packet_precomputed` with the bytes alone, so on lnsd no path
+    /// entry learned a `via_peer` and no relayed link a peer per side, and
+    /// the BLE interface flooded every routed packet (periculum 570: zero
+    /// `BLE_TX_ROUTE` lines on the relay, even for its path-table
+    /// LinkRequest forward).
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_inbound_packets_peer_reaches_the_core() {
+        use leviculum_core::{DestinationType, Direction};
+
+        let (core, _td) = shared_test_core();
+        let harness = spawn_flush_loop(Arc::clone(&core), 3600);
+
+        let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "test",
+            &["peerstamp"],
+        )
+        .unwrap();
+        let dest_hash = dest.hash().into_bytes();
+        let announce = dest
+            .announce(None, &mut rand_core::OsRng, 12_000, 1_700_000_000)
+            .unwrap();
+        let mut buf = [0u8; 500];
+        let len = announce.pack(&mut buf).unwrap();
+        let link = [0x5Bu8; TRUNCATED_HASHBYTES];
+        harness
+            ._in_tx
+            .send(crate::interfaces::IncomingPacket {
+                data: buf[..len].to_vec(),
+                peer: Some(link),
+            })
+            .await
+            .expect("loop is live");
+
+        let via_peer = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(path) = core.lock_recover().storage().get_path(&dest_hash) {
+                    break path.via_peer;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the announce must install a path");
+        assert_eq!(
+            via_peer,
+            Some(link),
+            "the path must carry the peer link the announce arrived through"
+        );
+
         harness.shutdown_tx.send(true).expect("loop is live");
         harness.loop_handle.await.expect("loop exits cleanly");
     }

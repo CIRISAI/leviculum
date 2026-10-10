@@ -2086,6 +2086,8 @@ mod tests {
                 proof_timeout_ms: 0,
                 destination_hash: [0u8; TRUNCATED_HASHBYTES],
                 peer_signing_key: None,
+                received_peer: None,
+                next_hop_peer: None,
             },
         );
 
@@ -2373,6 +2375,8 @@ mod tests {
                 proof_timeout_ms: 0,
                 destination_hash: [0u8; TRUNCATED_HASHBYTES],
                 peer_signing_key: None,
+                received_peer: None,
+                next_hop_peer: None,
             },
         );
         assert_eq!(s.earliest_link_deadline(5000), Some(6000));
@@ -2391,6 +2395,8 @@ mod tests {
                 proof_timeout_ms: 3000,
                 destination_hash: [0u8; TRUNCATED_HASHBYTES],
                 peer_signing_key: None,
+                received_peer: None,
+                next_hop_peer: None,
             },
         );
         // min(6000, 3000) = 3000
@@ -2415,6 +2421,8 @@ mod tests {
                 proof_timeout_ms: 5000,
                 destination_hash: [0u8; TRUNCATED_HASHBYTES],
                 peer_signing_key: None,
+                received_peer: None,
+                next_hop_peer: None,
             },
         );
 
@@ -2446,6 +2454,8 @@ mod tests {
             proof_timeout_ms: 0,
             destination_hash: [0u8; TRUNCATED_HASHBYTES],
             peer_signing_key: None,
+            received_peer: None,
+            next_hop_peer: None,
         };
 
         // h1: received on iface 0, forwarded on iface 1
@@ -2656,6 +2666,8 @@ mod diagnostic_model_tests {
                 proof_timeout_ms: 0,
                 destination_hash: hash(3),
                 peer_signing_key: None,
+                received_peer: None,
+                next_hop_peer: None,
             },
         );
         s.set_announce_rate(
@@ -2861,6 +2873,8 @@ mod cap_tests {
             proof_timeout_ms: 0,
             destination_hash: hash16(0),
             peer_signing_key: None,
+            received_peer: None,
+            next_hop_peer: None,
         }
     }
 

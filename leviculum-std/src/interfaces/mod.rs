@@ -429,6 +429,11 @@ pub(crate) type InterfaceReadyMap =
 /// Packet received from an interface, ready for the event loop
 pub(crate) struct IncomingPacket {
     pub data: Vec<u8>,
+    /// The peer link the packet arrived through, on a multi-peer interface
+    /// (Codeberg #573): the identity the interface reports on peer-up, and
+    /// the one it maps a delivery hint back to. Every single-peer
+    /// interface leaves it `None`.
+    pub peer: Option<[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]>,
 }
 
 /// A peer-link transition on a multi-peer broadcast-domain interface

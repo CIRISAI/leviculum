@@ -3629,6 +3629,8 @@ mod tests {
                 proof_timeout_ms: now + 5_000,
                 destination_hash: dest,
                 peer_signing_key: None,
+                received_peer: None,
+                next_hop_peer: None,
             },
         );
         core.storage_mut().set_announce(
@@ -3943,6 +3945,8 @@ mod tests {
             proof_timeout_ms: now + 5_000,
             destination_hash: [0x11u8; 16],
             peer_signing_key: None,
+            received_peer: None,
+            next_hop_peer: None,
         };
         // The unvalidated id's eighth byte is non-zero and the validated id's
         // is zero, so upstream's key-indexing accident (Transport.py:3215-3216)
@@ -4128,6 +4132,8 @@ mod tests {
                     proof_timeout_ms: now + 5_000,
                     destination_hash: [0x01; 16],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
         }

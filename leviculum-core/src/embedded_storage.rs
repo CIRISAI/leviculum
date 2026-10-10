@@ -1645,6 +1645,8 @@ mod tests {
             proof_timeout_ms: 99_999,
             destination_hash: [0u8; TRUNCATED_HASHBYTES],
             peer_signing_key: None,
+            received_peer: None,
+            next_hop_peer: None,
         }
     }
     fn mk_reverse(seed: u8) -> ReverseEntry {

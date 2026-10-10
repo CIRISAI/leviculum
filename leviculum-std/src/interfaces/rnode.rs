@@ -2431,7 +2431,7 @@ where
                                             payload.len() as u64,
                                             std::sync::atomic::Ordering::Relaxed,
                                         );
-                                        let pkt = IncomingPacket { data: payload.to_vec() };
+                                        let pkt = IncomingPacket { data: payload.to_vec(), peer: None };
                                         if incoming_tx.send(pkt).await.is_err() {
                                             // Event loop shut down
                                             send_goodbye(&mut port, &name).await;
@@ -4007,7 +4007,7 @@ async fn rnode_multi_io_task<S>(
                                                 name, payload.len(), selected_vport, v.name
                                             );
                                             if v.incoming_tx
-                                                .send(IncomingPacket { data: payload.to_vec() })
+                                                .send(IncomingPacket { data: payload.to_vec(), peer: None })
                                                 .await
                                                 .is_err()
                                             {

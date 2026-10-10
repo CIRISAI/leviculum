@@ -86,6 +86,50 @@ pub struct LinkEntry {
     /// Used for LRPROOF signature validation. None if announce not cached.
     /// Removed when link entry is cleaned up (clean_link_table).
     pub peer_signing_key: Option<[u8; crate::constants::ED25519_KEY_SIZE]>,
+    /// The peer link behind `received_interface_index` the link request
+    /// arrived through, as a multi-peer interface named it (Codeberg #573,
+    /// the link-table half of #376's delivery hint). `None` when the
+    /// carrier has no peer links or the driver did not name one.
+    pub received_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
+    /// The peer link behind `next_hop_interface_index` the link request was
+    /// forwarded to: the path's [`PathEntry::via_peer`] at forward time.
+    pub next_hop_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
+}
+
+impl LinkEntry {
+    /// The #376 delivery hint for one repeat of this link's traffic onto
+    /// `target_iface`, given the peer the packet arrived through
+    /// (Codeberg #573).
+    ///
+    /// Across two interfaces the direction is the interface, so the hint
+    /// is the peer stored for the outbound one. On ONE shared interface
+    /// the interface says nothing and the frozen hop counts are equal on
+    /// a symmetric chain, so the direction is read off the arriving peer:
+    /// from one endpoint's link, the repeat is for the other's. A packet
+    /// from an unnamed or unknown peer there gets no hint, which a
+    /// multi-peer interface serves as before, by reaching every link.
+    pub fn forward_peer(
+        &self,
+        target_iface: usize,
+        ingress_peer: Option<&[u8; TRUNCATED_HASHBYTES]>,
+    ) -> Option<[u8; TRUNCATED_HASHBYTES]> {
+        if self.next_hop_interface_index == self.received_interface_index {
+            let from = ingress_peer?;
+            if self.received_peer.as_ref() == Some(from) {
+                self.next_hop_peer
+            } else if self.next_hop_peer.as_ref() == Some(from) {
+                self.received_peer
+            } else {
+                None
+            }
+        } else if target_iface == self.received_interface_index {
+            self.received_peer
+        } else if target_iface == self.next_hop_interface_index {
+            self.next_hop_peer
+        } else {
+            None
+        }
+    }
 }
 
 // Reverse Types
