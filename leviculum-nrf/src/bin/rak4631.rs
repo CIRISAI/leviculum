@@ -251,6 +251,11 @@ async fn main(spawner: Spawner) {
         // newest one; the queue keeps what it has and drains fewest-hops-
         // first (`Transport::drain_announce_queues`).
         .max_queued_announces(8)
+        // #598: announces the ingress burst limiter holds are the same kind
+        // of heap term, and the core's 256 per interface would be more than
+        // the heap. The cap and its arithmetic are the heap budget's
+        // (`leviculum_heap_budget::HELD_ANNOUNCE_SLICE_BYTES`), pinned there.
+        .max_held_announces(leviculum_nrf::heap_census::BOARD_MAX_HELD_ANNOUNCES)
         .max_random_blobs(8)
         .respond_to_probes(true);
 

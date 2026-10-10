@@ -384,7 +384,7 @@ informatively:
 
 | event | where | says |
 | --- | --- | --- |
-| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6151`) | announce handling itself took ≥ 100 ms |
+| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6182`) | announce handling itself took ≥ 100 ms |
 | `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4290`) | an outside thread waited ≥ 250 ms for the core lock |
 | `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1540`) | one batch write to the log file took ≥ 50 ms |
 

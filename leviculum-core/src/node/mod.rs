@@ -3611,6 +3611,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             requests,
             destinations,
             transport: self.transport.heap_bytes(),
+            held_announces: self.transport.held_announce_count(),
+            announces_hold_refused: self.transport.stats().drops_ingress_burst_announce(),
             storage: self.transport.storage().heap_bytes(),
         }
     }

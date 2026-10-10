@@ -159,3 +159,38 @@ fn cached_announce_shows_up_in_embedded_storage() {
         "cached announce smaller than the raw packet minus framing: {after}"
     );
 }
+
+/// Codeberg #598: a node built with a hold cap holds no more than it, and
+/// the census reports both the held count and the refusals past the cap
+/// (the `held=` and `hold_refused=` keys of the firmware's line).
+#[test]
+fn held_announces_and_hold_refusals_show_up_in_the_census() {
+    let clock = StepClock::new(START_MS);
+    let mut node = NodeCoreBuilder::new()
+        .enable_transport(true)
+        .max_held_announces(1)
+        .build(OsRng, clock.clone(), NoStorage);
+    let before = node.heap_census();
+    assert_eq!(before.held_announces, 0);
+    assert_eq!(before.announces_hold_refused, 0);
+
+    // Twelve unknown destinations 100 ms apart: well past the 3 Hz burst
+    // threshold of a new interface.
+    for _ in 0..12 {
+        let (_responder, _dest, _key, announce) = make_responder(clock.0.get());
+        let _ = node.handle_packet(IFACE, &announce);
+        clock.0.set(clock.0.get() + 100);
+    }
+
+    let after = node.heap_census();
+    assert_eq!(after.held_announces, 1, "the cap of one holds one");
+    assert!(
+        after.announces_hold_refused > 0,
+        "the burst offered more than one new destination to the hold"
+    );
+    assert_eq!(
+        after.announces_hold_refused,
+        node.transport_stats().drops_ingress_burst_announce(),
+        "the census reads the drop counter the refusal books"
+    );
+}

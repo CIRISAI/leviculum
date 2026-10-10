@@ -607,3 +607,107 @@ const _: () = assert!(
 );
 // And the inbound batch it bounds must fit the slice it is held in.
 const _: () = assert!(BOARD_SYNC_LIMIT_KB as usize * 1000 <= SYNC_SLICE_BYTES);
+
+// The held-announce hold (Codeberg #598). Declared after everything the
+// book cites by line, like `peak`, so those citations stay where they are.
+
+/// Size of one held-announce entry (`HeldAnnounce` in
+/// `leviculum-core/src/transport.rs`: the raw announce's `Vec` header, the
+/// hop count and the peer it came through) on `thumbv7em-none-eabihf`.
+/// Pinned for the reason [`LINK_BYTES`] is: on the host it is 48. The
+/// firmware asserts `leviculum_core::transport::HELD_ANNOUNCE_ENTRY_BYTES`
+/// against it (`leviculum-nrf/src/heap_census.rs`).
+pub const HELD_ANNOUNCE_ENTRY_BYTES: usize = 32;
+
+/// The raw announce one held entry pins, at its bound: the largest packet
+/// the core accepts. The announces held on the rig ran 167 to 183 B (589's
+/// btvirt runs), and app data takes one up to the MTU, which a burst does
+/// not choose against.
+pub const HELD_ANNOUNCE_RAW_BYTES: usize = leviculum_core::constants::MTU;
+
+/// Interfaces a board registers (`leviculum_nrf::iface_bytes::IFACE_COUNT`:
+/// USB, LoRa, BLE). The cap is per interface and the board leaves ingress
+/// control on for all of them, so the hold's worst case is every interface
+/// full at once. The firmware asserts the two agree.
+pub const BOARD_INTERFACES: usize = 3;
+
+/// Heap the hold pins with `per_iface` announces held on each of `ifaces`
+/// interfaces, every raw announce at [`HELD_ANNOUNCE_RAW_BYTES`], by the
+/// census's B-tree model on the target's 4-byte words (as
+/// [`peak::peer_table_bytes`]): the per-interface map's nodes keyed by a
+/// 16-byte destination, the raw blocks, and the outer map from an
+/// interface index to that map (a 12-byte `BTreeMap` header).
+pub const fn held_announce_bytes(per_iface: usize, ifaces: usize) -> usize {
+    const NODE_CAPACITY: usize = 11;
+    const NODE_TYPICAL_FILL: usize = 7;
+    const WORD: usize = 4;
+    const fn nodes(len: usize, entry: usize) -> usize {
+        len.div_ceil(NODE_TYPICAL_FILL) * (2 * WORD + NODE_CAPACITY * entry)
+    }
+    if per_iface == 0 || ifaces == 0 {
+        return 0;
+    }
+    let per_queue =
+        nodes(per_iface, 16 + HELD_ANNOUNCE_ENTRY_BYTES) + per_iface * HELD_ANNOUNCE_RAW_BYTES;
+    nodes(ifaces, WORD + 3 * WORD) + ifaces * per_queue
+}
+
+/// Heap the board lets the hold take, and the decision as a number the
+/// Lead can move: [`BOARD_MAX_HELD_ANNOUNCES`] is derived from it.
+///
+/// **Not in [`budget_total`], and the boot plan funds none of it.** The
+/// plan's slack is [`budget_slack`], 656 B on a T114, and one interface's
+/// first held announce costs 1 220 B (a 536 B map node, the 184 B outer
+/// node, a 500 B raw announce). Putting this slice into the sum would cost
+/// three of the four endpoint links the heap affords, below [`MAX_LINKS`].
+/// So it is held to the heap the board HAS, as the serve is
+/// ([`live_serve_cap`]), and it is sized so that on the tightest heap the
+/// rig has recorded it leaves both of what the live heap must keep clear:
+///
+/// ```text
+///   free at the 2026-09-23 T114 panic (two phones + role)  30 380 B
+/// − SERVE_MARGIN_BYTES        claimed while a /get is in   14 712 B
+/// − FRAG_RESERVE_BYTES        the allocator's elbow room    6 144 B
+/// =                           what a hold may take          9 524 B
+/// ```
+///
+/// 8 KiB is under that with 1.3 KiB to spare. What it buys is
+/// [`BOARD_MAX_HELD_ANNOUNCES`] = 4 per interface at the MTU bound
+/// (7 792 B for all three full); at the rig's 183 B announces the same
+/// cap costs 3 988 B.
+///
+/// Why 4 is enough: a burst holds one slot per NEW destination (a repeat
+/// replaces its slot), held announces are released one per
+/// `IC_HELD_RELEASE_INTERVAL` (5 s) once the burst calms, and an announce
+/// refused at the cap is the one Python also refuses when its own queue is
+/// full: its destination is learned from its next announce, or at once by
+/// a path request, which bypasses the hold. Against that, the core's
+/// default of 256 is 148 016 B on ONE interface at the MTU bound, more
+/// than the heap, and 66 864 B at the rig's 183 B announces, two thirds
+/// of it.
+pub const HELD_ANNOUNCE_SLICE_BYTES: usize = 8 * 1024;
+
+/// The board's hold cap per interface (`NodeCoreBuilder::max_held_announces`
+/// in the binaries): the largest count whose worst case on every
+/// interface fits [`HELD_ANNOUNCE_SLICE_BYTES`].
+pub const BOARD_MAX_HELD_ANNOUNCES: usize = derive_max_held_announces();
+
+/// [`BOARD_MAX_HELD_ANNOUNCES`]'s derivation, by search, as
+/// [`derive_sync_limit_kb`].
+pub const fn derive_max_held_announces() -> usize {
+    let mut cap = 0;
+    while held_announce_bytes(cap + 1, BOARD_INTERFACES) <= HELD_ANNOUNCE_SLICE_BYTES {
+        cap += 1;
+    }
+    cap
+}
+
+// Pinned, so a change to the entry, the raw bound, the interface count or
+// the slice moves these numbers in the diff, not silently on the board.
+// Moving them legitimately: move the pin and say what the board holds now.
+const _: () = assert!(BOARD_MAX_HELD_ANNOUNCES == 4);
+const _: () = assert!(held_announce_bytes(BOARD_MAX_HELD_ANNOUNCES, BOARD_INTERFACES) == 7_792);
+// The slice must leave what the live heap keeps clear on the recorded
+// worst heap (the arithmetic at `HELD_ANNOUNCE_SLICE_BYTES`).
+const _: () =
+    assert!(HELD_ANNOUNCE_SLICE_BYTES + SERVE_MARGIN_BYTES + FRAG_RESERVE_BYTES <= 30_380);

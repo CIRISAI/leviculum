@@ -118,15 +118,15 @@ if id_store.load() => Some(identity)   -> "Identity loaded from flash"
 else                                   -> generate new, then save
 ```
 
-(`leviculum-nrf/src/bin/t114.rs:181-285`,
-`leviculum-nrf/src/bin/rak4631.rs:216-320`. The identity lives on the
+(`leviculum-nrf/src/bin/t114.rs:181-290`,
+`leviculum-nrf/src/bin/rak4631.rs:216-325`. The identity lives on the
 board's `identity_flash_page`, e.g. `0xEC000` on the T114,
 `leviculum-nrf/src/boards/t114.rs:177`.) Flashing new firmware rewrites
 the program region but leaves that page intact, so the node keeps its
 address. You can confirm the loaded identity on the debug port: the boot
 log prints `Identity loaded from flash`
-(`leviculum-nrf/src/bin/t114.rs:241`) and an `[IDENTITY]` line with the
-full hash (`leviculum-nrf/src/bin/t114.rs:616`, and again on the 5 s
+(`leviculum-nrf/src/bin/t114.rs:246`) and an `[IDENTITY]` line with the
+full hash (`leviculum-nrf/src/bin/t114.rs:621`, and again on the 5 s
 banner). Both are on the boot-critical log path, so attaching after the
 board has come up still shows them (Codeberg #234).
 

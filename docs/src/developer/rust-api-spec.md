@@ -190,13 +190,13 @@ caller must dispatch.
 
 A node is more often built with `NodeCoreBuilder` (`node/builder.rs:40`), whose
 `fn build<R, Clk, S>(self, rng: R, clock: Clk, storage: S) -> NodeCore<R, Clk, S>`
-(`node/builder.rs:247`) supplies the platform triple. Setters include
+(`node/builder.rs:256`) supplies the platform triple. Setters include
 `identity`, `proof_strategy`, and `enable_transport`.
 
 ### Core `TickOutput` and `Action`
 
 `TickOutput` is what every core method returns. Defined at
-`leviculum-core/src/transport.rs:154`. It is `#[must_use]` — dropping it silently
+`leviculum-core/src/transport.rs:155`. It is `#[must_use]` — dropping it silently
 loses outbound packets and events.
 
 | Field | Type | Source |

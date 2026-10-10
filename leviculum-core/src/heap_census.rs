@@ -101,6 +101,14 @@ pub struct NodeHeapCensus {
     /// Transport-owned dynamic state: pending actions, queued announces,
     /// interface bookkeeping maps.
     pub transport: usize,
+    /// Ingress-limited announces held right now, across interfaces. Their
+    /// bytes are in `transport`; the count says how close the hold is to
+    /// its cap (`TransportConfig::max_held_announces`, Codeberg #598).
+    pub held_announces: usize,
+    /// Announces the hold refused at its cap since boot
+    /// (`TransportStats::drops_ingress_burst_announce`). Moves when a
+    /// burst brought more new destinations than the cap admits.
+    pub announces_hold_refused: u64,
     /// What the `Storage` impl reports via `Storage::heap_bytes` (for
     /// the firmware's `EmbeddedStorage`: the announce-cache and ratchet
     /// value `Vec`s — the maps themselves are heapless and inside

@@ -147,11 +147,19 @@ const IC_BURST_MIN_SAMPLES: usize = 6;
 /// decisions (Python IC_DEQUE_MIN_SAMPLE). Under-filled deques read as 0 Hz so
 /// a couple of stray samples never trip a burst.
 const IC_DEQUE_MIN_SAMPLE: usize = 2;
-/// Maximum ingress-limited announces held per interface at any time. Once the
-/// queue is full, announces for new destinations are rejected while updates for
-/// already-held destinations still overwrite (Python MAX_HELD_ANNOUNCES /
+/// Default cap on ingress-limited announces held per interface
+/// ([`TransportConfig::max_held_announces`]). Once the queue is full, announces
+/// for new destinations are rejected while updates for already-held
+/// destinations still overwrite (Python MAX_HELD_ANNOUNCES /
 /// ic_max_held_announces = 256, Interface.py:70, hold_announce Interface.py:228-232).
 const MAX_HELD_ANNOUNCES: usize = 256;
+
+/// Size of one held-announce entry (the map value, without its raw announce),
+/// evaluated on the target the crate is built for. The boards' heap budget
+/// pins this number for `thumbv7em` and the firmware asserts it at compile
+/// time (Codeberg #598), so growing the entry fails the firmware build until
+/// the budget's hold arithmetic moves with it.
+pub const HELD_ANNOUNCE_ENTRY_BYTES: usize = core::mem::size_of::<HeldAnnounce>();
 /// Penalty window (ms) after an announce burst activates before the first held
 /// announce may be released. Python sets `ic_held_release = now + IC_BURST_PENALTY`
 /// on burst activation (IC_BURST_PENALTY = 15 s, Interface.py:81/160).
@@ -994,6 +1002,17 @@ pub struct TransportConfig {
     /// shortens it so a cell can watch a probe destination re-announce
     /// within minutes (#449); a field node keeps the default.
     pub mgmt_announce_interval_ms: u64,
+    /// Cap on ingress-limited announces held per interface while its burst
+    /// limiter is active. Default `MAX_HELD_ANNOUNCES`, Python's 256
+    /// (`Interface.py:70`). At the cap an announce for a destination not yet
+    /// held is refused, counted as [`DropReason::IngressBurstAnnounce`], and
+    /// an announce for a held destination still replaces its copy: Python's
+    /// policy, unchanged. Each held entry pins its raw announce on the heap,
+    /// so on a host 256 is nothing and on a board it is about half the heap;
+    /// the boards set it from their heap budget (Codeberg #598). Local
+    /// policy only: a refused announce is one Python would also refuse once
+    /// its own queue is full, and its next emission is learned as usual.
+    pub max_held_announces: usize,
 }
 
 impl Default for TransportConfig {
@@ -1017,6 +1036,7 @@ impl Default for TransportConfig {
             // series on the pathchoice corpus says otherwise (#230).
             path_choice: PathChoice::default(),
             mgmt_announce_interval_ms: MGMT_ANNOUNCE_INTERVAL_MS,
+            max_held_announces: MAX_HELD_ANNOUNCES,
         }
     }
 }
@@ -2076,7 +2096,9 @@ impl TransportStats {
     }
 
     /// Announces dropped while the receiving interface's ingress burst limiter
-    /// was active (Codeberg #87).
+    /// was active (Codeberg #87). The one site that books it is a hold refused
+    /// at [`TransportConfig::max_held_announces`], so this is also the count
+    /// of refused holds the heap census reports (Codeberg #598).
     pub fn drops_ingress_burst_announce(&self) -> u64 {
         self.drops_ingress_burst_announce
     }
@@ -4918,6 +4940,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         (s, total)
     }
 
+    /// Ingress-limited announces held across all interfaces right now, the
+    /// count the heap census prints beside its byte figures (Codeberg #598).
+    pub fn held_announce_count(&self) -> usize {
+        self.interface_held_announces
+            .values()
+            .map(BTreeMap::len)
+            .sum()
+    }
+
     /// Estimated heap bytes the transport's own dynamic state pins
     /// (#388 census): pending actions and events (spines plus queued
     /// packet payloads), the per-interface announce queues and held
@@ -5557,7 +5588,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3969. A destination with no cached
+    /// link-request path uses at transport.rs:3991. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6336,7 +6367,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 held = held,
             );
             if !held {
-                // Queue was at MAX_HELD_ANNOUNCES for a new destination: Python
+                // Queue was at max_held_announces for a new destination: Python
                 // silently drops the announce (Interface.py:231 falls through).
                 self.stats.record_drop(DropReason::IngressBurstAnnounce);
             }
@@ -6358,7 +6389,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1578 ran in the
+        // Gate on the already-incremented hops (transport.rs:1598 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -10564,8 +10595,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ///
     /// Returns `true` if the announce was stored, whether as a new entry or by
     /// overwriting an already-held destination, and `false` if the queue was
-    /// already at [`MAX_HELD_ANNOUNCES`] for a destination not yet held (Python
-    /// falls through and silently drops it). Keying by destination hash means a
+    /// already at [`TransportConfig::max_held_announces`] for a destination not
+    /// yet held (Python falls through and silently drops it). A refusal stores
+    /// nothing, not even an empty queue for the interface, so a board whose
+    /// cap is spent pins no more heap for the attempt. Keying by destination hash means a
     /// repeat announce for a held destination refreshes to the newest packet
     /// rather than accumulating, matching Python's dict semantics.
     fn hold_announce(
@@ -10576,6 +10609,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         hops: u8,
         peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     ) -> bool {
+        let current = self.interface_held_announces.get(&iface);
+        if current.map_or(0, BTreeMap::len) >= self.config.max_held_announces
+            && !current.is_some_and(|q| q.contains_key(&dest_hash))
+        {
+            return false;
+        }
         let queue = self.interface_held_announces.entry(iface).or_default();
         match queue.get(&dest_hash) {
             // Already held: keep the copy that names the SHORTER route.
@@ -10612,7 +10651,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 );
                 true
             }
-            None if queue.len() < MAX_HELD_ANNOUNCES => {
+            None => {
                 queue.insert(
                     dest_hash,
                     HeldAnnounce {
@@ -10623,7 +10662,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 );
                 true
             }
-            None => false,
         }
     }
 
@@ -11344,7 +11382,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2485`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2507`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -17525,7 +17563,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7084), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7115), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -23446,7 +23484,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1578) before
+        // The inbound path increments hops once (transport.rs:1598) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -32024,6 +32062,61 @@ mod tests {
                 held_count(&transport, NET_IFACE),
                 MAX_HELD_ANNOUNCES,
                 "updating a held destination must not grow the queue"
+            );
+        }
+
+        /// Codeberg #598: the cap is the transport's configuration, not a
+        /// constant written for the host. A burst past a configured cap of 2
+        /// holds two, refuses the rest, and every refusal moves the counter
+        /// the heap census prints.
+        #[test]
+        fn a_configured_hold_cap_refuses_past_it_and_counts_each_refusal() {
+            let mut transport = make_transport();
+            transport.config.max_held_announces = 2;
+            for _ in 0..12 {
+                let (raw, _dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport
+                    .handle_announce(packet, NET_IFACE, &raw, false, false)
+                    .unwrap();
+                transport.clock.advance(100);
+            }
+            assert!(
+                burst_active(&transport, NET_IFACE),
+                "the flood must activate the burst, or nothing was offered to the hold"
+            );
+            assert_eq!(held_count(&transport, NET_IFACE), 2);
+            assert_eq!(transport.held_announce_count(), 2);
+            let refused = transport.stats().drops_ingress_burst_announce();
+            assert!(
+                refused > 0,
+                "announces past the cap must be counted as refused"
+            );
+
+            // One more new destination: refused, and the counter moves by one.
+            let (raw, _dest) = make_announce_raw();
+            let packet = Packet::unpack(&raw).unwrap();
+            transport
+                .handle_announce(packet, NET_IFACE, &raw, false, false)
+                .unwrap();
+            assert_eq!(held_count(&transport, NET_IFACE), 2);
+            assert_eq!(
+                transport.stats().drops_ingress_burst_announce(),
+                refused + 1
+            );
+        }
+
+        /// Codeberg #598: a cap of zero holds nothing and leaves no empty
+        /// queue behind for the interface, so a refused hold pins no heap.
+        #[test]
+        fn a_zero_hold_cap_stores_nothing_for_the_interface() {
+            let mut transport = make_transport();
+            transport.config.max_held_announces = 0;
+            let (raw, dest) = make_announce_raw();
+            assert!(!transport.hold_announce(NET_IFACE, dest, &raw, 2, None));
+            assert!(
+                !transport.interface_held_announces.contains_key(&NET_IFACE),
+                "a refused hold must not create the interface's queue"
             );
         }
     }

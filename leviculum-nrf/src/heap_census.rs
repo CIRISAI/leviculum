@@ -26,7 +26,7 @@
 //!   res=… events=… req=… dest=… transport=… storage=… ble_defrag=…
 //!   ble_sessions=… ble_s0=… ble_s1=… ble_s2=… ble_s3=…
 //!   pn_peers=… n_peers=… pn_work=… pn_batch=… pn_out=… pn_links=…
-//!   pn_role=… pn_flush=… other=…
+//!   pn_role=… pn_flush=… held=… hold_refused=… other=…
 //! ```
 //!
 //! (one line on the wire; wrapped here for the page).
@@ -48,6 +48,12 @@
 //! holds only a GATT connection appears in `ble_sessions=` (total, with
 //! `ble_s<slot>=` per drain slot) — the per-connection owner the field
 //! boards' #388 panics grew in while `n_links=` stayed 0.
+//!
+//! `held=` is the count of announces the ingress burst limiter holds
+//! across interfaces (their bytes are in `transport=`), capped per
+//! interface at [`leviculum_heap_budget::BOARD_MAX_HELD_ANNOUNCES`];
+//! `hold_refused=` counts the
+//! announces refused at that cap since boot (#598).
 //!
 //! `other` is the
 //! honesty term: `used` minus everything the census attributes — the
@@ -135,7 +141,7 @@ impl Default for Ticker {
 // reaches it (#388); this module keeps the census, which reads the allocator.
 pub use leviculum_heap_budget::{
     budget_per_link, budget_reserve, budget_serve_cap, budget_slack, budget_total, live_serve_cap,
-    max_endpoint_links, SERVE_MARGIN_BYTES,
+    max_endpoint_links, BOARD_MAX_HELD_ANNOUNCES, SERVE_MARGIN_BYTES,
 };
 
 // The crate pins the target's `Link` size because its tests run on a host,
@@ -148,6 +154,15 @@ const _: () = assert!(
 // (`leviculum_heap_budget::peak`).
 const _: () =
     assert!(core::mem::size_of::<alloc::vec::Vec<u8>>() == leviculum_heap_budget::peak::VEC_BYTES);
+// The held-announce hold's two target terms (#598): the entry the core
+// keeps per held announce, and the interfaces it may be held on. A change
+// to either fails this build until the budget's hold arithmetic, and the
+// cap the binaries take from it, move with it.
+const _: () = assert!(
+    leviculum_core::transport::HELD_ANNOUNCE_ENTRY_BYTES
+        == leviculum_heap_budget::HELD_ANNOUNCE_ENTRY_BYTES
+);
+const _: () = assert!(crate::iface_bytes::IFACE_COUNT == leviculum_heap_budget::BOARD_INTERFACES);
 
 /// Emit the boot `HEAP_BUDGET` line and refuse to run a configuration
 /// whose worst case does not fit the heap (#388 step 4).
@@ -307,7 +322,7 @@ where
     crate::log::log_fmt(
         "[HEAP_CENSUS] ",
         format_args!(
-            "used={} free={} largest={} node_box={} links={} n_links={} res={} events={} req={} dest={} transport={} storage={} ble_defrag={} ble_sessions={} ble_s0={} ble_s1={} ble_s2={} ble_s3={} pn_peers={} n_peers={} pn_work={} pn_batch={} pn_out={} pn_links={} pn_role={} pn_flush={} other={}",
+            "used={} free={} largest={} node_box={} links={} n_links={} res={} events={} req={} dest={} transport={} storage={} ble_defrag={} ble_sessions={} ble_s0={} ble_s1={} ble_s2={} ble_s3={} pn_peers={} n_peers={} pn_work={} pn_batch={} pn_out={} pn_links={} pn_role={} pn_flush={} held={} hold_refused={} other={}",
             used_now,
             free_now,
             largest,
@@ -334,6 +349,8 @@ where
             pn.link_maps,
             pn.role,
             pn.flush,
+            census.held_announces,
+            census.announces_hold_refused,
             other,
         ),
     );

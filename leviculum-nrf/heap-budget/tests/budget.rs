@@ -17,10 +17,11 @@
 //! Run: `cargo test -p leviculum-heap-budget --test budget -- --nocapture`
 
 use leviculum_heap_budget::{
-    budget_per_link, budget_reserve, budget_serve_cap, budget_slack, budget_total, live_serve_cap,
-    max_endpoint_links, BOARD_SYNC_LIMIT_KB, BOARD_TRANSFER_LIMIT_KB, CHANNEL_BUDGET_BYTES,
-    HEAP_SIZE, INTERFACE_MTU, LINK_BYTES, MAX_INCOMING_RESOURCE_BYTES, MAX_LINKS,
-    OFFER_RESPONSE_RESERVE_BYTES, QUEUE_DEPTH, ROLE_BUDGET_BYTES, SERVE_MARGIN_BYTES,
+    budget_per_link, budget_reserve, budget_serve_cap, budget_slack, budget_total,
+    held_announce_bytes, live_serve_cap, max_endpoint_links, BOARD_INTERFACES,
+    BOARD_MAX_HELD_ANNOUNCES, BOARD_SYNC_LIMIT_KB, BOARD_TRANSFER_LIMIT_KB, CHANNEL_BUDGET_BYTES,
+    HEAP_SIZE, HELD_ANNOUNCE_SLICE_BYTES, INTERFACE_MTU, LINK_BYTES, MAX_INCOMING_RESOURCE_BYTES,
+    MAX_LINKS, OFFER_RESPONSE_RESERVE_BYTES, QUEUE_DEPTH, ROLE_BUDGET_BYTES, SERVE_MARGIN_BYTES,
     SERVE_PEAK_BYTES, SERVE_RESERVE_BYTES, SERVE_RESOURCE_SDU, SESSION_BUDGET_BYTES,
     SYNC_SLICE_BYTES,
 };
@@ -258,4 +259,39 @@ fn issue_388_field_figures() {
             assert_eq!(cap, boot, "{what}");
         }
     }
+}
+
+/// Codeberg #598: what the held-announce hold costs on the board, at the
+/// figures `HELD_ANNOUNCE_SLICE_BYTES` states. The boot plan's slack
+/// funds no held announce at all, the board's cap fills its slice, one
+/// more does not fit, and the core's default would not fit the heap.
+#[test]
+fn the_held_announce_hold_against_its_slice() {
+    let first = held_announce_bytes(1, 1);
+    let at_cap = held_announce_bytes(BOARD_MAX_HELD_ANNOUNCES, BOARD_INTERFACES);
+    let past_cap = held_announce_bytes(BOARD_MAX_HELD_ANNOUNCES + 1, BOARD_INTERFACES);
+    let core_default = held_announce_bytes(256, 1);
+    println!(
+        "HELD slack={} first={first} cap={BOARD_MAX_HELD_ANNOUNCES} at_cap={at_cap} \
+         past_cap={past_cap} slice={HELD_ANNOUNCE_SLICE_BYTES} core_default_one_iface={core_default}",
+        budget_slack(T114_NODE_BOX)
+    );
+    assert_eq!(
+        first, 1_220,
+        "a 536 B node, the 184 B outer node, 500 B raw"
+    );
+    assert!(
+        budget_slack(T114_NODE_BOX) < first,
+        "the boot plan's slack funds no held announce"
+    );
+    assert_eq!(BOARD_MAX_HELD_ANNOUNCES, 4);
+    assert_eq!(at_cap, 7_792);
+    assert!(at_cap <= HELD_ANNOUNCE_SLICE_BYTES);
+    assert!(
+        past_cap > HELD_ANNOUNCE_SLICE_BYTES,
+        "the cap is the largest that fits"
+    );
+    assert_eq!(core_default, 148_016);
+    assert!(core_default > HEAP_SIZE);
+    assert_eq!(held_announce_bytes(0, BOARD_INTERFACES), 0);
 }

@@ -30,7 +30,7 @@ your own allocator. The reference firmware `leviculum-nrf` targets
 ## The sans-IO contract
 
 The core is a state machine with exactly three ways in, and one way out. The way
-out is always a `TickOutput` (`leviculum-core/src/transport.rs:537`), carrying
+out is always a `TickOutput` (`leviculum-core/src/transport.rs:545`), carrying
 `actions` to perform, `events` that occurred, and `next_deadline_ms`, the time at
 which you must next tick the timer. It is `#[must_use]`: dropping it loses
 outbound packets and events.
@@ -66,8 +66,8 @@ The shape is: compute the next deadline, wait for whichever of "a packet on any
 interface" or "the deadline" happens first, call the matching entry point,
 dispatch the resulting actions. This is exactly the `leviculum-nrf` T114 main
 loop: the deadline comes from `next_deadline`
-(`leviculum-nrf/src/bin/t114.rs:763-768`) and the wait from Embassy's `select4`
-(`leviculum-nrf/src/bin/t114.rs:821-840`). The board selects over nine event
+(`leviculum-nrf/src/bin/t114.rs:768-773`) and the wait from Embassy's `select4`
+(`leviculum-nrf/src/bin/t114.rs:826-845`). The board selects over nine event
 sources; the loop below narrows that to the three interfaces (serial, LoRa,
 BLE) and the timer:
 
@@ -126,7 +126,7 @@ Three things to notice:
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice
    (or a slice of your own interface type, through `AsInterface`) to the
-   generic `dispatch_actions` (`leviculum-core/src/transport.rs:701`). Broadcast
+   generic `dispatch_actions` (`leviculum-core/src/transport.rs:709`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free. Bind what it returns: the `DispatchResult` is
    `#[must_use]` because dropping it discards the retries the core asked for,
@@ -143,7 +143,7 @@ drains the `EventReceiver`.
 triple — RNG, [`Clock`](rust-api-spec.md#platform-traits), and
 [`Storage`](rust-api-spec.md#platform-traits) — in its `build` call. The T114
 firmware builds its node the same way (`NodeCoreBuilder`,
-`leviculum-nrf/src/bin/t114.rs:202-220`):
+`leviculum-nrf/src/bin/t114.rs:202-225`):
 
 ```rust
 // Adapted from the T114 builder cited above.
@@ -161,7 +161,7 @@ let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
 
 `build` consumes the builder and the platform triple and returns the
 `NodeCore<R, C, S>`. A driver with an inline-storage `S` must not call it:
-use `build_boxed` (`leviculum-core/src/node/builder.rs:329`), which allocates
+use `build_boxed` (`leviculum-core/src/node/builder.rs:338`), which allocates
 first and configures through the box. `Box::new(builder.build(..))` holds a
 full-size `NodeCore` as a by-value local on the way into the box, and with
 `EmbeddedStorage` that is upwards of 40 KB twice over — it gave the T114 a

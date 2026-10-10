@@ -131,6 +131,15 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Set the cap on ingress-limited announces held per interface.
+    /// Default: 256 (Python's). The boards set it from their heap budget
+    /// (Codeberg #598), see
+    /// [`TransportConfig::max_held_announces`](crate::transport::TransportConfig::max_held_announces).
+    pub fn max_held_announces(mut self, n: usize) -> Self {
+        self.transport_config.max_held_announces = n;
+        self
+    }
+
     /// Set the maximum number of random blobs retained per path entry.
     /// Default: 64. On embedded with limited heap, set to e.g. 8.
     pub fn max_random_blobs(mut self, n: usize) -> Self {
