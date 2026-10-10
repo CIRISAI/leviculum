@@ -824,6 +824,10 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "accept_only" => {
             iface.accept_only = Some(split_csv(value));
         }
+        // The pacer's gap override (#379), a measurement knob.
+        "tx_gap_ms" => iface.tx_gap_ms = value.parse().ok(),
+        // The fragmenter's MTU cap (#379), the other measurement knob.
+        "fragment_mtu" => iface.fragment_mtu = value.parse().ok(),
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
         // bind, id_callsign, modulation, ...) must never make lnsd reject an
@@ -1103,6 +1107,8 @@ mod tests {
     discovery_interval = 2.5
     enable_central = yes
     enable_peripheral = no
+    tx_gap_ms = 25
+    fragment_mtu = 253
 "#,
         )
         .unwrap();
@@ -1119,6 +1125,8 @@ mod tests {
         assert_eq!(ble.discovery_interval, Some(2.5));
         assert_eq!(ble.enable_central, Some(true));
         assert_eq!(ble.enable_peripheral, Some(false));
+        assert_eq!(ble.tx_gap_ms, Some(25));
+        assert_eq!(ble.fragment_mtu, Some(253));
 
         // A minimal section leaves the tunables to the builder's defaults.
         let config = parse_ini(
@@ -1137,6 +1145,8 @@ mod tests {
         assert_eq!(ble.discovery_interval, None);
         assert_eq!(ble.enable_central, None);
         assert_eq!(ble.enable_peripheral, None);
+        assert_eq!(ble.tx_gap_ms, None, "unset is the firmware's gap");
+        assert_eq!(ble.fragment_mtu, None, "unset is the exchanged MTU");
         assert_eq!(
             ble.initiate_only, None,
             "no key is no restriction, not an empty list"

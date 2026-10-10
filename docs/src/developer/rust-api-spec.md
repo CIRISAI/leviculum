@@ -158,8 +158,8 @@ Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
 | Signature | Purpose |
 |-----------|---------|
 | `fn load<P: AsRef<Path>>(path: P) -> Result<Self>` — `config.rs:901` | Load an INI config (the `rnsd`/`lnsd` format) |
-| `fn default_config_dir() -> PathBuf` — `config.rs:1063` | Default config directory |
-| `fn default_config_path() -> PathBuf` — `config.rs:1072` | Default config file path |
+| `fn default_config_dir() -> PathBuf` — `config.rs:1076` | Default config directory |
+| `fn default_config_path() -> PathBuf` — `config.rs:1085` | Default config file path |
 
 ## `leviculum-core` (no_std, sans-IO)
 

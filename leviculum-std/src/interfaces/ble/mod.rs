@@ -99,6 +99,17 @@ pub(crate) struct BleOptions {
     /// identity handshake; it never reaches the scan path, so a peer
     /// left off it is still dialled if `initiate_only` allows.
     pub accept_only: links::PeerAllowlist,
+    /// Inter-packet gap override in ms (`tx_gap_ms`, #379); `None` —
+    /// the default — is the firmware's compiled gap. Every pacer of
+    /// the interface, the notify pipe's and each central link's, reads
+    /// it.
+    pub tx_gap_ms: Option<u16>,
+    /// Cap on the ATT MTU this interface sizes its outbound fragments
+    /// by (`fragment_mtu`, #379); `None` — the default — is the MTU the
+    /// link exchanged. A measurement knob: BlueZ to BlueZ exchanges
+    /// 512, at which no Reticulum packet needs a second fragment, and
+    /// the gap floor is a question about packets that do.
+    pub fragment_mtu: Option<usize>,
 }
 
 impl Default for BleOptions {
@@ -112,6 +123,8 @@ impl Default for BleOptions {
             enable_peripheral: true,
             initiate_only: links::PeerAllowlist::default(),
             accept_only: links::PeerAllowlist::default(),
+            tx_gap_ms: None,
+            fragment_mtu: None,
         }
     }
 }
@@ -368,7 +381,7 @@ impl BleTask {
         // reaches every subscribed central at once, so all peripheral
         // links share one schedule. The central links pace themselves,
         // each in its own task (`bluez::CentralTask::session_loop`).
-        let mut notify_pacer = links::LinkPacer::new();
+        let mut notify_pacer = links::LinkPacer::new(self.opts.tx_gap_ms);
         // The firmware central task's fallback clock and collection
         // window (#375 part 2, item 3), driven from the event loop:
         // sightings feed it, ticks close its windows.
@@ -547,6 +560,7 @@ impl BleTask {
                 notifiers.push(notifier);
             }
             Ev::PeriphWrite { addr, mtu, data } => {
+                let mtu = self.sizing_mtu(mtu);
                 self.counters
                     .rx_bytes
                     .fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -760,6 +774,7 @@ impl BleTask {
                 frames,
                 ack,
             } => {
+                let mtu = self.sizing_mtu(mtu);
                 let (admission, displaced) = table.admit(identity, addr.0, Role::Central, mtu, now);
                 match admission {
                     Admission::Accept => {
@@ -928,6 +943,7 @@ impl BleTask {
                 own_identity: self.identity_hash,
                 ev_tx: ev_tx.clone(),
                 iface: self.name.clone(),
+                tx_gap_ms: self.opts.tx_gap_ms,
             };
             tokio::spawn(central.run());
         }
@@ -1190,6 +1206,16 @@ impl BleTask {
                 total = total,
             );
         }
+    }
+
+    /// The MTU a link's outbound fragments are sized by: the exchanged
+    /// one, capped by the interface's `fragment_mtu` when set. Applied
+    /// where BlueZ reports an MTU, so the link table, its fragmenter and
+    /// the `BLE_LINK_UP` line all see the same number.
+    fn sizing_mtu(&self, exchanged: usize) -> usize {
+        self.opts
+            .fragment_mtu
+            .map_or(exchanged, |cap| exchanged.min(cap))
     }
 
     fn log_link_up(&self, identity: &IdentityHash, addr: &Addr, role: Role, mtu: usize) {

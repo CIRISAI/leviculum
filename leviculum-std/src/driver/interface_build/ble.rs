@@ -38,6 +38,17 @@ pub(super) fn build(
     };
     let initiate_only = allowlist("initiate_only", config.initiate_only.as_deref())?;
     let accept_only = allowlist("accept_only", config.accept_only.as_deref())?;
+    // Below the BLE 4.0 floor a fragment carries no payload, and the
+    // link table ignores an MTU under it, so a smaller cap would be
+    // silently no cap at all.
+    if let Some(cap) = config.fragment_mtu {
+        if cap < leviculum_core::framing::ble::MIN_MTU {
+            return Err(Error::Config(format!(
+                "BLEInterface fragment_mtu must be at least {}, got {cap}",
+                leviculum_core::framing::ble::MIN_MTU
+            )));
+        }
+    }
     let opts = BleOptions {
         adapter: config.device.clone(),
         max_connections: config.max_connections.unwrap_or(links::DEFAULT_MAX_LINKS),
@@ -47,6 +58,8 @@ pub(super) fn build(
         enable_peripheral: config.enable_peripheral.unwrap_or(true),
         initiate_only,
         accept_only,
+        tx_gap_ms: config.tx_gap_ms,
+        fragment_mtu: config.fragment_mtu,
     };
     if !opts.enable_central && !opts.enable_peripheral {
         return Err(Error::Config(
@@ -77,7 +90,7 @@ pub(super) fn build(
     };
     tracing::info!(
         "BLE interface on {} (central={}, peripheral={}, max_links={}, min_rssi={} dBm, \
-         initiate_only={}, accept_only={})",
+         initiate_only={}, accept_only={}, tx_gap_ms={}, fragment_mtu={})",
         opts.adapter.as_deref().unwrap_or("default adapter"),
         opts.enable_central,
         opts.enable_peripheral,
@@ -85,6 +98,9 @@ pub(super) fn build(
         opts.min_rssi,
         listed(&opts.initiate_only),
         listed(&opts.accept_only),
+        leviculum_ble_tx::effective_tx_gap_ms(opts.tx_gap_ms),
+        opts.fragment_mtu
+            .map_or_else(|| "exchanged".to_string(), |cap| cap.to_string()),
     );
     Ok(Built::Handles(vec![handle]))
 }
@@ -269,6 +285,30 @@ mod tests {
         assert!(bare.accept_only.is_none());
         build(1, &bare, &owner.ctx()).expect("no key, no restriction");
         assert!(BleOptions::default().accept_only.is_empty());
+    }
+
+    /// `fragment_mtu` below the BLE 4.0 floor is refused at startup:
+    /// the link table ignores an MTU under 23, so such a cap would build
+    /// and then cap nothing. The floor itself builds.
+    #[tokio::test]
+    async fn a_fragment_mtu_below_the_floor_is_a_config_error() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            fragment_mtu: Some(22),
+            ..Default::default()
+        };
+        let err = build(0, &config, &owner.ctx())
+            .err()
+            .expect("must not build");
+        assert!(err.to_string().contains("fragment_mtu"), "{err}");
+
+        let floor = InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            fragment_mtu: Some(23),
+            ..Default::default()
+        };
+        build(1, &floor, &owner.ctx()).expect("the floor itself builds");
     }
 
     /// The two keys are set independently and neither reads the other's

@@ -1532,9 +1532,13 @@ impl ScanScheduler {
 
 /// The inter-packet gap lnsd serves on every BLE link: the firmware's
 /// compiled default ([`leviculum_ble_tx::DEFAULT_TX_GAP_MS`], 100 ms —
-/// the measured desk value, justified on that constant), always. lnsd
-/// has no runtime knob, and as the phone stand-in on the rig it must
-/// pace exactly as a board does toward a real phone.
+/// the measured desk value, justified on that constant) unless the
+/// interface's `tx_gap_ms` key overrides it. The key exists for the
+/// gap-floor measurement (#379) and nothing sets it in a deployment:
+/// as the phone stand-in on the rig lnsd must pace exactly as a board
+/// does toward a real phone, so an unset key is the board's default,
+/// resolved through the same [`effective_tx_gap_ms`] the firmware's
+/// operator override goes through (`0` = no gap at all).
 ///
 /// Wraps the firmware's own host-tested [`TxGap`] arithmetic, so "gap"
 /// means the same thing on both stacks: measured from the last fragment
@@ -1544,17 +1548,23 @@ impl ScanScheduler {
 /// [`packet_done`](Self::packet_done)).
 pub(crate) struct LinkPacer {
     gap: TxGap,
+    /// The interface's `tx_gap_ms`, `None` when the config leaves it unset.
+    override_ms: Option<u16>,
 }
 
 impl LinkPacer {
-    pub(crate) fn new() -> Self {
-        Self { gap: TxGap::new() }
+    pub(crate) fn new(override_ms: Option<u16>) -> Self {
+        Self {
+            gap: TxGap::new(),
+            override_ms,
+        }
     }
 
     /// How long the next packet must still wait at `now_ms`, in
     /// milliseconds; 0 is "send now".
     pub(crate) fn wait_ms(&self, now_ms: u64) -> u64 {
-        self.gap.wait_ms(now_ms, effective_tx_gap_ms(None))
+        self.gap
+            .wait_ms(now_ms, effective_tx_gap_ms(self.override_ms))
     }
 
     /// The last fragment of a packet was handed to the carrier; the
@@ -1872,14 +1882,14 @@ mod tests {
     }
 
     /// lnsd paces every BLE link at the firmware's compiled default gap
-    /// (#376): 100 ms between packets on a link, no knob, first packet
-    /// free, the boundary itself send-now. The pacer wraps the
-    /// firmware's `TxGap`, so this pins that lnsd resolves the SAME
-    /// default the boards' pumps do.
+    /// (#376): 100 ms between packets on a link when `tx_gap_ms` is
+    /// unset, first packet free, the boundary itself send-now. The
+    /// pacer wraps the firmware's `TxGap`, so this pins that lnsd
+    /// resolves the SAME default the boards' pumps do.
     #[test]
     fn lnsd_paces_links_with_the_firmware_default_gap() {
         let default = u64::from(leviculum_ble_tx::DEFAULT_TX_GAP_MS);
-        let mut pacer = LinkPacer::new();
+        let mut pacer = LinkPacer::new(None);
         assert_eq!(pacer.wait_ms(0), 0, "first packet is never deferred");
         pacer.packet_done(1_000);
         assert_eq!(pacer.wait_ms(1_000), default, "back to back: full gap");
@@ -1888,6 +1898,22 @@ mod tests {
         // A keepalive never calls packet_done, so it cannot slide the
         // window — the pacer only ever hears about packets.
         assert_eq!(pacer.wait_ms(1_050), default - 50);
+    }
+
+    /// `tx_gap_ms` replaces the default and nothing else (#379): a set
+    /// value is the gap, `0` paces nothing, and the first packet is
+    /// still free either way.
+    #[test]
+    fn tx_gap_ms_overrides_the_default_gap() {
+        let mut pacer = LinkPacer::new(Some(25));
+        assert_eq!(pacer.wait_ms(0), 0, "first packet is never deferred");
+        pacer.packet_done(1_000);
+        assert_eq!(pacer.wait_ms(1_000), 25, "back to back: the set gap");
+        assert_eq!(pacer.wait_ms(1_025), 0, "boundary is send-now");
+
+        let mut unpaced = LinkPacer::new(Some(0));
+        unpaced.packet_done(1_000);
+        assert_eq!(unpaced.wait_ms(1_000), 0, "0 disables the gap");
     }
 
     /// lnsd advertises under the same name a board with the same identity

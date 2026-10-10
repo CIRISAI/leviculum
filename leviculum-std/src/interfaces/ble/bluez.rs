@@ -378,6 +378,8 @@ pub(crate) struct CentralTask {
     pub own_identity: IdentityHash,
     pub ev_tx: mpsc::Sender<Ev>,
     pub iface: String,
+    /// The interface's `tx_gap_ms` override, for this link's pacer.
+    pub tx_gap_ms: Option<u16>,
 }
 
 impl CentralTask {
@@ -492,7 +494,7 @@ impl CentralTask {
         // sleep between units. Keepalives bypass the gap and never
         // slide its window, same rule as the firmware pumps.
         let start = tokio::time::Instant::now();
-        let mut pacer = super::links::LinkPacer::new();
+        let mut pacer = super::links::LinkPacer::new(self.tx_gap_ms);
         loop {
             tokio::select! {
                 frame = session.notify_stream.next() => {

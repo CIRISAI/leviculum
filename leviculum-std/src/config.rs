@@ -777,6 +777,17 @@ pub struct InterfaceConfig {
     /// interface is built (`PeerAllowlist::parse`). No reference key:
     /// `ble-reticulum` has none, and this changes no wire byte.
     pub accept_only: Option<Vec<String>>,
+    /// The BLE inter-packet gap in milliseconds, overriding the
+    /// firmware's compiled default (`leviculum_ble_tx::DEFAULT_TX_GAP_MS`,
+    /// 100 ms); `0` disables the gap. A measurement knob (#379), the
+    /// sibling of the boards' `--set-ble-tx-gap`: absent is the board's
+    /// pacing, which is what every deployment runs. No reference key.
+    pub tx_gap_ms: Option<u16>,
+    /// Cap on the ATT MTU the BLE interface sizes its outbound fragments
+    /// by; absent is the exchanged MTU. A measurement knob (#379): two
+    /// BlueZ hosts exchange 512, a board 253, and only the latter splits
+    /// a full packet. No reference key.
+    pub fragment_mtu: Option<usize>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -917,6 +928,8 @@ impl Default for InterfaceConfig {
             enable_peripheral: None,
             initiate_only: None,
             accept_only: None,
+            tx_gap_ms: None,
+            fragment_mtu: None,
         }
     }
 }
