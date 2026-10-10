@@ -279,6 +279,11 @@ impl InterfaceCounters {
 
     /// Publish the owning task's census of its own tables (597), replacing
     /// the last one; `None` withdraws it (the tables are gone).
+    ///
+    /// Only the BLE interface publishes one, and it is Linux-only (BlueZ over
+    /// D-Bus), so off Linux this has no caller. The census itself, and the
+    /// dump that reads it, exist on every target.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn publish_census(&self, census: Option<census::InterfaceCensus>) {
         *self.census.lock_recover() = census;
     }
@@ -594,7 +599,9 @@ pub(crate) struct OutgoingPacket {
     /// holds several point-to-point links at once, and delivering a routed
     /// packet on all of them costs airtime on links the packet was never
     /// meant for — and, in the field, a second copy relayed back to the
-    /// addressee by the neighbour that received the stray one.
+    /// addressee by the neighbour that received the stray one. Off Linux
+    /// there is no BLE interface, so nothing reads it there.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub peer: Option<[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]>,
 }
 
