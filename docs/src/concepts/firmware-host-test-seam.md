@@ -136,6 +136,9 @@ because the list below is what is actually left:
 | The 1200-baud touch predicate | `leviculum-usb-policy` | `604b5fae`, 2026-10-06 |
 | Control-envelope answer windows and the deferral bound they cover | `leviculum-usb-policy` | `604b5fae`, 2026-10-06 |
 | The duty-hold notice: one frame per hold edge, and the state behind a media report | `leviculum-usb-policy` (`DutyHoldNotice`) | leviculum#501, 2026-10-07 |
+| The duty-hold edge: open once, lift once, the idle-turn lift | `leviculum-queue-budget` (`HoldEdge`) | leviculum#413, 2026-10-10 |
+| The sync backoff a round books before it dials | `leviculum-lxmf` (`Peer::book_sync_attempt`) | leviculum#413, 2026-10-10 |
+| Active delivery: which message is pushed, and when a failed push gives up | `leviculum-lxmf` (`active_delivery`) | leviculum#413, 2026-10-10 |
 
 The answer windows moved as constants, not as functions of the
 modulation. What the modulation moves is the delay they must cover, one
@@ -146,7 +149,10 @@ retry rather than waited out. The crate asserts both halves, and the
 envelope-inside-lnsd relation is a build-time assert the firmware build
 inherits.
 
-What has no host assertion, in the order it is cheap to move:
+The full inventory of what has no host assertion, one row per decision
+with the cheapest rig cell that exercises it, is [Firmware decisions only
+the rig can test](../firmware/host-test-seams.md) (leviculum#413). What
+this page singled out first, in the order it is cheap to move:
 
 **1. The `[TRANSPORT]` ticker.** The re-arm deliberately drops missed
 periods so a busy loop does not then emit a burst of catch-up lines
