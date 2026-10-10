@@ -7312,6 +7312,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     timestamp_ms: now,
                     receiving_interface_index: interface_index,
                     outbound_interface_index: target_iface,
+                    received_peer: self.ingress_peer.unwrap_or(ReverseEntry::NO_PEER),
                 },
             );
 
@@ -8052,18 +8053,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             Some(interface_index),
                             &mut forwarded,
                             ph8(&cache_hash),
-                            // The reverse table records the interface the
-                            // original packet came in on, not its peer.
-                            //
-                            // Knowable at insert: the entry is written while
-                            // relaying the original packet, when
-                            // `ingress_peer` names the peer it came from —
-                            // one more field on `ReverseEntry` (measured: 24
-                            // B, at most 48 B with a peer, times the
-                            // firmware's 16 reverse slots) would let a
-                            // relayed proof take the initiator's link alone,
-                            // as the link table above does since #573.
-                            None,
+                            // The #376 hint for a reverse-table repeat
+                            // (#582): the peer the original packet came in
+                            // through, stored while relaying it, so the
+                            // proof takes that link alone, as the link
+                            // table above does since #573.
+                            reverse_entry.peer().copied(),
                         );
                     }
                 }
@@ -8352,6 +8347,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         timestamp_ms: now,
                         receiving_interface_index: interface_index,
                         outbound_interface_index: target_iface,
+                        received_peer: self.ingress_peer.unwrap_or(ReverseEntry::NO_PEER),
                     },
                 );
 
@@ -8587,6 +8583,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 timestamp_ms: now,
                 receiving_interface_index: source_interface_index,
                 outbound_interface_index: target_iface,
+                // #582: the peer this plain packet came through, so its
+                // proof can go back to that link alone.
+                received_peer: self.ingress_peer.unwrap_or(ReverseEntry::NO_PEER),
             },
         );
         crate::tracing::debug!(
@@ -21060,6 +21059,7 @@ mod tests {
                     timestamp_ms: now,
                     receiving_interface_index: 0,
                     outbound_interface_index: 1,
+                    received_peer: ReverseEntry::NO_PEER,
                 },
             );
 
@@ -21659,6 +21659,7 @@ mod tests {
                     timestamp_ms: now,
                     receiving_interface_index: 0, // received on if0
                     outbound_interface_index: 1,  // forwarded to if1
+                    received_peer: ReverseEntry::NO_PEER,
                 },
             );
 
@@ -29035,6 +29036,7 @@ mod tests {
                     timestamp_ms: TEST_TIME_MS,
                     receiving_interface_index: LOCAL_CLIENT_IFACE,
                     outbound_interface_index: NETWORK_IFACE,
+                    received_peer: ReverseEntry::NO_PEER,
                 },
             );
 
@@ -35177,6 +35179,7 @@ mod table_export_tests {
                 timestamp_ms: T0,
                 receiving_interface_index: 3,
                 outbound_interface_index: 7,
+                received_peer: ReverseEntry::NO_PEER,
             },
         );
         t.storage.set_link_entry(

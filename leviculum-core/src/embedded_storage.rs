@@ -1376,9 +1376,17 @@ mod tests {
         // halved to 8 slots (−4 352). 44_300 -> 31_500; measured 31_120 B
         // on the 64-bit host. The 32-bit target has its own compile-time
         // assertion beside the struct.
+        //
+        // Deliberate relaxation 2026-10-10 (Codeberg #588): `ReverseEntry`
+        // gained `received_peer: [u8; 16]` so a relayed proof names the
+        // link it returns to (#582), +256 B over the 16 reverse slots.
+        // 31_500 -> 31_700; measured 31_632 B here. The ceiling is the
+        // board's heap census, not this tripwire: measured on thumbv7em
+        // (t114, rak4631, solarnode) the node box is 31_664 B, slack 32 B,
+        // and the endpoint links stay at 4.
         let size = core::mem::size_of::<EmbeddedStorage>();
         assert!(
-            size <= 31_500,
+            size <= 31_700,
             "EmbeddedStorage grew to {size} B; every slot here is boxed-NodeCore \
              heap on the board (#388) — grow a capacity only with the HEAP_BUDGET \
              arithmetic re-run"
@@ -1654,6 +1662,7 @@ mod tests {
             timestamp_ms: seed as u64,
             receiving_interface_index: 0,
             outbound_interface_index: 0,
+            received_peer: ReverseEntry::NO_PEER,
         }
     }
     fn mk_receipt(key: [u8; TRUNCATED_HASHBYTES]) -> PacketReceipt {

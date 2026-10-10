@@ -142,6 +142,30 @@ pub struct ReverseEntry {
     pub receiving_interface_index: usize,
     /// Interface index where the packet was forwarded to
     pub outbound_interface_index: usize,
+    /// The peer link the original packet arrived through on a multi-peer
+    /// interface, [`Self::NO_PEER`] on carriers without peer links or when
+    /// the arrival named none; read it through [`Self::peer`]. The proof's
+    /// repeat takes it as its #376 delivery hint, so it reaches that link
+    /// alone (Codeberg #582).
+    ///
+    /// A bare array, not an `Option`: the `Option` pads the entry from 32
+    /// to 40 B on thumbv7em (u64 alignment), and the board's 16 reverse
+    /// slots then overran its heap census (#588).
+    pub received_peer: [u8; TRUNCATED_HASHBYTES],
+}
+
+impl ReverseEntry {
+    /// The stored "no peer named". A peer id is the 16 bytes the remote
+    /// writes in its BLE identity handshake, so a peer CAN claim all
+    /// zeroes; such a peer's proofs then carry no hint and the multi-peer
+    /// interface reaches every live link with them, which includes that
+    /// peer. The collapse costs airtime, never a delivery.
+    pub const NO_PEER: [u8; TRUNCATED_HASHBYTES] = [0; TRUNCATED_HASHBYTES];
+
+    /// The peer the original packet arrived through, if one was named.
+    pub fn peer(&self) -> Option<&[u8; TRUNCATED_HASHBYTES]> {
+        (self.received_peer != Self::NO_PEER).then_some(&self.received_peer)
+    }
 }
 
 // Announce Types
@@ -381,5 +405,42 @@ mod random_blob_window_tests {
     fn a_zero_cap_keeps_nothing() {
         let existing = vec![blob(1), blob(2)];
         assert!(PathEntry::appended_random_blobs(&existing, blob(3), 0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod reverse_entry_tests {
+    use super::ReverseEntry;
+    use crate::constants::TRUNCATED_HASHBYTES;
+
+    fn reverse_with(peer: [u8; TRUNCATED_HASHBYTES]) -> ReverseEntry {
+        ReverseEntry {
+            timestamp_ms: 0,
+            receiving_interface_index: 0,
+            outbound_interface_index: 1,
+            received_peer: peer,
+        }
+    }
+
+    #[test]
+    fn a_reverse_entry_names_the_peer_it_stored() {
+        let peer = [0xA1; TRUNCATED_HASHBYTES];
+        assert_eq!(reverse_with(peer).peer(), Some(&peer));
+    }
+
+    /// #588: zero is the stored "none", so a peer that claims the
+    /// all-zero identity gets no hint, the pre-#582 flood.
+    #[test]
+    fn an_all_zero_peer_reads_as_none() {
+        assert_eq!(reverse_with(ReverseEntry::NO_PEER).peer(), None);
+    }
+
+    /// The board's census counts 16 reverse slots of this size (#588).
+    #[test]
+    fn a_reverse_entry_is_no_wider_than_its_fields() {
+        assert_eq!(
+            core::mem::size_of::<ReverseEntry>(),
+            8 + 2 * core::mem::size_of::<usize>() + TRUNCATED_HASHBYTES
+        );
     }
 }

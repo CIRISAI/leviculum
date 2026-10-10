@@ -1878,6 +1878,7 @@ mod tests {
                 timestamp_ms: 1000,
                 receiving_interface_index: 0,
                 outbound_interface_index: 1,
+                received_peer: ReverseEntry::NO_PEER,
             },
         );
         assert!(s.get_reverse(&hash).is_some());
@@ -2652,6 +2653,7 @@ mod diagnostic_model_tests {
                 timestamp_ms: 0,
                 receiving_interface_index: 0,
                 outbound_interface_index: 0,
+                received_peer: ReverseEntry::NO_PEER,
             },
         );
         s.set_link_entry(
@@ -2848,6 +2850,7 @@ mod cap_tests {
             timestamp_ms: ts,
             receiving_interface_index: 0,
             outbound_interface_index: 1,
+            received_peer: ReverseEntry::NO_PEER,
         }
     }
 

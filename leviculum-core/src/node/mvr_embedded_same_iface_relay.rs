@@ -256,7 +256,7 @@ fn embedded_transport_forwards_data_back_out_the_arrival_interface() {
     assert_eq!(
         packet.flags.header_type,
         HeaderType::Type2,
-        "a relay with a next hop keeps the transport header (`needs_relay`, transport.rs:8429)"
+        "a relay with a next hop keeps the transport header (`needs_relay`, transport.rs:8598-8600)"
     );
     assert_eq!(
         packet.transport_id,

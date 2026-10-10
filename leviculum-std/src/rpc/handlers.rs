@@ -3615,6 +3615,7 @@ mod tests {
                 timestamp_ms: now,
                 receiving_interface_index: 0,
                 outbound_interface_index: 1,
+                received_peer: ReverseEntry::NO_PEER,
             },
         );
         core.storage_mut().set_link_entry(
@@ -4016,6 +4017,7 @@ mod tests {
                     timestamp_ms: now,
                     receiving_interface_index: 0,
                     outbound_interface_index: 0,
+                    received_peer: ReverseEntry::NO_PEER,
                 },
             );
         }
@@ -4116,6 +4118,7 @@ mod tests {
                     timestamp_ms: now,
                     receiving_interface_index: 0,
                     outbound_interface_index: 0,
+                    received_peer: ReverseEntry::NO_PEER,
                 },
             );
         }
@@ -4296,6 +4299,7 @@ mod tests {
                     timestamp_ms: now,
                     receiving_interface_index: 0,
                     outbound_interface_index: 0,
+                    received_peer: ReverseEntry::NO_PEER,
                 },
             );
         }
