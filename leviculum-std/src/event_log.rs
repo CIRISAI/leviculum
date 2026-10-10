@@ -527,6 +527,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_SCAN_DECISION",
         required_keys: &["addr", "caps", "caps_record", "initiate", "pref", "rule"],
     },
+    // A sighting the scan decision discarded as no Columba peer (577):
+    // `reason` is `no_service_uuid` or `record_without_service_uuid`,
+    // the second the #443 signature (our record, but a stored device
+    // object whose `UUIDs` lost the service). DEBUG, once per (address,
+    // drop) change, `links::ScanLineGate`.
+    EventSchema {
+        name: "BLE_SCAN_DROPPED",
+        required_keys: &["iface", "addr", "reason", "hint", "rssi"],
+    },
     EventSchema {
         name: "BLE_LINK_UP",
         required_keys: &["iface", "peer", "addr", "role", "mtu"],

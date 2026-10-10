@@ -1155,6 +1155,74 @@ pub(crate) struct ScanDecision {
     pub(crate) identity_hint: Option<[u8; IDENTITY_HINT_LEN]>,
 }
 
+/// Why [`decide_from_scan`] discarded a sighting (577): what the
+/// `BLE_SCAN_DROPPED` line prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DropReason {
+    /// The device lists no Columba service UUID and carries no Columba
+    /// record: somebody else's device, or one whose stored `UUIDs` lost
+    /// the service and whose record was never ours.
+    NoServiceUuid,
+    /// The device carries our capability record but its `UUIDs` lack the
+    /// service: a Columba advertiser BlueZ no longer reports as one. The
+    /// #443 signature, bluetoothd's GATT-resolved list left on a stored
+    /// device object after an unpaired disconnect.
+    RecordWithoutService,
+}
+
+impl DropReason {
+    /// The `reason=` token.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            DropReason::NoServiceUuid => "no_service_uuid",
+            DropReason::RecordWithoutService => "record_without_service_uuid",
+        }
+    }
+}
+
+/// A sighting [`decide_from_scan`] discarded, with what it still knew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScanDrop {
+    pub(crate) reason: DropReason,
+    /// The identity hint the record carried, so a dropped peer can be
+    /// named in the line even though it is not a peer to the decision.
+    pub(crate) identity_hint: Option<[u8; IDENTITY_HINT_LEN]>,
+}
+
+/// The rate limit of the scan path's two log lines, `BLE_SCAN_DECISION`
+/// and `BLE_SCAN_DROPPED`: one line per address and change, not per
+/// sighting, because a waiting peer advertises several times a second
+/// (the firmware's rule).
+///
+/// Two ledgers, because the decision line's rule predates the drop line
+/// and a periculum cell reads it (575's `ble_room_strangers`: no
+/// decision line repeats the one before it for the same address), so a
+/// drop must not make an unchanged decision print again. The drop
+/// ledger forgets an address when it is decided, so a peer dropped,
+/// decided and dropped again — a device object that lost the service
+/// twice — names each drop.
+#[derive(Debug, Default)]
+pub(crate) struct ScanLineGate {
+    decided: std::collections::HashMap<Addr, ScanDecision>,
+    dropped: std::collections::HashMap<Addr, ScanDrop>,
+}
+
+impl ScanLineGate {
+    /// Record a decision for `addr`; `true` when `BLE_SCAN_DECISION` is
+    /// due, i.e. it differs from the last decision recorded there.
+    pub(crate) fn decided(&mut self, addr: Addr, decision: ScanDecision) -> bool {
+        self.dropped.remove(&addr);
+        self.decided.insert(addr, decision) != Some(decision)
+    }
+
+    /// Record a drop for `addr`; `true` when `BLE_SCAN_DROPPED` is due,
+    /// i.e. it differs from the last drop recorded there since the
+    /// address was last decided.
+    pub(crate) fn dropped(&mut self, addr: Addr, drop: ScanDrop) -> bool {
+        self.dropped.insert(addr, drop) != Some(drop)
+    }
+}
+
 /// Decide who connects, from the properties BlueZ hands a scanner.
 ///
 /// BlueZ parses the advertisement for us — the service list into a UUID
@@ -1165,8 +1233,10 @@ pub(crate) struct ScanDecision {
 /// rig-proven version gate and decision table instead of a second
 /// reading of them.
 ///
-/// Returns `None` when the sighting does not offer the Columba service
-/// (not a peer; no decision to log).
+/// Returns the [`ScanDrop`] instead when the sighting does not offer the
+/// Columba service: not a peer, no decision, but a reason the caller logs
+/// (577; the drop used to leave no trace, which cost #443 its first
+/// hour).
 ///
 /// `mode` is the #375 fallback switch, fed from the [`ScanScheduler`]'s
 /// clock — the same clock the firmware's central task runs, so the
@@ -1178,7 +1248,7 @@ pub(crate) fn decide_from_scan(
     offers_service: bool,
     manufacturer_ffff: Option<&[u8]>,
     mode: ScanMode,
-) -> Option<ScanDecision> {
+) -> Result<ScanDecision, ScanDrop> {
     let mut pdu: Vec<u8> = Vec::with_capacity(2 + 16 + 2 + MANUFACTURER_DATA_HINT_LEN + 2);
     if offers_service {
         pdu.push(17); // 1 type byte + 16 UUID bytes
@@ -1198,7 +1268,14 @@ pub(crate) fn decide_from_scan(
     }
     let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
     if !parsed.offers_service {
-        return None;
+        return Err(ScanDrop {
+            reason: if parsed.caps.is_some() {
+                DropReason::RecordWithoutService
+            } else {
+                DropReason::NoServiceUuid
+            },
+            identity_hint: parsed.identity_hint,
+        });
     }
     let decision = should_initiate(
         LOCAL_CAPS,
@@ -1207,7 +1284,7 @@ pub(crate) fn decide_from_scan(
         addr_value_display(peer_addr),
         mode,
     );
-    Some(ScanDecision {
+    Ok(ScanDecision {
         decision,
         caps_record: parsed.caps.is_some(),
         caps: parsed.caps.unwrap_or(0),
@@ -2346,10 +2423,68 @@ mod tests {
         assert_eq!(d.decision, ConnectDecision::InitiateFallback);
         assert!(d.decision.initiate());
 
-        // No service, no decision.
+        // No service, no decision: a drop, with the reason.
         assert_eq!(
             decide_from_scan(&local, &higher, false, None, ScanMode::Strict),
-            None
+            Err(ScanDrop {
+                reason: DropReason::NoServiceUuid,
+                identity_hint: None,
+            })
+        );
+    }
+
+    /// 577: a Columba record without the service UUID is the #443
+    /// signature — a stored device object whose `UUIDs` lost the service
+    /// — and drops under its own reason, still naming the hint.
+    #[test]
+    fn a_record_without_the_service_drops_with_its_own_reason() {
+        let record = capability_record(&[0x5E; 16], 3);
+        let dropped = decide_from_scan(
+            &ADDR_1,
+            &ADDR_2,
+            false,
+            Some(&record[2..]),
+            ScanMode::Strict,
+        )
+        .expect_err("no service, no decision");
+        assert_eq!(dropped.reason, DropReason::RecordWithoutService);
+        assert_eq!(dropped.reason.as_str(), "record_without_service_uuid");
+        assert_eq!(dropped.identity_hint, Some([0x5E; 4]));
+    }
+
+    /// 577: the scan lines are rate-limited per address and change. A
+    /// repeated drop is silent, a changed reason logs, a drop does not
+    /// make an unchanged decision print again (575's no-repeat rule), a
+    /// drop after a decision logs even when it repeats the one before,
+    /// and another address keeps its own state.
+    #[test]
+    fn the_scan_line_gate_logs_once_per_address_and_change() {
+        let no_service = ScanDrop {
+            reason: DropReason::NoServiceUuid,
+            identity_hint: None,
+        };
+        let stale = ScanDrop {
+            reason: DropReason::RecordWithoutService,
+            identity_hint: Some([0x5E; 4]),
+        };
+        let decision = decide_from_scan(&ADDR_1, &ADDR_2, true, None, ScanMode::Strict)
+            .expect("service offered");
+        let mut gate = ScanLineGate::default();
+        assert!(gate.dropped(ADDR_2, no_service), "first drop logs");
+        assert!(!gate.dropped(ADDR_2, no_service), "the same drop is silent");
+        assert!(!gate.dropped(ADDR_2, no_service), "and stays silent");
+        assert!(gate.dropped(ADDR_2, stale), "a new reason logs");
+        assert!(!gate.dropped(ADDR_2, stale));
+        assert!(gate.decided(ADDR_2, decision), "the first decision logs");
+        assert!(gate.dropped(ADDR_2, stale), "a drop after a decision logs");
+        assert!(
+            !gate.decided(ADDR_2, decision),
+            "an unchanged decision after a drop is silent"
+        );
+        assert!(!gate.decided(ADDR_2, decision));
+        assert!(
+            gate.dropped(ADDR_3, stale),
+            "another address has its own state"
         );
     }
 

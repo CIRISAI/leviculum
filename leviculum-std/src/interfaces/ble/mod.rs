@@ -412,10 +412,11 @@ impl BleTask {
         // part 3). Seeded from entropy; tests seed the queue directly.
         let mut dial_queue = DialQueue::new(rand_core::RngCore::next_u64(&mut rand_core::OsRng));
         let mut backoff_until: HashMap<Addr, u64> = HashMap::new();
-        // BLE_SCAN_DECISION is logged once per (address, decision) change,
-        // not per sighting — a waiting peer advertises several times a
-        // second (same rule as the firmware).
-        let mut last_decision: HashMap<Addr, links::ScanDecision> = HashMap::new();
+        // BLE_SCAN_DECISION and BLE_SCAN_DROPPED are logged once per
+        // (address, decision) and (address, drop) change, not per
+        // sighting — a waiting peer advertises several times a second
+        // (same rule as the firmware).
+        let mut scan_lines = links::ScanLineGate::default();
         // The peers that keep leaving (#417, #412): fed at the two
         // departure sites below, read where a sighting would enter the
         // collection window.
@@ -508,7 +509,7 @@ impl BleTask {
                         &mut central_pipes,
                         &mut dial_queue,
                         &mut backoff_until,
-                        &mut last_decision,
+                        &mut scan_lines,
                         &mut churn,
                         &mut link_addr_types,
                         &ev_tx,
@@ -614,7 +615,7 @@ impl BleTask {
         central_pipes: &mut HashMap<Addr, CentralPipe>,
         dial_queue: &mut DialQueue,
         backoff_until: &mut HashMap<Addr, u64>,
-        last_decision: &mut HashMap<Addr, links::ScanDecision>,
+        scan_lines: &mut links::ScanLineGate,
         churn: &mut links::ChurnGate,
         link_addr_types: &mut HashMap<Addr, AddrType>,
         ev_tx: &mpsc::Sender<Ev>,
@@ -724,14 +725,32 @@ impl BleTask {
                         after_ms = after_ms,
                     );
                 }
-                let Some(decision) = links::decide_from_scan(
+                let decision = match links::decide_from_scan(
                     local_addr,
                     &addr.0,
                     offers_service,
                     record.as_deref(),
                     mode,
-                ) else {
-                    return;
+                ) {
+                    Ok(decision) => decision,
+                    Err(dropped) => {
+                        // Not a peer to the decision, but not silent
+                        // either (577): a Columba device whose stored
+                        // `UUIDs` lost the service reads exactly like a
+                        // stranger here, and that silence cost #443 its
+                        // first hour.
+                        if scan_lines.dropped(addr.0, dropped) {
+                            tracing::debug!(
+                                event = "BLE_SCAN_DROPPED",
+                                iface = %Scalar(&self.name),
+                                addr = %hex12(&addr.0),
+                                reason = dropped.reason.as_str(),
+                                hint = %links::hint_str(dropped.identity_hint),
+                                rssi = rssi,
+                            );
+                        }
+                        return;
+                    }
                 };
                 // Who we are WILLING to dial (`initiate_only`), as
                 // opposed to who the sort says dials whom. A pure
@@ -742,7 +761,7 @@ impl BleTask {
                     .opts
                     .initiate_only
                     .allows(&addr.0, decision.identity_hint);
-                if last_decision.insert(addr.0, decision) != Some(decision) {
+                if scan_lines.decided(addr.0, decision) {
                     tracing::info!(
                         event = "BLE_SCAN_DECISION",
                         addr = %hex12(&addr.0),

@@ -331,7 +331,16 @@ emits `BLE_SCAN_DECISION` **with the same fields as the firmware's
 line of the same name** — `addr=`, `caps_record=`, `caps=`,
 `free_slots=`, `rule=`, `initiate=` — so a merged rig timeline shows both sides of one
 mutual sighting deciding, and the two `rule=` values must be
-complementary (one `initiate…`, one `wait…`).  Its link lifecycle is
+complementary (one `initiate…`, one `wait…`).  A sighting the
+decision discards is `BLE_SCAN_DROPPED iface=<name> addr=<a>
+reason=<r> hint=<hex8|unknown> rssi=<dBm>` at DEBUG, rate-limited like
+`BLE_SCAN_DECISION` (once per address and drop change, and again after
+the address was decided in between; a drop never makes an unchanged
+decision line print twice): `reason=no_service_uuid` is a device that lists no
+Columba service and carries no Columba record, and
+`reason=record_without_service_uuid` one that carries our record while
+BlueZ's stored `UUIDs` lack the service, the #443 signature of a
+device object poisoned by an earlier connection (577).  Its link lifecycle is
 `BLE_LINK_UP` / `BLE_LINK_DOWN` (with `role=central|peripheral` and
 `peer=<hex8>`, the same hex the firmware logs and the `LN-<hex8>`
 name carries), the admission decisions are the firmware's
