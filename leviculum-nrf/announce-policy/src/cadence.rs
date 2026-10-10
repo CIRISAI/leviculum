@@ -631,6 +631,23 @@ impl AnnounceCadence {
         self.slot_mut(slot).defer(now_ms, until_ms);
     }
 
+    /// The slot's announce may not go out for a reason of the caller's own
+    /// (the propagation role's store did not mount): if it is due, push it
+    /// out to `now_ms + retry_ms` and say so; if it is not, change nothing.
+    ///
+    /// Checked instead of [`poll`](Self::poll), so a withheld announce
+    /// spends nothing: the deadline is moved by the retry, never consumed
+    /// by an announce that did not happen, and the first poll after the
+    /// cause clears announces at once. Returns whether this call withheld
+    /// one, the moment the caller reports it.
+    pub fn withhold(&mut self, slot: AnnounceSlot, now_ms: u64, retry_ms: u64) -> bool {
+        if self.wait_ms(slot, now_ms) > 0 {
+            return false;
+        }
+        self.defer(slot, now_ms, now_ms.saturating_add(retry_ms));
+        true
+    }
+
     /// How long the caller may sleep before polling this slot.
     #[must_use]
     pub fn wait_ms(&self, slot: AnnounceSlot, now_ms: u64) -> u64 {
@@ -1261,6 +1278,35 @@ mod tests {
         assert_eq!(cadence.poll(AnnounceSlot::Propagation, pn_due, true), None);
         assert_eq!(
             cadence.poll(AnnounceSlot::Propagation, pn_due + 60_000, true),
+            Some(Decision::Announce)
+        );
+        assert_eq!(
+            cadence.wait_ms(AnnounceSlot::Own, t0()),
+            crate::PERIODIC_ANNOUNCE_INITIAL_DELAY_MS
+        );
+    }
+
+    /// The propagation role whose store did not mount (the board's
+    /// `tick_announce`, leviculum#413; no rig cell unmounts the store). A
+    /// tick before the slot is due withholds nothing; the due tick is
+    /// pushed a retry out, and every tick inside the retry is quiet, so
+    /// the caller's one log line is not repeated per pass; the store
+    /// mounting inside the retry announces at the retry's end, the
+    /// deadline never having been consumed.
+    #[test]
+    fn an_unmounted_store_withholds_the_due_announce_one_retry_at_a_time() {
+        const RETRY_MS: u64 = 60_000;
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        let pn_due = t0() + PN_ANNOUNCE_INITIAL_DELAY_MS;
+        assert!(!cadence.withhold(AnnounceSlot::Propagation, pn_due - 1, RETRY_MS));
+        assert_eq!(cadence.wait_ms(AnnounceSlot::Propagation, pn_due - 1), 1);
+        assert!(cadence.withhold(AnnounceSlot::Propagation, pn_due, RETRY_MS));
+        assert_eq!(cadence.wait_ms(AnnounceSlot::Propagation, pn_due), RETRY_MS);
+        assert!(!cadence.withhold(AnnounceSlot::Propagation, pn_due + RETRY_MS - 1, RETRY_MS));
+        assert!(cadence.withhold(AnnounceSlot::Propagation, pn_due + RETRY_MS, RETRY_MS));
+        assert_eq!(
+            cadence.poll(AnnounceSlot::Propagation, pn_due + 2 * RETRY_MS, true),
             Some(Decision::Announce)
         );
         assert_eq!(
