@@ -49,9 +49,10 @@ pub mod session_census;
 pub mod window;
 
 pub use admission::{
-    admit, connect_failure_condemns, AddrType, Admission, AdvReport, DeadEnds, Exclusion, Ledgers,
-    Local, Neighbour, PeerAddr, PhaseEvent, PhaseNeighbours, PhasePoll, ScanPhase, DEAD_END_SLOTS,
-    DEAD_END_TTL_MS, PHASE_NEIGHBOUR_SLOTS,
+    admit, connect_failure_condemns, dial_backoff_ms, AddrType, Admission, AdvReport,
+    BackoffBooked, DeadEnds, DialBackoff, DialFailure, Exclusion, Ledgers, Local, Neighbour,
+    PeerAddr, PhaseEvent, PhaseNeighbours, PhasePoll, ScanPhase, DEAD_END_SLOTS, DEAD_END_TTL_MS,
+    DIAL_BACKOFF_BASE_MS, DIAL_BACKOFF_CAP_MS, DIAL_BACKOFF_SLOTS, PHASE_NEIGHBOUR_SLOTS,
 };
 pub use adv::{
     ad_structure_len, free_slots, identity_hint, manufacturer_data, manufacturer_data_with_hint,

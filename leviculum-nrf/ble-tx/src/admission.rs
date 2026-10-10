@@ -32,6 +32,15 @@
 //! firmware says `BLE_DIAL_LEDGER held` and `BLE_CHURN_LEDGER held` only
 //! when that filter is the one that decided, exactly as it did while the
 //! chain was a short-circuiting `||`.
+//!
+//! # The dial backoff
+//!
+//! [`DialBackoff`] (579) is the per-address hold after a failed dial,
+//! asked after an admitted verdict by both the firmware and lnsd, whose
+//! own scan path does not run [`admit`]: a transport failure holds the
+//! address the flat [`DIAL_BACKOFF_BASE_MS`], one that names the peer as
+//! no Columba peer, or one that will not handshake, doubles the hold up
+//! to [`DIAL_BACKOFF_CAP_MS`].
 
 use crate::{
     rotating_address, should_initiate, ChurnLedger, ConnectDecision, DialLedger, PeerRegistry,
@@ -193,6 +202,258 @@ impl DeadEnds {
 #[must_use]
 pub fn connect_failure_condemns(decision: ConnectDecision) -> bool {
     decision == ConnectDecision::InitiateFallback
+}
+
+/// The retry pause after a dial that said nothing about its peer, and
+/// the step the peer-failure backoff doubles from (579). It was the
+/// whole backoff until then, on both stacks: the firmware's
+/// `CENTRAL_RETRY_BACKOFF_MS` and lnsd's `SESSION_BACKOFF_MS`.
+pub const DIAL_BACKOFF_BASE_MS: u64 = 5_000;
+
+/// The ceiling of the peer-failure backoff (579).
+///
+/// Two minutes, from the scan cadence: a sighting arrives about every
+/// 7 s and the fallback bound is [`SCAN_FALLBACK_AFTER_MS`] (30 s), so
+/// a cap of four fallback bounds lets the doubling (10, 20, 40, 80 s)
+/// run its whole course before it binds, and a peer that was wrongly
+/// judged, a real phone caught mid-restart, is dialled again within
+/// two minutes at worst, inside its own next advertising burst. It is
+/// also [`DEAD_END_TTL_MS`], the board's other address hold, so no
+/// address waits longer for being odd than for being a dead end. The
+/// same span is the absence that forgets an address: one not sighted
+/// for longer than the cap would have been dialled again by now anyway.
+pub const DIAL_BACKOFF_CAP_MS: u64 = 120_000;
+
+/// Room in the board's [`DialBackoff`]: one entry per address a dial
+/// failed at, [`DEAD_END_SLOTS`] like the dead-end table it sits
+/// beside. Overflow evicts the address sighted longest ago, which only
+/// costs that address its run, an early re-dial, never a lost link.
+pub const DIAL_BACKOFF_SLOTS: usize = DEAD_END_SLOTS;
+
+/// What a dial's give-up says about the peer behind the address (579).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialFailure {
+    /// The connection never came up, timed out in setup, or dropped:
+    /// a property of the air, not of the peer. Books the flat
+    /// [`DIAL_BACKOFF_BASE_MS`] and leaves the peer's run alone.
+    Transport,
+    /// Connected, and the peer serves no Columba GATT layout: it
+    /// advertised the service UUID and is not a Columba peer (545 D10,
+    /// a phone advertising the UUID alone).
+    NotColumba,
+    /// The layout is there, and the peer will not handshake: it refused
+    /// our identity write, or (#548) it connected to us and never wrote
+    /// its own within the bound.
+    NoHandshake,
+}
+
+impl DialFailure {
+    /// The token the log lines print.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::NotColumba => "not_columba",
+            Self::NoHandshake => "no_handshake",
+        }
+    }
+
+    /// Whether the failure is evidence about the peer, and so lengthens
+    /// its backoff.
+    #[must_use]
+    pub const fn says_peer(self) -> bool {
+        !matches!(self, Self::Transport)
+    }
+}
+
+/// The pause the `strikes`-th peer failure in a row books: the base
+/// doubled once per strike, so the first is already twice a transport
+/// failure's, up to [`DIAL_BACKOFF_CAP_MS`]. Zero strikes is the flat
+/// base.
+#[must_use]
+pub fn dial_backoff_ms(strikes: u8) -> u64 {
+    DIAL_BACKOFF_BASE_MS
+        .checked_shl(u32::from(strikes))
+        .map_or(DIAL_BACKOFF_CAP_MS, |ms| ms.min(DIAL_BACKOFF_CAP_MS))
+}
+
+/// One address's run in a [`DialBackoff`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackoffEntry {
+    addr: u64,
+    /// Peer failures in a row since the last success or absence.
+    strikes: u8,
+    /// No dial before this.
+    until_ms: u64,
+    /// The last sighting, or the failure that booked the entry.
+    seen_ms: u64,
+    /// Whether this booking's hold was announced ([`DialBackoff::announce`]).
+    announced: bool,
+}
+
+/// What [`DialBackoff::note_failure`] booked, for the log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackoffBooked {
+    /// No dial to the address before this.
+    pub until_ms: u64,
+    /// Peer failures in a row, this one included.
+    pub strikes: u8,
+}
+
+/// The per-address dial backoff (579): which addresses a dial failed
+/// at, how many times in a row the failure was the PEER's, and until
+/// when the scanner leaves each alone.
+///
+/// Before it, both stacks paused a flat 5 s after every failed dial,
+/// with no memory of the address: in 575's room a node with one free
+/// central slot dialled a UUID-only advertiser every 7 to 14 s for the
+/// whole cell. Now a failure that says "not a Columba peer" or "will
+/// not handshake" doubles the address's pause up to
+/// [`DIAL_BACKOFF_CAP_MS`]; a transport failure keeps the flat base. A
+/// handshake with the address in either role clears it
+/// ([`note_success`](Self::note_success)), and so does an absence from
+/// the sightings longer than the cap, which [`sighted`](Self::sighted)
+/// notices.
+///
+/// Bounded and allocation-free for the board, `N` entries; the host
+/// gives it more room.
+#[derive(Debug, Clone, Copy)]
+pub struct DialBackoff<const N: usize> {
+    entries: [Option<BackoffEntry>; N],
+}
+
+impl<const N: usize> Default for DialBackoff<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> DialBackoff<N> {
+    /// An empty table.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { entries: [None; N] }
+    }
+
+    fn find(&self, addr: u64) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|e| e.is_some_and(|e| e.addr == addr))
+    }
+
+    /// Whether an entry is forgotten by absence at `now_ms`.
+    fn absent(entry: &BackoffEntry, now_ms: u64) -> bool {
+        now_ms.saturating_sub(entry.seen_ms) > DIAL_BACKOFF_CAP_MS
+    }
+
+    /// Book a failed dial at `addr`. A peer failure adds a strike and
+    /// pauses [`dial_backoff_ms`] of the new count; a transport failure
+    /// pauses the flat base and keeps the count. A run whose address
+    /// was absent past the cap starts over first.
+    pub fn note_failure(&mut self, addr: u64, failure: DialFailure, now_ms: u64) -> BackoffBooked {
+        let prior = self
+            .find(addr)
+            .and_then(|i| self.entries[i])
+            .filter(|e| !Self::absent(e, now_ms))
+            .map_or(0, |e| e.strikes);
+        let strikes = if failure.says_peer() {
+            prior.saturating_add(1)
+        } else {
+            prior
+        };
+        let pause = if failure.says_peer() {
+            dial_backoff_ms(strikes)
+        } else {
+            DIAL_BACKOFF_BASE_MS
+        };
+        let entry = BackoffEntry {
+            addr,
+            strikes,
+            until_ms: now_ms.saturating_add(pause),
+            seen_ms: now_ms,
+            announced: false,
+        };
+        let slot = self.find(addr).unwrap_or_else(|| self.free_slot(now_ms));
+        if let Some(cell) = self.entries.get_mut(slot) {
+            *cell = Some(entry);
+        }
+        BackoffBooked {
+            until_ms: entry.until_ms,
+            strikes,
+        }
+    }
+
+    /// An empty or forgotten slot, else the one sighted longest ago.
+    fn free_slot(&self, now_ms: u64) -> usize {
+        self.entries
+            .iter()
+            .position(|e| e.is_none_or(|e| Self::absent(&e, now_ms)))
+            .unwrap_or_else(|| {
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, e)| e.map_or(0, |e| e.seen_ms))
+                    .map_or(0, |(i, _)| i)
+            })
+    }
+
+    /// A handshake with `addr` completed, in either role: it is a
+    /// Columba peer, its run is over.
+    pub fn note_success(&mut self, addr: u64) {
+        if let Some(i) = self.find(addr) {
+            self.entries[i] = None;
+        }
+    }
+
+    /// A sighting of `addr`: forgets the run if the address was absent
+    /// past the cap, else refreshes its last sighting. Returns the
+    /// deadline it is held until, `None` when it may be dialled.
+    pub fn sighted(&mut self, addr: u64, now_ms: u64) -> Option<u64> {
+        let i = self.find(addr)?;
+        let entry = self.entries[i].as_mut()?;
+        if Self::absent(entry, now_ms) {
+            self.entries[i] = None;
+            return None;
+        }
+        entry.seen_ms = now_ms;
+        (entry.until_ms > now_ms).then_some(entry.until_ms)
+    }
+
+    /// The deadline `addr` is held until at `now_ms`, without counting
+    /// as a sighting: the re-checks between a window's choice and its
+    /// dial ask this.
+    #[must_use]
+    pub fn held_until(&self, addr: u64, now_ms: u64) -> Option<u64> {
+        self.find(addr)
+            .and_then(|i| self.entries[i])
+            .filter(|e| !Self::absent(e, now_ms) && e.until_ms > now_ms)
+            .map(|e| e.until_ms)
+    }
+
+    /// The hold at `addr`, once per booking: `Some` the first time it is
+    /// asked while the address is held, `None` after that and whenever
+    /// it is not held. A board's scan callback has no per-address log
+    /// memory across passes; this is it, for the `rule=backoff` line.
+    pub fn announce(&mut self, addr: u64, now_ms: u64) -> Option<BackoffBooked> {
+        let until_ms = self.held_until(addr, now_ms)?;
+        let entry = self.find(addr).and_then(|i| self.entries[i].as_mut())?;
+        if entry.announced {
+            return None;
+        }
+        entry.announced = true;
+        Some(BackoffBooked {
+            until_ms,
+            strikes: entry.strikes,
+        })
+    }
+
+    /// The peer failures in a row booked at `addr`, 0 when none.
+    #[must_use]
+    pub fn strikes(&self, addr: u64) -> u8 {
+        self.find(addr)
+            .and_then(|i| self.entries[i])
+            .map_or(0, |e| e.strikes)
+    }
 }
 
 /// Whether the peer behind a [`PhaseEvent`] is new to the current
@@ -1215,8 +1476,159 @@ mod tests {
         assert!(matches!(a.outcome, Err(Exclusion::ChurnHeld { .. })));
     }
 
+    /// 579: a peer that keeps failing as a peer books 10, 20, 40, 80 s
+    /// and then the cap, and is held exactly that long.
+    #[test]
+    fn a_peer_failure_doubles_the_backoff_up_to_the_cap() {
+        let mut b: DialBackoff<DIAL_BACKOFF_SLOTS> = DialBackoff::new();
+        let mut now = 1_000;
+        let mut booked = [0u64; 7];
+        for slot in &mut booked {
+            let at = b.note_failure(BOARD_ABOVE, DialFailure::NotColumba, now);
+            *slot = at.until_ms - now;
+            assert_eq!(
+                b.held_until(BOARD_ABOVE, at.until_ms - 1),
+                Some(at.until_ms)
+            );
+            assert_eq!(
+                b.held_until(BOARD_ABOVE, at.until_ms),
+                None,
+                "free at the deadline"
+            );
+            // Sighted all along, dialled again right at the deadline.
+            assert_eq!(b.sighted(BOARD_ABOVE, at.until_ms - 1), Some(at.until_ms));
+            now = at.until_ms + 2_000;
+        }
+        assert_eq!(
+            booked,
+            [10_000, 20_000, 40_000, 80_000, 120_000, 120_000, 120_000]
+        );
+        assert_eq!(b.strikes(BOARD_ABOVE), 7);
+        // The handshake failure counts the same as the missing layout.
+        let mut h: DialBackoff<DIAL_BACKOFF_SLOTS> = DialBackoff::new();
+        h.note_failure(PHONE_RPA, DialFailure::NoHandshake, 0);
+        let second = h.note_failure(PHONE_RPA, DialFailure::NotColumba, 10_000);
+        assert_eq!((second.strikes, second.until_ms), (2, 30_000));
+    }
+
+    /// 579: a transport failure books the flat 5 s, every time, and
+    /// neither starts nor lengthens a run; after peer failures it keeps
+    /// their count, so the next peer failure resumes the doubling.
+    #[test]
+    fn a_transport_failure_keeps_the_flat_five_seconds() {
+        let mut b: DialBackoff<DIAL_BACKOFF_SLOTS> = DialBackoff::new();
+        for i in 0..5u64 {
+            let now = i * 10_000;
+            let at = b.note_failure(BOARD_ABOVE, DialFailure::Transport, now);
+            assert_eq!((at.until_ms, at.strikes), (now + DIAL_BACKOFF_BASE_MS, 0));
+        }
+        b.note_failure(BOARD_ABOVE, DialFailure::NotColumba, 60_000);
+        let flat = b.note_failure(BOARD_ABOVE, DialFailure::Transport, 80_000);
+        assert_eq!((flat.until_ms, flat.strikes), (85_000, 1));
+        let next = b.note_failure(BOARD_ABOVE, DialFailure::NotColumba, 90_000);
+        assert_eq!((next.until_ms, next.strikes), (110_000, 2));
+    }
+
+    /// 579: a handshake ends the run; the next failure starts from one
+    /// strike again.
+    #[test]
+    fn a_handshake_resets_the_backoff() {
+        let mut b: DialBackoff<DIAL_BACKOFF_SLOTS> = DialBackoff::new();
+        for now in [0, 20_000, 50_000] {
+            b.note_failure(BOARD_ABOVE, DialFailure::NoHandshake, now);
+        }
+        assert_eq!(b.strikes(BOARD_ABOVE), 3);
+        b.note_success(BOARD_ABOVE);
+        assert_eq!(b.strikes(BOARD_ABOVE), 0);
+        assert_eq!(b.held_until(BOARD_ABOVE, 50_001), None);
+        assert_eq!(b.sighted(BOARD_ABOVE, 50_001), None);
+        let again = b.note_failure(BOARD_ABOVE, DialFailure::NoHandshake, 60_000);
+        assert_eq!((again.until_ms, again.strikes), (70_000, 1));
+        // Another address's run was never touched.
+        b.note_failure(BOARD_BELOW, DialFailure::NotColumba, 60_000);
+        b.note_success(BOARD_ABOVE);
+        assert_eq!(b.strikes(BOARD_BELOW), 1);
+    }
+
+    /// 579: an address that stayed out of the sightings longer than the
+    /// cap is a new address when it returns: its run is forgotten. One
+    /// that kept advertising through its hold is not.
+    #[test]
+    fn an_absence_longer_than_the_cap_resets_the_backoff() {
+        let mut b: DialBackoff<DIAL_BACKOFF_SLOTS> = DialBackoff::new();
+        for now in [0, 20_000, 50_000, 100_000] {
+            b.note_failure(BOARD_ABOVE, DialFailure::NotColumba, now);
+        }
+        // Held 80 s, until 180 s, and sighted throughout: still held.
+        for t in (101_000..180_000).step_by(7_000) {
+            assert_eq!(b.sighted(BOARD_ABOVE, t), Some(180_000));
+        }
+        assert_eq!(b.strikes(BOARD_ABOVE), 4);
+        // Last sighted at 177 s; back exactly at the cap: still its run.
+        let last = 177_000;
+        assert_eq!(b.sighted(BOARD_ABOVE, last + DIAL_BACKOFF_CAP_MS), None);
+        assert_eq!(b.strikes(BOARD_ABOVE), 4);
+        // One more failure, then gone one millisecond past the cap.
+        let at = b.note_failure(BOARD_ABOVE, DialFailure::NotColumba, 300_000);
+        assert_eq!(at.strikes, 5);
+        let back = 300_000 + DIAL_BACKOFF_CAP_MS + 1;
+        assert_eq!(b.held_until(BOARD_ABOVE, back), None);
+        assert_eq!(b.sighted(BOARD_ABOVE, back), None);
+        assert_eq!(b.strikes(BOARD_ABOVE), 0, "forgotten");
+        let fresh = b.note_failure(BOARD_ABOVE, DialFailure::NotColumba, back + 1_000);
+        assert_eq!(fresh.strikes, 1);
+        // And a failure booked after an unnoticed absence starts over
+        // too, sighting or not.
+        let mut q: DialBackoff<DIAL_BACKOFF_SLOTS> = DialBackoff::new();
+        q.note_failure(BOARD_BELOW, DialFailure::NotColumba, 0);
+        q.note_failure(BOARD_BELOW, DialFailure::NotColumba, 20_000);
+        let late = q.note_failure(
+            BOARD_BELOW,
+            DialFailure::NotColumba,
+            20_001 + DIAL_BACKOFF_CAP_MS,
+        );
+        assert_eq!(late.strikes, 1);
+    }
+
+    /// The hold is announced once per booking, not per sighting, and
+    /// never for an address that may be dialled.
+    #[test]
+    fn a_backoff_hold_is_announced_once_per_booking() {
+        let mut b: DialBackoff<DIAL_BACKOFF_SLOTS> = DialBackoff::new();
+        assert_eq!(b.announce(BOARD_ABOVE, 0), None, "nothing booked");
+        let first = b.note_failure(BOARD_ABOVE, DialFailure::NotColumba, 0);
+        assert_eq!(b.announce(BOARD_ABOVE, 1_000), Some(first));
+        for t in [2_000, 5_000, 9_999] {
+            assert!(b.sighted(BOARD_ABOVE, t).is_some());
+            assert_eq!(b.announce(BOARD_ABOVE, t), None, "once per booking");
+        }
+        let second = b.note_failure(BOARD_ABOVE, DialFailure::NotColumba, 12_000);
+        assert_eq!(b.announce(BOARD_ABOVE, 12_500), Some(second));
+        // A booking whose hold ran out unannounced stays silent.
+        b.note_failure(BOARD_BELOW, DialFailure::Transport, 0);
+        assert_eq!(b.announce(BOARD_BELOW, DIAL_BACKOFF_BASE_MS), None);
+    }
+
+    /// A full table evicts the address sighted longest ago, never a
+    /// fresher run.
+    #[test]
+    fn a_full_backoff_table_evicts_the_stalest_address() {
+        let mut b: DialBackoff<2> = DialBackoff::new();
+        b.note_failure(1, DialFailure::NotColumba, 0);
+        b.note_failure(2, DialFailure::NotColumba, 1_000);
+        assert!(b.sighted(1, 2_000).is_some(), "1 is now the fresher");
+        b.note_failure(3, DialFailure::NotColumba, 3_000);
+        assert_eq!(b.strikes(2), 0, "2 was sighted longest ago");
+        assert_eq!((b.strikes(1), b.strikes(3)), (1, 1));
+    }
+
     #[test]
     fn the_constants_are_the_firmwares() {
+        assert_eq!(DIAL_BACKOFF_BASE_MS, 5_000);
+        assert_eq!(DIAL_BACKOFF_CAP_MS, 4 * SCAN_FALLBACK_AFTER_MS);
+        assert_eq!(DIAL_BACKOFF_CAP_MS, DEAD_END_TTL_MS);
+        assert_eq!(dial_backoff_ms(0), DIAL_BACKOFF_BASE_MS);
+        assert_eq!(dial_backoff_ms(u8::MAX), DIAL_BACKOFF_CAP_MS);
         assert_eq!(DEAD_END_TTL_MS, 120_000);
         // Three incoming slots and one outgoing: `MAX_LINKS` is 4.
         assert_eq!(DEAD_END_SLOTS, 2 * (usize::from(PERIPH_SLOTS) + 1));
