@@ -33,17 +33,13 @@ use leviculum_lxmf::peering::{
 use leviculum_lxmf::propagation::PeerError;
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_store::StoredMessage;
+use leviculum_lxmf::sync_round::{round_deadline_ms, round_step, RoundEvent, RoundStep, RoundView};
 use leviculum_lxmf::{
     CooperativeStamper, PropagationNode, PropagationNodeAnnounce, PropagationStore, StampCancel,
     TransientId, UploadOutcome,
 };
 
 use crate::engine::EngineEvent;
-
-/// Outbound round watchdog: a round that has not concluded in this long is
-/// torn down and retried after the backoff already booked at link
-/// establishment. Generous against the reference's own request timeouts.
-const OUTBOUND_DEADLINE_MS: u64 = 180_000;
 
 /// `/offer` request timeout handed to the core's request tracker.
 const OFFER_REQUEST_TIMEOUT_MS: u64 = 60_000;
@@ -1129,13 +1125,18 @@ impl PeeringRuntime {
             out.merge(core.request_path(&DestinationHash::new(destination)));
         }
 
-        if let Some(sync) = &self.outbound {
-            if now_ms > sync.deadline_ms {
-                let peer = sync.peer;
-                let link_id = sync.link_id;
-                self.finish_round(&peer, "timeout", 0, 0);
-                out.merge(core.close_link(&link_id));
-            }
+        // The round's watchdog, the board's own (`round_step`): a round
+        // that outlived `OUTBOUND_ROUND_DEADLINE_MS` is torn down and
+        // retried after the backoff its dial booked.
+        let view = self.round_view();
+        if let (Some(round), Some(sync), RoundStep::End(end)) = (
+            view,
+            self.outbound.as_ref(),
+            round_step(view.as_ref(), RoundEvent::Tick { now_ms }),
+        ) {
+            let peer = sync.peer;
+            self.finish_round(&peer, end.as_str(), 0, 0);
+            out.merge(core.close_link(&round.link_id));
         }
 
         // On its own cadence, whether or not a round is in flight: the
@@ -1305,6 +1306,28 @@ impl PeeringRuntime {
             })
             .is_err()
         {
+            // A store that cannot be walked now will most likely fail on
+            // the next pass too: the peer is booked like an unreachable
+            // one, so it climbs the backoff ladder instead of staying due.
+            if let RoundStep::Backoff(end) = round_step(None, RoundEvent::StoreFailed) {
+                peer.book_sync_attempt(now);
+                peer.state = SyncPhase::Idle;
+                tracing::debug!(
+                    event = "PN_SYNC",
+                    peer = full_hex(&destination),
+                    dir = "out",
+                    transferred = 0,
+                    bytes = 0,
+                    result = end.as_str(),
+                );
+                self.emit(EngineEvent::SyncDone {
+                    dir: "out",
+                    peer: destination,
+                    transferred: 0,
+                    bytes: 0,
+                    result: end.as_str(),
+                });
+            }
             return;
         }
         entries.sort_by_key(|meta| meta.sequence);
@@ -1343,8 +1366,10 @@ impl PeeringRuntime {
                     // already booked, so the round simply retries on a later
                     // pass instead of spinning.
                     tracing::debug!("lnpnd: sync connect refused: {error}");
-                    if let Some(peer) = self.table.get_mut(&destination) {
-                        peer.state = SyncPhase::Idle;
+                    if round_step(None, RoundEvent::DialRefused) == RoundStep::Defer {
+                        if let Some(peer) = self.table.get_mut(&destination) {
+                            peer.state = SyncPhase::Idle;
+                        }
                     }
                     return;
                 }
@@ -1356,7 +1381,7 @@ impl PeeringRuntime {
             plan,
             request_id: None,
             sending: None,
-            deadline_ms: now_ms + OUTBOUND_DEADLINE_MS,
+            deadline_ms: round_deadline_ms(now_ms),
             concluded: false,
         });
     }
@@ -1378,34 +1403,48 @@ impl PeeringRuntime {
             return;
         }
         let peer_hash = sync.peer;
-        match core.identify_link(link_id, &self.our_identity) {
-            Ok(send) => out.merge(send),
+        let identified = match core.identify_link(link_id, &self.our_identity) {
+            Ok(send) => {
+                out.merge(send);
+                true
+            }
             Err(error) => {
                 tracing::warn!("lnpnd: identify on sync link failed: {error:?}");
-                self.finish_round(&peer_hash, "identify_failed", 0, 0);
-                out.merge(core.close_link(link_id));
-                return;
+                false
             }
-        }
-        self.traffic_mut(&peer_hash).alive = true;
-        let Some(peer) = self.table.get_mut(&peer_hash) else {
-            return;
         };
-        peer.note_link_established();
-        let Some((key, _)) = peer.peering_key else {
-            self.finish_round(&peer_hash, "no_key", 0, 0);
-            out.merge(core.close_link(link_id));
-            return;
+        let peering_key = if identified {
+            self.traffic_mut(&peer_hash).alive = true;
+            let Some(peer) = self.table.get_mut(&peer_hash) else {
+                return;
+            };
+            peer.note_link_established();
+            peer.peering_key.map(|(key, _)| key)
+        } else {
+            None
         };
         // The offer is planned HERE, against this link, because only now
         // is the MDU known: `send_request` refuses a body over
         // `link.mdu()` — 431 B over LoRa, ten ids. The plan the round was
         // scheduled with only established that something above the cursor
         // is offerable at all.
-        let Some(mdu) = core.link(link_id).map(|link| link.mdu()) else {
-            self.finish_round(&peer_hash, "link_gone", 0, 0);
-            out.merge(core.close_link(link_id));
-            return;
+        let link_mdu = core.link(link_id).map(|link| link.mdu());
+        let event = RoundEvent::LinkUp {
+            identified,
+            peering_key,
+            link_mdu,
+        };
+        let (key, mdu) = match round_step(self.round_view().as_ref(), event) {
+            RoundStep::Offer {
+                peering_key,
+                link_mdu,
+            } => (peering_key, link_mdu),
+            RoundStep::End(end) => {
+                self.finish_round(&peer_hash, end.as_str(), 0, 0);
+                out.merge(core.close_link(link_id));
+                return;
+            }
+            RoundStep::Unchanged | RoundStep::Defer | RoundStep::Backoff(_) => return,
         };
         let Some(cursor) = self.table.get(&peer_hash).map(|peer| peer.cursor) else {
             return;
@@ -1420,8 +1459,12 @@ impl PeeringRuntime {
             })
             .is_err()
         {
-            self.finish_round(&peer_hash, "store_error", 0, 0);
-            out.merge(core.close_link(link_id));
+            if let RoundStep::End(end) =
+                round_step(self.round_view().as_ref(), RoundEvent::StoreFailed)
+            {
+                self.finish_round(&peer_hash, end.as_str(), 0, 0);
+                out.merge(core.close_link(link_id));
+            }
             return;
         }
         entries.sort_by_key(|meta| meta.sequence);
@@ -1635,15 +1678,26 @@ impl PeeringRuntime {
         request_id: &[u8; 16],
         out: &mut TickOutput,
     ) {
-        let Some(sync) = self.outbound.as_ref() else {
+        let Some(peer_hash) = self.outbound.as_ref().map(|sync| sync.peer) else {
             return;
         };
-        if sync.link_id != *link_id || sync.request_id != Some(*request_id) {
-            return;
+        let event = RoundEvent::RequestTimedOut {
+            link_id: *link_id,
+            request_id: *request_id,
+        };
+        if let RoundStep::End(end) = round_step(self.round_view().as_ref(), event) {
+            self.finish_round(&peer_hash, end.as_str(), 0, 0);
+            out.merge(core.close_link(link_id));
         }
-        let peer_hash = sync.peer;
-        self.finish_round(&peer_hash, "offer_timeout", 0, 0);
-        out.merge(core.close_link(link_id));
+    }
+
+    /// The round in flight, as [`round_step`] sees it.
+    fn round_view(&self) -> Option<RoundView> {
+        self.outbound.as_ref().map(|sync| RoundView {
+            link_id: sync.link_id,
+            request_id: sync.request_id,
+            deadline_ms: sync.deadline_ms,
+        })
     }
 
     pub(crate) fn on_link_closed(&mut self, link_id: &LinkId) {

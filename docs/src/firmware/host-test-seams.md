@@ -133,6 +133,15 @@ whole accumulator, an end after link-up leaves it due. Row 15, the far
 side closing the round's link, stays: it drops the round without a
 `PN_SYNC` line and decides nothing the step would add.
 
+lnpnd shares the step (#583). Its outbound round in
+`lnpnd/src/peering.rs` (`on_tick`, `start_round`, `on_link_established`,
+`on_request_timeout`) hands the same events to `round_step` and reads the
+same `OUTBOUND_ROUND_DEADLINE_MS`; its own deadline constant and its own
+copies of the arms are gone, so a PC and a board end a round on the same
+inputs with the same `PN_SYNC result=` value. The arms the step does not
+cover (a failed `/offer` send, a failed transfer, the far side closing)
+stay in each caller.
+
 **Store mount.** Row 49 is a decision: a due announce is pushed one retry
 out and spends nothing, so the store mounting inside the retry announces
 at its end. It is now `AnnounceCadence::withhold` in
@@ -146,7 +155,8 @@ peer stayed due and a node with a broken store redialled it on every
 pass. Since #583 the step answers a store failure with no round in flight
 as `RoundStep::Backoff(RoundEnd::StoreError)`: the caller books the
 peer's sync attempt (`Peer::book_sync_attempt`), logs `PN_SYNC
-result=store_error` and leaves the peer Idle, and the same failure at link-up ends the round in flight as
+result=store_error` and leaves the peer Idle, on the board and in lnpnd
+alike, and the same failure at link-up ends the round in flight as
 `store_error`. The other three are not moved, all early returns. 30 ends
 the round on the only result a failed batch plan has; 43 is one length
 check on a read body; 81 forgets an id on a failed append, the pairing of `PnStore::op_done` with

@@ -4,7 +4,11 @@
 //!
 //! The board's engine (`leviculum-nrf/src/pn.rs`: `on_sync_link_up`, the
 //! `RequestTimedOut` arm of `on_event`, `tick_sync` and `start_round`) took
-//! these decisions inline until leviculum#413. Every arm but the happy path
+//! these decisions inline until leviculum#413, and lnpnd
+//! (`lnpnd/src/peering.rs`: `on_tick`, `start_round`,
+//! `on_link_established`, `on_request_timeout`) kept its own copy of them
+//! until #583. Both now take every step here, so a PC and a board peer the
+//! same way. Every arm but the happy path
 //! is a failure no rig cell induces: a peer that identifies and then
 //! vanishes, a link whose identify cannot be sent, a request that times
 //! out mid-round, a dial the link cap refuses. Here each is a host test
