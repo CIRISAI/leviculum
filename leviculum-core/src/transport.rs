@@ -1113,6 +1113,14 @@ struct HeldAnnounce {
     /// announce_packet.hops), restored on release since `Packet::unpack` reads
     /// the pre-increment wire value.
     hops: u8,
+    /// The peer link the announce arrived through (`ingress_peer` at hold
+    /// time), restored for the release's install (Codeberg #589). The
+    /// release runs from the tick, outside `process_incoming_from_peer`, so
+    /// without it the path is installed with no `via_peer` and every packet
+    /// of a link over it floods the shared interface (#445). An `Option`
+    /// costs no more than a zero sentinel here: 32 bytes on the board either
+    /// way, the padding after `hops` absorbs the tag.
+    peer: Option<[u8; TRUNCATED_HASHBYTES]>,
 }
 
 /// The bitrate inputs of one interface, without the read side effect of
@@ -5549,7 +5557,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3961. A destination with no cached
+    /// link-request path uses at transport.rs:3969. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6295,7 +6303,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // interface.hold_announce(packet) instead of dropping). The announce
             // is queued per-interface and released slowly by process_held_announces,
             // so a burst DELAYS propagation instead of losing it.
-            let held = self.hold_announce(interface_index, dest_hash, raw, packet.hops);
+            let held = self.hold_announce(
+                interface_index,
+                dest_hash,
+                raw,
+                packet.hops,
+                self.ingress_peer,
+            );
             // `hops=` is what makes this line decidable from a run log alone.
             // A burst holds SEVERAL copies of the same announce, one per
             // arrival, and the copy the node finally keeps is picked by hop
@@ -6344,7 +6358,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1570 ran in the
+        // Gate on the already-incremented hops (transport.rs:1578 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -10560,6 +10574,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         dest_hash: [u8; TRUNCATED_HASHBYTES],
         raw: &[u8],
         hops: u8,
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     ) -> bool {
         let queue = self.interface_held_announces.entry(iface).or_default();
         match queue.get(&dest_hash) {
@@ -10592,6 +10607,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     HeldAnnounce {
                         raw: raw.to_vec(),
                         hops,
+                        peer,
                     },
                 );
                 true
@@ -10602,6 +10618,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     HeldAnnounce {
                         raw: raw.to_vec(),
                         hops,
+                        peer,
                     },
                 );
                 true
@@ -10686,11 +10703,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // RNS.Transport.inbound(raw, receiving_interface), Interface.py:252). We
         // call handle_announce directly with from_held=true so the burst check is
         // skipped and the announce is processed / rebroadcast as usual. Restore
-        // the receipt-adjusted hop count that Packet::unpack does not carry.
+        // the receipt-adjusted hop count that Packet::unpack does not carry,
+        // and the peer it arrived through, which the direct install reads
+        // off `ingress_peer` (Codeberg #589).
         match Packet::unpack(&held.raw) {
             Ok(mut packet) => {
                 packet.hops = held.hops;
-                if let Err(e) = self.handle_announce(packet, iface, &held.raw, true, false) {
+                let outer_peer = core::mem::replace(&mut self.ingress_peer, held.peer);
+                let result = self.handle_announce(packet, iface, &held.raw, true, false);
+                self.ingress_peer = outer_peer;
+                if let Err(e) = result {
                     crate::tracing::debug!(
                         dest = %HexShort(&dest_hash),
                         iface = %self.iface_name(iface),
@@ -11322,7 +11344,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2477`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2485`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -17503,7 +17525,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7070), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7084), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -23424,7 +23446,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1570) before
+        // The inbound path increments hops once (transport.rs:1578) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -31966,7 +31988,7 @@ mod tests {
             for _ in 0..MAX_HELD_ANNOUNCES {
                 let (raw, dest) = make_announce_raw();
                 assert!(
-                    transport.hold_announce(NET_IFACE, dest, &raw, 2),
+                    transport.hold_announce(NET_IFACE, dest, &raw, 2, None),
                     "holding below the cap must succeed"
                 );
                 dests.push((raw, dest));
@@ -31976,7 +31998,7 @@ mod tests {
             // A new destination beyond the cap is rejected without growing.
             let (raw_new, dest_new) = make_announce_raw();
             assert!(
-                !transport.hold_announce(NET_IFACE, dest_new, &raw_new, 2),
+                !transport.hold_announce(NET_IFACE, dest_new, &raw_new, 2, None),
                 "a new destination at the cap must be rejected"
             );
             assert_eq!(
@@ -31991,11 +32013,11 @@ mod tests {
             // one claims is that the cap does not reject the update.
             let (raw0, dest0) = &dests[0];
             assert!(
-                transport.hold_announce(NET_IFACE, *dest0, raw0, 1),
+                transport.hold_announce(NET_IFACE, *dest0, raw0, 1, None),
                 "an already-held destination must still be updatable at the cap"
             );
             assert!(
-                transport.hold_announce(NET_IFACE, *dest0, raw0, 3),
+                transport.hold_announce(NET_IFACE, *dest0, raw0, 3, None),
                 "a longer-route copy of a held destination is accepted, not rejected"
             );
             assert_eq!(

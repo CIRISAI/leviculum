@@ -60,6 +60,8 @@ mod mvr_bidir_transfer;
 #[cfg(test)]
 mod mvr_ble_cull_identity_mismatch;
 #[cfg(test)]
+mod mvr_ble_held_announce_peer;
+#[cfg(test)]
 mod mvr_ble_link_table_delivery_hint;
 #[cfg(test)]
 mod mvr_ble_peer_loss_reroute;
