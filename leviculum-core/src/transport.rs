@@ -31501,6 +31501,61 @@ mod tests {
             );
         }
 
+        /// Codeberg #606: the board's USB serial interface, as the firmware
+        /// registers it. It is a Gateway (#117) with ingress control off, and
+        /// the hold cap is the board's 6 (`BOARD_MAX_HELD_ANNOUNCES`), not the
+        /// host's 256. A host that relays a dozen freshly learned paths into
+        /// the board at 10 Hz must have every one of them learned at once:
+        /// none held, none refused. The board's LoRa interface, ingress
+        /// control on, still holds the same flood up to the cap and refuses
+        /// the rest, so the radio's protection is unchanged.
+        #[test]
+        fn board_serial_gateway_with_ingress_off_learns_a_relayed_burst() {
+            const BOARD_CAP: usize = 6;
+            const SERIAL_IFACE: usize = NET_IFACE;
+            const LORA_IFACE: usize = 1;
+            let mut transport = make_transport();
+            transport.config.max_held_announces = BOARD_CAP;
+            transport.set_interface_mode(SERIAL_IFACE, InterfaceMode::Gateway);
+            transport.set_interface_mode(LORA_IFACE, InterfaceMode::Gateway);
+            transport.set_interface_ingress_control(SERIAL_IFACE, false);
+
+            let mut relayed = Vec::new();
+            for _ in 0..12 {
+                let (raw, dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport
+                    .handle_announce(packet, SERIAL_IFACE, &raw, false, false)
+                    .unwrap();
+                relayed.push(dest);
+                transport.clock.advance(100);
+            }
+            assert_eq!(held_count(&transport, SERIAL_IFACE), 0);
+            assert_eq!(transport.stats().drops_ingress_burst_announce(), 0);
+            assert!(!burst_active(&transport, SERIAL_IFACE));
+            for dest in &relayed {
+                assert!(
+                    transport.has_path(dest),
+                    "every announce the host relays must be learned at once"
+                );
+            }
+
+            for _ in 0..12 {
+                let (raw, _dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport
+                    .handle_announce(packet, LORA_IFACE, &raw, false, false)
+                    .unwrap();
+                transport.clock.advance(100);
+            }
+            assert!(burst_active(&transport, LORA_IFACE));
+            assert_eq!(held_count(&transport, LORA_IFACE), BOARD_CAP);
+            assert!(
+                transport.stats().drops_ingress_burst_announce() > 0,
+                "the radio still refuses past the cap"
+            );
+        }
+
         #[test]
         fn ingress_control_flag_defaults_on_and_toggles() {
             // The transport-side flag defaults enabled (missing entry) and stores
