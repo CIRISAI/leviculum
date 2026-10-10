@@ -18,10 +18,11 @@
 
 use leviculum_heap_budget::{
     budget_per_link, budget_reserve, budget_serve_cap, budget_slack, budget_total,
-    held_announce_bytes, live_serve_cap, max_endpoint_links, BOARD_INTERFACES,
-    BOARD_MAX_HELD_ANNOUNCES, BOARD_SYNC_LIMIT_KB, BOARD_TRANSFER_LIMIT_KB, CHANNEL_BUDGET_BYTES,
-    HEAP_SIZE, HELD_ANNOUNCE_SLICE_BYTES, INTERFACE_MTU, LINK_BYTES, MAX_INCOMING_RESOURCE_BYTES,
-    MAX_LINKS, OFFER_RESPONSE_RESERVE_BYTES, QUEUE_DEPTH, ROLE_BUDGET_BYTES, SERVE_MARGIN_BYTES,
+    held_announce_bytes, live_serve_cap, max_endpoint_links, BOARD_HOLDING_INTERFACES,
+    BOARD_INGRESS_CONTROL, BOARD_INTERFACES, BOARD_MAX_HELD_ANNOUNCES, BOARD_SYNC_LIMIT_KB,
+    BOARD_TRANSFER_LIMIT_KB, CHANNEL_BUDGET_BYTES, HEAP_SIZE, HELD_ANNOUNCE_SLICE_BYTES,
+    INTERFACE_MTU, LINK_BYTES, MAX_INCOMING_RESOURCE_BYTES, MAX_LINKS,
+    OFFER_RESPONSE_RESERVE_BYTES, QUEUE_DEPTH, ROLE_BUDGET_BYTES, SERVE_MARGIN_BYTES,
     SERVE_PEAK_BYTES, SERVE_RESERVE_BYTES, SERVE_RESOURCE_SDU, SESSION_BUDGET_BYTES,
     SYNC_SLICE_BYTES,
 };
@@ -268,8 +269,8 @@ fn issue_388_field_figures() {
 #[test]
 fn the_held_announce_hold_against_its_slice() {
     let first = held_announce_bytes(1, 1);
-    let at_cap = held_announce_bytes(BOARD_MAX_HELD_ANNOUNCES, BOARD_INTERFACES);
-    let past_cap = held_announce_bytes(BOARD_MAX_HELD_ANNOUNCES + 1, BOARD_INTERFACES);
+    let at_cap = held_announce_bytes(BOARD_MAX_HELD_ANNOUNCES, BOARD_HOLDING_INTERFACES);
+    let past_cap = held_announce_bytes(BOARD_MAX_HELD_ANNOUNCES + 1, BOARD_HOLDING_INTERFACES);
     let core_default = held_announce_bytes(256, 1);
     println!(
         "HELD slack={} first={first} cap={BOARD_MAX_HELD_ANNOUNCES} at_cap={at_cap} \
@@ -284,8 +285,16 @@ fn the_held_announce_hold_against_its_slice() {
         budget_slack(T114_NODE_BOX) < first,
         "the boot plan's slack funds no held announce"
     );
-    assert_eq!(BOARD_MAX_HELD_ANNOUNCES, 4);
-    assert_eq!(at_cap, 7_792);
+    // Codeberg #606: the USB serial interface holds none, so the slice is
+    // shared by LoRa and BLE alone, and the cap the three shared (4) is 6.
+    assert!(
+        !BOARD_INGRESS_CONTROL[0],
+        "USB serial runs no ingress limiter"
+    );
+    assert_eq!(BOARD_HOLDING_INTERFACES, 2);
+    assert_eq!(BOARD_MAX_HELD_ANNOUNCES, 6);
+    assert_eq!(at_cap, 7_256);
+    assert_eq!(held_announce_bytes(4, BOARD_INTERFACES), 7_792);
     assert!(at_cap <= HELD_ANNOUNCE_SLICE_BYTES);
     assert!(
         past_cap > HELD_ANNOUNCE_SLICE_BYTES,
@@ -293,5 +302,5 @@ fn the_held_announce_hold_against_its_slice() {
     );
     assert_eq!(core_default, 148_016);
     assert!(core_default > HEAP_SIZE);
-    assert_eq!(held_announce_bytes(0, BOARD_INTERFACES), 0);
+    assert_eq!(held_announce_bytes(0, BOARD_HOLDING_INTERFACES), 0);
 }

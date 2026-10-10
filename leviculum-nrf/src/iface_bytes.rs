@@ -60,6 +60,25 @@ pub const IFACE_COUNT: usize = 3;
 /// way, which is the whole point of feeding both from one set of counters.
 pub const NAMES: [&str; IFACE_COUNT] = ["serial_usb", "lora_sx1262", "ble"];
 
+/// Register every interface's ingress-control flag with the node, from
+/// [`leviculum_heap_budget::BOARD_INGRESS_CONTROL`]: off on [`SERIAL`], on
+/// for [`LORA`] and [`BLE`] (Codeberg #606, the reasons at the table). The
+/// held-announce cap is budgeted for the interfaces this leaves on, so the
+/// binaries take the flags from here and not from a line of their own.
+pub fn apply_board_ingress_control<R, C, S>(node: &mut leviculum_core::node::NodeCore<R, C, S>)
+where
+    R: rand_core::CryptoRngCore,
+    C: leviculum_core::traits::Clock,
+    S: leviculum_core::traits::Storage,
+{
+    for (iface, enabled) in leviculum_heap_budget::BOARD_INGRESS_CONTROL
+        .iter()
+        .enumerate()
+    {
+        node.set_interface_ingress_control(iface, *enabled);
+    }
+}
+
 /// Shortest window a speed may be derived from, in milliseconds.
 ///
 /// A sample taken a few milliseconds after the last one divides a byte count

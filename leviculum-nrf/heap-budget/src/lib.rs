@@ -626,10 +626,48 @@ pub const HELD_ANNOUNCE_ENTRY_BYTES: usize = 32;
 pub const HELD_ANNOUNCE_RAW_BYTES: usize = leviculum_core::constants::MTU;
 
 /// Interfaces a board registers (`leviculum_nrf::iface_bytes::IFACE_COUNT`:
-/// USB, LoRa, BLE). The cap is per interface and the board leaves ingress
-/// control on for all of them, so the hold's worst case is every interface
-/// full at once. The firmware asserts the two agree.
+/// USB, LoRa, BLE). The firmware asserts the two agree.
 pub const BOARD_INTERFACES: usize = 3;
+
+/// Whether the ingress burst limiter runs on each of the board's interfaces,
+/// indexed by interface id (`leviculum_nrf::iface_bytes`: 0 USB serial,
+/// 1 LoRa, 2 BLE). The binaries register every interface with its entry
+/// (`leviculum_nrf::iface_bytes::apply_board_ingress_control`), so the flag the core
+/// enforces and the count the hold is budgeted for are this one table.
+///
+/// The USB serial interface is off (Codeberg #606). It is a point-to-point
+/// link to the one host daemon behind it: no peer can storm it, and every
+/// announce the host relays into the board arrives there. With the limiter
+/// on, a host that has just learned a dozen paths made the board hold
+/// [`BOARD_MAX_HELD_ANNOUNCES`] of them and refuse the rest, and a refused
+/// stationary destination is learned again only on its next announce, an
+/// hour or more away. `lnsd` turns the limiter off for the same reason on
+/// its point-to-point links: the dial-out IP types
+/// (`leviculum_std::config::ingress_control_default_for_type`) and the
+/// shared-instance IPC client (`leviculum-std/src/interfaces/local.rs`,
+/// `ingress_control: Some(false)`, after Python's
+/// `LocalClientInterface.should_ingress_limit() -> False`). LoRa and BLE
+/// are shared media with arbitrary peers, the surface the limiter exists
+/// for, and keep it on.
+pub const BOARD_INGRESS_CONTROL: [bool; BOARD_INTERFACES] = [false, true, true];
+
+/// The board interfaces that can hold announces: those
+/// [`BOARD_INGRESS_CONTROL`] leaves the limiter on for. An interface with it
+/// off never reaches the hold, so the hold's worst case is every one of
+/// these full at once.
+pub const BOARD_HOLDING_INTERFACES: usize = count_holding_interfaces();
+
+const fn count_holding_interfaces() -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    while i < BOARD_INTERFACES {
+        if BOARD_INGRESS_CONTROL[i] {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
 
 /// Heap the hold pins with `per_iface` announces held on each of `ifaces`
 /// interfaces, every raw announce at [`HELD_ANNOUNCE_RAW_BYTES`], by the
@@ -672,11 +710,13 @@ pub const fn held_announce_bytes(per_iface: usize, ifaces: usize) -> usize {
 /// ```
 ///
 /// 8 KiB is under that with 1.3 KiB to spare. What it buys is
-/// [`BOARD_MAX_HELD_ANNOUNCES`] = 4 per interface at the MTU bound
-/// (7 792 B for all three full); at the rig's 183 B announces the same
-/// cap costs 3 988 B.
+/// [`BOARD_MAX_HELD_ANNOUNCES`] = 6 per interface at the MTU bound
+/// (7 256 B for both holding interfaces full, LoRa and BLE; the USB serial
+/// interface holds none, [`BOARD_INGRESS_CONTROL`]); at the rig's 183 B
+/// announces the same cap costs 3 452 B. While all three interfaces held,
+/// the same slice bought 4 (7 792 B).
 ///
-/// Why 4 is enough: a burst holds one slot per NEW destination (a repeat
+/// Why 6 is enough: a burst holds one slot per NEW destination (a repeat
 /// replaces its slot), held announces are released one per
 /// `IC_HELD_RELEASE_INTERVAL` (5 s) once the burst calms, and an announce
 /// refused at the cap is the one Python also refuses when its own queue is
@@ -689,24 +729,32 @@ pub const HELD_ANNOUNCE_SLICE_BYTES: usize = 8 * 1024;
 
 /// The board's hold cap per interface (`NodeCoreBuilder::max_held_announces`
 /// in the binaries): the largest count whose worst case on every
-/// interface fits [`HELD_ANNOUNCE_SLICE_BYTES`].
+/// holding interface ([`BOARD_HOLDING_INTERFACES`]) fits
+/// [`HELD_ANNOUNCE_SLICE_BYTES`].
 pub const BOARD_MAX_HELD_ANNOUNCES: usize = derive_max_held_announces();
 
 /// [`BOARD_MAX_HELD_ANNOUNCES`]'s derivation, by search, as
 /// [`derive_sync_limit_kb`].
 pub const fn derive_max_held_announces() -> usize {
     let mut cap = 0;
-    while held_announce_bytes(cap + 1, BOARD_INTERFACES) <= HELD_ANNOUNCE_SLICE_BYTES {
+    while held_announce_bytes(cap + 1, BOARD_HOLDING_INTERFACES) <= HELD_ANNOUNCE_SLICE_BYTES {
         cap += 1;
     }
     cap
 }
 
-// Pinned, so a change to the entry, the raw bound, the interface count or
-// the slice moves these numbers in the diff, not silently on the board.
+// Pinned, so a change to the entry, the raw bound, the interface count, the
+// ingress table or the slice moves these numbers in the diff, not silently
+// on the board.
 // Moving them legitimately: move the pin and say what the board holds now.
-const _: () = assert!(BOARD_MAX_HELD_ANNOUNCES == 4);
-const _: () = assert!(held_announce_bytes(BOARD_MAX_HELD_ANNOUNCES, BOARD_INTERFACES) == 7_792);
+const _: () = assert!(
+    !BOARD_INGRESS_CONTROL[0],
+    "USB serial holds no announce (#606)"
+);
+const _: () = assert!(BOARD_HOLDING_INTERFACES == 2);
+const _: () = assert!(BOARD_MAX_HELD_ANNOUNCES == 6);
+const _: () =
+    assert!(held_announce_bytes(BOARD_MAX_HELD_ANNOUNCES, BOARD_HOLDING_INTERFACES) == 7_256);
 // The slice must leave what the live heap keeps clear on the recorded
 // worst heap (the arithmetic at `HELD_ANNOUNCE_SLICE_BYTES`).
 const _: () =

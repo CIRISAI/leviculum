@@ -51,7 +51,8 @@
 //!
 //! `held=` is the count of announces the ingress burst limiter holds
 //! across interfaces (their bytes are in `transport=`), capped per
-//! interface at [`leviculum_heap_budget::BOARD_MAX_HELD_ANNOUNCES`];
+//! interface at [`leviculum_heap_budget::BOARD_MAX_HELD_ANNOUNCES`], on
+//! LoRa and BLE only: the USB serial interface runs no limiter (#606);
 //! `hold_refused=` counts the
 //! announces refused at that cap since boot (#598).
 //!
@@ -163,6 +164,9 @@ const _: () = assert!(
         == leviculum_heap_budget::HELD_ANNOUNCE_ENTRY_BYTES
 );
 const _: () = assert!(crate::iface_bytes::IFACE_COUNT == leviculum_heap_budget::BOARD_INTERFACES);
+// The serial interface the budget counts out of the hold (#606) is the one
+// `iface_bytes` registers as the USB link.
+const _: () = assert!(!leviculum_heap_budget::BOARD_INGRESS_CONTROL[crate::iface_bytes::SERIAL]);
 
 /// Emit the boot `HEAP_BUDGET` line and refuse to run a configuration
 /// whose worst case does not fit the heap (#388 step 4).
