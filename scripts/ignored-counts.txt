@@ -85,6 +85,15 @@
 # the identify-loss fix direction is revisited.
 23   -p leviculum-std --test rnsd_interop
 
+# ble_link_gap_floor (2026-10-10, #379): the measurement grid behind
+# docs/measurements/2026-10-10-ble-link-gap-floor.md. It needs the patched
+# btvirt, /dev/vhci and a running bluetoothd, and a full grid takes about
+# seven minutes, so no tier can run it. Run by name with
+# `cargo test -p leviculum-std --test ble_link_gap_floor -- --ignored
+# --nocapture` whenever the BLE pacer, the fragmenter or the defragmenter
+# changes; nothing in the release path re-measures it.
+1    -p leviculum-std --test ble_link_gap_floor
+
 # measure_propagation_stamp_at_cost_13 is a proof-of-work timing sample, not
 # an assertion: its runtime is a coin-flip distribution and only means
 # anything in --release on the host it runs on, by hand. Run manually before
