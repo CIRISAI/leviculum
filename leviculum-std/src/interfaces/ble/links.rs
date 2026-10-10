@@ -226,6 +226,13 @@ pub(crate) struct Link {
     last_keepalive_tx_ms: u64,
 }
 
+/// A `Vec`'s census figures (597): `(entries, bytes of the entries, bytes
+/// of its allocated slots)`.
+fn vec_census<T>(v: &Vec<T>) -> (usize, usize, usize) {
+    let size = std::mem::size_of::<T>();
+    (v.len(), v.len() * size, v.capacity() * size)
+}
+
 /// One live link's figures for the interface census (597).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LinkCensus {
@@ -886,22 +893,15 @@ impl LinkTable {
         self.links.capacity()
     }
 
-    /// Pending handshakes (597): `(entries, bytes)`, the bytes being the
-    /// `Vec`'s allocated slots.
-    pub(crate) fn pending_census(&self) -> (usize, usize) {
-        (
-            self.pending.len(),
-            self.pending.capacity() * std::mem::size_of::<Pending>(),
-        )
+    /// Pending handshakes (597): `(entries, entry bytes, allocated bytes)`.
+    pub(crate) fn pending_census(&self) -> (usize, usize, usize) {
+        vec_census(&self.pending)
     }
 
     /// Abandonment reports not yet taken by the driver (597): `(entries,
-    /// bytes)`, the bytes being the `Vec`'s allocated slots.
-    pub(crate) fn abandon_report_census(&self) -> (usize, usize) {
-        (
-            self.abandon_reports.len(),
-            self.abandon_reports.capacity() * std::mem::size_of::<(IdentityHash, u32, u32)>(),
-        )
+    /// entry bytes, allocated bytes)`.
+    pub(crate) fn abandon_report_census(&self) -> (usize, usize, usize) {
+        vec_census(&self.abandon_reports)
     }
 
     /// Drain the queued reassembly-loss reports (#373); the driver turns
@@ -1910,13 +1910,10 @@ pub(crate) struct DialQueue {
 }
 
 impl DialQueue {
-    /// Queued dials (597): `(entries, bytes)`, the bytes being the `Vec`'s
-    /// allocated slots. The one in flight is not queued.
-    pub(crate) fn census(&self) -> (usize, usize) {
-        (
-            self.queue.len(),
-            self.queue.capacity() * std::mem::size_of::<QueuedDial>(),
-        )
+    /// Queued dials (597): `(entries, entry bytes, allocated bytes)`. The
+    /// one in flight is not queued.
+    pub(crate) fn census(&self) -> (usize, usize, usize) {
+        vec_census(&self.queue)
     }
 
     pub(crate) fn new(seed: u64) -> Self {
@@ -2804,6 +2801,17 @@ mod tests {
             ScanMode::Strict,
             "a strict dial proves the sort works and restarts the clock"
         );
+    }
+
+    /// 597: a `Vec` row's raw bytes are its entries, its estimate its
+    /// allocation; an emptied queue keeps the allocation and drops the raw.
+    #[test]
+    fn vec_census_separates_entries_from_allocated_slots() {
+        let mut v: Vec<u64> = Vec::with_capacity(8);
+        v.extend([1, 2]);
+        assert_eq!(vec_census(&v), (2, 16, v.capacity() * 8));
+        v.clear();
+        assert_eq!(vec_census(&v), (0, 0, v.capacity() * 8));
     }
 
     #[test]

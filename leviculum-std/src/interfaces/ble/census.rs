@@ -225,10 +225,10 @@ impl<const N: usize> BleState<'_, N> {
             spare * link_size,
             "Vec spare slots",
         ));
-        let (n, bytes) = self.table.pending_census();
-        rows.push(row("pending_handshakes", n, bytes, bytes, "Vec slots"));
-        let (n, bytes) = self.table.abandon_report_census();
-        rows.push(row("abandon_reports", n, bytes, bytes, "Vec slots"));
+        let (n, raw, slots) = self.table.pending_census();
+        rows.push(row("pending_handshakes", n, raw, slots, "Vec slots"));
+        let (n, raw, slots) = self.table.abandon_report_census();
+        rows.push(row("abandon_reports", n, raw, slots, "Vec slots"));
         rows.push(row(
             "defrag_partial",
             defrag_links,
@@ -266,8 +266,8 @@ impl<const N: usize> BleState<'_, N> {
             self.notifiers.capacity() * notifier_size,
             "Vec slots",
         ));
-        let (n, bytes) = self.dial_queue.census();
-        rows.push(row("dial_queue", n, bytes, bytes, "Vec slots"));
+        let (n, raw, slots) = self.dial_queue.census();
+        rows.push(row("dial_queue", n, raw, slots, "Vec slots"));
         rows.push(hash_map_row("backoff_until", self.backoff_until));
         let fixed = size_of::<DialBackoff<N>>();
         rows.push(row(
@@ -375,6 +375,12 @@ mod tests {
         assert_eq!(find(&census, "scan_line_decided").entries, 0);
         assert_eq!(find(&census, "churn_ledger").entries, 0);
 
+        // Raw bytes are entries' bytes: an empty growable collection has
+        // none, whatever it keeps allocated. Fixed tables price their array.
+        for r in census.rows.iter().filter(|r| r.model != "fixed table") {
+            assert!(r.entries > 0 || r.raw == 0, "{r:?}");
+            assert!(r.raw <= r.estimated, "{r:?}");
+        }
         let sum: u64 = census.rows.iter().map(|r| r.estimated).sum();
         assert_eq!(census.total(), sum);
         let section = census.render("ble", "BLE0");

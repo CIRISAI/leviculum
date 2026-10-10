@@ -382,7 +382,7 @@ C and D there is one interface and one path entry; the planner takes
 the first link it finds for that identity
 (`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:952`), and a
 peer loss is reported only when the *last* link for that identity dies
-(`knows_identity`, `leviculum-std/src/interfaces/ble/links.rs:519`).
+(`knows_identity`, `leviculum-std/src/interfaces/ble/links.rs:526`).
 The observable difference is which of two equally good links carries
 the next packet — the transport cannot express a preference it has no
 information to form. Under B, whichever of the two the stack in
