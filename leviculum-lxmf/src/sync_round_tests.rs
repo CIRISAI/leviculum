@@ -216,3 +216,35 @@ fn a_link_up_after_the_round_ended_changes_nothing() {
         RoundStep::Unchanged
     );
 }
+
+/// Census row 56: the store walk at round start fails before anything was
+/// booked. The step books the peer one step and logs `store_error`, so a
+/// node whose store is broken comes back to the peer by the backoff ladder
+/// instead of on every sync pass; without the booking the peer is due at
+/// once. With a round in flight (the walk at link-up) the same failure
+/// ends the round instead.
+#[test]
+fn a_store_error_at_round_start_defers_the_peer_one_step() {
+    assert_eq!(
+        round_step(None, RoundEvent::StoreFailed),
+        RoundStep::Backoff(RoundEnd::StoreError)
+    );
+    assert_eq!(RoundEnd::StoreError.as_str(), "store_error");
+    let mut unbooked = booked_table(0);
+    assert_eq!(ended_and_next_due(&mut unbooked), NOW);
+    let mut table = booked_table(0);
+    if let Some(peer) = table.get_mut(&PEER) {
+        peer.book_sync_attempt(NOW);
+    }
+    assert_eq!(ended_and_next_due(&mut table), NOW + SYNC_BACKOFF_STEP_SECS);
+}
+
+/// The walk at link-up fails with the round in flight: the round ends as
+/// `store_error`, like the board and lnpnd logged it before the step.
+#[test]
+fn a_store_error_at_link_up_ends_the_round() {
+    assert_eq!(
+        round_step(Some(&round(None)), RoundEvent::StoreFailed),
+        RoundStep::End(RoundEnd::StoreError)
+    );
+}

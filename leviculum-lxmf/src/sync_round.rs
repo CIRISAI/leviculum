@@ -65,6 +65,9 @@ pub enum RoundEvent {
     Tick { now_ms: u64 },
     /// The dial was refused (the core's link cap).
     DialRefused,
+    /// The store could not be walked for the entries above the peer's
+    /// cursor: at round start, before anything was booked, or at link-up.
+    StoreFailed,
 }
 
 /// Why a round ended without concluding.
@@ -80,6 +83,8 @@ pub enum RoundEnd {
     OfferTimeout,
     /// The round outlived [`OUTBOUND_ROUND_DEADLINE_MS`].
     Timeout,
+    /// The store walk for the offer failed.
+    StoreError,
 }
 
 impl RoundEnd {
@@ -91,6 +96,7 @@ impl RoundEnd {
             Self::LinkGone => "link_gone",
             Self::OfferTimeout => "offer_timeout",
             Self::Timeout => "timeout",
+            Self::StoreError => "store_error",
         }
     }
 }
@@ -111,6 +117,13 @@ pub enum RoundStep {
     /// made before the dial stands, so the peer is retried on a later
     /// pass instead of on every one.
     Defer,
+    /// No round was opened and nothing was booked yet: book the peer's
+    /// sync attempt
+    /// ([`Peer::book_sync_attempt`](crate::peering::Peer::book_sync_attempt)),
+    /// log the result, peer Idle. Without the booking the peer stays due
+    /// and the next sync pass hits the same failure; with it the peer
+    /// climbs the backoff ladder like any other unreachable one.
+    Backoff(RoundEnd),
 }
 
 /// The round's next step on `event`; `round` is the round in flight, if
@@ -121,10 +134,15 @@ pub enum RoundStep {
 /// peering key, then a link the core no longer holds. A request timeout
 /// ends the round only when it is the round's own `/offer` on the round's
 /// own link. The deadline is strict: a tick AT the deadline is still in
-/// time.
+/// time. A store failure ends a round in flight and backs off a peer whose
+/// round never opened.
 pub fn round_step(round: Option<&RoundView>, event: RoundEvent) -> RoundStep {
     match event {
         RoundEvent::DialRefused => RoundStep::Defer,
+        RoundEvent::StoreFailed => match round {
+            Some(_) => RoundStep::End(RoundEnd::StoreError),
+            None => RoundStep::Backoff(RoundEnd::StoreError),
+        },
         RoundEvent::LinkUp {
             identified,
             peering_key,

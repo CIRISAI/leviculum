@@ -1553,7 +1553,7 @@ impl Engine {
                 out.merge(node.close_link(link_id));
                 return;
             }
-            RoundStep::Unchanged | RoundStep::Defer => return,
+            RoundStep::Unchanged | RoundStep::Defer | RoundStep::Backoff(_) => return,
         };
         let Some(cursor) = self.peers.get(&peer_hash).map(|peer| peer.cursor) else {
             return;
@@ -1569,8 +1569,12 @@ impl Engine {
             })
             .is_err()
         {
-            self.finish_round("store_error", 0, 0);
-            out.merge(node.close_link(link_id));
+            if let RoundStep::End(end) =
+                round_step(self.round_view().as_ref(), RoundEvent::StoreFailed)
+            {
+                self.finish_round(end.as_str(), 0, 0);
+                out.merge(node.close_link(link_id));
+            }
             return;
         }
         entries.sort_by_key(|meta| meta.sequence);
@@ -2627,6 +2631,21 @@ impl Engine {
             })
             .is_err()
         {
+            // A store that cannot be walked now will most likely fail on
+            // the next pass too: the peer is booked like an unreachable
+            // one, so it climbs the backoff ladder instead of staying due.
+            if let RoundStep::Backoff(end) = round_step(None, RoundEvent::StoreFailed) {
+                peer.book_sync_attempt(now);
+                peer.state = SyncPhase::Idle;
+                crate::log::log_fmt(
+                    "PN_SYNC ",
+                    format_args!(
+                        "peer={} dir=out transferred=0 bytes=0 result={}",
+                        Hex(&destination),
+                        end.as_str()
+                    ),
+                );
+            }
             return;
         }
         entries.sort_by_key(|meta| meta.sequence);
