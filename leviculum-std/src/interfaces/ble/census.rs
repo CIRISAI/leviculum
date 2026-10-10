@@ -22,6 +22,7 @@
 //! | `scan_line_decided`, `_dropped`, `_backed_off` | addresses ever logged | `HashMap` capacity |
 //! | `churn_ledger` | identities remembered | the fixed table |
 //! | `link_addr_types` | handshaked addresses' types | `HashMap` capacity |
+//! | `owed_removals` | device removals an adapter loss could swallow (600) | `BTreeSet` entries + `VecDeque` slots |
 //!
 //! The peripheral notify pipe has no queue: a notification is awaited at the
 //! send, so its pacer holds no packet. Its links show `pacer=notify` in the
@@ -38,7 +39,7 @@ use bluer::gatt::local::CharacteristicNotifier;
 use leviculum_ble_tx::{AddrType, DialBackoff};
 use tokio::sync::mpsc;
 
-use super::links::{Addr, ChurnGate, DialQueue, Link, LinkTable, Role, ScanLineGate};
+use super::links::{Addr, ChurnGate, DialQueue, Link, LinkTable, OwedRemovals, Role, ScanLineGate};
 use super::CentralPipe;
 use crate::interfaces::census::{hash_map_row, CensusRow, InterfaceCensus};
 
@@ -144,6 +145,7 @@ pub(super) struct BleState<'a, const N: usize> {
     pub scan_lines: &'a ScanLineGate,
     pub churn: &'a ChurnGate,
     pub link_addr_types: &'a HashMap<Addr, AddrType>,
+    pub owed_removals: &'a OwedRemovals,
 }
 
 fn row(
@@ -287,6 +289,7 @@ impl<const N: usize> BleState<'_, N> {
             "fixed table",
         ));
         rows.push(hash_map_row("link_addr_types", self.link_addr_types));
+        rows.push(self.owed_removals.census_row());
         InterfaceCensus { rows, detail }
     }
 }
@@ -344,6 +347,7 @@ mod tests {
         let dial_queue = DialQueue::new(1);
         let churn = ChurnGate::new(crate::interfaces::ble::links::CHURN_POLICY);
         let link_addr_types = HashMap::new();
+        let owed_removals = OwedRemovals::default();
 
         let census = BleState {
             table: &table,
@@ -355,6 +359,7 @@ mod tests {
             scan_lines: &scan_lines,
             churn: &churn,
             link_addr_types: &link_addr_types,
+            owed_removals: &owed_removals,
         }
         .census();
 

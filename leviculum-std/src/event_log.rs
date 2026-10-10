@@ -1050,6 +1050,21 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_PEER_LOST",
         required_keys: &["iface", "peer"],
     },
+    // The adapter's D-Bus object vanished under a running BLE session
+    // (600): bluetoothd restarted or the controller re-enumerated, seen as
+    // its `InterfacesRemoved` or as a discovery failing on the missing
+    // object (`error` says which). WARN, once per loss; `links` is how many connections the table held, each
+    // released as `BLE_LINK_DOWN reason=adapter_lost`. `BLE_ADAPTER_BACK`
+    // is the session that resolved it again, `down_ms` after the loss;
+    // `forgot` is how many stored peer device objects it removed first.
+    EventSchema {
+        name: "BLE_ADAPTER_LOST",
+        required_keys: &["iface", "hci", "links", "error"],
+    },
+    EventSchema {
+        name: "BLE_ADAPTER_BACK",
+        required_keys: &["iface", "hci", "down_ms", "forgot"],
+    },
     EventSchema {
         name: "BLE_SCAN_FALLBACK",
         required_keys: &["iface", "after_ms"],

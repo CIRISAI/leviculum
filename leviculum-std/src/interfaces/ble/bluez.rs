@@ -321,6 +321,22 @@ impl ScanTask {
                     }
                 }
                 Err(e) => {
+                    // 600: an adapter object that is gone (bluetoothd
+                    // restarted, the dongle re-enumerated) fails every
+                    // later discovery the same way, forever. Hand it to
+                    // the orchestrator, which rebuilds the session on a
+                    // fresh resolution; retrying here would only scan a
+                    // dead object path.
+                    let adapter_present = self.adapter.is_powered().await.is_ok();
+                    if adapter_lost(&e, adapter_present) {
+                        let _ = self
+                            .ev_tx
+                            .send(Ev::AdapterLost {
+                                error: e.to_string(),
+                            })
+                            .await;
+                        return;
+                    }
                     tracing::debug!("BLE {}: discovery failed: {e}", self.iface);
                 }
             }
@@ -622,6 +638,16 @@ fn connect_failure(source: &bluer::Error, adapter_present: bool) -> DialFailure 
     }
 }
 
+/// Whether a failed BlueZ call says the ADAPTER's object is gone (600):
+/// D-Bus `UnknownObject` (`NotFound`, 595's classification) on a call
+/// against the adapter, confirmed by a property read of the adapter
+/// failing too (`adapter_present` false). The confirmation keeps a
+/// `NotFound` that named some other object, a device the call touched,
+/// from tearing down a healthy session.
+fn adapter_lost(source: &bluer::Error, adapter_present: bool) -> bool {
+    source.kind == bluer::ErrorKind::NotFound && !adapter_present
+}
+
 /// Why a central setup gave up: the BlueZ error, and what it says about
 /// the peer (579).
 struct SetupError {
@@ -694,6 +720,33 @@ mod tests {
         }
         let busy = bluez_reply("org.bluez.Error.InProgress", "In Progress");
         assert_eq!(connect_failure(&busy, true), DialFailure::Transport);
+    }
+
+    /// 600: a discovery that failed because the adapter's object is
+    /// gone (589's run 1: `the target object was either not present or
+    /// removed`, with the adapter's own property read failing too) is an
+    /// adapter loss; the same error with the adapter answering, or any
+    /// other error, is a failed window and the scan loop goes on.
+    #[test]
+    fn a_discovery_without_an_adapter_object_is_an_adapter_loss() {
+        let gone = bluez_reply(
+            "org.freedesktop.DBus.Error.UnknownObject",
+            "Method \"StartDiscovery\" with signature \"\" on interface \"org.bluez.Adapter1\" doesn't exist",
+        );
+        assert_eq!(
+            gone.to_string(),
+            "the target object was either not present or removed",
+            "the message 589's run 1 printed every 5 s"
+        );
+        assert!(adapter_lost(&gone, false));
+        assert!(!adapter_lost(&gone, true));
+        let busy = bluez_reply(
+            "org.bluez.Error.InProgress",
+            "Operation already in progress",
+        );
+        assert!(!adapter_lost(&busy, false));
+        let not_ready = bluez_reply("org.bluez.Error.NotReady", "Resource Not Ready");
+        assert!(!adapter_lost(&not_ready, false));
     }
 
     /// What BlueZ and bluer build for one AcquireWrite: a SEQPACKET pair

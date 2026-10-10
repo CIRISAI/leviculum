@@ -30,13 +30,14 @@ pub(crate) mod bluez;
 pub(crate) mod census;
 pub(crate) mod links;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bluer::gatt::local::CharacteristicNotifier;
 use bluer::Address;
+use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
@@ -188,6 +189,38 @@ pub(crate) enum Ev {
         addr: Address,
         failure: Option<DialFailure>,
     },
+    /// The scan task found the adapter's D-Bus object gone (600):
+    /// bluetoothd restarted or the controller re-enumerated, and with
+    /// the object went the GATT application, the advertisement and
+    /// every connection. The scan task's last event; `error` is the
+    /// discovery failure that showed it.
+    AdapterLost { error: String },
+}
+
+/// How a BlueZ session ended without a setup error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionEnd {
+    /// The daemon dropped the interface or asked for carrier teardown.
+    Detached,
+    /// The adapter's object vanished under a running session (600).
+    /// `forget` is every peer whose stored device object the session
+    /// could not remove, because the adapter went first.
+    AdapterLost { forget: BTreeSet<Addr> },
+}
+
+/// What a session that lost its adapter hands the sessions after it,
+/// until one comes up (600).
+struct LostAdapter {
+    since: Instant,
+    /// The peers whose `Device1` objects the link-down path owed a
+    /// removal (#443) when the adapter vanished: the links released at
+    /// the loss, and any departure whose removal failed against the
+    /// already vanishing adapter. bluetoothd restores a connected peer's
+    /// stored object, cached GATT database included, the moment the
+    /// adapter returns, and a dial at that object found no Columba
+    /// layout every time on btvirt (600's runs); the session that finds
+    /// the adapter again removes them before it scans.
+    forget: BTreeSet<Addr>,
 }
 
 /// Spawn the Columba BLE interface. Never fails at build time: BlueZ
@@ -303,12 +336,33 @@ impl BleTask {
         // Held across session retries: the hook fires once, whichever
         // session is live at that moment answers it.
         let mut teardown_rx = Some(teardown_rx);
+        // Set while the adapter a running session held is gone (600):
+        // re-resolution then runs at the scan cadence, quietly, and the
+        // session that finds it again says so.
+        let mut lost: Option<LostAdapter> = None;
         loop {
-            let ended = self.session(&mut outgoing_rx, &mut teardown_rx).await;
+            let ended = self
+                .session(&mut outgoing_rx, &mut teardown_rx, lost.as_ref())
+                .await;
             // The session's tables died with it (597).
             self.counters.publish_census(None);
             match ended {
-                Ok(()) => return, // interface detached
+                Ok(SessionEnd::Detached) => return,
+                Ok(SessionEnd::AdapterLost { forget }) => {
+                    lost = Some(LostAdapter {
+                        since: Instant::now(),
+                        forget,
+                    });
+                    tokio::time::sleep(self.adapter_reresolve()).await;
+                }
+                Err(e) if lost.is_some() => {
+                    tracing::debug!(
+                        "BLE {}: adapter still gone ({e}); retrying in {:?}",
+                        self.name,
+                        self.adapter_reresolve()
+                    );
+                    tokio::time::sleep(self.adapter_reresolve()).await;
+                }
                 Err(e) => {
                     tracing::warn!(
                         "BLE {}: BlueZ session failed ({e}); retrying in {:?}",
@@ -321,15 +375,29 @@ impl BleTask {
         }
     }
 
+    /// The pause between re-resolutions of a lost adapter (600): the
+    /// scan cadence, so the interface is deaf for at most one scan
+    /// interval longer than the adapter is gone. Floored at a second,
+    /// because `discovery_interval = 0` is a valid config and must not
+    /// turn into a busy loop against bluetoothd.
+    fn adapter_reresolve(&self) -> Duration {
+        self.opts.discovery_interval.max(Duration::from_secs(1))
+    }
+
     /// One BlueZ session: set up both roles, then run the event loop
-    /// until the daemon drops the interface (`Ok`), asks for carrier
-    /// teardown (`Ok`), or the adapter goes away (`Err` → retried by
-    /// [`run`]).
+    /// until the daemon drops the interface or asks for carrier
+    /// teardown ([`SessionEnd::Detached`]), the adapter's object
+    /// vanishes under it ([`SessionEnd::AdapterLost`], 600), or a setup
+    /// call fails (`Err`); [`run`] retries the last two. `lost` is set
+    /// when an earlier session lost its adapter: this session then
+    /// removes the device objects that loss left behind before either
+    /// role starts, and logs `BLE_ADAPTER_BACK` once it is up.
     async fn session(
         &self,
         outgoing_rx: &mut mpsc::Receiver<OutgoingPacket>,
         teardown_rx: &mut Option<oneshot::Receiver<oneshot::Sender<()>>>,
-    ) -> bluer::Result<()> {
+        lost: Option<&LostAdapter>,
+    ) -> bluer::Result<SessionEnd> {
         let session = bluer::Session::new().await?;
         let adapter = match &self.opts.adapter {
             Some(name) => session.adapter(name)?,
@@ -337,6 +405,32 @@ impl BleTask {
         };
         adapter.set_powered(true).await?;
         let local_addr: Addr = adapter.address().await?.0;
+        if let Some(lost) = lost {
+            for addr in &lost.forget {
+                forget_device(&adapter, *addr).await;
+            }
+        }
+        // The removals an adapter loss could swallow (600), handed to
+        // the next session if this one loses its adapter.
+        let mut owed_removals = links::OwedRemovals::default();
+        // The adapter object's removal as bluetoothd announces it (600):
+        // a restart or a re-enumeration takes the GATT application, the
+        // advertisement and every connection with the object. The scan
+        // task's failing discovery shows the same loss, but only while
+        // the object stays away; a bluetoothd restart can bring it back
+        // before the next window, and then the scan task scans on while
+        // nothing serves or advertises. Without the stream (subscription
+        // refused) the scan task's check still stands.
+        let mut adapter_events = match session.events().await {
+            Ok(events) => Some(Box::pin(events)),
+            Err(e) => {
+                tracing::warn!(
+                    "BLE {}: adapter removal watch not subscribed: {e}",
+                    self.name
+                );
+                None
+            }
+        };
 
         let (ev_tx, mut ev_rx) = mpsc::channel::<Ev>(64);
 
@@ -408,6 +502,15 @@ impl BleTask {
             self.opts.enable_central,
             self.opts.max_connections,
         );
+        if let Some(lost) = lost {
+            tracing::info!(
+                event = "BLE_ADAPTER_BACK",
+                iface = %Scalar(&self.name),
+                hci = %Scalar(adapter.name()),
+                down_ms = lost.since.elapsed().as_millis() as u64,
+                forgot = lost.forget.len(),
+            );
+        }
         self.ready.signal_ready();
 
         let start = Instant::now();
@@ -462,6 +565,7 @@ impl BleTask {
                 scan_lines: &scan_lines,
                 churn: &churn,
                 link_addr_types: &link_addr_types,
+                owed_removals: &owed_removals,
             }
             .census(),
         ));
@@ -479,7 +583,7 @@ impl BleTask {
                 outgoing = outgoing_rx.recv() => {
                     let Some(packet) = outgoing else {
                         // Daemon dropped the handle: interface detached.
-                        return Ok(());
+                        return Ok(SessionEnd::Detached);
                     };
                     self.send_packet(
                         &table,
@@ -534,10 +638,45 @@ impl BleTask {
                     if let Ok(ack) = ack {
                         let _ = ack.send(());
                     }
-                    return Ok(());
+                    return Ok(SessionEnd::Detached);
+                }
+                gone = async {
+                    match adapter_events.as_mut() {
+                        Some(events) => events.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match gone {
+                        Some(bluer::SessionEvent::AdapterRemoved(name)) if name == adapter.name() => {
+                            let forget = self
+                                .release_lost_adapter(
+                                    &adapter,
+                                    &mut table,
+                                    owed_removals,
+                                    "InterfacesRemoved",
+                                    now_ms(Instant::now()),
+                                )
+                                .await;
+                            return Ok(SessionEnd::AdapterLost { forget });
+                        }
+                        Some(_) => {}
+                        None => adapter_events = None,
+                    }
                 }
                 ev = ev_rx.recv() => {
-                    let Some(ev) = ev else { return Ok(()) };
+                    let Some(ev) = ev else { return Ok(SessionEnd::Detached) };
+                    if let Ev::AdapterLost { error } = ev {
+                        let forget = self
+                            .release_lost_adapter(
+                                &adapter,
+                                &mut table,
+                                owed_removals,
+                                &error,
+                                now_ms(Instant::now()),
+                            )
+                            .await;
+                        return Ok(SessionEnd::AdapterLost { forget });
+                    }
                     self.handle_event(
                         ev,
                         &adapter,
@@ -552,6 +691,7 @@ impl BleTask {
                         &mut scan_lines,
                         &mut churn,
                         &mut link_addr_types,
+                        &mut owed_removals,
                         &ev_tx,
                         now_ms(Instant::now()),
                     )
@@ -610,7 +750,8 @@ impl BleTask {
                         self.log_link_down(&identity, role, "timeout");
                         central_pipes.remove(&addr);
                         disconnect_quietly(&adapter, addr).await;
-                        forget_device(&adapter, addr).await;
+                        let done = forget_device(&adapter, addr).await;
+                        owed_removals.note(addr, done, now);
                         backoff_until.insert(addr, now + SESSION_BACKOFF_MS);
                         self.report_peer_lost(&table, identity).await;
                     }
@@ -660,6 +801,7 @@ impl BleTask {
                             scan_lines: &scan_lines,
                             churn: &churn,
                             link_addr_types: &link_addr_types,
+                            owed_removals: &owed_removals,
                         }
                         .census(),
                     ));
@@ -684,6 +826,7 @@ impl BleTask {
         scan_lines: &mut links::ScanLineGate,
         churn: &mut links::ChurnGate,
         link_addr_types: &mut HashMap<Addr, AddrType>,
+        owed_removals: &mut links::OwedRemovals,
         ev_tx: &mpsc::Sender<Ev>,
         now: u64,
     ) {
@@ -763,7 +906,8 @@ impl BleTask {
                 if let Some((identity, _, role)) = table.remove_peripheral_by_addr(&addr.0) {
                     scheduler.note_reset(now);
                     self.log_link_down(&identity, role, "disconnected");
-                    forget_device(adapter, addr.0).await;
+                    let done = forget_device(adapter, addr.0).await;
+                    owed_removals.note(addr.0, done, now);
                     self.report_peer_lost(table, identity).await;
                 }
             }
@@ -1033,7 +1177,8 @@ impl BleTask {
                 central_pipes.remove(&addr.0);
                 if let Some((identity, _, role)) = table.remove_by_addr(&addr.0) {
                     self.log_link_down(&identity, role, "disconnected");
-                    forget_device(adapter, addr.0).await;
+                    let done = forget_device(adapter, addr.0).await;
+                    owed_removals.note(addr.0, done, now);
                     self.report_peer_lost(table, identity).await;
                 }
                 match failure {
@@ -1046,6 +1191,9 @@ impl BleTask {
                     }
                 }
             }
+            // Ends the session in the event loop, which never hands it
+            // here (600).
+            Ev::AdapterLost { .. } => {}
         }
     }
 
@@ -1373,6 +1521,44 @@ impl BleTask {
             .await;
     }
 
+    /// The adapter's object vanished (600): log `BLE_ADAPTER_LOST` and
+    /// release every link through the link-down path. The connections
+    /// went with the object, so there is nothing to disconnect; what
+    /// matters is that the driver hears `BLE_PEER_LOST` for each peer
+    /// and culls the paths through it, instead of holding them until
+    /// the session that replaces this one has forgotten them. Not a
+    /// departure of the peer, so the churn ledger and the dial backoff
+    /// are left alone. The path's last step, removing the peer's device
+    /// object (#443), cannot run without the adapter: the addresses come
+    /// back, with every earlier removal the loss could have swallowed
+    /// ([`links::OwedRemovals`]), for the session that finds the adapter
+    /// again.
+    async fn release_lost_adapter(
+        &self,
+        adapter: &bluer::Adapter,
+        table: &mut LinkTable,
+        owed_removals: links::OwedRemovals,
+        error: &str,
+        now: u64,
+    ) -> BTreeSet<Addr> {
+        let addrs = table.connected_addrs();
+        tracing::warn!(
+            event = "BLE_ADAPTER_LOST",
+            iface = %Scalar(&self.name),
+            hci = %Scalar(adapter.name()),
+            links = addrs.len(),
+            error = %Scalar(error),
+        );
+        let owed = owed_removals.owed(&addrs, now);
+        for addr in addrs {
+            if let Some((identity, _, role)) = table.remove_by_addr(&addr) {
+                self.log_link_down(&identity, role, "adapter_lost");
+                self.report_peer_lost(table, identity).await;
+            }
+        }
+        owed
+    }
+
     /// Report a peer loss to the driver loop, unless the identity still
     /// owns another live link — `LinkTable::knows_identity` is the
     /// single decision point (Codeberg #365). Called at the timeout and
@@ -1654,8 +1840,20 @@ async fn disconnect_quietly(adapter: &bluer::Adapter, addr: Addr) {
 /// never-met peer starts from. We never bond, so nothing kept is lost.
 /// The removal can race the peer's own reconnect; that dial fails its
 /// setup once and the peer retries after its backoff.
-async fn forget_device(adapter: &bluer::Adapter, addr: Addr) {
-    let _ = adapter.remove_device(Address(addr)).await;
+///
+/// `false` when the removal failed because the ADAPTER's object is gone
+/// (600: D-Bus `UnknownObject`; a device that is already gone answers
+/// `DoesNotExist` instead): bluetoothd keeps the stored object and
+/// restores it with the adapter, so the caller owes the removal to the
+/// session that finds the adapter again.
+async fn forget_device(adapter: &bluer::Adapter, addr: Addr) -> bool {
+    !matches!(
+        adapter.remove_device(Address(addr)).await,
+        Err(bluer::Error {
+            kind: bluer::ErrorKind::NotFound,
+            ..
+        })
+    )
 }
 
 /// `peer=` value: leading 4 identity-hash bytes as hex, the same hex the

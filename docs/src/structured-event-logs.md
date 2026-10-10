@@ -373,7 +373,22 @@ shows that a list is in force without the config beside it.  The line
 exists so a measuring host that turned strangers away does not read
 like a host nobody tried; its dialling-side sibling is
 `BLE_DIAL_NOT_ALLOWED`, which fires when `initiate_only` is what
-stopped a dial.  The churn penalty (#417) is the firmware's
+stopped a dial.  Two more are lnsd's alone, because a board's radio
+cannot vanish from under its firmware: `BLE_ADAPTER_LOST iface=<name>
+hci=<hciN> links=<n> error=<text>` (WARN) — the adapter's D-Bus object
+is gone (bluetoothd restarted, the dongle re-enumerated; 600), seen
+either as bluetoothd's `InterfacesRemoved` for it (`error=InterfacesRemoved`)
+or as a scan window's discovery failing on the missing object while a
+read of the adapter fails too (`error=` is that failure); every link it held goes
+down as `BLE_LINK_DOWN reason=adapter_lost`, and the interface
+re-resolves the adapter by its bring-up rule once per
+`discovery_interval`; `BLE_ADAPTER_BACK iface=<name> hci=<hciN>
+down_ms=<n> forgot=<n>` is the session that found it again, advertising
+and scanning anew.  `forgot=` counts the peers' stored device objects it
+removed before either role started: bluetoothd restores a connected
+peer's object, cached GATT database included, with the adapter, and a
+dial at the restored object finds no Columba layout, so the removal the
+link-down path owes (#443) is paid here.  The churn penalty (#417) is the firmware's
 `BLE_CHURN_LEDGER` with the bare token spelled `state=`:
 `BLE_CHURN_LEDGER state=armed identity=<hex8> run=<n>
 reason=expiry_central|expiry_peripheral|replaced window_ms=<n>

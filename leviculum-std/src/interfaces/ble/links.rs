@@ -2037,6 +2037,78 @@ impl Xorshift64 {
     }
 }
 
+/// How long a link-down's device-object removal (#443) stays owed after
+/// it was asked for, should the adapter vanish in the meantime (600).
+///
+/// bluetoothd does not remove a connected device at once: it disconnects
+/// first, through its ~2 s deferred-disconnect machinery (measured on
+/// btvirt, the carrier-teardown comment in [`super`]), and removes the
+/// object after. An adapter that goes in that gap takes the removal with
+/// it while the stored device survives, and bluetoothd restores it with
+/// the adapter: 600's green run caught exactly that, a `RemoveDevice`
+/// answered 40 ms before the adapter's `InterfacesRemoved` and the object
+/// back 3 s later. Ten seconds covers the deferral several times over;
+/// an address owed by mistake costs one `RemoveDevice` at the return.
+pub(crate) const REMOVAL_RACE_MS: u64 = 10_000;
+
+/// The device-object removals the link-down path asked for that an
+/// adapter loss could have swallowed (600): the ones that failed on the
+/// adapter's missing object, and the ones asked for less than
+/// [`REMOVAL_RACE_MS`] ago. A session keeps one; when its adapter
+/// vanishes, [`owed`](Self::owed) names every peer whose stored object
+/// the session that finds the adapter again must remove before it scans.
+#[derive(Debug, Default)]
+pub(crate) struct OwedRemovals {
+    failed: std::collections::BTreeSet<Addr>,
+    recent: std::collections::VecDeque<(u64, Addr)>,
+}
+
+impl OwedRemovals {
+    /// The link-down path asked bluetoothd to remove `addr`'s device
+    /// object at `now_ms`; `done` is false when the call failed because
+    /// the adapter's object was already gone.
+    pub(crate) fn note(&mut self, addr: Addr, done: bool, now_ms: u64) {
+        if !done {
+            self.failed.insert(addr);
+        }
+        while self
+            .recent
+            .front()
+            .is_some_and(|(at, _)| now_ms.saturating_sub(*at) > REMOVAL_RACE_MS)
+        {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((now_ms, addr));
+    }
+
+    /// The adapter vanished at `now_ms` while the table still held
+    /// connections to `released`: every address whose removal is owed.
+    pub(crate) fn owed(self, released: &[Addr], now_ms: u64) -> std::collections::BTreeSet<Addr> {
+        let mut owed = self.failed;
+        owed.extend(
+            self.recent
+                .iter()
+                .filter(|(at, _)| now_ms.saturating_sub(*at) <= REMOVAL_RACE_MS)
+                .map(|(_, addr)| *addr),
+        );
+        owed.extend(released.iter().copied());
+        owed
+    }
+
+    /// The census row (597): addresses held in either list.
+    pub(crate) fn census_row(&self) -> crate::interfaces::census::CensusRow {
+        let failed = self.failed.len() * std::mem::size_of::<Addr>();
+        let slot = std::mem::size_of::<(u64, Addr)>();
+        crate::interfaces::census::CensusRow {
+            name: "owed_removals",
+            entries: (self.failed.len() + self.recent.len()) as u64,
+            raw: (failed + self.recent.len() * slot) as u64,
+            estimated: (failed + self.recent.capacity() * slot) as u64,
+            model: "BTreeSet entries + VecDeque slots",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2048,6 +2120,38 @@ mod tests {
     const ADDR_1: Addr = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x01];
     const ADDR_2: Addr = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x02];
     const ADDR_3: Addr = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x03];
+
+    /// 600: an adapter loss owes the removal of every link it released,
+    /// of every removal that failed on the missing adapter, and of every
+    /// removal asked for within the race window before the loss; one
+    /// asked for longer ago is done and is not repeated.
+    #[test]
+    fn an_adapter_loss_owes_the_removals_it_could_have_swallowed() {
+        let mut owed = OwedRemovals::default();
+        owed.note(ADDR_1, true, 0);
+        owed.note(ADDR_2, false, 1_000);
+        owed.note(ADDR_3, true, 20_000);
+        let released = [[0xC0, 0, 0, 0, 0, 0x04]];
+        let row = owed.census_row();
+        assert_eq!(
+            row.entries, 2,
+            "ADDR_3 recent, ADDR_2 failed; both older notes left the window at ADDR_3's"
+        );
+        assert!(row.raw <= row.estimated, "{row:?}");
+        let owed = owed.owed(&released, 20_000 + REMOVAL_RACE_MS);
+        assert_eq!(
+            owed.into_iter().collect::<Vec<_>>(),
+            vec![ADDR_2, ADDR_3, released[0]],
+            "ADDR_1's removal ran 30 s before the loss: done"
+        );
+
+        let mut late = OwedRemovals::default();
+        late.note(ADDR_1, true, 0);
+        assert!(
+            late.owed(&[], REMOVAL_RACE_MS + 1).is_empty(),
+            "a removal older than the window is not owed"
+        );
+    }
 
     fn table() -> LinkTable {
         LinkTable::new(OWN, DEFAULT_MAX_LINKS)
