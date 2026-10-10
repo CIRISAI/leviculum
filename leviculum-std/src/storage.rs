@@ -15,10 +15,11 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use leviculum_core::cached_announce_app_data;
-use leviculum_core::constants::TRUNCATED_HASHBYTES;
+use leviculum_core::constants::{IDENTITY_KEY_SIZE, TRUNCATED_HASHBYTES};
 use leviculum_core::memory_storage::{MemoryStorage, TableCaps};
 use leviculum_core::storage_census::CollectionCount;
 use leviculum_core::traits::Storage as CoreStorage;
@@ -60,8 +61,11 @@ pub struct Storage {
     // Persistent store for write-through ratchets. The flush-on-interval
     // stores are stateless path wrappers, built on demand from base_path.
     ratchet_store: FileRatchetStore,
-    // Known dest entries for merge logic
-    known_dest_entries: BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>,
+    // Known dest entries for merge logic. Shared with an in-flight flush,
+    // which folds and writes a copy off the node lock (leviculum#563).
+    // Spelled out rather than `KnownDestTable`: the census test finds
+    // collections by their type name.
+    known_dest_entries: Arc<BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>>,
     // Packet hash state (two-generation rotation)
     packet_cache: HashSet<[u8; 32]>,
     packet_cache_prev: HashSet<[u8; 32]>,
@@ -173,7 +177,7 @@ impl Storage {
             base_path,
             inner,
             ratchet_store,
-            known_dest_entries,
+            known_dest_entries: Arc::new(known_dest_entries),
             packet_cache,
             packet_cache_prev: HashSet::new(),
             packet_hash_cap: FILE_STORAGE_PACKET_HASH_CAP,
@@ -383,17 +387,63 @@ const UNREADABLE_ENTRY_LOG_CAP: usize = 32;
 #[cfg(test)]
 pub(crate) type FlushIoHook = std::sync::Arc<dyn Fn() + Send + Sync>;
 
-/// Dirty state captured under the node lock for one flush, written off it
+/// The known-destinations table: what `known_destinations` on disk holds
+/// for this node, minus the entries only another process wrote there.
+type KnownDestTable = BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>;
+
+/// Runtime identities read per core-lock hold when a flush collects them
+/// (leviculum#563).
+///
+/// The soak node holds 50 000 identities (the `identity_cap`), and reading
+/// all of them in one hold, together with a deep copy of the 87 000 entry
+/// table, kept the lock for 1.9 to 2.6 s once an hour. One slice of this
+/// size reads 1024 identities and clones the cached announce of those that
+/// have one. In a host debug build the walk over all 50 000 cost 10 ms and
+/// the announce clones of the 17 000 that had one 28 ms, so a slice holds
+/// the lock for under a millisecond there.
+pub(crate) const FLUSH_IDENTITY_SLICE: usize = 1024;
+
+/// Dirty state captured for one flush, written off the node lock
 /// (leviculum#44). Carries the storage root, not the live store handles:
 /// the file stores are stateless path wrappers, so the off-lock writer
 /// builds its own; the in-struct ratchet store stays with the write-through
 /// path.
+///
+/// Three phases share it (leviculum#563): [`Storage::take_flush_snapshot`]
+/// opens it in one short hold, [`Storage::collect_flush_slice`] fills in the
+/// runtime identities a slice per hold, and [`FlushSnapshot::write`] does
+/// everything that scales with the tables — the fold, the announce parses,
+/// the copy and the file IO — with no lock at all.
 pub(crate) struct FlushSnapshot {
     base_path: PathBuf,
-    identities: Option<(u64, BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>)>,
+    identities: Option<IdentityFlush>,
     packet_hashes: Option<(u64, Vec<[u8; 32]>)>,
     #[cfg(test)]
     io_hook: Option<FlushIoHook>,
+}
+
+/// The known-destinations half of a flush.
+struct IdentityFlush {
+    generation: u64,
+    /// Read once when the flush opens, so every entry it refreshes carries
+    /// the same time, as one in-lock fold gave them.
+    timestamp: f64,
+    /// The table as the flush found it, shared rather than copied: only a
+    /// flush writes it, and flushes do not overlap, so it cannot change
+    /// under the writer.
+    table: Arc<KnownDestTable>,
+    runtime: Vec<RuntimeIdentity>,
+    /// The last destination hash collected, where the next slice resumes.
+    cursor: Option<[u8; TRUNCATED_HASHBYTES]>,
+    collected: bool,
+}
+
+/// What a flush needs of one runtime identity, read under the lock.
+struct RuntimeIdentity {
+    hash: [u8; TRUNCATED_HASHBYTES],
+    public_key: [u8; IDENTITY_KEY_SIZE],
+    /// The cached announce, raw; its `app_data` is parsed off the lock.
+    announce: Option<Vec<u8>>,
 }
 
 /// Which stores the write landed, tagged with the snapshot's generations;
@@ -401,31 +451,54 @@ pub(crate) struct FlushSnapshot {
 pub(crate) struct FlushOutcome {
     identities_written: Option<u64>,
     packet_hashes_written: Option<u64>,
+    /// The table with the runtime identities folded in, for finish_flush to
+    /// install whether or not the file write succeeded.
+    known_dest_entries: Option<KnownDestTable>,
+}
+
+impl FlushOutcome {
+    /// A flush that wrote nothing: every dirty flag stays set for the next
+    /// interval, and the table stays as it was.
+    pub(crate) fn abandoned() -> Self {
+        Self {
+            identities_written: None,
+            packet_hashes_written: None,
+            known_dest_entries: None,
+        }
+    }
 }
 
 impl FlushSnapshot {
-    /// Blocking file IO — blocking pool from the event loop, inline at
-    /// shutdown. Merges on-disk entries written by other processes
-    /// (Python-compatible) before rewriting. Never touches the node lock.
+    /// Blocking work — blocking pool from the event loop, inline at
+    /// shutdown. Folds the runtime identities into a copy of the table, then
+    /// merges on-disk entries written by other processes (Python-compatible)
+    /// before rewriting. Never touches the node lock.
     pub(crate) fn write(self) -> FlushOutcome {
         #[cfg(test)]
         if let Some(hook) = &self.io_hook {
             hook();
         }
 
-        let mut outcome = FlushOutcome {
-            identities_written: None,
-            packet_hashes_written: None,
-        };
+        let mut outcome = FlushOutcome::abandoned();
 
-        if let Some((generation, entries)) = self.identities {
+        if let Some(flush) = self.identities {
+            debug_assert!(flush.collected, "a flush writes only collected identities");
+            let generation = flush.generation;
+            let mut merged = fold_runtime_identities(&flush.table, flush.runtime, flush.timestamp);
+            drop(flush.table);
+
             // Merge with on-disk entries (preserving entries added by other
-            // processes, matching Python behavior).
+            // processes, matching Python behavior). They go into the file
+            // only: the in-memory table never held them, so they leave it
+            // again after the write.
             let mut kd_store = FileKnownDestinationsStore::new(&self.base_path);
-            let mut merged = entries;
+            let mut from_disk = Vec::new();
             if let Ok(disk_entries) = kd_store.load_all() {
                 for (hash, entry) in disk_entries {
-                    merged.entry(hash).or_insert(entry);
+                    if let std::collections::btree_map::Entry::Vacant(slot) = merged.entry(hash) {
+                        slot.insert(entry);
+                        from_disk.push(hash);
+                    }
                 }
             }
             match kd_store.save_all(&merged) {
@@ -437,6 +510,10 @@ impl FlushSnapshot {
                     tracing::error!("Failed to save known_destinations: {e}");
                 }
             }
+            for hash in &from_disk {
+                merged.remove(hash);
+            }
+            outcome.known_dest_entries = Some(merged);
         }
 
         if let Some((generation, hashes)) = self.packet_hashes {
@@ -456,70 +533,83 @@ impl FlushSnapshot {
     }
 }
 
+/// Merge runtime identities into a copy of the known-destinations table.
+///
+/// New identities get a minimal entry; existing entries get their timestamp
+/// and public_key refreshed (the runtime version was just validated from a
+/// live announce, so it takes precedence over the disk version). packet_hash
+/// is preserved: it belongs to the announce packet and is not available
+/// here.
+///
+/// app_data comes from the cached announce, which is what Python hands
+/// `Identity.remember` at validate time
+/// (`reference/Reticulum/RNS/Identity.py:598`). Writing it is what lets the
+/// recall survive a restart (Codeberg #420); writing `None` instead left
+/// every runtime-learned destination unrecallable for a full announce
+/// interval after every start, and a propagation peer that syncs into such a
+/// node in that window is read as "not a node" (#417). A destination whose
+/// announce has since been swept from the cache keeps whatever was
+/// remembered before — the reference overwrites the field only on a new
+/// announce too.
+fn fold_runtime_identities(
+    table: &KnownDestTable,
+    runtime: Vec<RuntimeIdentity>,
+    timestamp: f64,
+) -> KnownDestTable {
+    let mut folded = table.clone();
+    for identity in runtime {
+        let announced = identity
+            .announce
+            .as_deref()
+            .and_then(cached_announce_app_data)
+            .filter(|data| !data.is_empty());
+        folded
+            .entry(identity.hash)
+            .and_modify(|e| {
+                e.timestamp = timestamp;
+                e.public_key = identity.public_key;
+                if announced.is_some() {
+                    e.app_data = announced.clone();
+                }
+            })
+            .or_insert_with(|| KnownDestEntry {
+                timestamp,
+                packet_hash: vec![0u8; PACKET_HASH_LEN],
+                public_key: identity.public_key,
+                app_data: announced,
+                // Freshly remembered, so never used — the value
+                // `Identity.remember` writes (Identity.py:107). An entry that
+                // already existed keeps whatever use-state came off disk:
+                // `and_modify` above touches only the fields a new announce
+                // refreshes, as `remember` does for a known destination
+                // (Identity.py:108-113).
+                use_state: KnownDestUseState::default(),
+            });
+    }
+    folded
+}
+
 impl Storage {
-    /// Phase 1, under the node lock, memory ops only: fold runtime
-    /// identities into known_dest_entries and clone out everything dirty.
+    /// Phase 1, under the node lock, and short whatever the table sizes:
+    /// shares the known-destinations table and copies out the packet hashes.
     /// None when nothing is dirty. Dirty flags stay set until finish_flush.
+    ///
+    /// The runtime identities are not read here; the caller collects them
+    /// with [`Self::collect_flush_slice`] before it writes.
     pub(crate) fn take_flush_snapshot(&mut self) -> Option<FlushSnapshot> {
         if !self.identities_dirty && !self.packet_hashes_dirty {
             tracing::debug!("Flush skipped — nothing dirty");
             return None;
         }
 
-        let identities = if self.identities_dirty {
-            let timestamp = unix_timestamp_secs();
-
-            // Merge runtime identities into known_dest_entries.
-            // New identities get a minimal entry; existing entries get their
-            // timestamp and public_key refreshed (the runtime version was just
-            // validated from a live announce, so it takes precedence over the
-            // disk version). packet_hash is preserved: it belongs to the
-            // announce packet and is not available here.
-            //
-            // app_data comes from the cached announce, which is what Python
-            // hands `Identity.remember` at validate time
-            // (`reference/Reticulum/RNS/Identity.py:598`). Writing it is what
-            // lets the recall survive a restart (Codeberg #420); writing
-            // `None` instead left every runtime-learned destination
-            // unrecallable for a full announce interval after every start,
-            // and a propagation peer that syncs into such a node in that
-            // window is read as "not a node" (#417). A destination whose
-            // announce has since been swept from the cache keeps whatever was
-            // remembered before — the reference overwrites the field only on
-            // a new announce too.
-            for (hash, identity) in self.inner.known_identity_iter() {
-                let announced = self
-                    .inner
-                    .get_announce_cache(hash)
-                    .and_then(|raw| cached_announce_app_data(raw))
-                    .filter(|data| !data.is_empty());
-                self.known_dest_entries
-                    .entry(*hash)
-                    .and_modify(|e| {
-                        e.timestamp = timestamp;
-                        e.public_key = identity.public_key_bytes();
-                        if announced.is_some() {
-                            e.app_data = announced.clone();
-                        }
-                    })
-                    .or_insert_with(|| KnownDestEntry {
-                        timestamp,
-                        packet_hash: vec![0u8; PACKET_HASH_LEN],
-                        public_key: identity.public_key_bytes(),
-                        app_data: announced,
-                        // Freshly remembered, so never used — the value
-                        // `Identity.remember` writes (Identity.py:107). An
-                        // entry that already existed keeps whatever use-state
-                        // came off disk: `and_modify` above touches only the
-                        // fields a new announce refreshes, as `remember` does
-                        // for a known destination (Identity.py:108-113).
-                        use_state: KnownDestUseState::default(),
-                    });
-            }
-            Some((self.identities_gen, self.known_dest_entries.clone()))
-        } else {
-            None
-        };
+        let identities = self.identities_dirty.then(|| IdentityFlush {
+            generation: self.identities_gen,
+            timestamp: unix_timestamp_secs(),
+            table: Arc::clone(&self.known_dest_entries),
+            runtime: Vec::new(),
+            cursor: None,
+            collected: false,
+        });
 
         let packet_hashes = if self.packet_hashes_dirty {
             let hashes: Vec<[u8; 32]> = self
@@ -542,15 +632,60 @@ impl Storage {
         })
     }
 
+    /// Phase 1b, under the node lock, one slice per call: reads the next
+    /// [`FLUSH_IDENTITY_SLICE`] runtime identities in hash order. `true` once
+    /// there is nothing left to read, and from then on.
+    ///
+    /// The lock is let go between slices, so the identities can change while
+    /// a flush collects them. An identity learned meanwhile bumps the
+    /// generation, which keeps the store dirty for the next interval
+    /// (finish_flush); one evicted meanwhile is written once more if its
+    /// slice was already read, as it would have been by a flush a moment
+    /// earlier.
+    pub(crate) fn collect_flush_slice(&self, snapshot: &mut FlushSnapshot) -> bool {
+        let Some(flush) = snapshot.identities.as_mut() else {
+            return true;
+        };
+        if flush.collected {
+            return true;
+        }
+        let before = flush.runtime.len();
+        for (hash, identity) in self
+            .inner
+            .known_identities_after(flush.cursor.as_ref())
+            .take(FLUSH_IDENTITY_SLICE)
+        {
+            flush.runtime.push(RuntimeIdentity {
+                hash: *hash,
+                public_key: identity.public_key_bytes(),
+                announce: self.inner.get_announce_cache(hash).cloned(),
+            });
+        }
+        if let Some(last) = flush.runtime.last() {
+            flush.cursor = Some(last.hash);
+        }
+        flush.collected = flush.runtime.len() - before < FLUSH_IDENTITY_SLICE;
+        flush.collected
+    }
+
     /// Phase 3, under the node lock, map ops only: generation-guarded
-    /// dirty-flag clear (an entry dirtied mid-write stays dirty).
-    pub(crate) fn finish_flush(&mut self, outcome: FlushOutcome) {
+    /// dirty-flag clear (an entry dirtied mid-write stays dirty), and the
+    /// folded table swapped in.
+    ///
+    /// Returns the table it replaced, so the caller can free it after letting
+    /// go of the lock: dropping 87 000 entries is the same order of work as
+    /// copying them.
+    #[must_use = "drop the replaced table outside the node lock"]
+    pub(crate) fn finish_flush(&mut self, outcome: FlushOutcome) -> Option<Arc<KnownDestTable>> {
         if outcome.identities_written == Some(self.identities_gen) {
             self.identities_dirty = false;
         }
         if outcome.packet_hashes_written == Some(self.packet_hashes_gen) {
             self.packet_hashes_dirty = false;
         }
+        outcome
+            .known_dest_entries
+            .map(|folded| std::mem::replace(&mut self.known_dest_entries, Arc::new(folded)))
     }
 
     #[cfg(test)]
@@ -901,8 +1036,9 @@ impl leviculum_core::traits::Storage for Storage {
     // on the blocking pool between the two lock-holding phases
     // (leviculum#44).
     fn flush(&mut self) {
-        if let Some(snapshot) = self.take_flush_snapshot() {
-            self.finish_flush(snapshot.write());
+        if let Some(mut snapshot) = self.take_flush_snapshot() {
+            while !self.collect_flush_slice(&mut snapshot) {}
+            drop(self.finish_flush(snapshot.write()));
         }
     }
 
@@ -1502,7 +1638,7 @@ mod tests {
 
             // Manually insert an old entry with app_data (simulates a previous flush
             // or disk load)
-            storage.known_dest_entries.insert(
+            Arc::make_mut(&mut storage.known_dest_entries).insert(
                 dest_hash,
                 KnownDestEntry {
                     timestamp: 1000.0,
@@ -1553,6 +1689,11 @@ mod tests {
 
     // Three-phase flush (leviculum#44)
 
+    /// Phase 1b to the end, as the shutdown flush runs it.
+    fn collect_all(storage: &Storage, snapshot: &mut FlushSnapshot) {
+        while !storage.collect_flush_slice(snapshot) {}
+    }
+
     #[test]
     fn test_take_flush_snapshot_defers_dirty_clear() {
         let path = temp_dir().join(format!("reticulum_test_snap_defer_{}", std::process::id()));
@@ -1562,15 +1703,16 @@ mod tests {
         let id = Identity::generate(&mut rand_core::OsRng);
         CoreStorage::set_identity(&mut storage, [0xA1; TRUNCATED_HASHBYTES], id);
 
-        let snapshot = storage
+        let mut snapshot = storage
             .take_flush_snapshot()
             .expect("dirty storage must snapshot");
+        collect_all(&storage, &mut snapshot);
         assert!(
             storage.identities_dirty,
             "the snapshot must not clear the dirty flag; only finish_flush may"
         );
 
-        storage.finish_flush(snapshot.write());
+        drop(storage.finish_flush(snapshot.write()));
         assert!(
             !storage.identities_dirty,
             "an undisturbed write must clear the dirty flag"
@@ -1596,7 +1738,8 @@ mod tests {
         CoreStorage::set_identity(&mut storage, [0x01; TRUNCATED_HASHBYTES], id_a);
         CoreStorage::add_packet_hash(&mut storage, [0x0A; 32]);
 
-        let snapshot = storage.take_flush_snapshot().unwrap();
+        let mut snapshot = storage.take_flush_snapshot().unwrap();
+        collect_all(&storage, &mut snapshot);
 
         // Dirtied between snapshot and finish: both generations bump, so the
         // finished write must not clear either flag.
@@ -1604,7 +1747,7 @@ mod tests {
         CoreStorage::set_identity(&mut storage, [0x02; TRUNCATED_HASHBYTES], id_b);
         CoreStorage::add_packet_hash(&mut storage, [0x0B; 32]);
 
-        storage.finish_flush(snapshot.write());
+        drop(storage.finish_flush(snapshot.write()));
         assert!(
             storage.identities_dirty,
             "identity added mid-write must stay dirty for the next interval"
@@ -1614,11 +1757,17 @@ mod tests {
             "packet hash added mid-write must stay dirty for the next interval"
         );
 
-        // The next snapshot carries both the flushed and the mid-write data.
-        let second = storage.take_flush_snapshot().unwrap();
-        let (_, entries) = second.identities.as_ref().unwrap();
-        assert!(entries.contains_key(&[0x01; TRUNCATED_HASHBYTES]));
-        assert!(entries.contains_key(&[0x02; TRUNCATED_HASHBYTES]));
+        // The next snapshot carries both: the flushed identity in the table
+        // the first flush folded it into, the mid-write one as a runtime
+        // identity still to fold.
+        let mut second = storage.take_flush_snapshot().unwrap();
+        collect_all(&storage, &mut second);
+        let identities = second.identities.as_ref().unwrap();
+        assert!(identities.table.contains_key(&[0x01; TRUNCATED_HASHBYTES]));
+        assert!(identities
+            .runtime
+            .iter()
+            .any(|r| r.hash == [0x02; TRUNCATED_HASHBYTES]));
         let (_, hashes) = second.packet_hashes.as_ref().unwrap();
         assert!(hashes.contains(&[0x0A; 32]));
         assert!(hashes.contains(&[0x0B; 32]));
@@ -1636,10 +1785,11 @@ mod tests {
         CoreStorage::set_identity(&mut storage, [0x03; TRUNCATED_HASHBYTES], id);
         CoreStorage::add_packet_hash(&mut storage, [0x0C; 32]);
 
-        let snapshot = storage.take_flush_snapshot().unwrap();
+        let mut snapshot = storage.take_flush_snapshot().unwrap();
+        collect_all(&storage, &mut snapshot);
         // Yank the storage root: both saves fail, nothing is written.
         std::fs::remove_dir_all(&path).unwrap();
-        storage.finish_flush(snapshot.write());
+        drop(storage.finish_flush(snapshot.write()));
         assert!(
             storage.identities_dirty,
             "a failed identities write must leave the flag set"
@@ -1651,8 +1801,9 @@ mod tests {
 
         // Next interval retries and succeeds.
         std::fs::create_dir_all(&path).unwrap();
-        let snapshot = storage.take_flush_snapshot().unwrap();
-        storage.finish_flush(snapshot.write());
+        let mut snapshot = storage.take_flush_snapshot().unwrap();
+        collect_all(&storage, &mut snapshot);
+        drop(storage.finish_flush(snapshot.write()));
         assert!(!storage.identities_dirty);
         assert!(!storage.packet_hashes_dirty);
         assert!(path.join(KNOWN_DESTINATIONS_FILE).exists());
@@ -2004,5 +2155,157 @@ mod tests {
 
         // Should round-trip (within f64 precision)
         assert_eq!(back, mono);
+    }
+
+    /// The fold as one node-lock hold ran it before leviculum#563, kept
+    /// verbatim as the oracle the sliced flush is held to: the runtime
+    /// identities folded into a copy of the table, then the on-disk entries
+    /// of other processes merged in for the file.
+    fn single_hold_flush(storage: &Storage, timestamp: f64) -> (KnownDestTable, Vec<u8>) {
+        let mut entries = (*storage.known_dest_entries).clone();
+        for (hash, identity) in storage.inner.known_identity_iter() {
+            let announced = storage
+                .inner
+                .get_announce_cache(hash)
+                .and_then(|raw| cached_announce_app_data(raw))
+                .filter(|data| !data.is_empty());
+            entries
+                .entry(*hash)
+                .and_modify(|e| {
+                    e.timestamp = timestamp;
+                    e.public_key = identity.public_key_bytes();
+                    if announced.is_some() {
+                        e.app_data = announced.clone();
+                    }
+                })
+                .or_insert_with(|| KnownDestEntry {
+                    timestamp,
+                    packet_hash: vec![0u8; PACKET_HASH_LEN],
+                    public_key: identity.public_key_bytes(),
+                    app_data: announced,
+                    use_state: KnownDestUseState::default(),
+                });
+        }
+        let mut merged = entries.clone();
+        let disk = FileKnownDestinationsStore::new(&storage.base_path)
+            .load_all()
+            .unwrap_or_default();
+        for (hash, entry) in disk {
+            merged.entry(hash).or_insert(entry);
+        }
+        (entries, encode_known_destinations(&merged).unwrap())
+    }
+
+    /// leviculum#563: the sliced, off-lock flush writes byte for byte the
+    /// file the single-hold flush wrote, and leaves the same table in memory.
+    ///
+    /// The state covers every branch of the fold across more than two
+    /// slices: identities with and without a cached announce, an announce
+    /// with empty `app_data`, table entries no runtime identity refreshes,
+    /// and an entry only another process wrote to the file, which the file
+    /// keeps and the memory table does not take in.
+    #[test]
+    fn sliced_flush_writes_the_bytes_the_single_hold_flush_wrote() {
+        use leviculum_core::{Destination, DestinationType, Direction};
+
+        const TIMESTAMP: f64 = 1_760_000_000.25;
+        let td = tempfile::tempdir().unwrap();
+        let mut storage = Storage::new(td.path()).unwrap();
+
+        let announce = |app_data: &[u8]| {
+            let mut destination = Destination::new(
+                Some(crate::generate_identity()),
+                Direction::In,
+                DestinationType::Single,
+                "lxmf",
+                &["delivery"],
+            )
+            .unwrap();
+            let packet = destination
+                .announce(Some(app_data), &mut rand_core::OsRng, 0, 1_700_000_000)
+                .unwrap();
+            let mut raw = vec![0u8; 600];
+            let len = packet.pack(&mut raw).unwrap();
+            raw.truncate(len);
+            raw
+        };
+        let named = announce(b"\x92\xc4\x04name\xc0");
+        let empty = announce(b"");
+
+        let key = |i: usize, tag: u8| {
+            let mut hash = [tag; TRUNCATED_HASHBYTES];
+            hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            hash
+        };
+        // Already in the table, some of them refreshed below.
+        for i in 0..FLUSH_IDENTITY_SLICE {
+            Arc::make_mut(&mut storage.known_dest_entries).insert(
+                key(i * 3, 0x11),
+                KnownDestEntry {
+                    timestamp: 1000.0 + i as f64,
+                    packet_hash: vec![i as u8; PACKET_HASH_LEN],
+                    public_key: [0x42; IDENTITY_KEY_SIZE],
+                    app_data: (i % 2 == 0).then(|| vec![0xA0, i as u8]),
+                    use_state: KnownDestUseState::default(),
+                },
+            );
+        }
+        let identity = crate::generate_identity();
+        for i in 0..2 * FLUSH_IDENTITY_SLICE + 7 {
+            let hash = key(i, 0x11);
+            CoreStorage::set_identity(&mut storage, hash, identity.clone());
+            match i % 3 {
+                0 => CoreStorage::set_announce_cache(&mut storage, hash, named.clone()),
+                1 => CoreStorage::set_announce_cache(&mut storage, hash, empty.clone()),
+                _ => {}
+            }
+        }
+        // Another process's entry, on disk only.
+        let mut foreign = BTreeMap::new();
+        foreign.insert(
+            [0xF0; TRUNCATED_HASHBYTES],
+            KnownDestEntry {
+                timestamp: 5.0,
+                packet_hash: vec![0xF0; PACKET_HASH_LEN],
+                public_key: [0xF0; IDENTITY_KEY_SIZE],
+                app_data: Some(b"foreign".to_vec()),
+                use_state: KnownDestUseState::default(),
+            },
+        );
+        storage
+            .write_root(
+                KNOWN_DESTINATIONS_FILE,
+                &encode_known_destinations(&foreign).unwrap(),
+            )
+            .unwrap();
+
+        let (expected_table, expected_bytes) = single_hold_flush(&storage, TIMESTAMP);
+
+        let mut snapshot = storage.take_flush_snapshot().expect("identities are dirty");
+        snapshot.identities.as_mut().unwrap().timestamp = TIMESTAMP;
+        let mut slices = 1;
+        while !storage.collect_flush_slice(&mut snapshot) {
+            slices += 1;
+        }
+        assert_eq!(slices, 3, "the state must span more than two slices");
+        drop(storage.finish_flush(snapshot.write()));
+
+        let written = storage.read_root(KNOWN_DESTINATIONS_FILE).unwrap();
+        assert!(
+            written == expected_bytes,
+            "the sliced flush must write the single-hold flush's bytes \
+             ({} against {} bytes)",
+            written.len(),
+            expected_bytes.len()
+        );
+        assert!(
+            encode_known_destinations(&storage.known_dest_entries).unwrap()
+                == encode_known_destinations(&expected_table).unwrap(),
+            "the table left in memory must be the single-hold flush's, \
+             without the entry only the file holds"
+        );
+        assert!(!storage
+            .known_dest_entries
+            .contains_key(&[0xF0; TRUNCATED_HASHBYTES]));
     }
 }

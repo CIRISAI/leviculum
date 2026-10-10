@@ -394,6 +394,50 @@ alongside it names the disk. The watchdog measures the *wait* for the
 core mutex, never the hold, which is exactly "how long the loop spent
 not polling" without an `Instant` in a dozen `select!` arms.
 
+## A periodic job is inside the budget too (#563)
+
+The three-phase shape was already the storage flush's: since #44 the
+driver snapshots the dirty state under the lock and writes the files on
+the blocking pool. It was not enough, because the snapshot was not
+cheap. It folded every runtime identity into the known-destinations
+table, parsing each one's cached announce for its `app_data` (#420), and
+then deep-copied that table — work that scales with how much of the mesh
+the node has ever heard, and that table never shrinks.
+
+The miauhaus soak node (50 000 runtime identities, the cap; 87 059 known
+destinations in its 2026-10-03 census) wrote one `CORE_STALL` every
+3602 s and nothing in between: 1.9 s after the first hour, 2.6 s after
+45. The period gave it away. The flush interval is 3600 s, and the driver
+re-arms the timer only after `begin_flush` returns, so each period is the
+interval plus the stall. On the coder host, debug build, the same shape
+held the event loop 93 to 100 ms per flush: 20 to 28 times less than the
+field node's release build, and below the watchdog's 250 ms, so a host
+run never reports it. `the_hourly_flush_leaves_the_core_lock_free`
+(`leviculum-std/tests/mvr/storage_flush_holds_the_core_lock.rs`) measures
+it as the longest gap between two processor ticks instead.
+
+The flush now keeps to the shape in all three phases:
+
+| phase | lock | code |
+| --- | --- | --- |
+| `Storage::take_flush_snapshot` | brief: shares the table, copies the packet hashes | `leviculum-std/src/storage.rs:599` |
+| `Storage::collect_flush_slice` | brief, once per 1024 identities, 1 ms apart | `leviculum-std/src/storage.rs:645` |
+| `FlushSnapshot::write` | **none**: the fold, the announce parses, the copy, the file IO | `leviculum-std/src/storage.rs:476` |
+| `Storage::finish_flush` | brief: swaps the folded table in; `settle_flush` frees the old one on the blocking pool | `leviculum-std/src/storage.rs:679` |
+
+The capture is sliced rather than made a single cheap copy because a
+cheap copy of 50 000 identities and their announces does not exist; the
+pause between slices is there because `std::sync::Mutex` lets the thread
+that unlocks take the lock straight back, ahead of a waiter it has just
+woken. The longest loop gap in the same host run fell to 12 and 13 ms,
+and the file the sliced flush writes is byte for byte the one the
+single-hold flush wrote
+(`sliced_flush_writes_the_bytes_the_single_hold_flush_wrote`, in the
+storage tests).
+
+> **A job's cost is set by the tables it walks, not by how rarely it
+> runs. Once an hour is still two seconds of a deaf transport node.**
+
 ## A durable store append is inside the budget too (#384)
 
 The #418 rule above is about a diagnostic, and a diagnostic can be dropped.

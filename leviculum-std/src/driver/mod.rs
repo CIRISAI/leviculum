@@ -6094,26 +6094,71 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
     }
 }
 
-/// Phases 1+2 of the periodic storage flush (leviculum#44): a brief node-lock
-/// hold to snapshot the dirty state, then the file IO on the blocking pool.
-/// `None` when nothing is dirty. The returned handle is the overlap guard;
-/// the caller must settle it — including on the shutdown path — before the
-/// synchronous shutdown flush may run.
+/// How long the flush's collector stays off the core lock between two
+/// identity slices (leviculum#563).
+///
+/// `std::sync::Mutex` does not hand the lock to a waiter on unlock: a thread
+/// that re-locks at once wins it again before the woken waiter runs, so
+/// slices taken back to back would starve the event loop for the whole
+/// collection, the very hold the slicing exists to break. The pause lets
+/// every waiter in. 50 000 identities are 49 slices, so it adds about 50 ms
+/// of wall time to a flush that runs once an hour, all of it off the lock.
+const FLUSH_SLICE_PAUSE: Duration = Duration::from_millis(1);
+
+/// Phases 1+2 of the periodic storage flush (leviculum#44, #563): a brief
+/// node-lock hold to open the snapshot, then a task on the blocking pool
+/// that reads the runtime identities a slice per short hold and does the
+/// fold and the file IO with no lock. `None` when nothing is dirty. The
+/// returned handle is the overlap guard; the caller must settle it —
+/// including on the shutdown path — before the synchronous shutdown flush
+/// may run.
+///
+/// This is the core lock budget's three-phase shape
+/// (`docs/src/concepts/core-lock-budget.md`, the `send_resource` split),
+/// with the capture itself sliced: on the soak node the capture alone, one
+/// announce parse per identity and a deep copy of the known-destinations
+/// table, held the lock 1.9 to 2.6 s.
 fn begin_flush(
     inner: &Arc<Mutex<StdNodeCore>>,
 ) -> Option<tokio::task::JoinHandle<crate::storage::FlushOutcome>> {
-    let snapshot = inner.lock_recover().storage_mut().take_flush_snapshot()?;
-    Some(tokio::task::spawn_blocking(move || snapshot.write()))
+    let mut snapshot = inner.lock_recover().storage_mut().take_flush_snapshot()?;
+    // Weak, like the stall watchdog: a flush must not keep a dropped node
+    // alive. A node gone mid-collection has nobody left to write for.
+    let core = Arc::downgrade(inner);
+    Some(tokio::task::spawn_blocking(move || {
+        loop {
+            let Some(core) = core.upgrade() else {
+                return crate::storage::FlushOutcome::abandoned();
+            };
+            let collected = core
+                .lock_recover()
+                .storage()
+                .collect_flush_slice(&mut snapshot);
+            drop(core);
+            if collected {
+                break;
+            }
+            std::thread::sleep(FLUSH_SLICE_PAUSE);
+        }
+        snapshot.write()
+    }))
 }
 
-/// Phase 3: brief re-lock to clear the dirty flags the write covered.
-/// A JoinError leaves the flags set, so the next interval retries.
+/// Phase 3: brief re-lock to clear the dirty flags the write covered and
+/// install the folded table. A JoinError leaves the flags set, so the next
+/// interval retries. The table the fold replaced is freed on the blocking
+/// pool, since freeing it is as much work as the copy that was moved there.
 fn settle_flush(
     inner: &Arc<Mutex<StdNodeCore>>,
     joined: std::result::Result<crate::storage::FlushOutcome, tokio::task::JoinError>,
 ) {
     match joined {
-        Ok(outcome) => inner.lock_recover().storage_mut().finish_flush(outcome),
+        Ok(outcome) => {
+            let replaced = inner.lock_recover().storage_mut().finish_flush(outcome);
+            if let Some(replaced) = replaced {
+                tokio::task::spawn_blocking(move || drop(replaced));
+            }
+        }
         Err(e) => tracing::error!("Storage flush write task failed: {e}"),
     }
 }
