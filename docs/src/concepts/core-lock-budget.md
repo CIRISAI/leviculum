@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:5296`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:5604`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -357,7 +357,7 @@ The emission can. Until #418 the event-log layer wrote each line with
 a blocking `write(2)`, flushed, under a process-global mutex, on the
 thread that emitted it — and the event loop emits while it holds the
 core mutex (`apply_inbound`,
-`leviculum-std/src/driver/mod.rs:4456`). A `write(2)` to a USB disk
+`leviculum-std/src/driver/mod.rs:4458`). A `write(2)` to a USB disk
 under writeback throttling blocks for seconds, so the loop stopped,
 and everything that wanted the core queued behind it. That is why the
 symptom was total silence rather than a missing log line.
@@ -369,7 +369,7 @@ The rule that follows is the CPU rule's sibling:
 > worse bug than the missing diagnostic.**
 
 The event log now inverts the trade (`FileSink`,
-`leviculum-std/src/event_log.rs:1438`): the emitting thread does a
+`leviculum-std/src/event_log.rs:1444`): the emitting thread does a
 bounded enqueue and returns, one writer thread owns the file, and an
 overrun drops lines and says so with `EVENT_LOG_DROPPED` rather than
 blocking the mesh. `LEVICULUM_EVENT_LOG_SYNC=1` restores the old
@@ -386,7 +386,7 @@ informatively:
 | --- | --- | --- |
 | `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6182`) | announce handling itself took ≥ 100 ms |
 | `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4290`) | an outside thread waited ≥ 250 ms for the core lock |
-| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1555`) | one batch write to the log file took ≥ 50 ms |
+| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1561`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by
 something other than announce handling; `EVENT_LOG_WRITE_SLOW`
@@ -414,7 +414,14 @@ held the event loop 93 to 100 ms per flush: 20 to 28 times less than the
 field node's release build, and below the watchdog's 250 ms, so a host
 run never reports it. `the_hourly_flush_leaves_the_core_lock_free`
 (`leviculum-std/tests/mvr/storage_flush_holds_the_core_lock.rs`) measures
-it as the longest gap between two processor ticks instead.
+it from the flush's own `FLUSH_LOCK_HOLD` line instead: one per flush,
+emitted by `settle_flush`, with the longest and the total of the flush's
+lock holds in CPU time of the holding thread. Not wall time: the mvr
+first asserted the longest gap between two processor ticks, and that gap
+read 58 to 77 ms beside `stress-ng --cpu 40` with the flush unchanged and
+`core_stalls=0`, because a wall-clock interval includes every slice the
+scheduler gave to another process (#607). A hold that sleeps under the
+lock spends no CPU time; the watchdog sees that one as `CORE_STALL`.
 
 The flush now keeps to the shape in all three phases:
 
@@ -430,6 +437,7 @@ cheap copy of 50 000 identities and their announces does not exist; the
 pause between slices is there because `std::sync::Mutex` lets the thread
 that unlocks take the lock straight back, ahead of a waiter it has just
 woken. The longest loop gap in the same host run fell to 12 and 13 ms,
+the longest hold to one slice of about 2.6 ms of CPU time,
 and the file the sliced flush writes is byte for byte the one the
 single-hold flush wrote
 (`sliced_flush_writes_the_bytes_the_single_hold_flush_wrote`, in the

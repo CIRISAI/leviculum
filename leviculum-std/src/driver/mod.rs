@@ -4370,7 +4370,9 @@ async fn run_event_loop(
     // In-flight off-lock flush write (leviculum#44). Doubles as the overlap
     // guard: a flush timer fire while a write is in flight re-arms and does
     // nothing. Settled on every exit path, including shutdown.
-    let mut flush_in_flight: Option<tokio::task::JoinHandle<crate::storage::FlushOutcome>> = None;
+    let mut flush_in_flight: Option<
+        tokio::task::JoinHandle<(crate::storage::FlushOutcome, FlushHolds)>,
+    > = None;
     let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
     // Live peer count per multi-peer interface (Codeberg #365), counted
     // from the same ordered Up/Lost channel the path cull and the
@@ -6201,27 +6203,37 @@ const FLUSH_SLICE_PAUSE: Duration = Duration::from_millis(1);
 /// table, held the lock 1.9 to 2.6 s.
 fn begin_flush(
     inner: &Arc<Mutex<StdNodeCore>>,
-) -> Option<tokio::task::JoinHandle<crate::storage::FlushOutcome>> {
-    let mut snapshot = inner.lock_recover().storage_mut().take_flush_snapshot()?;
+) -> Option<tokio::task::JoinHandle<(crate::storage::FlushOutcome, FlushHolds)>> {
+    let mut holds = FlushHolds::default();
+    let mut snapshot = {
+        let mut core = inner.lock_recover();
+        let start = thread_cpu_time();
+        let snapshot = core.storage_mut().take_flush_snapshot();
+        holds.record(start);
+        snapshot?
+    };
     // Weak, like the stall watchdog: a flush must not keep a dropped node
     // alive. A node gone mid-collection has nobody left to write for.
     let core = Arc::downgrade(inner);
     Some(tokio::task::spawn_blocking(move || {
         loop {
             let Some(core) = core.upgrade() else {
-                return crate::storage::FlushOutcome::abandoned();
+                return (crate::storage::FlushOutcome::abandoned(), holds);
             };
-            let collected = core
-                .lock_recover()
-                .storage()
-                .collect_flush_slice(&mut snapshot);
+            let collected = {
+                let guard = core.lock_recover();
+                let start = thread_cpu_time();
+                let collected = guard.storage().collect_flush_slice(&mut snapshot);
+                holds.record(start);
+                collected
+            };
             drop(core);
             if collected {
                 break;
             }
             std::thread::sleep(FLUSH_SLICE_PAUSE);
         }
-        snapshot.write()
+        (snapshot.write(), holds)
     }))
 }
 
@@ -6231,17 +6243,72 @@ fn begin_flush(
 /// pool, since freeing it is as much work as the copy that was moved there.
 fn settle_flush(
     inner: &Arc<Mutex<StdNodeCore>>,
-    joined: std::result::Result<crate::storage::FlushOutcome, tokio::task::JoinError>,
+    joined: std::result::Result<(crate::storage::FlushOutcome, FlushHolds), tokio::task::JoinError>,
 ) {
     match joined {
-        Ok(outcome) => {
-            let replaced = inner.lock_recover().storage_mut().finish_flush(outcome);
+        Ok((outcome, mut holds)) => {
+            let replaced = {
+                let mut core = inner.lock_recover();
+                let start = thread_cpu_time();
+                let replaced = core.storage_mut().finish_flush(outcome);
+                holds.record(start);
+                replaced
+            };
             if let Some(replaced) = replaced {
                 tokio::task::spawn_blocking(move || drop(replaced));
             }
+            tracing::debug!(
+                event = "FLUSH_LOCK_HOLD",
+                holds = holds.count,
+                longest_cpu_us = holds.longest.as_micros() as u64,
+                total_cpu_us = holds.total.as_micros() as u64
+            );
         }
         Err(e) => tracing::error!("Storage flush write task failed: {e}"),
     }
+}
+
+/// The core-lock holds of one storage flush, in CPU time of the holding
+/// thread (leviculum#607).
+///
+/// CPU time rather than wall time because a wall-clock hold on a busy host
+/// includes every slice the scheduler gave to someone else while the lock
+/// was held, so it reads the host's load as much as the flush's cost. The
+/// CPU time of the holder is the work the flush did under the lock, and that
+/// is the part that grows with the tables. A hold that sleeps or blocks on
+/// IO under the lock does not show here; the stall watchdog
+/// (`CORE_STALL`) sees that one as a wait.
+#[derive(Debug, Default, Clone, Copy)]
+struct FlushHolds {
+    count: u32,
+    longest: Duration,
+    total: Duration,
+}
+
+impl FlushHolds {
+    /// Count the hold that began at `start`, a [`thread_cpu_time`] reading
+    /// taken on this thread after the lock was acquired.
+    fn record(&mut self, start: Duration) {
+        let held = thread_cpu_time().saturating_sub(start);
+        self.count += 1;
+        self.longest = self.longest.max(held);
+        self.total += held;
+    }
+}
+
+/// The CPU time the calling thread has run. Zero if the clock cannot be
+/// read, which makes every hold read as zero rather than fail a flush.
+fn thread_cpu_time() -> Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec for the call's duration.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    if rc != 0 {
+        return Duration::ZERO;
+    }
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
 /// Map a configured interface type (Python-style class name) to its transport

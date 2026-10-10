@@ -980,6 +980,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "CORE_STALL",
         required_keys: &["ms"],
     },
+    // One per storage flush: the core-lock holds of its three phases in
+    // CPU time of the holder (#607).
+    EventSchema {
+        name: "FLUSH_LOCK_HOLD",
+        required_keys: &["holds", "longest_cpu_us", "total_cpu_us"],
+    },
     EventSchema {
         name: "CORE_PROCESSOR_OVER_BUDGET",
         required_keys: &["hook", "elapsed_us", "budget_us", "events"],
@@ -1423,7 +1429,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4614`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4616`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the

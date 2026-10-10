@@ -22,15 +22,22 @@
 //! interval is 2 s, and the driver's own stall watchdog
 //! (`spawn_core_stall_watchdog`) is the instrument.
 //!
-//! The processor also asks for a tick every millisecond and records the
-//! longest gap between two ticks while the flushes run. A gap is time the
-//! event loop did not poll; unlike `CORE_STALL` it belongs to this node
-//! alone and needs no threshold of the watchdog's to be seen.
+//! Each flush reports its own core-lock holds as `FLUSH_LOCK_HOLD`, in CPU
+//! time of the holding thread: the work done under the lock, which belongs
+//! to this node alone and needs no threshold of the watchdog's to be seen.
 //!
-//! **Acceptance**: across three flushes, no `CORE_STALL` and no tick gap
-//! of [`MAX_TICK_GAP`] or more, and the file the flushes wrote reads back
-//! through the production reader (`StdStorage::new`) with every identity and
-//! every `app_data` in it.
+//! The processor also asks for a tick every millisecond and prints the
+//! longest gap between two ticks while the flushes run. It is printed, not
+//! asserted (leviculum#607): a wall-clock gap includes every slice the host
+//! scheduler gave to another process, so beside a hundred parallel mvrs it
+//! read 67 ms with `core_stalls=0`, and under `stress-ng --cpu 40` 58 to 77
+//! ms, with the flush unchanged. A test that is red when the host is busy
+//! is flaky by construction.
+//!
+//! **Acceptance**: across three flushes, no `CORE_STALL` and no flush whose
+//! longest lock hold took [`MAX_FLUSH_HOLD_CPU`] or more, and the file the
+//! flushes wrote reads back through the production reader
+//! (`StdStorage::new`) with every identity and every `app_data` in it.
 //!
 //! The capture sees every node in this process, so a stall from another
 //! mvr running in parallel would also land here. A healthy node emits
@@ -74,17 +81,26 @@ const LOAD_SLICE: usize = 500;
 const FLUSH_INTERVAL_SECS: u64 = 2;
 const FLUSHES: usize = 3;
 
-/// The longest the event loop may go without a tick while the flushes run.
+/// The longest single core-lock hold, in CPU time, a flush may take.
 ///
-/// Before the fix the field shape held the loop for the whole capture, and
-/// each flush showed it as one gap of that length: 93, 94 and 100 ms in
-/// three runs on the coder host, debug build. The watchdog stayed silent in
-/// all three, which is the host being faster than the field node (1.9 to
-/// 2.6 s there in a release build, 20 to 28 times the host's debug hold), not the hold
-/// being harmless. After the fix a flush costs the loop one slice at a time
-/// and the longest gap read 12 and 13 ms. The bound sits between the two, a
-/// fifth of the watchdog's 250 ms.
-const MAX_TICK_GAP: Duration = Duration::from_millis(50);
+/// Before the #563 fix the field shape held the loop for the whole capture,
+/// and each flush showed it as one wall-clock tick gap of that length: 93,
+/// 94 and 100 ms in three runs on the coder host, debug build. The watchdog
+/// stayed silent in all three, which is the host being faster than the
+/// field node (1.9 to 2.6 s there in a release build, 20 to 28 times the
+/// host's debug hold), not the hold being harmless. After the fix the
+/// longest hold is one identity slice: 2.5 to 2.6 ms of CPU time on a quiet
+/// host, 2.6 to 3.7 ms under `stress-ng --cpu 40`. The bound sits
+/// between the two, a fifth of the watchdog's 250 ms, and CPU time keeps
+/// it where it is on a loaded host (#607).
+const MAX_FLUSH_HOLD_CPU: Duration = Duration::from_millis(50);
+
+/// The `key=value` field of a structured event line, as a number.
+fn field(line: &str, key: &str) -> Option<u64> {
+    line.split_whitespace()
+        .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+        .and_then(|v| v.parse().ok())
+}
 
 fn destination(i: usize) -> [u8; 16] {
     let mut dest = [0x63; 16];
@@ -285,19 +301,30 @@ async fn the_hourly_flush_leaves_the_core_lock_free() {
     // interval after the lock comes free.
     tokio::time::sleep(Duration::from_millis(200)).await;
     measuring.store(false, Ordering::Relaxed);
-    let stalls: Vec<String> = evlog
-        .dump()
-        .into_iter()
+    let events = evlog.dump();
+    let stalls: Vec<&String> = events
+        .iter()
         .filter(|line| line.starts_with("CORE_STALL "))
         .collect();
+    let flush_holds: Vec<&String> = events
+        .iter()
+        .filter(|line| line.starts_with("FLUSH_LOCK_HOLD "))
+        .collect();
+    let longest_hold = flush_holds
+        .iter()
+        .filter_map(|line| field(line, "longest_cpu_us"))
+        .max()
+        .map(Duration::from_micros);
     let longest_gap = Duration::from_micros(longest_gap_us.load(Ordering::Relaxed));
     node.stop().await.expect("stop node");
     drop(node);
     eprintln!(
         "FLUSH_HOLD known={KNOWN_DESTINATIONS} identities={IDENTITY_CAP} paths={PATHS} \
-         longest_tick_gap_ms={} core_stalls={}",
+         longest_tick_gap_ms={} core_stalls={} flushes={} longest_hold_cpu_us={}",
         longest_gap.as_millis(),
-        stalls.len()
+        stalls.len(),
+        flush_holds.len(),
+        longest_hold.map_or(0, |d| d.as_micros())
     );
 
     assert!(
@@ -305,14 +332,29 @@ async fn the_hourly_flush_leaves_the_core_lock_free() {
         "the storage flush must not hold the core lock past CORE_STALL_REPORT_MS; \
          {} stall(s) across {FLUSHES} flushes:\n{}",
         stalls.len(),
-        stalls.join("\n")
+        stalls
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     assert!(
-        longest_gap < MAX_TICK_GAP,
-        "the event loop went {} ms without a tick while the flushes ran, \
-         bound {} ms",
-        longest_gap.as_millis(),
-        MAX_TICK_GAP.as_millis()
+        flush_holds.len() >= FLUSHES,
+        "every flush reports its lock holds; {} FLUSH_LOCK_HOLD line(s) for \
+         at least {FLUSHES} flushes",
+        flush_holds.len()
+    );
+    let longest_hold = longest_hold.unwrap_or(Duration::MAX);
+    assert!(
+        longest_hold < MAX_FLUSH_HOLD_CPU,
+        "a flush held the core lock for {} us of CPU time, bound {} ms:\n{}",
+        longest_hold.as_micros(),
+        MAX_FLUSH_HOLD_CPU.as_millis(),
+        flush_holds
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     // The production reader still reads what the flushes wrote.
