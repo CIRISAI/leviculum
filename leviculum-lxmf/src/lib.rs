@@ -56,6 +56,7 @@ pub mod propagation_store;
 pub mod router;
 pub mod stamp;
 pub mod storage;
+pub mod sync_round;
 pub mod telemetry;
 pub mod ticket;
 

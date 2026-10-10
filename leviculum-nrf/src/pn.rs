@@ -246,6 +246,7 @@ use leviculum_lxmf::propagation::{
 };
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_store::StoredMessage;
+use leviculum_lxmf::sync_round::{round_deadline_ms, round_step, RoundEvent, RoundStep, RoundView};
 use leviculum_lxmf::{
     CooperativeStamper, Eviction, EvictionReason, GetOutcome, PropagationNode,
     PropagationNodeConfig, PropagationStore, StampCancel, UploadOutcome, WorkblockStream,
@@ -377,9 +378,6 @@ const MAINTENANCE_SECS: u64 = 480;
 
 /// `PN_STATS` cadence (instruction item 3).
 const STATS_SECS: u64 = 300;
-
-/// Outbound sync round watchdog, as on the host (`lnpnd/src/peering.rs`).
-const OUTBOUND_DEADLINE_MS: u64 = 180_000;
 
 /// `/offer` request timeout, as on the host.
 const OFFER_REQUEST_TIMEOUT_MS: u64 = 60_000;
@@ -1157,12 +1155,15 @@ impl Engine {
                 link_id,
                 request_id,
             } => {
-                let matches = self
-                    .outbound
-                    .as_ref()
-                    .is_some_and(|s| s.link_id == *link_id && s.request_id == Some(*request_id));
-                if matches {
-                    self.finish_round("offer_timeout", 0, 0);
+                let step = round_step(
+                    self.round_view().as_ref(),
+                    RoundEvent::RequestTimedOut {
+                        link_id: *link_id,
+                        request_id: *request_id,
+                    },
+                );
+                if let RoundStep::End(end) = step {
+                    self.finish_round(end.as_str(), 0, 0);
                     out.merge(node.close_link(link_id));
                 }
             }
@@ -1515,32 +1516,44 @@ impl Engine {
             out.merge(node.close_link(link_id));
             return;
         }
-        match node.identify_link(link_id, &self.identity) {
-            Ok(send) => out.merge(send),
-            Err(_) => {
-                self.finish_round("identify_failed", 0, 0);
-                out.merge(node.close_link(link_id));
-                return;
+        let identified = match node.identify_link(link_id, &self.identity) {
+            Ok(send) => {
+                out.merge(send);
+                true
             }
-        }
-        let Some(peer) = self.peers.get_mut(&peer_hash) else {
-            return;
+            Err(_) => false,
         };
-        peer.note_link_established();
-        let Some((key, _)) = peer.peering_key else {
-            self.finish_round("no_key", 0, 0);
-            out.merge(node.close_link(link_id));
-            return;
+        let peering_key = if identified {
+            let Some(peer) = self.peers.get_mut(&peer_hash) else {
+                return;
+            };
+            peer.note_link_established();
+            peer.peering_key.map(|(key, _)| key)
+        } else {
+            None
         };
         // The offer is planned HERE, against this link, because only now
         // is the MDU known: `send_request` refuses a body over
         // `link.mdu()`, which on LoRa is 431 B and admits ten ids. The
         // plan the round was scheduled with only established that
         // something above the cursor is offerable at all.
-        let Some(mdu) = node.link(link_id).map(|link| link.mdu()) else {
-            self.finish_round("link_gone", 0, 0);
-            out.merge(node.close_link(link_id));
-            return;
+        let link_mdu = node.link(link_id).map(|link| link.mdu());
+        let event = RoundEvent::LinkUp {
+            identified,
+            peering_key,
+            link_mdu,
+        };
+        let (key, mdu) = match round_step(self.round_view().as_ref(), event) {
+            RoundStep::Offer {
+                peering_key,
+                link_mdu,
+            } => (peering_key, link_mdu),
+            RoundStep::End(end) => {
+                self.finish_round(end.as_str(), 0, 0);
+                out.merge(node.close_link(link_id));
+                return;
+            }
+            RoundStep::Unchanged | RoundStep::Defer => return,
         };
         let Some(cursor) = self.peers.get(&peer_hash).map(|peer| peer.cursor) else {
             return;
@@ -1889,6 +1902,15 @@ impl Engine {
             peer.release_yielded_round();
         }
         self.finish_round("duty_share", 0, 0);
+    }
+
+    /// The round in flight, as [`round_step`] sees it.
+    fn round_view(&self) -> Option<RoundView> {
+        self.outbound.as_ref().map(|sync| RoundView {
+            link_id: sync.link_id,
+            request_id: sync.request_id,
+            deadline_ms: sync.deadline_ms,
+        })
     }
 
     fn finish_round(&mut self, result: &str, transferred: usize, bytes: u64) {
@@ -2271,26 +2293,16 @@ impl Engine {
             // so a withheld tick spends nothing: the deadline is pushed
             // out by the retry rather than consumed by an announce that
             // never happened.
-            if crate::announce::with_cadence(|cadence| {
-                cadence.wait_ms(AnnounceSlot::Propagation, now_ms)
-            }) > 0
-            {
-                return;
-            }
-            if !self.announce_withheld_logged {
+            let withheld = crate::announce::with_cadence(|cadence| {
+                cadence.withhold(AnnounceSlot::Propagation, now_ms, ANNOUNCE_STORE_RETRY_MS)
+            });
+            if withheld && !self.announce_withheld_logged {
                 self.announce_withheld_logged = true;
                 crate::log::log_fmt_critical(
                     "PN ",
                     format_args!("announce withheld reason=store-unmounted"),
                 );
             }
-            crate::announce::with_cadence(|cadence| {
-                cadence.defer(
-                    AnnounceSlot::Propagation,
-                    now_ms,
-                    now_ms + ANNOUNCE_STORE_RETRY_MS,
-                )
-            });
             return;
         }
         // NOT clock-gated (#384 item 6): a clockless board still
@@ -2518,12 +2530,12 @@ impl Engine {
         C: Clock,
         S: Storage,
     {
-        if let Some(sync) = &self.outbound {
-            if now_ms > sync.deadline_ms {
-                let link_id = sync.link_id;
-                self.finish_round("timeout", 0, 0);
-                out.merge(node.close_link(&link_id));
-            }
+        let view = self.round_view();
+        if let (Some(round), RoundStep::End(end)) =
+            (view, round_step(view.as_ref(), RoundEvent::Tick { now_ms }))
+        {
+            self.finish_round(end.as_str(), 0, 0);
+            out.merge(node.close_link(&round.link_id));
         }
         if self.outbound.is_some() || self.mining_peer.is_some() || now_ms < self.next_sync_at_ms {
             return;
@@ -2651,12 +2663,14 @@ impl Engine {
                     // as a LINK_REFUSED line (`crate::events`); the
                     // backoff above is already booked, so this round
                     // retries on a later sync pass instead of spinning.
-                    crate::log::log_fmt(
-                        "PN_SYNC ",
-                        format_args!("peer={} action=defer reason=link_cap", Hex(&destination)),
-                    );
-                    if let Some(peer) = self.peers.get_mut(&destination) {
-                        peer.state = SyncPhase::Idle;
+                    if round_step(None, RoundEvent::DialRefused) == RoundStep::Defer {
+                        crate::log::log_fmt(
+                            "PN_SYNC ",
+                            format_args!("peer={} action=defer reason=link_cap", Hex(&destination)),
+                        );
+                        if let Some(peer) = self.peers.get_mut(&destination) {
+                            peer.state = SyncPhase::Idle;
+                        }
                     }
                     return;
                 }
@@ -2668,7 +2682,7 @@ impl Engine {
             plan,
             request_id: None,
             sending: None,
-            deadline_ms: now_ms + OUTBOUND_DEADLINE_MS,
+            deadline_ms: round_deadline_ms(now_ms),
         });
     }
 
