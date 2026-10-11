@@ -87,6 +87,13 @@ no current cell measures. Test that would show it: an emulator census
 with asymmetric offered load (one leviculum node, one scripted
 reference-policy node, airtime held above 7 %), counting contest wins;
 then one rig window on the dual-pair cell with background traffic.
+Fixed in 20241367: the board draws in the reference's band for its own
+short airtime (the input is our keyed share, not the channel load), and
+the `[LORA_JITTER]` and `[LORA_CSMA_TX]` lines carry `band=`; tests
+`the_band_follows_the_reference_map_to_the_percent` and
+`an_acquisition_draws_in_the_band_of_its_own_airtime`. One figure above
+is off: with the map's `+ 7` shift band 4 starts at 78 % airtime, not
+85 %. The CAD gate's doubling window stays as a second mechanism.
 
 **D4 — the wait, interrupted: the reference freezes its countdown, we
 keep a debt.** The reference's CW countdown pauses while the medium is
