@@ -47,7 +47,7 @@ pub struct PacketSender {
     action_dispatch_tx: mpsc::Sender<TickOutput>,
     /// The shared instance this node is a client of, asked for the first
     /// hop timeout that prices each receipt (leviculum#485).
-    connect_instance_name: Option<String>,
+    shared_instance: Option<crate::rpc::SharedInstanceClient>,
 }
 
 impl PacketSender {
@@ -56,13 +56,13 @@ impl PacketSender {
         dest_hash: DestinationHash,
         inner: Arc<Mutex<StdNodeCore>>,
         action_dispatch_tx: mpsc::Sender<TickOutput>,
-        connect_instance_name: Option<String>,
+        shared_instance: Option<crate::rpc::SharedInstanceClient>,
     ) -> Self {
         Self {
             dest_hash,
             inner,
             action_dispatch_tx,
-            connect_instance_name,
+            shared_instance,
         }
     }
 
@@ -75,7 +75,7 @@ impl PacketSender {
     /// `None` when this node is no client or the daemon did not answer.
     async fn first_hop_timeout_ms(&self) -> Option<u64> {
         super::shared_instance_first_hop_timeout_ms(
-            self.connect_instance_name.as_deref(),
+            self.shared_instance.as_ref(),
             &self.inner,
             &self.dest_hash,
         )

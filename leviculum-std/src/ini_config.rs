@@ -419,6 +419,20 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
         "shared_instance_port" => {
             config.shared_instance_port = value.trim().parse().ok();
         }
+        // The shared-instance RPC key (D1 of the 2026-10-11 shared-instance
+        // audit). Python parses it with `bytes.fromhex` and on failure logs an
+        // error and falls back to the identity-derived key
+        // (Reticulum.py:509-515); so do we, so the same file keys both daemons
+        // the same way.
+        "rpc_key" => match crate::rpc::parse_rpc_key(value.trim()) {
+            Some(key) => config.rpc_key = Some(key),
+            None => {
+                tracing::error!(
+                    "Invalid shared instance RPC key specified, falling back to default key"
+                );
+                config.rpc_key = None;
+            }
+        },
         "instance_control_port" => {
             config.instance_control_port = value.trim().parse().ok();
         }
@@ -2735,6 +2749,22 @@ mod tests {
         .unwrap();
         assert_eq!(config.reticulum.shared_instance_port, Some(37500));
         assert_eq!(config.reticulum.instance_control_port, Some(37501));
+    }
+
+    /// D1 of the 2026-10-11 shared-instance audit: `rpc_key` is parsed as
+    /// hex instead of falling into the tolerated-unknown arm; a value Python
+    /// cannot parse falls back to the default key, and so does a missing one.
+    #[test]
+    fn test_rpc_key_parsed_as_hex() {
+        let config = parse_ini("[reticulum]\n  rpc_key = 00112233aabbccdd\n").unwrap();
+        assert_eq!(
+            config.reticulum.rpc_key,
+            Some(vec![0x00, 0x11, 0x22, 0x33, 0xAA, 0xBB, 0xCC, 0xDD])
+        );
+        let config = parse_ini("[reticulum]\n  rpc_key = not-hex\n").unwrap();
+        assert_eq!(config.reticulum.rpc_key, None);
+        let config = parse_ini("[reticulum]\n").unwrap();
+        assert_eq!(config.reticulum.rpc_key, None);
     }
 
     #[test]

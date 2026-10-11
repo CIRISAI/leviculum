@@ -1518,7 +1518,11 @@ impl BleTask {
     async fn deliver(&self, packet: Vec<u8>, peer: Option<IdentityHash>) {
         let _ = self
             .incoming_tx
-            .send(IncomingPacket { data: packet, peer })
+            .send(IncomingPacket {
+                data: packet,
+                peer,
+                radio: None,
+            })
             .await;
     }
 

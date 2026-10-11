@@ -809,7 +809,7 @@ async fn local_interface_task(
                                             continue;
                                         }
                                         if let DeframeResult::Frame(data) = r {
-                                            if incoming_tx.send(IncomingPacket { data, peer: None }).await.is_err() {
+                                            if incoming_tx.send(IncomingPacket { data, peer: None, radio: None }).await.is_err() {
                                                 break 'io;
                                             }
                                         }

@@ -455,6 +455,12 @@ pub(crate) struct IncomingPacket {
     /// the one it maps a delivery hint back to. Every single-peer
     /// interface leaves it `None`.
     pub peer: Option<[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]>,
+    /// The radio's readings for this packet, on a medium that has them (an
+    /// RNode stamps its last RSSI/SNR report, as Python's
+    /// `Transport.inbound` does, `reference/Reticulum/RNS/Transport.py:1458-1479`).
+    /// The driver files them under the packet hash for the `packet_rssi`
+    /// family of RPC verbs. Every other interface leaves it `None`.
+    pub radio: Option<crate::rpc::radio_cache::PacketRadioStats>,
 }
 
 /// A peer-link transition on a multi-peer broadcast-domain interface

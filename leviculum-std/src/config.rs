@@ -99,6 +99,14 @@ pub struct ReticulumConfig {
     /// port is unused. `None` keeps the 37429 default.
     #[serde(default)]
     pub instance_control_port: Option<u16>,
+    /// The shared-instance RPC key from the RNS config's `rpc_key` (hex,
+    /// `reference/Reticulum/RNS/Reticulum.py:509-515`). When set, the daemon's
+    /// RPC listener and every client tool reading the same config key their
+    /// handshake with it instead of the hash of the transport identity
+    /// (`:355-359`, `:1265`). `None` when unset or unparseable, which Python
+    /// also answers with the identity-derived default.
+    #[serde(default)]
+    pub rpc_key: Option<Vec<u8>>,
     /// Respond to rnprobe requests
     ///
     /// When enabled, creates a probe destination (`rnstransport.probe`) with
@@ -403,6 +411,7 @@ impl Default for ReticulumConfig {
             shared_instance_socket: None,
             shared_instance_port: None,
             instance_control_port: None,
+            rpc_key: None,
             respond_to_probes: false,
             remote_management_enabled: false,
             remote_management_allowed: Vec::new(),

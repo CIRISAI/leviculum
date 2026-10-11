@@ -203,7 +203,7 @@ async fn run(args: Args) -> i32 {
         args.wait,
         more_output,
         &instance_name,
-        authkey.as_ref(),
+        authkey.as_deref(),
     )
     .await;
     let _ = node.stop().await;
@@ -244,7 +244,7 @@ fn connect_error(instance_name: &str, error: &dyn std::fmt::Display) -> String {
 /// also what both daemons answer while no path is known.
 async fn first_hop_timeout(
     instance_name: &str,
-    authkey: Option<&[u8; 32]>,
+    authkey: Option<&[u8]>,
     dest_hash: &DestinationHash,
 ) -> f64 {
     let Some(authkey) = authkey else {
@@ -268,7 +268,7 @@ async fn first_hop_timeout(
 /// the daemon like Python's `get_next_hop` / `get_next_hop_if_name` RPCs.
 async fn via_suffix(
     instance_name: &str,
-    authkey: Option<&[u8; 32]>,
+    authkey: Option<&[u8]>,
     dest_hash: &DestinationHash,
 ) -> String {
     let Some(authkey) = authkey else {
@@ -321,7 +321,7 @@ async fn probe(
     wait: f64,
     more_output: bool,
     instance_name: &str,
-    authkey: Option<&[u8; 32]>,
+    authkey: Option<&[u8]>,
 ) -> i32 {
     // rnprobe.py:79-95: no path -> request one and wait, bounded by the
     // timeout (or the default plus the daemon's first-hop timeout).

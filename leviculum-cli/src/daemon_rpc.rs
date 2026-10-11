@@ -48,7 +48,11 @@ pub fn resolve_storage_path(config_dir: &Path, config: Option<&Config>) -> PathB
     }
 }
 
-/// Resolve the daemon's RPC authkey: `SHA256(storage/transport_identity)`.
+/// Resolve the daemon's RPC authkey: the config's `rpc_key` when it names
+/// one, as every Python client keys itself
+/// (`reference/Reticulum/RNS/Reticulum.py:509-515`, `:1265`), else
+/// `SHA256(storage/transport_identity)`. The returned path is the file the key
+/// came from: the config file, or the identity file.
 ///
 /// Tries the storage directory the config resolves to first — that is the one
 /// `lnsd` runs with — and falls back to `{config_dir}/storage` for a daemon
@@ -57,7 +61,10 @@ pub fn resolve_storage_path(config_dir: &Path, config: Option<&Config>) -> PathB
 pub fn resolve_authkey(
     config_dir: &Path,
     config: Option<&Config>,
-) -> Result<([u8; 32], PathBuf), String> {
+) -> Result<(Vec<u8>, PathBuf), String> {
+    if let Some(key) = config.and_then(|c| c.reticulum.rpc_key.clone()) {
+        return Ok((key, config_dir.join("config")));
+    }
     let mut candidates: Vec<PathBuf> =
         vec![resolve_storage_path(config_dir, config).join("transport_identity")];
     let fallback = config_dir.join("storage").join("transport_identity");
@@ -70,9 +77,7 @@ pub fn resolve_authkey(
             Ok(bytes) if bytes.len() == 64 => {
                 use sha2::Digest;
                 let digest = sha2::Sha256::digest(&bytes);
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&digest);
-                return Ok((key, path.clone()));
+                return Ok((digest.to_vec(), path.clone()));
             }
             Ok(bytes) => errors.push(format!(
                 "{}: unexpected size {} (expected 64)",
@@ -91,7 +96,7 @@ pub struct DaemonAccess {
     /// Shared instance to address.
     pub instance_name: String,
     /// RPC authkey the daemon expects.
-    pub authkey: [u8; 32],
+    pub authkey: Vec<u8>,
 }
 
 impl DaemonAccess {
@@ -171,5 +176,24 @@ mod tests {
         let expected: [u8; 32] = sha2::Sha256::digest(identity).into();
         assert_eq!(access.authkey, expected);
         assert_eq!(access.instance_name, "inst");
+    }
+
+    /// A config that sets `rpc_key` keys the client with it, as it keys the
+    /// daemon (D1 of the 2026-10-11 shared-instance audit); the identity file
+    /// beside it is not consulted.
+    #[test]
+    fn a_configured_rpc_key_wins_over_the_identity_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let storage = tmp.path().join("storage");
+        std::fs::create_dir_all(&storage).expect("storage dir");
+        std::fs::write(storage.join("transport_identity"), [7u8; 64]).expect("write identity");
+        std::fs::write(
+            tmp.path().join("config"),
+            "[reticulum]\n  rpc_key = a0b1c2d3\n\n[interfaces]\n",
+        )
+        .expect("write config");
+
+        let access = DaemonAccess::resolve(Some(tmp.path()), Some("inst")).expect("resolves");
+        assert_eq!(access.authkey, vec![0xA0, 0xB1, 0xC2, 0xD3]);
     }
 }

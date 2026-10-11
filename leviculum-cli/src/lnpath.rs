@@ -145,12 +145,12 @@ async fn run(args: Args) -> i32 {
         .map(|(key, _)| key);
 
     if args.drop {
-        return drop_path(&instance_name, authkey.as_ref(), &dest_hash).await;
+        return drop_path(&instance_name, authkey.as_deref(), &dest_hash).await;
     }
     query_path(
         &instance_name,
         &daemon_rpc::resolve_storage_path(&config_dir, config.as_ref()),
-        authkey.as_ref(),
+        authkey.as_deref(),
         &dest_hash,
         args.timeout.unwrap_or(DEFAULT_TIMEOUT),
     )
@@ -167,7 +167,7 @@ async fn run(args: Args) -> i32 {
 /// is built for this path — the RPC is the whole operation.
 async fn drop_path(
     instance_name: &str,
-    authkey: Option<&[u8; 32]>,
+    authkey: Option<&[u8]>,
     dest_hash: &DestinationHash,
 ) -> i32 {
     let pretty = prettyhexrep(dest_hash.as_bytes());
@@ -203,7 +203,7 @@ async fn drop_path(
 async fn query_path(
     instance_name: &str,
     storage_path: &std::path::Path,
-    authkey: Option<&[u8; 32]>,
+    authkey: Option<&[u8]>,
     dest_hash: &DestinationHash,
     timeout: f64,
 ) -> i32 {
@@ -222,7 +222,7 @@ async fn query_path(
 async fn wait_and_report(
     node: &ReticulumNode,
     instance_name: &str,
-    authkey: Option<&[u8; 32]>,
+    authkey: Option<&[u8]>,
     dest_hash: &DestinationHash,
     timeout: f64,
 ) -> i32 {
@@ -311,7 +311,7 @@ fn connect_error(instance_name: &str, error: &dyn std::fmt::Display) -> String {
 /// Python `reticulum.get_next_hop(dest)` — an RPC over the shared instance.
 async fn next_hop(
     instance_name: &str,
-    authkey: Option<&[u8; 32]>,
+    authkey: Option<&[u8]>,
     dest_hash: &DestinationHash,
 ) -> Option<Vec<u8>> {
     let authkey = authkey?;
@@ -332,7 +332,7 @@ async fn next_hop(
 /// prints whatever came back, so the caller passes it through unchanged.
 async fn next_hop_if_name(
     instance_name: &str,
-    authkey: Option<&[u8; 32]>,
+    authkey: Option<&[u8]>,
     dest_hash: &DestinationHash,
 ) -> Option<String> {
     let authkey = authkey?;

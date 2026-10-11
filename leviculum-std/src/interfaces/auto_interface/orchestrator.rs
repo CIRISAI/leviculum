@@ -568,6 +568,7 @@ where
                     match peer.incoming_tx.try_send(IncomingPacket {
                         data: data.to_vec(),
                         peer: None,
+                        radio: None,
                     }) {
                         Ok(()) => {}
                         Err(mpsc::error::TrySendError::Full(_)) => {

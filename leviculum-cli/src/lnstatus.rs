@@ -193,7 +193,7 @@ impl Args {
 /// Fetch `interface_stats` (and `link_count` when `-l`) from the daemon.
 async fn fetch_status(
     instance_name: &str,
-    authkey: &[u8; 32],
+    authkey: &[u8],
     want_link_count: bool,
 ) -> Result<(serde_json::Value, Option<i64>), String> {
     let stats = leviculum_std::rpc_query(instance_name, authkey, "interface_stats")
@@ -253,7 +253,7 @@ fn requested_table_rows(values: &[String]) -> Vec<&str> {
 /// omission is never silent.
 async fn fetch_transport_tables(
     instance_name: &str,
-    authkey: &[u8; 32],
+    authkey: &[u8],
     rows: &[&str],
 ) -> Option<serde_json::Value> {
     match leviculum_std::rpc_query_transport_tables(instance_name, authkey, rows).await {
@@ -591,7 +591,7 @@ fn parse_identity_hash(hex: &str) -> Result<[u8; 16], String> {
 /// `-m/--monitor`: clear the screen and re-render on each interval. The redraw
 /// uses the same single-shot render as the one-off path (rnstatus buffers its
 /// output then clears + prints; this matches that behaviour).
-async fn run_monitor(instance_name: &str, authkey: &[u8; 32], args: &Args, opts: &StatusOptions) {
+async fn run_monitor(instance_name: &str, authkey: &[u8], args: &Args, opts: &StatusOptions) {
     let interval = args.monitor_interval.max(0.2);
     loop {
         let rendered = match fetch_status(instance_name, authkey, args.link_stats).await {

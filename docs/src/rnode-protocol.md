@@ -365,7 +365,7 @@ WARN level, on the same target as `LORA_TX` and `LORA_CHTM`, and
 counted as `tx_unaccounted` in the interface stats. Every ambiguity
 resolves away from the accusation, because a false one would poison the
 instrument (`judge_airtime`,
-`leviculum-std/src/interfaces/rnode.rs:1316`): any rise at all counts as
+`leviculum-std/src/interfaces/rnode.rs:1317`): any rise at all counts as
 keyed, a falling ledger is read as a bin ageing out of the two-bin
 window rather than as a swallowed frame, a rise in `airtime_long`
 absolves even when the short window has not moved, a DCD busy fraction
@@ -382,7 +382,7 @@ it; the second verdict counts the frame as lost instead
 (`RNODE_TX_QUEUE_DROP ... reason=unaccounted_twice`). What a re-hand
 costs the far end is one duplicate, and the dedup cache drops it on
 arrival (`has_packet_hash`,
-`leviculum-core/src/transport.rs:4013`, which emits `DEDUP_DROP`). The
+`leviculum-core/src/transport.rs:4018`, which emits `DEDUP_DROP`). The
 classes that cache exempts -- announces, and link requests and proofs
 addressed to us -- are exactly the classes whose retries the stack
 already expects, so a second copy there is processed as a retry rather

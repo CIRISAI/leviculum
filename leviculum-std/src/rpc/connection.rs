@@ -139,7 +139,7 @@ pub(crate) async fn write_message<W: AsyncWrite + Unpin>(
 /// - `{sha256}` + 32 bytes: modern HMAC-SHA256 (Python >= 3.12)
 pub(crate) async fn deliver_challenge<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
-    authkey: &[u8; 32],
+    authkey: &[u8],
 ) -> Result<(), RpcError> {
     // Generate challenge: #CHALLENGE#{sha256} + 40 random bytes
     let mut challenge =
@@ -197,7 +197,7 @@ pub(crate) async fn deliver_challenge<S: AsyncRead + AsyncWrite + Unpin>(
 /// - Legacy: raw HMAC-MD5 (16 bytes, no prefix)
 pub(crate) async fn answer_challenge<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
-    authkey: &[u8; 32],
+    authkey: &[u8],
 ) -> Result<(), RpcError> {
     let challenge = read_message(stream).await?;
 
@@ -245,7 +245,7 @@ pub(crate) async fn answer_challenge<S: AsyncRead + AsyncWrite + Unpin>(
 /// 2. `answer_challenge(conn, authkey)`, server answers client's challenge
 pub(crate) async fn server_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
-    authkey: &[u8; 32],
+    authkey: &[u8],
 ) -> Result<(), RpcError> {
     deliver_challenge(stream, authkey).await?;
     answer_challenge(stream, authkey).await?;
@@ -259,7 +259,7 @@ pub(crate) async fn server_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 /// 2. `deliver_challenge(conn, authkey)`, client authenticates server
 pub(crate) async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
-    authkey: &[u8; 32],
+    authkey: &[u8],
 ) -> Result<(), RpcError> {
     answer_challenge(stream, authkey).await?;
     deliver_challenge(stream, authkey).await?;

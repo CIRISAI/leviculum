@@ -929,6 +929,16 @@ impl leviculum_core::traits::Storage for Storage {
     ) {
         self.inner.set_announce_rate(dest_hash, entry)
     }
+    fn record_announce_rate_timestamp(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        now_ms: u64,
+    ) {
+        self.inner.record_announce_rate_timestamp(dest_hash, now_ms)
+    }
+    fn announce_rate_timestamps(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Vec<u64> {
+        self.inner.announce_rate_timestamps(dest_hash)
+    }
 
     // Receipts
     fn get_receipt(

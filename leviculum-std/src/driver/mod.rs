@@ -1375,10 +1375,17 @@ pub struct ReticulumNode {
     /// to abstract Unix socket `\0rns/{name}` instead of starting its own
     /// interfaces from config.
     connect_instance_name: Option<String>,
+    /// The config's shared-instance `rpc_key`, keying this node's RPC
+    /// listener when it shares an instance and its queries when it is a
+    /// client of one; `None` keys both with the identity-derived default.
+    rpc_key: Option<Vec<u8>>,
     /// Time when the node was created (for RPC uptime reporting).
     start_time: std::time::Instant,
     /// Shared interface I/O counters, populated by the event loop.
     iface_stats_map: InterfaceStatsMap,
+    /// Per-packet radio readings by packet hash, filled by the event loop
+    /// and read by the RPC server's `packet_rssi` family.
+    radio_cache: crate::rpc::radio_cache::SharedPacketRadioCache,
     /// Reporting-side interface inventory (Codeberg #177): the listeners this
     /// daemon runs, plus the reference display identity of the connections
     /// they spawn. Transport holds only interfaces it can route packets on,
@@ -1564,8 +1571,10 @@ impl ReticulumNode {
             auto_peer_count: AutoPeerCount::default(),
             share_instance_name: None,
             connect_instance_name: None,
+            rpc_key: None,
             start_time: std::time::Instant::now(),
             iface_stats_map: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            radio_cache: crate::rpc::radio_cache::shared(),
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
             local_client_count: Arc::new(AtomicUsize::new(0)),
             iface_ready_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
@@ -1986,6 +1995,7 @@ impl ReticulumNode {
             _ => None,
         };
         let iface_stats_map = Arc::clone(&self.iface_stats_map);
+        let radio_cache = Arc::clone(&self.radio_cache);
         let inventory = Arc::clone(&self.inventory);
         let local_client_count = Arc::clone(&self.local_client_count);
         let flush_interval_secs = self.flush_interval_secs;
@@ -2114,6 +2124,7 @@ impl ReticulumNode {
                     shutdown: shutdown_rx,
                 },
                 iface_stats_map,
+                radio_cache,
                 inventory,
                 local_client_count,
                 flush_interval_secs,
@@ -2325,7 +2336,7 @@ impl ReticulumNode {
             // Start RPC server for Python CLI tool compatibility (rnstatus, rnpath, rnprobe)
             let authkey = {
                 let core = self.inner.lock_recover();
-                match crate::rpc::rpc_authkey(core.identity()) {
+                match crate::rpc::resolve_rpc_authkey(self.rpc_key.as_deref(), core.identity()) {
                     Ok(key) => key,
                     Err(e) => {
                         tracing::warn!(
@@ -2345,6 +2356,7 @@ impl ReticulumNode {
                 Arc::clone(&self.inventory),
                 self.auto_peer_count.clone(),
                 Some(self.discovery_storage_root()),
+                Arc::clone(&self.radio_cache),
             ) {
                 tracing::warn!("Failed to start RPC server: {}", e);
             }
@@ -2410,6 +2422,24 @@ impl ReticulumNode {
     /// Called by the builder when `connect_to_shared_instance` is set.
     pub(crate) fn set_connect_instance(&mut self, name: String) {
         self.connect_instance_name = Some(name);
+    }
+
+    /// Key the shared-instance RPC with the config's `rpc_key`, both ends.
+    ///
+    /// Called by the builder from `[reticulum] rpc_key`.
+    pub(crate) fn set_rpc_key(&mut self, key: Option<Vec<u8>>) {
+        self.rpc_key = key;
+    }
+
+    /// The shared instance this node is a client of, with the key to ask it
+    /// with, or `None` when it is no client.
+    fn shared_instance_client(&self) -> Option<crate::rpc::SharedInstanceClient> {
+        self.connect_instance_name
+            .as_ref()
+            .map(|name| crate::rpc::SharedInstanceClient {
+                instance_name: name.clone(),
+                rpc_key: self.rpc_key.clone(),
+            })
     }
 
     /// Called by the builder to carry channel-backed RNode interfaces
@@ -2802,7 +2832,7 @@ impl ReticulumNode {
         dest_hash: &DestinationHash,
     ) -> Option<u64> {
         shared_instance_first_hop_timeout_ms(
-            self.connect_instance_name.as_deref(),
+            self.shared_instance_client().as_ref(),
             &self.inner,
             dest_hash,
         )
@@ -3776,7 +3806,7 @@ impl ReticulumNode {
             *dest_hash,
             Arc::clone(&self.inner),
             self.action_dispatch_tx.clone(),
-            self.connect_instance_name.clone(),
+            self.shared_instance_client(),
         )
     }
 
@@ -4313,6 +4343,29 @@ fn spawn_core_stall_watchdog(inner: &Arc<Mutex<StdNodeCore>>) -> CoreStallWatchd
     CoreStallWatchdog(stop)
 }
 
+/// File a received packet's radio readings under the hash the core computes
+/// for it, so the `packet_rssi` family of RPC verbs can answer (D6 of
+/// `docs/src/audits/2026-10-11-shared-instance-rpc.md`). On an IFAC
+/// interface the hash is over the bytes the access code unwraps to, as
+/// Python hashes the packet after IFAC removal
+/// (`reference/Reticulum/RNS/Transport.py:1452-1458`); a frame that fails
+/// the code is dropped by the core and leaves no reading.
+fn record_packet_radio_stats(
+    cache: &crate::rpc::radio_cache::SharedPacketRadioCache,
+    ifac: Option<&leviculum_core::ifac::IfacConfig>,
+    raw: &[u8],
+    stats: crate::rpc::radio_cache::PacketRadioStats,
+) {
+    let hash = match ifac {
+        Some(ifac) => match ifac.verify_ifac(raw) {
+            Ok(unwrapped) => leviculum_core::packet::packet_hash(&unwrapped),
+            Err(_) => return,
+        },
+        None => leviculum_core::packet::packet_hash(raw),
+    };
+    cache.lock_recover().record(hash, stats);
+}
+
 /// pure state machine (`NodeCore`) and the actual network. Uses `select!`
 /// to wake immediately on socket readability, outgoing data, or timer expiry.
 #[allow(clippy::too_many_arguments)]
@@ -4321,6 +4374,7 @@ async fn run_event_loop(
     mut registry: InterfaceRegistry,
     channels: EventLoopChannels,
     iface_stats_map: InterfaceStatsMap,
+    radio_cache: crate::rpc::radio_cache::SharedPacketRadioCache,
     inventory: crate::interfaces::inventory::SharedInventory,
     local_client_count: Arc<AtomicUsize>,
     flush_interval_secs: u64,
@@ -4563,6 +4617,14 @@ async fn run_event_loop(
                             iface_id,
                             registry.name_of(iface_id),
                         );
+                        if let Some(stats) = pkt.radio {
+                            record_packet_radio_stats(
+                                &radio_cache,
+                                ifac_configs.get(&iface_id.0),
+                                &pkt.data,
+                                stats,
+                            );
+                        }
                         // leviculum#29 stages 2-3: precompute the expensive
                         // inbound crypto OFF the node lock. The Ed25519
                         // announce verify and the Single-destination ECDH
@@ -6342,14 +6404,15 @@ fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::Int
 /// which on run 475/1 made our client retry 1.7 times later than a Python
 /// client beside it (leviculum#480, receipts leviculum#485).
 pub(crate) async fn shared_instance_first_hop_timeout_ms(
-    instance: Option<&str>,
+    client: Option<&crate::rpc::SharedInstanceClient>,
     inner: &Mutex<StdNodeCore>,
     dest_hash: &DestinationHash,
 ) -> Option<u64> {
-    let instance = instance?;
+    let client = client?;
+    let instance = client.instance_name.as_str();
     let authkey = {
         let core = inner.lock_recover();
-        crate::rpc::rpc_authkey(core.identity())
+        crate::rpc::resolve_rpc_authkey(client.rpc_key.as_deref(), core.identity())
     };
     let answer = match authkey {
         Ok(authkey) => crate::rpc::rpc_query_hash_param(
@@ -6394,6 +6457,45 @@ pub(crate) async fn shared_instance_first_hop_timeout_ms(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A radio reading is filed under the hash of the packet the core will
+    /// see: on an IFAC interface that is the unwrapped packet, as Python
+    /// hashes after IFAC removal; a frame that fails the access code leaves
+    /// no reading.
+    #[test]
+    fn packet_radio_stats_are_filed_under_the_unwrapped_hash() {
+        use crate::rpc::radio_cache::{lookup, shared, PacketRadioStats};
+        let stats = PacketRadioStats {
+            rssi: Some(-80),
+            snr: Some(-2.25),
+            q: Some(45.0),
+        };
+        // A plain HEADER_1 data packet: flags, hops, destination, context, data.
+        let mut plain = vec![0x00u8, 0x00];
+        plain.extend_from_slice(&[0x11; 16]);
+        plain.push(0x00);
+        plain.extend_from_slice(b"payload");
+        let hash = leviculum_core::packet::packet_hash(&plain);
+
+        let cache = shared();
+        record_packet_radio_stats(&cache, None, &plain, stats);
+        assert_eq!(lookup(&cache, &hash), Some(stats));
+
+        let ifac = leviculum_core::ifac::IfacConfig::new(Some("radionet"), None, 8).expect("ifac");
+        let wrapped = ifac.apply_ifac(&plain).expect("wrap");
+        let cache = shared();
+        record_packet_radio_stats(&cache, Some(&ifac), &wrapped, stats);
+        assert_eq!(lookup(&cache, &hash), Some(stats));
+        assert_eq!(
+            lookup(&cache, &leviculum_core::packet::packet_hash(&wrapped)),
+            None
+        );
+
+        let other = leviculum_core::ifac::IfacConfig::new(Some("othernet"), None, 8).expect("ifac");
+        let cache = shared();
+        record_packet_radio_stats(&cache, Some(&other), &wrapped, stats);
+        assert_eq!(lookup(&cache, &hash), None);
+    }
 
     /// Codeberg #293: pin `DEFAULT_IFAC_SIZE` for **every** interface type we
     /// build, so a newly supported type has to be classified deliberately
@@ -9770,6 +9872,7 @@ mod tests {
                 shutdown: shutdown_rx,
             },
             Arc::new(Mutex::new(BTreeMap::new())),
+            crate::rpc::radio_cache::shared(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             Arc::new(AtomicUsize::new(0)),
             flush_interval_secs,
@@ -9917,6 +10020,7 @@ mod tests {
             .send(crate::interfaces::IncomingPacket {
                 data: buf[..len].to_vec(),
                 peer: None,
+                radio: None,
             })
             .await
             .expect("loop is live");
@@ -9978,6 +10082,7 @@ mod tests {
             .send(crate::interfaces::IncomingPacket {
                 data: buf[..len].to_vec(),
                 peer: Some(link),
+                radio: None,
             })
             .await
             .expect("loop is live");

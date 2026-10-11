@@ -592,6 +592,7 @@ async fn udp_io_task(
                                 .send(IncomingPacket {
                                     data: buf[..len].to_vec(),
                                     peer: None,
+                                    radio: None,
                                 })
                                 .await
                                 .is_err()

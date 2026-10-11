@@ -26,6 +26,7 @@ pub(super) fn handle_request(
     inventory: &SharedInventory,
     auto_peer_count: usize,
     discovery_storage: Option<&std::path::Path>,
+    radio_cache: &super::radio_cache::SharedPacketRadioCache,
     codec: Codec,
 ) -> Result<Vec<u8>, RpcError> {
     let response = match request {
@@ -111,10 +112,29 @@ pub(super) fn handle_request(
         RpcRequest::DropAllVia { destination_hash } => drop_all_via(core, destination_hash),
         RpcRequest::DropAnnounceQueues => pickle_bool(true),
 
-        // Radio-only (always None for TCP/UDP/Auto)
-        RpcRequest::GetPacketRssi { .. } => pickle_none(),
-        RpcRequest::GetPacketSnr { .. } => pickle_none(),
-        RpcRequest::GetPacketQ { .. } => pickle_none(),
+        // Per-packet radio readings (D6 of the 2026-10-11 shared-instance
+        // audit): answered from the cache the event loop fills from the
+        // readings a radio interface hands over with each packet; None for
+        // a packet that came over a medium without them, or one evicted
+        // (`Reticulum.py:1648-1688`).
+        RpcRequest::GetPacketRssi { packet_hash } => {
+            match super::radio_cache::lookup(radio_cache, packet_hash).and_then(|s| s.rssi) {
+                Some(rssi) => pickle_int(rssi as i64),
+                None => pickle_none(),
+            }
+        }
+        RpcRequest::GetPacketSnr { packet_hash } => {
+            match super::radio_cache::lookup(radio_cache, packet_hash).and_then(|s| s.snr) {
+                Some(snr) => pickle_float(snr),
+                None => pickle_none(),
+            }
+        }
+        RpcRequest::GetPacketQ { packet_hash } => {
+            match super::radio_cache::lookup(radio_cache, packet_hash).and_then(|s| s.q) {
+                Some(q) => pickle_float(q),
+                None => pickle_none(),
+            }
+        }
 
         // Blackhole set (Codeberg #67 + #88). Real membership-backed set on
         // Transport; matches the Python wire contract (Reticulum.py:1699-1742,
@@ -308,7 +328,7 @@ fn opt_int(v: Option<i64>) -> Value {
 ///     `r_battery_state != 0x00`).
 ///   - `last_rssi` (int dBm) / `last_snr` (float dB) -> only once the device
 ///     has reported a received packet via `apply_radio_stat`
-///     (interfaces/rnode.rs:1940-1948). These two are ours: Python does not
+///     (interfaces/rnode.rs:1941-1949). These two are ours: Python does not
 ///     place them in the dict (its RSSI feeds per-packet reporting), so they
 ///     are emitted as additive keys and omitted while `None` — rnstatus
 ///     renders by key lookup (rnstatus.py:475-533) and ignores them.
@@ -1628,7 +1648,18 @@ fn build_rate_table(core: &StdNodeCore, start_time: std::time::Instant) -> Value
                 pickle_int(entry.rate_violations as i64),
             ),
             (pickle_str_key("blocked_until"), blocked_until_secs),
-            (pickle_str_key("timestamps"), pickle_list(vec![])),
+            // Python serves the entry's own list (Reticulum.py:1557);
+            // `rnpath -r` reads `timestamps[0]` (rnpath.py:344).
+            (
+                pickle_str_key("timestamps"),
+                pickle_list(
+                    entry
+                        .timestamps_ms
+                        .iter()
+                        .map(|&ms| pickle_float(mono_ms_to_epoch(epoch_base, now_mono_ms, ms)))
+                        .collect(),
+                ),
+            ),
         ]);
         list.push(dict);
     }
@@ -2346,6 +2377,7 @@ mod tests {
                 &inventory,
                 0,
                 None,
+                &crate::rpc::radio_cache::shared(),
                 codec,
             )
             .expect("handle request");
@@ -2497,6 +2529,100 @@ mod tests {
         assert!(try_into_hash(&[]).is_none());
     }
 
+    /// D6 of the 2026-10-11 shared-instance audit: the three per-packet verbs
+    /// answer a cached packet's readings in Python's types (int dBm, float dB,
+    /// float percent) over both codecs, and None for a hash never heard.
+    #[test]
+    fn packet_radio_verbs_answer_from_the_cache() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::InterfaceStatsMap;
+        use crate::rpc::pickle::{decode_response_msgpack, Codec, RpcRequest};
+        use crate::rpc::radio_cache::PacketRadioStats;
+        use leviculum_core::node::NodeCoreBuilder;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-packet-radio-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
+        let cache = crate::rpc::radio_cache::shared();
+        let heard = [0x5Au8; 32];
+        cache.lock().unwrap().record(
+            heard,
+            PacketRadioStats {
+                rssi: Some(-61),
+                snr: Some(5.5),
+                q: Some(96.7),
+            },
+        );
+
+        for codec in [Codec::Pickle, Codec::Msgpack] {
+            let ask = |core: &mut StdNodeCore, req: RpcRequest| -> Value {
+                let bytes = handle_request(
+                    &req,
+                    core,
+                    std::time::Instant::now(),
+                    &stats,
+                    &inventory,
+                    0,
+                    None,
+                    &cache,
+                    codec,
+                )
+                .unwrap();
+                match codec {
+                    Codec::Pickle => {
+                        serde_pickle::value_from_slice(&bytes, Default::default()).unwrap()
+                    }
+                    Codec::Msgpack => decode_response_msgpack(&bytes).unwrap(),
+                }
+            };
+            let h = heard.to_vec();
+            assert_eq!(
+                ask(
+                    &mut core,
+                    RpcRequest::GetPacketRssi {
+                        packet_hash: h.clone()
+                    }
+                ),
+                Value::I64(-61)
+            );
+            assert_eq!(
+                ask(
+                    &mut core,
+                    RpcRequest::GetPacketSnr {
+                        packet_hash: h.clone()
+                    }
+                ),
+                Value::F64(5.5)
+            );
+            assert_eq!(
+                ask(&mut core, RpcRequest::GetPacketQ { packet_hash: h }),
+                Value::F64(96.7)
+            );
+            let unheard = vec![0xA5u8; 32];
+            for req in [
+                RpcRequest::GetPacketRssi {
+                    packet_hash: unheard.clone(),
+                },
+                RpcRequest::GetPacketSnr {
+                    packet_hash: unheard.clone(),
+                },
+                RpcRequest::GetPacketQ {
+                    packet_hash: unheard.clone(),
+                },
+            ] {
+                assert_eq!(ask(&mut core, req), Value::None, "{codec:?}");
+            }
+        }
+    }
+
     // identity_data lifecycle dispatch end-to-end: handle_request must produce a
     // bool response (never drop the connection) for both the pickle and msgpack
     // codecs. For an identity with no known destinations (nothing cached), the
@@ -2546,6 +2672,7 @@ mod tests {
                     &crate::interfaces::inventory::InterfaceInventory::shared(),
                     0,
                     None,
+                    &crate::rpc::radio_cache::shared(),
                     codec,
                 )
                 .unwrap();
@@ -2594,6 +2721,7 @@ mod tests {
                 &crate::interfaces::inventory::InterfaceInventory::shared(),
                 0,
                 None,
+                &crate::rpc::radio_cache::shared(),
                 codec,
             )
             .unwrap();
@@ -3511,7 +3639,7 @@ mod tests {
     // a peer/instance label that matches none of `interface_type`'s name
     // prefixes, so a LoRa radio is reported as the generic "Interface". That
     // is not only a wrong medium column in rnstatus: `itype` also picks the
-    // bitrate guess (handlers.rs:719-725), so the radio is advertised at 10 Mbps.
+    // bitrate guess (handlers.rs:739-745), so the radio is advertised at 10 Mbps.
     #[test]
     fn interface_type_comes_from_the_transport_not_the_name() {
         use crate::clock::SystemClock;
@@ -3922,6 +4050,7 @@ mod tests {
                 &inventory,
                 0,
                 None,
+                &crate::rpc::radio_cache::shared(),
                 Codec::Msgpack,
             )
             .expect("handle request");
@@ -4256,6 +4385,7 @@ mod tests {
                 &inventory,
                 0,
                 None,
+                &crate::rpc::radio_cache::shared(),
                 Codec::Msgpack,
             )
             .expect("transport_tables must serialize")
@@ -4401,6 +4531,7 @@ mod tests {
                 &crate::interfaces::inventory::InterfaceInventory::shared(),
                 0,
                 None,
+                &crate::rpc::radio_cache::shared(),
                 codec,
             )
             .expect("transport_tables must serialize");
@@ -4530,6 +4661,7 @@ mod tests {
                 &crate::interfaces::inventory::InterfaceInventory::shared(),
                 0,
                 None,
+                &crate::rpc::radio_cache::shared(),
                 codec,
             )
             .expect("identities must serialize");

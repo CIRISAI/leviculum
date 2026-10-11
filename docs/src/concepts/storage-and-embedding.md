@@ -24,7 +24,7 @@ driver:
   subject of [Time and Clocks](time-and-clocks.md).
 - **`Storage`** (`traits.rs:589`) — supplies persistence and lookup
   for every collection the protocol maintains. `flush()` defaults to a
-  no-op (`traits.rs:962`) so a RAM-only backend needs to implement
+  no-op (`traits.rs:980`) so a RAM-only backend needs to implement
   nothing extra.
 - **`Interface`** (`traits.rs:316`) — supplies framing and the wire (see
   [Interface Isolation](interface-isolation.md) and the

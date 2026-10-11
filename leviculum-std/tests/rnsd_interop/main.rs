@@ -71,6 +71,7 @@ mod mtu_tests;
 mod multihop_tests;
 mod node_api_tests;
 mod nomad_page_tests;
+mod packet_radio_stats_tests;
 mod path_gap_tests;
 mod path_recovery_tests;
 mod pipe_interop_tests;

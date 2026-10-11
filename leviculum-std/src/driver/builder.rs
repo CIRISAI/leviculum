@@ -1006,6 +1006,7 @@ impl ReticulumNodeBuilder {
         if let Some(ref name) = self.connect_instance_name {
             node.set_connect_instance(name.clone());
         }
+        node.set_rpc_key(config.reticulum.rpc_key.clone());
         node.set_storage_path(storage_path.clone());
         node.set_rnode_channels(rnode_channels);
         node.set_autoconnect_max(autoconnect_max);

@@ -292,7 +292,7 @@ fn render_interface_config(out: &mut String, iface: &InterfaceConfig) {
 // RPC / daemon view
 // ---------------------------------------------------------------------------
 
-async fn append_rpc_section(out: &mut String, instance_name: &str, authkey: &[u8; 32]) {
+async fn append_rpc_section(out: &mut String, instance_name: &str, authkey: &[u8]) {
     // interface_stats
     let _ = writeln!(out, "## interface_stats");
     match leviculum_std::rpc_query(instance_name, authkey, "interface_stats").await {

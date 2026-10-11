@@ -28,8 +28,8 @@ use alloc::vec::Vec;
 
 use crate::bounded_map::BoundedMap;
 use crate::constants::{
-    HASHLIST_MAXSIZE, KNOWN_DEST_USED_LINGER_MS, MAX_PATH_REQUEST_TAGS, RATCHET_SIZE,
-    RECEIPT_RETENTION_MS, TRUNCATED_HASHBYTES,
+    HASHLIST_MAXSIZE, KNOWN_DEST_USED_LINGER_MS, MAX_PATH_REQUEST_TAGS, MAX_RATE_TIMESTAMPS,
+    RATCHET_SIZE, RECEIPT_RETENTION_MS, TRUNCATED_HASHBYTES,
 };
 use crate::identity::Identity;
 use crate::storage_census::CollectionCount;
@@ -196,6 +196,15 @@ const fn order_index_bytes(key_bytes: usize) -> usize {
 /// `local_client_dest_map` is keyed by.
 const HASH_ORDER_BYTES: usize = order_index_bytes(TRUNCATED_HASHBYTES);
 
+/// One announce-rate row: the rate state the transport reads and writes,
+/// plus the last [`MAX_RATE_TIMESTAMPS`] announce times (oldest first) that
+/// only the `rate_table` RPC reads.
+#[derive(Debug, Clone)]
+struct RateSlot {
+    entry: AnnounceRateEntry,
+    timestamps: VecDeque<u64>,
+}
+
 /// In-memory storage with configurable per-collection capacity limits.
 ///
 /// Uses BTreeMap/BTreeSet for all collections. Not persistent, all data is
@@ -281,8 +290,9 @@ pub struct MemoryStorage {
     /// **Eviction: oldest first.** Dropping an entry forgets that a
     /// destination has been announcing too fast, which costs at most one
     /// extra rebroadcast before the state rebuilds; the entry is re-inserted
-    /// on its next announce anyway.
-    announce_rate_table: BoundedMap<[u8; TRUNCATED_HASHBYTES], AnnounceRateEntry>,
+    /// on its next announce anyway. The announce times ride in the same slot,
+    /// so they are evicted and swept with the entry they describe.
+    announce_rate_table: BoundedMap<[u8; TRUNCATED_HASHBYTES], RateSlot>,
 
     // Receipts
     /// Sent packets awaiting proof.
@@ -687,11 +697,15 @@ impl MemoryStorage {
             n, raw, est
         );
 
-        // announce_rate_table: BTreeMap<[u8; 16], AnnounceRateEntry>, 3x
+        // announce_rate_table: BTreeMap<[u8; 16], RateSlot>, 3x, plus each
+        // slot's timestamp deque
         let n = self.announce_rate_table.len();
-        let raw = (n
-            * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<AnnounceRateEntry>()))
+        let mut raw = (n
+            * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<RateSlot>()))
             as u64;
+        for slot in self.announce_rate_table.values() {
+            raw += (slot.timestamps.capacity() * core::mem::size_of::<u64>()) as u64;
+        }
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -960,7 +974,7 @@ impl Storage for MemoryStorage {
     fn announce_rate_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], AnnounceRateEntry)> {
         self.announce_rate_table
             .iter()
-            .map(|(k, v)| (*k, *v))
+            .map(|(k, v)| (*k, v.entry))
             .collect()
     }
 
@@ -1070,7 +1084,9 @@ impl Storage for MemoryStorage {
         &self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
     ) -> Option<&AnnounceRateEntry> {
-        self.announce_rate_table.get(dest_hash)
+        self.announce_rate_table
+            .get(dest_hash)
+            .map(|slot| &slot.entry)
     }
 
     fn set_announce_rate(
@@ -1078,7 +1094,37 @@ impl Storage for MemoryStorage {
         dest_hash: [u8; TRUNCATED_HASHBYTES],
         entry: AnnounceRateEntry,
     ) {
-        self.announce_rate_table.insert(dest_hash, entry);
+        if let Some(slot) = self.announce_rate_table.get_mut(&dest_hash) {
+            slot.entry = entry;
+        } else {
+            self.announce_rate_table.insert(
+                dest_hash,
+                RateSlot {
+                    entry,
+                    timestamps: VecDeque::new(),
+                },
+            );
+        }
+    }
+
+    fn record_announce_rate_timestamp(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        now_ms: u64,
+    ) {
+        if let Some(slot) = self.announce_rate_table.get_mut(dest_hash) {
+            slot.timestamps.push_back(now_ms);
+            while slot.timestamps.len() > MAX_RATE_TIMESTAMPS {
+                slot.timestamps.pop_front();
+            }
+        }
+    }
+
+    fn announce_rate_timestamps(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Vec<u64> {
+        self.announce_rate_table
+            .get(dest_hash)
+            .map(|slot| slot.timestamps.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     // Receipts
@@ -2101,6 +2147,45 @@ mod tests {
         assert_eq!(expired.len(), 1);
     }
 
+    /// The announce times live in the rate entry's slot: a rate update
+    /// keeps them, the list is capped at `MAX_RATE_TIMESTAMPS`, nothing is
+    /// recorded for a destination without an entry, and the stale-metadata
+    /// sweep takes them with the entry.
+    #[test]
+    fn announce_rate_timestamps_ride_with_their_entry() {
+        let mut s = MemoryStorage::with_defaults();
+        let h = [0x42u8; TRUNCATED_HASHBYTES];
+        let entry = AnnounceRateEntry {
+            last_ms: 1,
+            rate_violations: 0,
+            blocked_until_ms: 0,
+        };
+
+        s.record_announce_rate_timestamp(&h, 5);
+        assert!(s.announce_rate_timestamps(&h).is_empty());
+
+        s.set_announce_rate(h, entry);
+        for t in 0..(MAX_RATE_TIMESTAMPS as u64 + 3) {
+            s.record_announce_rate_timestamp(&h, t);
+        }
+        s.set_announce_rate(
+            h,
+            AnnounceRateEntry {
+                rate_violations: 2,
+                ..entry
+            },
+        );
+        let expected: Vec<u64> = (3..MAX_RATE_TIMESTAMPS as u64 + 3).collect();
+        assert_eq!(s.announce_rate_timestamps(&h), expected);
+        assert_eq!(s.get_announce_rate(&h).unwrap().rate_violations, 2);
+
+        // No path for `h`, so the sweep drops the entry and its times.
+        s.clean_stale_path_metadata();
+        assert!(s.get_announce_rate(&h).is_none());
+        s.set_announce_rate(h, entry);
+        assert!(s.announce_rate_timestamps(&h).is_empty());
+    }
+
     #[test]
     fn test_clean_stale_path_metadata() {
         let mut s = MemoryStorage::with_defaults();
@@ -2712,9 +2797,11 @@ mod diagnostic_model_tests {
             raw_bytes_of(&dump, "link_table"),
             (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<LinkEntry>()) as u64,
         );
+        // The slot carries the entry and its announce times; a fresh one
+        // holds no times, so its deque has no heap block yet.
         assert_eq!(
             raw_bytes_of(&dump, "announce_rate_table"),
-            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<AnnounceRateEntry>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<RateSlot>()) as u64,
         );
         assert_eq!(
             raw_bytes_of(&dump, "receipts"),

@@ -343,6 +343,171 @@ async fn test_rnpath_rate_table_against_rust_daemon() {
     cleanup_config_dir(&config_dir);
 }
 
+/// D4 of the shared-instance audit (`docs/src/audits/2026-10-11-shared-instance-rpc.md`):
+/// with one announce-rate entry present, `rnpath -r` from the reference tree
+/// prints the rate row. It reads `timestamps[0]`
+/// (`reference/Reticulum/RNS/Utilities/rnpath.py:344`), so an empty list
+/// made it print "Error while processing entry" for every row.
+#[tokio::test]
+async fn test_rnpath_rate_table_prints_a_row_for_a_rate_entry() {
+    init_tracing();
+
+    let (_node, instance_name, tcp_addr, identity_bytes, _storage) =
+        start_rust_daemon_with_rpc().await;
+    let config_dir = python_client_ready(&instance_name, &identity_bytes).await;
+
+    // A neighbour over TCP: the daemon is transport-enabled, so its TCP
+    // interface carries the default announce-rate target and the announce
+    // opens a rate entry.
+    let peer_storage = crate::common::temp_storage("rnpath_rate_row", "peer");
+    let mut peer = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_client(tcp_addr)
+        .storage_path(peer_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build peer");
+    peer.start().await.expect("start peer");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let dest = leviculum_core::Destination::new(
+        Some(Identity::generate(&mut rand_core::OsRng)),
+        leviculum_core::Direction::In,
+        leviculum_core::DestinationType::Single,
+        "ratetable",
+        &["row"],
+    )
+    .expect("create destination");
+    let dest_hash = *dest.hash();
+    peer.register_destination(dest);
+    peer.announce_destination(&dest_hash, None)
+        .await
+        .expect("announce");
+
+    let hash_hex = hex::encode(dest_hash.as_bytes());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let (stdout, stderr) = loop {
+        let output = run_python_tool(RNPATH_PY, &["-r"], &config_dir).await;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "rnpath -r exited with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        );
+        if stdout.contains(&hash_hex) || tokio::time::Instant::now() >= deadline {
+            break (stdout, stderr);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    eprintln!("=== rnpath -r STDOUT ===\n{stdout}");
+
+    assert!(
+        stdout.contains(&hash_hex),
+        "rnpath -r never listed the announced destination {hash_hex}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("Error while processing entry"),
+        "rnpath -r could not render the rate row:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("announces/hour"),
+        "rnpath -r printed no rate line:\n{stdout}"
+    );
+
+    cleanup_config_dir(&config_dir);
+}
+
+/// D1 of the shared-instance audit: a config that sets `rpc_key` keys both
+/// ends of the RPC (`reference/Reticulum/RNS/Reticulum.py:509-515`, applied at
+/// `:355-359` and `:1265`). `rnstatus` reading that config must reach lnsd
+/// built from it; before, lnsd ignored the key and refused the handshake.
+/// The negative control: a client without the key no longer gets in.
+#[tokio::test]
+async fn test_rnstatus_with_rpc_key_against_rust_daemon() {
+    init_tracing();
+
+    let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let instance_name = format!("rpckey_{}_{}", std::process::id(), test_id);
+    let rpc_key_hex = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let identity_bytes = identity
+        .private_key_bytes()
+        .expect("generated identity must have private keys");
+
+    // One config file, the one the Python client reads, is also the one
+    // the daemon is built from: the drop-in contract in its plainest form.
+    let keyed_dir = create_python_config_dir(&instance_name, &identity_bytes);
+    let config_file = keyed_dir.join("config");
+    let content = std::fs::read_to_string(&config_file).expect("read config");
+    std::fs::write(
+        &config_file,
+        content.replacen(
+            "[reticulum]\n",
+            &format!("[reticulum]\n  rpc_key = {rpc_key_hex}\n"),
+            1,
+        ),
+    )
+    .expect("write keyed config");
+    let daemon_config =
+        leviculum_std::config::Config::load(&config_file).expect("load the keyed config");
+    let storage = crate::common::temp_storage("rnstatus_rpc_key", "node");
+    let mut node = ReticulumNodeBuilder::new()
+        .identity(identity)
+        .config(daemon_config)
+        .enable_transport(true)
+        .share_instance(true)
+        .instance_name(instance_name.clone())
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build daemon");
+    node.start().await.expect("start daemon");
+
+    // Waited on the real condition: rnstatus exits 0 with "Could not get RNS
+    // status" both while the RPC is still coming up and when the key is
+    // refused, so only the rendered status tells the two apart.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let output = loop {
+        let output = run_python_tool(RNSTATUS_PY, &[], &keyed_dir).await;
+        if String::from_utf8_lossy(&output.stdout).contains("Transport Instance")
+            || tokio::time::Instant::now() >= deadline
+        {
+            break output;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("=== rnstatus (rpc_key) STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}");
+    assert!(
+        output.status.success() && stdout.contains("Transport Instance"),
+        "rnstatus with the configured rpc_key must reach lnsd:\n{stdout}\n{stderr}"
+    );
+
+    // Same daemon, a client config without the key: it derives the key
+    // from the transport identity, which no longer opens the listener.
+    let unkeyed_dir = std::env::temp_dir().join(format!("rpc_interop_unkeyed_{instance_name}"));
+    let _ = std::fs::remove_dir_all(&unkeyed_dir);
+    std::fs::create_dir_all(&unkeyed_dir).expect("create unkeyed dir");
+    std::fs::create_dir_all(unkeyed_dir.join("storage")).expect("storage dir");
+    std::fs::write(
+        unkeyed_dir.join("storage").join("transport_identity"),
+        identity_bytes,
+    )
+    .expect("write identity");
+    std::fs::write(unkeyed_dir.join("config"), content).expect("write unkeyed config");
+    let output = run_python_tool(RNSTATUS_PY, &[], &unkeyed_dir).await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    eprintln!("=== rnstatus (no rpc_key) STDOUT ===\n{stdout}");
+    assert!(
+        !stdout.contains("Transport Instance"),
+        "a client without the configured rpc_key must not get in:\n{stdout}"
+    );
+
+    cleanup_config_dir(&keyed_dir);
+    cleanup_config_dir(&unkeyed_dir);
+}
+
 /// Test `rnstatus -l` (link stats) against the Rust daemon.
 /// Exercises the link_count RPC command.
 #[tokio::test]

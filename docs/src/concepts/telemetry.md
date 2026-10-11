@@ -430,8 +430,8 @@ A collector redistributes positions of people who are not asking for
 that redistribution. It therefore answers requests only from an explicit
 allow-list, empty by default, set only through a path that is not the
 radio: on a host that is the config file, as `remote_management_allowed`
-is (`leviculum-std/src/config.rs:119`, empty by default at
-`leviculum-std/src/config.rs:375`); on a firmware with no filesystem it
+is (`leviculum-std/src/config.rs:127`, empty by default at
+`leviculum-std/src/config.rs:383`); on a firmware with no filesystem it
 is the local control channel, which is the same requirement in a
 different envelope.
 
@@ -522,7 +522,7 @@ their index stamps (there is no re-index).
   destination is impossible without it. There is no broadcast around
   this: the reference's transmit-on-all-interfaces branch
   (`reference/Reticulum/RNS/Transport.py:1177-1182`, our equivalent
-  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:4349`)
+  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:4354`)
   applies to a packet that already exists, and building one required the
   key. So a port either preconfigures the target identity or waits until
   it has heard the target announce.

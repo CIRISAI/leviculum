@@ -337,7 +337,7 @@ where
                                         counters.rx_bytes.fetch_add(
                                             data.len() as u64, Ordering::Relaxed);
                                         if incoming_tx
-                                            .send(IncomingPacket { data, peer: None })
+                                            .send(IncomingPacket { data, peer: None, radio: None })
                                             .await
                                             .is_err()
                                         {

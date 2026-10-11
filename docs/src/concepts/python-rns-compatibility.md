@@ -118,7 +118,7 @@ grounds: an application pinned it, it was used within
 `UNUSED_DESTINATION_LINGER` — 6 minutes
 (`reference/Reticulum/RNS/Identity.py:349-352`, the two timeouts at
 `Transport.py:91-92`). We implement the first two and not the third
-(`leviculum-core/src/memory_storage.rs:1242`): our announce cache stores
+(`leviculum-core/src/memory_storage.rs:1288`): our announce cache stores
 the raw announce, not the moment we heard it, so there is no age to
 compare against. The third arm only ever protects a destination nothing
 has asked about, so dropping it a few minutes early costs a path request
@@ -136,7 +136,7 @@ Leviculum defaults it **off** on dial-out point-to-point links —
 `TCPClientInterface`, `BackboneClientInterface`, `UDPInterface`, and an
 `I2PInterface` without `connectable` — and leaves it **on** everywhere
 else, including every listener
-(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:960`).
+(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:969`).
 
 Against the rule: the flag decides only whether *we* hold incoming
 announces, so no wire byte and no behaviour a peer observes changes
@@ -188,7 +188,7 @@ whose maximum is lower answers by clamping and echoing the clamped
 value (`RNode_Firmware/RNode_Firmware.ino:861-879` — 17 dBm on an
 SX127x, `PA_MAX_OUTPUT` on an SX1262 with an external PA). Confirmation
 is otherwise an exact match on both stacks (ours at
-`leviculum-std/src/interfaces/rnode.rs:1874`, the reference at
+`leviculum-std/src/interfaces/rnode.rs:1875`, the reference at
 `RNodeInterface.py:677`), so the derived default — and only the derived
 default — accepts a confirmation *below* what it asked for, logs the
 board's ceiling, and runs. An explicitly configured power keeps the
@@ -318,13 +318,13 @@ The reference behaves this way on every forwarding path:
 Loop-freedom never came from interface suppression. It comes from
 transport_id addressing (only the addressed relay processes a Type2
 transport packet), the hop-count limit, and packet-hash dedup —
-`has_packet_hash` (`leviculum-core/src/transport.rs:4013`) drops a
+`has_packet_hash` (`leviculum-core/src/transport.rs:4018`) drops a
 repeated copy, `add_packet_hash`
-(`leviculum-core/src/transport.rs:4067`) records it.
+(`leviculum-core/src/transport.rs:4072`) records it.
 
 The forwarding decision lives in the media-agnostic core
 (`forward_on_interface_from`,
-`leviculum-core/src/transport.rs:8755`). Whether the relayed echo
+`leviculum-core/src/transport.rs:8767`). Whether the relayed echo
 needs TX spacing on a half-duplex channel is the interface's business
 — see [Interface Isolation](interface-isolation.md).
 

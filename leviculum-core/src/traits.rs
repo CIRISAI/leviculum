@@ -763,6 +763,24 @@ pub trait Storage {
     /// Set announce rate tracking for a destination
     fn set_announce_rate(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], entry: AnnounceRateEntry);
 
+    /// Append one announce time to a destination's rate entry, dropping the
+    /// oldest beyond [`crate::constants::MAX_RATE_TIMESTAMPS`] (Python
+    /// `reference/Reticulum/RNS/Transport.py:1841-1849`). Only the
+    /// `rate_table` RPC reads them, so a storage that serves no RPC keeps
+    /// none: the default does nothing, and the board's census stays as it is.
+    fn record_announce_rate_timestamp(
+        &mut self,
+        _dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        _now_ms: u64,
+    ) {
+    }
+
+    /// The announce times recorded for a destination, oldest first; empty
+    /// when the storage keeps none.
+    fn announce_rate_timestamps(&self, _dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Vec<u64> {
+        Vec::new()
+    }
+
     // Receipts
     /// Look up a receipt by truncated hash
     fn get_receipt(&self, hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<&PacketReceipt>;

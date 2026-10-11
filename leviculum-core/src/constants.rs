@@ -348,6 +348,13 @@ pub const ANNOUNCE_RATE_PENALTY_MS: u64 = 0;
 /// Maximum number of random blobs to retain per destination (matches Python MAX_RANDOM_BLOBS)
 pub const MAX_RANDOM_BLOBS: usize = 64;
 
+/// Announce timestamps kept per destination in the announce-rate table, the
+/// newest last (Python `MAX_RATE_TIMESTAMPS`,
+/// `reference/Reticulum/RNS/Transport.py:96`). They serve only the
+/// `rate_table` RPC, where `rnpath -r` reads the oldest one as the start of
+/// its announces-per-hour window.
+pub const MAX_RATE_TIMESTAMPS: usize = 16;
+
 /// Default timeout factor for request/response (Python Link.TRAFFIC_TIMEOUT_FACTOR = 6)
 pub const TRAFFIC_TIMEOUT_FACTOR: u64 = 6;
 

@@ -20,6 +20,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use super::{IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket};
+use crate::rpc::radio_cache::PacketRadioStats;
 
 // ---------------------------------------------------------------------------
 // Named constants for serial protocol timing and buffers
@@ -2431,7 +2432,11 @@ where
                                             payload.len() as u64,
                                             std::sync::atomic::Ordering::Relaxed,
                                         );
-                                        let pkt = IncomingPacket { data: payload.to_vec(), peer: None };
+                                        let pkt = IncomingPacket {
+                                            data: payload.to_vec(),
+                                            peer: None,
+                                            radio: packet_radio_stats(&counters, sf),
+                                        };
                                         if incoming_tx.send(pkt).await.is_err() {
                                             // Event loop shut down
                                             send_goodbye(&mut port, &name).await;
@@ -3160,6 +3165,35 @@ struct RNodeReconnectCtx {
     /// connection: a reconnect must not re-roll it, or two ends that were
     /// apart could land together after one of them loses its port.
     frame_class: FrameClass,
+}
+
+/// Link quality in percent from an SNR reading at a spreading factor, as
+/// Python's `RNodeInterface` derives `r_stat_q`
+/// (`reference/Reticulum/RNS/Interfaces/RNodeInterface.py:881-890`, constants
+/// at `:124-126`): the SNR placed on a span from an SF-dependent floor to
+/// 6 dB, rounded to one decimal and clamped to `[0, 100]`.
+fn link_quality(snr: f64, sf: u8) -> f64 {
+    const Q_SNR_MIN_BASE: f64 = -9.0;
+    const Q_SNR_MAX: f64 = 6.0;
+    const Q_SNR_STEP: f64 = 2.0;
+    let q_snr_min = Q_SNR_MIN_BASE - (sf as f64 - 7.0) * Q_SNR_STEP;
+    let quality = ((snr - q_snr_min) / (Q_SNR_MAX - q_snr_min) * 100.0 * 10.0).round() / 10.0;
+    quality.clamp(0.0, 100.0)
+}
+
+/// The readings a received data frame is stamped with: the modem's last
+/// RSSI/SNR report, which the firmware sends just ahead of the frame it
+/// describes, as Python stamps `r_stat_rssi`/`r_stat_snr`/`r_stat_q` onto
+/// every inbound packet (`reference/Reticulum/RNS/Transport.py:1458-1479`).
+/// `None` before the modem reported anything.
+fn packet_radio_stats(counters: &InterfaceCounters, sf: u8) -> Option<PacketRadioStats> {
+    let radio = counters.radio_stats()?;
+    let stats = PacketRadioStats {
+        rssi: radio.last_rssi,
+        snr: radio.last_snr,
+        q: radio.last_snr.map(|snr| link_quality(snr, sf)),
+    };
+    (stats != PacketRadioStats::default()).then_some(stats)
 }
 
 /// Reconnect loop: open channel → configure → I/O → on disconnect → wait → retry.
@@ -4007,7 +4041,7 @@ async fn rnode_multi_io_task<S>(
                                                 name, payload.len(), selected_vport, v.name
                                             );
                                             if v.incoming_tx
-                                                .send(IncomingPacket { data: payload.to_vec(), peer: None })
+                                                .send(IncomingPacket { data: payload.to_vec(), peer: None, radio: None })
                                                 .await
                                                 .is_err()
                                             {
@@ -10172,6 +10206,38 @@ mod tests {
     // -----------------------------------------------------------------------
     // Radio stats parse/state path (Codeberg #25)
     // -----------------------------------------------------------------------
+
+    /// The reference's link quality (`RNodeInterface.py:881-890`) at its
+    /// three regions: clamped low, inside the span, clamped high; the floor
+    /// drops by 2 dB per SF step above 7.
+    #[test]
+    fn link_quality_matches_the_reference_formula() {
+        assert_eq!(link_quality(5.5, 7), 96.7);
+        assert_eq!(link_quality(-9.0, 7), 0.0);
+        assert_eq!(link_quality(-20.0, 7), 0.0);
+        assert_eq!(link_quality(10.0, 7), 100.0);
+        // SF8: floor -11, span 17: (0 + 11) / 17 = 64.7 %.
+        assert_eq!(link_quality(0.0, 8), 64.7);
+    }
+
+    /// A data frame is stamped with the modem's last RSSI/SNR report and
+    /// the quality derived from it; before any report it carries none.
+    #[test]
+    fn packet_radio_stats_follow_the_last_report() {
+        let c = InterfaceCounters::new();
+        c.enable_radio_stats();
+        assert_eq!(packet_radio_stats(&c, 7), None);
+        assert!(apply_radio_stat("t", &c, rnode::CMD_STAT_RSSI, &[96]));
+        assert!(apply_radio_stat("t", &c, rnode::CMD_STAT_SNR, &[22]));
+        assert_eq!(
+            packet_radio_stats(&c, 7),
+            Some(PacketRadioStats {
+                rssi: Some(-61),
+                snr: Some(5.5),
+                q: Some(96.7),
+            })
+        );
+    }
 
     /// A fresh RNode interface is marked radio-capable so `radio_stats()`
     /// returns the default record (0.0 airtime/channel-load, None noise/temp,

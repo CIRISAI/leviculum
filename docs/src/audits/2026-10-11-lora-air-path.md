@@ -44,9 +44,9 @@ flushes everything it holds with no carrier sense between frames
 decision at `:1644` makes the full flush the behaviour at every bitrate
 below 14 kbps, i.e. every PHY we run). Our host instead serves an
 acquisition jitter per channel acquisition (`arm_owed_jitter_ms`,
-`leviculum-std/src/interfaces/rnode.rs:739`) and holds the next frame
+`leviculum-std/src/interfaces/rnode.rs:740`) and holds the next frame
 for the previous one's priced busy time (`tx_hold`,
-`leviculum-std/src/interfaces/rnode.rs:1062`), so the modem's queue
+`leviculum-std/src/interfaces/rnode.rs:1063`), so the modem's queue
 never holds more than one frame and every frame gets its own CSMA
 contest. On the air: a Python host with a deep queue keys bursts deaf,
 back to back; ours does not. Class: deviation ours (deliberate, the
@@ -106,7 +106,7 @@ remainder owed and serves it on the next turn
 `leviculum-nrf/channel-access/src/lib.rs:443-465`;
 `leviculum-nrf/src/lora.rs:2052-2085`) — same shape, same reason. Our
 *host* serves its drawn wait as an uninterruptible sleep
-(`leviculum-std/src/interfaces/rnode.rs:2785-2800`): it cannot sense
+(`leviculum-std/src/interfaces/rnode.rs:2790-2805`): it cannot sense
 the medium, the modem under it can and does. On the air: equivalent
 within one draw. Class: agreement in substance; noted because the three
 spell it differently.
@@ -187,7 +187,7 @@ nothing a peer can see; a few per mille of duty budget in the lawful
 direction. Class: deviation ours (deliberate — the ledger is the legal
 meter, and it must not undercount). The host's accounting observable
 already refuses to threshold on the difference (`judge_airtime`,
-`leviculum-std/src/interfaces/rnode.rs:1318`, "any rise is Keyed").
+`leviculum-std/src/interfaces/rnode.rs:1319`, "any rise is Keyed").
 Test: a unit comparing the two formulas over the reference's PHY grid
 would pin the sign (ours ≥ theirs); nothing today asserts it.
 
@@ -210,13 +210,13 @@ alone: a frame held by the lock past `HOLD_MAX_AGE_MS`
 keyed (#433); the hold is reported to the core and suppresses relayed
 announces and path responses (leviculum#493,
 `announce_allowed_on_interface`,
-`leviculum-core/src/transport.rs:9369-9391`); a propagation node stops
+`leviculum-core/src/transport.rs:9381-9403`); a propagation node stops
 originating at half the long-term cap (`OWN_TRAFFIC_SHARE_PERMILLE`,
 `leviculum-nrf/queue-budget/src/lib.rs:525`, leviculum#494). The
 reference holds silently, forever, and signals nothing over KISS — the
 host-side inference from CMD_READY gate closures (`DutyHolds`,
 `leviculum-nrf/queue-budget/src/lib.rs:358`;
-`duty_hold_min_ms`, `leviculum-std/src/interfaces/rnode.rs:188`) exists
+`duty_hold_min_ms`, `leviculum-std/src/interfaces/rnode.rs:189`) exists
 *because* of that silence. On the air: we key current traffic where the
 reference keys fossils (measured 145.6 s old on 2026-09-27), and we
 withhold route advertisements a held relay cannot honour. Class:
@@ -237,13 +237,13 @@ bound refused (`outbound_verdict`,
 `leviculum-nrf/queue-budget/src/lib.rs:636`); our host bounds its
 flow-control queue at 64 frames with counted, named drops
 (`FLOW_CONTROL_QUEUE_LIMIT`,
-`leviculum-std/src/interfaces/rnode.rs:842`). On the air: identical —
+`leviculum-std/src/interfaces/rnode.rs:843`). On the air: identical —
 the difference is whether anyone can see the loss. Class: reference
 defect (#344's finding); deviation ours to fix it. Note one mirror-image
 hazard: the RNode's silent drop is *upstream* of our host's accounting,
 which is exactly what the CMD_READY query protocol and the
 airtime-ledger settlement (`settle_handovers`,
-`leviculum-std/src/interfaces/rnode.rs:1426`) exist to catch.
+`leviculum-std/src/interfaces/rnode.rs:1427`) exist to catch.
 
 **D11 — flush under the cap.** When the airtime lock lifts, the
 reference's next `tx_queue_handler` pass flushes its **whole queue** in
@@ -252,7 +252,7 @@ one acquisition (`should_flush`,
 it aged under the lock goes out, oldest first, deaf. Ours: the host
 never lets the modem hold more than one frame (D1), sweeps frames the
 hold aged past 18 s (`pop_live_frame`,
-`leviculum-std/src/interfaces/rnode.rs:240`), and the board drops stale
+`leviculum-std/src/interfaces/rnode.rs:241`), and the board drops stale
 frames at dequeue (`leviculum-nrf/src/lora.rs:1933-1977`). On the air: a
 reference relay exiting a duty hold emits a burst of minutes-old
 traffic; ours emits one current frame. Class: deviation ours
@@ -263,15 +263,15 @@ measurement in `docs/src/concepts/regulatory-airtime.md`).
 
 Where we match Python, verified: 2 % default cap over the interface
 bitrate (`DEFAULT_ANNOUNCE_CAP_PERCENT`,
-`leviculum-core/src/constants.rs:391`, against
+`leviculum-core/src/constants.rs:398`, against
 `reference/Reticulum/RNS/Reticulum.py:114`); local announces
-(`hops == 0`) bypass the cap (`leviculum-core/src/transport.rs:12246`,
+(`hops == 0`) bypass the cap (`leviculum-core/src/transport.rs:12258`,
 against `reference/Reticulum/RNS/Transport.py:1246-1250`); the queue
 holds one slot per destination, a newer emission replacing an older
-(`leviculum-core/src/transport.rs:12444-12462`, against
+(`leviculum-core/src/transport.rs:12456-12474`, against
 `reference/Reticulum/RNS/Transport.py:1267-1281`); release picks lowest
 hops, then oldest (`drain_announce_queues`,
-`leviculum-core/src/transport.rs:12607-12617`, against
+`leviculum-core/src/transport.rs:12619-12629`, against
 `reference/Reticulum/RNS/Interfaces/Interface.py:339-343`).
 
 **D12 — the cap's bitrate is the effective airtime rate, not the
@@ -286,7 +286,7 @@ function's docs). Test: exists in core.
 
 **D13 — the release draw.** After each capped emission ours adds a
 randomised draw to the holdoff (`cap_release_draw_ms`,
-`leviculum-core/src/transport.rs:10403`, applied at `:12433` and
+`leviculum-core/src/transport.rs:10415`, applied at `:12433` and
 `:12613`); Python re-arms its timer at exactly the holdoff
 (`reference/Reticulum/RNS/Interfaces/Interface.py:356-358`), so two
 saturated relays on one channel drain on two grids of the same period
@@ -300,10 +300,10 @@ is empty** (`if not queued_announces and outbound_time > ...`,
 `reference/Reticulum/RNS/Transport.py:1256-1257`); a non-empty queue
 forces queueing, so release order is always the min-hops draw. Ours
 transmits immediately whenever `now >= cap.allowed_at_ms`
-(`leviculum-core/src/transport.rs:12427`, before 9b4515b1) **without consulting the
+(`leviculum-core/src/transport.rs:12439`, before 9b4515b1) **without consulting the
 queue**, and the queue only drains on the poll cadence
-(`drain_announce_queues`, `leviculum-core/src/transport.rs:12566`,
-called from `poll`, `leviculum-core/src/transport.rs:4605`). In the
+(`drain_announce_queues`, `leviculum-core/src/transport.rs:12578`,
+called from `poll`, `leviculum-core/src/transport.rs:4610`). In the
 window between the holdoff elapsing and the next poll — up to one poll
 interval, per holdoff cycle — a fresh announce, whatever its hop count,
 overtakes every queued one and re-arms the holdoff on top of them. On the air: hop-priority
@@ -324,7 +324,7 @@ the broadcast path and the peer re-offer path alike; test
 queue entries older than `QUEUED_ANNOUNCE_LIFE` = 24 h at release time
 (`reference/Reticulum/RNS/Interfaces/Interface.py:330-337`,
 `reference/Reticulum/RNS/Reticulum.py:112`). Our drain has no age check
-(`leviculum-core/src/transport.rs:12566-12631`): an entry leaves only
+(`leviculum-core/src/transport.rs:12578-12643`): an entry leaves only
 by being sent or replaced by a newer emission. The per-destination slot
 bounds the damage, but a destination that announced once and went away
 stays queued indefinitely, and at a saturated LoRa cap (a 183-byte
@@ -424,9 +424,9 @@ Verified byte-for-byte against the firmware's indications: CHTM
 `decode_phy_params`, `leviculum-core/src/rnode.rs:694`, against
 `reference/RNode_Firmware/Utilities.h:996-1013`), CSMA stats (band,
 cw_min, cw_max; consumed into the hold pricing via `FirmwareCsma`,
-`leviculum-std/src/interfaces/rnode.rs:914` — Python only logs them),
+`leviculum-std/src/interfaces/rnode.rs:915` — Python only logs them),
 RSSI/SNR (offset 157, SNR × 0.25; `apply_radio_stat`,
-`leviculum-std/src/interfaces/rnode.rs:1940`, matching
+`leviculum-std/src/interfaces/rnode.rs:1941`, matching
 `reference/Reticulum/RNS/Interfaces/RNodeInterface.py:878-880`), and
 the CMD_READY query protocol
 (`reference/RNode_Firmware/RNode_Firmware.ino:1003-1008`,
@@ -438,7 +438,7 @@ Two asymmetries, neither a defect of ours:
   the band changes (`reference/RNode_Firmware/RNode_Firmware.ino:1614-1618`),
   so a run that stays in band 1 never reports `cw_max` and the hold
   falls back to its own derivation. Already documented at
-  `FirmwareCsma` (`leviculum-std/src/interfaces/rnode.rs:894-922`).
+  `FirmwareCsma` (`leviculum-std/src/interfaces/rnode.rs:895-923`).
 * **Python's CMD_STAT_RX/TX parsers are dead code that would crash.**
   They call ord() on what Python 3 already hands them as an int, which
   raises a TypeError
@@ -453,7 +453,7 @@ Two asymmetries, neither a defect of ours:
 ## Wrong claims in our own tree, verified or refuted
 
 1. **"The RNode emits CMD_STAT_CHTM every ~2 s" — wrong, it is ~1 s.**
-   `leviculum-std/src/interfaces/rnode.rs:846` (corrected in 35034019; the
+   `leviculum-std/src/interfaces/rnode.rs:847` (corrected in 35034019; the
    `TX_GATED_EVENT_AFTER` rationale) and `:873` (the `READY_POLL_MAX`
    rationale, "one CHTM stat cadence") both claim ~2 s. The firmware's
    idle cadence is `UTIL_UPDATE_INTERVAL_MS` = 1000
@@ -461,7 +461,7 @@ Two asymmetries, neither a defect of ours:
    `check_modem_status`,
    `reference/RNode_Firmware/RNode_Firmware.ino:1445-1465`), plus one
    CHTM per queue drain. The same file's `CHTM_PERIOD`
-   (`leviculum-std/src/interfaces/rnode.rs:1168`) documents 1000 ms
+   (`leviculum-std/src/interfaces/rnode.rs:1169`) documents 1000 ms
    correctly, so the file disagrees with itself. No functional
    consequence — both constants remain sensible at the true cadence —
    but the two rationales are the kind that get copied.
@@ -489,16 +489,16 @@ Two asymmetries, neither a defect of ours:
    the value stays; `JITTER_MAX_MS` is deleted.
 4. **Claims that held.** Spot-checked against the mirror and correct:
    the CMD_READY query protocol citations
-   (`leviculum-std/src/interfaces/rnode.rs:858-868`), the
+   (`leviculum-std/src/interfaces/rnode.rs:859-869`), the
    flush-vs-pop decision and its 14 kbps threshold
-   (`tx_hold` docs, `leviculum-std/src/interfaces/rnode.rs:997-1061`),
+   (`tx_hold` docs, `leviculum-std/src/interfaces/rnode.rs:998-1062`),
    the CHTM-follows-every-drain argument in `apply_radio_stat`
-   (`leviculum-std/src/interfaces/rnode.rs:1967-2049`), the ESP32
+   (`leviculum-std/src/interfaces/rnode.rs:1968-2050`), the ESP32
    `init_channel_stats` reset
    (`docs/src/concepts/regulatory-airtime.md`, against
    `reference/RNode_Firmware/RNode_Firmware.ino:523`), the two-bin
    arithmetic citations in `AIRTIME_WINDOW_MS`
-   (`leviculum-std/src/interfaces/rnode.rs:1142-1147`), and the
+   (`leviculum-std/src/interfaces/rnode.rs:1143-1148`), and the
    channel-access crate's derivation table
    (`leviculum-nrf/channel-access/src/lib.rs:28-59`). The unsourced
    `cadDetPeak` ladder is already honestly declared where it lives
@@ -508,7 +508,7 @@ Two asymmetries, neither a defect of ours:
 ## The three I would fix first
 
 1. **The announce-cap queue jump (D14).** Mechanism: the immediate-send
-   branch at `leviculum-core/src/transport.rs:12427` (before 9b4515b1) tested only the
+   branch at `leviculum-core/src/transport.rs:12439` (before 9b4515b1) tested only the
    holdoff; Python additionally requires the queue empty
    (`reference/Reticulum/RNS/Transport.py:1256-1257`). One added
    condition (`&& cap.queue.is_empty()`) restores the min-hops release
@@ -518,7 +518,7 @@ Two asymmetries, neither a defect of ours:
    possible change with a mesh-visible win under exactly the load the
    propagation Leitstern cares about.
 2. **Stale cap-queue entries (D15).** Mechanism: no age check in
-   `drain_announce_queues` (`leviculum-core/src/transport.rs:12566`);
+   `drain_announce_queues` (`leviculum-core/src/transport.rs:12578`);
    add Python's `QUEUED_ANNOUNCE_LIFE` prune at release (drop entries
    older than 24 h before selection, as
    `reference/Reticulum/RNS/Interfaces/Interface.py:330-337` does).
@@ -528,7 +528,7 @@ Two asymmetries, neither a defect of ours:
 3. **The two self-disagreeing rationales (wrong claims 1 and 2).**
    Mechanism: comment-only edits — "~2 s" → "~1 s
    (`UTIL_UPDATE_INTERVAL_MS`)" at
-   `leviculum-std/src/interfaces/rnode.rs:846` and `:873` (done in 35034019), and the
+   `leviculum-std/src/interfaces/rnode.rs:847` and `:873` (done in 35034019), and the
    post-TX-yield sentence at `leviculum-nrf/src/lora.rs:876-877` (likewise)
    rewritten to what the reference does (returns to continuous RX;
    the yield constant is unused). Test: the citation guard anchors the

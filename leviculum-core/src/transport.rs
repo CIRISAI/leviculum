@@ -1599,6 +1599,11 @@ pub struct RateTableExport {
     pub rate_violations: u8,
     /// Blocked until (ms)
     pub blocked_until_ms: u64,
+    /// Announce times (ms), oldest first, at most
+    /// [`crate::constants::MAX_RATE_TIMESTAMPS`]. Never empty: a storage that
+    /// keeps none answers `[last_ms]`, because `rnpath -r` indexes the first
+    /// element (`reference/Reticulum/RNS/Utilities/rnpath.py:344`).
+    pub timestamps_ms: Vec<u64>,
 }
 
 /// Exported link table entry for RPC reporting (the `link_table`
@@ -5445,11 +5450,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.storage
             .announce_rate_entries()
             .into_iter()
-            .map(|(hash, entry)| RateTableExport {
-                hash,
-                last_ms: entry.last_ms,
-                rate_violations: entry.rate_violations,
-                blocked_until_ms: entry.blocked_until_ms,
+            .map(|(hash, entry)| {
+                let mut timestamps_ms = self.storage.announce_rate_timestamps(&hash);
+                if timestamps_ms.is_empty() {
+                    timestamps_ms.push(entry.last_ms);
+                }
+                RateTableExport {
+                    hash,
+                    last_ms: entry.last_ms,
+                    rate_violations: entry.rate_violations,
+                    blocked_until_ms: entry.blocked_until_ms,
+                    timestamps_ms,
+                }
             })
             .collect()
     }
@@ -5588,7 +5600,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3991. A destination with no cached
+    /// link-request path uses at transport.rs:3996. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -11382,7 +11394,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2507`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2512`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -13316,6 +13328,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Matches Python Transport.py:1838-1864. Only blocks rebroadcast (announce_table insertion),
     /// NOT path_table updates. Skipped for PATH_RESPONSE context and when the receiving
     /// interface has no announce-rate target (see [`Self::effective_announce_rate`]).
+    /// Every checked announce, blocked or not, is also recorded in the entry's
+    /// timestamp list, as Python appends before it tests the block.
     fn check_announce_rate(
         &mut self,
         iface_index: usize,
@@ -13326,7 +13340,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             Some(v) => v,
             None => return false, // Disabled for this interface
         };
+        let blocked = self.update_announce_rate(dest_hash, now, rate_target, grace, penalty_ms);
+        self.storage.record_announce_rate_timestamp(dest_hash, now);
+        blocked
+    }
 
+    /// The rate-entry arithmetic of [`Self::check_announce_rate`]; creates
+    /// the entry on first sight.
+    fn update_announce_rate(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        now: u64,
+        rate_target: u64,
+        grace: u8,
+        penalty_ms: u64,
+    ) -> bool {
         if let Some(entry) = self.storage.get_announce_rate(dest_hash) {
             // Currently blocked?
             if now <= entry.blocked_until_ms {
@@ -17599,7 +17627,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7115), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7127), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -27904,6 +27932,57 @@ mod tests {
             assert_eq!(rate_entry.rate_violations, 0);
             // announce_rate cleanup is handled by clean_stale_path_metadata()
             // which cleans both path_states and announce_rate for stale destinations
+        }
+
+        /// D4 of `docs/src/audits/2026-10-11-shared-instance-rpc.md`: every
+        /// rate-checked announce lands in the entry's timestamp list, blocked
+        /// ones included (Python appends before it tests the block,
+        /// `reference/Reticulum/RNS/Transport.py:1845-1849`), the list keeps
+        /// the newest `MAX_RATE_TIMESTAMPS`, and the export carries them.
+        #[test]
+        fn test_announce_rate_timestamps_keep_the_newest_sixteen() {
+            use crate::constants::MAX_RATE_TIMESTAMPS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            // grace=0 with a 10 s target: from the second announce on, every
+            // 3 s announce is a violation or arrives inside the block.
+            let mut transport = make_transport_rate_limited(10_000, 0, 0);
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["ratestamps"],
+            )
+            .unwrap();
+            let dest_hash = dest.hash().into_bytes();
+
+            let mut sent = Vec::new();
+            for _ in 0..MAX_RATE_TIMESTAMPS + 2 {
+                let now = transport.clock.now_ms();
+                let raw = make_announce_raw_for_dest(&dest, 1, now);
+                transport.process_incoming(0, &raw).unwrap();
+                sent.push(now);
+                transport.clock.advance(3_000);
+                transport.storage_mut().clear_packet_hashes();
+            }
+            let entry = *transport.storage().get_announce_rate(&dest_hash).unwrap();
+            assert!(
+                entry.blocked_until_ms > 0,
+                "the run must cross the blocked arm"
+            );
+
+            let newest = &sent[sent.len() - MAX_RATE_TIMESTAMPS..];
+            assert_eq!(
+                transport.storage().announce_rate_timestamps(&dest_hash),
+                newest
+            );
+            let export = transport.rate_table_entries();
+            assert_eq!(export.len(), 1);
+            assert_eq!(export[0].timestamps_ms, newest);
+            assert_eq!(export[0].last_ms, entry.last_ms);
         }
 
         #[test]

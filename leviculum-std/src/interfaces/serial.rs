@@ -1477,7 +1477,11 @@ impl Ingress<'_> {
             .rx_bytes
             .fetch_add(data.len() as u64, Ordering::Relaxed);
         self.incoming_tx
-            .send(IncomingPacket { data, peer: None })
+            .send(IncomingPacket {
+                data,
+                peer: None,
+                radio: None,
+            })
             .await
             .is_ok()
     }

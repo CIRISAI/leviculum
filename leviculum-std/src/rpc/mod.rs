@@ -13,6 +13,7 @@ pub(crate) mod connection;
 mod error;
 pub(crate) mod handlers;
 pub(crate) mod pickle;
+pub(crate) mod radio_cache;
 
 pub use pickle::TRANSPORT_TABLE_NAMES;
 
@@ -44,6 +45,7 @@ use connection::{read_message, read_message_bounded, server_handshake, write_mes
 use error::RpcError;
 use handlers::handle_request;
 use pickle::parse_request;
+use radio_cache::SharedPacketRadioCache;
 
 /// Bind the RPC listener for the given abstract name.
 ///
@@ -107,13 +109,15 @@ fn connect_rpc(abstract_name: &str) -> Result<std::net::TcpStream, std::io::Erro
 pub(crate) fn spawn_rpc_server(
     instance_name: &str,
     core: Arc<Mutex<StdNodeCore>>,
-    authkey: [u8; 32],
+    authkey: impl Into<Arc<[u8]>>,
     start_time: std::time::Instant,
     iface_stats_map: InterfaceStatsMap,
     inventory: SharedInventory,
     auto_peer_count: AutoPeerCount,
     discovery_storage: Option<std::path::PathBuf>,
+    radio_cache: SharedPacketRadioCache,
 ) -> Result<(), std::io::Error> {
+    let authkey = authkey.into();
     let abstract_name = format!("rns/{}/rpc", instance_name);
 
     let std_listener = bind_rpc_listener(&abstract_name)?;
@@ -132,6 +136,7 @@ pub(crate) fn spawn_rpc_server(
             inventory,
             auto_peer_count,
             discovery_storage,
+            radio_cache,
         )
         .await;
     });
@@ -144,12 +149,13 @@ pub(crate) fn spawn_rpc_server(
 async fn rpc_accept_loop(
     listener: RpcListener,
     core: Arc<Mutex<StdNodeCore>>,
-    authkey: [u8; 32],
+    authkey: Arc<[u8]>,
     start_time: std::time::Instant,
     iface_stats_map: InterfaceStatsMap,
     inventory: SharedInventory,
     auto_peer_count: AutoPeerCount,
     discovery_storage: Option<std::path::PathBuf>,
+    radio_cache: SharedPacketRadioCache,
 ) {
     loop {
         let (stream, _addr) = match listener.accept().await {
@@ -165,6 +171,8 @@ async fn rpc_accept_loop(
         let inventory = Arc::clone(&inventory);
         let peer_count = auto_peer_count.clone();
         let discovery_storage = discovery_storage.clone();
+        let radio_cache = Arc::clone(&radio_cache);
+        let authkey = Arc::clone(&authkey);
         tokio::spawn(async move {
             if let Err(e) = handle_rpc_connection(
                 stream,
@@ -175,6 +183,7 @@ async fn rpc_accept_loop(
                 &inventory,
                 &peer_count,
                 discovery_storage.as_deref(),
+                &radio_cache,
             )
             .await
             {
@@ -189,12 +198,13 @@ async fn rpc_accept_loop(
 async fn handle_rpc_connection(
     mut stream: RpcStream,
     core: &Arc<Mutex<StdNodeCore>>,
-    authkey: &[u8; 32],
+    authkey: &[u8],
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
     inventory: &SharedInventory,
     auto_peer_count: &AutoPeerCount,
     discovery_storage: Option<&std::path::Path>,
+    radio_cache: &SharedPacketRadioCache,
 ) -> Result<(), RpcError> {
     server_handshake(&mut stream, authkey).await?;
 
@@ -214,6 +224,7 @@ async fn handle_rpc_connection(
             inventory,
             peer_count,
             discovery_storage,
+            radio_cache,
             codec,
         )?
     };
@@ -239,6 +250,48 @@ pub(crate) fn rpc_authkey(
     let mut key = [0u8; 32];
     key.copy_from_slice(&hash);
     Ok(key)
+}
+
+/// The key a shared instance's RPC is keyed with: the configured `rpc_key`
+/// when the config names one, else the identity-derived [`rpc_authkey`].
+/// Python keys BOTH ends with the same choice, the daemon's listener and every
+/// client connection (`reference/Reticulum/RNS/Reticulum.py:355-359` and
+/// `:1265`), so a daemon that ignored the key locked every client that read
+/// it out (D1 of `docs/src/audits/2026-10-11-shared-instance-rpc.md`).
+pub(crate) fn resolve_rpc_authkey(
+    configured: Option<&[u8]>,
+    identity: &leviculum_core::Identity,
+) -> Result<Vec<u8>, leviculum_core::identity::IdentityError> {
+    match configured {
+        Some(key) => Ok(key.to_vec()),
+        None => rpc_authkey(identity).map(|key| key.to_vec()),
+    }
+}
+
+/// The shared instance a client node asks, and the key it asks with.
+#[derive(Debug, Clone)]
+pub(crate) struct SharedInstanceClient {
+    pub instance_name: String,
+    /// The config's `rpc_key`; `None` asks with the identity-derived key.
+    pub rpc_key: Option<Vec<u8>>,
+}
+
+/// Parse a config `rpc_key` value as Python does, with `bytes.fromhex`
+/// (`reference/Reticulum/RNS/Reticulum.py:509-515`): pairs of hex digits,
+/// ASCII whitespace allowed between pairs. `None` for a value Python's parse
+/// would raise on, which there means "fall back to the default key".
+pub(crate) fn parse_rpc_key(value: &str) -> Option<Vec<u8>> {
+    let mut key = Vec::new();
+    let mut digits = value.chars();
+    while let Some(c) = digits.next() {
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        let hi = c.to_digit(16)?;
+        let lo = digits.next()?.to_digit(16)?;
+        key.push((hi * 16 + lo) as u8);
+    }
+    Some(key)
 }
 
 /// What a shared instance answered for `first_hop_timeout`, in whole
@@ -268,7 +321,7 @@ const RPC_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 /// expiry this returns a `TimedOut` I/O error rather than hanging.
 pub(crate) async fn rpc_client_call(
     abstract_name: &str,
-    authkey: &[u8; 32],
+    authkey: &[u8],
     request: &serde_pickle::value::Value,
 ) -> Result<serde_pickle::value::Value, RpcError> {
     // `connect_rpc` either succeeds quickly or fails fast (ECONNREFUSED /
@@ -340,7 +393,7 @@ pub(crate) async fn rpc_client_call(
 /// model the printing code consumes, so the conversion is unchanged.)
 pub async fn rpc_query(
     instance_name: &str,
-    authkey: &[u8; 32],
+    authkey: &[u8],
     get_key: &str,
 ) -> Result<serde_json::Value, crate::Error> {
     let abstract_name = format!("rns/{}/rpc", instance_name);
@@ -383,7 +436,7 @@ pub async fn rpc_query(
 /// authkey, codec, JSON decoding and unanswered-verb caveat as [`rpc_query`].
 pub async fn rpc_query_transport_tables(
     instance_name: &str,
-    authkey: &[u8; 32],
+    authkey: &[u8],
     rows: &[&str],
 ) -> Result<serde_json::Value, crate::Error> {
     let abstract_name = format!("rns/{}/rpc", instance_name);
@@ -422,7 +475,7 @@ pub async fn rpc_query_transport_tables(
 /// unanswered verb closes the connection and surfaces as `Err`.
 pub async fn rpc_query_hash_param(
     instance_name: &str,
-    authkey: &[u8; 32],
+    authkey: &[u8],
     get_key: &str,
     param_key: &str,
     param: &[u8],
@@ -461,7 +514,7 @@ pub async fn rpc_query_hash_param(
 /// a typo. Same authkey and transport caveats as those two.
 pub async fn rpc_drop_path(
     instance_name: &str,
-    authkey: &[u8; 32],
+    authkey: &[u8],
     destination_hash: &[u8],
 ) -> Result<bool, crate::Error> {
     let abstract_name = format!("rns/{}/rpc", instance_name);
@@ -688,6 +741,7 @@ mod tests {
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
+            radio_cache::shared(),
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -880,6 +934,7 @@ mod tests {
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
+            radio_cache::shared(),
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -942,6 +997,7 @@ mod tests {
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
+            radio_cache::shared(),
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1001,6 +1057,7 @@ mod tests {
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
+            radio_cache::shared(),
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1107,6 +1164,7 @@ mod tests {
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
+            radio_cache::shared(),
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1115,6 +1173,65 @@ mod tests {
         let request = pickle_dict(vec![(pickle_str_key("get"), pickle_str("interface_stats"))]);
         let result = rpc_client_call(&abstract_name, &wrong_key, &request).await;
         assert!(result.is_err(), "wrong authkey should cause failure");
+    }
+
+    /// `rpc_key` is read as Python's `bytes.fromhex` reads it
+    /// (`reference/Reticulum/RNS/Reticulum.py:509-515`): whitespace between
+    /// pairs, any length, and a value it raises on is no key.
+    #[test]
+    fn parse_rpc_key_reads_hex_as_bytes_fromhex_does() {
+        assert_eq!(parse_rpc_key("00ff"), Some(vec![0x00, 0xFF]));
+        assert_eq!(parse_rpc_key("  0a 0B\t"), Some(vec![0x0A, 0x0B]));
+        assert_eq!(parse_rpc_key(""), Some(vec![]));
+        assert_eq!(parse_rpc_key("0 0"), None);
+        assert_eq!(parse_rpc_key("0a0"), None);
+        assert_eq!(parse_rpc_key("zz"), None);
+    }
+
+    /// D1 of the 2026-10-11 shared-instance audit: a node whose config sets
+    /// `rpc_key` keys its listener with it, and the identity-derived key no
+    /// longer opens it. A 16-byte key, because Python takes any length.
+    #[tokio::test]
+    async fn configured_rpc_key_keys_the_listener() {
+        let id = RPC_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let instance_name = format!("rpctest_rpckey_{}_{}", std::process::id(), id);
+        let storage_path =
+            std::env::temp_dir().join(format!("reticulum_rpc_key_test_{}", instance_name));
+        let key = vec![0x5Au8; 16];
+        let mut config = crate::config::Config::default();
+        config.reticulum.rpc_key = Some(key.clone());
+        let mut node = crate::driver::ReticulumNodeBuilder::new()
+            .config(config)
+            .storage_path(storage_path)
+            .share_instance(true)
+            .instance_name(instance_name.clone())
+            .build()
+            .await
+            .expect("build");
+        node.start().await.expect("start");
+        let derived = derive_authkey(&node.inner());
+        let abstract_name = format!("rns/{}/rpc", instance_name);
+        let request = pickle_dict(vec![(pickle_str_key("get"), pickle_str("link_count"))]);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let answer = loop {
+            let answer = rpc_client_call(&abstract_name, &key, &request).await;
+            if answer.is_ok() || std::time::Instant::now() >= deadline {
+                break answer;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert!(
+            answer.is_ok(),
+            "the configured key must open the listener: {answer:?}"
+        );
+        assert!(
+            rpc_client_call(&abstract_name, &derived, &request)
+                .await
+                .is_err(),
+            "the identity-derived key must not open a listener keyed by rpc_key"
+        );
+        node.stop().await.expect("stop");
     }
 
     /// Test link_count RPC. The count is the size of the TRANSPORT link table
@@ -1139,6 +1256,7 @@ mod tests {
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
+            radio_cache::shared(),
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1175,6 +1293,7 @@ mod tests {
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
+            radio_cache::shared(),
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1285,6 +1404,7 @@ mod tests {
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
+            radio_cache::shared(),
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1341,6 +1461,7 @@ mod tests {
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
+            radio_cache::shared(),
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1490,6 +1611,7 @@ mod tests {
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             Some(td.path().to_path_buf()),
+            radio_cache::shared(),
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1560,6 +1682,7 @@ mod tests {
                 crate::interfaces::inventory::InterfaceInventory::shared(),
                 AutoPeerCount::default(),
                 None,
+                radio_cache::shared(),
             )
             .unwrap();
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
