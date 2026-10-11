@@ -28,14 +28,17 @@ use alloc::vec::Vec;
 
 use leviculum_core::constants::RESOURCE_HASHMAP_LEN;
 use leviculum_core::resource::{ResourceSource, SourceError, RESOURCE_RANDOM_HASH_SIZE};
+use leviculum_core::{Destination, Identity};
 
 use crate::{
     constants::{DESTINATION_LENGTH, STAMP_SIZE},
     msgpack,
+    node::APP_NAME,
     propagation::{
-        MessageGetRequest, MessageGetResponse, MessageListResponse, PropagationError,
+        MessageGetRequest, MessageGetResponse, MessageListResponse, PeerError, PropagationError,
         PropagationNodeAnnounce, PropagationSignal, PropagationUpload, TransferLimit, TransientId,
     },
+    propagation_client::PROPAGATION_ASPECT,
     propagation_store::{PropagationStore, StoredMessage},
     storage::StorageError,
 };
@@ -485,6 +488,67 @@ pub enum UploadOutcome {
     /// dropped one is silently lost (concept paper §1, "acceptance is proven
     /// and retention is not").
     StoreFailed(StorageError),
+}
+
+impl UploadOutcome {
+    /// Whether this message counts against the peer that synced it: a
+    /// stamp that does not hold up, an undecodable body, or a nested
+    /// multi-message transfer. Any such message in an inbound sync batch
+    /// throttles the sender once the batch drains
+    /// (`reference/LXMF/LXMF/LXMRouter.py:2440-2450`). A store failure is
+    /// ours, not the peer's, and does not count. The board's sync drain
+    /// (`leviculum-nrf/src/pn.rs`, `perform_sync_step`) calls this; no rig
+    /// cell syncs a bad stamp to a board (leviculum#413).
+    pub fn counts_against_sender(&self) -> bool {
+        match self {
+            Self::InvalidStamp { .. } | Self::Malformed(_) | Self::PeerSyncForm => true,
+            Self::Accepted { .. } | Self::StoreFailed(_) => false,
+        }
+    }
+}
+
+/// The mailbox a `/get` on a link drains: the `lxmf.delivery` destination
+/// of the identity the link was identified with
+/// (`message_get_request`, `reference/LXMF/LXMF/LXMRouter.py:1487`). A link
+/// that never identified gets [`PeerError::NoIdentity`] (`:1483`), which
+/// the caller answers as a `MessageListResponse` error. The board's engine
+/// (`leviculum-nrf/src/pn.rs`, the `Work::Get` arm) calls this; no rig cell
+/// sends `/get` over an unidentified link (leviculum#413).
+pub fn get_mailbox(remote: Option<&Identity>) -> Result<[u8; DESTINATION_LENGTH], PeerError> {
+    let identity = remote.ok_or(PeerError::NoIdentity)?;
+    let name_hash = Destination::compute_name_hash(APP_NAME, &["delivery"]);
+    Ok(*Destination::compute_destination_hash(&name_hash, identity.hash()).as_bytes())
+}
+
+/// The `lxmf.propagation` destination hash of `identity`: the hash a peer
+/// node is known by in the peer table.
+pub fn propagation_hash_of(identity: &Identity) -> [u8; DESTINATION_LENGTH] {
+    let name_hash = Destination::compute_name_hash(APP_NAME, &[PROPAGATION_ASPECT]);
+    *Destination::compute_destination_hash(&name_hash, identity.hash()).as_bytes()
+}
+
+/// Who sent an inbound `/offer`, as the gates and the peering-key check
+/// need it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OfferRemote {
+    /// The identity hash, the second half of the peering-key material.
+    pub identity_hash: [u8; DESTINATION_LENGTH],
+    /// Its propagation destination, the peer-table key.
+    pub propagation_hash: [u8; DESTINATION_LENGTH],
+}
+
+/// The remote of an inbound `/offer`. A link that never identified gets
+/// [`PeerError::NoIdentity`] before any gate runs (`offer_request`,
+/// `reference/LXMF/LXMF/LXMRouter.py:2267`), which the caller answers as an
+/// `OfferResponse` error. The board's engine (`leviculum-nrf/src/pn.rs`,
+/// `answer_offer_work`) calls this; no rig cell offers over an
+/// unidentified link (leviculum#413).
+pub fn offer_remote(remote: Option<&Identity>) -> Result<OfferRemote, PeerError> {
+    let identity = remote.ok_or(PeerError::NoIdentity)?;
+    Ok(OfferRemote {
+        identity_hash: *identity.hash(),
+        propagation_hash: propagation_hash_of(identity),
+    })
 }
 
 /// Why a `/get` could not be answered. Either way the caller responds with

@@ -72,3 +72,45 @@ fn a_failed_push_resends_until_the_last_attempt_and_then_gives_up() {
     assert_eq!(after_failed_push(1), AfterFailedPush::GiveUp);
     assert_eq!(after_failed_push(0), AfterFailedPush::GiveUp);
 }
+
+/// The core refusing a push as too large for one packet leaves the message
+/// for `/get`; every other refusal (no path, pacing, a busy send path, a
+/// missing identity) waits the gap and retries.
+#[test]
+fn a_push_too_large_is_left_for_get_and_any_other_refusal_waits_the_gap() {
+    assert_eq!(
+        after_refused_push(&SendError::TooLarge),
+        AfterRefusedPush::LeaveForGet
+    );
+    for error in [
+        SendError::NoPath,
+        SendError::NoLink,
+        SendError::LinkFailed,
+        SendError::Busy,
+        SendError::PacingDelay { ready_at_ms: 5 },
+        SendError::EncryptionFailed,
+    ] {
+        assert_eq!(after_refused_push(&error), AfterRefusedPush::WaitGap);
+    }
+}
+
+/// The too-large list holds an id once, and past its cap the oldest goes:
+/// the pick may name it again, the core refuses it again, and it rejoins.
+#[test]
+fn the_too_large_list_holds_an_id_once_and_drops_the_oldest_past_its_cap() {
+    let mut list = Vec::new();
+    remember_too_large(&mut list, [1; 32]);
+    remember_too_large(&mut list, [1; 32]);
+    assert_eq!(list, alloc::vec![[1; 32]]);
+
+    for n in 2..=TOO_LARGE_CAP as u8 {
+        remember_too_large(&mut list, [n; 32]);
+    }
+    assert_eq!(list.len(), TOO_LARGE_CAP);
+    assert_eq!(list[0], [1; 32]);
+
+    remember_too_large(&mut list, [0xFF; 32]);
+    assert_eq!(list.len(), TOO_LARGE_CAP);
+    assert_eq!(list[0], [2; 32], "the oldest id dropped out");
+    assert_eq!(list[TOO_LARGE_CAP - 1], [0xFF; 32]);
+}

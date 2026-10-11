@@ -11,6 +11,14 @@
 //! no cell at all for the give-up, since none makes a push fail.
 //!
 //! One message is in flight at a time, so the pick names exactly one.
+//!
+//! The third decision, what a push the core refuses outright leaves
+//! ([`after_refused_push`], [`remember_too_large`]), followed in the third
+//! wave of leviculum#413: no cell makes the core refuse a push.
+
+use alloc::vec::Vec;
+
+use leviculum_core::SendError;
 
 use crate::propagation::TransientId;
 use crate::propagation_store::StoredMessage;
@@ -79,6 +87,47 @@ pub const fn after_failed_push(attempts_left: u8) -> AfterFailedPush {
         left => AfterFailedPush::Resend {
             attempts_left: left,
         },
+    }
+}
+
+/// How many ids the too-large list holds before the oldest drops out.
+pub const TOO_LARGE_CAP: usize = 64;
+
+/// What a push the core refused to send at all leaves (the `Err` arm of
+/// the board's `send_raw_single_packet`, `resend_active` in
+/// `leviculum-nrf/src/pn.rs`). A push the core accepted is the one in
+/// flight; nothing here decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterRefusedPush {
+    /// The message does not fit one packet: remember it
+    /// ([`remember_too_large`]) so the pick never names it again. It stays
+    /// in the store for the recipient's `/get`, and no gap is set, so the
+    /// next-oldest can go at once.
+    LeaveForGet,
+    /// No path after all, or pacing: wait the engine's gap, then the next
+    /// trigger retries the same pick.
+    WaitGap,
+}
+
+/// Map the core's refusal of a push to what the engine does next.
+pub const fn after_refused_push(error: &SendError) -> AfterRefusedPush {
+    match error {
+        SendError::TooLarge => AfterRefusedPush::LeaveForGet,
+        _ => AfterRefusedPush::WaitGap,
+    }
+}
+
+/// Add `transient_id` to the too-large list once, dropping the oldest entry
+/// past [`TOO_LARGE_CAP`]. Bounded because the list only ever needs the ids
+/// still in the store, and a store that cycles its oldest page out takes
+/// the oldest ids with it.
+pub fn remember_too_large(list: &mut Vec<TransientId>, transient_id: TransientId) {
+    if list.contains(&transient_id) {
+        return;
+    }
+    list.push(transient_id);
+    if list.len() > TOO_LARGE_CAP {
+        list.remove(0);
     }
 }
 

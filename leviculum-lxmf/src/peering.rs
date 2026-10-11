@@ -780,6 +780,38 @@ impl PeerTable {
         self.peers.values_mut()
     }
 
+    /// The calendar just jumped from `before`, the estimate the old
+    /// calendar gave at the moment of the jump, to `now`: refresh every
+    /// liveness stamp taken on the old calendar, so the 14-day
+    /// unreachability cull does not read the jump as fourteen days of
+    /// silence. "Heard this boot" is the honest reading of those stamps.
+    /// Returns the peers it refreshed, which the caller persists.
+    ///
+    /// `last_heard <= before` is exactly "stamped on the old calendar": no
+    /// fixed date can say that, because a board's birth anchor is itself a
+    /// plausible-looking value (Codeberg #247). A jump that does not move
+    /// the calendar forward refreshes nothing. The board's engine
+    /// (`leviculum-nrf/src/pn.rs`, `seed_clock`) calls this; no rig cell
+    /// seeds a board's clock mid-run with peers in its table
+    /// (leviculum#413).
+    pub fn refresh_after_calendar_jump(
+        &mut self,
+        before: u64,
+        now: u64,
+    ) -> Vec<[u8; DESTINATION_LENGTH]> {
+        let mut refreshed = Vec::new();
+        if now <= before {
+            return refreshed;
+        }
+        for peer in self.peers.values_mut() {
+            if peer.last_heard <= before {
+                peer.last_heard = now;
+                refreshed.push(peer.destination_hash);
+            }
+        }
+        refreshed
+    }
+
     /// Restore persisted peers (engine start-up).
     pub fn restore(&mut self, records: Vec<PeerRecord>) {
         for record in records {

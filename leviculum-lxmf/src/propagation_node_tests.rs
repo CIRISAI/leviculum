@@ -1007,3 +1007,134 @@ fn a_board_at_cost_zero_skips_the_stamp_value_until_a_peer_demands_one() {
         other => panic!("{other:?}"),
     }
 }
+
+/// What a synced message the peer got wrong leaves: a stamp below the cost,
+/// a body too short to hold one, and a nested multi-message transfer all
+/// count against the sender, so its batch throttles it once drained.
+#[test]
+fn a_bad_stamp_a_bad_body_and_a_nested_transfer_count_against_the_sender() {
+    let mut demanding = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig {
+            stamp_cost: 13,
+            ..PropagationNodeConfig::default()
+        },
+    );
+    let invalid = demanding.accept_stamped(&envelope_body(7, 1), 100, |_, _| None);
+    assert!(matches!(invalid, UploadOutcome::InvalidStamp { .. }));
+    assert!(invalid.counts_against_sender());
+
+    let malformed = node(64 * 1024).accept_stamped(&[7; 40], 100, stamp_of_value_zero);
+    assert!(matches!(malformed, UploadOutcome::Malformed(_)));
+    assert!(malformed.counts_against_sender());
+
+    assert!(UploadOutcome::PeerSyncForm.counts_against_sender());
+}
+
+/// A store that could not hold a synced message is our failure, not the
+/// peer's: it does not count against the sender.
+#[test]
+fn a_store_failure_does_not_count_against_the_sender() {
+    assert!(!UploadOutcome::StoreFailed(StorageError::Full).counts_against_sender());
+    assert!(!UploadOutcome::StoreFailed(StorageError::Io).counts_against_sender());
+}
+
+/// A stored message, new or already held, does not count against the
+/// sender.
+#[test]
+fn an_accepted_message_does_not_count_against_the_sender() {
+    let mut node = node(64 * 1024);
+    let first = node.accept_stamped(&envelope_body(7, 1), 100, stamp_of_value_zero);
+    assert!(matches!(
+        first,
+        UploadOutcome::Accepted {
+            duplicate: false,
+            ..
+        }
+    ));
+    assert!(!first.counts_against_sender());
+    let again = node.accept_stamped(&envelope_body(7, 1), 101, stamp_of_value_zero);
+    assert!(matches!(
+        again,
+        UploadOutcome::Accepted {
+            duplicate: true,
+            ..
+        }
+    ));
+    assert!(!again.counts_against_sender());
+}
+
+/// One stamped message body (`lxmf_data ‖ stamp`), the form a peer sync
+/// carries, for `destination`, unique per `seed`.
+fn envelope_body(destination: u8, seed: u8) -> Vec<u8> {
+    let mut body = vec![destination; DESTINATION_LENGTH];
+    body.resize(120, seed);
+    body.extend_from_slice(&[0xEE; STAMP_SIZE]);
+    body
+}
+
+fn link_identity(seed: u8) -> leviculum_core::Identity {
+    let mut private = [0u8; 64];
+    for (index, byte) in private.iter_mut().enumerate() {
+        *byte = seed.wrapping_add(index as u8);
+    }
+    leviculum_core::Identity::from_private_key_bytes(&private).expect("valid identity")
+}
+
+/// The destination the stack itself builds for `identity` and these
+/// aspects: the independent derivation the link gates are checked against.
+fn destination_of(identity: &leviculum_core::Identity, aspect: &str) -> [u8; DESTINATION_LENGTH] {
+    *leviculum_core::Destination::new(
+        Some(identity.clone()),
+        leviculum_core::Direction::In,
+        leviculum_core::DestinationType::Single,
+        "lxmf",
+        &[aspect],
+    )
+    .expect("valid destination")
+    .hash()
+    .as_bytes()
+}
+
+/// A `/get` over a link that never identified is refused with
+/// `ERROR_NO_IDENTITY` before the request is read.
+#[test]
+fn a_get_over_an_unidentified_link_is_answered_no_identity() {
+    assert_eq!(get_mailbox(None), Err(PeerError::NoIdentity));
+}
+
+/// An identified link drains the identity's own `lxmf.delivery` mailbox,
+/// and a second identity drains a different one.
+#[test]
+fn a_get_over_an_identified_link_drains_that_identitys_delivery_mailbox() {
+    let identity = link_identity(1);
+    assert_eq!(
+        get_mailbox(Some(&identity)),
+        Ok(destination_of(&identity, "delivery"))
+    );
+    assert_ne!(
+        get_mailbox(Some(&link_identity(2))),
+        get_mailbox(Some(&identity))
+    );
+}
+
+/// An `/offer` over a link that never identified is refused with
+/// `ERROR_NO_IDENTITY` before any gate runs.
+#[test]
+fn an_offer_over_an_unidentified_link_is_answered_no_identity() {
+    assert_eq!(offer_remote(None), Err(PeerError::NoIdentity));
+}
+
+/// An identified offerer is known by its identity hash and its
+/// `lxmf.propagation` destination.
+#[test]
+fn an_offer_over_an_identified_link_names_the_identity_and_its_propagation_destination() {
+    let identity = link_identity(3);
+    assert_eq!(
+        offer_remote(Some(&identity)),
+        Ok(OfferRemote {
+            identity_hash: *identity.hash(),
+            propagation_hash: destination_of(&identity, "propagation"),
+        })
+    );
+}

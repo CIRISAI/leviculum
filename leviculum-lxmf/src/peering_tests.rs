@@ -100,6 +100,45 @@ fn the_cap_declines_new_peers_first_heard_wins() {
 
 /// A full default table (20 peers, the static one among them) for the
 /// rotation tests: every peer tested, alive, offered 10 and took 9.
+/// A board whose calendar ran on its birth anchor (the build time) seeds
+/// real time: the peers it heard on the old calendar, the one at the jump
+/// instant included, read "heard now"; a peer restored with a stamp the
+/// previous boot took on real time, later than the anchor, keeps it.
+#[test]
+fn a_calendar_jump_refreshes_the_peers_heard_on_the_old_calendar() {
+    const ANCHOR: u64 = 1_760_000_000;
+    let before = ANCHOR + 300;
+    let now = ANCHOR + 100_000;
+    let mut table = table();
+    for (n, heard) in [(1u8, ANCHOR + 100), (2, before), (3, ANCHOR + 50_000)] {
+        assert_eq!(
+            table.handle_announce([n; 16], &announce(1), Some(1), heard, false),
+            PeerChange::Added
+        );
+    }
+
+    let refreshed = table.refresh_after_calendar_jump(before, now);
+
+    assert_eq!(refreshed, vec![[1; 16], [2; 16]]);
+    assert_eq!(table.get(&[1; 16]).unwrap().last_heard, now);
+    assert_eq!(table.get(&[2; 16]).unwrap().last_heard, now);
+    assert_eq!(table.get(&[3; 16]).unwrap().last_heard, ANCHOR + 50_000);
+}
+
+/// A seed that does not move the calendar forward is no jump: nothing is
+/// refreshed and nothing is handed back to persist.
+#[test]
+fn a_seed_that_does_not_move_the_calendar_forward_refreshes_nothing() {
+    let mut table = table();
+    assert_eq!(
+        table.handle_announce([1; 16], &announce(1), Some(1), 100, false),
+        PeerChange::Added
+    );
+    assert!(table.refresh_after_calendar_jump(500, 500).is_empty());
+    assert!(table.refresh_after_calendar_jump(500, 400).is_empty());
+    assert_eq!(table.get(&[1; 16]).unwrap().last_heard, 100);
+}
+
 fn full_table_for_rotation() -> (PeerTable, BTreeMap<[u8; 16], PeerTraffic>) {
     let mut table = PeerTable::new(PeeringConfig {
         static_peers: vec![[200; 16]],
