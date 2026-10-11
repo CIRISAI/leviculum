@@ -64,6 +64,17 @@ pub enum AfterClose {
     Conclude,
 }
 
+/// What a decoded sync envelope that arrives while a batch is held means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    /// No batch is held: this envelope becomes the batch.
+    Take,
+    /// A batch is still held: the sender ignored the `/offer` gate's
+    /// throttle, which refuses offers while a batch drains. Close its link;
+    /// the held batch is untouched.
+    CloseLink,
+}
+
 /// One inbound sync batch, draining one message per settle pass.
 ///
 /// Generic over the message body so the tests can drain byte strings while the
@@ -161,6 +172,18 @@ impl<M> SyncBatch<M> {
             AfterClose::KeepDraining
         }
     }
+
+    /// One batch at a time: a second envelope while `held` is anything but
+    /// `None` closes its sender's link (leviculum#413, the engine's
+    /// `on_inbound_resource`). A batch the engine still holds is
+    /// one it has not concluded, drained or not, and the next envelope
+    /// waits for that conclusion like the `/offer` gate does.
+    pub fn arrival(held: Option<&Self>) -> Arrival {
+        match held {
+            None => Arrival::Take,
+            Some(_) => Arrival::CloseLink,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +247,25 @@ mod tests {
 
         assert_eq!(batch.after_close(), AfterClose::Conclude);
         assert_eq!(batch.transferred(), 1);
+    }
+
+    /// No batch held: the envelope is taken.
+    #[test]
+    fn an_envelope_with_no_batch_held_is_taken() {
+        assert_eq!(SyncBatch::<&[u8]>::arrival(None), Arrival::Take);
+    }
+
+    /// A second envelope while a batch still drains, or while a drained one
+    /// waits for its conclusion, closes the sender's link and leaves the
+    /// held batch as it was.
+    #[test]
+    fn a_second_envelope_while_a_batch_is_held_closes_the_link() {
+        let mut batch = SyncBatch::new(VecDeque::from(vec![&b"first"[..], &b"second"[..]]));
+        assert_eq!(SyncBatch::arrival(Some(&batch)), Arrival::CloseLink);
+        assert_eq!(batch.messages().len(), 2);
+
+        settle_until_drained(&mut batch);
+        assert_eq!(SyncBatch::arrival(Some(&batch)), Arrival::CloseLink);
     }
 
     /// `transferred=` counts what was stored, not what was judged: a refused

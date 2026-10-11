@@ -651,3 +651,123 @@ fn read_body_at_reassembles_what_read_body_returns() {
         );
     });
 }
+
+// ---- the flush settling the role (leviculum#413, census row 81) ----
+
+/// A propagation-node role over the board's store adapter, at stamp cost 0
+/// so an upload is accepted on its envelope alone.
+fn role(region: &SharedRegion) -> PropagationNode<PnStore<SharedRegion>> {
+    PropagationNode::new(
+        PnStore::new(region.clone(), SECTORS),
+        leviculum_lxmf::PropagationNodeConfig {
+            stamp_cost: 0,
+            ..leviculum_lxmf::PropagationNodeConfig::default()
+        },
+    )
+}
+
+/// One client upload envelope for destination 7, unique per `seed`.
+fn upload(seed: u8) -> Vec<u8> {
+    let mut lxmf = vec![7u8; DESTINATION_LENGTH];
+    lxmf.resize(200, seed);
+    leviculum_lxmf::PropagationUpload::single(1_700_000_000.0, lxmf, [0xEE; 32]).encode()
+}
+
+/// Upload `bytes` and return whether the role called it a duplicate.
+fn upload_is_duplicate(role: &mut PropagationNode<PnStore<SharedRegion>>, bytes: &[u8]) -> bool {
+    match role.handle_upload(bytes, 1000, |_, _| Some(0)) {
+        leviculum_lxmf::UploadOutcome::Accepted { duplicate, .. } => duplicate,
+        other => panic!("expected acceptance, got {other:?}"),
+    }
+}
+
+/// Hand the role's front op to the log the way the record-store task does,
+/// failures included, and settle it. Returns whether the op landed.
+fn flush_front(
+    role: &mut PropagationNode<PnStore<SharedRegion>>,
+    region: &SharedRegion,
+    log: &mut RecordLog<SimNor>,
+) -> bool {
+    let op = role.store().peek_op().cloned().expect("an op to flush");
+    let ok = match &op {
+        FlushOp::Append {
+            key,
+            time,
+            tag,
+            body,
+        } => block_on(log.append(key, *time, *tag, body)).is_ok(),
+        FlushOp::Purge { .. } => unreachable!("only appends in these tests"),
+    };
+    sync(region, log);
+    assert_eq!(settle_message_op(role, ok), Some(op));
+    ok
+}
+
+/// The flash refused the append (the SoftDevice found no gap, past the
+/// task's retries): the id is forgotten, so the client's retry is stored
+/// rather than proven as a duplicate of a message that never landed.
+#[test]
+fn an_append_the_flash_refused_forgets_its_id_and_the_retry_is_stored() {
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let mut role = role(&region);
+    let bytes = upload(1);
+
+    assert!(!upload_is_duplicate(&mut role, &bytes));
+    log.flash_mut().fail_next_op();
+    assert!(!flush_front(&mut role, &region, &mut log));
+    assert_eq!(directory(role.store()).len(), 0, "nothing reached flash");
+
+    assert!(!upload_is_duplicate(&mut role, &bytes), "the retry is new");
+    assert!(flush_front(&mut role, &region, &mut log));
+    assert_eq!(directory(role.store()).len(), 1);
+}
+
+/// The store was not mounted, so the task refused the op without touching
+/// the part: the same `false`, the same forgetting.
+#[test]
+fn an_append_refused_by_an_unmounted_store_forgets_its_id() {
+    let region = SharedRegion::new(SECTORS);
+    let mut role = role(&region);
+    let bytes = upload(2);
+
+    assert!(!upload_is_duplicate(&mut role, &bytes));
+    assert!(matches!(
+        settle_message_op(&mut role, false),
+        Some(FlushOp::Append { .. })
+    ));
+    assert_eq!(role.store().pending_ops(), 0);
+    assert!(!upload_is_duplicate(&mut role, &bytes), "the retry is new");
+}
+
+/// A full region is not a failure: the log reclaims its oldest page and
+/// the append lands, so the id stays remembered and the retry is the proven
+/// duplicate it should be.
+#[test]
+fn an_append_into_a_full_region_lands_and_its_retry_is_a_duplicate() {
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let mut role = role(&region);
+    let filler = (SECTORS * SECTOR_SIZE) as usize / FIELD_BODY + 8;
+    for n in 0..filler as u32 {
+        role.store_mut()
+            .append(&key(n), n.into(), 0, &msg_body(1, FIELD_BODY))
+            .unwrap();
+        flush_messages(role.store_mut(), &region, &mut log);
+    }
+    assert!(
+        !role.store().contains(&key(0)).unwrap(),
+        "the region cycled its oldest page"
+    );
+
+    let bytes = upload(3);
+    assert!(!upload_is_duplicate(&mut role, &bytes));
+    assert!(flush_front(&mut role, &region, &mut log));
+    assert!(
+        upload_is_duplicate(&mut role, &bytes),
+        "the retry is proven"
+    );
+    assert_eq!(role.store().pending_ops(), 0, "and not stored twice");
+}

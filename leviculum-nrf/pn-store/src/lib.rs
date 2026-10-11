@@ -74,6 +74,7 @@ use leviculum_lxmf::constants::DESTINATION_LENGTH;
 use leviculum_lxmf::peering::{PeerRecord, PeerStore};
 use leviculum_lxmf::propagation_store::{copy_from, PropagationStore, StoredMessage, MIN_BODY_LEN};
 use leviculum_lxmf::storage::StorageError;
+use leviculum_lxmf::PropagationNode;
 use leviculum_record_log::{
     crc16_update, record_stride, FLAG_LIVE, FLAG_PURGED, HEADER_LEN, KEY_LEN, MIN_STRIDE,
     SECTOR_HEADER_LEN, SECTOR_PAYLOAD, SECTOR_SIZE,
@@ -230,6 +231,37 @@ pub enum FlushOp {
     /// re-validating that its key still matches (the page may have been
     /// reclaimed since the mark).
     Purge { offset: u32, key: [u8; KEY_LEN] },
+}
+
+/// The record-store task answered the message store's front op: `ok` is
+/// whether it landed. Pops the op and returns it.
+///
+/// **An append that failed is not processed.** The role remembered the
+/// message's transient id when it accepted the upload, before the deferred
+/// write ran; left there, the client's retry of a message that never
+/// reached flash would be answered as a proven duplicate and lost, the
+/// exact lie "persist before you prove" exists to prevent. So a failed
+/// append un-remembers its id ([`PropagationNode::forget_processed`]). A
+/// failed purge needs nothing from the role: popping it drops its mask and
+/// the record reappears. Every way the task can fail an op (the store not
+/// mounted, the flash refusing past its retries, a page sealed mid-record)
+/// arrives here as the same `false`.
+///
+/// This is where the two crates meet: the queue is this crate's, the
+/// duplicate cache the role's. The board's engine (`leviculum-nrf/src/pn.rs`,
+/// `flush`) calls it; no rig cell makes a board's flash refuse an append
+/// (leviculum#413).
+pub fn settle_message_op<R: Region>(
+    role: &mut PropagationNode<PnStore<R>>,
+    ok: bool,
+) -> Option<FlushOp> {
+    let done = role.store_mut().op_done(ok);
+    if !ok {
+        if let Some(FlushOp::Append { key, .. }) = &done {
+            role.forget_processed(key);
+        }
+    }
+    done
 }
 
 /// The message-store half: [`PropagationStore`] over the region.
