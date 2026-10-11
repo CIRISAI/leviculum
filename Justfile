@@ -1627,11 +1627,16 @@ build-integ-bins:
 # manifests have recorded for it, so the default is comfortable warm and only
 # marginal cold, and a backstop that fires on an honest cold build is a backstop
 # people switch off. The nightly's `timeout 3600` around all of `just complete`
-# stays the outer bound; this is the inner one, so an interactive cold run is
-# not cut off mid-build.
+# stays the outer bound there; this is the inner one, so an interactive cold run
+# is not cut off mid-build.
+#
+# 7200, not 3600: the land gate on bb628d67 compiled 1472 crates cold after the
+# push-tree sweep and hit 3600 s (started 19:23, rc=124 at 20:22) with two coder
+# passes building beside it; the ceiling only has to stop a hung test, which
+# 7200 still does.
 [doc('Run every test in the workspace, selecting nothing by name')]
 complete:
-    {{manifest}} workspace-all-targets --timeout 3600 -- cargo test --workspace --all-targets --no-fail-fast
+    {{manifest}} workspace-all-targets --timeout 7200 -- cargo test --workspace --all-targets --no-fail-fast
     {{manifest}} workspace-doc -- cargo test --workspace --doc --no-fail-fast
 
 [doc('Tier 2: standard, complete and the periculum docker corpora')]
