@@ -101,6 +101,31 @@ but the configuration guide's drop-in paragraph (see §6) does not
 carry the caveat. Test: drop-in — `shared_instance_type = tcp` on
 Linux, `rnstatus` against both daemons.
 
+*Fixed in 217fc8f6.* Both channels move to TCP loopback when the key says
+`tcp`, on every platform, at the configured ports or 37428/37429, the
+instance name unused, as the reference resolves them
+(`endpoint`, `leviculum-std/src/interfaces/ipc.rs:68`). One module binds and
+dials for the data channel (`spawn_local_server`,
+`leviculum-std/src/interfaces/local.rs:140`; `spawn_local_client`,
+`leviculum-std/src/interfaces/local.rs:468`) and the RPC channel
+(`spawn_rpc_server`, `leviculum-std/src/rpc/mod.rs:50`; `rpc_client_call_at`,
+`leviculum-std/src/rpc/mod.rs:281`), through `bind`
+(`leviculum-std/src/interfaces/ipc.rs:152`) and `connect`
+(`leviculum-std/src/interfaces/ipc.rs:174`). A node takes the
+transport from the config it is built from; our client tools take it from
+the config they read (`dial_as_configured`,
+`leviculum-cli/src/daemon_rpc.rs:39`). In that mode the server and its
+clients carry the reference's TCP names, `Shared Instance[<port>]` and
+`LocalInterface[<peer port>]` (`LocalInterface.py:497-498`, `:374`). Pinned
+by `test_rnstatus_over_tcp_shared_instance_against_rust_daemon`: the
+reference `rnstatus` reading a `tcp` config reaches lnsd built from it,
+`ss -ltnp` shows this process on both loopback ports, and `ss -xl` lists
+no abstract socket of the instance (red before: "No shared RNS instance
+available to get status from"); by
+`lnstatus_reaches_a_tcp_shared_instance_from_the_same_config` (lnsd and our
+`lnstatus` from one file; red without the client side); and by
+`tcp_transport_serves_and_dials_the_data_channel_on_loopback`.
+
 **D3 — message ceilings where Python has none.** We refuse a request
 whose length prefix exceeds 64 KiB before allocating
 (`MAX_REQUEST_LEN`, `leviculum-std/src/rpc/connection.rs:48`) and a
@@ -343,14 +368,21 @@ interface through the same lookup `interface_stats` uses
 presentation identity a listener gave a spawned interface, otherwise the
 driver's registered name. The case that differed is the accepted
 connection, `tcp_server/<peer>` against `TCPInterface[Client on
-<section>/<peer>]`; a configured TCP client is still `tcp_client_0` in
-both answers, so the two agree, though neither spells the reference's
-`TCPInterface[<name>/<host>:<port>]` for it. Pinned by
+<section>/<peer>]`. A configured TCP client is
+`TCPInterface[<name>/<host>:<port>]` in both answers since 217fc8f6, as the
+reference's client `__str__` spells it
+(`reference/Reticulum/RNS/Interfaces/TCPInterface.py:443-449`), while its
+tunnel hash still derives from the internal `tcp_client_<idx>`
+(`tcp_client_tunnel_hash`, `leviculum-std/src/driver/mod.rs:850`). Pinned by
 `test_rnpath_table_names_the_interface_rnstatus_reports`: the reference
 `rnpath -tj` against lnsd, joined to `rnstatus -j` by name, finds the
 row, and `rnpath -t` prints `on TCPInterface[Client on TCP
-Server/127.0.0.1:<port>]` (red before: `tcp_server/127.0.0.1:<port>`);
-and by `path_answers_name_interfaces_as_interface_stats_does`.
+Server/127.0.0.1:<port>]` (red before: `tcp_server/127.0.0.1:<port>`),
+and for a daemon reaching another through an `[[Upstream Link]]` section,
+`on TCPInterface[Upstream Link/127.0.0.1:<port>]` in both tools (red
+before: `tcp_client_0`); by
+`path_answers_name_interfaces_as_interface_stats_does`; and by
+`a_tcp_client_tunnel_hash_is_the_internal_names_hash`.
 
 **D9 — the no-path `next_hop_if_name` answer is `"unknown"`, Python's
 is the string `"None"`.** Python's standalone arm is
@@ -453,6 +485,14 @@ and relies on packet parsing to refuse it. Semantically a no-op — a
 short frame is unparseable either way — recorded so a future
 malformed-client fuzz finding is not hunted as a transport bug.
 Class: deviation ours, inert.
+
+*Fixed in 217fc8f6.* The local interface drops such a frame and counts it
+in a debug line (`is_packet_sized`,
+`leviculum-std/src/interfaces/local.rs:678`), the same test the reference
+makes. Pinned by `a_frame_not_over_header_minsize_never_reaches_the_core`:
+an 18-byte and a 19-byte frame followed by a 20-byte one, and only the
+20-byte frame reaches the core (red before: the 18-byte frame arrived
+first).
 
 **D11 — the reconnect cadence is ours, deliberately.** Python waits
 `RECONNECT_WAIT` = 8 s before its first retry
@@ -670,8 +710,8 @@ rather than misleading.
   from a configured `default_ar_target`, none on a LocalInterface row
   (D16, fixed in a26157d1). Visible gaps: `-d`/`-D` read the LOCAL discovery registry files,
   not the RPC, and our on-disk registry format is ours — not compared
-  in this audit (coverage, below). Config-dependent lockouts: D1, D2,
-  D12.1.
+  in this audit (coverage, below). Config-dependent lockouts: D12.1
+  (D1 and D2 are fixed, in e5f78966 and 217fc8f6).
 * **`rnprobe`** — works end to end (probe destination via
   `respond_to_probes`, timeout from `first_hop_timeout`); prints the
   RSSI/SNR/Q decoration on radio paths (D6, fixed in e5f78966; the
@@ -711,14 +751,15 @@ rather than misleading.
    (`docs/src/guide/configuration.md:109`), so the document contradicts
    its own opening paragraph. *Rewritten in e5f78966*: the paragraph now
    says what the drop-in holds, and a second one says where it does
-   not (D12, D2, D14); D1 is fixed in the same commit.
+   not (D12, D2, D14); D1 is fixed in the same commit. D2 is fixed in
+   217fc8f6 and leaves the second paragraph.
 2. **"It is a drop-in replacement for Python's rnsd"
    (`docs/src/man/lnsd.1.md:13-15`) — holds for the deployed
    configuration shape, with the D12 defaults as the unstated
    proviso.** Every config we generate writes the three flipped keys
    explicitly, so the claim is true of our fleet and untrue of a
    minimal foreign config. *Rewritten in e5f78966* to name the D12, D2
-   and D14 provisos.
+   and D14 provisos; D2 left the list in 217fc8f6.
 3. **The memory `project_identity_data_rpc_gap` ("the shared-instance
    RPC does not parse the identity_data retain key") — stale,
    refuted.** The arm exists with tests in both codecs
