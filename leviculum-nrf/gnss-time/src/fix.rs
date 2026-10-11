@@ -15,7 +15,6 @@
 //! calendar wrong ([`crate::SeedGate`] is only ever offered what a valid
 //! RMC carried).
 
-use nmea0183::coords::{Hemisphere, Latitude, Longitude};
 use nmea0183::{GPSQuality, GGA, RMC};
 
 use crate::unix_secs_from_rmc_utc;
@@ -26,7 +25,8 @@ use crate::unix_secs_from_rmc_utc;
 /// policy.
 ///
 /// `latitude` / `longitude` are decimal degrees with sign (negative = S/W,
-/// positive = N/E).
+/// positive = N/E), as nmea0183's `as_f64` returns them: it applies the
+/// hemisphere itself, so the fold must not apply it a second time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GnssFix {
     /// True when the receiver reports a usable fix.
@@ -82,8 +82,8 @@ impl GnssFix {
     pub fn fold_rmc(&mut self, rmc: &RMC) {
         self.valid = rmc.mode.is_valid();
         if self.valid {
-            self.latitude = Some(signed_latitude(&rmc.latitude));
-            self.longitude = Some(signed_longitude(&rmc.longitude));
+            self.latitude = Some(rmc.latitude.as_f64());
+            self.longitude = Some(rmc.longitude.as_f64());
             // RMC UTC is already leap-second-corrected by the receiver —
             // converted as-is, never via raw GPS time (#166,
             // time-and-clocks.md).
@@ -107,8 +107,8 @@ impl GnssFix {
         let fix = !matches!(gga.gps_quality, GPSQuality::NoFix);
         self.valid = fix;
         if fix {
-            self.latitude = Some(signed_latitude(&gga.latitude));
-            self.longitude = Some(signed_longitude(&gga.longitude));
+            self.latitude = Some(gga.latitude.as_f64());
+            self.longitude = Some(gga.longitude.as_f64());
             self.altitude_m = gga.altitude.as_ref().map(|a| a.meters);
             // The accuracy gate's input (#236). Kept with position rather
             // than cleared with time: a stale HDOP mis-scales a position
@@ -122,26 +122,6 @@ impl GnssFix {
 impl Default for GnssFix {
     fn default() -> Self {
         Self::empty()
-    }
-}
-
-/// nmea0183's positive-magnitude latitude as signed decimal degrees
-/// (negative south).
-fn signed_latitude(lat: &Latitude) -> f64 {
-    let mag = lat.as_f64();
-    match lat.hemisphere {
-        Hemisphere::South => -mag,
-        _ => mag,
-    }
-}
-
-/// nmea0183's positive-magnitude longitude as signed decimal degrees
-/// (negative west).
-fn signed_longitude(lon: &Longitude) -> f64 {
-    let mag = lon.as_f64();
-    match lon.hemisphere {
-        Hemisphere::West => -mag,
-        _ => mag,
     }
 }
 
@@ -180,6 +160,7 @@ mod tests {
     }
 
     const RMC_VALID: &str = "GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W,A";
+    const RMC_SOUTH_WEST: &str = "GPRMC,123519,A,3352.000,S,15112.000,W,000.0,,230394,,,A";
     const RMC_VOID: &str = "GPRMC,123521,V,4807.038,N,01131.000,E,000.0,,230394,,,N";
     const GGA_FIX: &str = "GPGGA,123520,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
     const GGA_NO_FIX: &str = "GPGGA,123522,4807.038,N,01131.000,E,0,03,99.9,,M,,M,,";
@@ -194,6 +175,15 @@ mod tests {
         assert_eq!(fix.unix_secs, Some(764_426_119));
         assert!(fix.speed_mps.unwrap() > 11.0);
         assert_eq!(fix.bearing_deg, Some(84.4));
+    }
+
+    #[test]
+    fn south_and_west_are_negative_and_a_missing_course_stays_absent() {
+        let mut fix = GnssFix::empty();
+        fix.fold_rmc(&rmc(RMC_SOUTH_WEST));
+        assert!(fix.latitude.unwrap() < -33.0, "{:?}", fix.latitude);
+        assert!(fix.longitude.unwrap() < -151.0, "{:?}", fix.longitude);
+        assert_eq!(fix.bearing_deg, None);
     }
 
     #[test]
