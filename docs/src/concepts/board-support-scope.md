@@ -170,8 +170,8 @@ drive them, and being liftable is the same property as being portable:
 - `rx-arming` reaches a radio only through two traits, `RxPort`
   (`leviculum-nrf/rx-arming/src/lib.rs:167`) and `RxWindowProbe`
   (`leviculum-nrf/rx-arming/src/lib.rs:706`). The driver implements both,
-  `RxPort` (`leviculum-nrf/src/sx1262.rs:1450`) and `RxWindowProbe`
-  (`leviculum-nrf/src/sx1262.rs:1480`), and a test fake implements
+  `RxPort` (`leviculum-nrf/src/sx1262.rs:1452`) and `RxWindowProbe`
+  (`leviculum-nrf/src/sx1262.rs:1482`), and a test fake implements
   `RxPort` (`leviculum-nrf/rx-arming/src/lib.rs:1868`) beside it. A second
   family writes a third implementation; it does not fork the crate.
 - `channel-access` touches no radio at all. The caller reports what its

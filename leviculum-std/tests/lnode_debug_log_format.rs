@@ -1117,8 +1117,12 @@ fn the_transmit_deferral_is_spent_once_per_externally_paced_event() {
          an event paced from outside this loop has to be re-argued. \
          {DEFERRAL_HAND_CHECK}"
     );
+    // The rule itself is `leviculum_rx_arming::window_entry`, host-tested in
+    // that crate (leviculum#413); what this pins is that `rx_window` asks it
+    // with the config channel's state and stands aside on its answer.
     assert!(
-        window.contains("if !config_rx.is_empty() {"),
+        window.contains("window_entry(!config_rx.is_empty())")
+            && window.contains("WindowEntry::StandAside"),
         "rx_window arms a window even when a config is already waiting, so one \
          config push can now reach the deferral once per window instead of once. \
          {DEFERRAL_HAND_CHECK}"

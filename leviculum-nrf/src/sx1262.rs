@@ -810,12 +810,14 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // says the chip is back in standby on its own, anything else takes
         // the standby that ends the transmit. Without this an SPI error
         // after `SetTx` would leave the PA recorded as keyed, and the front
-        // end would then refuse every later receive window.
+        // end would then refuse every later receive window. The rule is
+        // `leviculum_core::sx126x::tx_exit` (leviculum#413).
         let on_air = self.on_air(timeout_ms).await;
-        if on_air.is_ok() {
-            self.front_end.tx_done();
-        } else {
-            let _ = self.set_standby_rc().await;
+        match leviculum_core::sx126x::tx_exit(on_air.is_ok()) {
+            leviculum_core::sx126x::TxExit::Done => self.front_end.tx_done(),
+            leviculum_core::sx126x::TxExit::Standby => {
+                let _ = self.set_standby_rc().await;
+            }
         }
         on_air
     }
@@ -828,7 +830,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
 
         // Wait for DIO1 high (TxDone) via GPIOTE interrupt
         with_timeout(
-            Duration::from_millis(timeout_ms.max(100) as u64),
+            Duration::from_millis(leviculum_core::sx126x::tx_wait_ms(timeout_ms)),
             self.dio1.wait_for_high(),
         )
         .await
@@ -836,7 +838,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         let flags = self.get_irq_status().await?;
         self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
             .await?;
-        if flags & irq::IRQ_TX_DONE != 0 {
+        if leviculum_core::sx126x::tx_left_the_air(flags) {
             Ok(())
         } else {
             Err(Error::Timeout)

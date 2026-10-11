@@ -67,8 +67,8 @@ counted its backoff in `max(24, airtime(500)/10)` — a tenth of a
 into the gate's doubling window, so a board could owe 63 of those slots
 on one busy channel where its RNode neighbours owe at most 58 of theirs.
 The gate now counts in the same slot the draw does
-(`leviculum-nrf/src/lora.rs:2131`), and the before/after figures are
-pinned in `csma_slot_is_no_longer_a_tenth_of_a_500_byte_airtime`
+(`leviculum-nrf/channel-access/src/lib.rs:415`), and the before/after
+figures are pinned in `csma_slot_is_no_longer_a_tenth_of_a_500_byte_airtime`
 (`leviculum-core/src/rnode.rs:3321`).
 
 A millisecond constant would have been wrong in both directions. At
@@ -126,7 +126,7 @@ The two predict a median gap of 216 ms and 204 ms; the bench measured
 we are already transmitting owes nothing, because the frame before it
 served the wait. The wait comes back when the channel is handed back,
 which the transmit path does after its post-TX listening window
-(`leviculum-nrf/src/lora.rs:2299`).
+(`leviculum-nrf/src/lora.rs:2295`).
 
 Asking for the wait does not discharge it. The wait is spent listening
 and the listen returns early on a reception, so a wait cut short by an
@@ -231,7 +231,7 @@ Codeberg #423, and it is fixed here rather than described.
 
 The window the transmit path opens after a transmission is one full
 single-frame reply airtime plus the peer's turnaround
-(`post_tx_rx_window_ms`, `leviculum-nrf/src/lora.rs:866`, deciding in
+(`post_tx_rx_window_ms`, `leviculum-nrf/src/lora.rs:904`, deciding in
 `leviculum-channel-access` where the peer's window is defined). The right
 comparison is against the peer's time to *key up*, not to finish its
 frame: the receiver stops its timeout on preamble detect and then runs
@@ -310,7 +310,7 @@ that went deaf would trade a collision for a missed frame, which is the
 same loss at the layer that counts. The transmit path arms the receiver
 for the drawn duration and reports back what it actually listened
 through, and a reception that cuts the wait short leaves the debt
-standing (`leviculum-nrf/src/lora.rs:2025`).
+standing (`leviculum-nrf/src/lora.rs:2060`).
 
 ## 6. Does the window's floor matter?
 

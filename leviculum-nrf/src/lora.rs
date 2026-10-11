@@ -17,7 +17,9 @@ use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use leviculum_core::traits::{Interface, InterfaceError};
 use leviculum_core::InterfaceId;
-use leviculum_queue_budget::{HoldVerdict, QueueBudget, LORA_QUEUE_BYTES, LORA_QUEUE_SLOTS};
+use leviculum_queue_budget::{
+    HoldVerdict, Outbound, QueueBudget, LORA_QUEUE_BYTES, LORA_QUEUE_SLOTS,
+};
 use static_cell::StaticCell;
 
 use crate::sx1262::Sx1262;
@@ -109,11 +111,15 @@ static LORA_OUTGOING: Channel<CriticalSectionRawMutex, QueuedFrame, LORA_QUEUE_S
 static LORA_CONFIG: Channel<CriticalSectionRawMutex, RadioConfig, 1> = Channel::new();
 
 /// On-air transmit spacing in ms, set from the host (#345,
-/// `TYPE_TX_SPACING`). One slot: the value is a level, not an event, and a
-/// second one arriving while the first is unread means the task has not
-/// reached its next key-up yet — the host is told to retry rather than
-/// having a sweep point silently overwritten.
-static LORA_TX_SPACING: Channel<CriticalSectionRawMutex, u16, 1> = Channel::new();
+/// `TYPE_TX_SPACING`). One slot, refused while it holds a value the task has
+/// not taken: [`leviculum_tx_spacing::SpacingRequest`], where the rule and
+/// its tests are (leviculum#413).
+static LORA_TX_SPACING: embassy_sync::blocking_mutex::Mutex<
+    CriticalSectionRawMutex,
+    core::cell::Cell<leviculum_tx_spacing::SpacingRequest>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(
+    leviculum_tx_spacing::SpacingRequest::new(),
+));
 
 /// Hand the LoRa task a new on-air transmit spacing (#345). `false` means
 /// one is already queued and unread — the caller answers `REFUSE_BUSY`.
@@ -124,7 +130,23 @@ static LORA_TX_SPACING: Channel<CriticalSectionRawMutex, u16, 1> = Channel::new(
 /// compiled default and no sweep can outlive the bench session that set
 /// it.
 pub fn deliver_tx_spacing(spacing_ms: u16) -> bool {
-    LORA_TX_SPACING.try_send(spacing_ms).is_ok()
+    LORA_TX_SPACING.lock(|slot| {
+        let mut request = slot.get();
+        let accepted = request.offer(spacing_ms);
+        slot.set(request);
+        accepted
+    })
+}
+
+/// The LoRa task's half of [`deliver_tx_spacing`]: put a waiting spacing into
+/// force on `spacer`, returning it for the log line.
+fn take_tx_spacing(spacer: &mut leviculum_tx_spacing::TxSpacer) -> Option<u16> {
+    LORA_TX_SPACING.lock(|slot| {
+        let mut request = slot.get();
+        let taken = request.take_into(spacer);
+        slot.set(request);
+        taken
+    })
 }
 
 /// One frame in the outbound queue, with the instant the interface accepted
@@ -325,47 +347,63 @@ impl Interface for LoRaInterface {
         // driver must not re-queue it forever. Same shape as the
         // `radio_silent` drop the TX path already does, one layer up so
         // the packet is not copied first.
-        if !crate::media::lora_active() {
-            // Logged as a run rather than per packet: every log line also
-            // writes the 2 KiB post-crash tail, and a carrier that is off
-            // drops one packet per announce, so per-packet lines empty the
-            // tail of the boot and fault diagnostics it exists for — in
-            // exactly the single-carrier measurement runs where a crash
-            // most needs explaining (#255). Same rule as `dispatch::settle`
-            // and `Reporter::note_state`: the transition is the signal.
-            if let Some(run) = self.drops.dropped(data.len()) {
-                crate::media::log_tx_drop(self.name(), run);
-            }
-            return Ok(());
-        }
-        if let Some(run) = self.drops.resumed() {
-            crate::media::log_tx_resumed(self.name(), run);
-        }
-        // Two bounds, the reference's shape (`CONFIG_QUEUE_SIZE` /
-        // `CONFIG_QUEUE_MAX_LENGTH`), checked before the packet is copied:
-        // whichever binds first refuses, and the copy a refused packet would
-        // have needed is not made.
+        // Carrier first, then the two bounds, the reference's shape
+        // (`CONFIG_QUEUE_SIZE` / `CONFIG_QUEUE_MAX_LENGTH`), checked before
+        // the packet is copied: whichever binds first refuses, and the copy a
+        // refused packet would have needed is not made. The order and every
+        // arm are `leviculum_queue_budget::outbound_verdict` (leviculum#413).
         //
         // Codeberg #344: a full `LORA_OUTGOING` used to be invisible — the
         // caller saw `BufferFull` and (before #344) dropped it, so the most
         // likely place for the board to lose a packet was also the quietest.
         // The four slots this queue had were under a three-second backlog at
         // SF10 (723 ms a frame), which any ordinary burst overran.
-        if let Err(bound) = OUTGOING_BUDGET.reserve(data.len()) {
-            crate::log::log_fmt(
-                "[IFACE_FULL] ",
-                format_args!(
-                    "iface={} bound={} slots={}/{} bytes={}/{} len={}",
-                    self.name(),
-                    bound.as_str(),
-                    OUTGOING_BUDGET.queued_slots(),
-                    OUTGOING_BUDGET.max_slots(),
-                    OUTGOING_BUDGET.queued_bytes(),
-                    OUTGOING_BUDGET.max_bytes(),
-                    data.len()
-                ),
-            );
-            return Err(InterfaceError::BufferFull);
+        match leviculum_queue_budget::outbound_verdict(
+            crate::media::lora_active(),
+            &OUTGOING_BUDGET,
+            data.len(),
+        ) {
+            // The media profile, applied where the medium's quirks belong:
+            // the interface knows its carrier is down, the core does not have
+            // to. Same shape as the `radio_silent` drop the TX path already
+            // does, one layer up so the packet is not copied first.
+            Outbound::Swallow => {
+                // Logged as a run rather than per packet: every log line also
+                // writes the 2 KiB post-crash tail, and a carrier that is off
+                // drops one packet per announce, so per-packet lines empty the
+                // tail of the boot and fault diagnostics it exists for — in
+                // exactly the single-carrier measurement runs where a crash
+                // most needs explaining (#255). Same rule as `dispatch::settle`
+                // and `Reporter::note_state`: the transition is the signal.
+                if let Some(run) = self.drops.dropped(data.len()) {
+                    crate::media::log_tx_drop(self.name(), run);
+                }
+                return Ok(());
+            }
+            Outbound::Refuse(bound) => {
+                if let Some(run) = self.drops.resumed() {
+                    crate::media::log_tx_resumed(self.name(), run);
+                }
+                crate::log::log_fmt(
+                    "[IFACE_FULL] ",
+                    format_args!(
+                        "iface={} bound={} slots={}/{} bytes={}/{} len={}",
+                        self.name(),
+                        bound.as_str(),
+                        OUTGOING_BUDGET.queued_slots(),
+                        OUTGOING_BUDGET.max_slots(),
+                        OUTGOING_BUDGET.queued_bytes(),
+                        OUTGOING_BUDGET.max_bytes(),
+                        data.len()
+                    ),
+                );
+                return Err(InterfaceError::BufferFull);
+            }
+            Outbound::Queue => {
+                if let Some(run) = self.drops.resumed() {
+                    crate::media::log_tx_resumed(self.name(), run);
+                }
+            }
         }
         let bytes = data.len();
         self.sender
@@ -387,7 +425,7 @@ impl Interface for LoRaInterface {
                 // Handed back rather than asserted: a leaked reservation would
                 // close the queue permanently, and the line below says the two
                 // disagreed, which is the bug to see.
-                OUTGOING_BUDGET.release(data.len());
+                OUTGOING_BUDGET.channel_refused(data.len());
                 crate::log::log_fmt(
                     "[IFACE_FULL] ",
                     format_args!(
@@ -947,21 +985,13 @@ fn active_facts(
     }
 }
 
-/// Put a freshly applied config's mute into force, or lift it.
-///
-/// One function for the boot config and the runtime one, because the rule is
-/// the same in both and it is the rule the whole of Codeberg #410 turns on: a
-/// config that says the board is silent starts a deadline, and a config that
-/// says it is not clears one outright. There is no third outcome — in
-/// particular, a config that leaves `radio_silent` set does not *extend* an
-/// existing lease, it restarts it, which is what makes "the harness re-sends
-/// the config" the supported way to hold a board quiet for longer.
+/// Put a freshly applied config's mute into force, or lift it: one call for
+/// the boot config and the runtime one, so the two cannot come to disagree
+/// about what a config means. The rule (a silent config restarts the lease, a
+/// config that is not silent clears it, Codeberg #410) is
+/// [`leviculum_mute_lease::MuteLease::apply`] (leviculum#413).
 fn apply_mute(lease: &mut leviculum_mute_lease::MuteLease, config: &RadioConfig, now_ms: u64) {
-    if config.radio_silent {
-        lease.grant(now_ms, config.silence_lease_s);
-    } else {
-        lease.clear();
-    }
+    lease.apply(config.radio_silent, config.silence_lease_s, now_ms);
 }
 
 /// Apply a config's airtime limits to the tracker, deriving the lawful
@@ -1084,7 +1114,10 @@ async fn transmit_all_frames(
         crate::log::log_fmt("[LORA] ", format_args!("TX {} bytes", data.len()));
     }
 
-    let mut tx_ok = true;
+    // Which frames are charged, where a refused one stops the packet, and
+    // whether the packet counts as sent: `leviculum_queue_budget::PacketTx`
+    // (leviculum#413).
+    let mut packet = leviculum_queue_budget::PacketTx::new(frames.len());
     for (i, frame) in frames.iter().enumerate() {
         // Per-frame TX identity, mirrors the RX-side [T114_SX_RX] first8 line so
         // a merged two-board timeline can pair each transmitted frame with the
@@ -1122,8 +1155,9 @@ async fn transmit_all_frames(
             config.cr_denom,
             config.preamble_len,
         );
-        match radio.transmit(frame, tx_timeout_ms).await {
-            Ok(()) => {
+        let result = radio.transmit(frame, tx_timeout_ms).await;
+        match (packet.frame_keyed(result.is_ok()), result) {
+            (leviculum_queue_budget::FrameStep::Charge, _) => {
                 // Record this frame's on-air time (header and programmed
                 // preamble included, matching the RNode firmware's
                 // `add_airtime(written)`).
@@ -1141,15 +1175,16 @@ async fn transmit_all_frames(
                 // the second frame's end — the last edge on the air.
                 spacer.note_tx_end(now_ms);
             }
-            Err(e) => {
-                crate::log::log_fmt("[LORA] ", format_args!("TX err frame {}: {:?}", i, e));
-                tx_ok = false;
+            (leviculum_queue_budget::FrameStep::Abort, result) => {
+                if let Err(e) = result {
+                    crate::log::log_fmt("[LORA] ", format_args!("TX err frame {}: {:?}", i, e));
+                }
                 break;
             }
         }
     }
     let tx_ms = tx_start.elapsed().as_millis();
-    if tx_ok {
+    if packet.sent() {
         crate::log::log_fmt("[LORA] ", format_args!("TX done"));
         LORA_TX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         #[cfg(feature = "display")]
@@ -1350,7 +1385,9 @@ async fn rx_window(
     config_rx: &Receiver<'static, CriticalSectionRawMutex, RadioConfig, 1>,
 ) -> bool {
     let (timeout_ms, site) = window;
-    if !config_rx.is_empty() {
+    if leviculum_rx_arming::window_entry(!config_rx.is_empty())
+        == leviculum_rx_arming::WindowEntry::StandAside
+    {
         // Nothing to listen for that the turn is not about to be interrupted
         // for anyway. Reported, because a capture that shows a window's log
         // line without its `[SX_RX_ARM]` should say why.
@@ -1667,7 +1704,6 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     let outgoing_rx = LORA_OUTGOING.receiver();
     let incoming_tx = LORA_INCOMING.sender();
     let config_rx = LORA_CONFIG.receiver();
-    let spacing_rx = LORA_TX_SPACING.receiver();
 
     // Init radio
     radio.reset().await;
@@ -1781,8 +1817,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
         // Take a new on-air spacing before anything is keyed this
         // iteration, so a value the host set is in force for the very next
         // transmission rather than the one after it.
-        if let Ok(spacing_ms) = spacing_rx.try_receive() {
-            spacer.set_spacing_ms(spacing_ms);
+        if let Some(spacing_ms) = take_tx_spacing(&mut spacer) {
             crate::log::log_fmt(
                 "[LORA_TX_SPACING] ",
                 format_args!("set intended_ms={}", spacing_ms),
@@ -2032,7 +2067,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     },
                     format_args!("wait_ms={} slot_ms={}", jitter_ms, access.jitter_slot()),
                 );
-                let rx_ms = jitter_ms.clamp(1, 10_000) as u32;
+                let rx_ms = leviculum_channel_access::listen_window_ms(jitter_ms);
                 reassembler.check_timeout(rx_timeout_count, 10);
                 let jitter_start = embassy_time::Instant::now();
                 if rx_window(
@@ -2064,19 +2099,44 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 rx_timeout_count,
             };
             let cad = radio.cad(config.sf, &mut rx_buf, &mut cad_sink).await;
-            match cad {
+            // What the gate makes of the outcome, and what follows a key-up
+            // it allows, are `leviculum_channel_access` (`ChannelAccess::cad`,
+            // `after_key_up`), host-tested against scripted outcomes
+            // (leviculum#413). The attempt on the line is the count before
+            // this probe is booked.
+            let outcome = match &cad {
                 Ok(false) => {
-                    // Channel clear, send the whole packet (both split
-                    // frames back-to-back, no CAD between them).
                     crate::log::log_fmt(
                         "[LORA_CAD] ",
                         format_args!("busy=false attempt={}", access.retries()),
                     );
+                    leviculum_channel_access::CadOutcome::Clear
+                }
+                Ok(true) => {
+                    crate::log::log_fmt(
+                        "[LORA_CAD] ",
+                        format_args!("busy=true attempt={}", access.retries()),
+                    );
+                    leviculum_channel_access::CadOutcome::Busy
+                }
+                Err(e) => {
+                    crate::log::log_fmt(
+                        "[LORA_CAD] ",
+                        format_args!("err={:?} attempt={}", e, access.retries()),
+                    );
+                    leviculum_channel_access::CadOutcome::Error
+                }
+            };
+            match access.cad(outcome) {
+                leviculum_channel_access::Verdict::Transmit { forced, retries } => {
+                    // The whole packet, both split frames back-to-back with
+                    // no CAD between them.
                     crate::log::log_fmt(
                         "[LORA_CSMA_TX] ",
                         format_args!(
-                            "retries={} forced=false slot_ms={}",
-                            access.retries(),
+                            "retries={} forced={} slot_ms={}",
+                            retries,
+                            forced,
                             access.jitter_slot()
                         ),
                     );
@@ -2090,101 +2150,37 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     )
                     .await;
                     pending_tx = None;
+                    // Counted on every key-up, the one that skips the ack
+                    // window below included, so the burst bounds stay
+                    // accurate.
                     frames_since_yield += 1;
                     airtime_since_yield_ms += tx_cost_ms;
-                }
-                Ok(true) => {
-                    crate::log::log_fmt(
-                        "[LORA_CAD] ",
-                        format_args!("busy=true attempt={}", access.retries()),
-                    );
-                    match access.cad_busy() {
-                        leviculum_channel_access::Verdict::Transmit { retries, .. } => {
-                            crate::log::log_fmt(
-                                "[LORA_CSMA_TX] ",
-                                format_args!(
-                                    "retries={} forced=true slot_ms={}",
-                                    retries,
-                                    access.jitter_slot()
-                                ),
-                            );
-                            transmit_all_frames(
-                                &mut radio,
-                                data,
-                                &mut rng_state,
-                                &config,
-                                &mut airtime,
-                                &mut spacer,
-                            )
-                            .await;
-                            pending_tx = None;
-                            frames_since_yield += 1;
-                            airtime_since_yield_ms += tx_cost_ms;
-                        }
-                        leviculum_channel_access::Verdict::Backoff { slots } => {
-                            // The slot the gate counts its backoff in is the
-                            // reference CSMA slot, the same one the
-                            // acquisition jitter draws in — there is one slot
-                            // on a shared channel, and the second one this
-                            // site used to derive from a 500-byte airtime was
-                            // 27x it at SF12 (Codeberg #147).
-                            let backoff_ms = slots * access.jitter_slot();
-                            // RX during the backoff so incoming packets aren't lost.
-                            // Clamp to >=1ms, the SX1262 needs a non-zero timeout.
-                            let rx_ms = backoff_ms.clamp(1, 10_000) as u32;
-                            reassembler.check_timeout(rx_timeout_count, 10);
-                            if rx_window(
-                                &mut radio,
-                                &mut rx_buf,
-                                (rx_ms, leviculum_core::sx126x::RxSite::Csma),
-                                &mut reassembler,
-                                &incoming_tx,
-                                &mut rx_timeout_count,
-                                &config_rx,
-                            )
-                            .await
-                            {
-                                consecutive_empty_acks = 0;
-                            }
-                            continue;
-                        }
-                        leviculum_channel_access::Verdict::Retry => continue,
+                    if leviculum_channel_access::after_key_up(outcome)
+                        == leviculum_channel_access::AfterKeyUp::NextTurn
+                    {
+                        continue;
                     }
                 }
-                Err(e) => {
-                    crate::log::log_fmt(
-                        "[LORA_CAD] ",
-                        format_args!("err={:?} attempt={}", e, access.retries()),
-                    );
-                    if let leviculum_channel_access::Verdict::Transmit { retries, .. } =
-                        access.cad_error()
+                leviculum_channel_access::Verdict::Backoff { slots } => {
+                    // RX during the backoff so incoming packets aren't lost.
+                    let rx_ms = access.backoff_window_ms(slots);
+                    reassembler.check_timeout(rx_timeout_count, 10);
+                    if rx_window(
+                        &mut radio,
+                        &mut rx_buf,
+                        (rx_ms, leviculum_core::sx126x::RxSite::Csma),
+                        &mut reassembler,
+                        &incoming_tx,
+                        &mut rx_timeout_count,
+                        &config_rx,
+                    )
+                    .await
                     {
-                        crate::log::log_fmt(
-                            "[LORA_CSMA_TX] ",
-                            format_args!(
-                                "retries={} forced=true slot_ms={}",
-                                retries,
-                                access.jitter_slot()
-                            ),
-                        );
-                        transmit_all_frames(
-                            &mut radio,
-                            data,
-                            &mut rng_state,
-                            &config,
-                            &mut airtime,
-                            &mut spacer,
-                        )
-                        .await;
-                        pending_tx = None;
-                        // This forced-TX path skips the ack window below
-                        // (pre-existing continue); still account its
-                        // airtime so the burst bounds stay accurate.
-                        frames_since_yield += 1;
-                        airtime_since_yield_ms += tx_cost_ms;
+                        consecutive_empty_acks = 0;
                     }
                     continue;
                 }
+                leviculum_channel_access::Verdict::Retry => continue,
             }
             // TX just completed. Before draining the next outgoing item, give
             // RX a real, bounded listening window so the peer's ack/reply gets

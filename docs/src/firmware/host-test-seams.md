@@ -37,7 +37,12 @@ left in it are marked "no decision" with the reason. A fourth wave
 ([below](#the-ble-wave-faults-only-a-misbehaving-peer-would-cause)) took
 13 of the 35 BLE "none" rows to the host and marked 8 more as no
 decision; a fifth ([below](#the-ble-wave-a-saturated-board-and-a-dark-carrier))
-took the 14 left, so no BLE "none" row is a decision any more.
+took the 14 left, so no BLE "none" row is a decision any more. A sixth
+([below](#the-lora-wave-the-air-paths-faults-and-host-edges)) took 14 rows
+of the LoRa section to the host, the ten dearest decisions of the air path
+and four rig-reached arms of the same decisions, and marked 2 more as no
+decision; 21 LoRa "none" rows are left, all in `announce.rs` and
+`telemetry.rs`. Across the six waves 64 of the 412 rows have moved.
 
 ## The rig-cost measure
 
@@ -300,6 +305,54 @@ What is left in the BLE "none" tier decides nothing: tier D (96, 98, 100,
 106, 130, 135, 140: HAL glue, unreachable branches and boot-only returns)
 and row 143 (an early return), each marked in the table with its reason.
 
+## The LoRa wave: the air path's faults and host edges
+
+The three open LoRa P1s of the week (#431, #438, #433) were each measured
+on the rig because nothing on the host could reach them. Of the 34 LoRa
+"none" rows, 2 had moved with the first wave (160, 173); the other 32 were
+ranked by the cell their branch would need, dearest first:
+
+| Tier | What the cell would need | Rows |
+|---|---|---|
+| T | the three-radio, 1800 s delivery-promise topology plus an induced fault, a moving fix, or 33 announcers | 208, 211, 209, 222, 237, 238, 242, 239, 231, 232, 233, 236, 230, 234, 235, 224, 225, 241, 244, 217, 213 |
+| R | a radio that fails a command at a chosen moment | 163, 191, 180, 168, 195 |
+| H | one board and a host that pushes an edge: a config into a turn with a second window, a dark carrier, a silent config, two spacing sets in one turn | 165, 154, 153, 161, 152, 171 |
+
+Tier T is dearer, and it is not on the air path: its rows are the
+telemetry reporter's and the announce scheduler's, and their other halves
+are `leviculum-telemetry-policy` and `leviculum-announce-policy`, not the
+duty, channel-access or radio crates this wave was for. They are the next
+wave. Of tiers R and H, 168 (a boot-only return) and 195 (a guard no caller
+reaches) decide nothing, which leaves nine decisions; the tenth is the
+dearest rig-reached air-path row, 179, the CSMA backoff window of
+`bench_dual_pair_fast` (four radios). Four rig-reached rows are arms of the
+same decisions and moved with them: 164 with 163, 178 with 180, 192 and 193
+with 191. Each went to the crate that holds its other half; the firmware
+calls it with the inputs it used inline.
+
+| Rows | What it decides | Now |
+|---|---|---|
+| 163 (164) | only a frame that left the air is charged; a refused frame stops the packet, the second split half neither keyed nor charged; the packet counts as sent only if every frame went out | `PacketTx` (`FrameStep`), `leviculum-nrf/queue-budget`, beside the duty hold the charge feeds |
+| 191 (192, 193) | a transmit ends in a forced standby unless `TxDone` was latched; the wait for it has a 100 ms floor | `tx_exit` (`TxExit`), `tx_left_the_air`, `tx_wait_ms`, `leviculum-core/src/sx126x.rs`, beside `tx_timeout_ms` |
+| 180 (178) | the three CAD outcomes go through one gate entry; a key-up forced by CAD errors goes straight to the next turn, the others open the ack window | `ChannelAccess::cad` (`CadOutcome`), `after_key_up` (`AfterKeyUp`), `leviculum-nrf/channel-access` |
+| 179 | a backoff is listened through in whole CSMA slots, at least 1 ms and at most 10 s | `ChannelAccess::backoff_window_ms`, `listen_window_ms`, the same crate |
+| 165 | a window entered with a config waiting arms nothing | `window_entry` (`WindowEntry`), `leviculum-nrf/rx-arming` |
+| 153 | a dark carrier answers `Ok` however full the queue is; a lit one with a full queue refuses with the bound that bound | `outbound_verdict` (`Outbound`), `leviculum-nrf/queue-budget`, beside `QueueBudget` |
+| 154 | a channel refusal after a reservation hands the room back | `QueueBudget::channel_refused`, the same crate |
+| 161 | a silent config restarts the mute lease, any other clears it | `MuteLease::apply`, `leviculum-nrf/mute-lease` |
+| 152, 171 | a second spacing while one is unread is refused and overwrites nothing; the turn puts a waiting one in force before the next key-up | `SpacingRequest`, `leviculum-nrf/tx-spacing`, beside `TxSpacer`; it replaces the depth-1 `LORA_TX_SPACING` channel |
+
+Row 177's clamp now calls `listen_window_ms` too; its credit floor stays
+inline, so the row keeps its rig cell. The CAD dispatch also folded the
+three transmit call sites of the CAD match into one, with the same
+`[LORA_CAD]` and `[LORA_CSMA_TX]` lines.
+
+The host's RNode interface (`leviculum-std/src/interfaces/rnode.rs`) calls
+none of the ten. It does not key a radio: the RNode firmware runs the CAD,
+the transmit and the split frames behind the KISS port, and the host's own
+half of the air, the acquisition jitter and the duty hold, already goes
+through `ChannelAccess` and `DutyHolds`, the same crates.
+
 ## Observations made during the walk
 
 Read from the code, not measured on a board; each is a candidate for its
@@ -323,6 +376,11 @@ own issue, not a finding of this page.
   (`leviculum-nrf/src/ble/columba.rs:2879`,
   `leviculum-nrf/src/ble/notify.rs:128`). Both rules are now one function,
   `leviculum_ble_tx::abort_disconnects`, whose tests pin the difference.
+- A packet forced out after CAD errors skips the ack window and the
+  `channel_released` that follows it, so the next acquisition owes no fresh
+  jitter, unlike a packet forced out of a busy channel. The sixth wave pinned
+  the behaviour as it is (`leviculum_channel_access::after_key_up`); whether
+  the skip is wanted is a question for its own issue.
 
 ## The census
 
@@ -493,64 +551,64 @@ own issue, not a finding of this page.
 
 ### LoRa, radio, announce and telemetry (`lora.rs`, `sx1262.rs`, `announce.rs`, `telemetry.rs`)
 
-97 decisions no host test reached on 2026-10-10; 54 more were already a call into a host-built crate and are not listed.
+97 decisions no host test reached on 2026-10-10; 54 more were already a call into a host-built crate and are not listed. Since the sixth wave 17 of the 97 carry host tests, 2 are marked no decision, and 21 of the 34 "none" rows are left, none of them on the LoRa air path.
 
 | # | Where | What it decides | State it reads | Cheapest rig cell | s | radios/boards | Host test |
 |---|---|---|---|---|---|---|---|
-| 152 | `leviculum-nrf/src/lora.rs:127` | refuse a TX-spacing set while one is queued (REFUSE_BUSY) | LORA_TX_SPACING | none | - | - |  |
-| 153 | `leviculum-nrf/src/lora.rs:328` | carrier off swallows an outbound packet as Ok | media::lora_active | none | - | - |  |
-| 154 | `leviculum-nrf/src/lora.rs:371` | channel send failure releases the budget and answers BufferFull | channel | none | - | - |  |
-| 155 | `leviculum-nrf/src/lora.rs:535` | a config whose bandwidth has no SX1262 code is rejected | wire.bandwidth_hz | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 156 | `leviculum-nrf/src/lora.rs:550` | coding-rate code is the denominator minus 4, unchecked | wire.cr | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 157 | `leviculum-nrf/src/lora.rs:709` | mirror a duty-hold edge into the core | LORA_DUTY_HOLD | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
-| 158 | `leviculum-nrf/src/lora.rs:713` | no announce-cap registration before the radio is configured | RUNNING_CONFIG | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 159 | `leviculum-nrf/src/lora.rs:774` | open a duty hold once per hold: raise the flag and signal the USB frame | hold state, stale total | `lora_duty_lock_lawful_default` | 900 | 2/1 | `queue_budget tests::a_hold_opens_once_and_the_lift_measures_from_the_first_held_turn` |
-| 160 | `leviculum-nrf/src/lora.rs:795` | lift a duty hold only if one is open, once, and state held time and stale drops | hold state, airtime | none (needs a run past one rolling hour) | >3600 | - | `queue_budget tests::a_lift_happens_once_and_never_without_a_hold`<br>`queue_budget tests::the_lift_counts_drops_across_the_counter_wrap` |
-| 161 | `leviculum-nrf/src/lora.rs:960` | radio_silent grants (restarts) the mute lease, else clears it | config.radio_silent | none | - | - |  |
-| 162 | `leviculum-nrf/src/lora.rs:1070` | split-frame sequence nibble from the xorshift state | rng_state | `lora_lnode_split` | 240 | 2/1 |  |
-| 163 | `leviculum-nrf/src/lora.rs:1125` | TX ok charges airtime; a TX error aborts, the second split frame is neither sent nor charged | radio result | none | - | - |  |
-| 164 | `leviculum-nrf/src/lora.rs:1152` | count TX and flash the display only if every frame went out | tx_ok | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 165 | `leviculum-nrf/src/lora.rs:1353` | no RX window while a config is pending | config_rx | none | - | - |  |
-| 166 | `leviculum-nrf/src/lora.rs:1408` | window outcome: reception true, timeout or error false (drives empty-ack and peer-yield) | rx_result | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
-| 167 | `leviculum-nrf/src/lora.rs:1569` | runtime reconfig ok: mute, publish, set_phy, limits, CONFIG_APPLIED; error keeps the old PHY, no ack | configure result | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 168 | `leviculum-nrf/src/lora.rs:1676` | init_radio failure ends the LoRa task | radio | none | - | - |  |
-| 169 | `leviculum-nrf/src/lora.rs:1693` | boot configure failure ends the task; ok applies the mute and publishes | radio | `boot_smoke_t114` | 300 | 1/1 |  |
-| 170 | `leviculum-nrf/src/lora.rs:1726` | a zero RNG seed is replaced | channel_seed | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 171 | `leviculum-nrf/src/lora.rs:1784` | take a new TX spacing at the top of a turn | spacing_rx | none | - | - |  |
-| 172 | `leviculum-nrf/src/lora.rs:1798` | apply a runtime config at the top of a turn | config_rx | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 173 | `leviculum-nrf/src/lora.rs:1847` | lift the hold on an idle turn: hold open, nothing pending, not locked | hold state, pending_tx, airtime | none (needs a run past one rolling hour) | >3600 | - | `queue_budget tests::an_idle_turn_lifts_only_an_open_hold_with_nothing_pending_and_no_lock`<br>`queue_budget tests::the_hold_edge_lifts_on_the_first_idle_turn_after_the_rolling_hour_frees_a_bin` |
-| 174 | `leviculum-nrf/src/lora.rs:1876` | dequeue the next frame only when none is pending | pending_tx | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 175 | `leviculum-nrf/src/lora.rs:1908` | DropStale: open the hold, count, drop, rate-limited line, next turn | verdict | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
-| 176 | `leviculum-nrf/src/lora.rs:1953` | Hold: open the hold, listen one post-TX window at site Hold, retry | verdict | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
-| 177 | `leviculum-nrf/src/lora.rs:2025` | acquisition jitter: listen through the draw, clamp 1..10000 ms, credit elapsed | access | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 178 | `leviculum-nrf/src/lora.rs:2068` | CAD clear transmits and bumps the burst counters | CAD result | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 179 | `leviculum-nrf/src/lora.rs:2131` | CSMA backoff is slots times the jitter slot, clamped 1..10000 ms | slots | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
-| 180 | `leviculum-nrf/src/lora.rs:2159` | CAD error: a forced TX skips the ack window and burst check | access | none | - | - |  |
-| 181 | `leviculum-nrf/src/lora.rs:2210` | burst continuation pulls the next frame; a mute-dropped one counts as empty | queue, lease | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
-| 182 | `leviculum-nrf/src/lora.rs:2243` | post-TX ack window counts consecutive empty acks | ack_received | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
-| 183 | `leviculum-nrf/src/lora.rs:2270` | peer-turn yield after two empty acks, twice the ack window | consecutive_empty_acks | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
-| 184 | `leviculum-nrf/src/lora.rs:2297` | reset burst accounting; the next acquisition owes fresh jitter | - | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 185 | `leviculum-nrf/src/lora.rs:2318` | idle continuous RX until a frame or an outgoing packet | select | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 186 | `leviculum-nrf/src/lora.rs:2373` | outgoing in idle stands RX down deferring one frame, then admits | latch | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 152 | `leviculum-nrf/src/lora.rs:135` | refuse a TX-spacing set while one is queued (REFUSE_BUSY) | LORA_TX_SPACING | none | - | - | `leviculum_tx_spacing::tests::a_spacing_set_while_one_is_unread_is_refused_and_overwrites_nothing` |
+| 153 | `leviculum-nrf/src/lora.rs:361` | carrier off swallows an outbound packet as Ok | media::lora_active | none | - | - | `leviculum_queue_budget::tests::a_dark_carrier_swallows_a_packet_however_full_the_queue_is`<br>`leviculum_queue_budget::tests::a_lit_carrier_queues_with_room_and_refuses_with_the_bound_that_bound` |
+| 154 | `leviculum-nrf/src/lora.rs:428` | channel send failure releases the budget and answers BufferFull | channel | none | - | - | `leviculum_queue_budget::tests::a_channel_refusal_hands_the_reserved_room_back` |
+| 155 | `leviculum-nrf/src/lora.rs:573` | a config whose bandwidth has no SX1262 code is rejected | wire.bandwidth_hz | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
+| 156 | `leviculum-nrf/src/lora.rs:588` | coding-rate code is the denominator minus 4, unchecked | wire.cr | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
+| 157 | `leviculum-nrf/src/lora.rs:747` | mirror a duty-hold edge into the core | LORA_DUTY_HOLD | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
+| 158 | `leviculum-nrf/src/lora.rs:751` | no announce-cap registration before the radio is configured | RUNNING_CONFIG | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 159 | `leviculum-nrf/src/lora.rs:812` | open a duty hold once per hold: raise the flag and signal the USB frame | hold state, stale total | `lora_duty_lock_lawful_default` | 900 | 2/1 | `queue_budget tests::a_hold_opens_once_and_the_lift_measures_from_the_first_held_turn` |
+| 160 | `leviculum-nrf/src/lora.rs:833` | lift a duty hold only if one is open, once, and state held time and stale drops | hold state, airtime | none (needs a run past one rolling hour) | >3600 | - | `queue_budget tests::a_lift_happens_once_and_never_without_a_hold`<br>`queue_budget tests::the_lift_counts_drops_across_the_counter_wrap` |
+| 161 | `leviculum-nrf/src/lora.rs:994` | radio_silent grants (restarts) the mute lease, else clears it | config.radio_silent | none | - | - | `leviculum_mute_lease::tests::a_silent_config_restarts_the_lease_it_finds`<br>`leviculum_mute_lease::tests::a_config_that_is_not_silent_lifts_the_mute_without_an_expiry` |
+| 162 | `leviculum-nrf/src/lora.rs:1100` | split-frame sequence nibble from the xorshift state | rng_state | `lora_lnode_split` | 240 | 2/1 |  |
+| 163 | `leviculum-nrf/src/lora.rs:1158` | TX ok charges airtime; a TX error aborts, the second split frame is neither sent nor charged | radio result | none | - | - | `leviculum_queue_budget::tests::a_refused_frame_is_not_charged_and_the_packet_is_not_counted`<br>`leviculum_queue_budget::tests::a_split_packet_whose_first_half_fails_keys_and_charges_nothing_more`<br>`leviculum_queue_budget::tests::a_split_packet_whose_second_half_fails_keeps_the_first_charge_and_is_not_counted` |
+| 164 | `leviculum-nrf/src/lora.rs:1187` | count TX and flash the display only if every frame went out | tx_ok | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_queue_budget::tests::a_single_frame_that_leaves_the_air_is_charged_and_counted`<br>`leviculum_queue_budget::tests::a_split_packet_is_counted_once_both_halves_left_the_air` |
+| 165 | `leviculum-nrf/src/lora.rs:1388` | no RX window while a config is pending | config_rx | none | - | - | `leviculum_rx_arming::tests::a_window_stands_aside_while_a_config_waits_for_its_turn` |
+| 166 | `leviculum-nrf/src/lora.rs:1445` | window outcome: reception true, timeout or error false (drives empty-ack and peer-yield) | rx_result | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
+| 167 | `leviculum-nrf/src/lora.rs:1606` | runtime reconfig ok: mute, publish, set_phy, limits, CONFIG_APPLIED; error keeps the old PHY, no ack | configure result | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
+| 168 | `leviculum-nrf/src/lora.rs:1712` | init_radio failure ends the LoRa task | radio | none | - | - | no decision: boot-only return, a radio that does not answer its first command leaves the board without LoRa and nothing to decide |
+| 169 | `leviculum-nrf/src/lora.rs:1729` | boot configure failure ends the task; ok applies the mute and publishes | radio | `boot_smoke_t114` | 300 | 1/1 |  |
+| 170 | `leviculum-nrf/src/lora.rs:1762` | a zero RNG seed is replaced | channel_seed | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 171 | `leviculum-nrf/src/lora.rs:1820` | take a new TX spacing at the top of a turn | spacing_rx | none | - | - | `leviculum_tx_spacing::tests::the_turn_puts_a_waiting_spacing_in_force_before_the_next_key_up` |
+| 172 | `leviculum-nrf/src/lora.rs:1833` | apply a runtime config at the top of a turn | config_rx | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
+| 173 | `leviculum-nrf/src/lora.rs:1882` | lift the hold on an idle turn: hold open, nothing pending, not locked | hold state, pending_tx, airtime | none (needs a run past one rolling hour) | >3600 | - | `queue_budget tests::an_idle_turn_lifts_only_an_open_hold_with_nothing_pending_and_no_lock`<br>`queue_budget tests::the_hold_edge_lifts_on_the_first_idle_turn_after_the_rolling_hour_frees_a_bin` |
+| 174 | `leviculum-nrf/src/lora.rs:1911` | dequeue the next frame only when none is pending | pending_tx | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 175 | `leviculum-nrf/src/lora.rs:1943` | DropStale: open the hold, count, drop, rate-limited line, next turn | verdict | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
+| 176 | `leviculum-nrf/src/lora.rs:1988` | Hold: open the hold, listen one post-TX window at site Hold, retry | verdict | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
+| 177 | `leviculum-nrf/src/lora.rs:2060` | acquisition jitter: listen through the draw, clamp 1..10000 ms, credit elapsed | access | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 178 | `leviculum-nrf/src/lora.rs:2131` | CAD clear transmits and bumps the burst counters | CAD result | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_channel_access::tests::the_single_cad_entry_gives_each_outcome_its_own_arm` |
+| 179 | `leviculum-nrf/src/lora.rs:2166` | CSMA backoff is slots times the jitter slot, clamped 1..10000 ms | slots | `bench_dual_pair_fast` | 360 | 4/2 (>2) | `leviculum_channel_access::tests::a_backoff_is_listened_through_in_whole_csma_slots`<br>`leviculum_channel_access::tests::a_backoff_of_no_slots_still_arms_a_window`<br>`leviculum_channel_access::tests::no_listening_wait_parks_the_transmit_path_past_the_ceiling` |
+| 180 | `leviculum-nrf/src/lora.rs:2158` | CAD error: a forced TX skips the ack window and burst check | access | none | - | - | `leviculum_channel_access::tests::a_radio_that_cannot_cad_is_retried_at_once_then_forced_out`<br>`leviculum_channel_access::tests::only_a_key_up_forced_by_cad_errors_skips_the_ack_window` |
+| 181 | `leviculum-nrf/src/lora.rs:2206` | burst continuation pulls the next frame; a mute-dropped one counts as empty | queue, lease | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
+| 182 | `leviculum-nrf/src/lora.rs:2239` | post-TX ack window counts consecutive empty acks | ack_received | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
+| 183 | `leviculum-nrf/src/lora.rs:2266` | peer-turn yield after two empty acks, twice the ack window | consecutive_empty_acks | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
+| 184 | `leviculum-nrf/src/lora.rs:2293` | reset burst accounting; the next acquisition owes fresh jitter | - | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 185 | `leviculum-nrf/src/lora.rs:2314` | idle continuous RX until a frame or an outgoing packet | select | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 186 | `leviculum-nrf/src/lora.rs:2369` | outgoing in idle stands RX down deferring one frame, then admits | latch | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 187 | `leviculum-nrf/src/sx1262.rs:495` | image-calibration band from the frequency | freq_hz | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 188 | `leviculum-nrf/src/sx1262.rs:516` | LDO regulator, DIO2 as RF switch, TCXO timeout | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 189 | `leviculum-nrf/src/sx1262.rs:631` | packet params: explicit header, CRC on, standard IQ, preamble | preamble_len | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 190 | `leviculum-nrf/src/sx1262.rs:750` | sync word 0x1424, TX clamp, StopRxTimerOnPreamble | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 191 | `leviculum-nrf/src/sx1262.rs:815` | TX ok is tx_done, else force standby | on_air result | none | - | - |  |
-| 192 | `leviculum-nrf/src/sx1262.rs:831` | TX wait floor 100 ms | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 193 | `leviculum-nrf/src/sx1262.rs:839` | TX success only with IRQ_TX_DONE | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 194 | `leviculum-nrf/src/sx1262.rs:1050` | RX hardware timeout: 0 single mode, else ms*64 capped at 0xFFFFFF | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 195 | `leviculum-nrf/src/sx1262.rs:1107` | awaiting an unarmed window is NotArmed | rx_state | none | - | - |  |
-| 196 | `leviculum-nrf/src/sx1262.rs:1112` | software wait: 60 s single mode, else timeout plus 500 ms | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 197 | `leviculum-nrf/src/sx1262.rs:1148` | latched take: not armed is an error, no RxDone/Timeout is None | rx_state, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 198 | `leviculum-nrf/src/sx1262.rs:1280` | the chip left RX on RxDone or Timeout | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 199 | `leviculum-nrf/src/sx1262.rs:1288` | erratum 15.3 workaround only for timed RX | hw_timeout | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 200 | `leviculum-nrf/src/sx1262.rs:1292` | classify: CRC error drops the payload, RxDone is a frame, Timeout, else WaitExpired | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 201 | `leviculum-nrf/src/sx1262.rs:1315` | truncate the read to the buffer | len | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 202 | `leviculum-nrf/src/sx1262.rs:1364` | CAD detMin 0x0A, CAD-only exit mode | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 203 | `leviculum-nrf/src/sx1262.rs:1422` | CAD done: busy iff CAD_DETECTED; timeout goes standby with an error | DIO1, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 204 | `leviculum-nrf/src/sx1262.rs:1484` | standing-window age (clamped) fed to adoption | rx_state | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 205 | `leviculum-nrf/src/sx1262.rs:1501` | a window ends itself iff its timeout is non-zero | window | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 191 | `leviculum-nrf/src/sx1262.rs:816` | TX ok is tx_done, else force standby | on_air result | none | - | - | `leviculum_core::sx126x::tests::only_a_reported_tx_done_leaves_the_transmitter_without_a_forced_standby` |
+| 192 | `leviculum-nrf/src/sx1262.rs:833` | TX wait floor 100 ms | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_core::sx126x::tests::the_tx_wait_has_a_floor_no_computed_timeout_reaches` |
+| 193 | `leviculum-nrf/src/sx1262.rs:841` | TX success only with IRQ_TX_DONE | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_core::sx126x::tests::a_frame_left_the_air_only_if_tx_done_is_latched` |
+| 194 | `leviculum-nrf/src/sx1262.rs:1052` | RX hardware timeout: 0 single mode, else ms*64 capped at 0xFFFFFF | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 195 | `leviculum-nrf/src/sx1262.rs:1109` | awaiting an unarmed window is NotArmed | rx_state | none | - | - | no decision: unreachable guard, the one caller (`leviculum_rx_arming::receive_and_hand_up`) awaits only after `ensure_armed` succeeded |
+| 196 | `leviculum-nrf/src/sx1262.rs:1114` | software wait: 60 s single mode, else timeout plus 500 ms | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 197 | `leviculum-nrf/src/sx1262.rs:1150` | latched take: not armed is an error, no RxDone/Timeout is None | rx_state, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 198 | `leviculum-nrf/src/sx1262.rs:1282` | the chip left RX on RxDone or Timeout | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 199 | `leviculum-nrf/src/sx1262.rs:1290` | erratum 15.3 workaround only for timed RX | hw_timeout | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 200 | `leviculum-nrf/src/sx1262.rs:1294` | classify: CRC error drops the payload, RxDone is a frame, Timeout, else WaitExpired | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 201 | `leviculum-nrf/src/sx1262.rs:1317` | truncate the read to the buffer | len | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 202 | `leviculum-nrf/src/sx1262.rs:1366` | CAD detMin 0x0A, CAD-only exit mode | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 203 | `leviculum-nrf/src/sx1262.rs:1424` | CAD done: busy iff CAD_DETECTED; timeout goes standby with an error | DIO1, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 204 | `leviculum-nrf/src/sx1262.rs:1486` | standing-window age (clamped) fed to adoption | rx_state | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 205 | `leviculum-nrf/src/sx1262.rs:1503` | a window ends itself iff its timeout is non-zero | window | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 206 | `leviculum-nrf/src/announce.rs:149` | announce set is 2 frames with the PN role, else 1 | propagation_hash | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
 | 207 | `leviculum-nrf/src/announce.rs:184` | the first announce heard from a destination triggers our own at once | NEIGHBOURS | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 208 | `leviculum-nrf/src/announce.rs:264` | neighbour-known test, round-robin eviction at 32 | slots | none | - | - |  |

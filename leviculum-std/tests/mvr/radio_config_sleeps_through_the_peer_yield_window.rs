@@ -200,8 +200,11 @@ fn every_rx_window_the_lora_loop_arms_wakes_on_a_config() {
         body.contains("RxTeardownBy::Config"),
         "rx_window leaves the receiver armed when it wakes on a config"
     );
+    // The rule is `leviculum_rx_arming::window_entry`, host-tested in that
+    // crate (leviculum#413); this pins that `rx_window` asks it.
     assert!(
-        body.contains("if !config_rx.is_empty()"),
+        body.contains("window_entry(!config_rx.is_empty())")
+            && body.contains("WindowEntry::StandAside"),
         "rx_window arms a window even when a config is already waiting, which \
          is what would let one push cost more than one mid-air deferral"
     );
