@@ -73,6 +73,18 @@ daemons; unit — `parse_ini` stores the key and `spawn_rpc_server` is
 keyed with it, wrong-key client refused (the existing
 `test_rpc_auth_failure` shape).
 
+*Fixed in e5f78966.* `rpc_key` is parsed as `bytes.fromhex` parses it,
+with the same fallback on a bad value (`parse_rpc_key`), and keys both
+ends through one resolver (`resolve_rpc_authkey`): the daemon's
+listener, a client node's first-hop-timeout query, and our client
+tools, whose `resolve_authkey` now prefers the config's key — keying
+the listener alone would have locked `lnstatus` out where `rnstatus`
+got in. Pinned by `test_rnstatus_with_rpc_key_against_rust_daemon`
+(`rnstatus` from the reference tree and lnsd built from one config
+file; a client without the key is refused),
+`configured_rpc_key_keys_the_listener`, `test_rpc_key_parsed_as_hex`
+and `a_configured_rpc_key_wins_over_the_identity_file`.
+
 **D2 — `shared_instance_type = tcp` is parsed but not acted on, on
 the platforms where rnsd acts on it.** Python, on any platform, moves
 BOTH channels to TCP loopback (37428/37429 or the configured ports)
@@ -197,6 +209,17 @@ drop-in — `rnpath -r` against both daemons with one rate entry
 present; unit — a rate entry with a `last` answers a non-empty
 `timestamps` whose first element is a float.
 
+*Fixed in e5f78966.* Every rate check records its announce time, blocked
+ones included as Python's append precedes its block test, capped at
+`MAX_RATE_TIMESTAMPS`; the times live in MemoryStorage's slot beside the
+entry (the board's `AnnounceRateEntry` is unchanged) and
+`build_rate_table` serves them, `[last]` for a storage that keeps none.
+Pinned by `test_rnpath_rate_table_prints_a_row_for_a_rate_entry`
+(`rnpath -r` from the reference tree against lnsd prints the rate row;
+red before with "list index out of range"),
+`test_announce_rate_timestamps_keep_the_newest_sixteen` and
+`announce_rate_timestamps_ride_with_their_entry`.
+
 **D5 — `drop: announce_queues` does nothing and answers `true`.**
 Python walks every interface's announce queue and empties it
 (`reference/Reticulum/RNS/Reticulum.py:1587-1595` →
@@ -218,7 +241,7 @@ empty and nothing transmits at the next drain.
 
 **D6 — `packet_rssi` / `packet_snr` / `packet_q` always answer
 None, so `rnprobe` against lnsd never prints RSSI/SNR on a LoRa
-path.** Python caches the last 1000 per-packet radio readings exactly
+path.** Python caches the last 512 per-packet radio readings exactly
 so local clients can ask after the fact
 (`reference/Reticulum/RNS/Transport.py:166-168`, filled at
 `:1458-1479`), and `rnprobe` decorates a delivered probe with them
@@ -235,6 +258,21 @@ discipline's same-driver rule is kept, but the two daemons answer
 differently. Test: drop-in — `rnprobe` over the RNode pair against
 both daemons; unit — a packet delivered over an interface with radio
 stats answers its hash's `packet_rssi` with the stamped value.
+
+*Fixed in e5f78966.* The cap is 512, not 1000:
+`LOCAL_CLIENT_CACHE_MAXSIZE` is set at
+`reference/Reticulum/RNS/Transport.py:168`. The RNode interface stamps
+each received frame with its last RSSI/SNR report and the reference's
+link quality (`packet_radio_stats`, `link_quality`), the event loop
+files them under the packet hash, unwrapped on an IFAC interface
+(`record_packet_radio_stats`), and the three verbs answer from that
+cache (`leviculum-std/src/rpc/radio_cache.rs`). Pinned by
+`test_rnprobe_prints_the_radio_readings_of_its_proof`: `rnprobe` from
+the reference tree against lnsd, the probe answered by a second node
+over a scripted pair of RNode modems, prints `[RSSI -61 dBm] [SNR 5.5
+dB] [Link Quality 96.7%]`, and nothing of it without the cache. The
+multi-vport RNode path does not stamp yet; it tracks no per-vport
+RSSI/SNR to stamp from.
 
 **D7 — `announce_queue` is always None in `interface_stats`, so
 `rnstatus -A` can never show queued announces.** Python reports
@@ -572,13 +610,16 @@ rather than misleading.
    rnsd refuses (D14). The same page's own key table states the
    `share_instance` default `false` honestly
    (`docs/src/guide/configuration.md:104`), so the document contradicts
-   its own opening paragraph.
+   its own opening paragraph. *Rewritten in e5f78966*: the paragraph now
+   says what the drop-in holds, and a second one says where it does
+   not (D12, D2, D14); D1 is fixed in the same commit.
 2. **"It is a drop-in replacement for Python's rnsd"
    (`docs/src/man/lnsd.1.md:13-15`) — holds for the deployed
    configuration shape, with the D12 defaults as the unstated
    proviso.** Every config we generate writes the three flipped keys
    explicitly, so the claim is true of our fleet and untrue of a
-   minimal foreign config.
+   minimal foreign config. *Rewritten in e5f78966* to name the D12, D2
+   and D14 provisos.
 3. **The memory `project_identity_data_rpc_gap` ("the shared-instance
    RPC does not parse the identity_data retain key") — stale,
    refuted.** The arm exists with tests in both codecs
@@ -601,6 +642,8 @@ rather than misleading.
 
 ## The three I would fix first
 
+All three are fixed in e5f78966; see the *Fixed in* note under each.
+
 1. **`rate_table` timestamps (D4).** Mechanism: carry a bounded
    timestamp deque (Python's cap is 16,
    `reference/Reticulum/RNS/Transport.py:96`) on the core's rate
@@ -613,8 +656,8 @@ rather than misleading.
    error, against both daemons. This is the one divergence where a
    named reference tool is visibly broken today.
 2. **The packet radio-stat cache (D6).** Mechanism: a capped
-   (1000-entry, matching `LOCAL_CLIENT_CACHE_MAXSIZE`,
-   `reference/Reticulum/RNS/Transport.py:163`) packet-hash → rssi/snr
+   (512-entry, first written here as 1000, matching `LOCAL_CLIENT_CACHE_MAXSIZE`,
+   `reference/Reticulum/RNS/Transport.py:168`) packet-hash → rssi/snr
    map filled where the RNode interface already stamps per-interface
    RSSI (`apply_radio_stat` feeds `radio_stat_fields`,
    `leviculum-std/src/rpc/handlers.rs:335`), answered from the three
