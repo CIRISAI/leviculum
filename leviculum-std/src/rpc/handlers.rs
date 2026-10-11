@@ -13,7 +13,7 @@ use serde_pickle::value::{HashableValue, Value};
 use super::error::RpcError;
 use super::pickle::*;
 use crate::driver::StdNodeCore;
-use crate::interfaces::inventory::SharedInventory;
+use crate::interfaces::inventory::{InterfaceInventory, SharedInventory};
 use crate::interfaces::InterfaceStatsMap;
 
 /// Dispatch an RPC request against node state and return the pickle-encoded response.
@@ -62,7 +62,7 @@ pub(super) fn handle_request(
                 .filter(|e| e.validated)
                 .count() as i64,
         ),
-        RpcRequest::GetLinkTable => build_link_table(core),
+        RpcRequest::GetLinkTable => build_link_table(core, &inventory.lock_recover()),
 
         // The timing pair every path-request client sizes its wait window
         // with (Codeberg #329). Until they existed, an `rnprobe`/`rnpath`/
@@ -91,14 +91,18 @@ pub(super) fn handle_request(
         // (`Reticulum.get_rpc_client`), so the closed connection cannot poison
         // the `interface_stats` read two lines later. Serving a fabricated
         // shape would be a worse answer than not knowing the question.
-        RpcRequest::GetTransportTables { rows } => build_transport_tables(core, start_time, rows),
-        RpcRequest::GetIdentityTable => build_identity_table(core, start_time),
+        RpcRequest::GetTransportTables { rows } => {
+            build_transport_tables(core, start_time, inventory, rows)
+        }
+        RpcRequest::GetIdentityTable => build_identity_table(core, start_time, inventory),
         RpcRequest::GetDiscoveredInterfaces => build_discovered_interfaces(discovery_storage),
-        RpcRequest::GetPathTable { max_hops } => build_path_table(core, start_time, *max_hops),
+        RpcRequest::GetPathTable { max_hops } => {
+            build_path_table(core, start_time, inventory, *max_hops)
+        }
         RpcRequest::GetRateTable => build_rate_table(core, start_time),
         RpcRequest::GetNextHop { destination_hash } => get_next_hop(core, destination_hash),
         RpcRequest::GetNextHopIfName { destination_hash } => {
-            get_next_hop_if_name(core, destination_hash)
+            get_next_hop_if_name(core, inventory, destination_hash)
         }
         RpcRequest::GetFirstHopTimeout { destination_hash } => {
             // Mirror Python Transport.first_hop_timeout (Transport.py:2700):
@@ -761,6 +765,31 @@ fn default_bitrate(itype: &str) -> i64 {
     }
 }
 
+/// The name a client sees for interface `id`: the presentation identity a
+/// listener gave the interface it spawned, otherwise the name the driver
+/// registered with transport.
+///
+/// Python stringifies the same interface object for the `interface_stats`
+/// row (`ifstats["name"] = str(interface)`, Reticulum.py:1469), for every
+/// path row (`str(path_table[dst][5])`, Reticulum.py:1534) and for
+/// `next_hop_if_name` (Reticulum.py:1605), so a script that joins
+/// `rnpath -tj` to `rnstatus -j` by name matches against rnsd. Every one of
+/// those answers here goes through this lookup for the same reason (D8 of
+/// the 2026-10-11 shared-instance audit: the path answers read the driver's
+/// label, `tcp_server/<peer>`, while the stats row said
+/// `TCPInterface[Client on <section>/<peer>]`).
+///
+/// A pure lookup: `interface_stats()` would pop frequency samples.
+fn interface_display_name<'a>(
+    core: &'a StdNodeCore,
+    inv: &'a InterfaceInventory,
+    id: usize,
+) -> Option<&'a str> {
+    inv.identity(id)
+        .map(|i| i.name.as_str())
+        .or_else(|| core.interface_name(id))
+}
+
 /// Build the `interface_stats` response dict matching Python's format.
 /// `core` is mutable because frequency reads pop decayed samples, exactly
 /// like Python's get_interface_stats (Python parity, Codeberg #67/#87).
@@ -817,8 +846,8 @@ pub(crate) fn build_interface_stats(
         // display name their listener gave them; everything else falls back to
         // the driver's internal interface name.
         let identity_of = inv.identity(entry.id);
-        let name = identity_of
-            .map(|i| i.name.clone())
+        let name = interface_display_name(core, &inv, entry.id)
+            .map(str::to_owned)
             .unwrap_or_else(|| entry.name.clone());
         let short = identity_of
             .map(|i| i.short_name.clone())
@@ -1084,9 +1113,11 @@ pub(crate) fn build_interface_stats(
 fn build_path_table(
     core: &StdNodeCore,
     start_time: std::time::Instant,
+    inventory: &SharedInventory,
     max_hops: Option<i64>,
 ) -> Value {
     let entries = core.path_table_entries();
+    let inv = inventory.lock_recover();
 
     // Anchor: wall clock at start_time
     let epoch_base = epoch_base_secs(start_time);
@@ -1102,10 +1133,8 @@ fn build_path_table(
             }
         }
 
-        // Name lookup only; interface_stats() would pop frequency samples.
-        let iface_name = core
-            .interface_name(entry.interface_index)
-            .unwrap_or("unknown");
+        let iface_name =
+            interface_display_name(core, &inv, entry.interface_index).unwrap_or("unknown");
 
         // Local receipt time, back-computed from expires - the lifetime THIS
         // path was given (which depends on the receiving interface's mode, so
@@ -1144,15 +1173,14 @@ fn build_path_table(
 /// response shape is therefore a Leviculum extension, kept to
 /// pickle-friendly scalars so Python clients can still deserialise it into
 /// a list of dicts if they ever consume it.
-fn build_link_table(core: &StdNodeCore) -> Value {
+fn build_link_table(core: &StdNodeCore, inv: &InterfaceInventory) -> Value {
     let entries = core.link_table_entries();
 
     let mut list = Vec::new();
     for entry in &entries {
-        // Name lookup only; interface_stats() would pop frequency samples.
         let iface_name = entry
             .interface_index
-            .and_then(|idx| core.interface_name(idx))
+            .and_then(|idx| interface_display_name(core, inv, idx))
             .unwrap_or("");
         let dict = pickle_dict(vec![
             (pickle_str_key("link_id"), pickle_bytes(&entry.link_id)),
@@ -1242,13 +1270,15 @@ fn build_link_table(core: &StdNodeCore) -> Value {
 fn build_transport_tables(
     core: &StdNodeCore,
     start_time: std::time::Instant,
+    inventory: &SharedInventory,
     rows: &[&str],
 ) -> Value {
     let epoch_base = epoch_base_secs(start_time);
     let now_mono_ms = core.now_ms();
     let to_epoch = |mono_ms: u64| pickle_float(mono_ms_to_epoch(epoch_base, now_mono_ms, mono_ms));
-    // Name lookup only; interface_stats() would pop frequency samples.
-    let iface = |idx: usize| pickle_str(core.interface_name(idx).unwrap_or("unknown"));
+    let inv = inventory.lock_recover();
+    let iface =
+        |idx: usize| pickle_str(interface_display_name(core, &inv, idx).unwrap_or("unknown"));
     let opt_iface = |idx: Option<usize>| match idx {
         Some(i) => iface(i),
         None => pickle_none(),
@@ -1455,7 +1485,7 @@ fn build_transport_tables(
     }
 
     if rows.contains(&"local_links") {
-        entries.push((pickle_str_key("local_links"), build_link_table(core)));
+        entries.push((pickle_str_key("local_links"), build_link_table(core, &inv)));
     }
 
     pickle_dict(entries)
@@ -1582,10 +1612,17 @@ fn build_collection_counts(core: &StdNodeCore) -> Vec<Value> {
 // path instead of repeating the destination hash: this listing has no Python
 // consumer to stay byte-compatible with, and the client renders direct as the
 // bare interface name.
-fn build_identity_table(core: &StdNodeCore, start_time: std::time::Instant) -> Value {
+fn build_identity_table(
+    core: &StdNodeCore,
+    start_time: std::time::Instant,
+    inventory: &SharedInventory,
+) -> Value {
     let epoch_base = epoch_base_secs(start_time);
     let now_mono_ms = core.now_ms();
     let to_epoch = |mono_ms: u64| pickle_float(mono_ms_to_epoch(epoch_base, now_mono_ms, mono_ms));
+    let inv = inventory.lock_recover();
+    let iface =
+        |idx: usize| pickle_str(interface_display_name(core, &inv, idx).unwrap_or("unknown"));
 
     let rows = core
         .identity_table_entries()
@@ -1617,9 +1654,7 @@ fn build_identity_table(core: &StdNodeCore, start_time: std::time::Instant) -> V
                 (
                     pickle_str_key("interface"),
                     match e.interface_index {
-                        // Name lookup only; interface_stats() would pop
-                        // frequency samples.
-                        Some(i) => pickle_str(core.interface_name(i).unwrap_or("unknown")),
+                        Some(i) => iface(i),
                         None => pickle_none(),
                     },
                 ),
@@ -1817,21 +1852,26 @@ fn get_next_hop(core: &StdNodeCore, destination_hash: &[u8]) -> Value {
     }
 }
 
-fn get_next_hop_if_name(core: &StdNodeCore, destination_hash: &[u8]) -> Value {
-    let hash = match try_into_hash(destination_hash) {
-        Some(h) => h,
-        None => return pickle_str("unknown"),
-    };
-    match core.get_path_clone(&hash) {
-        Some(entry) => {
-            // Name lookup only; interface_stats() would pop frequency samples.
-            let iface_name = core
-                .interface_name(entry.interface_index)
-                .unwrap_or("unknown");
-            pickle_str(iface_name)
-        }
-        None => pickle_str("unknown"),
-    }
+/// Python answers `str(Transport.next_hop_interface(dest))`, which renders
+/// the no-path case as the string `"None"` (Reticulum.py:1597-1605), and
+/// `rnprobe -v` prints its ` on <interface>` suffix only when the answer is
+/// not exactly that string (rnprobe.py:127). Any other spelling for "no
+/// interface" (we said `"unknown"`, D9 of the 2026-10-11 shared-instance
+/// audit) prints as an interface called that.
+const NO_NEXT_HOP_INTERFACE: &str = "None";
+
+fn get_next_hop_if_name(
+    core: &StdNodeCore,
+    inventory: &SharedInventory,
+    destination_hash: &[u8],
+) -> Value {
+    let name = try_into_hash(destination_hash)
+        .and_then(|hash| core.get_path_clone(&hash))
+        .and_then(|entry| {
+            let inv = inventory.lock_recover();
+            interface_display_name(core, &inv, entry.interface_index).map(str::to_owned)
+        });
+    pickle_str(name.as_deref().unwrap_or(NO_NEXT_HOP_INTERFACE))
 }
 
 // Drop Operations
@@ -3770,7 +3810,7 @@ mod tests {
     // a peer/instance label that matches none of `interface_type`'s name
     // prefixes, so a LoRa radio is reported as the generic "Interface". That
     // is not only a wrong medium column in rnstatus: `itype` also picks the
-    // bitrate guess (handlers.rs:756-762), so the radio is advertised at 10 Mbps.
+    // bitrate guess (handlers.rs:760-766), so the radio is advertised at 10 Mbps.
     #[test]
     fn interface_type_comes_from_the_transport_not_the_name() {
         use crate::clock::SystemClock;
@@ -3909,8 +3949,12 @@ mod tests {
         );
         core.storage_mut().set_announce_cache(dest, vec![0xCD; 42]);
 
-        let value =
-            build_transport_tables(&core, std::time::Instant::now(), &TRANSPORT_TABLE_NAMES);
+        let value = build_transport_tables(
+            &core,
+            std::time::Instant::now(),
+            &crate::interfaces::inventory::InterfaceInventory::shared(),
+            &TRANSPORT_TABLE_NAMES,
+        );
         let Value::Dict(top) = &value else {
             panic!("transport_tables must be a dict")
         };
@@ -4030,8 +4074,12 @@ mod tests {
         assert_eq!(field(&c, "retained"), Value::Bool(false));
         core.storage_mut().retain_known_dest(&dest);
         let c = row(
-            &match build_transport_tables(&core, std::time::Instant::now(), &TRANSPORT_TABLE_NAMES)
-            {
+            &match build_transport_tables(
+                &core,
+                std::time::Instant::now(),
+                &crate::interfaces::inventory::InterfaceInventory::shared(),
+                &TRANSPORT_TABLE_NAMES,
+            ) {
                 Value::Dict(d) => match d.get(&HashableValue::String("announce_cache".into())) {
                     Some(Value::List(rows)) => rows.clone(),
                     other => panic!("announce_cache must be a list, got {other:?}"),
@@ -4078,7 +4126,12 @@ mod tests {
         }
 
         // No rows asked for: the census is what a plain status call gets.
-        let Value::Dict(top) = build_transport_tables(&core, std::time::Instant::now(), &[]) else {
+        let Value::Dict(top) = build_transport_tables(
+            &core,
+            std::time::Instant::now(),
+            &crate::interfaces::inventory::InterfaceInventory::shared(),
+            &[],
+        ) else {
             panic!("transport_tables must be a dict")
         };
         let Some(Value::List(rows)) = top.get(&HashableValue::String("collections".into())) else {
@@ -4282,7 +4335,12 @@ mod tests {
             );
         }
 
-        let Value::Dict(top) = build_transport_tables(&core, std::time::Instant::now(), &[]) else {
+        let Value::Dict(top) = build_transport_tables(
+            &core,
+            std::time::Instant::now(),
+            &crate::interfaces::inventory::InterfaceInventory::shared(),
+            &[],
+        ) else {
             panic!("transport_tables must be a dict")
         };
         for name in TRANSPORT_TABLE_NAMES {
@@ -4311,9 +4369,12 @@ mod tests {
 
         // And asking by name brings that table's rows back, without bringing
         // any other table's.
-        let Value::Dict(top) =
-            build_transport_tables(&core, std::time::Instant::now(), &["reverse_table"])
-        else {
+        let Value::Dict(top) = build_transport_tables(
+            &core,
+            std::time::Instant::now(),
+            &crate::interfaces::inventory::InterfaceInventory::shared(),
+            &["reverse_table"],
+        ) else {
             panic!("transport_tables must be a dict")
         };
         assert!(matches!(
@@ -4421,13 +4482,21 @@ mod tests {
                 .set_announce_cache([0x90 + i; 16], vec![0xCD; 8]);
         }
 
-        let sizes = match build_transport_tables(&core, std::time::Instant::now(), &[]) {
+        let sizes = match build_transport_tables(
+            &core,
+            std::time::Instant::now(),
+            &crate::interfaces::inventory::InterfaceInventory::shared(),
+            &[],
+        ) {
             Value::Dict(top) => table_size_map(&top),
             other => panic!("expected dict, got {other:?}"),
         };
-        let Value::Dict(full) =
-            build_transport_tables(&core, std::time::Instant::now(), &TRANSPORT_TABLE_NAMES)
-        else {
+        let Value::Dict(full) = build_transport_tables(
+            &core,
+            std::time::Instant::now(),
+            &crate::interfaces::inventory::InterfaceInventory::shared(),
+            &TRANSPORT_TABLE_NAMES,
+        ) else {
             panic!("transport_tables must be a dict")
         };
         for name in TRANSPORT_TABLE_NAMES {
@@ -4854,6 +4923,170 @@ mod tests {
                 field(foreign_row, "name"),
                 Value::None,
                 "{codec:?}: a name this node never registered stays unknown, not guessed"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// D8 of the 2026-10-11 shared-instance audit: every answer that names a
+    /// path's interface names it as the same daemon's `interface_stats` row
+    /// does, so `rnpath -tj` joins against `rnstatus -j` by name. The spawned
+    /// TCP connection is the case that differed (`tcp_server/<peer>` against
+    /// `TCPInterface[Client on <section>/<peer>]`); the configured client is
+    /// the control that already agreed.
+    #[test]
+    fn path_answers_name_interfaces_as_interface_stats_does() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::inventory::{InterfaceIdentity, InterfaceInventory};
+        use crate::interfaces::InterfaceStatsMap;
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::storage_types::PathEntry;
+        use leviculum_core::traits::Storage as _;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        const CONFIGURED: usize = 0;
+        const SPAWNED: usize = 7;
+        let tmp = std::env::temp_dir().join(format!("rpc-path-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        core.set_interface_name(CONFIGURED, "tcp_client_0".into());
+        core.set_interface_kind(CONFIGURED, InterfaceKind::Tcp);
+        core.set_interface_name(SPAWNED, "tcp_server/127.0.0.1:40000".into());
+        core.set_interface_kind(SPAWNED, InterfaceKind::Tcp);
+        let inventory = InterfaceInventory::shared();
+        inventory.lock_recover().add_spawned(
+            SPAWNED,
+            InterfaceIdentity {
+                name: "TCPInterface[Client on Srv/127.0.0.1:40000]".into(),
+                short_name: "Client on Srv".into(),
+                type_name: "TCPClientInterface",
+                parent: None,
+            },
+        );
+
+        let now = core.now_ms();
+        let dest_on = |iface: usize| [0x10 + iface as u8; 16];
+        for iface in [CONFIGURED, SPAWNED] {
+            core.storage_mut().set_path(
+                dest_on(iface),
+                PathEntry {
+                    hops: 1,
+                    expires_ms: now + 60_000,
+                    interface_index: iface,
+                    random_blobs: Vec::new(),
+                    next_hop: None,
+                    via_peer: None,
+                },
+            );
+        }
+
+        let str_of = |d: &BTreeMap<HashableValue, Value>, k: &str| match d
+            .get(&HashableValue::String(k.into()))
+        {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Bytes(b)) => hex::encode(b),
+            other => panic!("{k} must be a string or bytes, got {other:?}"),
+        };
+        let dicts = |v: &Value| -> Vec<BTreeMap<HashableValue, Value>> {
+            let Value::List(list) = v else {
+                panic!("expected a list, got {v:?}")
+            };
+            list.iter()
+                .map(|e| match e {
+                    Value::Dict(d) => d.clone(),
+                    other => panic!("expected a dict, got {other:?}"),
+                })
+                .collect()
+        };
+
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let Value::Dict(top) =
+            build_interface_stats(&mut core, std::time::Instant::now(), &stats, &inventory, 0)
+        else {
+            panic!("interface_stats must be a dict")
+        };
+        let stats_rows = dicts(&top[&HashableValue::String("interfaces".into())]);
+        let stats_name = |id_name: &str| -> String {
+            stats_rows
+                .iter()
+                .map(|r| str_of(r, "name"))
+                .find(|n| n == id_name)
+                .unwrap_or_else(|| panic!("interface_stats has no row named {id_name}"))
+        };
+        let want = BTreeMap::from([
+            (hex::encode(dest_on(CONFIGURED)), stats_name("tcp_client_0")),
+            (
+                hex::encode(dest_on(SPAWNED)),
+                stats_name("TCPInterface[Client on Srv/127.0.0.1:40000]"),
+            ),
+        ]);
+
+        let path_rows = dicts(&build_path_table(
+            &core,
+            std::time::Instant::now(),
+            &inventory,
+            None,
+        ));
+        let Value::Dict(tables) = build_transport_tables(
+            &core,
+            std::time::Instant::now(),
+            &inventory,
+            &["path_table"],
+        ) else {
+            panic!("transport_tables must be a dict")
+        };
+        let table_rows = dicts(&tables[&HashableValue::String("path_table".into())]);
+        for (answer, rows) in [
+            ("path_table", &path_rows),
+            ("transport_tables", &table_rows),
+        ] {
+            let got: BTreeMap<String, String> = rows
+                .iter()
+                .map(|r| (str_of(r, "hash"), str_of(r, "interface")))
+                .collect();
+            assert_eq!(got, want, "{answer} rows must name the interface_stats row");
+        }
+        for (dest, name) in &want {
+            let hash = hex::decode(dest).unwrap();
+            assert_eq!(
+                get_next_hop_if_name(&core, &inventory, &hash),
+                Value::String(name.clone()),
+                "next_hop_if_name must name the interface_stats row"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// D9 of the 2026-10-11 shared-instance audit: with no path the answer is
+    /// Python's `str(None)`, the one spelling `rnprobe -v` leaves unprinted
+    /// (rnprobe.py:127). A hash of the wrong length has no path either.
+    #[test]
+    fn next_hop_if_name_without_a_path_is_the_string_none() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::inventory::InterfaceInventory;
+        use leviculum_core::node::NodeCoreBuilder;
+
+        let tmp = std::env::temp_dir().join(format!("rpc-nhif-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        let inventory = InterfaceInventory::shared();
+        for hash in [&[0x5Au8; 16][..], &[0x5A; 3][..]] {
+            assert_eq!(
+                get_next_hop_if_name(&core, &inventory, hash),
+                Value::String("None".into()),
+                "no path for {} bytes must answer \"None\"",
+                hash.len()
             );
         }
         let _ = std::fs::remove_dir_all(&tmp);

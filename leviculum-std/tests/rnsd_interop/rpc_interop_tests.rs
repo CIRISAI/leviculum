@@ -29,6 +29,10 @@ pub(crate) const RNPATH_PY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../reference/Reticulum/RNS/Utilities/rnpath.py"
 );
+const RNPROBE_PY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../reference/Reticulum/RNS/Utilities/rnprobe.py"
+);
 
 /// Path to vendor Reticulum package (for PYTHONPATH).
 const VENDOR_RNS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../reference/Reticulum");
@@ -542,6 +546,192 @@ async fn test_rnstatus_shows_and_rnpath_drops_the_announce_queue() {
         !dropped.contains("Queued"),
         "rnpath -D must leave no queued announce:\n{dropped}"
     );
+
+    cleanup_config_dir(&config_dir);
+}
+
+/// D8 of the shared-instance audit: the reference `rnpath -t` names a path's
+/// interface as the same daemon's `rnstatus` names it, so a script joining
+/// `rnpath -tj` to `rnstatus -j` by name finds the row. Python stringifies
+/// the same interface object for both (`reference/Reticulum/RNS/Reticulum.py:1469`
+/// and `:1534`). The path here runs over a connection the daemon's TCP server
+/// accepted, which `interface_stats` reports as `TCPInterface[Client on ...]`
+/// and the path answers used to report by the driver's `tcp_server/<peer>`.
+#[tokio::test]
+async fn test_rnpath_table_names_the_interface_rnstatus_reports() {
+    init_tracing();
+
+    let (_node, instance_name, tcp_addr, identity_bytes, _storage) =
+        start_rust_daemon_with_rpc().await;
+    let config_dir = python_client_ready(&instance_name, &identity_bytes).await;
+
+    let peer_storage = crate::common::temp_storage("rnpath_iface_name", "peer");
+    let mut peer = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_client(tcp_addr)
+        .storage_path(peer_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build peer");
+    peer.start().await.expect("start peer");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let dest = leviculum_core::Destination::new(
+        Some(Identity::generate(&mut rand_core::OsRng)),
+        leviculum_core::Direction::In,
+        leviculum_core::DestinationType::Single,
+        "pathiface",
+        &["name"],
+    )
+    .expect("create destination");
+    let dest_hash = *dest.hash();
+    peer.register_destination(dest);
+    peer.announce_destination(&dest_hash, None)
+        .await
+        .expect("announce");
+
+    let run_ok = |script: &'static str, args: &'static [&'static str], dir: PathBuf| async move {
+        let output = run_python_tool(script, args, &dir).await;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "{script} {args:?} exited with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        );
+        stdout
+    };
+
+    let hash_hex = hex::encode(dest_hash.as_bytes());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let path_rows = loop {
+        let stdout = run_ok(RNPATH_PY, &["-t", "-j"], config_dir.clone()).await;
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(stdout.trim()).expect("rnpath -tj prints a JSON list");
+        if rows.iter().any(|r| r["hash"] == hash_hex.as_str())
+            || tokio::time::Instant::now() >= deadline
+        {
+            break rows;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    let row = path_rows
+        .iter()
+        .find(|r| r["hash"] == hash_hex.as_str())
+        .unwrap_or_else(|| panic!("rnpath -tj never listed {hash_hex}: {path_rows:?}"));
+    let path_iface = row["interface"]
+        .as_str()
+        .expect("a path row's interface is a string")
+        .to_string();
+
+    let status: serde_json::Value = serde_json::from_str(
+        run_ok(RNSTATUS_PY, &["-j"], config_dir.clone())
+            .await
+            .trim(),
+    )
+    .expect("rnstatus -j prints JSON");
+    let names: Vec<&str> = status["interfaces"]
+        .as_array()
+        .expect("rnstatus -j lists interfaces")
+        .iter()
+        .filter_map(|i| i["name"].as_str())
+        .collect();
+    eprintln!("=== rnpath -tj interface: {path_iface}\n=== rnstatus -j names: {names:?}");
+    assert!(
+        names.contains(&path_iface.as_str()),
+        "joining rnpath -tj to rnstatus -j by name must match: the path names \
+         {path_iface:?}, rnstatus names {names:?}"
+    );
+    assert!(
+        path_iface.starts_with("TCPInterface[Client on "),
+        "the accepted connection carries the reference display name, got {path_iface:?}"
+    );
+
+    let text = run_ok(RNPATH_PY, &["-t"], config_dir.clone()).await;
+    eprintln!("=== rnpath -t STDOUT ===\n{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.contains(&format!(" on {path_iface} expires "))),
+        "rnpath -t must print the rnstatus name for the path:\n{text}"
+    );
+
+    cleanup_config_dir(&config_dir);
+}
+
+/// D9 of the shared-instance audit: with no path at the daemon,
+/// `next_hop_if_name` answers the string "None", and the reference
+/// `rnprobe -v` prints no " on <interface>" suffix
+/// (`reference/Reticulum/RNS/Utilities/rnprobe.py:127`). The probed
+/// destination is the daemon's own probe responder: the client learns a path
+/// to it, the daemon holds none to itself, which is the no-path answer an
+/// rnsd gives in the same place. lnsd answered "unknown", printed as
+/// "on unknown".
+#[tokio::test]
+async fn test_rnprobe_verbose_prints_no_interface_without_a_path() {
+    init_tracing();
+
+    let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let instance_name = format!("probenone_{}_{}", std::process::id(), test_id);
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let identity_bytes = identity
+        .private_key_bytes()
+        .expect("generated identity must have private keys");
+    let probe_hash = *leviculum_core::Destination::new(
+        Some(identity.clone()),
+        leviculum_core::Direction::In,
+        leviculum_core::DestinationType::Single,
+        "rnstransport",
+        &["probe"],
+    )
+    .expect("probe destination")
+    .hash();
+    let mut config = leviculum_std::config::Config::default();
+    config.reticulum.respond_to_probes = true;
+    let storage = crate::common::temp_storage("rnprobe_no_path", "node");
+    let mut node = ReticulumNodeBuilder::new()
+        .identity(identity)
+        .config(config)
+        .enable_transport(true)
+        .share_instance(true)
+        .instance_name(instance_name.clone())
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build daemon");
+    node.start().await.expect("start daemon");
+    let config_dir = python_client_ready(&instance_name, &identity_bytes).await;
+
+    let probe_hex = hex::encode(probe_hash.as_bytes());
+    let output = run_python_tool(
+        RNPROBE_PY,
+        &[
+            "-v",
+            "-n",
+            "1",
+            "-t",
+            "15",
+            "rnstransport.probe",
+            &probe_hex,
+        ],
+        &config_dir,
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    eprintln!("=== rnprobe -v STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}");
+    let sent: Vec<&str> = stdout
+        .split(['\r', '\n'])
+        .filter(|l| l.contains("Sent probe"))
+        .collect();
+    assert!(
+        !sent.is_empty(),
+        "rnprobe -v never sent its probe:\n{stdout}\n{stderr}"
+    );
+    for line in sent {
+        assert!(
+            !line.contains(" on "),
+            "with no path at the daemon rnprobe -v must print no interface: {line:?}"
+        );
+    }
 
     cleanup_config_dir(&config_dir);
 }
