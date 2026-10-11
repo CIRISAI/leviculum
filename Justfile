@@ -974,11 +974,11 @@ check-env-knobs:
 # Codeberg nightly #509: an mvr drew a port, the probe found it free, and its
 # own bind of that number a few instructions later was refused (EADDRINUSE).
 # A number picked before its bind is a handoff anything on the host can win,
-# and a literal is the same handoff for the whole run. This refuses a literal
-# port under leviculum-std/tests/ that scripts/test-port-literals.txt does not
-# admit, and in the mvr tier any listener the test binds itself on a port it
-# chose first, or a drawn port without a `port-handoff:` reason (see
-# leviculum-std/tests/mvr/ports.rs). The selftest injects each fault first.
+# and a literal is the same handoff for the whole run. Under leviculum-std/tests/
+# this refuses a literal port scripts/test-port-literals.txt does not admit, a
+# listener the test binds itself on a port it chose first or got by binding 0
+# and dropping, and a draw without a `port-handoff:` reason (see
+# leviculum-std/tests/support/ports.rs). The selftest injects each fault first.
 [doc('Refuse literal and advance-picked test ports')]
 check-test-ports:
     @python3 scripts/check-test-ports.py --selftest

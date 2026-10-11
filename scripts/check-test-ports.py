@@ -22,14 +22,25 @@ Two rules, both a text scan, sub-second, no build:
      `<file> <port> <reason>`; a line that matches nothing fails too, so the
      list cannot outlive what it excuses.
 
-  2. ADVANCE PICKS, over leviculum-std/tests/mvr/: every listener the test
-     process binds itself takes port 0 (`crate::ports::LOOPBACK_ANY_PORT`,
-     `bind_loopback_tcp()`, `"127.0.0.1:0"`) and reads the port back. A
-     number drawn ahead of its bind (`free_port()`, the allocator) is allowed
-     only for a consumer that cannot report back, and the draw must say so
-     in a `port-handoff:` comment directly above it; a `bind(...)` or
-     `add_tcp_server(...)` that is not port 0 is allowed only in a function
-     that has such a draw. `ports.rs` defines the helpers and is exempt.
+  2. ADVANCE PICKS, over every Rust file under leviculum-std/tests/ (the
+     mvrs until 630; the integration tests run on the same forge, and
+     `rnsd_interop/identify_loss_proxy.rs` had the #509 shape byte for
+     byte): every listener the test process binds itself takes port 0
+     (`crate::ports::LOOPBACK_ANY_PORT`, `bind_loopback_tcp()`,
+     `"127.0.0.1:0"`, `listen_port: Some(0)`) and reads the port back. A
+     number drawn ahead of its bind (`free_port()`, the allocator, the
+     harness's `find_available_ports`) is allowed only for a consumer that
+     cannot report back (a Python daemon's config, the two ends of a UDP
+     pair, a port nothing may serve), and the draw must say so in a
+     `port-handoff:` comment directly above it; a `bind(...)`,
+     `add_tcp_server(...)`, `add_udp_interface(...)` or `listen_port:
+     Some(..)` that is not port 0 is allowed only in a function that has such
+     a draw, or with its own `port-handoff:` comment when the number was
+     drawn elsewhere (a UDP pair the harness drew for a Python daemon). A
+     socket bound on port 0 and then dropped is a draw too, by the kernel and
+     inside the ephemeral range, and is refused outright. Exempt: the files in EXEMPT (the helpers and the allocator,
+     whose binds are its probe), and the body of a function that is itself
+     a drawer, which is the drawer's definition and not a pick.
 
 `--selftest` runs both rules over fixtures with each fault injected and
 fails unless every one fires and the clean fixture passes.
@@ -49,6 +60,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TESTS_REL = Path("leviculum-std/tests")
 MVR_REL = TESTS_REL / "mvr"
+INTEROP_REL = TESTS_REL / "rnsd_interop"
 ALLOW_REL = Path("scripts/test-port-literals.txt")
 MARKER = "port-handoff:"
 
@@ -63,16 +75,28 @@ LITERAL_PATTERNS = [
     re.compile(r"\blet\s+(?:mut\s+)?\w*port\w*\s*:\s*u16\s*=\s*" + _N),
 ]
 
-DRAW = re.compile(
-    r"\b(?:free_port|free_tcp_port|free_udp_port|free_udp_port_pair|"
-    r"try_free_tcp_port|try_free_udp_port|pick_free_tcp_port|pick_free_udp_port|"
-    r"find_available_ports|next_port_candidate)\b\s*(?:::<[^>]*>)?\("
+DRAWERS = (
+    "free_port|free_tcp_port|free_udp_port|free_udp_port_pair|"
+    "try_free_tcp_port|try_free_udp_port|pick_free_tcp_port|pick_free_udp_port|"
+    "find_available_ports|find_two_available_ports|find_four_available_ports|"
+    "next_port_candidate"
 )
-BIND = re.compile(r"(?:::bind|\.add_tcp_server|\.add_udp_interface)\(")
+DRAW = re.compile(r"\b(?:" + DRAWERS + r")\b\s*(?:::<[^>]*>)?\(")
+BIND = re.compile(r"(?:::bind|\.add_tcp_server|\.add_udp_interface)\(|\blisten_port:\s*Some\(")
 PORT_ZERO = re.compile(
-    r"LOOPBACK_ANY_PORT|bind_loopback_tcp\(|\"[^\"]*:0\"|,\s*0\s*\)"
+    r"LOOPBACK_ANY_PORT|bind_loopback_tcp\(|\"[^\"]*:0\"|,\s*0\s*\)|Some\(0\)"
 )
-FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+\w+")
+ZERO_SOCKET = re.compile(r"\blet\s+(?:mut\s+)?(\w+)\s*=.*::bind\(")
+DROP = re.compile(r"\bdrop\(\s*(\w+)\s*\)")
+FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)")
+DRAWER_FN = re.compile(r"^(?:" + DRAWERS + r")$")
+
+# Files rule 2 does not read, each with its reason.
+EXEMPT = {
+    TESTS_REL / "support/ports.rs": "defines the helpers rule 2 points at",
+    TESTS_REL / "support/port_alloc.rs": "the allocator; its binds are the probe",
+    TESTS_REL / "port_alloc_multiprocess.rs": "tests the allocator's draws, binds none",
+}
 
 
 def is_comment(line: str) -> bool:
@@ -135,7 +159,10 @@ def check_literals(root: Path) -> list[str]:
 
 
 def handoff_comment_above(lines: list[str], index: int) -> bool:
-    """A `port-handoff:` line in the comment block directly above `index`."""
+    """A `port-handoff:` line in the comment block directly above the statement
+    `index` belongs to (rustfmt breaks a long `let .. =` before the call)."""
+    while index > 0 and lines[index - 1].rstrip().endswith("=") and not is_comment(lines[index - 1]):
+        index -= 1
     i = index - 1
     while i >= 0 and is_comment(lines[i]):
         if MARKER in lines[i]:
@@ -144,19 +171,36 @@ def handoff_comment_above(lines: list[str], index: int) -> bool:
     return False
 
 
-def check_mvr(root: Path) -> list[str]:
+def check_advance_picks(root: Path) -> list[str]:
     errors: list[str] = []
-    for path in sorted((root / MVR_REL).glob("*.rs")):
-        if path.name == "ports.rs":
-            continue
+    for path in sorted((root / TESTS_REL).rglob("*.rs")):
         rel = path.relative_to(root)
+        if rel in EXEMPT:
+            continue
         lines = path.read_text().splitlines()
         fn_has_handoff = False
+        in_drawer = False
+        zero_sockets: set[str] = set()
         for index, line in enumerate(lines):
-            if FN.match(line):
+            fn = FN.match(line)
+            if fn:
                 fn_has_handoff = False
-            if is_comment(line):
+                in_drawer = bool(DRAWER_FN.match(fn.group(1)))
+                zero_sockets = set()
+            if is_comment(line) or in_drawer:
                 continue
+            bound = ZERO_SOCKET.search(line)
+            if bound and PORT_ZERO.search(line):
+                zero_sockets.add(bound.group(1))
+            dropped = DROP.search(line)
+            if dropped and dropped.group(1) in zero_sockets:
+                errors.append(
+                    f"{rel}:{index + 1}: a port picked by binding 0 and releasing the "
+                    f"socket ({line.strip()}): the number is free for anyone until "
+                    f"the consumer binds it, and it lies in the ephemeral range. Keep "
+                    f"the socket and hand it on, have the consumer bind "
+                    f"crate::ports::LOOPBACK_ANY_PORT, or draw with a `{MARKER}` reason"
+                )
             if DRAW.search(line):
                 if handoff_comment_above(lines, index):
                     fn_has_handoff = True
@@ -167,7 +211,12 @@ def check_mvr(root: Path) -> list[str]:
                         f"crate::ports::LOOPBACK_ANY_PORT and read the port back "
                         f"instead, or say why the consumer cannot"
                     )
-            if BIND.search(line) and not PORT_ZERO.search(line) and not fn_has_handoff:
+            if (
+                BIND.search(line)
+                and not PORT_ZERO.search(line)
+                and not fn_has_handoff
+                and not handoff_comment_above(lines, index)
+            ):
                 errors.append(
                     f"{rel}:{index + 1}: a listener this process binds on a port "
                     f"chosen before the bind ({line.strip()}). Bind "
@@ -178,7 +227,7 @@ def check_mvr(root: Path) -> list[str]:
 
 
 def check(root: Path) -> list[str]:
-    return check_literals(root) + check_mvr(root)
+    return check_literals(root) + check_advance_picks(root)
 
 
 CLEAN_MVR = """\
@@ -195,6 +244,38 @@ fn daemon() {
     // port-handoff: the daemon reads it from a config file.
     let port = crate::ports::free_port();
     let b = Builder::new().add_tcp_server(addr_from(port));
+}
+"""
+
+# The integration-test shapes: the harness's drawer definitions, a Python
+# daemon's handoff, a node's config listener on port 0.
+CLEAN_INTEROP = """\
+pub fn pick_free_tcp_port() -> Result<u16, HarnessError> {
+    port_alloc::try_free_tcp_port().ok_or_else(|| HarnessError::Exhausted)
+}
+
+fn find_two_available_ports() -> Result<(u16, u16), HarnessError> {
+    Ok((pick_free_tcp_port()?, pick_free_tcp_port()?))
+}
+
+async fn interop() {
+    // port-handoff: rnsd reads both numbers from its config file.
+    let ([rns, cmd], _alloc) = find_available_ports::<2>().await.unwrap();
+    let mut cfg = Config::default();
+    cfg.interfaces.insert("S".into(), InterfaceConfig {
+        listen_port: Some(0),
+        ..Default::default()
+    });
+    let b = Builder::new().config(cfg).add_tcp_client(addr_from(rns));
+}
+
+async fn python_udp(daemon: &TestDaemon) {
+    let (py, rust) = (daemon.udp_listen_addr(), daemon.udp_forward_addr());
+    let b = Builder::new()
+        // port-handoff: the harness drew the pair for the Python daemon.
+        .add_udp_interface(rust, py);
+    let kept = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    hand_on(kept);
 }
 """
 
@@ -220,6 +301,32 @@ FAULTS = {
         "fn a() {\n    // port-handoff: daemon config.\n    let p = crate::ports::free_port();\n}\n"
         "fn b(addr: SocketAddr) {\n    let s = B::new().add_tcp_server(addr);\n}\n",
     ),
+    "interop: node server on a drawn port": (
+        INTEROP_REL / "i.rs",
+        "async fn f() {\n    // port-handoff: rnsd reads it.\n"
+        "    let ([a, b], _g) = find_available_ports::<2>().await.unwrap();\n}\n"
+        "async fn g() {\n    let ([a, b], _g) = harness::find_available_ports::<2>().await.unwrap();\n"
+        "    let n = B::new().add_tcp_server(addr_from(a));\n}\n",
+    ),
+    "interop: own proxy on a drawn port (the #509 shape)": (
+        INTEROP_REL / "i.rs",
+        "pub async fn spawn(listen_port: u16) {\n"
+        '    let listener = TcpListener::bind(("127.0.0.1", listen_port)).await;\n}\n',
+    ),
+    "integration: a wrapper hides the draw": (
+        TESTS_REL / "t.rs",
+        "fn next_port() -> u16 {\n    port_alloc::free_tcp_port()\n}\n",
+    ),
+    "integration: bind port 0 and drop the socket": (
+        INTEROP_REL / "i.rs",
+        "fn f() {\n    let l = std::net::TcpListener::bind(\"127.0.0.1:0\").unwrap();\n"
+        "    let p = l.local_addr().unwrap().port();\n    drop(l);\n}\n",
+    ),
+    "integration: config listener on a drawn port": (
+        TESTS_REL / "t.rs",
+        "fn f(p: u16) {\n    let c = InterfaceConfig {\n        listen_port: Some(p),\n"
+        "        ..Default::default()\n    };\n}\n",
+    ),
     "stale allowlist line": (ALLOW_REL, "leviculum-std/tests/gone.rs 4242 parsed only\n"),
 }
 
@@ -227,9 +334,11 @@ FAULTS = {
 def fixture(files: dict[Path, str]) -> Path:
     root = Path(tempfile.mkdtemp(prefix="check-test-ports-"))
     (root / MVR_REL).mkdir(parents=True)
+    (root / INTEROP_REL).mkdir(parents=True)
     (root / ALLOW_REL).parent.mkdir(parents=True)
     (root / ALLOW_REL).write_text("# empty\n")
     (root / MVR_REL / "clean.rs").write_text(CLEAN_MVR)
+    (root / INTEROP_REL / "clean.rs").write_text(CLEAN_INTEROP)
     for rel, text in files.items():
         (root / rel).write_text(text)
     return root
@@ -259,7 +368,7 @@ def main() -> int:
     if errors:
         print(
             f"check-test-ports: {len(errors)} finding(s); see the docstring of "
-            f"scripts/check-test-ports.py and leviculum-std/tests/mvr/ports.rs",
+            f"scripts/check-test-ports.py and leviculum-std/tests/support/ports.rs",
             file=sys.stderr,
         )
         return 1
