@@ -282,6 +282,21 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         }
     }
 
+    // `panic_on_interface_error` (D13 of the 2026-10-11 shared-instance
+    // audit). Python exits the daemon when an interface fails for good
+    // (Reticulum.py:571-573, the pattern at LocalInterface.py:360-363); lnsd
+    // keeps every interface reconnecting instead, by design, and leaves
+    // restarting the process to its service manager. A config that asks for
+    // fail-fast gets this line, so the difference is visible where the IFAC
+    // warnings above make theirs.
+    if reticulum.panic_on_interface_error {
+        tracing::warn!(
+            "panic_on_interface_error is read but not honoured: lnsd does not exit when an \
+             interface fails; the interface keeps reconnecting, by design. Leave restarts \
+             to the service manager."
+        );
+    }
+
     // RNS 1.3.x semantic: shared_instance_type = tcp disables AF_UNIX and
     // therefore overrides any configured shared_instance_socket path (tcp
     // wins on conflict). Applied here, post-parse, so it holds for any key
@@ -574,11 +589,61 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
                 config.storage_path = Some(std::path::PathBuf::from(trimmed));
             }
         }
+        // The node-wide announce-rate fill (D16 of the 2026-10-11
+        // shared-instance audit, Reticulum.py:622-633). Python stores a target
+        // only when > 0 and reads 0 as unset; its getters then fall back with
+        // `or` (:1111-1118), so a grace of 0 is the reference 5 as well, and a
+        // penalty of 0 is the reference 0 either way. A negative or
+        // non-integer value is left unset.
+        "default_ar_target" => {
+            config.default_ar_target = value.trim().parse().ok().filter(|&v: &u32| v > 0);
+        }
+        "default_ar_penalty" => {
+            config.default_ar_penalty = value.trim().parse().ok();
+        }
+        "default_ar_grace" => {
+            config.default_ar_grace = value.trim().parse().ok().filter(|&v: &u32| v > 0);
+        }
+        // Every interface's egress-control default (Reticulum.py:663-665,
+        // Interface.py:130); an interface's own `egress_control` wins.
+        "egress_control" => {
+            config.egress_control = Some(parse_bool(value));
+        }
+        // The held-announce cap of the ingress limiter (Reticulum.py:635-637);
+        // 0 is the reference 256 through the same `or` (:1120-1121).
+        "ic_max_held_announces" => {
+            config.ic_max_held_announces = parse_positive(value);
+        }
+        // Read so it can be named at startup (see parse_ini), not honoured.
+        "panic_on_interface_error" => {
+            config.panic_on_interface_error = parse_bool(value);
+        }
+        // The ingress/egress limiter's thresholds and timings
+        // (Reticulum.py:639-677). lnsd's limiter runs the reference values as
+        // constants (`IC_BURST_FREQ_HZ` and its siblings in
+        // `leviculum-core/src/transport.rs`), node-wide, so a value here would
+        // change nothing; it is named instead of dropped in silence, because an
+        // operator who tuned rnsd's limiter would otherwise believe lnsd tuned.
+        "ic_burst_hold"
+        | "ic_burst_freq_new"
+        | "ic_burst_freq"
+        | "ic_pr_burst_freq_new"
+        | "ic_pr_burst_freq"
+        | "ic_new_time"
+        | "ic_burst_penalty"
+        | "ic_held_release_interval"
+        | "ec_pr_freq" => {
+            tracing::warn!(
+                "[reticulum] {} = {} is read but not honoured: lnsd's ingress and egress \
+                 limiters run the reference defaults for it.",
+                key,
+                value.trim()
+            );
+        }
         // Tolerate (accept without error) RNS 1.2.2..1.3.5 reticulum-level
-        // keys we don't implement: blackhole_update_interval, default_ar_*,
-        // egress_control, the ic_*/ic_pr_*/ec_pr_freq ingress/egress-control
-        // tuning knobs, etc. An unknown key must never make lnsd reject a
-        // config a current rnsd would accept.
+        // keys we don't implement: blackhole_update_interval, etc. An unknown
+        // key must never make lnsd reject a config a current rnsd would
+        // accept.
         _ => {}
     }
     Ok(())
@@ -3545,5 +3610,153 @@ loglevel = 4
         let err = parse_ini("[a]\n[[b]]\n[[[c]]]\n[[[[d]]]]\n")
             .expect_err("depth 4 has no place to go in our config model");
         assert!(err.contains("nested 4 deep"), "{err}");
+    }
+
+    /// Every `warn!` message `parse_ini` emits for `content`, and the result.
+    fn parse_with_warnings(content: &str) -> (Result<Config, String>, Vec<String>) {
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+        struct Sink(Seen);
+        impl Visit for Sink {
+            fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
+                if f.name() == "message" {
+                    if let Ok(mut seen) = self.0.lock() {
+                        seen.push(format!("{v:?}"));
+                    }
+                }
+            }
+        }
+        struct Layer(Seen);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Layer {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    event.record(&mut Sink(std::sync::Arc::clone(&self.0)));
+                }
+            }
+        }
+
+        let seen: Seen = Default::default();
+        let subscriber = tracing_subscriber::registry().with(Layer(std::sync::Arc::clone(&seen)));
+        let result = tracing::subscriber::with_default(subscriber, || parse_ini(content));
+        let warnings = seen.lock().expect("warn tap").clone();
+        (result, warnings)
+    }
+
+    /// D16 of the 2026-10-11 shared-instance audit: the three `default_ar_*`
+    /// keys are read with Python's validation (Reticulum.py:622-633) and its
+    /// `or` fallback (:1111-1118): 0 is unset for the target and the grace.
+    #[test]
+    fn default_ar_keys_are_read_with_the_reference_validation() {
+        let cfg = |body: &str| {
+            let c = parse_ini(&format!("[reticulum]\n{body}"))
+                .expect("parse")
+                .reticulum;
+            (
+                c.default_ar_target,
+                c.default_ar_penalty,
+                c.default_ar_grace,
+            )
+        };
+        assert_eq!(cfg(""), (None, None, None), "unset keeps the reference");
+        assert_eq!(
+            cfg("  default_ar_target = 7200\n  default_ar_penalty = 30\n  default_ar_grace = 2\n"),
+            (Some(7200), Some(30), Some(2))
+        );
+        assert_eq!(
+            cfg("  default_ar_target = 0\n  default_ar_penalty = 0\n  default_ar_grace = 0\n"),
+            (None, Some(0), None),
+            "0 is unset for target and grace, as Python's `or` reads it"
+        );
+        assert_eq!(
+            cfg("  default_ar_target = -5\n  default_ar_penalty = 2.0\n  default_ar_grace = x\n"),
+            (None, None, None),
+            "a negative or non-integer value stays unset"
+        );
+    }
+
+    /// D16: the global `egress_control` and `ic_max_held_announces` are read;
+    /// a held-announce cap of 0 is the reference 256 (Reticulum.py:1120-1121).
+    #[test]
+    fn egress_control_and_ic_max_held_announces_are_read() {
+        let c = parse_ini("[reticulum]\n  egress_control = yes\n  ic_max_held_announces = 10\n")
+            .expect("parse")
+            .reticulum;
+        assert_eq!(c.egress_control, Some(true));
+        assert_eq!(c.ic_max_held_announces, Some(10));
+        let c = parse_ini("[reticulum]\n  egress_control = no\n  ic_max_held_announces = 0\n")
+            .expect("parse")
+            .reticulum;
+        assert_eq!(c.egress_control, Some(false));
+        assert_eq!(c.ic_max_held_announces, None);
+        let c = parse_ini("[reticulum]\n").expect("parse").reticulum;
+        assert_eq!((c.egress_control, c.ic_max_held_announces), (None, None));
+    }
+
+    /// D16: the limiter tunings lnsd runs as constants are named, one line
+    /// per key, rather than dropped in silence; the honoured keys are not.
+    #[test]
+    fn unhonoured_limiter_keys_are_named_at_warn() {
+        let tuned = [
+            "ic_burst_hold",
+            "ic_burst_freq_new",
+            "ic_burst_freq",
+            "ic_pr_burst_freq_new",
+            "ic_pr_burst_freq",
+            "ic_new_time",
+            "ic_burst_penalty",
+            "ic_held_release_interval",
+            "ec_pr_freq",
+        ];
+        let body: String = tuned.iter().map(|k| format!("  {k} = 7\n")).collect();
+        let (parsed, warnings) = parse_with_warnings(&format!(
+            "[reticulum]\n{body}  default_ar_target = 7200\n  egress_control = yes\n  \
+             ic_max_held_announces = 10\n"
+        ));
+        parsed.expect("parse");
+        assert_eq!(
+            warnings.len(),
+            tuned.len(),
+            "one line per key: {warnings:?}"
+        );
+        for key in tuned {
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.contains(&format!("{key} = 7")) && w.contains("not honoured")),
+                "{key} is named as read but not honoured: {warnings:?}"
+            );
+        }
+    }
+
+    /// D13 of the 2026-10-11 shared-instance audit: `panic_on_interface_error`
+    /// is read and named once, saying what lnsd does instead; unset or false
+    /// says nothing, because then both daemons keep their interfaces up.
+    #[test]
+    fn panic_on_interface_error_is_named_as_read_but_not_honoured() {
+        let (parsed, warnings) =
+            parse_with_warnings("[reticulum]\n  panic_on_interface_error = yes\n");
+        assert!(parsed.expect("parse").reticulum.panic_on_interface_error);
+        assert_eq!(warnings.len(), 1, "one line: {warnings:?}");
+        assert!(
+            warnings[0].contains("panic_on_interface_error")
+                && warnings[0].contains("not honoured")
+                && warnings[0].contains("reconnecting"),
+            "the line names the key and what lnsd does instead: {}",
+            warnings[0]
+        );
+        for quiet in [
+            "[reticulum]\n  panic_on_interface_error = no\n",
+            "[reticulum]\n",
+        ] {
+            let (parsed, warnings) = parse_with_warnings(quiet);
+            assert!(!parsed.expect("parse").reticulum.panic_on_interface_error);
+            assert!(warnings.is_empty(), "{quiet:?} warns nothing: {warnings:?}");
+        }
     }
 }

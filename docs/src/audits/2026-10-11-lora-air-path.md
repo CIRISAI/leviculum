@@ -210,7 +210,7 @@ alone: a frame held by the lock past `HOLD_MAX_AGE_MS`
 keyed (#433); the hold is reported to the core and suppresses relayed
 announces and path responses (leviculum#493,
 `announce_allowed_on_interface`,
-`leviculum-core/src/transport.rs:9408-9430`); a propagation node stops
+`leviculum-core/src/transport.rs:9435-9457`); a propagation node stops
 originating at half the long-term cap (`OWN_TRAFFIC_SHARE_PERMILLE`,
 `leviculum-nrf/queue-budget/src/lib.rs:525`, leviculum#494). The
 reference holds silently, forever, and signals nothing over KISS — the
@@ -265,13 +265,13 @@ Where we match Python, verified: 2 % default cap over the interface
 bitrate (`DEFAULT_ANNOUNCE_CAP_PERCENT`,
 `leviculum-core/src/constants.rs:398`, against
 `reference/Reticulum/RNS/Reticulum.py:114`); local announces
-(`hops == 0`) bypass the cap (`leviculum-core/src/transport.rs:12290`,
+(`hops == 0`) bypass the cap (`leviculum-core/src/transport.rs:12324`,
 against `reference/Reticulum/RNS/Transport.py:1246-1250`); the queue
 holds one slot per destination, a newer emission replacing an older
-(`leviculum-core/src/transport.rs:12488-12506`, against
+(`leviculum-core/src/transport.rs:12522-12540`, against
 `reference/Reticulum/RNS/Transport.py:1267-1281`); release picks lowest
 hops, then oldest (`drain_announce_queues`,
-`leviculum-core/src/transport.rs:12651-12661`, against
+`leviculum-core/src/transport.rs:12685-12695`, against
 `reference/Reticulum/RNS/Interfaces/Interface.py:339-343`).
 
 **D12 — the cap's bitrate is the effective airtime rate, not the
@@ -286,7 +286,7 @@ function's docs). Test: exists in core.
 
 **D13 — the release draw.** After each capped emission ours adds a
 randomised draw to the holdoff (`cap_release_draw_ms`,
-`leviculum-core/src/transport.rs:10442`, applied at `:12433` and
+`leviculum-core/src/transport.rs:10469`, applied at `:12433` and
 `:12613`); Python re-arms its timer at exactly the holdoff
 (`reference/Reticulum/RNS/Interfaces/Interface.py:356-358`), so two
 saturated relays on one channel drain on two grids of the same period
@@ -300,10 +300,10 @@ is empty** (`if not queued_announces and outbound_time > ...`,
 `reference/Reticulum/RNS/Transport.py:1256-1257`); a non-empty queue
 forces queueing, so release order is always the min-hops draw. Ours
 transmits immediately whenever `now >= cap.allowed_at_ms`
-(`leviculum-core/src/transport.rs:12471`, before 9b4515b1) **without consulting the
+(`leviculum-core/src/transport.rs:12505`, before 9b4515b1) **without consulting the
 queue**, and the queue only drains on the poll cadence
-(`drain_announce_queues`, `leviculum-core/src/transport.rs:12610`,
-called from `poll`, `leviculum-core/src/transport.rs:4614`). In the
+(`drain_announce_queues`, `leviculum-core/src/transport.rs:12644`,
+called from `poll`, `leviculum-core/src/transport.rs:4639`). In the
 window between the holdoff elapsing and the next poll — up to one poll
 interval, per holdoff cycle — a fresh announce, whatever its hop count,
 overtakes every queued one and re-arms the holdoff on top of them. On the air: hop-priority
@@ -324,7 +324,7 @@ the broadcast path and the peer re-offer path alike; test
 queue entries older than `QUEUED_ANNOUNCE_LIFE` = 24 h at release time
 (`reference/Reticulum/RNS/Interfaces/Interface.py:330-337`,
 `reference/Reticulum/RNS/Reticulum.py:112`). Our drain has no age check
-(`leviculum-core/src/transport.rs:12610-12675`): an entry leaves only
+(`leviculum-core/src/transport.rs:12644-12709`): an entry leaves only
 by being sent or replaced by a newer emission. The per-destination slot
 bounds the damage, but a destination that announced once and went away
 stays queued indefinitely, and at a saturated LoRa cap (a 183-byte
@@ -508,7 +508,7 @@ Two asymmetries, neither a defect of ours:
 ## The three I would fix first
 
 1. **The announce-cap queue jump (D14).** Mechanism: the immediate-send
-   branch at `leviculum-core/src/transport.rs:12471` (before 9b4515b1) tested only the
+   branch at `leviculum-core/src/transport.rs:12505` (before 9b4515b1) tested only the
    holdoff; Python additionally requires the queue empty
    (`reference/Reticulum/RNS/Transport.py:1256-1257`). One added
    condition (`&& cap.queue.is_empty()`) restores the min-hops release
@@ -518,7 +518,7 @@ Two asymmetries, neither a defect of ours:
    possible change with a mesh-visible win under exactly the load the
    propagation Leitstern cares about.
 2. **Stale cap-queue entries (D15).** Mechanism: no age check in
-   `drain_announce_queues` (`leviculum-core/src/transport.rs:12610`);
+   `drain_announce_queues` (`leviculum-core/src/transport.rs:12644`);
    add Python's `QUEUED_ANNOUNCE_LIFE` prune at release (drop entries
    older than 24 h before selection, as
    `reference/Reticulum/RNS/Interfaces/Interface.py:330-337` does).

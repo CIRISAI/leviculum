@@ -30,7 +30,7 @@ your own allocator. The reference firmware `leviculum-nrf` targets
 ## The sans-IO contract
 
 The core is a state machine with exactly three ways in, and one way out. The way
-out is always a `TickOutput` (`leviculum-core/src/transport.rs:545`), carrying
+out is always a `TickOutput` (`leviculum-core/src/transport.rs:552`), carrying
 `actions` to perform, `events` that occurred, and `next_deadline_ms`, the time at
 which you must next tick the timer. It is `#[must_use]`: dropping it loses
 outbound packets and events.
@@ -126,7 +126,7 @@ Three things to notice:
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice
    (or a slice of your own interface type, through `AsInterface`) to the
-   generic `dispatch_actions` (`leviculum-core/src/transport.rs:709`). Broadcast
+   generic `dispatch_actions` (`leviculum-core/src/transport.rs:716`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free. Bind what it returns: the `DispatchResult` is
    `#[must_use]` because dropping it discards the retries the core asked for,
@@ -161,7 +161,7 @@ let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
 
 `build` consumes the builder and the platform triple and returns the
 `NodeCore<R, C, S>`. A driver with an inline-storage `S` must not call it:
-use `build_boxed` (`leviculum-core/src/node/builder.rs:338`), which allocates
+use `build_boxed` (`leviculum-core/src/node/builder.rs:354`), which allocates
 first and configures through the box. `Box::new(builder.build(..))` holds a
 full-size `NodeCore` as a by-value local on the way into the box, and with
 `EmbeddedStorage` that is upwards of 40 KB twice over — it gave the T114 a

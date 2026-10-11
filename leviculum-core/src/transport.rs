@@ -183,21 +183,28 @@ const DEFAULT_AR_GRACE: u32 = 5;
 /// disabled and the key unset the value stays `None`, matching a real Python
 /// daemon so rnstatus renders no `(t:.../p:.../g:...)` suffix.
 ///
+/// The fill takes each value from `defaults` (the node-wide
+/// [`TransportConfig::default_announce_rate`], Python's `default_ar_*` keys)
+/// and, where that is unset too, from the reference constants: Python's
+/// `_default_ar_target()` is `__default_ar_target or DEFAULT_AR_TARGET`
+/// (Reticulum.py:1111-1118). An interface's own value wins over both.
+///
 /// Free function because interfaces that carry no packets (listeners) are
 /// reported without ever entering transport's routing map, and their reporting
 /// side has to resolve the same values from the same rules.
 pub fn resolve_announce_rate(
     cfg: Option<&AnnounceRateConfig>,
     transport_enabled: bool,
+    defaults: &AnnounceRateConfig,
 ) -> (Option<u32>, Option<u32>, Option<u32>) {
     let (mut target, mut penalty, mut grace) = match cfg {
         Some(c) => (c.target, c.penalty, c.grace),
         None => (None, None, None),
     };
     if transport_enabled {
-        target.get_or_insert(DEFAULT_AR_TARGET);
-        penalty.get_or_insert(DEFAULT_AR_PENALTY);
-        grace.get_or_insert(DEFAULT_AR_GRACE);
+        target.get_or_insert(defaults.target.unwrap_or(DEFAULT_AR_TARGET));
+        penalty.get_or_insert(defaults.penalty.unwrap_or(DEFAULT_AR_PENALTY));
+        grace.get_or_insert(defaults.grace.unwrap_or(DEFAULT_AR_GRACE));
     }
     (target, penalty, grace)
 }
@@ -1013,6 +1020,22 @@ pub struct TransportConfig {
     /// policy only: a refused announce is one Python would also refuse once
     /// its own queue is full, and its next emission is learned as usual.
     pub max_held_announces: usize,
+    /// The announce-rate values a transport-enabled node gives every interface
+    /// that leaves its own `announce_rate_*` unset (Python's `[reticulum]`
+    /// `default_ar_target` / `default_ar_penalty` / `default_ar_grace`,
+    /// Reticulum.py:622-633, applied at :830-833). A `None` field keeps the
+    /// reference constant. Default: all `None`, which is Python's 3600/0/5.
+    ///
+    /// Node-wide here, as in the reference, so it reaches every interface the
+    /// fill reaches: configured ones, the connections a listener spawns and
+    /// the listener rows themselves. See [`resolve_announce_rate`].
+    pub default_announce_rate: AnnounceRateConfig,
+    /// Whether path-request egress control runs on an interface that does not
+    /// set `egress_control` itself (Python's `[reticulum] egress_control`,
+    /// Reticulum.py:663-665, read by every interface at construction through
+    /// `_default_egress_control()`, Interface.py:130). Default `false`, the
+    /// reference `Interface.EGRESS_CONTROL`.
+    pub default_egress_control: bool,
 }
 
 impl Default for TransportConfig {
@@ -1037,6 +1060,8 @@ impl Default for TransportConfig {
             path_choice: PathChoice::default(),
             mgmt_announce_interval_ms: MGMT_ANNOUNCE_INTERVAL_MS,
             max_held_announces: MAX_HELD_ANNOUNCES,
+            default_announce_rate: AnnounceRateConfig::default(),
+            default_egress_control: false,
         }
     }
 }
@@ -5604,7 +5629,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4000. A destination with no cached
+    /// link-request path uses at transport.rs:4025. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6405,7 +6430,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1602 ran in the
+        // Gate on the already-incremented hops (transport.rs:1627 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -9362,23 +9387,25 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     // Public: Interface Egress-Control API (Codeberg #172)
     /// Set whether path-request egress limiting runs for an interface (called
     /// by the driver at registration from the `egress_control` config key).
-    /// DISABLED is the baseline (Python `Interface.EGRESS_CONTROL = False`), so
-    /// only an enabled flag is stored, keeping the map sparse.
+    /// The node-wide [`TransportConfig::default_egress_control`] is the
+    /// baseline (Python `Interface.EGRESS_CONTROL = False` unless the
+    /// `[reticulum]` key raises it), so only a flag that differs from it is
+    /// stored, keeping the map sparse.
     pub fn set_interface_egress_control(&mut self, id: usize, enabled: bool) {
-        if enabled {
-            self.interface_egress_control.insert(id, true);
+        if enabled != self.config.default_egress_control {
+            self.interface_egress_control.insert(id, enabled);
         } else {
             self.interface_egress_control.remove(&id);
         }
     }
 
-    /// Whether egress control is enabled for an interface (disabled when unset,
-    /// matching the reference default).
+    /// Whether egress control is enabled for an interface: its own setting,
+    /// else the node-wide [`TransportConfig::default_egress_control`].
     pub fn interface_egress_control(&self, id: usize) -> bool {
         self.interface_egress_control
             .get(&id)
             .copied()
-            .unwrap_or(false)
+            .unwrap_or(self.config.default_egress_control)
     }
 
     /// Propagation mode for an interface (`Full` when unset).
@@ -10842,15 +10869,25 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_announce_rate_configs.remove(&id);
     }
 
-    /// Resolve the announce-rate values to emit for one interface. Thin
-    /// forwarder to the free [`resolve_announce_rate`], which reporting code
-    /// outside transport (a listener has no transport entry to read them from)
-    /// shares so both answer from one implementation.
-    fn resolve_announce_rate(
-        cfg: Option<&AnnounceRateConfig>,
-        transport_enabled: bool,
-    ) -> (Option<u32>, Option<u32>, Option<u32>) {
-        resolve_announce_rate(cfg, transport_enabled)
+    /// Resolve the announce-rate values of one interface. Thin forwarder to
+    /// the free [`resolve_announce_rate`], which reporting code outside
+    /// transport (a listener has no transport entry to read them from) shares
+    /// so both answer from one implementation.
+    ///
+    /// A local IPC client has none: the reference sets all three to None on
+    /// both sides of the shared-instance socket (LocalInterface.py:127-129
+    /// and :428-430), and the transport-enabled fill only runs for
+    /// config-created interfaces, so its `rnstatus -A` row carries no
+    /// `(t:...)` suffix and its announces are never rate-accounted.
+    fn announce_rate_of(&self, iface_index: usize) -> (Option<u32>, Option<u32>, Option<u32>) {
+        if self.is_local_client(iface_index) {
+            return (None, None, None);
+        }
+        resolve_announce_rate(
+            self.interface_announce_rate_configs.get(&iface_index),
+            self.config.enable_transport,
+            &self.config.default_announce_rate,
+        )
     }
 
     // Public: Interface Stats (for RPC)
@@ -10919,10 +10956,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     .get_mut(&id)
                     .map(|d| Self::deque_frequency(d, now, 1))
                     .unwrap_or(0.0);
-                let (ar_target, ar_penalty, ar_grace) = Self::resolve_announce_rate(
-                    self.interface_announce_rate_configs.get(&id),
-                    self.config.enable_transport,
-                );
+                let (ar_target, ar_penalty, ar_grace) = self.announce_rate_of(id);
                 // Codeberg #87: real ingress-limit burst state (Python
                 // ic_burst_* / ic_pr_burst_*). Read-only here; the state machine
                 // is advanced on the ingest path and the poll cadence. Activation
@@ -11426,7 +11460,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2516`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2541`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -13324,7 +13358,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// whose value was resolved at config time from the interface's
     /// `announce_rate_*` keys plus the transport-enabled default fill
     /// (Reticulum.py:826-829, Interface DEFAULT_AR_TARGET/PENALTY/GRACE).
-    /// Reuses [`Self::resolve_announce_rate`] so reporting (`interface_stats`)
+    /// Reuses [`Self::announce_rate_of`] so reporting (`interface_stats`)
     /// and enforcement share one source of truth. Returns `None` when rate
     /// limiting is inactive for the interface (no target configured and
     /// transport disabled), matching `announce_rate_target == None`.
@@ -13332,19 +13366,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// The config values are in seconds (Python units); this converts the
     /// target and penalty to the millisecond epoch the rate table stores.
     fn effective_announce_rate(&self, iface_index: usize) -> Option<(u64, u8, u64)> {
-        // Local client interfaces are never rate-accounted in the reference:
-        // LocalInterface hard-sets announce_rate_target = None
-        // (LocalInterface.py:127/:428), and the transport-enabled default
-        // fill (Reticulum.py:831) only runs for config-created network
-        // interfaces, so a shared-instance client's announces bypass the
-        // rate scheme entirely.
-        if self.is_local_client(iface_index) {
-            return None;
-        }
-        let (target_s, penalty_s, grace) = Self::resolve_announce_rate(
-            self.interface_announce_rate_configs.get(&iface_index),
-            self.config.enable_transport,
-        );
+        // A local IPC client resolves to no target (see `announce_rate_of`),
+        // so a shared-instance client's announces bypass the rate scheme
+        // entirely, as in the reference.
+        let (target_s, penalty_s, grace) = self.announce_rate_of(iface_index);
         let target_ms = target_s? as u64 * 1000;
         // When a target resolves, grace/penalty are always populated too (the
         // config coupling at Reticulum.py:813-817 defaults them to 0 for a
@@ -17659,7 +17684,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7131), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7156), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -23753,7 +23778,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1602) before
+        // The inbound path increments hops once (transport.rs:1627) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -31128,13 +31153,13 @@ mod tests {
 
         #[test]
         fn resolve_announce_rate_unset_with_transport_uses_python_defaults() {
-            let r = Transport::<MockClock, MemoryStorage>::resolve_announce_rate(None, true);
+            let r = resolve_announce_rate(None, true, &AnnounceRateConfig::default());
             assert_eq!(r, (Some(3600), Some(0), Some(5)));
         }
 
         #[test]
         fn resolve_announce_rate_unset_without_transport_is_none() {
-            let r = Transport::<MockClock, MemoryStorage>::resolve_announce_rate(None, false);
+            let r = resolve_announce_rate(None, false, &AnnounceRateConfig::default());
             assert_eq!(r, (None, None, None));
         }
 
@@ -31147,11 +31172,11 @@ mod tests {
             };
             // Configured values survive regardless of transport state.
             assert_eq!(
-                Transport::<MockClock, MemoryStorage>::resolve_announce_rate(Some(&cfg), true),
+                resolve_announce_rate(Some(&cfg), true, &AnnounceRateConfig::default()),
                 (Some(7200), Some(30), Some(2))
             );
             assert_eq!(
-                Transport::<MockClock, MemoryStorage>::resolve_announce_rate(Some(&cfg), false),
+                resolve_announce_rate(Some(&cfg), false, &AnnounceRateConfig::default()),
                 (Some(7200), Some(30), Some(2))
             );
         }
@@ -31166,7 +31191,7 @@ mod tests {
                 grace: Some(0),
             };
             assert_eq!(
-                Transport::<MockClock, MemoryStorage>::resolve_announce_rate(Some(&cfg), true),
+                resolve_announce_rate(Some(&cfg), true, &AnnounceRateConfig::default()),
                 (Some(1800), Some(0), Some(0))
             );
         }
@@ -31192,6 +31217,139 @@ mod tests {
             assert_eq!(iface1.announce_rate_target, Some(3600));
             assert_eq!(iface1.announce_rate_penalty, Some(0));
             assert_eq!(iface1.announce_rate_grace, Some(5));
+        }
+
+        /// D16 of the 2026-10-11 shared-instance audit: Python's
+        /// `default_ar_*` keys replace the constants in the transport-enabled
+        /// fill, value by value (`__default_ar_x or DEFAULT_AR_X`,
+        /// Reticulum.py:1111-1118), and an interface's own value still wins.
+        #[test]
+        fn resolve_announce_rate_fills_from_the_node_defaults() {
+            let target_only = AnnounceRateConfig {
+                target: Some(7200),
+                penalty: None,
+                grace: None,
+            };
+            assert_eq!(
+                resolve_announce_rate(None, true, &target_only),
+                (Some(7200), Some(0), Some(5)),
+                "an unset node default keeps the reference constant"
+            );
+            let all = AnnounceRateConfig {
+                target: Some(7200),
+                penalty: Some(30),
+                grace: Some(2),
+            };
+            assert_eq!(
+                resolve_announce_rate(None, true, &all),
+                (Some(7200), Some(30), Some(2))
+            );
+            let own = AnnounceRateConfig {
+                target: Some(900),
+                penalty: Some(0),
+                grace: Some(0),
+            };
+            assert_eq!(
+                resolve_announce_rate(Some(&own), true, &all),
+                (Some(900), Some(0), Some(0)),
+                "the interface's own values win over the node defaults"
+            );
+            assert_eq!(
+                resolve_announce_rate(None, false, &all),
+                (None, None, None),
+                "without transport there is no fill, as in the reference"
+            );
+        }
+
+        /// The node defaults reach both readers of the fill: the reported row
+        /// and the rate enforcement, for an interface that set nothing.
+        #[test]
+        fn node_announce_rate_defaults_reach_stats_and_enforcement() {
+            let clock = MockClock::new(TEST_TIME_MS);
+            let identity = crate::identity::Identity::generate(&mut OsRng);
+            let config = TransportConfig {
+                enable_transport: true,
+                default_announce_rate: AnnounceRateConfig {
+                    target: Some(7200),
+                    penalty: Some(30),
+                    grace: Some(2),
+                },
+                ..TransportConfig::default()
+            };
+            let mut transport =
+                Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+            transport.set_interface_name(0, "iface0".into());
+            let stats = transport.interface_stats();
+            let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
+            assert_eq!(
+                (
+                    iface0.announce_rate_target,
+                    iface0.announce_rate_penalty,
+                    iface0.announce_rate_grace
+                ),
+                (Some(7200), Some(30), Some(2))
+            );
+            assert_eq!(
+                transport.effective_announce_rate(0),
+                Some((7_200_000, 2, 30_000))
+            );
+        }
+
+        /// A local IPC client reports no announce-rate target, whatever the
+        /// node defaults are: the reference sets None on every LocalInterface
+        /// (LocalInterface.py:127-129, :428-430), so rnstatus -A shows no
+        /// `(t:...)` suffix on its row; enforcement skips it the same way.
+        #[test]
+        fn local_client_has_no_announce_rate() {
+            let mut transport = make_transport();
+            transport.set_local_client(1, true);
+            let stats = transport.interface_stats();
+            let local = stats.iter().find(|s| s.id == 1).unwrap();
+            assert_eq!(
+                (
+                    local.announce_rate_target,
+                    local.announce_rate_penalty,
+                    local.announce_rate_grace
+                ),
+                (None, None, None)
+            );
+            assert_eq!(transport.effective_announce_rate(1), None);
+            let net = stats.iter().find(|s| s.id == 0).unwrap();
+            assert_eq!(
+                net.announce_rate_target,
+                Some(3600),
+                "the control keeps the fill"
+            );
+        }
+
+        /// Python's `[reticulum] egress_control` is every interface's default
+        /// (Interface.py:130); an interface's own key overrides it either way.
+        #[test]
+        fn node_egress_default_is_overridden_per_interface() {
+            let clock = MockClock::new(TEST_TIME_MS);
+            let identity = crate::identity::Identity::generate(&mut OsRng);
+            let config = TransportConfig {
+                default_egress_control: true,
+                ..TransportConfig::default()
+            };
+            let mut transport =
+                Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+            assert!(
+                transport.interface_egress_control(3),
+                "unset follows the node"
+            );
+            transport.set_interface_egress_control(3, false);
+            assert!(!transport.interface_egress_control(3), "own false wins");
+            transport.set_interface_egress_control(3, true);
+            assert!(transport.interface_egress_control(3));
+            assert!(
+                !transport.interface_egress_control.contains_key(&3),
+                "a flag equal to the node default is not stored"
+            );
+            let mut plain = make_transport();
+            assert!(!plain.interface_egress_control(3), "reference default off");
+            plain.set_interface_egress_control(3, true);
+            assert!(plain.interface_egress_control(3));
         }
 
         #[test]

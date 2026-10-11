@@ -57,6 +57,9 @@ pub(super) struct InterfaceBuildCtx<'a> {
     /// Whether transport is enabled, which decides the announce-rate defaults
     /// a listener reports (Reticulum.py:830-833).
     pub transport_enabled: bool,
+    /// The node-wide values that fill (`default_ar_*`, Reticulum.py:622-633),
+    /// the same the core fills a routable interface from.
+    pub default_announce_rate: leviculum_core::transport::AnnounceRateConfig,
     /// The node's 16-byte identity hash. The BLE interface publishes it in
     /// the Columba Identity characteristic, handshakes with it, and derives
     /// its advertised `LN-<hex8>` name from it — the same derivation the
@@ -191,6 +194,7 @@ mod tests {
                 outbound_socket_hook: None,
                 inventory: self.inventory.clone(),
                 transport_enabled: false,
+                default_announce_rate: Default::default(),
                 identity_hash: [0u8; 16],
             }
         }

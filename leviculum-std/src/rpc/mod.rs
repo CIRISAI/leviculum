@@ -717,7 +717,39 @@ mod tests {
     /// target=3600/penalty=0/grace=5).
     #[tokio::test]
     async fn test_rpc_interface_stats_round_trip() {
-        let core = make_test_core(true);
+        interface_stats_round_trip("default", "[reticulum]\n", (3600, 0, 5)).await;
+    }
+
+    /// The same round trip from a config that sets Python's `default_ar_*`
+    /// keys (D16 of the 2026-10-11 shared-instance audit): the interface that
+    /// sets nothing of its own reports the configured values, where the
+    /// keys used to be tolerated and the row said 3600/0/5 regardless.
+    #[tokio::test]
+    async fn test_rpc_interface_stats_round_trip_reads_default_ar_keys() {
+        interface_stats_round_trip(
+            "default_ar",
+            "[reticulum]\n  default_ar_target = 7200\n  default_ar_penalty = 30\n  \
+             default_ar_grace = 2\n",
+            (7200, 30, 2),
+        )
+        .await;
+    }
+
+    async fn interface_stats_round_trip(tag: &str, ini: &str, want_ar: (i64, i64, i64)) {
+        let id = RPC_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut config = crate::ini_config::parse_ini(ini).expect("parse");
+        config.reticulum.enable_transport = true;
+        let core = crate::driver::ReticulumNodeBuilder::new()
+            .config(config)
+            .storage_path(std::env::temp_dir().join(format!(
+                "reticulum_rpc_test_{}_{}_{tag}",
+                std::process::id(),
+                id
+            )))
+            .enable_transport(true)
+            .build_sync()
+            .expect("build_sync failed")
+            .inner();
         // Register an interface so it appears in the stats list (not a local
         // client -> not skipped by build_interface_stats).
         {
@@ -729,7 +761,7 @@ mod tests {
         let start_time = std::time::Instant::now();
         let authkey = derive_authkey(&core);
 
-        let instance_name = format!("rpctest_{}", std::process::id());
+        let instance_name = format!("rpctest_{}_{tag}", std::process::id());
         let abstract_name = format!("rns/{}/rpc", instance_name);
 
         spawn_rpc_server(
@@ -795,21 +827,22 @@ mod tests {
                     Some(&Value::F64(0.0)),
                     "outgoing_pr_frequency default 0.0"
                 );
-                // Announce-rate defaults for a transport-enabled node.
+                // Announce-rate fill for a transport-enabled node: the
+                // configured `default_ar_*`, else the reference 3600/0/5.
                 assert_eq!(
                     get("announce_rate_target"),
-                    Some(&Value::I64(3600)),
-                    "announce_rate_target default 3600"
+                    Some(&Value::I64(want_ar.0)),
+                    "announce_rate_target"
                 );
                 assert_eq!(
                     get("announce_rate_penalty"),
-                    Some(&Value::I64(0)),
-                    "announce_rate_penalty default 0"
+                    Some(&Value::I64(want_ar.1)),
+                    "announce_rate_penalty"
                 );
                 assert_eq!(
                     get("announce_rate_grace"),
-                    Some(&Value::I64(5)),
-                    "announce_rate_grace default 5"
+                    Some(&Value::I64(want_ar.2)),
+                    "announce_rate_grace"
                 );
                 // Burst flags: False/0.
                 assert_eq!(

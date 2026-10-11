@@ -140,6 +140,22 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// The announce-rate values a transport-enabled node fills in for an
+    /// interface that sets none of its own (Python's `default_ar_*` keys). See
+    /// [`TransportConfig::default_announce_rate`](crate::transport::TransportConfig::default_announce_rate).
+    pub fn default_announce_rate(mut self, defaults: crate::transport::AnnounceRateConfig) -> Self {
+        self.transport_config.default_announce_rate = defaults;
+        self
+    }
+
+    /// Whether egress control runs on an interface that does not set its own
+    /// (Python's `[reticulum] egress_control`). See
+    /// [`TransportConfig::default_egress_control`](crate::transport::TransportConfig::default_egress_control).
+    pub fn default_egress_control(mut self, enabled: bool) -> Self {
+        self.transport_config.default_egress_control = enabled;
+        self
+    }
+
     /// Set the maximum number of random blobs retained per path entry.
     /// Default: 64. On embedded with limited heap, set to e.g. 8.
     pub fn max_random_blobs(mut self, n: usize) -> Self {

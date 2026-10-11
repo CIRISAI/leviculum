@@ -292,9 +292,55 @@ pub struct ReticulumConfig {
     /// lowering this is what an operator trades for memory.
     #[serde(default)]
     pub destination_cap: Option<usize>,
+    /// Python's `[reticulum] default_ar_target`: the announce-rate target, in
+    /// seconds, a transport-enabled node gives every interface that sets no
+    /// `announce_rate_target` of its own (Reticulum.py:622-625, applied at
+    /// :830-833). `None` keeps the reference 3600; so does 0, which Python
+    /// also reads as unset (`v == 0` stores None, and `_default_ar_target()`
+    /// is `__default_ar_target or DEFAULT_AR_TARGET`, :1111-1112).
+    #[serde(default)]
+    pub default_ar_target: Option<u32>,
+    /// Python's `[reticulum] default_ar_penalty`, in seconds
+    /// (Reticulum.py:627-629). `None` keeps the reference 0.
+    #[serde(default)]
+    pub default_ar_penalty: Option<u32>,
+    /// Python's `[reticulum] default_ar_grace` (Reticulum.py:631-633). `None`
+    /// keeps the reference 5; so does 0, through the same `or` as the target
+    /// (:1117-1118).
+    #[serde(default)]
+    pub default_ar_grace: Option<u32>,
+    /// Python's `[reticulum] egress_control`: whether path-request egress
+    /// control runs on an interface that does not set `egress_control` itself
+    /// (Reticulum.py:663-665, read by every interface at construction,
+    /// Interface.py:130). `None` keeps the reference default, off.
+    #[serde(default)]
+    pub egress_control: Option<bool>,
+    /// Python's `[reticulum] ic_max_held_announces`: how many ingress-limited
+    /// announces an interface holds while its burst limiter is active
+    /// (Reticulum.py:635-637). `None` keeps the reference 256; so does 0,
+    /// which Python's `or MAX_HELD_ANNOUNCES` also reads as unset (:1120-1121).
+    #[serde(default)]
+    pub ic_max_held_announces: Option<usize>,
+    /// Python's `[reticulum] panic_on_interface_error` (Reticulum.py:571-573).
+    /// Read so a config that sets it gets a warning, not honoured: lnsd keeps
+    /// a failed interface reconnecting instead of exiting, by design (the
+    /// interfaces' reconnect loops, e.g. `spawn_tcp_client_with_reconnect`),
+    /// and leaves restarting the whole daemon to its supervisor.
+    #[serde(default)]
+    pub panic_on_interface_error: bool,
 }
 
 impl ReticulumConfig {
+    /// The `default_ar_*` keys as the core's node-wide announce-rate fill
+    /// ([`leviculum_core::transport::TransportConfig::default_announce_rate`]).
+    pub fn default_announce_rate(&self) -> leviculum_core::transport::AnnounceRateConfig {
+        leviculum_core::transport::AnnounceRateConfig {
+            target: self.default_ar_target,
+            penalty: self.default_ar_penalty,
+            grace: self.default_ar_grace,
+        }
+    }
+
     /// The per-table ceilings this config asks for (Codeberg #421): the named
     /// profile, with any individually configured key overriding it.
     pub fn table_caps(&self) -> TableCaps {
@@ -434,6 +480,12 @@ impl Default for ReticulumConfig {
             link_table_cap: None,
             announce_table_cap: None,
             destination_cap: None,
+            default_ar_target: None,
+            default_ar_penalty: None,
+            default_ar_grace: None,
+            egress_control: None,
+            ic_max_held_announces: None,
+            panic_on_interface_error: false,
         }
     }
 }

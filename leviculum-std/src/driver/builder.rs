@@ -971,11 +971,20 @@ impl ReticulumNodeBuilder {
                     .mgmt_announce_interval_secs
                     .saturating_mul(1000),
             )
+            .default_announce_rate(config.reticulum.default_announce_rate())
+            .default_egress_control(config.reticulum.egress_control.unwrap_or(false))
             .respond_to_probes(config.reticulum.respond_to_probes)
             .remote_management(
                 config.reticulum.remote_management_enabled,
                 remote_management_allowed,
             );
+
+        // Python's `ic_max_held_announces` (Reticulum.py:635-637); unset keeps
+        // the core's reference 256.
+        let core_builder = match config.reticulum.ic_max_held_announces {
+            Some(n) => core_builder.max_held_announces(n),
+            None => core_builder,
+        };
 
         // Build NodeCore (consumes storage, persistent data already loaded)
         let node_core = core_builder.build(rand_core::OsRng, clock, storage);
@@ -1291,6 +1300,57 @@ mod tests {
             .expect("build_sync failed");
         let core = crate::sync_ext::MutexRecover::lock_recover(&*node.inner);
         assert_eq!(core.transport_config().mgmt_announce_interval_ms, 7_000);
+    }
+
+    /// D16 of the 2026-10-11 shared-instance audit: the global tuning keys
+    /// reach the core's node-wide defaults; unset keeps the reference values.
+    #[test]
+    fn test_builder_global_tuning_keys_from_config() {
+        let build = |ini: &str| {
+            let td = tempfile::tempdir().expect("tempdir");
+            let node = ReticulumNodeBuilder::new()
+                .config(crate::ini_config::parse_ini(ini).expect("parse"))
+                .storage_path(td.path().to_path_buf())
+                .build_sync()
+                .expect("build_sync failed");
+            let core = crate::sync_ext::MutexRecover::lock_recover(&*node.inner);
+            let c = core.transport_config();
+            (
+                c.default_announce_rate.clone(),
+                c.default_egress_control,
+                c.max_held_announces,
+            )
+        };
+        let (ar, egress, held) = build(
+            "[reticulum]
+  default_ar_target = 7200
+  default_ar_penalty = 30
+  \
+             default_ar_grace = 2
+  egress_control = yes
+  ic_max_held_announces = 10
+",
+        );
+        assert_eq!(
+            ar,
+            leviculum_core::transport::AnnounceRateConfig {
+                target: Some(7200),
+                penalty: Some(30),
+                grace: Some(2),
+            }
+        );
+        assert!(egress);
+        assert_eq!(held, 10);
+        let (ar, egress, held) = build(
+            "[reticulum]
+",
+        );
+        assert_eq!(ar, leviculum_core::transport::AnnounceRateConfig::default());
+        assert!(!egress);
+        assert_eq!(
+            held,
+            leviculum_core::transport::TransportConfig::default().max_held_announces
+        );
     }
 
     #[test]

@@ -129,6 +129,7 @@ pub(super) fn build_server(
         announce_rate: leviculum_core::transport::resolve_announce_rate(
             build_announce_rate_config(config).as_ref(),
             ctx.transport_enabled,
+            &ctx.default_announce_rate,
         ),
     })?;
     Ok(Built::SelfManaged)

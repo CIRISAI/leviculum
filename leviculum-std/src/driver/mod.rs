@@ -914,7 +914,9 @@ fn register_interface_config(core: &mut StdNodeCore, idx: usize, iface_config: &
     // (`Interface.EGRESS_CONTROL = False`). No medium-class default
     // here: the reference has none either, and switching it on by
     // guess would silently drop path requests.
-    let egress_on = iface_config.egress_control.unwrap_or(false);
+    let egress_on = iface_config
+        .egress_control
+        .unwrap_or(core.transport_config().default_egress_control);
     core.set_interface_egress_control(idx, egress_on);
     if egress_on {
         tracing::info!("Interface {} egress control: on", idx);
@@ -982,6 +984,7 @@ fn reattach_bootstrap_interfaces(
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
     inventory: &crate::interfaces::inventory::SharedInventory,
     transport_enabled: bool,
+    default_announce_rate: &leviculum_core::transport::AnnounceRateConfig,
 ) {
     let BootstrapWiring {
         ifaces,
@@ -1002,6 +1005,7 @@ fn reattach_bootstrap_interfaces(
         outbound_socket_hook,
         inventory: Arc::clone(inventory),
         transport_enabled,
+        default_announce_rate: default_announce_rate.clone(),
         identity_hash: *identity_hash,
     };
     for b in ifaces.iter_mut() {
@@ -2205,6 +2209,7 @@ impl ReticulumNode {
                 outbound_socket_hook: self.outbound_socket_hook.clone(),
                 inventory: Arc::clone(&self.inventory),
                 transport_enabled: self.is_transport_enabled(),
+                default_announce_rate: self.default_announce_rate(),
                 identity_hash: self.identity_hash(),
             };
             for (idx, config) in self.interfaces.iter().enumerate() {
@@ -2743,6 +2748,7 @@ impl ReticulumNode {
             outbound_socket_hook: self.outbound_socket_hook.clone(),
             inventory: Arc::clone(&self.inventory),
             transport_enabled: self.is_transport_enabled(),
+            default_announce_rate: self.default_announce_rate(),
             identity_hash: self.identity_hash(),
         };
 
@@ -3845,6 +3851,16 @@ impl ReticulumNode {
             .lock_recover()
             .transport_config()
             .enable_transport
+    }
+
+    /// The node-wide announce-rate fill (`default_ar_*`), which the reporting
+    /// side of a listener resolves its row from as the core does.
+    fn default_announce_rate(&self) -> leviculum_core::transport::AnnounceRateConfig {
+        self.inner
+            .lock_recover()
+            .transport_config()
+            .default_announce_rate
+            .clone()
     }
 
     /// Get the number of discovered AutoInterface peers
@@ -5209,8 +5225,11 @@ async fn run_event_loop(
                     // Read live, exactly as Python reads
                     // `RNS.Reticulum.transport_enabled()` at auto-connect time
                     // (Discovery.py:671).
-                    let transport_enabled =
-                        inner.lock_recover().transport_config().enable_transport;
+                    let (transport_enabled, default_announce_rate) = {
+                        let core = inner.lock_recover();
+                        let config = core.transport_config();
+                        (config.enable_transport, config.default_announce_rate.clone())
+                    };
                     let mut spawner = AutoConnectLiveSpawner {
                         next_id: &autoconnect_wiring.next_id,
                         new_iface_tx: &autoconnect_wiring.new_iface_tx,
@@ -5259,6 +5278,7 @@ async fn run_event_loop(
                                     autoconnect_wiring.outbound_socket_hook.clone(),
                                     &inventory,
                                     transport_enabled,
+                                    &default_announce_rate,
                                 );
                             }
                         }

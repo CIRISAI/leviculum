@@ -736,6 +736,107 @@ async fn test_rnprobe_verbose_prints_no_interface_without_a_path() {
     cleanup_config_dir(&config_dir);
 }
 
+/// D16 of the shared-instance audit: a config that raises Python's
+/// `default_ar_target` (`reference/Reticulum/RNS/Reticulum.py:622-625`,
+/// applied at `:830-833`) changes the announce-rate target every interface
+/// without its own reports, and the reference `rnstatus -A` renders it in the
+/// `(t:...)` suffix (`reference/Reticulum/RNS/Utilities/rnstatus.py:556-563`).
+/// The key used to be tolerated and inert, so lnsd showed `(t:1h/...)` for a
+/// config that gave rnsd `(t:2h/...)`. The daemon is built from the same file
+/// the client reads; the rows checked are the TCP listener and the connection
+/// it accepted, one reported from the driver's inventory and one from the core.
+/// The client's own `LocalInterface` row renders none, as the reference sets
+/// None on every LocalInterface (`reference/Reticulum/RNS/Interfaces/LocalInterface.py:428-430`);
+/// it used to render the fill too.
+#[tokio::test]
+async fn test_rnstatus_shows_the_configured_default_ar_target() {
+    init_tracing();
+
+    let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let instance_name = format!("defaultar_{}_{}", std::process::id(), test_id);
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let identity_bytes = identity
+        .private_key_bytes()
+        .expect("generated identity must have private keys");
+    let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
+    let config_file = config_dir.join("config");
+    let content = std::fs::read_to_string(&config_file).expect("read config");
+    std::fs::write(
+        &config_file,
+        content.replacen(
+            "[reticulum]\n",
+            "[reticulum]\n  default_ar_target = 7200\n",
+            1,
+        ),
+    )
+    .expect("write config");
+    let daemon_config = leviculum_std::config::Config::load(&config_file).expect("load the config");
+    let storage = crate::common::temp_storage("default_ar_target", "node");
+    let mut node = ReticulumNodeBuilder::new()
+        .identity(identity)
+        .config(daemon_config)
+        .enable_transport(true)
+        .share_instance(true)
+        .instance_name(instance_name.clone())
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build daemon");
+    node.start().await.expect("start daemon");
+    let tcp_addr = crate::ports::bound_tcp_addr(&node.tcp_listen_addrs());
+    wait_for_rpc_ready(&config_dir, Duration::from_secs(20)).await;
+
+    let peer_storage = crate::common::temp_storage("default_ar_target", "peer");
+    let mut peer = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_client(tcp_addr)
+        .storage_path(peer_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build peer");
+    peer.start().await.expect("start peer");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let stdout = loop {
+        // `-a`: rnstatus hides spawned interfaces without it.
+        let output = run_python_tool(RNSTATUS_PY, &["-a", "-A"], &config_dir).await;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "rnstatus -a -A exited with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        );
+        if stdout.contains("TCPInterface[Client on ") || tokio::time::Instant::now() >= deadline {
+            break stdout;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    eprintln!("=== rnstatus -a -A STDOUT ===\n{stdout}");
+
+    assert!(
+        stdout.contains("TCPInterface[Client on "),
+        "the peer's connection never appeared:\n{stdout}"
+    );
+    let suffixes: Vec<&str> = stdout.lines().filter(|l| l.contains("(t:")).collect();
+    assert_eq!(
+        suffixes.len(),
+        2,
+        "the listener and its accepted connection each render a target, the \
+         LocalInterface row none:\n{stdout}"
+    );
+    for line in suffixes {
+        assert!(
+            line.contains("(t:2h/p:0s/g:5)"),
+            "default_ar_target = 7200 renders as (t:2h/...), with the reference \
+             penalty and grace beside it: {line:?}\n{stdout}"
+        );
+    }
+
+    cleanup_config_dir(&config_dir);
+}
+
 /// D1 of the shared-instance audit: a config that sets `rpc_key` keys both
 /// ends of the RPC (`reference/Reticulum/RNS/Reticulum.py:509-515`, applied at
 /// `:355-359` and `:1265`). `rnstatus` reading that config must reach lnsd
