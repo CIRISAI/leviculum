@@ -23,18 +23,12 @@
 //! Medium under test: TCP loopback only. No radio is involved and none is
 //! configured, so there is nothing to switch off.
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use leviculum_core::link::LinkId;
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::NodeEvent;
-
-/// Listener port from the host-wide allocator shared by every suite.
-fn next_port() -> u16 {
-    crate::harness::port_alloc::free_tcp_port()
-}
 
 /// How many channel messages B sends. More than A's data plane holds, so on
 /// the unfixed path all but the first are destroyed after being proofed.
@@ -48,20 +42,18 @@ const STALL: Duration = Duration::from_millis(400);
 
 #[tokio::test]
 async fn reliable_channel_messages_survive_a_full_data_plane() {
-    let server_port = next_port();
-    let server_addr: SocketAddr = format!("127.0.0.1:{server_port}").parse().unwrap();
-
     // A: server + responder, one single data-plane slot.
     let a_storage = tempfile::tempdir().expect("tempdir A");
     let mut a = ReticulumNodeBuilder::new()
         .enable_transport(false)
-        .add_tcp_server(server_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(a_storage.path().to_path_buf())
         .data_channel_capacity(1)
         .build()
         .await
         .expect("build A");
     a.start().await.expect("start A");
+    let server_addr = crate::ports::bound_tcp_addr(&a.tcp_listen_addrs());
 
     // B: client + initiator.
     let b_storage = tempfile::tempdir().expect("tempdir B");

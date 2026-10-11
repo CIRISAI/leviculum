@@ -12,7 +12,7 @@
 //! `identify_drop_budget` LINKIDENTIFY frames travelling **towards the
 //! upstream**, re-framing everything else onward untouched. The gate is the
 //! context byte, not a time window: the byte gate in
-//! `tests/mvr/link_failure_recovery_silent_resume.rs:64-110` drops everything
+//! `tests/mvr/link_failure_recovery_silent_resume.rs:54-101` drops everything
 //! inside a window, which here would take the advertisement with it and prove
 //! nothing.
 //!

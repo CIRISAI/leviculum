@@ -18,6 +18,9 @@
 #[allow(dead_code)]
 pub mod harness;
 
+/// Who picks a port and when: the consumer binds port 0 wherever it can.
+pub mod ports;
+
 /// A counting allocator, for the one mvr that measures heap rather than
 /// protocol (`pn_serve_peak_outgrows_the_board_heap`).
 ///
@@ -60,7 +63,7 @@ pub mod harness;
 /// So the code under test emitting `PKT_TX`
 /// (`leviculum-core/src/transport.rs:3450`) inside the window made THIS
 /// thread pay another test's `Vec<String>` growth step: on 2026-09-25,
-/// `link_failure_recovery_silent_resume.rs:530` held the only handle in this
+/// `link_failure_recovery_silent_resume.rs:520` held the only handle in this
 /// binary, its buffer crossed 256 -> 512 entries during the calibration
 /// serve, and `512 * size_of::<String>()` = 12 288 B landed in a window whose
 /// whole budget is 4 096 B. Deterministic, and invisible under

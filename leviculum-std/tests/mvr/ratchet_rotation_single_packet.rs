@@ -25,7 +25,6 @@
 //! every run.
 
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -101,21 +100,19 @@ struct RunResult {
 async fn run_once(settle_ms: u64) -> RunResult {
     let tl = Arc::new(Timeline::new());
 
-    let server_port = crate::harness::port_alloc::free_tcp_port();
-    let server_addr: SocketAddr = format!("127.0.0.1:{server_port}").parse().unwrap();
-
     // A: TCP server. B: TCP client. Transport off on both, like the selftest
     // clients (the daemons between them are transparent to the ratchet
     // protocol, which runs end to end).
     let a_storage = tempfile::tempdir().expect("tempdir A");
     let mut a = ReticulumNodeBuilder::new()
         .enable_transport(false)
-        .add_tcp_server(server_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(a_storage.path().to_path_buf())
         .build()
         .await
         .expect("build A");
     a.start().await.expect("start A");
+    let server_addr = crate::ports::bound_tcp_addr(&a.tcp_listen_addrs());
 
     let b_storage = tempfile::tempdir().expect("tempdir B");
     let mut b = ReticulumNodeBuilder::new()

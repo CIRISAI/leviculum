@@ -17,23 +17,12 @@
 //! delivery rate. It is the RED reproduction: it asserts 100% delivery, so
 //! it fails on master while the bug is live and prints the measured rate.
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use leviculum_core::link::{LinkCloseReason, LinkId};
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::NodeEvent;
-
-/// Listener port from the host-wide allocator shared by every suite
-/// (`crate::harness::port_alloc`). This file used to carry its own
-/// `AtomicU16` at a private base, which is why the bases were chosen
-/// disjoint; one counter per host does not need disjoint bases and, unlike
-/// a per-process one, does not hand the same number to a concurrently
-/// running test binary.
-fn next_port() -> u16 {
-    crate::harness::port_alloc::free_tcp_port()
-}
 
 #[derive(Debug)]
 struct RunOutcome {
@@ -65,19 +54,17 @@ enum TeardownMode {
 /// Run one full establish -> responder-close -> wait-for-peer-close cycle
 /// in the given teardown mode.
 async fn run_once_mode(iter: usize, teardown: TeardownMode) -> RunOutcome {
-    let server_port = next_port();
-    let server_addr: SocketAddr = format!("127.0.0.1:{server_port}").parse().unwrap();
-
     // A: server + responder.
     let a_storage = tempfile::tempdir().expect("tempdir A");
     let mut a = ReticulumNodeBuilder::new()
         .enable_transport(false)
-        .add_tcp_server(server_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(a_storage.path().to_path_buf())
         .build()
         .await
         .expect("build A");
     a.start().await.expect("start A");
+    let server_addr = crate::ports::bound_tcp_addr(&a.tcp_listen_addrs());
 
     // B: client connecting directly to A.
     let b_storage = tempfile::tempdir().expect("tempdir B");

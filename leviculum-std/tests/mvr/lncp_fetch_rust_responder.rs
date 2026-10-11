@@ -24,16 +24,6 @@ use std::time::{Duration, Instant};
 
 use leviculum_std::process::spawn_supervised;
 
-/// Listener port from the host-wide allocator shared by every suite
-/// (`crate::harness::port_alloc`). This file used to carry its own
-/// `AtomicU16` at a private base, which is why the bases were chosen
-/// disjoint; one counter per host does not need disjoint bases and, unlike
-/// a per-process one, does not hand the same number to a concurrently
-/// running test binary.
-fn next_port() -> u16 {
-    crate::harness::port_alloc::free_tcp_port()
-}
-
 /// Resolve the release binary that the integ runner and this mvr share.
 /// Honours `CARGO_TARGET_DIR` so a `just build-integ-bins` under the
 /// nightly's CI cache dir is picked up the same way the runner's
@@ -218,7 +208,9 @@ fn lncp_fetch_rust_responder_over_tcp() {
     let dir_a = base.join("A");
     let dir_b = base.join("B");
 
-    let tcp_port = next_port();
+    // port-handoff: lnsd B listens on this and lnsd A dials it, both from
+    // config files written before the daemons start, in other processes.
+    let tcp_port = crate::ports::free_port();
 
     // Node A reaches Node B by initiating a TCP client connection to the
     // fixed listening port. Keep the two configs directional so there is no
@@ -496,23 +488,24 @@ use std::sync::Arc;
 use std::thread;
 
 fn spawn_latency_proxy(
-    listen_port: u16,
     upstream_port: u16,
     delay: Duration,
     stop: Arc<AtomicBool>,
-) -> thread::JoinHandle<()> {
+) -> (u16, thread::JoinHandle<()>) {
     // Bound before the thread is spawned: a client that connects while the new
     // thread is still unscheduled gets ECONNREFUSED and then waits a full
     // reconnect_interval (Codeberg #221, pinned by
     // `link_failure_recovery_silent_resume::proxy_listener_is_bound_before_spawn_returns`).
-    let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
-        Ok(l) => l,
-        Err(e) => panic!("latency proxy bind {listen_port} failed: {e}"),
-    };
+    //
+    // And at port 0, not at a number drawn beforehand: a drawn number is free
+    // when it is probed and may not be when it is bound (nightly #509, see
+    // `crate::ports`). Returns the port it listens on.
+    let listener: StdTcpListener = crate::ports::bind_loopback_tcp();
+    let listen_port = listener.local_addr().expect("proxy local addr").port();
     listener
         .set_nonblocking(true)
         .expect("set proxy nonblocking");
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((client, _addr)) => {
@@ -543,7 +536,8 @@ fn spawn_latency_proxy(
                 }
             }
         }
-    })
+    });
+    (listen_port, handle)
 }
 
 fn copy_with_delay(src: TcpStream, dst: TcpStream, delay: Duration, stop: Arc<AtomicBool>) {
@@ -556,24 +550,25 @@ fn copy_with_delay(src: TcpStream, dst: TcpStream, delay: Duration, stop: Arc<At
 /// Used by Bug #26's mvr to simulate the LoRa per-packet airtime
 /// that the bog-standard proxy cannot express.
 fn spawn_latency_proxy_sized(
-    listen_port: u16,
     upstream_port: u16,
     delay: Duration,
     buf_size: usize,
     stop: Arc<AtomicBool>,
-) -> thread::JoinHandle<()> {
+) -> (u16, thread::JoinHandle<()>) {
     // Bound before the thread is spawned: a client that connects while the new
     // thread is still unscheduled gets ECONNREFUSED and then waits a full
     // reconnect_interval (Codeberg #221, pinned by
     // `link_failure_recovery_silent_resume::proxy_listener_is_bound_before_spawn_returns`).
-    let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
-        Ok(l) => l,
-        Err(e) => panic!("sized latency proxy bind {listen_port} failed: {e}"),
-    };
+    //
+    // And at port 0, not at a number drawn beforehand: a drawn number is free
+    // when it is probed and may not be when it is bound (nightly #509, see
+    // `crate::ports`). Returns the port it listens on.
+    let listener: StdTcpListener = crate::ports::bind_loopback_tcp();
+    let listen_port = listener.local_addr().expect("proxy local addr").port();
     listener
         .set_nonblocking(true)
         .expect("set proxy nonblocking");
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((client, _addr)) => {
@@ -603,7 +598,8 @@ fn spawn_latency_proxy_sized(
                 Err(_) => thread::sleep(Duration::from_millis(50)),
             }
         }
-    })
+    });
+    (listen_port, handle)
 }
 
 fn copy_with_delay_sized(
@@ -647,8 +643,16 @@ fn run_fetch_with_latency(delay_ms: u64) -> (bool, u64) {
     let base = tmp.path();
     let dir_a = base.join("A");
     let dir_b = base.join("B");
-    let daemon_port = next_port();
-    let proxy_port = next_port();
+    // port-handoff: lnsd B binds this from its config file, written before
+    // the daemon starts, in another process that cannot report a port back.
+    let daemon_port = crate::ports::free_port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (proxy_port, _proxy) = spawn_latency_proxy(
+        daemon_port,
+        Duration::from_millis(delay_ms),
+        Arc::clone(&stop),
+    );
+
     let instance_a = format!("mvr-lat-a-{daemon_port}");
     let instance_b = format!("mvr-lat-b-{daemon_port}");
     write_config(
@@ -671,14 +675,6 @@ fn run_fetch_with_latency(delay_ms: u64) -> (bool, u64) {
         ),
     )
     .unwrap();
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let _proxy = spawn_latency_proxy(
-        proxy_port,
-        daemon_port,
-        Duration::from_millis(delay_ms),
-        Arc::clone(&stop),
-    );
 
     let fetch_jail = dir_b.join("files");
     fs::create_dir_all(&fetch_jail).unwrap();
@@ -809,24 +805,25 @@ fn lncp_fetch_latency_injection() {
 ///     direction. Models the Bug #26 H5 "resource-strategy
 ///     registration race" hypothesis.
 fn spawn_latency_proxy_asymmetric(
-    listen_port: u16,
     upstream_port: u16,
     delay_c2u: Duration,
     delay_u2c: Duration,
     stop: Arc<AtomicBool>,
-) -> thread::JoinHandle<()> {
+) -> (u16, thread::JoinHandle<()>) {
     // Bound before the thread is spawned: a client that connects while the new
     // thread is still unscheduled gets ECONNREFUSED and then waits a full
     // reconnect_interval (Codeberg #221, pinned by
     // `link_failure_recovery_silent_resume::proxy_listener_is_bound_before_spawn_returns`).
-    let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
-        Ok(l) => l,
-        Err(e) => panic!("async latency proxy bind {listen_port} failed: {e}"),
-    };
+    //
+    // And at port 0, not at a number drawn beforehand: a drawn number is free
+    // when it is probed and may not be when it is bound (nightly #509, see
+    // `crate::ports`). Returns the port it listens on.
+    let listener: StdTcpListener = crate::ports::bind_loopback_tcp();
+    let listen_port = listener.local_addr().expect("proxy local addr").port();
     listener
         .set_nonblocking(true)
         .expect("set proxy nonblocking");
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((client, _addr)) => {
@@ -852,7 +849,8 @@ fn spawn_latency_proxy_asymmetric(
                 Err(_) => thread::sleep(Duration::from_millis(50)),
             }
         }
-    })
+    });
+    (listen_port, handle)
 }
 
 /// Swap every other pair of reads so adjacent frames arrive in reverse
@@ -901,23 +899,21 @@ fn copy_with_reorder(mut src: TcpStream, mut dst: TcpStream, stop: Arc<AtomicBoo
     let _ = dst.shutdown(std::net::Shutdown::Write);
 }
 
-fn spawn_reorder_proxy(
-    listen_port: u16,
-    upstream_port: u16,
-    stop: Arc<AtomicBool>,
-) -> thread::JoinHandle<()> {
+fn spawn_reorder_proxy(upstream_port: u16, stop: Arc<AtomicBool>) -> (u16, thread::JoinHandle<()>) {
     // Bound before the thread is spawned: a client that connects while the new
     // thread is still unscheduled gets ECONNREFUSED and then waits a full
     // reconnect_interval (Codeberg #221, pinned by
     // `link_failure_recovery_silent_resume::proxy_listener_is_bound_before_spawn_returns`).
-    let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
-        Ok(l) => l,
-        Err(e) => panic!("reorder proxy bind {listen_port} failed: {e}"),
-    };
+    //
+    // And at port 0, not at a number drawn beforehand: a drawn number is free
+    // when it is probed and may not be when it is bound (nightly #509, see
+    // `crate::ports`). Returns the port it listens on.
+    let listener: StdTcpListener = crate::ports::bind_loopback_tcp();
+    let listen_port = listener.local_addr().expect("proxy local addr").port();
     listener
         .set_nonblocking(true)
         .expect("set proxy nonblocking");
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((client, _addr)) => {
@@ -948,7 +944,8 @@ fn spawn_reorder_proxy(
                 Err(_) => thread::sleep(Duration::from_millis(50)),
             }
         }
-    })
+    });
+    (listen_port, handle)
 }
 
 /// Parameterised variant of `run_fetch_with_latency` that lets the
@@ -964,8 +961,21 @@ fn run_fetch_variant(
     let base = tmp.path();
     let dir_a = base.join("A");
     let dir_b = base.join("B");
-    let daemon_port = next_port();
-    let proxy_port = next_port();
+    // port-handoff: lnsd B binds this from its config file, written before
+    // the daemon starts, in another process that cannot report a port back.
+    let daemon_port = crate::ports::free_port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (proxy_port, _proxy) = if reorder_u2c {
+        spawn_reorder_proxy(daemon_port, Arc::clone(&stop))
+    } else {
+        spawn_latency_proxy_asymmetric(
+            daemon_port,
+            Duration::from_millis(delay_c2u_ms),
+            Duration::from_millis(delay_u2c_ms),
+            Arc::clone(&stop),
+        )
+    };
+
     let instance_a = format!("mvr-var-a-{daemon_port}");
     let instance_b = format!("mvr-var-b-{daemon_port}");
     write_config(
@@ -988,19 +998,6 @@ fn run_fetch_variant(
         ),
     )
     .unwrap();
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let _proxy = if reorder_u2c {
-        spawn_reorder_proxy(proxy_port, daemon_port, Arc::clone(&stop))
-    } else {
-        spawn_latency_proxy_asymmetric(
-            proxy_port,
-            daemon_port,
-            Duration::from_millis(delay_c2u_ms),
-            Duration::from_millis(delay_u2c_ms),
-            Arc::clone(&stop),
-        )
-    };
 
     let fetch_jail = dir_b.join("files");
     fs::create_dir_all(&fetch_jail).unwrap();
@@ -1246,8 +1243,17 @@ fn run_fetch_for_bug26(
     let base = tmp.path();
     let dir_a = base.join("A");
     let dir_b = base.join("B");
-    let daemon_port = next_port();
-    let proxy_port = next_port();
+    // port-handoff: lnsd B binds this from its config file, written before
+    // the daemon starts, in another process that cannot report a port back.
+    let daemon_port = crate::ports::free_port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (proxy_port, _proxy) = spawn_latency_proxy_sized(
+        daemon_port,
+        Duration::from_millis(delay_ms),
+        proxy_buf_size,
+        Arc::clone(&stop),
+    );
+
     let instance_a = format!("mvr-b26-a-{daemon_port}");
     let instance_b = format!("mvr-b26-b-{daemon_port}");
     write_config(
@@ -1270,15 +1276,6 @@ fn run_fetch_for_bug26(
         ),
     )
     .unwrap();
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let _proxy = spawn_latency_proxy_sized(
-        proxy_port,
-        daemon_port,
-        Duration::from_millis(delay_ms),
-        proxy_buf_size,
-        Arc::clone(&stop),
-    );
 
     let fetch_jail = dir_b.join("files");
     fs::create_dir_all(&fetch_jail).unwrap();

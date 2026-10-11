@@ -176,7 +176,9 @@ fn consecutive_pushes_complete(policy: &str) {
     let base = tmp.path();
     let dir_a = base.join("A");
     let dir_b = base.join("B");
-    let tcp_port = crate::harness::port_alloc::free_tcp_port();
+    // port-handoff: lnsd B listens on this and lnsd A dials it, both from
+    // config files written before the daemons start, in other processes.
+    let tcp_port = crate::ports::free_port();
 
     let instance_a = format!("mvr-winpol-a-{tcp_port}");
     let instance_b = format!("mvr-winpol-b-{tcp_port}");

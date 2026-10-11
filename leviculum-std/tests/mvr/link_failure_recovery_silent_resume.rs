@@ -49,16 +49,6 @@ use leviculum_core::{Destination, DestinationHash, DestinationType, Direction, I
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::NodeEvent;
 
-/// Listener port from the host-wide allocator shared by every suite
-/// (`crate::harness::port_alloc`). This file used to carry its own
-/// `AtomicU16` at a private base, which is why the bases were chosen
-/// disjoint; one counter per host does not need disjoint bases and, unlike
-/// a per-process one, does not hand the same number to a concurrently
-/// running test binary.
-fn next_port() -> u16 {
-    crate::harness::port_alloc::free_tcp_port()
-}
-
 /// Runner-side proxy controls. `blocked` toggles silent-drop mode;
 /// `stop` shuts down all proxy threads on test teardown.
 struct ProxyCtrl {
@@ -104,28 +94,28 @@ fn copy_with_gate(mut src: TcpStream, mut dst: TcpStream, ctrl: Arc<ProxyCtrl>) 
     let _ = dst.shutdown(Shutdown::Write);
 }
 
-/// TCP proxy listening on `listen_port`, forwarding to
-/// `127.0.0.1:upstream_port`. One accept = one bidirectional pair of
-/// `copy_with_gate` threads sharing the same `ctrl`.
-fn spawn_blocking_proxy(
-    listen_port: u16,
-    upstream_port: u16,
-    ctrl: Arc<ProxyCtrl>,
-) -> thread::JoinHandle<()> {
+/// TCP proxy on a loopback port the kernel picks, forwarding to
+/// `127.0.0.1:upstream_port`. Returns the port it listens on. One accept =
+/// one bidirectional pair of `copy_with_gate` threads sharing the same
+/// `ctrl`.
+fn spawn_blocking_proxy(upstream_port: u16, ctrl: Arc<ProxyCtrl>) -> (u16, thread::JoinHandle<()>) {
     // Bound by the caller, not inside the thread: the caller starts alice
     // immediately after this returns, and her TCP client connects within
     // microseconds. A bind that waits for the new thread to be scheduled loses
     // that race under co-tenant load, and the refused connect costs a full
     // reconnect_interval (Codeberg #221) — see
     // `proxy_listener_is_bound_before_spawn_returns`.
-    let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
-        Ok(l) => l,
-        Err(e) => panic!("blocking proxy bind {listen_port} failed: {e}"),
-    };
+    //
+    // And bound at port 0, not at a number drawn beforehand: a drawn number
+    // is free when it is probed and may not be when it is bound, which is
+    // how nightly #509 failed here with `EADDRINUSE` on 61455 (see
+    // `crate::ports`).
+    let listener: StdTcpListener = crate::ports::bind_loopback_tcp();
+    let listen_port = listener.local_addr().expect("proxy local addr").port();
     listener
         .set_nonblocking(true)
         .expect("set proxy nonblocking");
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         while !ctrl.stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((client, _addr)) => {
@@ -151,7 +141,8 @@ fn spawn_blocking_proxy(
                 Err(_) => thread::sleep(Duration::from_millis(50)),
             }
         }
-    })
+    });
+    (listen_port, handle)
 }
 
 /// Mechanism pin for Codeberg #221: the proxy's listener must already accept
@@ -175,10 +166,11 @@ fn spawn_blocking_proxy(
 #[test]
 fn proxy_listener_is_bound_before_spawn_returns() {
     let ctrl = Arc::new(ProxyCtrl::new());
-    let proxy_port = next_port();
     // Upstream is never contacted: this pins the listener's existence, not
-    // forwarding.
-    let _proxy = spawn_blocking_proxy(proxy_port, next_port(), Arc::clone(&ctrl));
+    // forwarding. Held anyway, so the number names nobody else's socket.
+    let upstream = crate::ports::bind_loopback_tcp();
+    let upstream_port = upstream.local_addr().expect("upstream local addr").port();
+    let (proxy_port, _proxy) = spawn_blocking_proxy(upstream_port, Arc::clone(&ctrl));
     let connected = TcpStream::connect(("127.0.0.1", proxy_port));
     ctrl.stop.store(true, Ordering::Relaxed);
     assert!(
@@ -227,10 +219,22 @@ async fn run_scenario(opts: ScenarioOpts) -> ScenarioResult {
     let t0 = Instant::now();
     let mut events = Vec::<String>::new();
 
-    let bob_listen_port = next_port();
-    let proxy_port = next_port();
-    let bob_addr: SocketAddr = format!("127.0.0.1:{bob_listen_port}").parse().unwrap();
-    let alice_target: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    // Bob: server side, holds the destination we will announce. Started
+    // first, so the proxy can be pointed at the port his listener reports.
+    let bob_storage = tempfile::tempdir().expect("tempdir bob");
+    let mut bob = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
+        .storage_path(bob_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build bob");
+    bob.start().await.expect("start bob");
+    let bob_listen_port = crate::ports::bound_tcp_addr(&bob.tcp_listen_addrs()).port();
+
+    let proxy_ctrl = Arc::new(ProxyCtrl::new());
+    let (proxy_port, _proxy) = spawn_blocking_proxy(bob_listen_port, Arc::clone(&proxy_ctrl));
+    let alice_target = SocketAddr::from(([127, 0, 0, 1], proxy_port));
 
     events.push(structured_event(
         "MVR_START",
@@ -246,20 +250,6 @@ async fn run_scenario(opts: ScenarioOpts) -> ScenarioResult {
             ),
         ],
     ));
-
-    let proxy_ctrl = Arc::new(ProxyCtrl::new());
-    let _proxy = spawn_blocking_proxy(proxy_port, bob_listen_port, Arc::clone(&proxy_ctrl));
-
-    // Bob: server side, holds the destination we will announce.
-    let bob_storage = tempfile::tempdir().expect("tempdir bob");
-    let mut bob = ReticulumNodeBuilder::new()
-        .enable_transport(false)
-        .add_tcp_server(bob_addr)
-        .storage_path(bob_storage.path().to_path_buf())
-        .build()
-        .await
-        .expect("build bob");
-    bob.start().await.expect("start bob");
 
     // Alice: client connecting *through* the proxy.
     let alice_storage = tempfile::tempdir().expect("tempdir alice");

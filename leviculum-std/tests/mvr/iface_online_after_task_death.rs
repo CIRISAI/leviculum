@@ -20,10 +20,6 @@ use std::time::{Duration, Instant};
 
 use leviculum_std::driver::ReticulumNodeBuilder;
 
-fn next_port() -> u16 {
-    crate::harness::port_alloc::free_tcp_port()
-}
-
 /// Poll `cond` every 100 ms until it returns true or the deadline passes.
 async fn wait_until(deadline: Duration, mut cond: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + deadline;
@@ -38,7 +34,12 @@ async fn wait_until(deadline: Duration, mut cond: impl FnMut() -> bool) -> bool 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tcp_client_reports_offline_after_peer_is_gone() {
-    let port = next_port();
+    // port-handoff: the client keeps dialling this port after the peer is
+    // gone. A kernel-picked port lies in `ip_local_port_range`, where the
+    // client's own next ephemeral port can be that very number and the dial
+    // connects to itself, which reports online: the failure under test.
+    // The allocator's band sits above that range.
+    let port = crate::ports::free_port();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 
     // Peer: a plain TCP server node.

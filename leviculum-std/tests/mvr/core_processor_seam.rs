@@ -19,7 +19,6 @@
 //! answers, and B must see no confirmation. Without that control the positive
 //! result would not distinguish the seam from the core proving by itself.
 
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,10 +27,6 @@ use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
 use leviculum_core::{Destination, DestinationType, Direction, Identity, ProofStrategy};
 use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder, StdNodeCore};
-
-fn next_port() -> u16 {
-    crate::harness::port_alloc::free_tcp_port()
-}
 
 /// Answers `PacketProofRequested` in the tick that produced it.
 ///
@@ -75,14 +70,13 @@ struct Outcome {
 /// One full announce → path-install → single-packet → proof cycle, with the
 /// processor either registered or not.
 async fn run_once(with_processor: bool) -> Outcome {
-    let server_addr: SocketAddr = format!("127.0.0.1:{}", next_port()).parse().unwrap();
     let answered = Arc::new(AtomicUsize::new(0));
 
     // A: TCP server, application-decided proofs.
     let a_storage = tempfile::tempdir().expect("tempdir A");
     let mut a_builder = ReticulumNodeBuilder::new()
         .enable_transport(false)
-        .add_tcp_server(server_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(a_storage.path().to_path_buf());
     if with_processor {
         a_builder = a_builder.core_processor(ProofResponder {
@@ -91,6 +85,7 @@ async fn run_once(with_processor: bool) -> Outcome {
     }
     let mut a = a_builder.build().await.expect("build A");
     a.start().await.expect("start A");
+    let server_addr = crate::ports::bound_tcp_addr(&a.tcp_listen_addrs());
 
     // B: TCP client.
     let b_storage = tempfile::tempdir().expect("tempdir B");
