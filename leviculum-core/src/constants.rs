@@ -380,6 +380,13 @@ pub const RESPONSE_MAX_GRACE_TIME_MS: u64 = 10_000;
 /// Maximum number of queued announces per interface (Python Interface.py:337)
 pub const MAX_QUEUED_ANNOUNCES_PER_INTERFACE: usize = 16384;
 
+/// How long an announce may wait in an interface's cap queue before the
+/// release drops it unsent (Python `QUEUED_ANNOUNCE_LIFE` = 24 h,
+/// Reticulum.py:112, pruned at release in Interface.py:330-337). Without it
+/// a destination that announced once and went away stays queued for as long
+/// as a saturated cap takes to reach it, which on slow LoRa is days.
+pub const QUEUED_ANNOUNCE_LIFE_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// Default announce bandwidth cap as percentage of link capacity (Python Interface.py:25)
 pub const DEFAULT_ANNOUNCE_CAP_PERCENT: u32 = 2;
 

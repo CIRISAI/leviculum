@@ -12340,8 +12340,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Broadcast an announce on all interfaces except one, respecting per-interface
     /// bandwidth caps. Hops were already incremented on receipt (or set from stored entry).
     ///
-    /// For capped interfaces: if `now >= allowed_at_ms`, send immediately and compute
-    /// next holdoff. Otherwise, queue (capped at MAX_QUEUED_ANNOUNCES_PER_INTERFACE).
+    /// For capped interfaces: if `now >= allowed_at_ms` and the queue is empty, send
+    /// immediately and compute next holdoff. Otherwise, queue (capped at
+    /// MAX_QUEUED_ANNOUNCES_PER_INTERFACE).
     ///
     /// Uncapped interfaces receive the announce via Broadcast action (driver dispatches).
     /// Capped interfaces that already got a SendPacket may also receive the Broadcast;
@@ -12418,7 +12419,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 .get_mut(iface_idx)
                 .expect("key from collected list");
 
-            if now >= cap.allowed_at_ms {
+            // Immediate only when the holdoff has passed AND nothing waits
+            // (Python Transport.py:1256-1257). With a non-empty queue the
+            // announce queues like any other and the drain's min-hops pick
+            // decides; testing the holdoff alone let a fresh announce of any
+            // hop count overtake every queued one once per holdoff (631).
+            if now >= cap.allowed_at_ms && cap.queue.is_empty() {
                 self.pending_actions.push(Action::SendPacket {
                     iface: InterfaceId(*iface_idx),
                     data: raw.clone(),
@@ -12553,9 +12559,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Drain announce queues for interfaces whose holdoff has expired.
-    /// Called from `poll()`. Dequeues lowest-hops announce first, then oldest
-    /// within same hops (Python Interface.py:340-343).
+    /// Called from `poll()`. Drops entries older than
+    /// [`crate::constants::QUEUED_ANNOUNCE_LIFE_MS`] first (Python Interface.py:330-337), then
+    /// dequeues lowest-hops announce first, then oldest within same hops
+    /// (Python Interface.py:340-343).
     fn drain_announce_queues(&mut self, now: u64) {
+        // (iface_idx, dst, hops, age_ms) for each entry dropped as stale,
+        // logged once the cap map is no longer borrowed.
+        let mut stale: Vec<(usize, [u8; TRUNCATED_HASHBYTES], u8, u64)> = Vec::new();
         // (iface_idx, raw, dst, hops, peer) for each drained announce. dst/hops
         // carry the OBS-1 ANN_TX fields for the deferred send; peer keeps a
         // held-back #383 re-offer on the one link it was for.
@@ -12580,6 +12591,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             {
                 continue;
             }
+
+            // Pruned at release, as the reference does: an entry is aged by
+            // its queue time, which a fresher same-destination emission
+            // resets when it replaces the slot.
+            cap.queue.retain(|e| {
+                let age_ms = now.saturating_sub(e.queued_at_ms);
+                let keep = age_ms < crate::constants::QUEUED_ANNOUNCE_LIFE_MS;
+                if !keep {
+                    stale.push((*iface_idx, e.dst, e.hops, age_ms));
+                }
+                keep
+            });
 
             // Dequeue: lowest hops first, then oldest within same hops
             let best_idx = cap
@@ -12606,6 +12629,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let wait_ms = (tx_bits * 1000).checked_div(cap_bps).unwrap_or(0);
                 cap.allowed_at_ms = now + wait_ms;
             }
+        }
+
+        for (iface_idx, dst, hops, age_ms) in stale {
+            crate::tracing::debug!(
+                event = "ANN_QUEUE_STALE",
+                dst = %HexShort(&dst),
+                hops = hops,
+                iface = %self.iface_name(iface_idx),
+                age_ms = age_ms,
+            );
         }
 
         for (iface_idx, raw, dst, hops, peer) in sends {
@@ -12755,7 +12788,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // `broadcast_announce_with_caps`, release draw included (#560).
             let release_draw = self.cap_release_draw_ms(&dest_hash, &raw);
             if let Some(cap) = self.interface_announce_caps.get_mut(&interface_index) {
-                if now < cap.allowed_at_ms {
+                // Queued announces go first here too (631, Python
+                // Transport.py:1256-1257): an elapsed holdoff alone does not
+                // let a re-offer overtake what already waits.
+                if now < cap.allowed_at_ms || !cap.queue.is_empty() {
                     let emitted = ReceivedAnnounce::from_packet(&parsed)
                         .map(|a| emission_from_random_hash(a.random_hash()))
                         .unwrap_or(0);
@@ -19276,6 +19312,124 @@ mod tests {
                 .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1))
                 .count();
             assert_eq!(sent_after, 1, "should drain queued announce after holdoff");
+        }
+
+        /// Audit D14 (631): a fresh announce must not jump the cap queue.
+        /// The reference transmits immediately only when the holdoff has
+        /// passed AND nothing is queued (`Transport.py:1256-1257`); otherwise
+        /// it queues and the release is the min-hops pick. Here a queued
+        /// 1-hop announce waits with the holdoff already elapsed, and the
+        /// poll's rebroadcast pass (which runs before the drain) offers a
+        /// fresh 3-hop one: the 1-hop one has to leave first.
+        #[test]
+        fn fresh_announce_does_not_jump_the_cap_queue() {
+            extern crate alloc;
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            transport.register_interface_bitrate(1, 1000);
+
+            let queued_dst = [0x11u8; TRUNCATED_HASHBYTES];
+            let queued_raw = alloc::vec![0xAA; 100];
+            let now = transport.clock.now_ms();
+            let cap = transport.interface_announce_caps.get_mut(&1).unwrap();
+            cap.allowed_at_ms = now;
+            cap.queue.push_back(QueuedAnnounce {
+                raw: queued_raw.clone(),
+                dst: queued_dst,
+                hops: 1,
+                queued_at_ms: now,
+                emitted: 0,
+                peer: None,
+            });
+
+            // Wire hops 2, so the rebroadcast leaves with 3.
+            let (raw, fresh_dst) = make_announce_raw(2, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            let sent: Vec<Vec<u8>> = transport
+                .drain_actions()
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data),
+                    _ => None,
+                })
+                .collect();
+            let _ = transport.drain_events();
+
+            assert_eq!(
+                sent,
+                alloc::vec![queued_raw],
+                "the queued 1-hop announce leaves first, the fresh 3-hop one waits"
+            );
+            let queue = &transport.interface_announce_caps[&1].queue;
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0].dst, fresh_dst);
+            assert_eq!(queue[0].hops, 3);
+        }
+
+        /// Audit D15 (631): a queued announce does not live forever. The
+        /// reference drops entries older than `QUEUED_ANNOUNCE_LIFE` (24 h,
+        /// `Reticulum.py:112`) at release (`Interface.py:330-337`). An entry
+        /// queued 24 h ago is dropped even though its hop count would win the
+        /// pick; one queued 23 h ago is kept and released.
+        #[test]
+        fn queued_announce_older_than_its_life_is_dropped_at_release() {
+            extern crate alloc;
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            transport.register_interface_bitrate(1, 1000);
+
+            const HOUR_MS: u64 = 60 * 60 * 1000;
+            let stale_raw = alloc::vec![0xAA; 100];
+            let kept_raw = alloc::vec![0xBB; 100];
+            let t0 = transport.clock.now_ms();
+            let cap = transport.interface_announce_caps.get_mut(&1).unwrap();
+            cap.allowed_at_ms = u64::MAX;
+            cap.queue.push_back(QueuedAnnounce {
+                raw: stale_raw.clone(),
+                dst: [0x11; TRUNCATED_HASHBYTES],
+                hops: 1,
+                queued_at_ms: t0,
+                emitted: 0,
+                peer: None,
+            });
+            cap.queue.push_back(QueuedAnnounce {
+                raw: kept_raw.clone(),
+                dst: [0x22; TRUNCATED_HASHBYTES],
+                hops: 2,
+                queued_at_ms: t0 + HOUR_MS,
+                emitted: 0,
+                peer: None,
+            });
+
+            transport.clock.advance(24 * HOUR_MS);
+            let now = transport.clock.now_ms();
+            transport
+                .interface_announce_caps
+                .get_mut(&1)
+                .unwrap()
+                .allowed_at_ms = now;
+            transport.poll();
+            let sent: Vec<Vec<u8>> = transport
+                .drain_actions()
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(
+                sent,
+                alloc::vec![kept_raw],
+                "the 24 h entry is dropped, the 23 h one is released"
+            );
+            assert!(transport.interface_announce_caps[&1].queue.is_empty());
         }
 
         /// Codeberg #93: the announce holdoff registered from a configured
