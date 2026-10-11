@@ -17,12 +17,17 @@
 //! `leviculum-nrf/src/boot_trace.rs`; the firmware crate cross-compiles
 //! and runs no host tests, so everything greppable is asserted here
 //! (same split as `leviculum-log-line`).
+//!
+//! The panic and HardFault post-mortems, the other two records in
+//! `.retained`, have their decisions in [`postmortem`].
 
 #![cfg_attr(not(test), no_std)]
 
 use core::fmt;
 
-/// Record-valid marker. Versioned like `PANIC_PM_MAGIC`: bump it if
+pub mod postmortem;
+
+/// Record-valid marker. Versioned like [`postmortem::PANIC_RECORD`]: bump it if
 /// [`RawRecord`]'s layout or the [`Phase`] byte assignment ever changes,
 /// so a record left in `.uninit` by an older image reads as absent
 /// rather than misparsed.

@@ -33,6 +33,22 @@
 //! ([`RESET_ACK_WITHIN_MS`], derived from periculum's reset waits), the drain,
 //! the reset. The transport task in `usb.rs` runs the steps it is handed and
 //! decides none of them.
+//!
+//! # The transport reader and the outgoing queue
+//!
+//! [`reader_step`] says what the transport port's reader does with one read:
+//! deframe it, drop a frame a silent host tore ([`read_timeout_ms`]), or end
+//! the session on a disconnect so the next one starts with an empty
+//! deframer. [`offered`] is the serial interface's side of the queue in
+//! front of the writer: what is counted, and when a packet is dropped.
+//!
+//! # The debug port's drain
+//!
+//! [`drain_wake`] says what one wake of the debug writer does: nothing, open
+//! the runtime-drain gate, or open it and write the log ring out. The port is
+//! written only while DTR is up, and the gate opens on the first host or
+//! after [`HEADLESS_DRAIN_OPEN_MS`] without one. [`drain_continues`] bounds a
+//! drain against a host that holds DTR up and does not read.
 
 extern crate alloc;
 
@@ -164,7 +180,10 @@ const _: () = assert!(control_envelope_ms() <= LNSD_CONFIG_ACK_TIMEOUT_MS);
 
 /// Incomplete-frame timeout on the transport CDC port. A property of the
 /// serial line, not of the LoRa modulation: [`frame_timeout_margin`] is the
-/// arithmetic its comment carries.
+/// arithmetic its comment carries. Python uses 100 ms but also sets
+/// low_latency mode, so frames arrive as bulk USB packets; without it,
+/// byte-by-byte delivery needs more time, and 500 ms gives a 34x margin for a
+/// 167-byte frame at 115200. [`read_timeout_ms`] applies it.
 pub const FRAME_TIMEOUT_MS: u64 = 500;
 
 /// The one lawful delay of a config apply: the retune defers to a frame that
@@ -427,4 +446,167 @@ pub fn reset_plan(facts: &ResetFacts) -> ResetPlan {
     plan.push(ResetStep::Drain { ms: RESET_DRAIN_MS });
     plan.push(ResetStep::SystemReset);
     plan
+}
+
+// ---------------------------------------------------------------------------
+// The transport reader (leviculum#359, leviculum#413)
+// ---------------------------------------------------------------------------
+
+/// How long the transport port's reader waits for the next USB packet when
+/// no frame is open: an hour, which is "until the host writes". The loop
+/// also wakes on every outgoing packet and every duty-hold edge, so this
+/// bound is never what keeps a board responsive.
+pub const IDLE_READ_TIMEOUT_MS: u64 = 3_600_000;
+
+/// How long the reader waits for the next packet: [`FRAME_TIMEOUT_MS`] once
+/// a frame has opened, so a frame torn by a host that stopped writing is
+/// dropped before it can swallow the next one, else [`IDLE_READ_TIMEOUT_MS`].
+pub fn read_timeout_ms(in_frame: bool) -> u64 {
+    if in_frame {
+        FRAME_TIMEOUT_MS
+    } else {
+        IDLE_READ_TIMEOUT_MS
+    }
+}
+
+/// How one read on the transport port ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadOutcome {
+    /// The read returned bytes.
+    Bytes,
+    /// The read returned an error: the host closed the port, the cable
+    /// went, or the bus was reset.
+    Disconnected,
+    /// [`read_timeout_ms`] ran out with no packet.
+    TimedOut,
+}
+
+/// What the reader does next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReaderStep {
+    /// Feed the bytes to the deframer.
+    Deframe,
+    /// Leave the read loop and wait for the next connection. The deframer
+    /// is reset when it comes, so nothing of a frame the disconnect tore is
+    /// carried into the next session.
+    Rewait,
+    /// Drop the partial frame and keep reading.
+    DropPartial,
+    /// Nothing was open: keep reading.
+    Idle,
+}
+
+/// The reader's step for one read's outcome. A disconnect always ends the
+/// session, mid-frame or not; a timeout drops only a frame that is open.
+pub fn reader_step(outcome: ReadOutcome, in_frame: bool) -> ReaderStep {
+    match outcome {
+        ReadOutcome::Bytes => ReaderStep::Deframe,
+        ReadOutcome::Disconnected => ReaderStep::Rewait,
+        ReadOutcome::TimedOut if in_frame => ReaderStep::DropPartial,
+        ReadOutcome::TimedOut => ReaderStep::Idle,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The serial interface's outgoing queue
+// ---------------------------------------------------------------------------
+
+/// Depth of the queue between the node and the transport port's writer. A
+/// host that holds DTR up and does not read fills it in this many packets.
+pub const OUTGOING_DEPTH: usize = 8;
+
+/// What the serial interface reports for a packet offered to the outgoing
+/// queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Offered {
+    /// Queued, and this many bytes counted as sent: the unframed packet, as
+    /// the reference counts it where the interface accepts it for the medium
+    /// (`RNodeInterface.py:725`). The HDLC framing the writer adds is outside
+    /// the count.
+    Queued {
+        /// Bytes added to the interface's TX counter.
+        counted: usize,
+    },
+    /// The queue was full: the packet is dropped, nothing is counted, and the
+    /// caller sees `BufferFull` with an `[IFACE_FULL]` line naming the depth.
+    Full,
+}
+
+/// The interface's answer for a packet of `len` bytes the queue did or did
+/// not take.
+pub fn offered(accepted: bool, len: usize) -> Offered {
+    if accepted {
+        Offered::Queued { counted: len }
+    } else {
+        Offered::Full
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The debug port's drain
+// ---------------------------------------------------------------------------
+
+/// How often the debug writer wakes when no log line signals it. It is also
+/// how late a DTR change or the headless deadline can be seen.
+pub const DEBUG_POLL_MS: u64 = 100;
+
+/// How long one 64-byte write on the debug port may pend before the drain
+/// gives up until the next wake.
+pub const DEBUG_WRITE_WITHIN_MS: u64 = 50;
+
+// A stalled write ends inside one poll period, so a host that holds DTR up
+// without reading cannot keep the writer from its next wake. A build-time
+// check, like the windows above.
+const _: () = assert!(DEBUG_WRITE_WITHIN_MS < DEBUG_POLL_MS);
+
+/// After this long without a host on the debug port the runtime-drain gate
+/// opens anyway, so a board in the field without a debug host does not drop
+/// its runtime lines for the whole boot.
+pub const HEADLESS_DRAIN_OPEN_MS: u64 = 30_000;
+
+/// What one wake of the debug writer does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrainWake {
+    /// Nothing: no host, and the boot is younger than
+    /// [`HEADLESS_DRAIN_OPEN_MS`].
+    Wait,
+    /// Open the runtime-drain gate, write nothing: no host, but the boot has
+    /// waited out [`HEADLESS_DRAIN_OPEN_MS`]. Runtime lines land in the ring
+    /// from here and are written when a host attaches, as far as the ring
+    /// holds them.
+    OpenGate,
+    /// Open the gate and write the ring out: a host holds DTR up. Opening is
+    /// idempotent; the first wake that sees DTR is the one that opens it.
+    Drain,
+}
+
+/// The debug writer's step for one wake. The port is never written while
+/// DTR is down, because a CDC write with no reader pends until one comes.
+pub fn drain_wake(dtr: bool, since_boot_ms: u64) -> DrainWake {
+    if dtr {
+        DrainWake::Drain
+    } else if since_boot_ms >= HEADLESS_DRAIN_OPEN_MS {
+        DrainWake::OpenGate
+    } else {
+        DrainWake::Wait
+    }
+}
+
+/// How one bounded debug write ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugWrite {
+    /// The host took the packet.
+    Written,
+    /// The USB stack refused it.
+    Failed,
+    /// [`DEBUG_WRITE_WITHIN_MS`] ran out: DTR is up but nobody reads.
+    TimedOut,
+}
+
+/// Whether the drain writes the next chunk. Any write that did not land
+/// ends this wake's drain; what is still in the ring waits for the next
+/// wake, so a host that holds DTR up without reading costs the writer one
+/// bounded wait a wake and no more.
+pub fn drain_continues(write: DebugWrite) -> bool {
+    write == DebugWrite::Written
 }

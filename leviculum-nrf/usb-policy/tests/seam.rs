@@ -434,3 +434,243 @@ fn every_plan_starts_with_the_line_and_ends_in_the_reset() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The transport reader
+// ---------------------------------------------------------------------------
+
+use leviculum_core::envelope::{self, ControlAction};
+use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
+
+/// The transport port's deframer bound, `SERIAL_HW_MTU` in `usb.rs`.
+const SERIAL_HW_MTU: usize = 564;
+
+/// One read outcome at a time through the step the firmware takes, the
+/// deframer handled as `retic_serial_task` handles it. Returns the frames
+/// that came out, classified the way the task classifies them.
+enum Read<'a> {
+    Bytes(&'a [u8]),
+    Disconnect,
+    Timeout,
+}
+
+fn run_reader(reads: &[Read]) -> Vec<ControlAction> {
+    let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU);
+    let mut out = Vec::new();
+    for read in reads {
+        let outcome = match read {
+            Read::Bytes(_) => ReadOutcome::Bytes,
+            Read::Disconnect => ReadOutcome::Disconnected,
+            Read::Timeout => ReadOutcome::TimedOut,
+        };
+        match reader_step(outcome, deframer.is_in_frame()) {
+            ReaderStep::Deframe => {
+                let Read::Bytes(bytes) = read else {
+                    unreachable!("only bytes deframe")
+                };
+                for r in deframer.process(bytes) {
+                    if let DeframeResult::Frame(data) = r {
+                        out.push(envelope::classify_control_frame(
+                            &data,
+                            &[envelope::TYPE_RESET],
+                        ));
+                    }
+                }
+            }
+            // The firmware breaks to `wait_connection` and resets the
+            // deframer when the next session starts.
+            ReaderStep::Rewait => deframer.reset(),
+            ReaderStep::DropPartial => deframer.reset(),
+            ReaderStep::Idle => {}
+        }
+    }
+    out
+}
+
+/// The envelope reset frame on the wire, HDLC-framed as the host writes it.
+fn reset_on_the_wire() -> Vec<u8> {
+    let mut wire = Vec::new();
+    frame(&envelope::encode_reset(), &mut wire);
+    wire
+}
+
+#[test]
+fn the_read_timeout_is_the_frame_timeout_only_inside_a_frame() {
+    assert_eq!(read_timeout_ms(true), FRAME_TIMEOUT_MS);
+    assert_eq!(read_timeout_ms(true), 500);
+    assert_eq!(read_timeout_ms(false), IDLE_READ_TIMEOUT_MS);
+    assert_eq!(IDLE_READ_TIMEOUT_MS, 3_600 * 1_000);
+}
+
+#[test]
+fn a_disconnect_ends_the_session_in_or_out_of_a_frame() {
+    assert_eq!(
+        reader_step(ReadOutcome::Disconnected, true),
+        ReaderStep::Rewait
+    );
+    assert_eq!(
+        reader_step(ReadOutcome::Disconnected, false),
+        ReaderStep::Rewait
+    );
+    assert_eq!(reader_step(ReadOutcome::Bytes, true), ReaderStep::Deframe);
+    assert_eq!(reader_step(ReadOutcome::Bytes, false), ReaderStep::Deframe);
+}
+
+#[test]
+fn a_timeout_drops_only_an_open_frame() {
+    assert_eq!(
+        reader_step(ReadOutcome::TimedOut, true),
+        ReaderStep::DropPartial
+    );
+    assert_eq!(reader_step(ReadOutcome::TimedOut, false), ReaderStep::Idle);
+}
+
+/// leviculum#359: a host that closes the port in the middle of a reset frame
+/// and writes the whole frame again after it reopens. The torn half must not
+/// reach the classifier, and the whole frame must still read as a reset; a
+/// half carried across the session would close as a garbage frame on the
+/// retry's opening flag and swallow the retry with it.
+#[test]
+fn a_reset_frame_torn_by_a_disconnect_resets_on_the_retry() {
+    let wire = reset_on_the_wire();
+    let (torn, _) = wire.split_at(wire.len() / 2);
+    let actions = run_reader(&[Read::Bytes(torn), Read::Disconnect, Read::Bytes(&wire)]);
+    assert_eq!(actions, vec![ControlAction::Reset]);
+    println!(
+        "TORN_RESET wire={} torn={} -> {:?}",
+        wire.len(),
+        torn.len(),
+        actions
+    );
+}
+
+/// The same tear with no read error, a host that just stops writing: the
+/// frame timeout drops the half and the retry is a reset.
+#[test]
+fn a_reset_frame_torn_by_a_silent_host_resets_on_the_retry() {
+    let wire = reset_on_the_wire();
+    let (torn, _) = wire.split_at(wire.len() / 2);
+    let actions = run_reader(&[Read::Bytes(torn), Read::Timeout, Read::Bytes(&wire)]);
+    assert_eq!(actions, vec![ControlAction::Reset]);
+}
+
+/// Positive control for the two above: the deframer alone, given the torn
+/// half and then the retry with nothing between them, emits the half as a
+/// frame and loses the reset. That is the failure the step prevents.
+#[test]
+fn without_the_step_the_torn_half_swallows_the_retry() {
+    let wire = reset_on_the_wire();
+    let (torn, _) = wire.split_at(wire.len() / 2);
+    let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU);
+    let mut frames = Vec::new();
+    for bytes in [torn, &wire[..]] {
+        for r in deframer.process(bytes) {
+            if let DeframeResult::Frame(data) = r {
+                frames.push(envelope::classify_control_frame(
+                    &data,
+                    &[envelope::TYPE_RESET],
+                ));
+            }
+        }
+    }
+    assert!(!frames.contains(&ControlAction::Reset), "{frames:?}");
+}
+
+/// A timeout with no frame open changes nothing: the next frame is read
+/// whole.
+#[test]
+fn an_idle_timeout_leaves_the_next_frame_alone() {
+    let wire = reset_on_the_wire();
+    let actions = run_reader(&[Read::Timeout, Read::Bytes(&wire), Read::Timeout]);
+    assert_eq!(actions, vec![ControlAction::Reset]);
+}
+
+// ---------------------------------------------------------------------------
+// The outgoing queue
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_queued_packet_counts_its_unframed_bytes() {
+    // A packet whose framing grows it: two bytes that need escaping.
+    let packet = [0x7Eu8, 0x7D, 0x01, 0x02];
+    let mut framed = Vec::new();
+    frame(&packet, &mut framed);
+    assert!(framed.len() > packet.len());
+    assert_eq!(
+        offered(true, packet.len()),
+        Offered::Queued {
+            counted: packet.len()
+        }
+    );
+}
+
+/// A host that holds DTR up and does not read: the writer pends on the first
+/// packet, the queue fills behind it, and the packet past its depth is
+/// dropped uncounted.
+#[test]
+fn the_packet_past_a_full_queue_is_dropped_uncounted() {
+    let mut queued = 0usize;
+    let mut counted = 0usize;
+    let mut full = 0usize;
+    for _ in 0..OUTGOING_DEPTH + 3 {
+        match offered(queued < OUTGOING_DEPTH, 100) {
+            Offered::Queued { counted: n } => {
+                queued += 1;
+                counted += n;
+            }
+            Offered::Full => full += 1,
+        }
+    }
+    assert_eq!(queued, 8);
+    assert_eq!(counted, 800);
+    assert_eq!(full, 3);
+}
+
+// ---------------------------------------------------------------------------
+// The debug port's drain
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_drain_bounds_are_todays_numbers() {
+    assert_eq!(DEBUG_POLL_MS, 100);
+    assert_eq!(DEBUG_WRITE_WITHIN_MS, 50);
+    assert_eq!(HEADLESS_DRAIN_OPEN_MS, 30_000);
+    // That a stalled write ends inside one poll period is a build-time
+    // assert in the crate.
+}
+
+#[test]
+fn the_debug_port_is_written_only_while_dtr_is_up() {
+    for since_boot_ms in [0, 29_999, 30_000, 3_600_000] {
+        assert_eq!(drain_wake(true, since_boot_ms), DrainWake::Drain);
+        assert_ne!(drain_wake(false, since_boot_ms), DrainWake::Drain);
+    }
+}
+
+/// The wake order a headless boot produces, every 100 ms: the gate stays
+/// shut until 30 s and opens on the first wake at or past it.
+#[test]
+fn a_headless_boot_opens_the_gate_at_thirty_seconds() {
+    let first_open = (0..)
+        .map(|wake: u64| wake * DEBUG_POLL_MS)
+        .find(|&t| drain_wake(false, t) == DrainWake::OpenGate);
+    assert_eq!(first_open, Some(HEADLESS_DRAIN_OPEN_MS));
+    assert_eq!(
+        drain_wake(false, HEADLESS_DRAIN_OPEN_MS - 1),
+        DrainWake::Wait
+    );
+}
+
+/// A host that attaches at 3 s opens the gate then, not at 30 s.
+#[test]
+fn the_first_host_opens_the_gate_before_the_headless_deadline() {
+    assert_eq!(drain_wake(false, 2_900), DrainWake::Wait);
+    assert_eq!(drain_wake(true, 3_000), DrainWake::Drain);
+}
+
+#[test]
+fn a_write_that_did_not_land_ends_the_drain() {
+    assert!(drain_continues(DebugWrite::Written));
+    assert!(!drain_continues(DebugWrite::Failed));
+    assert!(!drain_continues(DebugWrite::TimedOut));
+}
