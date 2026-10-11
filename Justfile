@@ -515,6 +515,20 @@ changelog-links:
 core-no-tracing:
     {{manifest}} core-no-tracing -- cargo test -p leviculum-core --no-default-features
 
+# Every `event = "NAME"` literal in the workspace has its row in EVENT_CATALOG
+# (leviculum-std/src/event_log.rs), and nothing else. The test lives in
+# leviculum-std but the emitters live mostly in leviculum-core, so a pass that
+# adds an event in core and runs `cargo test -p leviculum-core` never runs it:
+# ANN_QUEUE_STALE (transport.rs) went to the land gate on 38ed5816 that way and
+# was catalogued one pass later. `cargo test --workspace --lib` holds the same
+# test; this recipe is the name a pass can run when it adds an `event = "`
+# literal. 0.4 s warm, 33 s after `touch leviculum-core/src/transport.rs`
+# (measured 2026-10-11), which is the leviculum-std test build and the reason
+# it is not in `guards`.
+[doc('Check every emitted event name is declared in EVENT_CATALOG')]
+event-catalog:
+    {{manifest}} event-catalog -- cargo test -p leviculum-std --lib event_catalog_completeness
+
 # Cortex-M0 gate (PR #57): leviculum-core must cross-compile for thumbv6m
 # (atomic-less MCU, e.g. rp2040) with tracing off. tracing-core's CAS-based
 # callsite registry does not compile there, so the default build FAILS on
@@ -1287,6 +1301,13 @@ tree-clean-selftest:
 #   leviculum-core/src/lib.rs` with this lane's six touched crates
 #   (measured 2026-09-27), and it checks host workspace crates
 # not-in-guards: core-no-tracing -- a cargo test target (clause c)
+# not-in-guards: event-catalog -- a cargo test target (clause c) and a host
+#   build of leviculum-std (clause b): 0.4 s warm, 33 s standing alone after
+#   `touch leviculum-core/src/transport.rs` (measured 2026-10-11). RUN IT BY
+#   HAND INSTEAD whenever a pass adds or renames an `event = "` literal
+#   anywhere in the workspace: `just event-catalog`. 631 added
+#   ANN_QUEUE_STALE in leviculum-core, ran that crate's tests green, and the
+#   red arrived on the land gate on 38ed5816.
 # not-in-guards: i686-usize-gate -- 66 s (#316), the core suite on a second triple
 # not-in-guards: no-atomic64-gate -- a cargo check on a third triple, which it
 #   installs itself
@@ -1374,7 +1395,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
+fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing event-catalog m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
