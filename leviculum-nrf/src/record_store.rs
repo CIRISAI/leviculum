@@ -74,6 +74,9 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash, ReadNorFlash};
+use leviculum_record_log::board::storm_admits;
+#[cfg(feature = "softdevice")]
+use leviculum_record_log::board::{mount_or_format, retry_after, sealed_a_page, storm_record};
 use leviculum_record_log::{Error as LogError, RecordLog, KEY_LEN, MAX_BODY};
 
 /// Tag every record the bench instrument writes carries.
@@ -195,18 +198,8 @@ static OP_FAILS: AtomicU32 = AtomicU32::new(0);
 /// Pages given up because an append failed after its first program run.
 static SEALED_PAGES: AtomicU32 = AtomicU32::new(0);
 
-/// How many times one flash operation is attempted before the store gives up
-/// on it.
-///
-/// The SoftDevice schedules flash work between radio events and fails the
-/// operation outright when it finds no gap (S140 SDS, Flash API timing), so a
-/// refusal is a statement about the next few milliseconds of radio traffic and
-/// not about the part. Four attempts with a doubling delay walk off a busy
-/// window; hammering at a fixed interval can sit inside one.
-const FLASH_ATTEMPTS: u8 = 4;
-/// Delay before the second attempt, doubled for each further one: 50, 100,
-/// 200 ms.
-const FLASH_BACKOFF_MS: u64 = 50;
+// How many times one flash operation is attempted and how long the store
+// waits between attempts: `leviculum_record_log::board::retry_after`.
 
 /// How often the task prints [`stats`](self#what-is-logged), if anything moved.
 const STATS_PERIOD_S: u64 = 300;
@@ -240,10 +233,12 @@ pub fn region() -> (u32, u32) {
 /// against what a page can hold so that a caller which is not the envelope
 /// cannot get past it.
 pub fn request_storm(records: u16, size: u16) -> bool {
-    if !MOUNTED.load(Ordering::Relaxed) || STORM_RUNNING.load(Ordering::Relaxed) {
-        return false;
-    }
-    if records == 0 || size as usize > MAX_BODY {
+    if !storm_admits(
+        MOUNTED.load(Ordering::Relaxed),
+        STORM_RUNNING.load(Ordering::Relaxed),
+        records,
+        size,
+    ) {
         return false;
     }
     REQUESTS.try_send(Request::Storm { records, size }).is_ok()
@@ -297,27 +292,28 @@ impl Device {
 #[cfg(feature = "softdevice")]
 macro_rules! retried {
     ($self:expr, $op:literal, |$guard:ident| $call:expr) => {{
-        let mut outcome = Ok(());
-        let mut delay = FLASH_BACKOFF_MS;
-        for attempt in 1..=FLASH_ATTEMPTS {
-            outcome = {
+        let mut attempt = 1u8;
+        loop {
+            let outcome = {
                 let mut $guard = $self.flash.lock().await;
                 $call.await
             };
             if outcome.is_ok() {
-                break;
+                break outcome;
             }
             OP_FAILS.fetch_add(1, Ordering::Relaxed);
             crate::log::log_fmt(
                 "STORE ",
                 format_args!("op_fail op={} attempt={}", $op, attempt),
             );
-            if attempt < FLASH_ATTEMPTS {
-                embassy_time::Timer::after(embassy_time::Duration::from_millis(delay)).await;
-                delay *= 2;
+            match retry_after(attempt) {
+                Some(ms) => {
+                    embassy_time::Timer::after(embassy_time::Duration::from_millis(ms)).await
+                }
+                None => break outcome,
             }
+            attempt += 1;
         }
-        outcome
     }};
 }
 
@@ -467,7 +463,7 @@ async fn pn_perform(log: &mut RecordLog<Device>, base: u32, op: PnOp) -> Result<
                     })
                 }
                 Err(err) => {
-                    if room_before > 0 && log.sector_room() == 0 {
+                    if sealed_a_page(room_before, log.sector_room()) {
                         SEALED_PAGES.fetch_add(1, Ordering::Relaxed);
                     }
                     crate::log::log_fmt(
@@ -513,48 +509,16 @@ async fn pn_perform(log: &mut RecordLog<Device>, base: u32, op: PnOp) -> Result<
 ///
 /// `None` means the store is unavailable for this boot and is the one outcome
 /// that leaves [`MOUNTED`] false — every control request is then refused
-/// rather than silently dropped.
+/// rather than silently dropped. What counts as ours, and which failure
+/// leaves no store, is [`mount_or_format`].
 #[cfg(feature = "softdevice")]
 async fn mount(
     flash: &'static crate::flash::SharedFlash,
     base: u32,
     len: u32,
 ) -> Option<RecordLog<Device>> {
-    let state;
-    let mut log = match RecordLog::mount(Device::new(flash), base, len).await {
-        Ok(Some(log)) => {
-            state = "ours";
-            log
-        }
-        Ok(None) => {
-            state = "formatted";
-            // `mount` took the device by value and dropped it along with its
-            // `None`, so the format builds a second one — free, because a
-            // `Device` is a borrowed reference. It costs one erase and one
-            // 12-byte page header. A fresh board and a board whose region
-            // holds a stranger's bytes take the same path on purpose: the
-            // region is inside our own image window, so there is no stranger
-            // whose data we would be protecting, and `mount` is still the
-            // first call so the decision to write is this module's rather
-            // than a side effect of opening.
-            match RecordLog::open(Device::new(flash), base, len).await {
-                Ok(log) => log,
-                Err(err) => {
-                    log_mount_failure(&err);
-                    return None;
-                }
-            }
-        }
-        Err(err) => {
-            log_mount_failure(&err);
-            return None;
-        }
-    };
-
-    // One scan of the region, reads only: what is already on the part after a
-    // reboot, which is the number that says whether the mount found anything.
-    let (live, _purged) = match log.count().await {
-        Ok(counts) => counts,
+    let mounted = match mount_or_format(Device::new(flash), base, len).await {
+        Ok(mounted) => mounted,
         Err(err) => {
             log_mount_failure(&err);
             return None;
@@ -564,13 +528,13 @@ async fn mount(
         "STORE ",
         format_args!(
             "mount state={} pages={} live={} free_bytes={}",
-            state,
-            log.sectors(),
-            live,
-            log.free_bytes()
+            mounted.state.as_str(),
+            mounted.log.sectors(),
+            mounted.live,
+            mounted.log.free_bytes()
         ),
     );
-    Some(log)
+    Some(mounted.log)
 }
 
 #[cfg(feature = "softdevice")]
@@ -609,19 +573,9 @@ async fn storm(log: &mut RecordLog<Device>, records: u16, size: u16) {
     let mut failed = 0u16;
 
     for n in 0..records {
-        // The key is the record's place in the storm, so a later reader can
-        // order the synthetic records without parsing a body; the log itself
-        // reads neither field.
-        let mut key = [0u8; KEY_LEN];
-        key[0..2].copy_from_slice(&n.to_be_bytes());
-        key[2..4].copy_from_slice(&(size as u16).to_be_bytes());
-        // Bytes that depend on the record index, so two synthetic records are
-        // distinguishable and a CRC failure cannot hide behind every record
-        // being identical.
-        if size > 0 {
-            body[0] = n as u8;
-            body[size - 1] = (n >> 8) as u8;
-        }
+        // The key and the index bytes are `storm_record`'s; the log itself
+        // reads neither.
+        let (key, size) = storm_record(n, size as u16, &mut body);
 
         let room_before = log.sector_room();
         // Uptime, not wall time: the timestamp is opaque to the log, a bench
@@ -635,7 +589,7 @@ async fn storm(log: &mut RecordLog<Device>, records: u16, size: u16) {
             }
             Err(err) => {
                 failed += 1;
-                if room_before > 0 && log.sector_room() == 0 {
+                if sealed_a_page(room_before, log.sector_room()) {
                     SEALED_PAGES.fetch_add(1, Ordering::Relaxed);
                 }
                 crate::log::log_fmt(

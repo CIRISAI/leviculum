@@ -368,9 +368,9 @@ carries UTC date and time in every fix.
 - **Guarantees:** UTC to well under a second, far beyond the
   one-second wire granularity. Trusted by default; a fix outside the
   sanity window is refused like any other source.
-- **Status:** the firmware parses RMC but consumes only position and
-  validity (`GnssFix`, `leviculum-nrf/src/baseboard.rs:26`, has no
-  time field yet). Seeding the calendar from RMC is tracked as a
+- **Status:** the firmware folds RMC into position, validity and time
+  (`GnssFix`, `leviculum-nrf/gnss-time/src/fix.rs:31`; an invalid RMC
+  clears the time). Seeding the calendar from RMC is tracked as a
   firmware implementation issue, not here. See
   [GNSS specifics](#gnss-specifics-for-a-board-bring-up) below.
 

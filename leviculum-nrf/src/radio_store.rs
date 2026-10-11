@@ -109,17 +109,15 @@ pub fn request_save_confirmed(cfg: &RadioConfigWire) -> crate::telemetry::Pendin
 #[repr(align(4))]
 struct Aligned([u8; ENCODED_SIZE_ALIGNED]);
 
-/// How often a failed flash operation is retried. The SoftDevice refuses
-/// flash access while the radio is busy (`NRF_ERROR_BUSY`), which is a
-/// transient condition on a node that is also forwarding packets.
-const SAVE_RETRIES: u8 = 3;
-/// Delay between retries.
-const SAVE_RETRY_MS: u64 = 250;
+// How often a failed flash write is tried and how long each failure pauses
+// are the telemetry page's: `leviculum_telemetry_policy::reporter::FlashSave`,
+// one loop for both pages.
 
 #[cfg(feature = "softdevice")]
 #[embassy_executor::task]
 pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
     use embedded_storage_async::nor_flash::NorFlash;
+    use leviculum_telemetry_policy::reporter::{FlashSave, SaveStep, SAVE_RETRIES};
 
     loop {
         let (ticket, cfg) = PENDING.receive().await;
@@ -140,29 +138,32 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
             continue;
         }
 
-        let mut written = false;
-        for attempt in 1..=SAVE_RETRIES {
+        let mut save = FlashSave::new();
+        let written = loop {
             let result = async {
                 let mut flash = flash.lock().await;
                 flash.erase(page, page + 4096).await?;
                 flash.write(page, &encoded.0).await
             }
             .await;
-            match result {
-                Ok(()) => {
-                    written = true;
-                    break;
-                }
-                Err(_) => {
+            match save.after_attempt(result.is_ok()) {
+                SaveStep::Written => break true,
+                SaveStep::Failed {
+                    attempt,
+                    wait_ms,
+                    gave_up,
+                } => {
                     crate::log::log_fmt(
                         "[RADIO] ",
                         format_args!("persist write failed, attempt {}/{}", attempt, SAVE_RETRIES),
                     );
-                    embassy_time::Timer::after(embassy_time::Duration::from_millis(SAVE_RETRY_MS))
-                        .await;
+                    embassy_time::Timer::after(embassy_time::Duration::from_millis(wait_ms)).await;
+                    if gave_up {
+                        break false;
+                    }
                 }
             }
-        }
+        };
 
         if written {
             crate::log::log_fmt(

@@ -185,7 +185,7 @@ pub trait PropagationStore {
 
     /// Number of stored messages — one directory pass by default; the record
     /// log's mount already reports the same count
-    /// (`leviculum-nrf/record-log/src/lib.rs:406`).
+    /// (`leviculum-nrf/record-log/src/lib.rs:408`).
     fn count(&self) -> Result<usize, StorageError> {
         let mut total = 0usize;
         self.for_each(&mut |_| total += 1)?;

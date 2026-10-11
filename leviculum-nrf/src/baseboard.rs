@@ -12,66 +12,11 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 #[cfg(any(feature = "display", feature = "gnss", feature = "battery"))]
 use embassy_sync::watch::Watch;
 
-/// Compact GNSS fix snapshot — what the display task needs and nothing
-/// more. Updated by `gnss::gnss_task` when an RMC or GGA sentence parses
-/// cleanly. `valid` is the receiver's own validity flag (RMC `Mode::is_valid`
-/// or GGA quality != NoFix), not a project-wide policy.
-///
-/// `latitude` / `longitude` are decimal degrees with sign (negative = S/W,
-/// positive = N/E). They keep their last good values across non-valid
-/// sentences so the display has something to render even briefly during
-/// a fix dip.
+/// Compact GNSS fix snapshot, updated by `gnss::gnss_task` when an RMC or
+/// GGA sentence parses cleanly. The struct and its fold of each sentence
+/// are host-tested in `leviculum-gnss-time` (`fix`).
 #[cfg(feature = "gnss")]
-#[derive(Clone, Copy, Debug)]
-pub struct GnssFix {
-    /// True when the receiver reports a usable fix.
-    pub valid: bool,
-    /// Number of satellites in use, from the latest GGA.
-    pub sat_in_use: u8,
-    /// Latitude in decimal degrees (signed). `None` until the first valid
-    /// sentence carries position data.
-    pub latitude: Option<f64>,
-    /// Longitude in decimal degrees (signed). Same convention as latitude.
-    pub longitude: Option<f64>,
-    /// RMC UTC date+time as unix seconds (Codeberg #166 item 1), set on
-    /// every valid RMC and — unlike position — CLEARED on an invalid one:
-    /// a stale time claim would seed the calendar wrong, while stale
-    /// position only mis-renders. Consumers must treat it as "time as of
-    /// this snapshot's publication", good to ~1 s (one RMC cadence).
-    pub unix_secs: Option<u64>,
-    /// Metres above mean sea level, from the latest GGA with a fix.
-    /// Follows position: kept across non-valid sentences.
-    pub altitude_m: Option<f32>,
-    /// Horizontal dilution of precision, from the latest GGA with a fix
-    /// (Codeberg #236). The only accuracy number standard NMEA carries,
-    /// and therefore the one the telemetry accuracy gate is applied to —
-    /// a position with no HDOP is a position of unknown quality and is
-    /// not reported.
-    pub hdop: Option<f32>,
-    /// Ground speed in metres per second, from the latest valid RMC.
-    pub speed_mps: Option<f32>,
-    /// Course over ground in degrees, from the latest valid RMC. `None`
-    /// while stationary — receivers stop reporting it, and inventing 0°
-    /// would claim due north.
-    pub bearing_deg: Option<f32>,
-}
-
-#[cfg(feature = "gnss")]
-impl GnssFix {
-    pub const fn empty() -> Self {
-        Self {
-            valid: false,
-            sat_in_use: 0,
-            latitude: None,
-            longitude: None,
-            unix_secs: None,
-            altitude_m: None,
-            hdop: None,
-            speed_mps: None,
-            bearing_deg: None,
-        }
-    }
-}
+pub use leviculum_gnss_time::GnssFix;
 
 /// Latest GNSS fix snapshot. Capacity-3 watch: one slot for the producer,
 /// one for the display consumer, one for the main loop's calendar

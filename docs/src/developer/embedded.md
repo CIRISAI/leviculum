@@ -66,8 +66,8 @@ The shape is: compute the next deadline, wait for whichever of "a packet on any
 interface" or "the deadline" happens first, call the matching entry point,
 dispatch the resulting actions. This is exactly the `leviculum-nrf` T114 main
 loop: the deadline comes from `next_deadline`
-(`leviculum-nrf/src/bin/t114.rs:772-777`) and the wait from Embassy's `select4`
-(`leviculum-nrf/src/bin/t114.rs:830-849`). The board selects over nine event
+(`leviculum-nrf/src/bin/t114.rs:755-760`) and the wait from Embassy's `select4`
+(`leviculum-nrf/src/bin/t114.rs:813-832`). The board selects over nine event
 sources; the loop below narrows that to the three interfaces (serial, LoRa,
 BLE) and the timer:
 
@@ -143,7 +143,7 @@ drains the `EventReceiver`.
 triple — RNG, [`Clock`](rust-api-spec.md#platform-traits), and
 [`Storage`](rust-api-spec.md#platform-traits) — in its `build` call. The T114
 firmware builds its node the same way (`NodeCoreBuilder`,
-`leviculum-nrf/src/bin/t114.rs:202-225`):
+`leviculum-nrf/src/bin/t114.rs:185-208`):
 
 ```rust
 // Adapted from the T114 builder cited above.

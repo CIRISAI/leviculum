@@ -194,26 +194,6 @@ async fn apply_init_output(output: leviculum_gnss_init::Output, uart_tx: &mut ua
     }
 }
 
-/// Convert nmea0183's positive-magnitude `Latitude` to signed decimal
-/// degrees (negative south).
-fn lat_to_f64(lat: &nmea0183::coords::Latitude) -> f64 {
-    let mag = lat.as_f64();
-    match lat.hemisphere {
-        nmea0183::coords::Hemisphere::South => -mag,
-        _ => mag,
-    }
-}
-
-/// Convert nmea0183's positive-magnitude `Longitude` to signed decimal
-/// degrees (negative west).
-fn lon_to_f64(lon: &nmea0183::coords::Longitude) -> f64 {
-    let mag = lon.as_f64();
-    match lon.hemisphere {
-        nmea0183::coords::Hemisphere::West => -mag,
-        _ => mag,
-    }
-}
-
 bind_interrupts!(pub struct GnssIrqs {
     UARTE0 => uarte::InterruptHandler<peripherals::UARTE0>;
 });
@@ -231,9 +211,9 @@ fn baudrate_of(baud: u32) -> uarte::Baudrate {
 
 /// Act on one machine output: publish a transition (watch + debug
 /// event), record a requested baud change, or fold RMC/GGA content into
-/// the `GnssFix` snapshot (the fold is byte-for-byte the pre-#240
-/// behaviour — `unix_secs` exists only while a valid RMC does, so the
-/// #166 seed gate stays keyed to valid RMC only).
+/// the `GnssFix` snapshot (`GnssFix::fold_rmc` and `fold_gga`,
+/// host-tested in `leviculum-gnss-time`: `unix_secs` exists only while a
+/// valid RMC does, so the #166 seed gate stays keyed to valid RMC only).
 fn apply_output(output: Output, latest: &mut GnssFix, pending_baud: &mut Option<u32>) {
     let sender = GNSS_FIX.sender();
     match output {
@@ -252,41 +232,11 @@ fn apply_output(output: Output, latest: &mut GnssFix, pending_baud: &mut Option<
         }
         Output::SetBaud(baud) => *pending_baud = Some(baud),
         Output::Rmc(rmc) => {
-            latest.valid = rmc.mode.is_valid();
-            if latest.valid {
-                latest.latitude = Some(lat_to_f64(&rmc.latitude));
-                latest.longitude = Some(lon_to_f64(&rmc.longitude));
-                // RMC UTC is already leap-second-corrected by
-                // the receiver — converted as-is, never via
-                // raw GPS time (#166, time-and-clocks.md).
-                latest.unix_secs = leviculum_gnss_time::unix_secs_from_rmc_utc(&rmc.datetime);
-                // Movement, for the telemetry location sensor (#236).
-                // Course is absent while stationary on most receivers, so
-                // it is carried as absent rather than as zero.
-                latest.speed_mps = Some(rmc.speed.as_mps());
-                latest.bearing_deg = rmc.course.map(|c| c.degrees);
-            } else {
-                // A stale time claim must not outlive the fix
-                // that made it: position keeps last-good for
-                // the display, time does not.
-                latest.unix_secs = None;
-            }
+            latest.fold_rmc(&rmc);
             sender.send(*latest);
         }
         Output::Gga(gga) => {
-            latest.sat_in_use = gga.sat_in_use;
-            let fix = !matches!(gga.gps_quality, nmea0183::GPSQuality::NoFix);
-            latest.valid = fix;
-            if fix {
-                latest.latitude = Some(lat_to_f64(&gga.latitude));
-                latest.longitude = Some(lon_to_f64(&gga.longitude));
-                latest.altitude_m = gga.altitude.map(|a| a.meters);
-                // The accuracy gate's input (#236). Kept with position
-                // rather than cleared with time: a stale HDOP mis-scales a
-                // position that is itself stale, which is the same class
-                // of error, not a new one.
-                latest.hdop = Some(gga.hdop);
-            }
+            latest.fold_gga(&gga);
             sender.send(*latest);
         }
     }

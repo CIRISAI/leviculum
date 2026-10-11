@@ -142,27 +142,10 @@ async fn main(spawner: Spawner) {
     // later time via the debug-port query (`p` byte, postmortem_query).
     leviculum_nrf::log_postmortems(hardfault_pm.as_ref(), panic_pm.as_ref());
     if let Some(snap) = persistent_log {
-        let mut start = 0usize;
-        while start < snap.len {
-            let end = snap.bytes[start..snap.len]
-                .iter()
-                .position(|&b| b == b'\n')
-                .map(|p| start + p + 1)
-                .unwrap_or(snap.len);
-            if start == 0 && end == snap.len {
-                // single-line case
-            } else if start == 0 {
-                start = end;
-                continue;
-            }
-            let raw = &snap.bytes[start..end];
-            let trimmed = core::str::from_utf8(raw)
-                .unwrap_or("<non-utf8>")
-                .trim_end_matches(['\r', '\n']);
-            if !trimmed.is_empty() {
-                log_critical!("[PERSISTENT_LOG] {}", trimmed);
-            }
-            start = end;
+        // Which lines of last boot's tail are replayed:
+        // `leviculum_boot_trace::tail::replay_lines`.
+        for line in leviculum_boot_trace::tail::replay_lines(&snap.bytes[..snap.len]) {
+            log_critical!("[PERSISTENT_LOG] {}", line);
         }
     }
 
@@ -886,8 +869,9 @@ async fn main(spawner: Spawner) {
                 #[cfg(feature = "gnss")]
                 {
                     use leviculum_core::transport::TimeSource;
-                    if node.set_wall_time_unix_secs(unix, TimeSource::Gnss) {
-                        time_seed_gate.mark_seeded();
+                    // A refusal leaves the gate open for the next fix:
+                    // `leviculum_gnss_time::SeedGate::settle`.
+                    if time_seed_gate.settle(node.set_wall_time_unix_secs(unix, TimeSource::Gnss)) {
                         leviculum_nrf::set_time_source(TimeSource::Gnss);
                         log_critical!("[TIME_SEED] source=gnss unix={}", unix);
                         log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());

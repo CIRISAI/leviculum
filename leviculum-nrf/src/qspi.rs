@@ -542,7 +542,7 @@ pub async fn identify_at_boot(
     // §10-24) and the recovery time runs from that pulse. So the read
     // above may be the thing that woke the part, and the read below is the
     // first one it could have answered. Both go on the log line.
-    let second = if first == [0u8; 3] {
+    let second = if leviculum_qspi_boot::wants_second_read(first) {
         cortex_m::asm::delay(RELEASE_WAIT_CYCLES);
         match read_jedec(&mut flash).await {
             Some(id) => Some(id),
@@ -555,26 +555,23 @@ pub async fn identify_at_boot(
         None
     };
 
-    let jedec = second.unwrap_or(first);
-    if jedec != part.jedec {
-        // Two silent reads after a release is not "some other part is
-        // fitted" — it is nothing on the bus driving MISO at all, which is
-        // a statement about the board rather than about the part number.
-        let silent = jedec == [0u8; 3];
-        let state = if silent {
-            "no-answer"
-        } else {
-            "unexpected-part"
-        };
-        log_part(part, Some(first), second, false, state);
-        if silent {
-            // The peripheral is out of answers; the pins are not. Drop it
-            // first — the bit-bang needs the QSPI off the pins, and
-            // `Drop` is what deactivates it and deconfigures them.
-            drop(flash);
-            bitbang_second_opinion(spare);
+    // Two silent reads after a release is not "some other part is fitted" —
+    // it is nothing on the bus driving MISO at all, which is a statement
+    // about the board rather than about the part number
+    // (`leviculum_qspi_boot::identify`).
+    match leviculum_qspi_boot::identify(first, second, part.jedec) {
+        leviculum_qspi_boot::Identified::Expected => {}
+        verdict => {
+            log_part(part, Some(first), second, false, verdict.as_str());
+            if verdict == leviculum_qspi_boot::Identified::NoAnswer {
+                // The peripheral is out of answers; the pins are not. Drop it
+                // first — the bit-bang needs the QSPI off the pins, and
+                // `Drop` is what deactivates it and deconfigures them.
+                drop(flash);
+                bitbang_second_opinion(spare);
+            }
+            return None;
         }
-        return None;
     }
 
     // The part named itself correctly. Whether anything is written to it

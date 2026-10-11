@@ -218,7 +218,7 @@ not.
 
 One file decides it. `leviculum-nrf/memory.x` carves `STORE` out of the
 top of the application window and exports `__srecord_store` /
-`__erecord_store`; `region` (`leviculum-nrf/src/record_store.rs:219`)
+`__erecord_store`; `region` (`leviculum-nrf/src/record_store.rs:212`)
 reads those two symbols, and nothing else in the tree knows the
 addresses.
 
@@ -330,28 +330,28 @@ multiple of a word because `sd_flash_write` takes a length in words.
 | body | `len` |
 | padding to a multiple of 4 | 0 to 3 |
 
-(`HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:218`; the layout is
+(`HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:220`; the layout is
 tabulated at `leviculum-nrf/record-log/src/lib.rs:108-119`.) The
 destination hash is not a field: it is the first 16 bytes of the body,
 as it is in the reference, which reads it back from the head of its file
 (`LXMRouter.py:2498`).
 
 Each page carries a 12-byte header written once per erase
-(`SECTOR_HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:220`), which
+(`SECTOR_HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:222`), which
 leaves 4 084 B of the 4 096 for records (`SECTOR_PAYLOAD`,
-`leviculum-nrf/record-log/src/lib.rs:225`). A record never straddles a
+`leviculum-nrf/record-log/src/lib.rs:227`). A record never straddles a
 page.
 
 At the measured median body of 304 B the stride is
 `align_up(42 + 304)` = **348 B** (`record_stride`,
-`leviculum-nrf/record-log/src/lib.rs:258`), so 4 084 / 348 = 11 records
+`leviculum-nrf/record-log/src/lib.rs:260`), so 4 084 / 348 = 11 records
 to a page with 256 B of tail (6.3 %).
 
 | Body | Stride | Per page | In the 16-page region |
 |---|---|---|---|
 | 304 B — the field median | 348 B | 11 | **176** |
 | 256 B — the smallest the walk produced | 300 B | 13 | 208 |
-| 4 042 B — the largest the format allows (`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:227`) | 4 084 B | 1 | 16 |
+| 4 042 B — the largest the format allows (`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:229`) | 4 084 B | 1 | 16 |
 
 The 176 is the count at the brim. Reclaim is round-robin — when the
 active page cannot fit the next record the *next* page is erased and
@@ -407,7 +407,7 @@ says 210 KiB of gap is what remains at 16. Widening the region upward is
 impossible, because `0xEA000` is the bootloader's `USER_FLASH_END`, and
 widening it downward moves every record, so a later resize is a
 reformat. That is the deliberate price of the smaller default, and
-`mount` (`leviculum-nrf/src/record_store.rs:518`) already treats a
+`mount` (`leviculum-nrf/src/record_store.rs:515`) already treats a
 region that is not ours as unformatted rather than as corrupt, so the
 reformat is a boot line and not an incident.
 
@@ -436,7 +436,7 @@ outright when it finds no gap (S140 SDS, Flash API timing), so a refusal
 is a statement about the next few milliseconds of radio traffic and not
 about the part. The store answers it with four attempts and a doubling
 delay — 50, 100, 200 ms (`FLASH_ATTEMPTS`,
-`leviculum-nrf/src/record_store.rs:206`) — and prints every refusal and
+`leviculum-nrf/record-log/src/board.rs:100`) — and prints every refusal and
 a running count on its debug port.
 
 A refusal part way through an append **seals the page**: the rest of it
@@ -459,7 +459,7 @@ the firmware: `STORE_STORM` (`TYPE_STORE_STORM`,
 given size, bounded at 1 000 records of 1 024 B
 (`STORE_STORM_MAX_BYTES`, `leviculum-core/src/envelope.rs:286`) and
 tagged so a later batch can purge exactly those (`TAG_BENCH`,
-`leviculum-nrf/src/record_store.rs:87`); `lnflash --store-storm
+`leviculum-nrf/src/record_store.rs:90`); `lnflash --store-storm
 COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:410`).
 The numbers owed are a connected phone's throughput and a LoRa link's
 delivery rate across a storm, measured against the same run without one.
@@ -468,7 +468,7 @@ delivery rate across a storm, measured against the same run without one.
 
 **Reads do not go through the SoftDevice's flash scheduler at all.** The
 internal flash is memory-mapped and the read is a `memcpy` that cannot
-fail or be refused (`read`, `leviculum-nrf/src/record_store.rs:335`) —
+fail or be refused (`read`, `leviculum-nrf/src/record_store.rs:331`) —
 unlike a write or an erase, it never waits for a gap between radio
 events. That single fact removes the RAM index the QSPI costing needed:
 a lookup is a scan, and a scan is free of the radio.
@@ -497,19 +497,19 @@ the second row: the peer sets scale with peers, and we control neither
 how many peer with us nor, therefore, that number.
 
 **What a full scan costs.** `for_each`
-(`leviculum-nrf/record-log/src/lib.rs:541`) walks every page, reads each
+(`leviculum-nrf/record-log/src/lib.rs:543`) walks every page, reads each
 record's 42-byte header and then its body, because `probe_record`
-(`leviculum-nrf/record-log/src/lib.rs:901`) checks the CRC over both. A
+(`leviculum-nrf/record-log/src/lib.rs:903`) checks the CRC over both. A
 full region is therefore one pass over at most 64 KiB.
 
 **This is arithmetic, not a measurement, and the assumption is stated:**
 the read is a `memcpy` from mapped flash, so the work is the bit-serial
 CRC-16 at eight shift-and-test steps a byte (`crc16_update`,
-`leviculum-nrf/record-log/src/lib.rs:270`) — 524 288 steps for the whole
+`leviculum-nrf/record-log/src/lib.rs:272`) — 524 288 steps for the whole
 region, and at one to four cycles a step on the Cortex-M4 at 64 MHz that
 is **8 to 33 ms**. The measured number is owed and nearly free, because
 the mount already performs exactly this scan and reports what it found
-(`count`, `leviculum-nrf/record-log/src/lib.rs:406`).
+(`count`, `leviculum-nrf/record-log/src/lib.rs:408`).
 
 Either way the conclusion is the same and it is not close: a `/get` list
 request costing tens of milliseconds of CPU, and nothing of the radio
@@ -755,7 +755,7 @@ built delivers that with a one-word commit rather than with a
 probability: a record counts as present only if its flags byte reads
 live or purged, that byte sits in a single word programmed last, and a
 word cannot be half-written (`FLAG_LIVE`,
-`leviculum-nrf/record-log/src/lib.rs:238`). Any cut before that word
+`leviculum-nrf/record-log/src/lib.rs:240`). Any cut before that word
 leaves the record invisible, deterministically; the CRC is then
 catching a dropped bit rather than standing in for a commit protocol.
 
@@ -974,7 +974,7 @@ once per peer, not per reboot.
 
 The record log is append-ordered: pages carry a monotone sequence
 written once per erase (`SECTOR_HEADER_LEN` header,
-`leviculum-nrf/record-log/src/lib.rs:220`), records within a page are
+`leviculum-nrf/record-log/src/lib.rs:222`), records within a page are
 ordered by offset. **A store position is therefore the pair
 `(page_sequence: u32, offset: u16)`, and each peer holds one cursor:
 everything at or below it has been offered and concluded.** As built,

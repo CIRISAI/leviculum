@@ -345,10 +345,11 @@ async fn debug_reader_task(mut cdc: cdc_acm::Receiver<'static, UsbDriver>) {
         cdc.wait_connection().await;
         // On read error (USB disconnect) fall back to the outer re-wait.
         while let Ok(n) = cdc.read_packet(&mut buf).await {
-            if buf[..n].contains(&b'p') {
+            let asked = leviculum_usb_policy::debug_commands(&buf[..n]);
+            if asked.postmortem {
                 crate::postmortem_query();
             }
-            if buf[..n].contains(&b's') {
+            if asked.stack_reset {
                 // SAFETY: this task's frame is the deepest live one (the
                 // executor polls task futures on this single stack), and
                 // everything below it is dead. See the fn docs for the
@@ -356,7 +357,7 @@ async fn debug_reader_task(mut cdc: cdc_acm::Receiver<'static, UsbDriver>) {
                 unsafe { crate::reset_stack_watermark() };
             }
             #[cfg(feature = "softdevice")]
-            if buf[..n].contains(&b'c') {
+            if asked.heap_census {
                 crate::heap_census::request();
             }
         }
@@ -557,7 +558,9 @@ async fn apply_radio_config(
         log("SER: invalid config frame");
         return ConfigDelivery::Invalid;
     };
-    if !crate::media::lora_booted() {
+    if leviculum_usb_policy::config_route(crate::media::lora_booted())
+        == leviculum_usb_policy::ConfigRoute::Store
+    {
         // No LoRa task this boot: the channel has no consumer, so a config
         // fed to it would wedge its one slot for the rest of the boot, and
         // an apply can never be confirmed. The truthful, useful answer is
@@ -565,18 +568,15 @@ async fn apply_radio_config(
         // confirmed, because "a reboot comes back on this config" is the
         // whole of what this route may claim (#358); the envelope says that
         // much and no more, with its own refusal reason (#363).
-        return match crate::telemetry::confirm(crate::radio_store::request_save_confirmed(&wire))
-            .await
-        {
-            envelope::Persist::Durable => {
-                log("SER: radio config stored, applies at next boot (lora not started)");
-                ConfigDelivery::Stored
-            }
-            envelope::Persist::Lost => {
-                log("SER: radio config store failed, refused (lora not started)");
-                ConfigDelivery::StoreFailed
-            }
-        };
+        let persist =
+            crate::telemetry::confirm(crate::radio_store::request_save_confirmed(&wire)).await;
+        let delivery = leviculum_usb_policy::stored_answer(persist);
+        if delivery == ConfigDelivery::Stored {
+            log("SER: radio config stored, applies at next boot (lora not started)");
+        } else {
+            log("SER: radio config store failed, refused (lora not started)");
+        }
+        return delivery;
     }
     // Reset before the handoff, so an apply signalled after this point is
     // one that happened with this config already in the channel — a signal
@@ -588,7 +588,9 @@ async fn apply_radio_config(
     let delivered_here = match config_tx.try_send(cfg) {
         Ok(()) => true,
         Err(embassy_sync::channel::TrySendError::Full(cfg)) => {
-            if crate::lora::pending_config() == Some(wire) {
+            if leviculum_usb_policy::full_slot(crate::lora::pending_config(), wire)
+                == leviculum_usb_policy::FullSlot::AlreadyQueued
+            {
                 // The slot is full with *this* config: a retry of one the
                 // LoRa task has not consumed yet. There is nothing left to
                 // deliver — the delivery happened on the attempt that filled

@@ -30,7 +30,7 @@ const LOG_RING_SIZE: usize = 8 * 1024;
 // — a HardFault that hits between `LOG_RING.write` and the parallel
 // `PERSISTENT_TAIL.write` loses that line.
 const PERSISTENT_TAIL_SIZE: usize = 2048;
-const PERSISTENT_TAIL_MAGIC: u32 = 0x10A9_11A1;
+const PERSISTENT_TAIL_MAGIC: u32 = leviculum_boot_trace::tail::TAIL_MAGIC;
 
 /// True once the host has DTR-asserted on the debug CDC port (or
 /// after the 30 s headless-fallback timeout). Producer-side runtime
@@ -97,9 +97,8 @@ impl LogRing {
 
         // If writer has lapped reader, advance reader to oldest available data
         let rp = self.read_pos.load(Ordering::Relaxed);
-        if wp.wrapping_sub(rp) > LOG_RING_SIZE {
-            self.read_pos
-                .store(wp.wrapping_sub(LOG_RING_SIZE), Ordering::Release);
+        if let Some(oldest) = leviculum_boot_trace::tail::lapped_reader(wp, rp, LOG_RING_SIZE) {
+            self.read_pos.store(oldest, Ordering::Release);
         }
     }
 
@@ -274,7 +273,7 @@ impl PersistentTailMirror {
             // re-initialize — that's intentional: the tail captures the
             // *current* boot's tail, not the previous boot's.)
             let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-            if magic != PERSISTENT_TAIL_MAGIC {
+            if leviculum_boot_trace::tail::must_rearm(magic) {
                 wp_atomic.store(0, Ordering::Release);
                 let buf_ptr = core::ptr::addr_of_mut!((*p).buf).cast::<u8>();
                 for i in 0..PERSISTENT_TAIL_SIZE {
@@ -311,18 +310,12 @@ pub fn take_persistent_log() -> Option<PersistentLogSnapshot> {
     unsafe {
         let p = core::ptr::addr_of_mut!(PERSISTENT_TAIL_RAW).cast::<PersistentTail>();
         let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-        if magic != PERSISTENT_TAIL_MAGIC {
-            return None;
-        }
         let wp_atomic: &AtomicU32 = &*core::ptr::addr_of!((*p).write_pos);
         let wp = wp_atomic.load(Ordering::Acquire) as usize;
+        let (start, len) =
+            leviculum_boot_trace::tail::tail_window(magic, wp, PERSISTENT_TAIL_SIZE)?;
         let mut out = [0u8; PERSISTENT_TAIL_SIZE];
         let buf_ptr = core::ptr::addr_of!((*p).buf).cast::<u8>();
-        let (start, len) = if wp >= PERSISTENT_TAIL_SIZE {
-            (wp - PERSISTENT_TAIL_SIZE, PERSISTENT_TAIL_SIZE)
-        } else {
-            (0usize, wp)
-        };
         for (i, slot) in out.iter_mut().enumerate().take(len) {
             *slot = core::ptr::read_volatile(buf_ptr.add((start + i) % PERSISTENT_TAIL_SIZE));
         }
