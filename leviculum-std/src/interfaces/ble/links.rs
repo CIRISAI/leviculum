@@ -65,7 +65,7 @@ pub(crate) const LOCAL_CAPS: u8 = 0x00;
 pub(crate) const DEFAULT_MAX_LINKS: usize = 4;
 
 /// Outgoing (central-role) links this node opens, the firmware's
-/// `CENTRAL_LINKS` (`leviculum-nrf/src/ble/mod.rs:119`): one. A node
+/// `CENTRAL_LINKS` (`leviculum-nrf/src/ble/mod.rs:122`): one. A node
 /// dials at most one neighbour at a time — which the dial queue's
 /// one-setup-in-flight rule (#49 part 3) already arranged in time; this
 /// is the same bound held in the table, where it survives a setup that
@@ -4594,7 +4594,7 @@ mod tests {
     /// The incoming cap, at the boundary: three dials land, the fourth
     /// is refused BY ROLE, and the node is on the air for exactly as
     /// long as it has room — the firmware's `PERIPH_LINKS` shape
-    /// (`leviculum-nrf/src/ble/mod.rs:112`) on a host.
+    /// (`leviculum-nrf/src/ble/mod.rs:115`) on a host.
     #[test]
     fn a_fourth_incoming_dial_is_refused_and_the_third_takes_the_node_dark() {
         const ADDR_4: Addr = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x04];

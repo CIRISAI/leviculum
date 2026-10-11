@@ -31,12 +31,13 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     abort_disconnects, addr_value, admit, advertise_pass_pause_ms, connect_failure_condemns,
-    dial_preference, dial_stage_failure, fragment_mtu, identity_hint, judge_read_identity,
-    judge_supervision_timeout, manufacturer_data_with_hint, parse_peer_advertisement,
-    scan_pass_pause_ms, with_free_slots, AdvReport, AdvertisePass, CandidateTable, ChurnLedger,
-    ChurnPolicy, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine,
-    ConnectDecision, DeadEnds, DialBackoff, DialFailure, DialLedger, DialStage, Exclusion,
-    GattBytes, LedgerPolicy, Ledgers, LinkPhase, LinkRole, LinkUp, LinkVerdict, Local, Origin,
+    dial_preference, dial_stage_failure, drain_table_refusal, fragment_mtu, identity_hint,
+    incoming_verdict, judge_read_identity, judge_supervision_timeout, link_queue_verdict,
+    manufacturer_data_with_hint, parse_peer_advertisement, scan_pass_pause_ms, with_free_slots,
+    AdvReport, AdvertisePass, CandidateTable, CarrierPath, CarrierStep, ChurnLedger, ChurnPolicy,
+    ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision,
+    DeadEnds, DialBackoff, DialFailure, DialLedger, DialStage, Enqueue, Exclusion, Fill, GattBytes,
+    LedgerPolicy, Ledgers, LinkItem, LinkPhase, LinkRole, LinkUp, LinkVerdict, Local, Origin,
     OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent, PhaseNeighbours, ReadIdentity,
     ScanMode, ScanPass, ScanPhase, StageError, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY,
     DEAD_END_SLOTS, DEAD_END_TTL_MS, DIAL_BACKOFF_SLOTS, GATT_VALUE_MAX, IDENTITY_HINT_LEN,
@@ -467,7 +468,7 @@ async fn peripheral_task(
         // came up at boot, it was only gated) falls through and resumes
         // advertising. Logged only when it actually gates, once per
         // gated period, not once per connection.
-        if !crate::media::ble_active() {
+        if super::carrier().step(CarrierPath::AdvertiseGate) != CarrierStep::Proceed {
             crate::log::log_fmt(
                 "[BLE ] ",
                 format_args!("BLE_CARRIER_GATE role=peripheral adv={index} state=off"),
@@ -487,7 +488,7 @@ async fn peripheral_task(
             // The carrier can flip off while this task waits for the
             // lock; back to the gate rather than advertising a
             // switched-off carrier onto the air.
-            if !crate::media::ble_active() {
+            if super::carrier().step(CarrierPath::AdvertiseGate) != CarrierStep::Proceed {
                 continue;
             }
             let config = peripheral::Config::default();
@@ -516,8 +517,8 @@ async fn peripheral_task(
                 // Carrier switched off while advertising: dropping the
                 // advertise future is what stops the advertisement (the
                 // SoftDevice cancels it on drop). The gate above then
-                // holds the loop.
-                Either::Second(()) => continue,
+                // holds the loop; no pass, so no pause.
+                Either::Second(_) => continue,
             }
             // The lock drops here: a session must not hold the
             // advertisement hostage, and a failed advertise must not
@@ -699,6 +700,32 @@ fn ask_for_a_survivable_timeout(conn: &Connection, handle: u16) {
     );
 }
 
+/// Hand one completed inbound packet to the main loop, answering whether
+/// it was queued. Both roles' receive paths call this: a full
+/// `BLE_INCOMING` drops the packet ([`incoming_verdict`]) and counts it in
+/// [`BLE_RX_QUEUE_FULL`], which before leviculum#413's fourth wave was a
+/// silent drop on both roles. A `Queue` verdict the channel still refuses
+/// cannot happen on the one thread-mode executor; were it to, it is the
+/// same counted drop.
+fn offer_incoming(
+    incoming_tx: &Sender<
+        'static,
+        CriticalSectionRawMutex,
+        (Option<[u8; 16]>, alloc::vec::Vec<u8>),
+        4,
+    >,
+    peer: Option<[u8; 16]>,
+    packet: alloc::vec::Vec<u8>,
+) -> bool {
+    let fill = Fill::new(incoming_tx.len(), incoming_tx.capacity());
+    let queued =
+        incoming_verdict(fill) == Enqueue::Queue && incoming_tx.try_send((peer, packet)).is_ok();
+    if !queued {
+        BLE_RX_QUEUE_FULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    queued
+}
+
 /// Run one inbound frame through a link's defragmenter, and say so when
 /// that cost a partial packet (#373): a new START over an unfinished
 /// head, a `total` that contradicts the reassembly in progress, or the
@@ -792,6 +819,11 @@ async fn gatt_events(
                 HVN_DRAIN.capacity()
             ),
         );
+        // The connection's drop would end the link a moment later; the
+        // refusal ends it here, as the central does.
+        if drain_table_refusal(LinkRole::Peripheral).disconnects {
+            let _ = conn.disconnect();
+        }
         return;
     };
     // The connection event, before any identity: the peer's address
@@ -968,12 +1000,12 @@ async fn gatt_events(
                                 conn_handle,
                                 frags
                             );
-                            // try_send: if the consumer is slow and the 4-deep
-                            // channel is full, drop the packet rather than block
-                            // here (we're in a sync closure, can't await).
+                            // If the consumer is slow and the 4-deep channel
+                            // is full, drop the packet rather than block here
+                            // (we're in a sync closure, can't await).
                             let bytes = packet.capacity();
                             let len = packet.len();
-                            if incoming_tx.try_send((link_peer.get(), packet)).is_ok() {
+                            if offer_incoming(incoming_tx, link_peer.get(), packet) {
                                 // #388 census: BLE_INCOMING custody; the
                                 // main loop subtracts on receive.
                                 super::incoming_held_add(bytes);
@@ -1086,13 +1118,15 @@ async fn gatt_events(
     )
     .await
     {
-        Either4::Third(()) => {
+        Either4::Third(down) => {
             crate::log::log_fmt(
                 "[BLE ] ",
                 format_args!("BLE_CARRIER_DROP role=peripheral slot={}", slot_index),
             );
             // Already-disconnected is fine; the teardown is the same.
-            let _ = conn.disconnect();
+            if down.disconnects() {
+                let _ = conn.disconnect();
+            }
         }
         Either4::Fourth(end) => {
             // An expiry is the peer's own departure (#417): it went
@@ -1200,6 +1234,14 @@ pub(crate) static BLE_GATT_OVERSIZE: core::sync::atomic::AtomicU32 =
 /// identity (#548), for the `BLE_COUNTERS` line's `unidentified=`
 /// field. Each also names itself as a `BLE_PRE_HANDSHAKE_REFUSE` line.
 pub(crate) static BLE_PRE_HANDSHAKE_REFUSED: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Completed inbound packets dropped because `BLE_INCOMING` was full,
+/// both roles together, for the `BLE_COUNTERS` line's `rx_full=` field
+/// (leviculum#413, census rows 114 and 138). A rising value says the main
+/// loop fell behind a burst; the drop names no line of its own, as the
+/// receive path runs inside the SoftDevice's event handler.
+pub(crate) static BLE_RX_QUEUE_FULL: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
 /// Per-slot displacement latches (#376): [`peer_link_up`] signals the
@@ -1540,7 +1582,9 @@ fn displace_old_link(displaced: DisplacedOld) {
     let mut dropped = 0usize;
     while let Ok(packet) = old_queue.try_receive() {
         let bytes = packet.capacity();
-        if new_queue.try_send(packet).is_ok() {
+        let fill = Fill::new(new_queue.len(), new_queue.capacity());
+        let verdict = link_queue_verdict(fill, LinkItem::Moved);
+        if verdict == Enqueue::Queue && new_queue.try_send(packet).is_ok() {
             // #388 census: custody follows the packet to the new slot.
             super::session_held_moved(old_slot, new_slot, bytes);
             moved += 1;
@@ -2510,8 +2554,11 @@ async fn central_link(
                 HVN_DRAIN.capacity()
             ),
         );
-        let _ = conn.disconnect();
-        return None;
+        let refused = drain_table_refusal(LinkRole::Central);
+        if refused.disconnects {
+            let _ = conn.disconnect();
+        }
+        return refused.books;
     };
     // This link's outbound queue; stale packets are the previous
     // tenant's, drained BEFORE the registry entry so a displacement's
@@ -2723,7 +2770,7 @@ async fn run_central_session(
                 );
                 let bytes = packet.capacity();
                 let len = packet.len();
-                if incoming_tx.try_send((Some(peer_id), packet)).is_ok() {
+                if offer_incoming(&incoming_tx, Some(peer_id), packet) {
                     // #388 census, as on the peripheral side.
                     super::incoming_held_add(bytes);
                     crate::iface_bytes::note_rx(crate::iface_bytes::BLE, len);
@@ -2864,12 +2911,14 @@ async fn run_central_session(
     )
     .await
     {
-        Either4::Third(()) => {
+        Either4::Third(down) => {
             crate::log::log_fmt(
                 "[BLE ] ",
                 format_args!("BLE_CARRIER_DROP role=central slot={}", slot_index),
             );
-            let _ = conn.disconnect();
+            if down.disconnects() {
+                let _ = conn.disconnect();
+            }
         }
         Either4::Fourth(end) => {
             // The same departure on this side of the connection (#417):
@@ -2907,7 +2956,7 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
         // loop: `ble=off` holds the task here, so a switched-off
         // carrier neither scans nor initiates; off→on falls through
         // and resumes scanning.
-        if !crate::media::ble_active() {
+        if super::carrier().step(CarrierPath::ScanGate) != CarrierStep::Proceed {
             crate::log::log_fmt(
                 "[BLE ] ",
                 format_args!("BLE_CARRIER_GATE role=central state=off"),
@@ -2972,7 +3021,7 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
             // Carrier switched off mid-scan: dropping the scan future
             // stops the scan. Straight back to the gate, no backoff —
             // there is nothing to pace against while off.
-            Either::Second(()) => ScanPass::CarrierOff,
+            Either::Second(_) => ScanPass::CarrierOff,
         };
         if let Some(pause_ms) = scan_pass_pause_ms(pass) {
             Timer::after_millis(pause_ms).await;

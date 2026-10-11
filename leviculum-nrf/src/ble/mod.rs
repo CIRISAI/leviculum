@@ -85,7 +85,10 @@ use embassy_nrf::{bind_interrupts, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::signal::Signal;
-use leviculum_ble_tx::{DrainRouter, TxAim, DEVICE_NAME_LEN};
+use leviculum_ble_tx::{
+    CarrierPath, CarrierState, CarrierStep, DrainRouter, Enqueue, Fill, StandDown, TxAim,
+    DEVICE_NAME_LEN,
+};
 use leviculum_core::traits::{Interface, InterfaceError};
 use leviculum_core::InterfaceId;
 use nrf_softdevice::{raw, SocEvent, Softdevice};
@@ -290,17 +293,28 @@ pub enum PeerEvent {
 /// relink `Up`s that follow (#372).
 static BLE_PEER_EVENTS: Channel<CriticalSectionRawMutex, PeerEvent, 8> = Channel::new();
 
-/// Report a peer transition (see [`BLE_PEER_EVENTS`]). `try_send`: with
-/// the 8-deep queue full the oldest pending report wins and this one is
-/// dropped — the affected node then falls back to the pre-#365
-/// behaviour (a dropped `Lost` ages the paths out via ordinary expiry,
-/// a dropped `Up` waits for the peer's periodic announce) rather than
-/// blocking a connection task.
+/// Report a peer transition (see [`BLE_PEER_EVENTS`]). Never blocks a
+/// connection task: with the 8-deep queue full the oldest pending report
+/// wins and this one is dropped
+/// ([`leviculum_ble_tx::peer_event_verdict`]) — the affected node then
+/// falls back to the pre-#365 behaviour (a dropped `Lost` ages the paths
+/// out via ordinary expiry, a dropped `Up` waits for the peer's periodic
+/// announce).
 pub(crate) fn report_peer_event(event: PeerEvent) {
-    if BLE_PEER_EVENTS.try_send(event).is_err() {
-        let (kind, identity) = match event {
-            PeerEvent::Up(id) => ("up", id),
-            PeerEvent::Lost(id) => ("lost", id),
+    let (kind, identity) = match event {
+        PeerEvent::Up(id) => (leviculum_ble_tx::PeerEventKind::Up, id),
+        PeerEvent::Lost(id) => (leviculum_ble_tx::PeerEventKind::Lost, id),
+    };
+    let fill = Fill::new(BLE_PEER_EVENTS.len(), BLE_PEER_EVENTS.capacity());
+    // A refused `try_send` after a `Queue` verdict cannot happen on the
+    // one thread-mode executor every producer runs on; were it to, it is
+    // the same drop.
+    let queued = leviculum_ble_tx::peer_event_verdict(fill, kind) == Enqueue::Queue
+        && BLE_PEER_EVENTS.try_send(event).is_ok();
+    if !queued {
+        let kind = match kind {
+            leviculum_ble_tx::PeerEventKind::Up => "up",
+            leviculum_ble_tx::PeerEventKind::Lost => "lost",
         };
         crate::log::log_fmt(
             "[BLE ] ",
@@ -356,6 +370,15 @@ pub(crate) enum CarrierWaiter {
 }
 
 impl CarrierWaiter {
+    /// The path this waiter's [`carrier_off`] stands down.
+    fn path(self) -> CarrierPath {
+        match self {
+            CarrierWaiter::Peripheral(_) => CarrierPath::Advertising,
+            CarrierWaiter::Central => CarrierPath::Scanning,
+            CarrierWaiter::Session(_) => CarrierPath::Session,
+        }
+    }
+
     fn index(self) -> usize {
         match self {
             CarrierWaiter::Peripheral(i) => i,
@@ -411,12 +434,23 @@ pub(crate) fn tx_gap_ms() -> u16 {
     leviculum_ble_tx::effective_tx_gap_ms((raw != TX_GAP_OVERRIDE_NONE).then_some(raw))
 }
 
-/// Resolve when the BLE carrier reads off. Selected against a live
-/// session or an advertise/scan future; never resolves while the
-/// carrier stays on.
-pub(crate) async fn carrier_off(waiter: CarrierWaiter) {
+/// The BLE carrier as the media profile states it now. Every path that
+/// reads the carrier asks this for its verdict
+/// ([`leviculum_ble_tx::CarrierState::step`]), so all of them agree when
+/// the operator switches it off.
+pub(crate) fn carrier() -> CarrierState {
+    CarrierState::from_active(crate::media::ble_active())
+}
+
+/// Resolve when the BLE carrier reads off, with how the waiter's path
+/// stands down. Selected against a live session or an advertise/scan
+/// future; never resolves while the carrier stays on.
+pub(crate) async fn carrier_off(waiter: CarrierWaiter) -> StandDown {
     let wake = &CARRIER_WAKES[waiter.index()];
-    while crate::media::ble_active() {
+    loop {
+        if let CarrierStep::StandDown(down) = carrier().step(waiter.path()) {
+            return down;
+        }
         wake.wait().await;
     }
 }
@@ -426,7 +460,7 @@ pub(crate) async fn carrier_off(waiter: CarrierWaiter) {
 /// nor scans nor accepts.
 pub(crate) async fn carrier_on(waiter: CarrierWaiter) {
     let wake = &CARRIER_WAKES[waiter.index()];
-    while !crate::media::ble_active() {
+    while !carrier().is_on() {
         wake.wait().await;
     }
 }
@@ -565,11 +599,15 @@ fn aim_peer(aim: leviculum_ble_tx::TxAim) -> [u8; 16] {
     }
 }
 
-/// Put one packet in a link's outbound queue, reporting a full queue.
+/// Put one packet in a link's outbound queue, reporting a full queue
+/// ([`leviculum_ble_tx::link_queue_verdict`]).
 fn queue_on_link(slot: usize, packet: Vec<u8>) {
     let len = packet.len();
     let bytes = packet.capacity();
-    if LINK_OUT[slot].try_send(packet).is_err() {
+    let queue = &LINK_OUT[slot];
+    let fill = Fill::new(queue.len(), queue.capacity());
+    let verdict = leviculum_ble_tx::link_queue_verdict(fill, leviculum_ble_tx::LinkItem::Fanout);
+    if verdict != Enqueue::Queue || queue.try_send(packet).is_err() {
         crate::log::log_fmt(
             "[BLE ] ",
             format_args!(
@@ -642,7 +680,7 @@ impl BleInterface {
     /// off: links torn down by a media switch cannot be asked anything,
     /// whatever the registry still holds mid-teardown.
     pub fn peer_count(&self) -> usize {
-        if crate::media::ble_active() {
+        if carrier().is_on() {
             columba::live_peer_count()
         } else {
             0
@@ -667,7 +705,7 @@ impl Interface for BleInterface {
         // (see `tx_fanout_task`). The main loop mirrors this into the
         // core, where a path over an offline interface is no path
         // (Codeberg #365).
-        crate::media::ble_active() && HVN_DRAIN.claimed() > 0
+        carrier().is_on() && HVN_DRAIN.claimed() > 0
     }
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
         self.queue(TxAim::Flood, data)
@@ -703,9 +741,13 @@ impl BleInterface {
     /// Hand one packet plus the core's link statement to
     /// [`tx_fanout_task`].
     fn queue(&mut self, aim: TxAim, data: &[u8]) -> Result<(), InterfaceError> {
-        // The media profile, applied at the interface — see the LoRa
-        // interface for why this is `Ok` and not `BufferFull`.
-        if !crate::media::ble_active() {
+        // The media profile first, then the queue
+        // (`leviculum_ble_tx::outbound_verdict`): a switched-off carrier
+        // is `Ok` and not `BufferFull` however full the queue is — see
+        // the LoRa interface for why.
+        let fill = Fill::new(self.sender.len(), self.sender.capacity());
+        let verdict = leviculum_ble_tx::outbound_verdict(carrier(), fill);
+        if verdict == leviculum_ble_tx::Outbound::Swallow {
             if let Some(run) = self.drops.dropped(data.len()) {
                 crate::media::log_tx_drop(self.name(), run);
             }
@@ -715,30 +757,31 @@ impl BleInterface {
             crate::media::log_tx_resumed(self.name(), run);
         }
         // #388 census: the copied packet enters BLE_OUTGOING custody on
-        // success (the fan-out subtracts on receive); a refused send
-        // frees the copy right here and is not counted.
+        // success (the fan-out subtracts on receive); a refused send is
+        // not counted. A `Queue` verdict the channel still refuses cannot
+        // happen on the one executor the core and the fan-out share; were
+        // it to, it is the same `BufferFull`.
         let bytes = data.len();
-        self.sender
-            .try_send((aim, data.to_vec()))
-            .map(|()| {
-                OUTGOING_HELD.add(bytes);
-                crate::iface_bytes::note_tx(crate::iface_bytes::BLE, bytes);
-            })
-            .map_err(|_| {
-                // Codeberg #344: same silence as the other two. A phone that
-                // stops draining the notify path fills this queue, and the board
-                // could not tell that from a mesh with nothing to say.
-                crate::log::log_fmt(
-                    "[IFACE_FULL] ",
-                    format_args!(
-                        "iface={} depth={} len={}",
-                        self.name(),
-                        self.sender.capacity(),
-                        data.len()
-                    ),
-                );
-                InterfaceError::BufferFull
-            })
+        let queued = verdict == leviculum_ble_tx::Outbound::Queue
+            && self.sender.try_send((aim, data.to_vec())).is_ok();
+        if queued {
+            OUTGOING_HELD.add(bytes);
+            crate::iface_bytes::note_tx(crate::iface_bytes::BLE, bytes);
+            return Ok(());
+        }
+        // Codeberg #344: same silence as the other two. A phone that
+        // stops draining the notify path fills this queue, and the board
+        // could not tell that from a mesh with nothing to say.
+        crate::log::log_fmt(
+            "[IFACE_FULL] ",
+            format_args!(
+                "iface={} depth={} len={}",
+                self.name(),
+                self.sender.capacity(),
+                data.len()
+            ),
+        );
+        Err(InterfaceError::BufferFull)
     }
 }
 
@@ -1123,7 +1166,7 @@ const COUNTERS_PERIOD_SECS: u64 = 30;
 /// and an absence needs a heartbeat to be quotable from a log:
 ///
 /// ```text
-/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n> refused=<n> route_miss=<n> oversize=<n> unidentified=<n>
+/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n> refused=<n> route_miss=<n> oversize=<n> unidentified=<n> rx_full=<n>
 /// ```
 ///
 /// `links=` is the number of claimed drain slots — live BLE links.
@@ -1145,6 +1188,9 @@ const COUNTERS_PERIOD_SECS: u64 = 30;
 /// `unidentified=` counts payload writes refused because they came
 /// before the peer's 16-byte identity (#548); each is also a
 /// `BLE_PRE_HANDSHAKE_REFUSE` line, and its connection was closed.
+/// `rx_full=` counts completed inbound packets dropped because the main
+/// loop's queue was full, both roles together (leviculum#413); before it
+/// the drop left no trace.
 /// The two-link acceptance for #255 phase B reads `links=2 unrouted=0`
 /// off this line: both slots claimed, and every HVN drain edge still
 /// found the link that produced it.
@@ -1156,7 +1202,7 @@ async fn counters_task() -> ! {
         crate::log::log_fmt(
             "[BLE ] ",
             format_args!(
-                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={} refused={} route_miss={} oversize={} unidentified={}",
+                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={} refused={} route_miss={} oversize={} unidentified={} rx_full={}",
                 BLE_TX_PACKETS.load(Ordering::Relaxed),
                 BLE_TX_DROPPED.load(Ordering::Relaxed),
                 BLE_TX_DRAIN_WAITS.load(Ordering::Relaxed),
@@ -1167,6 +1213,7 @@ async fn counters_task() -> ! {
                 BLE_TX_ROUTE_MISSES.load(Ordering::Relaxed),
                 columba::BLE_GATT_OVERSIZE.load(Ordering::Relaxed),
                 columba::BLE_PRE_HANDSHAKE_REFUSED.load(Ordering::Relaxed),
+                columba::BLE_RX_QUEUE_FULL.load(Ordering::Relaxed),
             ),
         );
     }
