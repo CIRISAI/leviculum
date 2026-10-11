@@ -55,8 +55,11 @@ ranked the 27 stores and boot rows with the 17 main-loop rows left, moved
 ten decisions (17 of those rows and five rig-reached arms) and gave every
 other "none" row its reason, so every row on this page now names its host
 test, its rig cell, or why it has neither. Counted off the tables on
-2026-10-11, 125 of the 412 rows carry host tests; the per-wave counts
-above added to 98 before the ninth wave, and the tables are the count.
+2026-10-11, 129 of the 412 rows carry host tests (four of them, 306, 155,
+369 and 374, moved by the pass that measured the observations
+[below](#three-observations-measured-three-decisions-moved)); the per-wave
+counts above added to 98 before the ninth wave, and the tables are the
+count.
 [Closing #413](#closing-413) is the summary.
 
 ## The rig-cost measure
@@ -567,7 +570,7 @@ the replay of the tail, which all three binaries carried as a copy each.
 | 350, 358, 359 (323) | a storm is refused unmounted, while one runs, for zero records or a body no page holds; each synthetic record is clamped to its buffer and carries its index | `storm_admits`, `storm_record`, the same module |
 | 364 | the radio page is tried three times, 250 ms after each failure, then Lost | `FlashSave`, `leviculum-nrf/telemetry-policy`: the loop the telemetry page already ran, now one loop for both pages |
 | 307, 308 | a boot without LoRa takes a radio config to the page and answers Stored or StoreFailed; behind a full slot, a repeat of the queued config waits for its apply and a different one gets one grace send | `config_route` (`ConfigRoute`), `stored_answer`, `full_slot` (`FullSlot`), `leviculum-nrf/usb-policy` |
-| 402, 403, 404 (249) | a writer that laps the runtime ring moves its reader to the oldest byte; any word but the tail's magic re-arms the tail; a boot replays nothing without it, the bytes written before a wrap, the last ring after one, and a torn write position still reads inside the ring; the replay drops the leading partial line | `lapped_reader`, `must_rearm`, `tail_window`, `replay_lines`, `TAIL_MAGIC`, `leviculum-nrf/boot-trace` (`tail`) |
+| 402, 403, 404 (249) | a writer that laps the runtime ring moves its reader to the oldest byte; any word but the tail's magic re-arms the tail; a boot replays nothing without it, the bytes written before a wrap, the last ring after one, and a torn write position still reads inside the ring; the replay drops the leading partial line (of a tail that went round, since the observations below were measured) | `lapped_reader`, `must_rearm`, `tail_window`, `replay_lines`, `TAIL_MAGIC`, `leviculum-nrf/boot-trace` (`tail`) |
 | 340, 341 | a valid RMC sets position, time and movement, a void one clears only the time; a GGA always sets the satellite count, and position, altitude and HDOP only with a fix | `GnssFix` (`fold_rmc`, `fold_gga`), `leviculum-nrf/gnss-time` (`fix`); the firmware re-exports the type |
 | 269 | the seam's answer to a GNSS candidate: an accepted seed closes the gate, a refused one leaves it open | `SeedGate::settle`, the same crate |
 | 392 (391) | a silent first JEDEC read earns a second; two silent reads are no-answer and ask the bit-banged second opinion; any other wrong id, all ones included, is unexpected-part | `wants_second_read`, `identify` (`Identified`), `leviculum-nrf/qspi-boot` |
@@ -599,26 +602,52 @@ the SX1262 has no code for), 320 (a name sent before the board can state
 it), 369 and 374 (the display's power toggle). None of the four is behind
 a field event; 306 is reachable by a host and is the next candidate.
 
+## Three observations measured, three decisions moved
+
+The three observations below the closing paragraph were read off the code,
+so each got the host test that would confirm or refute it before anything
+changed. All three were red as described, and each is fixed in the commit
+that turns its test green:
+
+| Observation | Test, red before the fix | Mechanism and fix |
+|---|---|---|
+| the boot replay drops the first line of a tail that never wrapped | `leviculum_boot_trace::tail::tests::a_tail_that_did_not_go_round_keeps_its_first_line` (read `[IDENTITY] hash=ab12`, `[LORA] tx` for three lines) | `replay_lines` dropped the first line of every snapshot. It now takes `went_round` (write position past the ring), which the snapshot carries; only a tail that went round starts inside a line. The previous boot's first line (`leviculum-nrf/src/log.rs` mirrors every line) is the one that was lost, refs #234 |
+| a no-fix GGA with blank position fields publishes no satellite count | `leviculum_gnss_time::fix::tests::a_gga_searching_for_a_fix_publishes_its_satellite_count` (it also left `valid` true and the count of the last fix) | `GGA::parse` returned `None` unless time, position and HDOP were all present. The vendored nmea0183 now makes those four `Option`s and needs only quality and satellite count (`vendor/nmea0183/README.md`); `fold_gga` sets position, altitude and HDOP only from a fix that carries a position |
+| the serial TX counter counts packets that never left the board | `leviculum_usb_policy` `tests/seam.rs`: `a_packet_the_writer_drops_unread_is_not_counted` (counted 100 for a dropped packet) | `offered` counted where the queue took the packet. The transport writer now counts the unframed length once every chunk was written (`tx_counted`), as the reference counts after its serial write returns (`RNodeInterface.py:724-725`) |
+
+Log lines are unchanged; the counter and the parsed GGA are the fixes.
+
+Three of the four decisions left after the ninth wave moved with them:
+306 (`leviculum_core::sx126x::bandwidth_code`, the code table
+`RadioConfig::from_wire_config` and the driver's inverse now share; row
+155, the same refusal on the rig-reached side, carries its tests too), 369
+and 374 (`leviculum_screen::power`, `press_target` and `apply_power`). The
+fourth, 320, stays: its decision is the conjunction `wired &&
+report().is_some()`, and what makes it worth a test, that a host's busy
+retry is not a second write, needs the async persist path around it in a
+seam crate, not a one-line predicate.
+
 ## Closing #413
 
 The census walked `leviculum-nrf/src` at `ad7eaa2e` on 2026-10-10 and found
 580 decisions on the board: 168 were already a call into a host-built
 crate, and 412 were listed, 147 of them reached by no rig cell. After nine
-waves, counted off the tables on this page on 2026-10-11, 125 of the 412
-carry host tests: 124 moved into a seam crate with a host test per arm,
-and one (244) was found tested already. Of the 287 without one, 245 are
-driven by a rig cell named in their row, the cell that exercises them on
-every hardware run, and were never what this issue was for. The other 42
-read "none": 35 are no decision, each with its reason in the row (glue
-over a host-tested decision, an early return, an unreachable guard), 3 are
-rig-only by nature (a hung QSPI transfer, the `store-spike` instrument
-build), and 4 are decisions left without a host test or a cell: 306, 320,
-369 and 374, none of them behind a field event. Every decision on the
-board now says where its host test is or why there is none. The move
-also found two defects nobody had reported: a southern or western GNSS
-fix reported mirrored (fixed with this wave), and the serial TX counter
-counting packets that never left the board (an observation below, its own
-issue).
+waves and the pass that measured their observations, counted off the
+tables on this page on 2026-10-11, 129 of the 412 carry host tests: 128
+moved into a seam crate with a host test per arm, and one (244) was found
+tested already. Of the 283 without one, 244 are driven by a rig cell named
+in their row, the cell that exercises them on every hardware run, and were
+never what this issue was for. The other 39 read "none": 35 are no
+decision, each with its reason in the row (glue over a host-tested
+decision, an early return, an unreachable guard), 3 are rig-only by nature
+(a hung QSPI transfer, the `store-spike` instrument build), and 1 is a
+decision left without a host test or a cell: 320, not behind a field
+event. Every decision on the board now says where its host test is or why
+there is none. The move also found four defects nobody had reported, each
+fixed with its reproducer: a southern or western GNSS fix reported
+mirrored, the boot replay dropping the previous boot's first line, a
+receiver searching for a fix publishing no satellite count, and the serial
+TX counter counting packets that never left the board.
 
 ## Observations made during the walk
 
@@ -648,22 +677,29 @@ own issue, not a finding of this page.
   jitter, unlike a packet forced out of a busy channel. The sixth wave pinned
   the behaviour as it is (`leviculum_channel_access::after_key_up`); whether
   the skip is wanted is a question for its own issue.
-- The serial interface counts a packet's bytes when the outgoing queue takes
-  it (`leviculum_usb_policy::offered`), and the transport writer drops a
-  queued packet when no host reads (`leviculum-nrf/src/usb.rs`, "TX dropped,
-  no host reading"), so the serial TX counter includes packets that never
-  left the board. Found in the eighth wave; whether to uncount them is a
-  question for its own issue.
-- The persistent-log replay drops its first line on every boot, also when
-  the previous boot never filled the ring and that line is whole
-  (`leviculum_boot_trace::tail::replay_lines`, pinned as it is by
-  `the_leading_partial_line_is_dropped`); `tail_window` knows whether the
-  ring wrapped and could tell it. Found in the ninth wave.
-- A GGA without a fix reaches the fold only from a receiver that still
-  reports a position: nmea0183 parses a GGA with empty latitude and
-  longitude fields to nothing at all (`vendor/nmea0183/src/gga.rs`), so
-  on a receiver that blanks them the satellite count of a no-fix sentence
-  is never published. Found in the ninth wave.
+- The serial interface counted a packet's bytes when the outgoing queue took
+  it, and the transport writer drops a queued packet when the host closes
+  the port (`leviculum-nrf/src/usb.rs`, "TX dropped, no host reading"), so
+  the serial TX counter included packets that never left the board. Found
+  in the eighth wave; confirmed and fixed, see
+  [below](#three-observations-measured-three-decisions-moved).
+- The persistent-log replay dropped its first line on every boot, also when
+  the previous boot never filled the ring and that line was whole. Found in
+  the ninth wave; confirmed and fixed, see
+  [below](#three-observations-measured-three-decisions-moved).
+- A GGA without a fix reached the fold only from a receiver that still
+  reports a position: nmea0183 parsed a GGA with empty latitude and
+  longitude fields to nothing at all, so on a receiver that blanks them the
+  satellite count of a no-fix sentence was never published. Found in the
+  ninth wave; confirmed and fixed, see
+  [below](#three-observations-measured-three-decisions-moved).
+- A void RMC with blank fields parses to nothing too
+  (`vendor/nmea0183/src/rmc.rs`, date or position missing), so on a receiver
+  that blanks them a lost fix does not clear `unix_secs` or `valid` from the
+  RMC side. Found while measuring the GGA observation; a probe folding
+  `GPRMC,092725.00,V,,,,,,,110126,,,N` after a valid RMC kept the old
+  `unix_secs`. Not fixed: a candidate for its own issue. The GGA fix now
+  clears `valid` on such a receiver; the time stays.
 
 ## The census
 
@@ -834,64 +870,64 @@ own issue, not a finding of this page.
 
 ### LoRa, radio, announce and telemetry (`lora.rs`, `sx1262.rs`, `announce.rs`, `telemetry.rs`)
 
-97 decisions no host test reached on 2026-10-10; 54 more were already a call into a host-built crate and are not listed. Since the seventh wave 40 of the 97 carry host tests (one of them, 244, a test that existed before the census), 2 are marked no decision, and none of the 34 "none" rows is left.
+97 decisions no host test reached on 2026-10-10; 54 more were already a call into a host-built crate and are not listed. Since the seventh wave 41 of the 97 carry host tests (one of them, 244, a test that existed before the census; one, 155, since the observations were measured), 2 are marked no decision, and none of the 34 "none" rows is left.
 
 | # | Where | What it decides | State it reads | Cheapest rig cell | s | radios/boards | Host test |
 |---|---|---|---|---|---|---|---|
 | 152 | `leviculum-nrf/src/lora.rs:135` | refuse a TX-spacing set while one is queued (REFUSE_BUSY) | LORA_TX_SPACING | none | - | - | `leviculum_tx_spacing::tests::a_spacing_set_while_one_is_unread_is_refused_and_overwrites_nothing` |
 | 153 | `leviculum-nrf/src/lora.rs:361` | carrier off swallows an outbound packet as Ok | media::lora_active | none | - | - | `leviculum_queue_budget::tests::a_dark_carrier_swallows_a_packet_however_full_the_queue_is`<br>`leviculum_queue_budget::tests::a_lit_carrier_queues_with_room_and_refuses_with_the_bound_that_bound` |
 | 154 | `leviculum-nrf/src/lora.rs:428` | channel send failure releases the budget and answers BufferFull | channel | none | - | - | `leviculum_queue_budget::tests::a_channel_refusal_hands_the_reserved_room_back` |
-| 155 | `leviculum-nrf/src/lora.rs:573` | a config whose bandwidth has no SX1262 code is rejected | wire.bandwidth_hz | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 156 | `leviculum-nrf/src/lora.rs:588` | coding-rate code is the denominator minus 4, unchecked | wire.cr | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 157 | `leviculum-nrf/src/lora.rs:747` | mirror a duty-hold edge into the core | LORA_DUTY_HOLD | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
-| 158 | `leviculum-nrf/src/lora.rs:751` | no announce-cap registration before the radio is configured | RUNNING_CONFIG | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 159 | `leviculum-nrf/src/lora.rs:812` | open a duty hold once per hold: raise the flag and signal the USB frame | hold state, stale total | `lora_duty_lock_lawful_default` | 900 | 2/1 | `queue_budget tests::a_hold_opens_once_and_the_lift_measures_from_the_first_held_turn` |
-| 160 | `leviculum-nrf/src/lora.rs:833` | lift a duty hold only if one is open, once, and state held time and stale drops | hold state, airtime | none (needs a run past one rolling hour) | >3600 | - | `queue_budget tests::a_lift_happens_once_and_never_without_a_hold`<br>`queue_budget tests::the_lift_counts_drops_across_the_counter_wrap` |
-| 161 | `leviculum-nrf/src/lora.rs:994` | radio_silent grants (restarts) the mute lease, else clears it | config.radio_silent | none | - | - | `leviculum_mute_lease::tests::a_silent_config_restarts_the_lease_it_finds`<br>`leviculum_mute_lease::tests::a_config_that_is_not_silent_lifts_the_mute_without_an_expiry` |
-| 162 | `leviculum-nrf/src/lora.rs:1100` | split-frame sequence nibble from the xorshift state | rng_state | `lora_lnode_split` | 240 | 2/1 |  |
-| 163 | `leviculum-nrf/src/lora.rs:1158` | TX ok charges airtime; a TX error aborts, the second split frame is neither sent nor charged | radio result | none | - | - | `leviculum_queue_budget::tests::a_refused_frame_is_not_charged_and_the_packet_is_not_counted`<br>`leviculum_queue_budget::tests::a_split_packet_whose_first_half_fails_keys_and_charges_nothing_more`<br>`leviculum_queue_budget::tests::a_split_packet_whose_second_half_fails_keeps_the_first_charge_and_is_not_counted` |
-| 164 | `leviculum-nrf/src/lora.rs:1187` | count TX and flash the display only if every frame went out | tx_ok | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_queue_budget::tests::a_single_frame_that_leaves_the_air_is_charged_and_counted`<br>`leviculum_queue_budget::tests::a_split_packet_is_counted_once_both_halves_left_the_air` |
-| 165 | `leviculum-nrf/src/lora.rs:1388` | no RX window while a config is pending | config_rx | none | - | - | `leviculum_rx_arming::tests::a_window_stands_aside_while_a_config_waits_for_its_turn` |
-| 166 | `leviculum-nrf/src/lora.rs:1445` | window outcome: reception true, timeout or error false (drives empty-ack and peer-yield) | rx_result | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
-| 167 | `leviculum-nrf/src/lora.rs:1606` | runtime reconfig ok: mute, publish, set_phy, limits, CONFIG_APPLIED; error keeps the old PHY, no ack | configure result | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 168 | `leviculum-nrf/src/lora.rs:1712` | init_radio failure ends the LoRa task | radio | none | - | - | no decision: boot-only return, a radio that does not answer its first command leaves the board without LoRa and nothing to decide |
-| 169 | `leviculum-nrf/src/lora.rs:1729` | boot configure failure ends the task; ok applies the mute and publishes | radio | `boot_smoke_t114` | 300 | 1/1 |  |
-| 170 | `leviculum-nrf/src/lora.rs:1762` | a zero RNG seed is replaced | channel_seed | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 171 | `leviculum-nrf/src/lora.rs:1820` | take a new TX spacing at the top of a turn | spacing_rx | none | - | - | `leviculum_tx_spacing::tests::the_turn_puts_a_waiting_spacing_in_force_before_the_next_key_up` |
-| 172 | `leviculum-nrf/src/lora.rs:1833` | apply a runtime config at the top of a turn | config_rx | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 173 | `leviculum-nrf/src/lora.rs:1882` | lift the hold on an idle turn: hold open, nothing pending, not locked | hold state, pending_tx, airtime | none (needs a run past one rolling hour) | >3600 | - | `queue_budget tests::an_idle_turn_lifts_only_an_open_hold_with_nothing_pending_and_no_lock`<br>`queue_budget tests::the_hold_edge_lifts_on_the_first_idle_turn_after_the_rolling_hour_frees_a_bin` |
-| 174 | `leviculum-nrf/src/lora.rs:1911` | dequeue the next frame only when none is pending | pending_tx | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 175 | `leviculum-nrf/src/lora.rs:1943` | DropStale: open the hold, count, drop, rate-limited line, next turn | verdict | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
-| 176 | `leviculum-nrf/src/lora.rs:1988` | Hold: open the hold, listen one post-TX window at site Hold, retry | verdict | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
-| 177 | `leviculum-nrf/src/lora.rs:2060` | acquisition jitter: listen through the draw, clamp 1..10000 ms, credit elapsed | access | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 178 | `leviculum-nrf/src/lora.rs:2131` | CAD clear transmits and bumps the burst counters | CAD result | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_channel_access::tests::the_single_cad_entry_gives_each_outcome_its_own_arm` |
-| 179 | `leviculum-nrf/src/lora.rs:2166` | CSMA backoff is slots times the jitter slot, clamped 1..10000 ms | slots | `bench_dual_pair_fast` | 360 | 4/2 (>2) | `leviculum_channel_access::tests::a_backoff_is_listened_through_in_whole_csma_slots`<br>`leviculum_channel_access::tests::a_backoff_of_no_slots_still_arms_a_window`<br>`leviculum_channel_access::tests::no_listening_wait_parks_the_transmit_path_past_the_ceiling` |
-| 180 | `leviculum-nrf/src/lora.rs:2158` | CAD error: a forced TX skips the ack window and burst check | access | none | - | - | `leviculum_channel_access::tests::a_radio_that_cannot_cad_is_retried_at_once_then_forced_out`<br>`leviculum_channel_access::tests::only_a_key_up_forced_by_cad_errors_skips_the_ack_window` |
-| 181 | `leviculum-nrf/src/lora.rs:2206` | burst continuation pulls the next frame; a mute-dropped one counts as empty | queue, lease | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
-| 182 | `leviculum-nrf/src/lora.rs:2239` | post-TX ack window counts consecutive empty acks | ack_received | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
-| 183 | `leviculum-nrf/src/lora.rs:2266` | peer-turn yield after two empty acks, twice the ack window | consecutive_empty_acks | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
-| 184 | `leviculum-nrf/src/lora.rs:2293` | reset burst accounting; the next acquisition owes fresh jitter | - | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 185 | `leviculum-nrf/src/lora.rs:2314` | idle continuous RX until a frame or an outgoing packet | select | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 186 | `leviculum-nrf/src/lora.rs:2369` | outgoing in idle stands RX down deferring one frame, then admits | latch | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 187 | `leviculum-nrf/src/sx1262.rs:495` | image-calibration band from the frequency | freq_hz | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 188 | `leviculum-nrf/src/sx1262.rs:516` | LDO regulator, DIO2 as RF switch, TCXO timeout | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 189 | `leviculum-nrf/src/sx1262.rs:631` | packet params: explicit header, CRC on, standard IQ, preamble | preamble_len | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 190 | `leviculum-nrf/src/sx1262.rs:750` | sync word 0x1424, TX clamp, StopRxTimerOnPreamble | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 191 | `leviculum-nrf/src/sx1262.rs:816` | TX ok is tx_done, else force standby | on_air result | none | - | - | `leviculum_core::sx126x::tests::only_a_reported_tx_done_leaves_the_transmitter_without_a_forced_standby` |
-| 192 | `leviculum-nrf/src/sx1262.rs:833` | TX wait floor 100 ms | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_core::sx126x::tests::the_tx_wait_has_a_floor_no_computed_timeout_reaches` |
-| 193 | `leviculum-nrf/src/sx1262.rs:841` | TX success only with IRQ_TX_DONE | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_core::sx126x::tests::a_frame_left_the_air_only_if_tx_done_is_latched` |
-| 194 | `leviculum-nrf/src/sx1262.rs:1052` | RX hardware timeout: 0 single mode, else ms*64 capped at 0xFFFFFF | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 195 | `leviculum-nrf/src/sx1262.rs:1109` | awaiting an unarmed window is NotArmed | rx_state | none | - | - | no decision: unreachable guard, the one caller (`leviculum_rx_arming::receive_and_hand_up`) awaits only after `ensure_armed` succeeded |
-| 196 | `leviculum-nrf/src/sx1262.rs:1114` | software wait: 60 s single mode, else timeout plus 500 ms | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 197 | `leviculum-nrf/src/sx1262.rs:1150` | latched take: not armed is an error, no RxDone/Timeout is None | rx_state, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 198 | `leviculum-nrf/src/sx1262.rs:1282` | the chip left RX on RxDone or Timeout | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 199 | `leviculum-nrf/src/sx1262.rs:1290` | erratum 15.3 workaround only for timed RX | hw_timeout | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 200 | `leviculum-nrf/src/sx1262.rs:1294` | classify: CRC error drops the payload, RxDone is a frame, Timeout, else WaitExpired | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 201 | `leviculum-nrf/src/sx1262.rs:1317` | truncate the read to the buffer | len | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 202 | `leviculum-nrf/src/sx1262.rs:1366` | CAD detMin 0x0A, CAD-only exit mode | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 203 | `leviculum-nrf/src/sx1262.rs:1424` | CAD done: busy iff CAD_DETECTED; timeout goes standby with an error | DIO1, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 204 | `leviculum-nrf/src/sx1262.rs:1486` | standing-window age (clamped) fed to adoption | rx_state | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 205 | `leviculum-nrf/src/sx1262.rs:1503` | a window ends itself iff its timeout is non-zero | window | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 155 | `leviculum-nrf/src/lora.rs:574` | a config whose bandwidth has no SX1262 code is rejected | wire.bandwidth_hz | `lora_path_discovery_fast_mixed` | 90 | 2/1 | `leviculum_core::sx126x::tests::a_bandwidth_the_wire_admits_without_a_code_is_refused`<br>`leviculum_core::sx126x::tests::every_sx1262_bandwidth_has_a_code_that_round_trips` |
+| 156 | `leviculum-nrf/src/lora.rs:577` | coding-rate code is the denominator minus 4, unchecked | wire.cr | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
+| 157 | `leviculum-nrf/src/lora.rs:736` | mirror a duty-hold edge into the core | LORA_DUTY_HOLD | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
+| 158 | `leviculum-nrf/src/lora.rs:740` | no announce-cap registration before the radio is configured | RUNNING_CONFIG | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 159 | `leviculum-nrf/src/lora.rs:801` | open a duty hold once per hold: raise the flag and signal the USB frame | hold state, stale total | `lora_duty_lock_lawful_default` | 900 | 2/1 | `queue_budget tests::a_hold_opens_once_and_the_lift_measures_from_the_first_held_turn` |
+| 160 | `leviculum-nrf/src/lora.rs:822` | lift a duty hold only if one is open, once, and state held time and stale drops | hold state, airtime | none (needs a run past one rolling hour) | >3600 | - | `queue_budget tests::a_lift_happens_once_and_never_without_a_hold`<br>`queue_budget tests::the_lift_counts_drops_across_the_counter_wrap` |
+| 161 | `leviculum-nrf/src/lora.rs:983` | radio_silent grants (restarts) the mute lease, else clears it | config.radio_silent | none | - | - | `leviculum_mute_lease::tests::a_silent_config_restarts_the_lease_it_finds`<br>`leviculum_mute_lease::tests::a_config_that_is_not_silent_lifts_the_mute_without_an_expiry` |
+| 162 | `leviculum-nrf/src/lora.rs:1089` | split-frame sequence nibble from the xorshift state | rng_state | `lora_lnode_split` | 240 | 2/1 |  |
+| 163 | `leviculum-nrf/src/lora.rs:1147` | TX ok charges airtime; a TX error aborts, the second split frame is neither sent nor charged | radio result | none | - | - | `leviculum_queue_budget::tests::a_refused_frame_is_not_charged_and_the_packet_is_not_counted`<br>`leviculum_queue_budget::tests::a_split_packet_whose_first_half_fails_keys_and_charges_nothing_more`<br>`leviculum_queue_budget::tests::a_split_packet_whose_second_half_fails_keeps_the_first_charge_and_is_not_counted` |
+| 164 | `leviculum-nrf/src/lora.rs:1176` | count TX and flash the display only if every frame went out | tx_ok | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_queue_budget::tests::a_single_frame_that_leaves_the_air_is_charged_and_counted`<br>`leviculum_queue_budget::tests::a_split_packet_is_counted_once_both_halves_left_the_air` |
+| 165 | `leviculum-nrf/src/lora.rs:1377` | no RX window while a config is pending | config_rx | none | - | - | `leviculum_rx_arming::tests::a_window_stands_aside_while_a_config_waits_for_its_turn` |
+| 166 | `leviculum-nrf/src/lora.rs:1434` | window outcome: reception true, timeout or error false (drives empty-ack and peer-yield) | rx_result | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
+| 167 | `leviculum-nrf/src/lora.rs:1595` | runtime reconfig ok: mute, publish, set_phy, limits, CONFIG_APPLIED; error keeps the old PHY, no ack | configure result | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
+| 168 | `leviculum-nrf/src/lora.rs:1701` | init_radio failure ends the LoRa task | radio | none | - | - | no decision: boot-only return, a radio that does not answer its first command leaves the board without LoRa and nothing to decide |
+| 169 | `leviculum-nrf/src/lora.rs:1718` | boot configure failure ends the task; ok applies the mute and publishes | radio | `boot_smoke_t114` | 300 | 1/1 |  |
+| 170 | `leviculum-nrf/src/lora.rs:1751` | a zero RNG seed is replaced | channel_seed | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 171 | `leviculum-nrf/src/lora.rs:1809` | take a new TX spacing at the top of a turn | spacing_rx | none | - | - | `leviculum_tx_spacing::tests::the_turn_puts_a_waiting_spacing_in_force_before_the_next_key_up` |
+| 172 | `leviculum-nrf/src/lora.rs:1822` | apply a runtime config at the top of a turn | config_rx | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
+| 173 | `leviculum-nrf/src/lora.rs:1871` | lift the hold on an idle turn: hold open, nothing pending, not locked | hold state, pending_tx, airtime | none (needs a run past one rolling hour) | >3600 | - | `queue_budget tests::an_idle_turn_lifts_only_an_open_hold_with_nothing_pending_and_no_lock`<br>`queue_budget tests::the_hold_edge_lifts_on_the_first_idle_turn_after_the_rolling_hour_frees_a_bin` |
+| 174 | `leviculum-nrf/src/lora.rs:1900` | dequeue the next frame only when none is pending | pending_tx | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 175 | `leviculum-nrf/src/lora.rs:1932` | DropStale: open the hold, count, drop, rate-limited line, next turn | verdict | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
+| 176 | `leviculum-nrf/src/lora.rs:1977` | Hold: open the hold, listen one post-TX window at site Hold, retry | verdict | `lora_duty_lock_lawful_default` | 900 | 2/1 |  |
+| 177 | `leviculum-nrf/src/lora.rs:2049` | acquisition jitter: listen through the draw, clamp 1..10000 ms, credit elapsed | access | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 178 | `leviculum-nrf/src/lora.rs:2120` | CAD clear transmits and bumps the burst counters | CAD result | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_channel_access::tests::the_single_cad_entry_gives_each_outcome_its_own_arm` |
+| 179 | `leviculum-nrf/src/lora.rs:2155` | CSMA backoff is slots times the jitter slot, clamped 1..10000 ms | slots | `bench_dual_pair_fast` | 360 | 4/2 (>2) | `leviculum_channel_access::tests::a_backoff_is_listened_through_in_whole_csma_slots`<br>`leviculum_channel_access::tests::a_backoff_of_no_slots_still_arms_a_window`<br>`leviculum_channel_access::tests::no_listening_wait_parks_the_transmit_path_past_the_ceiling` |
+| 180 | `leviculum-nrf/src/lora.rs:2147` | CAD error: a forced TX skips the ack window and burst check | access | none | - | - | `leviculum_channel_access::tests::a_radio_that_cannot_cad_is_retried_at_once_then_forced_out`<br>`leviculum_channel_access::tests::only_a_key_up_forced_by_cad_errors_skips_the_ack_window` |
+| 181 | `leviculum-nrf/src/lora.rs:2195` | burst continuation pulls the next frame; a mute-dropped one counts as empty | queue, lease | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
+| 182 | `leviculum-nrf/src/lora.rs:2228` | post-TX ack window counts consecutive empty acks | ack_received | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
+| 183 | `leviculum-nrf/src/lora.rs:2255` | peer-turn yield after two empty acks, twice the ack window | consecutive_empty_acks | `bench_dual_pair_fast` | 360 | 4/2 (>2) |  |
+| 184 | `leviculum-nrf/src/lora.rs:2282` | reset burst accounting; the next acquisition owes fresh jitter | - | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 185 | `leviculum-nrf/src/lora.rs:2303` | idle continuous RX until a frame or an outgoing packet | select | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 186 | `leviculum-nrf/src/lora.rs:2358` | outgoing in idle stands RX down deferring one frame, then admits | latch | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 187 | `leviculum-nrf/src/sx1262.rs:484` | image-calibration band from the frequency | freq_hz | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 188 | `leviculum-nrf/src/sx1262.rs:505` | LDO regulator, DIO2 as RF switch, TCXO timeout | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 189 | `leviculum-nrf/src/sx1262.rs:620` | packet params: explicit header, CRC on, standard IQ, preamble | preamble_len | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 190 | `leviculum-nrf/src/sx1262.rs:739` | sync word 0x1424, TX clamp, StopRxTimerOnPreamble | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 191 | `leviculum-nrf/src/sx1262.rs:805` | TX ok is tx_done, else force standby | on_air result | none | - | - | `leviculum_core::sx126x::tests::only_a_reported_tx_done_leaves_the_transmitter_without_a_forced_standby` |
+| 192 | `leviculum-nrf/src/sx1262.rs:822` | TX wait floor 100 ms | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_core::sx126x::tests::the_tx_wait_has_a_floor_no_computed_timeout_reaches` |
+| 193 | `leviculum-nrf/src/sx1262.rs:830` | TX success only with IRQ_TX_DONE | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_core::sx126x::tests::a_frame_left_the_air_only_if_tx_done_is_latched` |
+| 194 | `leviculum-nrf/src/sx1262.rs:1041` | RX hardware timeout: 0 single mode, else ms*64 capped at 0xFFFFFF | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 195 | `leviculum-nrf/src/sx1262.rs:1098` | awaiting an unarmed window is NotArmed | rx_state | none | - | - | no decision: unreachable guard, the one caller (`leviculum_rx_arming::receive_and_hand_up`) awaits only after `ensure_armed` succeeded |
+| 196 | `leviculum-nrf/src/sx1262.rs:1103` | software wait: 60 s single mode, else timeout plus 500 ms | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 197 | `leviculum-nrf/src/sx1262.rs:1139` | latched take: not armed is an error, no RxDone/Timeout is None | rx_state, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 198 | `leviculum-nrf/src/sx1262.rs:1271` | the chip left RX on RxDone or Timeout | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 199 | `leviculum-nrf/src/sx1262.rs:1279` | erratum 15.3 workaround only for timed RX | hw_timeout | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 200 | `leviculum-nrf/src/sx1262.rs:1283` | classify: CRC error drops the payload, RxDone is a frame, Timeout, else WaitExpired | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 201 | `leviculum-nrf/src/sx1262.rs:1306` | truncate the read to the buffer | len | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 202 | `leviculum-nrf/src/sx1262.rs:1355` | CAD detMin 0x0A, CAD-only exit mode | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 203 | `leviculum-nrf/src/sx1262.rs:1413` | CAD done: busy iff CAD_DETECTED; timeout goes standby with an error | DIO1, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 204 | `leviculum-nrf/src/sx1262.rs:1475` | standing-window age (clamped) fed to adoption | rx_state | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 205 | `leviculum-nrf/src/sx1262.rs:1492` | a window ends itself iff its timeout is non-zero | window | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 206 | `leviculum-nrf/src/announce.rs:153` | announce set is 2 frames with the PN role, else 1 | propagation_hash | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
 | 207 | `leviculum-nrf/src/announce.rs:188` | the first announce heard from a destination triggers our own at once | NEIGHBOURS | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 208 | `leviculum-nrf/src/announce.rs:188` | neighbour-known test, round-robin eviction at 32 | slots | none | - | - | `leviculum_announce_policy::scheduler::tests::a_known_neighbour_buys_nothing`<br>`leviculum_announce_policy::scheduler::tests::a_thirty_third_neighbour_displaces_the_first_round_robin` |
@@ -938,47 +974,47 @@ own issue, not a finding of this page.
 
 ### Main loops, USB control, status and panic handling (`bin/*`, `usb.rs`, `lib.rs`, `remote_status.rs`, `mgmt.rs`, `interface.rs`)
 
-90 decisions no host test reached on 2026-10-10; 31 more were already a call into a host-built crate and are not listed. Since the ninth wave 18 of the 90 carry host tests, 10 are marked no decision, and 2 of the 27 "none" rows are decisions left (306, 320).
+90 decisions no host test reached on 2026-10-10; 31 more were already a call into a host-built crate and are not listed. Since the ninth wave 19 of the 90 carry host tests, 10 are marked no decision, and 1 of the 27 "none" rows is a decision left (320).
 
 | # | Where | What it decides | State it reads | Cheapest rig cell | s | radios/boards | Host test |
 |---|---|---|---|---|---|---|---|
-| 249 | `leviculum-nrf/src/bin/t114.rs:144` | persistent-log replay drops the leading partial line (also rak4631.rs:164, solarnode.rs:171) | snapshot bytes | `boot_smoke_t114` | 300 | 1/1 || `leviculum_boot_trace::tail::tests::the_leading_partial_line_is_dropped`<br>`leviculum_boot_trace::tail::tests::a_last_line_without_its_end_is_kept`<br>`leviculum_boot_trace::tail::tests::a_snapshot_that_is_one_line_is_kept`<br>`leviculum_boot_trace::tail::tests::empty_lines_and_line_ends_are_not_replayed`<br>`leviculum_boot_trace::tail::tests::bytes_that_are_not_utf8_are_named` |
-| 250 | `leviculum-nrf/src/bin/t114.rs:185` | node build: transport on, max_links, 8 queued announces, 8 random blobs, probes answered (all three bins) | constants, heap_census | `boot_smoke_t114` | 300 | 1/1 |  |
-| 251 | `leviculum-nrf/src/bin/t114.rs:228` | use the flash identity or generate a new one (all three bins) | id_store.load() | `boot_smoke_t114` | 300 | 1/1 |  |
-| 252 | `leviculum-nrf/src/bin/t114.rs:260` | mgmt RUNNING flag means the destination was derived (all three bins) | remote_mgmt_dest_hash | `lnode_remote_status` | 900 | 2/1 |  |
-| 253 | `leviculum-nrf/src/bin/t114.rs:271` | persist a generated identity, save result ignored (all three bins) | identity_loaded | `reset_loop_quiet` | 300 | 1/1 |  |
-| 254 | `leviculum-nrf/src/bin/t114.rs:278` | interface config: MTU 564/508/564, Gateway mode on all three | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 255 | `leviculum-nrf/src/bin/solarnode.rs:397` | probe and mount QSPI only where the board declares a part | CONFIG.qspi_part | `boot_smoke_t114` | 300 | 1/1 |  |
-| 256 | `leviculum-nrf/src/bin/t114.rs:378` | radio profile: persisted config, else eu_medium (all three bins) | flash page | `reset_loop_quiet` | 300 | 1/1 |  |
-| 257 | `leviculum-nrf/src/bin/t114.rs:403` | spawn the LoRa task or hold the radio down (all three bins) | media.lora_enabled | `boot_smoke_t114` | 300 | 1/1 |  |
-| 258 | `leviculum-nrf/src/bin/t114.rs:431` | BLE on or off at init (all three bins) | media.ble_enabled | `boot_smoke_t114` | 300 | 1/1 |  |
-| 259 | `leviculum-nrf/src/bin/t114.rs:590` | no IFAC on any interface (all three bins) | - | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 260 | `leviculum-nrf/src/bin/t114.rs:621` | PN role on or off, spawn the miner (all three bins) | pn::Engine::new | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 261 | `leviculum-nrf/src/bin/t114.rs:633` | a telemetry reporter exists only if the delivery destination registered (all three bins) | delivery_hash | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 262 | `leviculum-nrf/src/bin/t114.rs:644` | restore the persisted telemetry target at boot (all three bins) | flash | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 263 | `leviculum-nrf/src/bin/t114.rs:667` | restore the persisted fixed position at boot (all three bins) | flash | none | - | - || no decision: glue, a stored record handed to the reporter; its decode is `leviculum_core::fixed_position_store::decode_fixed_position` and what the pin does is `location_source`, both host-tested |
-| 264 | `leviculum-nrf/src/bin/t114.rs:668` | GNSS time seeding off when the watch receiver is unavailable (all three bins) | GNSS_FIX.receiver() | `boot_smoke_t114` | 300 | 1/1 |  |
-| 265 | `leviculum-nrf/src/bin/t114.rs:755` | main-loop wake: earliest of node, stats, census, PN deadlines (all three bins) | deadlines | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 266 | `leviculum-nrf/src/bin/t114.rs:797` | arm the 5 s telemetry tick only while a target is set (all three bins) | reporter | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 267 | `leviculum-nrf/src/bin/t114.rs:840` | mirror interface online state into routing (all three bins) | is_online() | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 268 | `leviculum-nrf/src/bin/t114.rs:847` | mirror the BLE peer count into routing (all three bins) | peer_count | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 269 | `leviculum-nrf/src/bin/t114.rs:889` | GNSS seed accepted marks seeded and sets the time source, else refuses (all three bins) | node | none | - | - || `leviculum_gnss_time::tests::a_refused_seed_leaves_the_gate_open_and_an_accepted_one_closes_it`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_on_an_unseeded_board_offers_the_gate_nothing` |
-| 270 | `leviculum-nrf/src/bin/t114.rs:885` | host wall time: ack or REFUSE_VALUE, answer dropped when the channel is full (all three bins) | node, serial_ctl_tx | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 271 | `leviculum-nrf/src/bin/t114.rs:914` | host telemetry target applied, dropped silently without a reporter (all three bins) | reporter | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 272 | `leviculum-nrf/src/bin/t114.rs:943` | host fixed position applied, dropped silently without a reporter (all three bins) | reporter | none | - | - || no decision: early return, a board without a reporter has no telemetry role this boot (row 261); the host was answered by the serial task with `fixed_position_answer` |
-| 273 | `leviculum-nrf/src/bin/t114.rs:970` | host announce: run the PN announce if the role exists and produced actions (all three bins) | pn_engine | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 274 | `leviculum-nrf/src/bin/t114.rs:990` | host announce answer: UNSUPPORTED without delivery, NO_CLOCK, ack, or BUSY (all three bins) | delivery_hash, wall clock | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 275 | `leviculum-nrf/src/bin/t114.rs:1042` | an ack overrides the refusal when the PN announce went out (all three bins) | pn_announced | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 249 | `leviculum-nrf/src/bin/t114.rs:144` | persistent-log replay drops the leading partial line of a tail that went round, keeps every line of one that did not (also rak4631.rs:164, solarnode.rs:171) | snapshot bytes | `boot_smoke_t114` | 300 | 1/1 || `leviculum_boot_trace::tail::tests::the_leading_partial_line_of_a_tail_that_went_round_is_dropped`<br>`leviculum_boot_trace::tail::tests::a_tail_that_did_not_go_round_keeps_its_first_line`<br>`leviculum_boot_trace::tail::tests::a_ring_filled_to_its_last_byte_did_not_go_round`<br>`leviculum_boot_trace::tail::tests::a_last_line_without_its_end_is_kept`<br>`leviculum_boot_trace::tail::tests::a_snapshot_that_is_one_line_is_kept`<br>`leviculum_boot_trace::tail::tests::empty_lines_and_line_ends_are_not_replayed`<br>`leviculum_boot_trace::tail::tests::bytes_that_are_not_utf8_are_named` |
+| 250 | `leviculum-nrf/src/bin/t114.rs:187` | node build: transport on, max_links, 8 queued announces, 8 random blobs, probes answered (all three bins) | constants, heap_census | `boot_smoke_t114` | 300 | 1/1 |  |
+| 251 | `leviculum-nrf/src/bin/t114.rs:230` | use the flash identity or generate a new one (all three bins) | id_store.load() | `boot_smoke_t114` | 300 | 1/1 |  |
+| 252 | `leviculum-nrf/src/bin/t114.rs:262` | mgmt RUNNING flag means the destination was derived (all three bins) | remote_mgmt_dest_hash | `lnode_remote_status` | 900 | 2/1 |  |
+| 253 | `leviculum-nrf/src/bin/t114.rs:273` | persist a generated identity, save result ignored (all three bins) | identity_loaded | `reset_loop_quiet` | 300 | 1/1 |  |
+| 254 | `leviculum-nrf/src/bin/t114.rs:280` | interface config: MTU 564/508/564, Gateway mode on all three | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 255 | `leviculum-nrf/src/bin/solarnode.rs:399` | probe and mount QSPI only where the board declares a part | CONFIG.qspi_part | `boot_smoke_t114` | 300 | 1/1 |  |
+| 256 | `leviculum-nrf/src/bin/t114.rs:380` | radio profile: persisted config, else eu_medium (all three bins) | flash page | `reset_loop_quiet` | 300 | 1/1 |  |
+| 257 | `leviculum-nrf/src/bin/t114.rs:405` | spawn the LoRa task or hold the radio down (all three bins) | media.lora_enabled | `boot_smoke_t114` | 300 | 1/1 |  |
+| 258 | `leviculum-nrf/src/bin/t114.rs:433` | BLE on or off at init (all three bins) | media.ble_enabled | `boot_smoke_t114` | 300 | 1/1 |  |
+| 259 | `leviculum-nrf/src/bin/t114.rs:592` | no IFAC on any interface (all three bins) | - | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 260 | `leviculum-nrf/src/bin/t114.rs:623` | PN role on or off, spawn the miner (all three bins) | pn::Engine::new | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 261 | `leviculum-nrf/src/bin/t114.rs:635` | a telemetry reporter exists only if the delivery destination registered (all three bins) | delivery_hash | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 262 | `leviculum-nrf/src/bin/t114.rs:646` | restore the persisted telemetry target at boot (all three bins) | flash | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 263 | `leviculum-nrf/src/bin/t114.rs:669` | restore the persisted fixed position at boot (all three bins) | flash | none | - | - || no decision: glue, a stored record handed to the reporter; its decode is `leviculum_core::fixed_position_store::decode_fixed_position` and what the pin does is `location_source`, both host-tested |
+| 264 | `leviculum-nrf/src/bin/t114.rs:670` | GNSS time seeding off when the watch receiver is unavailable (all three bins) | GNSS_FIX.receiver() | `boot_smoke_t114` | 300 | 1/1 |  |
+| 265 | `leviculum-nrf/src/bin/t114.rs:757` | main-loop wake: earliest of node, stats, census, PN deadlines (all three bins) | deadlines | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 266 | `leviculum-nrf/src/bin/t114.rs:799` | arm the 5 s telemetry tick only while a target is set (all three bins) | reporter | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 267 | `leviculum-nrf/src/bin/t114.rs:842` | mirror interface online state into routing (all three bins) | is_online() | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 268 | `leviculum-nrf/src/bin/t114.rs:849` | mirror the BLE peer count into routing (all three bins) | peer_count | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 269 | `leviculum-nrf/src/bin/t114.rs:891` | GNSS seed accepted marks seeded and sets the time source, else refuses (all three bins) | node | none | - | - || `leviculum_gnss_time::tests::a_refused_seed_leaves_the_gate_open_and_an_accepted_one_closes_it`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_on_an_unseeded_board_offers_the_gate_nothing` |
+| 270 | `leviculum-nrf/src/bin/t114.rs:887` | host wall time: ack or REFUSE_VALUE, answer dropped when the channel is full (all three bins) | node, serial_ctl_tx | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 271 | `leviculum-nrf/src/bin/t114.rs:916` | host telemetry target applied, dropped silently without a reporter (all three bins) | reporter | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 272 | `leviculum-nrf/src/bin/t114.rs:945` | host fixed position applied, dropped silently without a reporter (all three bins) | reporter | none | - | - || no decision: early return, a board without a reporter has no telemetry role this boot (row 261); the host was answered by the serial task with `fixed_position_answer` |
+| 273 | `leviculum-nrf/src/bin/t114.rs:972` | host announce: run the PN announce if the role exists and produced actions (all three bins) | pn_engine | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 274 | `leviculum-nrf/src/bin/t114.rs:992` | host announce answer: UNSUPPORTED without delivery, NO_CLOCK, ack, or BUSY (all three bins) | delivery_hash, wall clock | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
+| 275 | `leviculum-nrf/src/bin/t114.rs:1044` | an ack overrides the refusal when the PN announce went out (all three bins) | pn_announced | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
 | 276 | `leviculum-nrf/src/bin/t114.rs:1128` | LoRa RX dropped while LoRa is off at runtime, PN step skipped too (all three bins) | media STATE | none | - | - || no decision: glue, a `continue` on `MediaState::lora_active`, host-tested in `leviculum-media-state` |
-| 277 | `leviculum-nrf/src/bin/t114.rs:1145` | attribute BLE RX to the peer the handshake named (all three bins) | peer | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 278 | `leviculum-nrf/src/bin/t114.rs:1204` | BLE peer up: PN announce to the phone if the role exists (all three bins) | pn_engine | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 279 | `leviculum-nrf/src/bin/t114.rs:715` | answer `/status` from the PN step on any carrier (all three bins) | events | `lnode_remote_status` | 900 | 2/1 |  |
-| 280 | `leviculum-nrf/src/bin/t114.rs:1286` | readings: unix time only with a plausible wall clock (all three bins) | node | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 281 | `leviculum-nrf/src/bin/t114.rs:1317` | readings: GNSS fields copied whenever a fix value exists (all three bins) | GNSS_FIX | none | - | - || no decision: glue, a copy of the snapshot whose fields `GnssFix::fold_rmc` and `fold_gga` decide (rows 340, 341) |
+| 277 | `leviculum-nrf/src/bin/t114.rs:1147` | attribute BLE RX to the peer the handshake named (all three bins) | peer | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 278 | `leviculum-nrf/src/bin/t114.rs:1206` | BLE peer up: PN announce to the phone if the role exists (all three bins) | pn_engine | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 279 | `leviculum-nrf/src/bin/t114.rs:717` | answer `/status` from the PN step on any carrier (all three bins) | events | `lnode_remote_status` | 900 | 2/1 |  |
+| 280 | `leviculum-nrf/src/bin/t114.rs:1288` | readings: unix time only with a plausible wall clock (all three bins) | node | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 281 | `leviculum-nrf/src/bin/t114.rs:1319` | readings: GNSS fields copied whenever a fix value exists (all three bins) | GNSS_FIX | none | - | - || no decision: glue, a copy of the snapshot whose fields `GnssFix::fold_rmc` and `fold_gga` decide (rows 340, 341) |
 | 282 | `leviculum-nrf/src/bin/t114.rs:1325` | readings: has_fix iff presence is Fix (all three bins) | GNSS_PRESENCE | none | - | - || no decision: glue, the presence state is `leviculum_gnss_presence::PresenceMachine`'s, host-tested |
-| 283 | `leviculum-nrf/src/bin/t114.rs:1320` | readings: battery percent only once classified (all three bins) | BATTERY_STATE | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 283 | `leviculum-nrf/src/bin/t114.rs:1322` | readings: battery percent only once classified (all three bins) | BATTERY_STATE | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
 | 284 | `leviculum-nrf/src/interface.rs:46` | the serial interface is always online | - | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 285 | `leviculum-nrf/src/interface.rs:45` | a full outgoing channel drops the frame with BufferFull; TX bytes only on accept | channel | none | - | - | `leviculum_usb_policy` `tests/seam.rs`: `a_queued_packet_counts_its_unframed_bytes`<br>`the_packet_past_a_full_queue_is_dropped_uncounted` |
+| 285 | `leviculum-nrf/src/interface.rs:45` | a full outgoing channel drops the frame with BufferFull; TX bytes counted by the writer once the frame reached the host (`tx_counted`, `usb.rs`) | channel | none | - | - | `leviculum_usb_policy` `tests/seam.rs`: `a_written_packet_counts_its_unframed_bytes`<br>`the_packet_past_a_full_queue_is_dropped_uncounted`<br>`a_packet_the_writer_drops_unread_is_not_counted` |
 | 286 | `leviculum-nrf/src/remote_status.rs:61` | only RequestReceived events are considered | events | `lnode_remote_status` | 900 | 2/1 |  |
 | 287 | `leviculum-nrf/src/remote_status.rs:72` | answer only `/status` at our mgmt destination | path, mgmt dest | `lnode_remote_status` | 900 | 2/1 |  |
 | 288 | `leviculum-nrf/src/remote_status.rs:103` | LoRa bitrate only while the radio runs | running_config | `lnode_remote_status` | 900 | 2/1 |  |
@@ -999,7 +1035,7 @@ own issue, not a finding of this page.
 | 303 | `leviculum-nrf/src/usb.rs:445` | reset even if the plan did not | - | `reset_loop_quiet` | 300 | 1/1 |  |
 | 304 | `leviculum-nrf/src/usb.rs:473` | never write with DTR down; abandon on DTR drop; retry on control change | DTR | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
 | 305 | `leviculum-nrf/src/usb.rs:503` | ZLP when the framed length is a multiple of 64 (twin at 1352) | len | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 306 | `leviculum-nrf/src/usb.rs:556` | invalid radio config answers Invalid | wire | none | - | - || decision left: `RadioConfig::from_wire_config` refuses a bandwidth with no SX1262 register code, which `parse_radio_config` admits; the answer is `envelope::radio_config_answer`, host-tested |
+| 306 | `leviculum-nrf/src/usb.rs:556` | invalid radio config answers Invalid | wire | none | - | - || `leviculum_core::sx126x::tests::a_bandwidth_the_wire_admits_without_a_code_is_refused`<br>`leviculum_core::sx126x::tests::every_sx1262_bandwidth_has_a_code_that_round_trips` (`bandwidth_code`, which `RadioConfig::from_wire_config` asks; the answer is `envelope::radio_config_answer`, host-tested) |
 | 307 | `leviculum-nrf/src/usb.rs:560` | LoRa not booted: persist only, Stored or StoreFailed | lora_booted, flash ack | none | - | - || `leviculum_usb_policy` `tests/seam.rs`: `a_boot_without_lora_takes_the_config_to_the_page_not_the_channel`<br>`a_lora_off_boot_whose_page_write_lands_answers_not_running`<br>`a_lora_off_boot_whose_page_write_is_lost_answers_not_persisted` |
 | 308 | `leviculum-nrf/src/usb.rs:588` | channel full: the same config waits for apply; a different one gets one grace send, else Undeliverable | channel, pending_config | none | - | - || `leviculum_usb_policy` `tests/seam.rs`: `a_retry_of_the_queued_config_waits_for_its_apply_while_the_task_stalls`<br>`a_different_config_behind_a_stalled_task_gets_one_grace_send`<br>`a_full_slot_with_no_published_config_gets_the_grace_send` |
 | 309 | `leviculum-nrf/src/usb.rs:624` | note delivery and request the save only if this call delivered | delivered_here | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
@@ -1035,17 +1071,17 @@ own issue, not a finding of this page.
 
 ### Stores, sensors, display and boot plumbing (the remaining modules)
 
-74 decisions no host test reached on 2026-10-10; 24 more were already a call into a host-built crate and are not listed. Since the ninth wave 16 of the 74 carry host tests, 13 of the 27 "none" rows are marked no decision or rig-only by nature, and 2 are decisions left (369, 374).
+74 decisions no host test reached on 2026-10-10; 24 more were already a call into a host-built crate and are not listed. Since the ninth wave 18 of the 74 carry host tests, 13 of the 27 "none" rows are marked no decision or rig-only by nature, and none is a decision left.
 
 | # | Where | What it decides | State it reads | Cheapest rig cell | s | radios/boards | Host test |
 |---|---|---|---|---|---|---|---|
-| 339 | `leviculum-nrf/src/gnss.rs:154` | which init sequencer runs: UBX on ZOE-M8Q, `$PCAS` on L76K | wiring.module | `boot_smoke_t114` | 300 | 1/1 |  |
-| 340 | `leviculum-nrf/src/gnss.rs:255` | RMC fold: valid sets lat/lon/time/speed/bearing, invalid clears only unix_secs | rmc, latest | none | - | - || `leviculum_gnss_time::fix::tests::a_valid_rmc_sets_position_time_and_movement`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_clears_the_time_and_keeps_the_position`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_on_an_unseeded_board_offers_the_gate_nothing` |
-| 341 | `leviculum-nrf/src/gnss.rs:277` | GGA fold: valid is quality != NoFix; position, altitude, HDOP only on a fix | gga, latest | none | - | - || `leviculum_gnss_time::fix::tests::a_gga_with_a_fix_sets_position_altitude_and_hdop`<br>`leviculum_gnss_time::fix::tests::a_gga_without_a_fix_counts_satellites_and_keeps_the_rest` |
-| 342 | `leviculum-nrf/src/gnss.rs:273` | hold the receiver power enable high, where the board has one | wiring.power_enable | `boot_smoke_t114` | 300 | 1/1 |  |
-| 343 | `leviculum-nrf/src/gnss.rs:284` | hold the standby pin high | wiring.standby | `boot_smoke_t114` | 300 | 1/1 |  |
-| 344 | `leviculum-nrf/src/gnss.rs:396` | rebuild the UART only for a different baud | pending_baud, configured_baud | `boot_smoke_t114` | 300 | 1/1 |  |
-| 345 | `leviculum-nrf/src/gnss.rs:408` | init frames after the baud decision, at most 4 staged per loop, extras dropped | locked, sentences_seen | `boot_smoke_t114` | 300 | 1/1 |  |
+| 339 | `leviculum-nrf/src/gnss.rs:155` | which init sequencer runs: UBX on ZOE-M8Q, `$PCAS` on L76K | wiring.module | `boot_smoke_t114` | 300 | 1/1 |  |
+| 340 | `leviculum-nrf/src/gnss.rs:256` | RMC fold: valid sets lat/lon/time/speed/bearing, invalid clears only unix_secs | rmc, latest | none | - | - || `leviculum_gnss_time::fix::tests::a_valid_rmc_sets_position_time_and_movement`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_clears_the_time_and_keeps_the_position`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_on_an_unseeded_board_offers_the_gate_nothing` |
+| 341 | `leviculum-nrf/src/gnss.rs:277` | GGA fold: valid is quality != NoFix; position, altitude, HDOP only on a fix | gga, latest | none | - | - || `leviculum_gnss_time::fix::tests::a_gga_with_a_fix_sets_position_altitude_and_hdop`<br>`leviculum_gnss_time::fix::tests::a_gga_without_a_fix_counts_satellites_and_keeps_the_rest`<br>`leviculum_gnss_time::fix::tests::a_gga_searching_for_a_fix_publishes_its_satellite_count` |
+| 342 | `leviculum-nrf/src/gnss.rs:274` | hold the receiver power enable high, where the board has one | wiring.power_enable | `boot_smoke_t114` | 300 | 1/1 |  |
+| 343 | `leviculum-nrf/src/gnss.rs:285` | hold the standby pin high | wiring.standby | `boot_smoke_t114` | 300 | 1/1 |  |
+| 344 | `leviculum-nrf/src/gnss.rs:397` | rebuild the UART only for a different baud | pending_baud, configured_baud | `boot_smoke_t114` | 300 | 1/1 |  |
+| 345 | `leviculum-nrf/src/gnss.rs:409` | init frames after the baud decision, at most 4 staged per loop, extras dropped | locked, sentences_seen | `boot_smoke_t114` | 300 | 1/1 |  |
 | 346 | `leviculum-nrf/src/battery.rs:234` | power the divider only while sampling, 10 ms settle | divider_enable | `boot_smoke_t114` | 300 | 1/1 |  |
 | 347 | `leviculum-nrf/src/battery.rs:393` | publish BATTERY_STATE every 5th sample | samples | `boot_smoke_t114` | 300 | 1/1 |  |
 | 348 | `leviculum-nrf/src/battery.rs:396` | 30 s report, then reseed the window with the closing sample | samples | `boot_smoke_t114` | 300 | 1/1 |  |
@@ -1068,22 +1104,22 @@ own issue, not a finding of this page.
 | 365 | `leviculum-nrf/src/radio_store.rs:168` | ack Durable or Lost to the waiting host | written | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
 | 366 | `leviculum-nrf/src/boot_count.rs:123` | did the retained record survive | boot.prev | `reset_loop_quiet` | 300 | 1/1 |  |
 | 367 | `leviculum-nrf/src/boot_count.rs:138` | erase the page first when the plan says so, then write | plan | `reset_loop_quiet` | 300 | 1/1 |  |
-| 368 | `leviculum-nrf/src/button.rs:68` | no display state yet means the display is on | DISPLAY_ON_REQ | none | - | - || no decision: glue, the seed of row 369's state |
-| 369 | `leviculum-nrf/src/button.rs:70` | display power: on and any press is off; off and 2 s or more is on; shorter ignored | press duration, state | none | - | - || decision left: the button's display toggle, a local UI no field fault reaches |
+| 368 | `leviculum-nrf/src/button.rs:65` | no display state yet means the display is on | DISPLAY_ON_REQ | none | - | - || no decision: glue, the seed of row 369's state |
+| 369 | `leviculum-nrf/src/button.rs:70` | display power: on and any press is off; off and 2 s or more is on; shorter ignored | press duration, state | none | - | - || `leviculum_screen::power::tests::any_press_turns_a_lit_display_off`<br>`leviculum_screen::power::tests::a_dark_display_wakes_only_on_a_long_press` |
 | 370 | `leviculum-nrf/src/display.rs:66` | OLED chip from a stabilised status read: SH1106 or SSD1306 | I2C reads | `boot_smoke_t114` | 300 | 1/1 |  |
 | 371 | `leviculum-nrf/src/display.rs:90` | first ACKing address wins; unclassifiable means SSD1306 | probe results | `boot_smoke_t114` | 300 | 1/1 |  |
 | 372 | `leviculum-nrf/src/display.rs:142` | which driver runs: SSD1306 init, SH1106 or none ends the task | detected kind | `boot_smoke_t114` | 300 | 1/1 |  |
 | 373 | `leviculum-nrf/src/display.rs:201` | seed display power on | - | `boot_smoke_t114` | 300 | 1/1 |  |
-| 374 | `leviculum-nrf/src/display.rs:220` | apply only a changed power request; an error keeps the old state | request, display_on | none | - | - || decision left: the display applies only a changed power request and keeps its state on an I2C error; a local UI |
-| 375 | `leviculum-nrf/src/display.rs:240` | no frame work while the display is off | display_on | none | - | - || no decision: early return while the display is off |
+| 374 | `leviculum-nrf/src/display.rs:220` | apply only a changed power request; an error keeps the old state | request, display_on | none | - | - || `leviculum_screen::power::tests::an_unchanged_request_does_not_command_the_panel`<br>`leviculum_screen::power::tests::a_changed_request_follows_the_panel_write`<br>`leviculum_screen::power::tests::a_failed_panel_write_keeps_the_old_state` |
+| 375 | `leviculum-nrf/src/display.rs:241` | no frame work while the display is off | display_on | none | - | - || no decision: early return while the display is off |
 | 376 | `leviculum-nrf/src/events.rs:76` | the first announce from a new neighbour is forwarded to the immediate-announce trigger | NodeEvent | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 377 | `leviculum-nrf/src/media.rs:144` | no flash profile means both carriers on | page | `boot_smoke_t114` | 300 | 1/1 |  |
 | 378 | `leviculum-nrf/src/media.rs:222` | runtime apply: store state, wake BLE, then queue the save | profile | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
 | 379 | `leviculum-nrf/src/name.rs:170` | an undecodable boot name is empty | BOOT_GAP | none | - | - || no decision: glue, `NodeName::decode` falling back to the empty name, which `boot_gap_name` documents as "no BLE name on the air" |
 | 380 | `leviculum-nrf/src/name.rs:217` | runtime set or clear, then persist | name | none | - | - || no decision: glue, a store and a save request; the answer is `envelope::node_name_answer`, host-tested |
 | 381 | `leviculum-nrf/src/transport_stats.rs:113` | stats due: re-arm from now (no catch-up), close the speed windows, emit | next, now | `lnode_remote_status` | 900 | 2/1 |  |
-| 382 | `leviculum-nrf/src/iface_bytes.rs:168` | a window under 1 s keeps the previous speed | at_ms, now | `lnode_remote_status` | 900 | 2/1 |  |
-| 383 | `leviculum-nrf/src/iface_bytes.rs:194` | an out-of-range interface index is ignored (also :182) | iface | none | - | - || no decision: unreachable guard, every caller passes one of the three registered interface indices |
+| 382 | `leviculum-nrf/src/iface_bytes.rs:171` | a window under 1 s keeps the previous speed | at_ms, now | `lnode_remote_status` | 900 | 2/1 |  |
+| 383 | `leviculum-nrf/src/iface_bytes.rs:197` | an out-of-range interface index is ignored (also :182) | iface | none | - | - || no decision: unreachable guard, every caller passes one of the three registered interface indices |
 | 384 | `leviculum-nrf/src/identity.rs:117` | hashes not published yet answer None (REFUSE_BUSY) | HASHES | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
 | 385 | `leviculum-nrf/src/identity.rs:62` | whether a PN hash exists (sizes the announce budget) | PN_HASH | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
 | 386 | `leviculum-nrf/src/flash.rs:39` | an identity that does not encode returns Ok with nothing written | identity | none | - | - || no decision: unreachable, the board saves only an identity it generated or loaded with its private key, and `encode_identity` fails only without one |
@@ -1100,12 +1136,12 @@ own issue, not a finding of this page.
 | 397 | `leviculum-nrf/src/heap_census.rs:272` | largest allocatable block by binary search (feeds the live serve cap) | allocator | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
 | 398 | `leviculum-nrf/src/heap_census.rs:126` | census due or requested by debug byte `c` | next, REQUESTED | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
 | 399 | `leviculum-nrf/src/log.rs:169` | drop gated lines until DTR or 30 s and count them | RUNTIME_DRAIN_OPEN | `boot_smoke_t114` | 300 | 1/1 |  |
-| 400 | `leviculum-nrf/src/log.rs:365` | the same gate for tracing events | RUNTIME_DRAIN_OPEN | `boot_smoke_t114` | 300 | 1/1 |  |
-| 401 | `leviculum-nrf/src/log.rs:348` | tracing level filter at DEBUG | metadata | `boot_smoke_t114` | 300 | 1/1 |  |
+| 400 | `leviculum-nrf/src/log.rs:372` | the same gate for tracing events | RUNTIME_DRAIN_OPEN | `boot_smoke_t114` | 300 | 1/1 |  |
+| 401 | `leviculum-nrf/src/log.rs:355` | tracing level filter at DEBUG | metadata | `boot_smoke_t114` | 300 | 1/1 |  |
 | 402 | `leviculum-nrf/src/log.rs:99` | ring full overwrites the oldest bytes | wp, rp | none | - | - || `leviculum_boot_trace::tail::tests::a_writer_that_laps_the_reader_moves_it_to_the_oldest_byte`<br>`leviculum_boot_trace::tail::tests::the_lap_is_found_across_the_counters_wrap` |
 | 403 | `leviculum-nrf/src/log.rs:277` | a foreign tail magic zeroes and re-arms the persistent tail | retained magic | `reset_loop_quiet` | 300 | 1/1 || `leviculum_boot_trace::tail::tests::power_on_ram_and_a_foreign_magic_rearm_the_tail` |
-| 404 | `leviculum-nrf/src/log.rs:313` | replay last boot's tail only with a valid magic, wrap handled, magic cleared | retained RAM | `reset_loop_quiet` | 300 | 1/1 || `leviculum_boot_trace::tail::tests::without_the_magic_nothing_is_replayed`<br>`leviculum_boot_trace::tail::tests::a_tail_that_did_not_go_round_is_replayed_from_the_start`<br>`leviculum_boot_trace::tail::tests::a_tail_that_went_round_keeps_its_last_ring_of_bytes`<br>`leviculum_boot_trace::tail::tests::a_torn_write_position_still_reads_inside_the_ring` |
-| 405 | `leviculum-nrf/src/log.rs:333` | open the gate once and report the dropped count | swap | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 404 | `leviculum-nrf/src/log.rs:316` | replay last boot's tail only with a valid magic, wrap handled, magic cleared | retained RAM | `reset_loop_quiet` | 300 | 1/1 || `leviculum_boot_trace::tail::tests::without_the_magic_nothing_is_replayed`<br>`leviculum_boot_trace::tail::tests::a_tail_that_did_not_go_round_is_replayed_from_the_start`<br>`leviculum_boot_trace::tail::tests::a_tail_that_went_round_keeps_its_last_ring_of_bytes`<br>`leviculum_boot_trace::tail::tests::a_torn_write_position_still_reads_inside_the_ring` |
+| 405 | `leviculum-nrf/src/log.rs:340` | open the gate once and report the dropped count | swap | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
 | 406 | `leviculum-nrf/src/rng.rs:130` | an empty request returns | dest | `boot_smoke_t114` | 300 | 1/1 |  |
 | 407 | `leviculum-nrf/src/rng.rs:142` | a successful SoftDevice call supplies the bytes | return code | `boot_smoke_t114` | 300 | 1/1 |  |
 | 408 | `leviculum-nrf/src/rng.rs:104` | take min(available, wanted); a lost race polls again | avail | `boot_smoke_t114` | 300 | 1/1 |  |

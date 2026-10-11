@@ -42,7 +42,7 @@ constraint on peripheral handling, not a hope:
   when nothing answers, the task logs and exits
   (`DetectedKind::None`, `leviculum-nrf/src/display.rs:161-167`).
 - **Fail into the harmless state.** The user button is configured
-  `Pull::Up` (`leviculum-nrf/src/button.rs:37`), so an absent button
+  `Pull::Up` (`leviculum-nrf/src/button.rs:34`), so an absent button
   reads as not pressed rather than as noise.
 - **Park rather than spin.** The GNSS task awaits a UART that simply
   stays silent when no receiver is fitted.
@@ -170,8 +170,8 @@ drive them, and being liftable is the same property as being portable:
 - `rx-arming` reaches a radio only through two traits, `RxPort`
   (`leviculum-nrf/rx-arming/src/lib.rs:167`) and `RxWindowProbe`
   (`leviculum-nrf/rx-arming/src/lib.rs:706`). The driver implements both,
-  `RxPort` (`leviculum-nrf/src/sx1262.rs:1452`) and `RxWindowProbe`
-  (`leviculum-nrf/src/sx1262.rs:1482`), and a test fake implements
+  `RxPort` (`leviculum-nrf/src/sx1262.rs:1441`) and `RxWindowProbe`
+  (`leviculum-nrf/src/sx1262.rs:1471`), and a test fake implements
   `RxPort` (`leviculum-nrf/rx-arming/src/lib.rs:1868`) beside it. A second
   family writes a third implementation; it does not fork the crate.
 - `channel-access` touches no radio at all. The caller reports what its

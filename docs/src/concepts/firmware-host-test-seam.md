@@ -42,7 +42,7 @@ the vocabulary it is expressed in; the firmware supplies the I/O and the
 clock and does what it is told. `leviculum-rx-arming` is the sharpest
 example already in the tree — it holds the order in which the receive
 path re-arms and hands a frame up, and `src/sx1262.rs` supplies a chip to
-drive (`stand_down_for_rx`, `leviculum-nrf/src/sx1262.rs:967`).
+drive (`stand_down_for_rx`, `leviculum-nrf/src/sx1262.rs:956`).
 
 ## Where the seam runs today
 

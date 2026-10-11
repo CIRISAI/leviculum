@@ -624,6 +624,18 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A board south of the equator or west of Greenwich reports its GNSS
+  position with the right sign (leviculum#447); it was mirrored across the
+  equator or the prime meridian on the display, in the board's announce and
+  in every telemetry location report.
+
+- A board's debug log replays the previous boot's first line again when
+  that boot's log never filled the ring (leviculum#413, refs #234), and a
+  board whose receiver is still searching for a fix reports how many
+  satellites it uses instead of the count from its last fix. The
+  serial interface's TX byte counter no longer counts packets the board
+  dropped because the host closed the port before reading them.
+
 - A board propagation node answers large offers without running out of heap
   (leviculum#388). When a peer wanted messages, the board read every wanted
   body, encoded them into one envelope and cut the transfer from it, all at
