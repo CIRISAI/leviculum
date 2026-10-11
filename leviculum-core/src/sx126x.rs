@@ -536,6 +536,49 @@ pub fn canonical_bandwidth_hz(bw_hz: u32) -> Option<u32> {
     }
 }
 
+/// The SX1262 register code for a bandwidth in [`BANDWIDTHS_HZ`]
+/// (datasheet Table 14-47), or `None` for any other value, the RNode
+/// spellings [`canonical_bandwidth_hz`] maps included.
+///
+/// `RadioConfig::from_wire_config` (`leviculum-nrf/src/lora.rs`) asks it, and
+/// a config whose bandwidth has no code is answered Invalid
+/// (`leviculum-nrf/src/usb.rs`, leviculum#413 row 306): `parse_radio_config`
+/// checks only the spreading factor and the coding rate, so this is the
+/// board's one refusal of a bandwidth.
+pub const fn bandwidth_code(bw_hz: u32) -> Option<u8> {
+    match bw_hz {
+        7_810 => Some(0x00),
+        10_420 => Some(0x08),
+        15_630 => Some(0x01),
+        20_830 => Some(0x09),
+        31_250 => Some(0x02),
+        41_670 => Some(0x0A),
+        62_500 => Some(0x03),
+        125_000 => Some(0x04),
+        250_000 => Some(0x05),
+        500_000 => Some(0x06),
+        _ => None,
+    }
+}
+
+/// The bandwidth in Hz a [`bandwidth_code`] programs, or 0 for a code the
+/// table does not hold.
+pub const fn bandwidth_hz_of_code(code: u8) -> u32 {
+    match code {
+        0x00 => 7_810,
+        0x08 => 10_420,
+        0x01 => 15_630,
+        0x09 => 20_830,
+        0x02 => 31_250,
+        0x0A => 41_670,
+        0x03 => 62_500,
+        0x04 => 125_000,
+        0x05 => 250_000,
+        0x06 => 500_000,
+        _ => 0,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Transmit power (Codeberg #349)
 // ---------------------------------------------------------------------------
@@ -1647,6 +1690,41 @@ mod tests {
                     "BW{bw} passes validate_config but has no SX1262 register code"
                 );
             }
+        }
+    }
+
+    /// Every bandwidth the part offers has its own register code, and the
+    /// code programs that bandwidth back.
+    #[test]
+    fn every_sx1262_bandwidth_has_a_code_that_round_trips() {
+        let mut seen = [false; 16];
+        for bw in BANDWIDTHS_HZ {
+            let code = bandwidth_code(bw).unwrap_or_else(|| panic!("BW{bw} has no code"));
+            assert!(!seen[code as usize], "code {code:#x} used twice");
+            seen[code as usize] = true;
+            assert_eq!(bandwidth_hz_of_code(code), bw);
+        }
+        assert_eq!(bandwidth_code(125_000), Some(0x04));
+        assert_eq!(bandwidth_code(41_670), Some(0x0A));
+        assert_eq!(bandwidth_hz_of_code(0x07), 0);
+    }
+
+    /// Row 306: the wire parse lets a bandwidth through that the part has no
+    /// code for, and that is the config a board answers Invalid. The RNode
+    /// spellings are among them; only the host canonicalises those.
+    #[test]
+    fn a_bandwidth_the_wire_admits_without_a_code_is_refused() {
+        for bw in [100_000u32, 41_700, 7_800, 0] {
+            let mut payload = [0u8; 13];
+            payload[0..4].copy_from_slice(&869_463_000u32.to_be_bytes());
+            payload[4..8].copy_from_slice(&bw.to_be_bytes());
+            payload[8] = 8;
+            payload[9] = 5;
+            payload[10] = 14;
+            payload[11..13].copy_from_slice(&18u16.to_be_bytes());
+            let wire = crate::rnode::parse_radio_config(&payload)
+                .unwrap_or_else(|| panic!("BW{bw} refused by the wire parse"));
+            assert_eq!(bandwidth_code(wire.bandwidth_hz), None, "BW{bw}");
         }
     }
 

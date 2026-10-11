@@ -569,20 +569,9 @@ impl RadioConfig {
     ///
     /// Returns `None` if the bandwidth has no SX1262 register code.
     pub fn from_wire_config(wire: leviculum_core::rnode::RadioConfigWire) -> Option<Self> {
-        // SX1262 bandwidth register codes (datasheet Table 14-47)
-        let bw = match wire.bandwidth_hz {
-            7_810 => 0x00,
-            10_420 => 0x08,
-            15_630 => 0x01,
-            20_830 => 0x09,
-            31_250 => 0x02,
-            41_670 => 0x0A,
-            62_500 => 0x03,
-            125_000 => 0x04,
-            250_000 => 0x05,
-            500_000 => 0x06,
-            _ => return None,
-        };
+        // SX1262 bandwidth register codes (datasheet Table 14-47); a
+        // bandwidth without one is the config `usb.rs` answers Invalid.
+        let bw = leviculum_core::sx126x::bandwidth_code(wire.bandwidth_hz)?;
 
         // CR denominator (5-8) to SX1262 code (1-4)
         let cr = wire.cr - 4;

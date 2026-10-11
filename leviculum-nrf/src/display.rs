@@ -217,20 +217,21 @@ pub async fn display_task(
         // Honour the latest power-state request from the button task. We
         // only act on actual changes — `try_changed()` returns `Some(_)`
         // exactly once per new value.
+        // An unchanged request is not sent and a failed one keeps the old
+        // state: `leviculum_screen::power::apply_power`.
         if let Some(req) = display_req_rx.try_changed() {
-            if req != display_on {
-                if let Err(e) = display.set_display_on(req) {
-                    crate::log::log_fmt(
-                        "[DISP] ",
-                        format_args!("set_display_on({}) failed: {:?}", req, e),
-                    );
-                } else {
-                    crate::log::log_fmt(
-                        "[DISP] ",
-                        format_args!("display power → {}", if req { "on" } else { "off" }),
-                    );
-                    display_on = req;
-                }
+            match leviculum_screen::power::apply_power(req, &mut display_on, |on| {
+                display.set_display_on(on)
+            }) {
+                None => {}
+                Some(Err(e)) => crate::log::log_fmt(
+                    "[DISP] ",
+                    format_args!("set_display_on({}) failed: {:?}", req, e),
+                ),
+                Some(Ok(())) => crate::log::log_fmt(
+                    "[DISP] ",
+                    format_args!("display power → {}", if req { "on" } else { "off" }),
+                ),
             }
         }
 

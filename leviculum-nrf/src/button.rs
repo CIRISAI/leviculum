@@ -24,12 +24,9 @@
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{AnyPin, Input, Pin, Pull};
 use embassy_nrf::Peri;
-use embassy_time::{Duration, Instant};
+use embassy_time::Instant;
 
 use crate::baseboard::DISPLAY_ON_REQ;
-
-/// Anything below this counts as a short press (display-on gesture).
-const LONG_PRESS_MIN: Duration = Duration::from_millis(2000);
 
 #[embassy_executor::task]
 pub async fn button_task(button_pin: Peri<'static, AnyPin>) {
@@ -67,14 +64,10 @@ pub async fn button_task(button_pin: Peri<'static, AnyPin>) {
         // is on — that's the boot state we expect.
         let currently_on = state_rx.try_get().unwrap_or(true);
 
-        let target = if currently_on {
-            // Display on + any press → off.
-            false
-        } else if duration >= LONG_PRESS_MIN {
-            // Display off + ≥ 2 s → on.
-            true
-        } else {
-            // Display off + < 2 s → ignore (pocket-press protection).
+        // Which presses count: `leviculum_screen::power::press_target`.
+        let Some(target) =
+            leviculum_screen::power::press_target(currently_on, duration.as_millis())
+        else {
             crate::log::log_fmt(
                 "[BTN] ",
                 format_args!(

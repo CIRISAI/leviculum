@@ -17,6 +17,8 @@
 
 #![no_std]
 
+pub mod power;
+
 use core::fmt::Write as _;
 
 use embedded_graphics::{

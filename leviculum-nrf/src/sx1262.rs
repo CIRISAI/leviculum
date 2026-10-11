@@ -227,22 +227,11 @@ enum RxSettle {
 }
 
 /// Convert an SX1262 bandwidth register code back to bandwidth in Hz
-/// (inverse of the table in `RadioConfig::from_wire`, datasheet Table 14-47).
+/// (`leviculum_core::sx126x::bandwidth_hz_of_code`, the inverse of the code
+/// table `RadioConfig::from_wire_config` asks, datasheet Table 14-47).
 /// Returns 0 for an unknown code so callers can treat it as "not configured".
 fn bw_code_to_hz(code: u8) -> u32 {
-    match code {
-        0x00 => 7_810,
-        0x08 => 10_420,
-        0x01 => 15_630,
-        0x09 => 20_830,
-        0x02 => 31_250,
-        0x0A => 41_670,
-        0x03 => 62_500,
-        0x04 => 125_000,
-        0x05 => 250_000,
-        0x06 => 500_000,
-        _ => 0,
-    }
+    leviculum_core::sx126x::bandwidth_hz_of_code(code)
 }
 
 /// SX1262 driver, generic over the SPI device type.
