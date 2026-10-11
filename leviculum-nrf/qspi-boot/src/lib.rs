@@ -117,3 +117,57 @@ pub fn outcome(step_ms: u64, budget_ms: u32) -> Option<Timeout> {
         })
     }
 }
+
+/// The JEDEC answer that reads as nothing on the bus: MISO undriven.
+pub const SILENT: [u8; 3] = [0; 3];
+
+/// Whether the first JEDEC read earns a second one: only a silent answer.
+///
+/// On the Macronix part the release from Deep Power Down is the CS# pulse
+/// rather than the opcode (rev. 1.6 §10-24), and the recovery time runs
+/// from that pulse, so the first read may be the thing that woke the part
+/// and the second the first one it could have answered.
+pub fn wants_second_read(first: [u8; 3]) -> bool {
+    first == SILENT
+}
+
+/// What the boot makes of the part's JEDEC answer (leviculum#413, the
+/// stores section of `docs/src/firmware/host-test-seams.md`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Identified {
+    /// The part named itself as the board declares it: go on to the
+    /// quad-enable step and the mount.
+    Expected,
+    /// Two silent reads: nothing drives MISO at all, a statement about the
+    /// board rather than the part number. The boot asks the bit-banged
+    /// second opinion and mounts nothing.
+    NoAnswer,
+    /// A part answered with another id. No mount: the record log's geometry
+    /// is the declared part's.
+    UnexpectedPart,
+}
+
+impl Identified {
+    /// The `state=` value of the `[QSPI]` part line for a failed identify;
+    /// `Expected` goes on and its line says `ok` once the part is ready.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Expected => "ok",
+            Self::NoAnswer => "no-answer",
+            Self::UnexpectedPart => "unexpected-part",
+        }
+    }
+}
+
+/// Judge the JEDEC answer: the second read when there was one, else the
+/// first, against the id the board declares.
+pub fn identify(first: [u8; 3], second: Option<[u8; 3]>, expected: [u8; 3]) -> Identified {
+    let jedec = second.unwrap_or(first);
+    if jedec == expected {
+        Identified::Expected
+    } else if jedec == SILENT {
+        Identified::NoAnswer
+    } else {
+        Identified::UnexpectedPart
+    }
+}

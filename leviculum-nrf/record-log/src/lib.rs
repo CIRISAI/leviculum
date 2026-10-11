@@ -199,6 +199,8 @@
 #[cfg(any(test, feature = "sim"))]
 extern crate alloc;
 
+pub mod board;
+
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
 

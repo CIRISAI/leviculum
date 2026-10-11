@@ -49,13 +49,27 @@
 //! written only while DTR is up, and the gate opens on the first host or
 //! after [`HEADLESS_DRAIN_OPEN_MS`] without one. [`drain_continues`] bounds a
 //! drain against a host that holds DTR up and does not read.
+//!
+//! # Where a radio config goes
+//!
+//! [`config_route`] sends a host's radio config to the flash page on a boot
+//! that never started LoRa and to the LoRa task's channel otherwise;
+//! [`stored_answer`] is the page route's answer. [`full_slot`] says what a
+//! config does when the channel's one slot is taken: a repeat of the queued
+//! config waits for that apply, a different one gets one grace send.
+//!
+//! # The debug port's commands
+//!
+//! [`debug_commands`] says which of the three one-byte commands a packet
+//! read on the debug port carries: `p` the post-mortem query, `s` the stack
+//! watermark reset, `c` the heap census.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 use leviculum_core::envelope::{encode_duty_hold, DutyHoldWire};
 use leviculum_core::rnode::{
-    airtime_ms_with_preamble, derive_preamble_symbols, MAX_SINGLE_PAYLOAD,
+    airtime_ms_with_preamble, derive_preamble_symbols, RadioConfigWire, MAX_SINGLE_PAYLOAD,
 };
 
 // ---------------------------------------------------------------------------
@@ -609,4 +623,96 @@ pub enum DebugWrite {
 /// bounded wait a wake and no more.
 pub fn drain_continues(write: DebugWrite) -> bool {
     write == DebugWrite::Written
+}
+
+// ---------------------------------------------------------------------------
+// The debug port's commands
+// ---------------------------------------------------------------------------
+
+/// The one-byte commands one packet on the debug port asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DebugCommands {
+    /// `p`: print the panic and HardFault post-mortems.
+    pub postmortem: bool,
+    /// `s`: restart the stack watermark from here.
+    pub stack_reset: bool,
+    /// `c`: print a heap census on the main loop's next wake.
+    pub heap_census: bool,
+}
+
+/// Which commands `packet` carries. Each runs at most once per packet,
+/// wherever and however often its byte appears, and the firmware runs them
+/// in the field order above. Every other byte is ignored, so terminal line
+/// endings, a capital letter and stray input are harmless.
+pub fn debug_commands(packet: &[u8]) -> DebugCommands {
+    DebugCommands {
+        postmortem: packet.contains(&b'p'),
+        stack_reset: packet.contains(&b's'),
+        heap_census: packet.contains(&b'c'),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Where a radio config goes
+// ---------------------------------------------------------------------------
+
+/// Where a radio config a host sent is taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigRoute {
+    /// No LoRa task this boot: the channel has no consumer, a config fed to
+    /// it would wedge its one slot for the rest of the boot, and no apply
+    /// can be confirmed. Persist it and answer once the page write is
+    /// confirmed, because "a reboot comes back on this config" is the whole
+    /// of what this route may claim (#358, #363).
+    Store,
+    /// Hand it to the LoRa task and answer for the apply.
+    Channel,
+}
+
+/// The route for a radio config on a boot that did or did not start LoRa.
+pub fn config_route(lora_booted: bool) -> ConfigRoute {
+    if lora_booted {
+        ConfigRoute::Channel
+    } else {
+        ConfigRoute::Store
+    }
+}
+
+/// The [`ConfigRoute::Store`] answer: stored for the next boot when the page
+/// write is confirmed, refused as not persisted when it was lost.
+pub fn stored_answer(
+    persist: leviculum_core::envelope::Persist,
+) -> leviculum_core::envelope::ConfigDelivery {
+    use leviculum_core::envelope::{ConfigDelivery, Persist};
+    match persist {
+        Persist::Durable => ConfigDelivery::Stored,
+        Persist::Lost => ConfigDelivery::StoreFailed,
+    }
+}
+
+/// What a config does when the LoRa task's one-slot channel is taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullSlot {
+    /// The slot holds this very config: a host's retry of one the LoRa task
+    /// has not consumed yet. Nothing is left to deliver, nothing is owed to
+    /// flash; wait for its apply and answer for what is queued. Refusing it
+    /// as undeliverable spent one of the host's three attempts on a config
+    /// that was on its way, which is how one slow apply became
+    /// `no_ack_after_3` (T114 DEC9947D, 2026-09-23).
+    AlreadyQueued,
+    /// A different config holds the slot: one send bounded by
+    /// [`CONFIG_DELIVER_WITHIN_MS`] for a live LoRa task to drain it. A send
+    /// that times out drops the value, so a refusal never also delivers;
+    /// the refusal is [`leviculum_core::envelope::ConfigDelivery::Undeliverable`].
+    GraceSend,
+}
+
+/// Decide [`FullSlot`] from the config the slot holds (`pending`) and the
+/// one the host sent.
+pub fn full_slot(pending: Option<RadioConfigWire>, sent: RadioConfigWire) -> FullSlot {
+    if pending == Some(sent) {
+        FullSlot::AlreadyQueued
+    } else {
+        FullSlot::GraceSend
+    }
 }

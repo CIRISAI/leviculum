@@ -12,10 +12,15 @@
 //! - [`SeedGate`] is the seed-once policy: one accepted fix seeds the
 //!   calendar and the monotonic clock carries it forward; a refused fix
 //!   leaves the gate open so the next fix retries.
+//! - [`GnssFix`] is the snapshot the GNSS task publishes, and its fold of
+//!   each RMC and GGA ([`fix`]).
 
 #![cfg_attr(not(test), no_std)]
 
 use nmea0183::datetime::DateTime;
+
+pub mod fix;
+pub use fix::GnssFix;
 
 /// Convert an RMC UTC date+time into unix seconds.
 ///
@@ -86,6 +91,17 @@ impl SeedGate {
     /// Close the gate — call only after the seam accepted the value.
     pub fn mark_seeded(&mut self) {
         self.seeded = true;
+    }
+
+    /// Book the seam's answer to an offered candidate and return it: an
+    /// accepted seed closes the gate, a refused one leaves it open for the
+    /// next fix. The board names the outcome as `[TIME_SEED]` or
+    /// `[TIME_SEED_REFUSED]`.
+    pub fn settle(&mut self, accepted: bool) -> bool {
+        if accepted {
+            self.mark_seeded();
+        }
+        accepted
     }
 }
 
@@ -204,6 +220,19 @@ mod tests {
         assert_eq!(gate.offer(Some(1_000)), Some(1_000));
         // The seam refused it — mark_seeded is NOT called.
         assert_eq!(gate.offer(Some(1_790_000_000)), Some(1_790_000_000));
+    }
+
+    // The seam's answer, booked: a refusal (a fix without a real date on an
+    // unseeded board) keeps the gate open, the next accepted fix closes it.
+    #[test]
+    fn a_refused_seed_leaves_the_gate_open_and_an_accepted_one_closes_it() {
+        let mut gate = SeedGate::new();
+        assert!(!gate.settle(false));
+        assert!(!gate.is_seeded());
+        assert_eq!(gate.offer(Some(1_790_000_000)), Some(1_790_000_000));
+        assert!(gate.settle(true));
+        assert!(gate.is_seeded());
+        assert_eq!(gate.offer(Some(1_790_000_060)), None);
     }
 
     // A fix without a time claim offers nothing.

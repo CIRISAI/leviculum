@@ -19,13 +19,15 @@
 //! (same split as `leviculum-log-line`).
 //!
 //! The panic and HardFault post-mortems, the other two records in
-//! `.retained`, have their decisions in [`postmortem`].
+//! `.retained`, have their decisions in [`postmortem`]; the persistent log
+//! tail beside them, and the runtime log ring, in [`tail`].
 
 #![cfg_attr(not(test), no_std)]
 
 use core::fmt;
 
 pub mod postmortem;
+pub mod tail;
 
 /// Record-valid marker. Versioned like [`postmortem::PANIC_RECORD`]: bump it if
 /// [`RawRecord`]'s layout or the [`Phase`] byte assignment ever changes,

@@ -342,9 +342,10 @@ pub enum SaveStep {
     },
 }
 
-/// The store task's retry loop over one page write: up to
+/// The store tasks' retry loop over one page write: up to
 /// [`SAVE_RETRIES`] attempts, [`SAVE_RETRY_MS`] after each failure, the
-/// last one included.
+/// last one included. Both page stores run it, the telemetry page's and the
+/// radio profile's (`leviculum-nrf/src/radio_store.rs`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FlashSave {
     attempts: u8,
@@ -641,6 +642,35 @@ mod tests {
             SaveStep::Failed { gave_up: false, .. }
         ));
         assert_eq!(save.after_attempt(true), SaveStep::Written);
+    }
+
+    /// The radio profile's page runs the same loop. Its numbers are the
+    /// ones it ran inline before it did (three tries, 250 ms after each),
+    /// so a profile a host sent while the radio was busy lands on the third
+    /// try and is acked Durable, and one refused three times is Lost after
+    /// 750 ms.
+    #[test]
+    fn the_radio_page_lands_on_its_third_try_or_is_lost_after_750_ms() {
+        let mut save = FlashSave::new();
+        assert!(matches!(
+            save.after_attempt(false),
+            SaveStep::Failed { gave_up: false, .. }
+        ));
+        assert!(matches!(
+            save.after_attempt(false),
+            SaveStep::Failed { gave_up: false, .. }
+        ));
+        assert_eq!(save.after_attempt(true), SaveStep::Written);
+
+        let mut save = FlashSave::new();
+        let waited: u64 = (0..SAVE_RETRIES)
+            .map(|_| match save.after_attempt(false) {
+                SaveStep::Failed { wait_ms, .. } => wait_ms,
+                SaveStep::Written => 0,
+            })
+            .sum();
+        assert_eq!(waited, 750);
+        assert_eq!(SAVE_RETRIES, 3);
     }
 
     // -- Inbound hand-over -------------------------------------------------

@@ -674,3 +674,132 @@ fn a_write_that_did_not_land_ends_the_drain() {
     assert!(!drain_continues(DebugWrite::Failed));
     assert!(!drain_continues(DebugWrite::TimedOut));
 }
+
+// ---------------------------------------------------------------------------
+// The debug port's commands
+// ---------------------------------------------------------------------------
+
+#[test]
+fn each_command_byte_asks_for_its_command() {
+    let none = DebugCommands::default();
+    assert_eq!(
+        debug_commands(b"p"),
+        DebugCommands {
+            postmortem: true,
+            ..none
+        }
+    );
+    assert_eq!(
+        debug_commands(b"s"),
+        DebugCommands {
+            stack_reset: true,
+            ..none
+        }
+    );
+    assert_eq!(
+        debug_commands(b"c"),
+        DebugCommands {
+            heap_census: true,
+            ..none
+        }
+    );
+}
+
+#[test]
+fn a_terminal_line_runs_each_command_once() {
+    // `echo p > /dev/ttyACM1` and a held key both reach the port as one
+    // packet; the query runs once, not once per byte.
+    let asked = debug_commands(b"ppp\r\n");
+    assert!(asked.postmortem);
+    assert!(!asked.stack_reset && !asked.heap_census);
+    let all = debug_commands(b"c s p\n");
+    assert!(all.postmortem && all.stack_reset && all.heap_census);
+}
+
+#[test]
+fn stray_input_asks_for_nothing() {
+    assert_eq!(debug_commands(b"\r\n"), DebugCommands::default());
+    assert_eq!(debug_commands(b"PSC"), DebugCommands::default());
+    assert_eq!(debug_commands(b""), DebugCommands::default());
+}
+
+// ---------------------------------------------------------------------------
+// Where a radio config goes
+// ---------------------------------------------------------------------------
+
+use leviculum_core::envelope::{
+    radio_config_answer, ConfigDelivery, Persist, REFUSE_BUSY, REFUSE_NOT_RUNNING, REFUSE_PERSIST,
+};
+use leviculum_core::rnode::RadioConfigWire;
+
+/// The rig's default PHY, as lnsd sends it on every connect.
+fn eu_default() -> RadioConfigWire {
+    RadioConfigWire {
+        frequency_hz: 869_463_000,
+        bandwidth_hz: 125_000,
+        sf: 8,
+        cr: 5,
+        tx_power_dbm: 14,
+        preamble_len: 18,
+        csma_enabled: true,
+        radio_silent: false,
+        st_alock: 0,
+        lt_alock: 0,
+        lt_alock_present: false,
+        silence_lease_s: 0,
+    }
+}
+
+/// The refusal reason byte an answer carries, the last byte of the frame.
+fn reason(answer: &[u8]) -> u8 {
+    *answer.last().expect("an answer has bytes")
+}
+
+#[test]
+fn a_boot_without_lora_takes_the_config_to_the_page_not_the_channel() {
+    assert_eq!(config_route(false), ConfigRoute::Store);
+    assert_eq!(config_route(true), ConfigRoute::Channel);
+}
+
+#[test]
+fn a_lora_off_boot_whose_page_write_lands_answers_not_running() {
+    let delivery = stored_answer(Persist::Durable);
+    assert_eq!(delivery, ConfigDelivery::Stored);
+    assert_eq!(reason(&radio_config_answer(delivery)), REFUSE_NOT_RUNNING);
+}
+
+#[test]
+fn a_lora_off_boot_whose_page_write_is_lost_answers_not_persisted() {
+    let delivery = stored_answer(Persist::Lost);
+    assert_eq!(delivery, ConfigDelivery::StoreFailed);
+    assert_eq!(reason(&radio_config_answer(delivery)), REFUSE_PERSIST);
+}
+
+#[test]
+fn a_retry_of_the_queued_config_waits_for_its_apply_while_the_task_stalls() {
+    // The LoRa task has not drained the slot; the host's busy retry is the
+    // same config, and it must not be refused as undeliverable.
+    assert_eq!(
+        full_slot(Some(eu_default()), eu_default()),
+        FullSlot::AlreadyQueued
+    );
+}
+
+#[test]
+fn a_different_config_behind_a_stalled_task_gets_one_grace_send() {
+    let mut wide = eu_default();
+    wide.bandwidth_hz = 250_000;
+    assert_eq!(full_slot(Some(eu_default()), wide), FullSlot::GraceSend);
+    // A grace send that times out is answered busy, so the host retries.
+    assert_eq!(
+        reason(&radio_config_answer(ConfigDelivery::Undeliverable)),
+        REFUSE_BUSY
+    );
+}
+
+#[test]
+fn a_full_slot_with_no_published_config_gets_the_grace_send() {
+    // The slot is full but the LoRa task has not published what it holds
+    // (the boot window before its first config): never treated as a repeat.
+    assert_eq!(full_slot(None, eu_default()), FullSlot::GraceSend);
+}
