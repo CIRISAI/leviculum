@@ -230,7 +230,10 @@ use leviculum_core::transport::{TickOutput, TimeSource};
 use leviculum_core::{
     Destination, DestinationHash, DestinationType, Direction, LinkId, ProofStrategy, RequestError,
 };
-use leviculum_lxmf::active_delivery::{after_failed_push, ActiveCandidate, AfterFailedPush};
+use leviculum_lxmf::active_delivery::{
+    after_failed_push, after_refused_push, remember_too_large, ActiveCandidate, AfterFailedPush,
+    AfterRefusedPush,
+};
 use leviculum_lxmf::constants::{
     STAMP_SIZE, WORKBLOCK_EXPAND_ROUNDS_PEERING, WORKBLOCK_EXPAND_ROUNDS_PN,
 };
@@ -245,6 +248,7 @@ use leviculum_lxmf::propagation::{
     MessageListResponse, PeerError, PropagationNodeAnnounce, TransientId,
 };
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
+use leviculum_lxmf::propagation_node::{get_mailbox, offer_remote, propagation_hash_of};
 use leviculum_lxmf::propagation_store::StoredMessage;
 use leviculum_lxmf::sync_round::{round_deadline_ms, round_step, RoundEvent, RoundStep, RoundView};
 use leviculum_lxmf::{
@@ -252,10 +256,10 @@ use leviculum_lxmf::{
     PropagationNodeConfig, PropagationStore, StampCancel, UploadOutcome, WorkblockStream,
     MESSAGE_GET_PATH,
 };
-use leviculum_pn_store::{FlushOp, PnPeerStore, PnStore, Region};
+use leviculum_pn_store::{settle_message_op, FlushOp, PnPeerStore, PnStore, Region};
 use leviculum_queue_budget::{OwnShare, OwnVerdict, OWN_TRAFFIC_SHARE_PERMILLE};
 use leviculum_record_log::SECTOR_SIZE;
-use leviculum_sync_batch::AfterClose;
+use leviculum_sync_batch::{AfterClose, Arrival};
 use leviculum_upload_proof::UploadProofs;
 use rand_core::CryptoRngCore;
 
@@ -478,15 +482,6 @@ const GRIND_SLICE_ROUNDS: usize = leviculum_settle_budget::GRIND_SLICE_ROUNDS as
 /// arm is already due when the `select` is entered, so every arm is polled
 /// once (the hand-off among them) and the loop comes straight back.
 const GRIND_POLL_MS: u64 = 0;
-
-/// The `lxmf.propagation` destination hash a remote identity owns — who a
-/// link's peer IS in the peer table. The same derivation the peer's own
-/// announce carries, so a remote recognised over a link and a remote heard
-/// on the air are one entry (`LXMRouter.py:2352`).
-fn propagation_hash_of(identity: &Identity) -> [u8; 16] {
-    let name_hash = Destination::compute_name_hash(APP_NAME, &[PROPAGATION_ASPECT]);
-    *Destination::compute_destination_hash(&name_hash, identity.hash()).as_bytes()
-}
 
 // ---------------------------------------------------------------------------
 // Region plumbing
@@ -1055,17 +1050,7 @@ impl Engine {
     /// calendar" — no fixed date can say that any more, because the birth
     /// anchor is itself a plausible-looking value (Codeberg #247).
     fn on_clock_seeded(&mut self, before: u64, now: u64) {
-        if now <= before {
-            return;
-        }
-        let mut refreshed: Vec<[u8; 16]> = Vec::new();
-        for peer in self.peers.iter_mut() {
-            if peer.last_heard <= before {
-                peer.last_heard = now;
-                refreshed.push(peer.destination_hash);
-            }
-        }
-        for destination in refreshed {
+        for destination in self.peers.refresh_after_calendar_jump(before, now) {
             self.persist_peer(&destination);
         }
     }
@@ -1769,8 +1754,12 @@ impl Engine {
             )
         });
         let Ok(batch) = planned else {
-            self.finish_round("store_error", 0, 0);
-            out.merge(node.close_link(link_id));
+            if let RoundStep::End(end) =
+                round_step(self.round_view().as_ref(), RoundEvent::StoreFailed)
+            {
+                self.finish_round(end.as_str(), 0, 0);
+                out.merge(node.close_link(link_id));
+            }
             return;
         };
         if batch.withheld > 0 {
@@ -2009,7 +1998,8 @@ impl Engine {
             return;
         };
         self.seed_clock(node, envelope.timestamp as u64, "peer-sync");
-        if self.sync_batch.is_some() {
+        let held = self.sync_batch.as_ref().map(|batch| &batch.drain);
+        if leviculum_sync_batch::SyncBatch::arrival(held) == Arrival::CloseLink {
             // One batch at a time; the gate throttled `/offer`s, so a
             // second batch here is a peer ignoring the throttle.
             self.drop_link_state(link_id);
@@ -2205,20 +2195,14 @@ impl Engine {
                     attempts_left,
                 });
             }
-            Err(leviculum_core::SendError::TooLarge) => {
-                // Left for /get, never retried actively. Bounded: the
-                // list only ever holds ids still in the store.
-                if !self.too_large.contains(&transient_id) {
-                    self.too_large.push(transient_id);
-                    if self.too_large.len() > 64 {
-                        self.too_large.remove(0);
-                    }
+            Err(error) => match after_refused_push(&error) {
+                AfterRefusedPush::LeaveForGet => {
+                    remember_too_large(&mut self.too_large, transient_id)
                 }
-            }
-            Err(_) => {
-                // No path after all, or pacing: the next trigger retries.
-                self.next_active_at_ms = node.now_ms().saturating_add(ACTIVE_GAP_MS);
-            }
+                AfterRefusedPush::WaitGap => {
+                    self.next_active_at_ms = node.now_ms().saturating_add(ACTIVE_GAP_MS);
+                }
+            },
         }
     }
 
@@ -2974,16 +2958,16 @@ impl Engine {
                 request_id,
                 data,
             } => {
-                let Some(identity) = node.get_remote_identity(&link_id).cloned() else {
-                    let response = MessageListResponse::Error(PeerError::NoIdentity)
-                        .encode()
-                        .unwrap_or_default();
-                    self.respond(node, &link_id, &request_id, &response, out);
-                    return None;
+                let mailbox = match get_mailbox(node.get_remote_identity(&link_id)) {
+                    Ok(mailbox) => mailbox,
+                    Err(error) => {
+                        let response = MessageListResponse::Error(error)
+                            .encode()
+                            .unwrap_or_default();
+                        self.respond(node, &link_id, &request_id, &response, out);
+                        return None;
+                    }
                 };
-                let name_hash = Destination::compute_name_hash(APP_NAME, &["delivery"]);
-                let mailbox =
-                    *Destination::compute_destination_hash(&name_hash, identity.hash()).as_bytes();
                 let now = node.emission_secs();
                 self.read_serve_cap();
                 match self.role.handle_get(&data, &mailbox, now) {
@@ -3051,11 +3035,12 @@ impl Engine {
         S: Storage,
     {
         let now = node.emission_secs();
-        let Some(identity) = node.get_remote_identity(link_id).cloned() else {
-            return OfferResponse::Error(PeerError::NoIdentity).encode();
+        let remote = match offer_remote(node.get_remote_identity(link_id)) {
+            Ok(remote) => remote,
+            Err(error) => return OfferResponse::Error(error).encode(),
         };
-        let remote_identity_hash = *identity.hash();
-        let remote_hash = propagation_hash_of(&identity);
+        let remote_identity_hash = remote.identity_hash;
+        let remote_hash = remote.propagation_hash;
 
         // Accepting an inbound offer commits this node to a transfer it
         // carries its half of (resource requests and proofs, then the
@@ -3206,15 +3191,14 @@ impl Engine {
                     }
                 }
             }
-            UploadOutcome::InvalidStamp { .. }
-            | UploadOutcome::Malformed(_)
-            | UploadOutcome::PeerSyncForm => {
+            refused => {
                 Self::log_reject(reason, "sync");
-                if let Some(batch) = self.sync_batch.as_mut() {
-                    batch.drain.reject();
+                if refused.counts_against_sender() {
+                    if let Some(batch) = self.sync_batch.as_mut() {
+                        batch.drain.reject();
+                    }
                 }
             }
-            UploadOutcome::StoreFailed(_) => Self::log_reject(reason, "sync"),
         }
         let drained = self.sync_batch.as_ref().map(|batch| {
             (
@@ -3313,14 +3297,9 @@ impl Engine {
     {
         let mut all_ok = true;
         while let Some(op) = self.role.store().peek_op().cloned() {
-            let ok = execute(&op).await;
-            let done = self.role.store_mut().op_done(ok.is_some());
-            if ok.is_none() {
-                all_ok = false;
-                if let Some(FlushOp::Append { key, .. }) = done {
-                    self.role.forget_processed(&key);
-                }
-            }
+            let ok = execute(&op).await.is_some();
+            settle_message_op(&mut self.role, ok);
+            all_ok &= ok;
         }
         while let Some(op) = self.peer_store.peek_op().cloned() {
             let ok = execute(&op).await;
