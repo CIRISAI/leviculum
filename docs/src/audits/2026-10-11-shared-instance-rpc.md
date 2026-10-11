@@ -413,7 +413,7 @@ only, where Python answers both in sequence
 (`reference/Reticulum/RNS/Reticulum.py:1213-1236`) — no real client
 sends either shape.
 
-*Both closed.* `try_into_hash` takes exactly 16 bytes and logs the
+*Both fixed in cc2b76a7.* `try_into_hash` takes exactly 16 bytes and logs the
 client guard's wording for any other length
 (`leviculum-std/src/rpc/handlers.rs:2123-2129`, the message at
 `:2133`, `rnpath.py:247`); a wrong length is answered as an unknown
@@ -624,6 +624,18 @@ deviation ours (unintended edge of a deliberate tolerance). Test:
 unit — a bool key with an unrecognised value warns by name, or
 refuses like the invalid-line arm does.
 
+*Fixed in 2d3eec85.* `parse_bool` accepts ConfigObj's eight spellings
+in any case and refuses everything else, the empty value included
+(`leviculum-std/src/ini_config.rs:1044`); the refusal stops the parse
+with the line, the key and the value named, as the invalid-line arm
+does: `config line 2: enable_transport = 'maybe' is neither true nor
+false (yes/no, true/false, on/off, 1/0)`. The same holds in interface
+and subinterface sections, where rnsd panics on the raise too
+(`reference/Reticulum/RNS/Reticulum.py:1058-1062`). Pinned by
+`test_parse_bool_refuses_an_unknown_spelling` and
+`an_unknown_boolean_spelling_refuses_the_file`; every existing config
+fixture still parses.
+
 **D15 — the discovery position and radio keys are parsed by rnsd and
 dropped by us on the PRODUCING side.** Python reads `latitude`,
 `longitude`, `height`, `discovery_stamp_value`,
@@ -631,8 +643,8 @@ dropped by us on the PRODUCING side.** Python reads `latitude`,
 `discovery_modulation` per discoverable interface and publishes them
 in its discovery announces
 (`reference/Reticulum/RNS/Reticulum.py:857-867`); our interface
-parser has no arms for them (they fall to the debug-logged unknown-key
-arm, `leviculum-std/src/ini_config.rs:835-837`), while our RECEIVING
+parser had no arms for them (they fell to the debug-logged unknown-key
+arm), while our RECEIVING
 side faithfully serves exactly these fields out of foreign announces
 (`build_discovered_interfaces`,
 `leviculum-std/src/rpc/handlers.rs:224`). A configured position on an
@@ -641,6 +653,27 @@ shows "Location: Unknown" for it. Class: **silently ignored config**.
 Bears on: discovery parity (Codeberg #32 family). Test: drop-in — one
 discoverable interface with latitude/longitude on both daemons, read
 the announce on a third node.
+
+*Fixed in 2d3eec85.* The seven keys have arms
+(`leviculum-std/src/ini_config.rs:917-923`) and reach the descriptor:
+the position and the stamp cost for every discoverable type, the three
+radio keys for a KISS interface, which becomes discoverable with them
+(`descriptor_from_config`, `leviculum-std/src/discovery.rs:64`, the
+position at `:73`, KISS at `:92`). The encoder writes the KISS fields
+in the reference order, each nil when unset (`encode_info`,
+`leviculum-core/src/discovery/mod.rs:214`, the KISS arm at `:293`), and
+mints the stamp at the configured cost (`:413`). One deviation, in the
+direction of the reference's intent: Python reads
+`discovery_modulation` `as_int` and then passes it through a string
+helper (`reference/Reticulum/RNS/Discovery.py:162`), so rnsd raises on a
+configured modulation and sends no KISS announce at all; we send the
+integer, which its receivers read untyped. Pinned by
+`discovery_position_and_radio_keys_reach_the_descriptor`, the
+Python-generated vector in `encode_info_matches_python_kiss_vector`,
+and the drop-in `test_a_configured_position_reaches_rnstatus_from_both_daemons`:
+one position text in both daemons' config files, one Python listener,
+and the Location line `rnstatus -d` prints is `52.52, 13.405, 34.5m h`
+for each (red before: `Unknown` for lnsd).
 
 **D16 — the global announce-rate and ingress-tuning keys are
 tolerated but inert.** Python's `[reticulum]` `default_ar_target` /
@@ -717,7 +750,9 @@ rather than misleading.
   stats; `-l` gets both counts; `-A` shows queued announces on a
   capped interface (D7, fixed in 2352c749) and the `(t:...)` suffix
   from a configured `default_ar_target`, none on a LocalInterface row
-  (D16, fixed in a26157d1). Visible gaps: `-d`/`-D` read the LOCAL discovery registry files,
+  (D16, fixed in a26157d1). `-d` run elsewhere shows the position an
+  lnsd hub's config gives its discoverable interface, as it does for
+  rnsd's (D15, fixed in 2d3eec85). Visible gaps: `-d`/`-D` read the LOCAL discovery registry files,
   not the RPC, and our on-disk registry format is ours — not compared
   in this audit (coverage, below). Config-dependent lockouts: D12.1
   (D1 and D2 are fixed, in e5f78966 and 217fc8f6).
@@ -761,15 +796,15 @@ rather than misleading.
    its own opening paragraph. *Rewritten in e5f78966*: the paragraph now
    says what the drop-in holds, and a second one says where it does
    not (D12, D2, D14); D1 is fixed in the same commit. D2 is fixed in
-   217fc8f6 and leaves the second paragraph; D14 is fixed with its own
-   entry, and the second paragraph now says both daemons refuse.
+   217fc8f6 and leaves the second paragraph; D14 is fixed in 2d3eec85,
+   and the second paragraph now says both daemons refuse.
 2. **"It is a drop-in replacement for Python's rnsd"
    (`docs/src/man/lnsd.1.md:13-15`) — holds for the deployed
    configuration shape, with the D12 defaults as the unstated
    proviso.** Every config we generate writes the three flipped keys
    explicitly, so the claim is true of our fleet and untrue of a
    minimal foreign config. *Rewritten in e5f78966* to name the D12, D2
-   and D14 provisos; D2 left the list in 217fc8f6, D14 with its fix.
+   and D14 provisos; D2 left the list in 217fc8f6, D14 in 2d3eec85.
 3. **The memory `project_identity_data_rpc_gap` ("the shared-instance
    RPC does not parse the identity_data retain key") — stale,
    refuted.** The arm exists with tests in both codecs
