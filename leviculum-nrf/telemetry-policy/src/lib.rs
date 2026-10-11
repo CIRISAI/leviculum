@@ -49,6 +49,11 @@
 /// silent board from restating an old one.
 pub mod link;
 
+/// The board reporter's decisions around the policy: the key chase, the
+/// owed retransmission, the position a report carries, the withheld
+/// attempts and the flash write (#413).
+pub mod reporter;
+
 // ---------------------------------------------------------------------------
 // Profiles
 // ---------------------------------------------------------------------------

@@ -45,8 +45,10 @@
 #![cfg_attr(not(test), no_std)]
 
 mod cadence;
+mod scheduler;
 
 pub use cadence::*;
+pub use scheduler::*;
 
 /// A peer identity, as both stacks report it on peer-up and stamp on
 /// inbound packets: the 16-byte truncated destination hash.
