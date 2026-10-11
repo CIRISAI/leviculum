@@ -89,7 +89,7 @@ and `a_configured_rpc_key_wins_over_the_identity_file`.
 the platforms where rnsd acts on it.** Python, on any platform, moves
 BOTH channels to TCP loopback (37428/37429 or the configured ports)
 when the key says `tcp` (`reference/Reticulum/RNS/Reticulum.py:683-694`).
-We parse and store the key (`leviculum-std/src/ini_config.rs:415-424`)
+We parse and store the key (`leviculum-std/src/ini_config.rs:417-426`)
 and apply its socket-override rule, but on Unix the daemon serves the
 abstract AF_UNIX pair regardless; only the Windows build reads the
 ports (the AF_INET path was compiled for Windows only, and the field's
@@ -509,25 +509,25 @@ client a fraction of a second instead of 8+. Class: deviation ours
 
 Where we match, verified: the ConfigObj grammar — three section
 depths, invalid lines refuse the whole file exactly as `rnsd` panics
-on them (`parse_ini`, `leviculum-std/src/ini_config.rs:207-209`,
+on them (`parse_ini`, `leviculum-std/src/ini_config.rs:209-211`,
 against `reference/Reticulum/RNS/Reticulum.py:328-333`), inline
 comments and quote stripping to ConfigObj's own rules
-(`strip_value`, `leviculum-std/src/ini_config.rs:1038`); the config
+(`strip_value`, `leviculum-std/src/ini_config.rs:1068`); the config
 directory lookup order `/etc/reticulum` → `~/.config/reticulum` →
 `~/.reticulum` (`resolve_config_dir`,
-`leviculum-std/src/config.rs:1168`, against
+`leviculum-std/src/config.rs:1204`, against
 `reference/Reticulum/RNS/Reticulum.py:229-236`); `ifac_size` in bits
-with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:877-883`,
+with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:879-885`,
 against `reference/Reticulum/RNS/Reticulum.py:747-750`) and the
 per-type default IFAC sizes pinned class by class
 (`default_ifac_size`, `leviculum-std/src/driver/mod.rs:578`);
 `announce_cap` kept only in (0, 100]
-(`leviculum-std/src/ini_config.rs:857-859`, against
+(`leviculum-std/src/ini_config.rs:859-861`, against
 `reference/Reticulum/RNS/Reticulum.py:819-822`); `bitrate` gated on
-MINIMUM_BITRATE (`leviculum-std/src/ini_config.rs:760-766`);
+MINIMUM_BITRATE (`leviculum-std/src/ini_config.rs:762-766`);
 Backbone-to-TCP normalization including the `port`/`remote`/
 `listen_on` aliases (`normalize_backbone_interface`,
-`leviculum-std/src/ini_config.rs:963`, against
+`leviculum-std/src/ini_config.rs:983`, against
 `reference/Reticulum/RNS/Reticulum.py:960-972`); the three UDP config
 forms of leviculum#279 — single `port`, bind-only, forward-only, plus
 the `device` broadcast fill — each built and pinned end to end from
@@ -539,10 +539,10 @@ tests at `:327`, against
 receive-bound caveat documented where it lives
 (`leviculum-std/src/interfaces/udp.rs:21-26`); both `mode` spellings
 including Python's `interface_mode = gateway` copy/paste bug handled
-as a strict superset (`leviculum-std/src/ini_config.rs:860-868`,
+as a strict superset (`leviculum-std/src/ini_config.rs:862-870`,
 against `reference/Reticulum/RNS/Reticulum.py:717-745`); and the rule
 that an unknown key never makes lnsd refuse a config rnsd loads
-(`leviculum-std/src/ini_config.rs:643-647`).
+(`leviculum-std/src/ini_config.rs:645-649`).
 
 **D12 — three defaults flip against a config that omits the key, and
 each flips a different layer of the daemon.** All three are
@@ -592,12 +592,12 @@ configured fail-fast gets keep-trying. Class: **silently ignored
 config**. The deviation itself (supervised restarts beat in-process
 panic) may well be the better behaviour — but then the key deserves a
 startup warning naming it, like the IFAC warnings beside it
-(`leviculum-std/src/ini_config.rs:239-283`). Test: unit — parsing a
+(`leviculum-std/src/ini_config.rs:241-285`). Test: unit — parsing a
 config with the key logs a visible "read but not honoured" line.
 
 *Fixed in a26157d1.* The key is parsed, and a config that sets it true
 gets one WARN line at load, beside the IFAC warnings
-(`leviculum-std/src/ini_config.rs:292`): read but not honoured, the
+(`leviculum-std/src/ini_config.rs:294`): read but not honoured, the
 interface keeps reconnecting by design, restarts belong to the service
 manager. False or unset says nothing, since both daemons then keep their
 interfaces up. The configuration guide lists it. Pinned by
@@ -606,8 +606,8 @@ interfaces up. The configuration guide lists it. Pinned by
 **D14 — tolerant booleans accept files rnsd refuses.** ConfigObj's
 `as_bool` raises on anything outside its vocabulary, and rnsd exits
 255 on the parse error (`reference/Reticulum/RNS/Reticulum.py:328-333`
-via `as_bool` at `:487`); our `parse_bool` maps every unknown
-spelling to false (`leviculum-std/src/ini_config.rs:1018-1023`). A
+via `as_bool` at `:487`); our `parse_bool` mapped every unknown
+spelling to false. A
 config with `enable_transport = maybe` is a startup error under rnsd
 and a silently transport-less daemon under lnsd. The inverse
 direction of D12: we accept what the reference refuses. Class:
@@ -641,7 +641,7 @@ transport-enabled interface's announce-rate enforcement
 `:830-833`), and the `ic_*`/`ec_pr_freq`/`egress_control` family
 tunes the ingress/egress limiters globally
 (`reference/Reticulum/RNS/Reticulum.py:635-677`). We honour the
-per-interface spellings (`leviculum-std/src/ini_config.rs:843-853`)
+per-interface spellings (`leviculum-std/src/ini_config.rs:845-855`)
 but the global ones fall into the catch-all, so our
 transport-enabled defaults are the hardcoded 3600/0/5
 (`leviculum-std/src/rpc/mod.rs:810-826` pins them). A config that
@@ -654,7 +654,7 @@ the `(t:...)` suffix.
 *Fixed in a26157d1*, for the keys that have a seam, and named for the
 rest. The three `default_ar_*` keys are read with Python's validation
 and its `or` fallback, so 0 keeps the default for the target and the
-grace (`leviculum-std/src/ini_config.rs:598`), and become the core's
+grace (`leviculum-std/src/ini_config.rs:600`), and become the core's
 node-wide fill (`TransportConfig::default_announce_rate`,
 `leviculum-core/src/transport.rs:1032`, applied in
 `resolve_announce_rate`, `leviculum-core/src/transport.rs:195`); an
@@ -671,7 +671,7 @@ held-announce cap the boards already size. The remaining tunings,
 `ic_burst_penalty`, `ic_held_release_interval` and `ec_pr_freq`, run as
 constants in our limiter, globally and per interface alike; each is now
 named at WARN as read but not honoured
-(`leviculum-std/src/ini_config.rs:627`) instead of dropped in silence.
+(`leviculum-std/src/ini_config.rs:629`) instead of dropped in silence.
 Making them tunable is a change to the core limiter with its own tests,
 not a config seam. Measuring this with the reference `rnstatus -A`
 turned up a neighbour: the accepted IPC client's row rendered the fill
@@ -692,9 +692,9 @@ Deliberate, documented deviations, re-confirmed as stated: our
 being locally observable only (`leviculum-std/src/config.rs:208-223`);
 ingress control defaults off for dial-out point-to-point types where
 Python is flat-true (`ingress_control_default_for_type`,
-`leviculum-std/src/config.rs:1025`); the discoverable-mode promotion
+`leviculum-std/src/config.rs:1061`); the discoverable-mode promotion
 fills only an UNSET mode where Python overrides an explicit one
-(`promote_discoverable_modes`, `leviculum-std/src/ini_config.rs:372`).
+(`promote_discoverable_modes`, `leviculum-std/src/ini_config.rs:374`).
 Also ignored without a current consumer: `link_mtu_discovery` (no
 link-MTU discovery exists on our side to enable) and
 `force_shared_instance_bitrate` (a Python test knob,
@@ -747,19 +747,20 @@ rather than misleading.
    not lnsd (D12.1); and the acceptance claim is also true in a
    direction the sentence does not mean — lnsd accepts bool spellings
    rnsd refuses (D14). The same page's own key table states the
-   `share_instance` default `false` honestly
-   (`docs/src/guide/configuration.md:109`), so the document contradicts
+   `share_instance` default `false` honestly (its row,
+   `docs/src/guide/configuration.md:109`), so the document contradicts
    its own opening paragraph. *Rewritten in e5f78966*: the paragraph now
    says what the drop-in holds, and a second one says where it does
    not (D12, D2, D14); D1 is fixed in the same commit. D2 is fixed in
-   217fc8f6 and leaves the second paragraph.
+   217fc8f6 and leaves the second paragraph; D14 is fixed with its own
+   entry, and the second paragraph now says both daemons refuse.
 2. **"It is a drop-in replacement for Python's rnsd"
    (`docs/src/man/lnsd.1.md:13-15`) — holds for the deployed
    configuration shape, with the D12 defaults as the unstated
    proviso.** Every config we generate writes the three flipped keys
    explicitly, so the claim is true of our fleet and untrue of a
    minimal foreign config. *Rewritten in e5f78966* to name the D12, D2
-   and D14 provisos; D2 left the list in 217fc8f6.
+   and D14 provisos; D2 left the list in 217fc8f6, D14 with its fix.
 3. **The memory `project_identity_data_rpc_gap` ("the shared-instance
    RPC does not parse the identity_data retain key") — stale,
    refuted.** The arm exists with tests in both codecs
@@ -806,7 +807,7 @@ All three are fixed in e5f78966; see the *Fixed in* note under each.
    RSSI/SNR against both daemons. Directly serves the rig's A/B
    measurement discipline.
 3. **The `rpc_key` lockout (D1).** Mechanism: one parse arm in
-   `apply_reticulum_key` (`leviculum-std/src/ini_config.rs:404`)
+   `apply_reticulum_key` (`leviculum-std/src/ini_config.rs:406`)
    storing the hex key, used in place of the identity-derived default
    when keying the listener (`leviculum-std/src/rpc/mod.rs:50-67`)
    and the client helpers. Python's fallback-on-invalid behaviour

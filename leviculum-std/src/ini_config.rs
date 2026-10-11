@@ -157,11 +157,13 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
 
             if let Some(ref mut sub) = current_subinterface {
                 // Inside a [[[subinterface]]] block.
-                apply_subinterface_key(sub, key, value);
+                apply_subinterface_key(sub, key, value)
+                    .map_err(|e| format!("config line {number}: {e}"))?;
             } else if current_subsection.is_some() {
                 // Inside an interface subsection
                 if let Some((_, ref mut iface)) = current_iface {
-                    apply_interface_key(iface, key, value);
+                    apply_interface_key(iface, key, value)
+                        .map_err(|e| format!("config line {number}: {e}"))?;
                 }
             } else {
                 // Inside a top-level section
@@ -404,10 +406,10 @@ fn parse_positive(value: &str) -> Option<usize> {
 fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> Result<(), String> {
     match key {
         "enable_transport" => {
-            config.enable_transport = parse_bool(value);
+            config.enable_transport = parse_bool(key, value)?;
         }
         "share_instance" => {
-            config.shared_instance = parse_bool(value);
+            config.shared_instance = parse_bool(key, value)?;
         }
         "instance_name" => {
             config.instance_name = value.trim().to_string();
@@ -452,19 +454,19 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
             config.instance_control_port = value.trim().parse().ok();
         }
         "respond_to_probes" => {
-            config.respond_to_probes = parse_bool(value);
+            config.respond_to_probes = parse_bool(key, value)?;
         }
         // Whether links prove implicitly (RNS default true, Reticulum.py:575-578).
         // Filled on the TOML path via serde; add it to the INI path too so a
         // stock rnsd config that sets it is honoured rather than silently dropped.
         "use_implicit_proof" => {
-            config.use_implicit_proof = parse_bool(value);
+            config.use_implicit_proof = parse_bool(key, value)?;
         }
         // `enable_remote_management` is the upstream rnsd key
         // (Reticulum.py:548); `remote_management_enabled` is accepted as a
         // Leviculum-side alias so either spelling works.
         "enable_remote_management" | "remote_management_enabled" => {
-            config.remote_management_enabled = parse_bool(value);
+            config.remote_management_enabled = parse_bool(key, value)?;
         }
         // Comma-separated identity hashes (ConfigObj `as_list`,
         // Reticulum.py:553). Hex is validated when the destination is built.
@@ -524,7 +526,7 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
         // number anyone derived from it is in the PATH_TABLE heartbeat
         // already. An operator turns it on for a debugging session.
         "path_entries_dump" => {
-            config.path_entries_dump = parse_bool(value);
+            config.path_entries_dump = parse_bool(key, value)?;
         }
         // Route choice between competing copies of one announce emission
         // (Codeberg #230). Leviculum-only key — rnsd reading the shared
@@ -557,7 +559,7 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
         // so. The default (true) deviates from Python's; see
         // [`ReticulumConfig::discover_interfaces`].
         "discover_interfaces" => {
-            config.discover_interfaces = parse_bool(value);
+            config.discover_interfaces = parse_bool(key, value)?;
         }
         // Codeberg #32 sub-task b: opt-in runtime auto-connect. An integer that
         // both enables the feature and caps concurrent auto-connections (Python
@@ -607,7 +609,7 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
         // Every interface's egress-control default (Reticulum.py:663-665,
         // Interface.py:130); an interface's own `egress_control` wins.
         "egress_control" => {
-            config.egress_control = Some(parse_bool(value));
+            config.egress_control = Some(parse_bool(key, value)?);
         }
         // The held-announce cap of the ingress limiter (Reticulum.py:635-637);
         // 0 is the reference 256 through the same `or` (:1120-1121).
@@ -616,7 +618,7 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
         }
         // Read so it can be named at startup (see parse_ini), not honoured.
         "panic_on_interface_error" => {
-            config.panic_on_interface_error = parse_bool(value);
+            config.panic_on_interface_error = parse_bool(key, value)?;
         }
         // The ingress/egress limiter's thresholds and timings
         // (Reticulum.py:639-677). lnsd's limiter runs the reference values as
@@ -693,20 +695,20 @@ pub(crate) fn peek_loglevel(content: &str) -> Option<u8> {
     None
 }
 
-fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
+fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> Result<(), String> {
     match key {
         "type" => iface.interface_type = value.to_string(),
         // `enabled` is the modern key; `interface_enabled` is the legacy spelling
         // upstream still honours (Reticulum.py:950). Accept both so a config that
         // disables an interface with the old key is not silently enabled.
-        "enabled" | "interface_enabled" => iface.enabled = parse_bool(value),
-        "outgoing" => iface.outgoing = parse_bool(value),
+        "enabled" | "interface_enabled" => iface.enabled = parse_bool(key, value)?,
+        "outgoing" => iface.outgoing = parse_bool(key, value)?,
         // Kernel NIC to bind to, plus IPv6 preference when resolving it
         // (Codeberg #94/#3; TCPInterface.py:504/509, UDPInterface.py:61,
         // BackboneInterface.py:114/118). The name is resolved to a concrete
         // bind address at interface start.
         "device" => iface.device = Some(value.to_string()),
-        "prefer_ipv6" => iface.prefer_ipv6 = Some(parse_bool(value)),
+        "prefer_ipv6" => iface.prefer_ipv6 = Some(parse_bool(key, value)?),
         "listen_ip" => iface.listen_ip = Some(value.to_string()),
         "listen_port" => iface.listen_port = value.parse().ok(),
         "target_host" => iface.target_host = Some(value.to_string()),
@@ -752,7 +754,7 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
                     .collect(),
             );
         }
-        "connectable" => iface.connectable = Some(parse_bool(value)),
+        "connectable" => iface.connectable = Some(parse_bool(key, value)?),
         // Honour a configured bitrate only when it clears MINIMUM_BITRATE, else
         // leave it unset so the interface keeps its default (Python
         // Reticulum.py:793-796). The stored value overrides the medium default
@@ -770,25 +772,25 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         // these `InterfaceConfig` fields. Before this they fell into the unknown-
         // key catch-all and were silently dropped, so a config-file-driven
         // deployment could never make an interface discoverable.
-        "discoverable" => iface.discoverable = parse_bool(value),
+        "discoverable" => iface.discoverable = parse_bool(key, value)?,
         // Emit ENCRYPTED discovery announces for a private discovery network
         // (Python `discovery_encrypt`, Reticulum.py:859). The announcer
         // (`driver::mod`) already reads this field to pick the encrypted vs
         // plaintext app_data; it needs a configured `network_identity` to take
         // effect. Before this it fell into the unknown-key catch-all, so a
         // config-file deployment could never turn on encrypted discovery.
-        "discovery_encrypt" => iface.discovery_encrypt = parse_bool(value),
+        "discovery_encrypt" => iface.discovery_encrypt = parse_bool(key, value)?,
         // Advertise this interface's own IFAC credentials in its discovery
         // announce (Python `publish_ifac`, Reticulum.py:861). Without it a
         // discovered peer can see us but not authenticate to us; with it the
         // passphrase is on the air, so it stays an explicit per-interface
         // opt-in exactly as in the reference (Codeberg #162).
-        "publish_ifac" => iface.publish_ifac = parse_bool(value),
+        "publish_ifac" => iface.publish_ifac = parse_bool(key, value)?,
         // Marks an interface a seed: the discovery job tears it down once
         // enough auto-discovered interfaces are up, and re-establishes it when
         // none are left (Reticulum.py:824-825/1025, Discovery.py:553-563).
         // Acted on by the driver's auto-connect poll (Codeberg #416).
-        "bootstrap_only" => iface.bootstrap_only = parse_bool(value),
+        "bootstrap_only" => iface.bootstrap_only = parse_bool(key, value)?,
         "discovery_name" => iface.discovery_name = Some(value.to_string()),
         "reachable_on" => iface.reachable_on = Some(value.to_string()),
         // Python config key is `announce_interval` in MINUTES (as_int, *60 with a
@@ -821,7 +823,7 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "data_port" => iface.data_port = value.parse().ok(),
         "devices" => iface.devices = Some(value.to_string()),
         "ignored_devices" => iface.ignored_devices = Some(value.to_string()),
-        "multicast_loopback" => iface.multicast_loopback = Some(parse_bool(value)),
+        "multicast_loopback" => iface.multicast_loopback = Some(parse_bool(key, value)?),
         // Multicast address type (Codeberg #282, Python
         // `multicast_address_type`, AutoInterface.py:109). Stored verbatim and
         // resolved in the AutoInterface builder, which rejects a value it does
@@ -829,22 +831,22 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         // would otherwise put the node in a group of its own, discovering
         // nobody and logging nothing.
         "multicast_address_type" => iface.multicast_address_type = Some(value.to_string()),
-        "flow_control" => iface.flow_control = Some(parse_bool(value)),
+        "flow_control" => iface.flow_control = Some(parse_bool(key, value)?),
         "airtime_limit_short" => iface.airtime_limit_short = value.parse().ok(),
         "airtime_limit_long" => iface.airtime_limit_long = value.parse().ok(),
-        "csma_enabled" => iface.csma_enabled = Some(parse_bool(value)),
+        "csma_enabled" => iface.csma_enabled = Some(parse_bool(key, value)?),
         // TEST-ONLY range emulation for co-located rigs: drop hops=0 ingress
         // frames (see `InterfaceConfig::test_drop_direct_ingress`). No Python
         // equivalent; consumed by the 3-node relay hardware scenario.
-        "test_drop_direct_ingress" => iface.test_drop_direct_ingress = parse_bool(value),
+        "test_drop_direct_ingress" => iface.test_drop_direct_ingress = parse_bool(key, value)?,
         // Ingress control (Codeberg #8, Python `ingress_control`,
         // Reticulum.py:768-769). An explicit value overrides the medium-class
         // default; unset (None) resolves per medium at registration.
-        "ingress_control" => iface.ingress_control = Some(parse_bool(value)),
+        "ingress_control" => iface.ingress_control = Some(parse_bool(key, value)?),
         // Egress control (Codeberg #172, Python `egress_control`,
         // Reticulum.py:770-771). Off unless set, matching
         // `Interface.EGRESS_CONTROL = False`.
-        "egress_control" => iface.egress_control = Some(parse_bool(value)),
+        "egress_control" => iface.egress_control = Some(parse_bool(key, value)?),
         // Announce-rate keys (Codeberg #92). Parsed as unsigned, so a
         // negative value fails to parse and stays None; Python's >0 (target) /
         // >=0 (grace, penalty) validation is applied later in the driver.
@@ -890,8 +892,8 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "max_connections" => iface.max_connections = value.parse().ok(),
         "min_rssi" => iface.min_rssi = value.parse().ok(),
         "discovery_interval" => iface.discovery_interval = value.parse().ok(),
-        "enable_central" => iface.enable_central = Some(parse_bool(value)),
-        "enable_peripheral" => iface.enable_peripheral = Some(parse_bool(value)),
+        "enable_central" => iface.enable_central = Some(parse_bool(key, value)?),
+        "enable_peripheral" => iface.enable_peripheral = Some(parse_bool(key, value)?),
         // Comma-separated (see `split_csv`): an entry is resolved to an
         // address or an identity hint when the interface is built.
         "initiate_only" => {
@@ -907,6 +909,18 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "tx_gap_ms" => iface.tx_gap_ms = value.parse().ok(),
         // The fragmenter's MTU cap (#379), the other measurement knob.
         "fragment_mtu" => iface.fragment_mtu = value.parse().ok(),
+        // Discovery position and radio keys (D15 of the 2026-10-11
+        // shared-instance audit; Python Reticulum.py:857-867, `as_float` for the
+        // position, `as_int` for the rest). Published by `descriptor_from_config`;
+        // before these arms a configured position never went on the air while
+        // we served the same fields out of every foreign announce.
+        "latitude" => iface.latitude = value.parse().ok(),
+        "longitude" => iface.longitude = value.parse().ok(),
+        "height" => iface.height = value.parse().ok(),
+        "discovery_stamp_value" => iface.discovery_stamp_value = value.parse().ok(),
+        "discovery_frequency" => iface.discovery_frequency = value.parse().ok(),
+        "discovery_bandwidth" => iface.discovery_bandwidth = value.parse().ok(),
+        "discovery_modulation" => iface.discovery_modulation = value.parse().ok(),
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
         // bind, id_callsign, modulation, ...) must never make lnsd reject an
@@ -915,6 +929,7 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
             tracing::debug!("Ignoring unknown interface key '{}' = '{}'", key, value);
         }
     }
+    Ok(())
 }
 
 /// Flush a pending `[[[subinterface]]]` block into its parent interface's
@@ -935,10 +950,14 @@ fn flush_subinterface(
 /// radio + routing keys are meaningful here (the shared `port` and `id_*` beacon
 /// keys live on the parent). Mirrors the fields Python reads per subinterface in
 /// `RNodeMultiInterface.__init__`.
-fn apply_subinterface_key(sub: &mut SubinterfaceConfig, key: &str, value: &str) {
+fn apply_subinterface_key(
+    sub: &mut SubinterfaceConfig,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
     match key {
-        "enabled" | "interface_enabled" => sub.enabled = parse_bool(value),
-        "outgoing" => sub.outgoing = parse_bool(value),
+        "enabled" | "interface_enabled" => sub.enabled = parse_bool(key, value)?,
+        "outgoing" => sub.outgoing = parse_bool(key, value)?,
         "vport" => sub.vport = value.parse().ok(),
         "frequency" => sub.frequency = value.parse().ok(),
         "bandwidth" => sub.bandwidth = value.parse().ok(),
@@ -951,6 +970,7 @@ fn apply_subinterface_key(sub: &mut SubinterfaceConfig, key: &str, value: &str) 
             tracing::debug!("Ignoring unknown subinterface key '{}' = '{}'", key, value);
         }
     }
+    Ok(())
 }
 
 /// Map a `BackboneInterface` / `BackboneClientInterface` config onto our TCP
@@ -1013,13 +1033,23 @@ fn split_csv(value: &str) -> Vec<String> {
 ///
 /// Accepts (any case): yes, true, on, 1 → true
 ///                     no, false, off, 0 → false
-///                     Anything else → false (conservative default, unchanged
-///                     contract).
-fn parse_bool(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "yes" | "true" | "on" | "1"
-    )
+///
+/// Anything else, the empty value included, is an error naming the key and
+/// the value. ConfigObj's `as_bool` raises on a spelling outside that table
+/// (`vendor/configobj.py:961-963`, the table at `:1161`) and rnsd exits on it
+/// (`RNS/Reticulum.py:1058-1062` for an interface key; for a `[reticulum]`
+/// one, `as_bool` at `:487` raises out of `__apply_config`, `:340`); mapping it to false instead turned
+/// `enable_transport = maybe` into a daemon that carried nothing and said
+/// nothing (D14 of the 2026-10-11 shared-instance audit).
+fn parse_bool(key: &str, value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "yes" | "true" | "on" | "1" => Ok(true),
+        "no" | "false" | "off" | "0" => Ok(false),
+        _ => Err(format!(
+            "{key} = '{}' is neither true nor false (yes/no, true/false, on/off, 1/0)",
+            value.trim()
+        )),
+    }
 }
 
 /// Apply ConfigObj value semantics to a raw `key = <value>` right-hand side.
@@ -1076,42 +1106,86 @@ fn strip_surrounding_quotes(s: &str) -> &str {
 mod tests {
     use super::*;
 
+    fn bool_of(value: &str) -> bool {
+        parse_bool("k", value).expect("a ConfigObj boolean")
+    }
+
     #[test]
     fn test_parse_bool_true() {
-        assert!(parse_bool("Yes"));
-        assert!(parse_bool("yes"));
-        assert!(parse_bool("True"));
-        assert!(parse_bool("true"));
-        assert!(parse_bool("1"));
-        assert!(parse_bool("on"));
+        assert!(bool_of("Yes"));
+        assert!(bool_of("yes"));
+        assert!(bool_of("True"));
+        assert!(bool_of("true"));
+        assert!(bool_of("1"));
+        assert!(bool_of("on"));
     }
 
     #[test]
     fn test_parse_bool_false() {
-        assert!(!parse_bool("No"));
-        assert!(!parse_bool("no"));
-        assert!(!parse_bool("False"));
-        assert!(!parse_bool("false"));
-        assert!(!parse_bool("0"));
-        assert!(!parse_bool("off"));
-        assert!(!parse_bool(""));
+        assert!(!bool_of("No"));
+        assert!(!bool_of("no"));
+        assert!(!bool_of("False"));
+        assert!(!bool_of("false"));
+        assert!(!bool_of("0"));
+        assert!(!bool_of("off"));
     }
 
     #[test]
     fn test_parse_bool_case_insensitive() {
         // ConfigObj is case-insensitive for bools and accepts on/off.
-        assert!(parse_bool("TRUE"));
-        assert!(parse_bool("Yes"));
-        assert!(parse_bool("ON"));
-        assert!(parse_bool("On"));
-        assert!(!parse_bool("OFF"));
-        assert!(!parse_bool("off"));
-        assert!(!parse_bool("No"));
-        assert!(!parse_bool("FALSE"));
-        assert!(!parse_bool("0"));
-        assert!(parse_bool("1"));
-        // Unknown input keeps the current contract: false.
-        assert!(!parse_bool("maybe"));
+        assert!(bool_of("TRUE"));
+        assert!(bool_of("Yes"));
+        assert!(bool_of("ON"));
+        assert!(bool_of("On"));
+        assert!(!bool_of("OFF"));
+        assert!(!bool_of("off"));
+        assert!(!bool_of("No"));
+        assert!(!bool_of("FALSE"));
+        assert!(!bool_of("0"));
+        assert!(bool_of("1"));
+    }
+
+    /// D14: an unknown spelling, and the empty value, are refused with the
+    /// key and the value named, as ConfigObj's `as_bool` refuses them.
+    #[test]
+    fn test_parse_bool_refuses_an_unknown_spelling() {
+        assert_eq!(
+            parse_bool("enable_transport", "maybe"),
+            Err("enable_transport = 'maybe' is neither true nor false \
+                 (yes/no, true/false, on/off, 1/0)"
+                .to_string())
+        );
+        assert!(parse_bool("enabled", "").is_err());
+    }
+
+    /// D14 end to end: the refusal stops the parse and names the line, in the
+    /// `[reticulum]` section, an interface and a subinterface alike, where it
+    /// used to start a daemon with the value read as false.
+    #[test]
+    fn an_unknown_boolean_spelling_refuses_the_file() {
+        let err = parse_ini("[reticulum]\n  enable_transport = maybe\n")
+            .expect_err("rnsd refuses this file");
+        assert_eq!(
+            err,
+            "config line 2: enable_transport = 'maybe' is neither true nor false \
+             (yes/no, true/false, on/off, 1/0)"
+        );
+
+        let err = parse_ini(
+            "[interfaces]\n  [[Hub]]\n    type = TCPServerInterface\n    enabled = sure\n",
+        )
+        .expect_err("rnsd refuses this file");
+        assert!(err.starts_with("config line 4: enabled = 'sure'"), "{err}");
+
+        let err = parse_ini(
+            "[interfaces]\n  [[Multi]]\n    type = RNodeMultiInterface\n    \
+             [[[a]]]\n      outgoing = perhaps\n",
+        )
+        .expect_err("rnsd refuses this file");
+        assert!(
+            err.starts_with("config line 5: outgoing = 'perhaps'"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3494,6 +3568,60 @@ loglevel = 4
         assert_eq!(fast.discovery_announce_interval_secs, Some(5));
         assert_eq!(crate::discovery::resolve_announce_interval_secs(fast), 5);
         assert!(crate::discovery::descriptor_from_config(fast).is_some());
+    }
+
+    /// D15 of the 2026-10-11 shared-instance audit: the position, the stamp
+    /// cost and the KISS radio keys parse from the file and reach the
+    /// descriptor the announcer stamps. Before the arms they fell into the
+    /// unknown-key catch-all and the announce carried nil for each.
+    #[test]
+    fn discovery_position_and_radio_keys_reach_the_descriptor() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Hub]]
+    type = TCPServerInterface
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+    discoverable = yes
+    reachable_on = 1.2.3.4
+    latitude = 52.52
+    longitude = -13.405
+    height = 34.5
+    discovery_stamp_value = 16
+
+  [[TNC]]
+    type = KISSInterface
+    port = /dev/ttyUSB0
+    discoverable = yes
+    discovery_frequency = 144800000
+    discovery_bandwidth = 12500
+    discovery_modulation = 3
+"#,
+        )
+        .unwrap();
+
+        let hub = config.interfaces.get("Hub").expect("iface");
+        assert_eq!(hub.latitude, Some(52.52));
+        assert_eq!(hub.longitude, Some(-13.405));
+        assert_eq!(hub.height, Some(34.5));
+        assert_eq!(hub.discovery_stamp_value, Some(16));
+        let desc = crate::discovery::descriptor_from_config(hub).expect("descriptor");
+        assert_eq!(desc.latitude, Some(52.52));
+        assert_eq!(desc.longitude, Some(-13.405));
+        assert_eq!(desc.height, Some(34.5));
+        assert_eq!(desc.stamp_value, Some(16));
+
+        let tnc = config.interfaces.get("TNC").expect("iface");
+        assert_eq!(tnc.discovery_frequency, Some(144_800_000));
+        assert_eq!(tnc.discovery_bandwidth, Some(12_500));
+        assert_eq!(tnc.discovery_modulation, Some(3));
+        let desc = crate::discovery::descriptor_from_config(tnc).expect("descriptor");
+        assert_eq!(desc.interface_type, "KISSInterface");
+        assert_eq!(desc.frequency, Some(144_800_000));
+        assert_eq!(desc.bandwidth, Some(12_500));
+        assert_eq!(desc.modulation, Some(3));
+        assert_eq!(desc.latitude, None, "an unset position goes out as nil");
     }
 
     #[test]

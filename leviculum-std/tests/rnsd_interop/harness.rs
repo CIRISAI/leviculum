@@ -358,6 +358,20 @@ impl TestDaemon {
         Self::start_with_retry_args(Self::discovery_args(name)).await
     }
 
+    /// Start a daemon whose main TCP server is discoverable and carries the
+    /// position `lat,lon,height`, written as the `latitude`/`longitude`/`height`
+    /// keys of its config block exactly as given (D15 of the 2026-10-11
+    /// shared-instance audit).
+    pub async fn start_discoverable_at_position(
+        name: &str,
+        position: &str,
+    ) -> Result<Self, HarnessError> {
+        let mut extra = Self::discovery_args(name);
+        extra.push("--discovery-position".to_string());
+        extra.push(position.to_string());
+        Self::start_with_retry_args(extra).await
+    }
+
     /// Start a daemon that advertises encrypted discovery announces keyed by the
     /// shared 64-byte network identity at `network_identity_path` (Codeberg #32,
     /// sub-task d). Python generates the identity file if it does not yet exist.

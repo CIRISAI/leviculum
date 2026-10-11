@@ -68,6 +68,12 @@ pub(crate) fn descriptor_from_config(cfg: &InterfaceConfig) -> Option<InterfaceD
     let mut desc = InterfaceDescriptor {
         interface_type: cfg.interface_type.clone(),
         name: cfg.discovery_name.clone(),
+        // Every type publishes its position, nil when unset, and stamps at its
+        // own cost (Reticulum.py:857-864, Discovery.py:98-109).
+        latitude: cfg.latitude,
+        longitude: cfg.longitude,
+        height: cfg.height,
+        stamp_value: cfg.discovery_stamp_value,
         ..Default::default()
     };
     match cfg.interface_type.as_str() {
@@ -80,6 +86,13 @@ pub(crate) fn descriptor_from_config(cfg: &InterfaceConfig) -> Option<InterfaceD
             desc.bandwidth = Some(cfg.bandwidth? as u64);
             desc.spreadingfactor = Some(cfg.spreading_factor? as u64);
             desc.codingrate = Some(cfg.coding_rate? as u64);
+        }
+        // The TNC's radio settings are not readable through KISS, so they come
+        // from the `discovery_*` keys and none is required (Discovery.py:158-162).
+        "KISSInterface" => {
+            desc.frequency = cfg.discovery_frequency;
+            desc.bandwidth = cfg.discovery_bandwidth;
+            desc.modulation = cfg.discovery_modulation;
         }
         other => {
             tracing::warn!("discovery: interface type {other} is not discoverable, skipping");

@@ -135,6 +135,13 @@ pub struct InterfaceDescriptor {
     pub spreadingfactor: Option<u64>,
     /// Coding rate (RNode).
     pub codingrate: Option<u64>,
+    /// Modulation of the TNC behind a KISS interface (Python
+    /// `discovery_modulation`). KISS publishes `frequency`, `bandwidth` and
+    /// this from configuration, each nil when unset.
+    pub modulation: Option<u64>,
+    /// Proof-of-work cost of the stamp (Python `discovery_stamp_value`);
+    /// `None` or 0 is [`DEFAULT_STAMP_VALUE`] (Discovery.py:98).
+    pub stamp_value: Option<u32>,
     /// Publish the IFAC credentials below in the announce (Python
     /// `discovery_publish_ifac`). Off by default: the passphrase reaches the
     /// air only on an explicit per-interface opt-in.
@@ -276,6 +283,27 @@ fn encode_info(
                 count += 1;
             }
         }
+        // A KISS TNC cannot be asked for its radio settings, so the three
+        // come from configuration and each goes out as nil when unset
+        // (Discovery.py:158-162). Python passes the modulation through
+        // `sanitize`, a string helper, after reading it `as_int`
+        // (Reticulum.py:867), so rnsd itself raises on a configured value and
+        // sends no announce; we send the integer the config holds, which its
+        // receivers read untyped (Discovery.py:340-343).
+        "KISSInterface" => {
+            for (key, value) in [
+                (KEY_FREQUENCY, desc.frequency),
+                (KEY_BANDWIDTH, desc.bandwidth),
+                (KEY_MODULATION, desc.modulation),
+            ] {
+                msgpack::write_uint(&mut body, key);
+                match value {
+                    Some(v) => msgpack::write_uint(&mut body, v),
+                    None => msgpack::write_nil(&mut body),
+                }
+                count += 1;
+            }
+        }
         _ => {}
     }
 
@@ -320,7 +348,7 @@ fn write_map_header(buf: &mut Vec<u8>, count: u32) {
 /// Build the discovery announce `app_data` for one interface.
 ///
 /// Produces `flags(0x00) + msgpack(info) + stamp(32)`, generating a fresh PoW
-/// stamp at [`DEFAULT_STAMP_VALUE`]. This is the plaintext "emit" half: hand
+/// stamp at the descriptor's `stamp_value`, or [`DEFAULT_STAMP_VALUE`]. This is the plaintext "emit" half: hand
 /// the result to `Destination::announce(app_data = ...)` on the discovery
 /// destination. For a private (encrypted) discovery network, use
 /// [`build_announce_app_data_encrypted`] instead.
@@ -379,11 +407,15 @@ fn build_announce_app_data_inner(
 ) -> Option<Vec<u8>> {
     let packed = encode_info(desc, transport_id, transport_enabled)?;
     let infohash = full_hash(&packed);
-    // `DEFAULT_STAMP_VALUE` is a local constant well under the hash width, so
-    // the guard cannot fire here; propagate rather than unwrap so it stays that
-    // way if the cost ever becomes configurable.
+    // The interface's configured cost, 0 or unset meaning the default
+    // (Discovery.py:98). A cost above the hash width is refused by
+    // `generate_stamp` and the announce is not built.
+    let cost = desc
+        .stamp_value
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_STAMP_VALUE);
     let (stamp, _value) =
-        stamp::generate_stamp(&infohash, DEFAULT_STAMP_VALUE, WORKBLOCK_EXPAND_ROUNDS, rng).ok()?;
+        stamp::generate_stamp(&infohash, cost, WORKBLOCK_EXPAND_ROUNDS, rng).ok()?;
 
     let mut tail = Vec::with_capacity(packed.len() + STAMP_SIZE);
     tail.extend_from_slice(&packed);

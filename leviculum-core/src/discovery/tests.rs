@@ -120,6 +120,61 @@ fn encode_info_matches_python_vector_c() {
     assert_eq!(packed, hx(C_PACKED));
 }
 
+/// KISSInterface with a configured position, frequency and bandwidth and no
+/// modulation: Python's `packb` of the dict `get_interface_announce_data`
+/// builds for it (Discovery.py:101-109, 158-162), generated over the vendored
+/// umsgpack. The modulation is nil because a configured one makes rnsd raise
+/// in `sanitize` and send nothing, so this is the only KISS shape rnsd emits.
+const KISS_PACKED: &str = "8a00ad4b495353496e7465726661636501c3ccfec41000112233445566778899aabbccddeeffccffaa5061636b657420544e4303cb404a428f5c28f5c304cb402acf5c28f5c28f05cb404100000000000009ce08a179000acd30d40dc0";
+
+fn desc_kiss() -> InterfaceDescriptor {
+    InterfaceDescriptor {
+        interface_type: "KISSInterface".into(),
+        name: Some("Packet TNC".into()),
+        latitude: Some(52.52),
+        longitude: Some(13.405),
+        height: Some(34.0),
+        frequency: Some(144_800_000),
+        bandwidth: Some(12_500),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn encode_info_matches_python_kiss_vector() {
+    let packed = encode_info(&desc_kiss(), &arr16(TID_HEX), true).unwrap();
+    assert_eq!(packed, hx(KISS_PACKED));
+}
+
+#[test]
+fn encode_info_publishes_a_configured_kiss_modulation_as_an_integer() {
+    // The trailing nil (0xc0) of the vector becomes the integer, nothing else
+    // moves.
+    let mut desc = desc_kiss();
+    desc.modulation = Some(3);
+    let packed = encode_info(&desc, &arr16(TID_HEX), true).unwrap();
+    let mut expected = hx(KISS_PACKED);
+    *expected.last_mut().unwrap() = 0x03;
+    assert_eq!(packed, expected);
+}
+
+#[test]
+fn a_configured_stamp_value_sets_the_minted_cost() {
+    // A cost of 1 is minted at 1 or better, and a cost above the hash width
+    // builds no announce rather than spinning (generate_stamp refuses it).
+    let mut desc = desc_b();
+    desc.stamp_value = Some(1);
+    let app = build_announce_app_data(&desc, &arr16(TID_HEX), true, &mut rand_core::OsRng)
+        .expect("a cost-1 announce");
+    let packed = &app[1..app.len() - STAMP_SIZE];
+    let workblock = stamp_workblock(&full_hash(packed), WORKBLOCK_EXPAND_ROUNDS);
+    let stamp: [u8; STAMP_SIZE] = app[app.len() - STAMP_SIZE..].try_into().unwrap();
+    assert!(stamp_valid(&stamp, 1, &workblock));
+
+    desc.stamp_value = Some(257);
+    assert!(build_announce_app_data(&desc, &arr16(TID_HEX), true, &mut rand_core::OsRng).is_none());
+}
+
 /// Does `haystack` contain `needle` anywhere in its bytes?
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)

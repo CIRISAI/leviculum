@@ -143,7 +143,8 @@ class TestDaemon:
                  discovery_port: int = None, discover_interfaces: bool = False,
                  network_identity: str = None, discovery_job_interval: float = None,
                  discovery_publish_ifac: bool = False,
-                 required_discovery_value: int = None):
+                 required_discovery_value: int = None,
+                 discovery_position: str = None):
         # Interface auto-discovery (Codeberg #32): drive the REAL Python
         # RNS.Discovery.InterfaceAnnouncer / InterfaceDiscovery. `discoverable`
         # marks a TCPServer interface discoverable so the daemon emits announces
@@ -161,6 +162,10 @@ class TestDaemon:
         self.discovery_encrypt = discovery_encrypt
         self.discovery_port = discovery_port
         self.discovery_publish_ifac = discovery_publish_ifac
+        # "lat,lon,height" written verbatim as the `latitude`/`longitude`/
+        # `height` keys of the discoverable block (Reticulum.py:862-864), so a
+        # test can hand both daemons the same position text (D15).
+        self.discovery_position = discovery_position
         self.discover_interfaces = discover_interfaces
         # `required_discovery_value` is the LISTENER's stamp gate, the
         # `[reticulum]` key RNS feeds to InterfaceDiscovery(required_value=...).
@@ -311,6 +316,18 @@ class TestDaemon:
             }
         return self._page_content_cache
 
+    @staticmethod
+    def _rnstatus_location(i):
+        """The `Location` value `rnstatus -d` prints for a discovered record,
+        by the reference's own expression (rnstatus.py:218-224)."""
+        if i.get("latitude") is not None and i.get("longitude") is not None:
+            lat = round(i["latitude"], 4)
+            lon = round(i["longitude"], 4)
+            if i.get("height") != None: height = ", "+str(i["height"])+"m h"
+            else: height = ""
+            return f"{lat}, {lon}{height}"
+        return "Unknown"
+
     def _discovery_keys(self):
         """Discovery config keys appended to a discoverable TCPServer block.
 
@@ -333,6 +350,9 @@ class TestDaemon:
             # announce (Reticulum.py `publish_ifac`, default off) -- Codeberg
             # #151: an auto-connecting peer derives the IFAC from the record.
             keys += "    publish_ifac = yes\n"
+        if self.discovery_position:
+            lat, lon, height = self.discovery_position.split(",")
+            keys += f"    latitude = {lat}\n    longitude = {lon}\n    height = {height}\n"
         return keys
 
     def _write_config(self):
@@ -1784,6 +1804,10 @@ class TestDaemon:
                     "hops": info.get("hops"),
                     "status": info.get("status"),
                     "config_entry": info.get("config_entry"),
+                    "latitude": info.get("latitude"),
+                    "longitude": info.get("longitude"),
+                    "height": info.get("height"),
+                    "location": self._rnstatus_location(info),
                 })
             return {"result": out}
 
@@ -2406,6 +2430,8 @@ def main():
     parser.add_argument("--discovery-publish-ifac", action="store_true",
                         help="Publish the discoverable interface's IFAC keys "
                              "in the discovery announce (#151)")
+    parser.add_argument("--discovery-position", type=str, default=None,
+                        help="lat,lon,height of the discoverable interface (D15)")
     parser.add_argument("--required-discovery-value", type=int, default=None,
                         help="Stamp value the InterfaceDiscovery listener requires "
                              "(RNS 1.5.0 defaults to 16, 1.3.5 to 14)")
@@ -2469,6 +2495,7 @@ def main():
         discovery_job_interval=args.discovery_job_interval,
         discovery_publish_ifac=args.discovery_publish_ifac,
         required_discovery_value=args.required_discovery_value,
+        discovery_position=args.discovery_position,
     )
     daemon.run()
 

@@ -573,6 +573,35 @@ pub struct InterfaceConfig {
     /// the announcer on a short cadence. Takes priority over `announce_interval`.
     #[serde(default)]
     pub discovery_announce_interval_secs: Option<u64>,
+    /// Position published in this interface's discovery announce, in degrees
+    /// and metres (Python `latitude`/`longitude`/`height`, `as_float`,
+    /// Reticulum.py:862-864). Unset goes out as nil, which `rnstatus -d`
+    /// shows as an unknown location.
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    /// Longitude published in the discovery announce, see `latitude`.
+    #[serde(default)]
+    pub longitude: Option<f64>,
+    /// Height published in the discovery announce, see `latitude`.
+    #[serde(default)]
+    pub height: Option<f64>,
+    /// Proof-of-work cost of this interface's discovery stamp (Python
+    /// `discovery_stamp_value`, Reticulum.py:857). Unset or 0 is the
+    /// reference default of 14 (Discovery.py:98).
+    #[serde(default)]
+    pub discovery_stamp_value: Option<u32>,
+    /// Radio parameters a KISS interface publishes about the TNC behind it,
+    /// which lnsd cannot read from the modem itself (Python
+    /// `discovery_frequency`/`discovery_bandwidth`/`discovery_modulation`,
+    /// all `as_int`, Reticulum.py:865-867; published at Discovery.py:158-162).
+    #[serde(default)]
+    pub discovery_frequency: Option<u64>,
+    /// Bandwidth a KISS interface publishes, see `discovery_frequency`.
+    #[serde(default)]
+    pub discovery_bandwidth: Option<u64>,
+    /// Modulation a KISS interface publishes, see `discovery_frequency`.
+    #[serde(default)]
+    pub discovery_modulation: Option<u64>,
 
     // TCP/UDP specific
     /// Kernel network interface name to bind to (Python `device`,
@@ -929,6 +958,13 @@ impl Default for InterfaceConfig {
             publish_ifac: false,
             announce_interval: None,
             discovery_announce_interval_secs: None,
+            latitude: None,
+            longitude: None,
+            height: None,
+            discovery_stamp_value: None,
+            discovery_frequency: None,
+            discovery_bandwidth: None,
+            discovery_modulation: None,
             device: None,
             prefer_ipv6: None,
             listen_ip: None,

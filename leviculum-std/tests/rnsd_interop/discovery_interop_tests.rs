@@ -928,3 +928,139 @@ async fn test_python_listener_at_150_stamp_gate_discovers_rust_announcement() {
 
     node.stop().await.expect("stop node");
 }
+
+// =========================================================================
+// Test 11: a configured position goes on the air (D15 of the 2026-10-11
+// shared-instance audit). One position text, handed to lnsd through its
+// config file and to rnsd through its own; one Python listener reads both
+// announces and renders the `Location` line `rnstatus -d` prints.
+// =========================================================================
+
+/// The position both daemons are configured with, as `lat,lon,height`.
+const POSITION: (&str, &str, &str) = ("52.5200", "13.4050", "34.5");
+
+/// What `rnstatus -d` prints after `Location     : ` for [`POSITION`]
+/// (rnstatus.py:218-224: lat/lon rounded to 4 places, height as given).
+const POSITION_LINE: &str = "52.52, 13.405, 34.5m h";
+
+/// Poll `listener` until it lists `name`, then return that record.
+async fn discovered_record(
+    listener: &TestDaemon,
+    name: &str,
+    deadline: Duration,
+) -> Option<serde_json::Value> {
+    let end = Instant::now() + deadline;
+    while Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Ok(listed) = listener.get_discovered_interfaces().await {
+            if let Some(record) = listed
+                .into_iter()
+                .find(|i| i.get("name").and_then(|v| v.as_str()) == Some(name))
+            {
+                return Some(record);
+            }
+        }
+    }
+    None
+}
+
+fn assert_position(record: &serde_json::Value, who: &str) {
+    assert_eq!(
+        record.get("latitude").and_then(|v| v.as_f64()),
+        Some(52.52),
+        "{who}: latitude in {record}"
+    );
+    assert_eq!(
+        record.get("longitude").and_then(|v| v.as_f64()),
+        Some(13.405),
+        "{who}: longitude in {record}"
+    );
+    assert_eq!(
+        record.get("height").and_then(|v| v.as_f64()),
+        Some(34.5),
+        "{who}: height in {record}"
+    );
+    assert_eq!(
+        record.get("location").and_then(|v| v.as_str()),
+        Some(POSITION_LINE),
+        "{who}: rnstatus -d Location in {record}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_a_configured_position_reaches_rnstatus_from_both_daemons() {
+    let listener = TestDaemon::start_discovering()
+        .await
+        .expect("start discovering daemon");
+
+    // lnsd: the position comes from the config FILE, through the parser arms
+    // this test exists for, not from a builder call.
+    // port-handoff: the discovery announce carries the configured port, not
+    // the bound one, so the advertised listener needs its number in the file.
+    let hub_port = pick_free_tcp_port().expect("free advertised port");
+    let (lat, lon, height) = POSITION;
+    let ini = format!(
+        "[reticulum]\n  enable_transport = yes\n\n[interfaces]\n  \
+         [[Uplink]]\n    type = TCPClientInterface\n    target_host = 127.0.0.1\n    \
+         target_port = {}\n\n  \
+         [[Hub]]\n    type = TCPServerInterface\n    listen_ip = 127.0.0.1\n    \
+         listen_port = {hub_port}\n    discoverable = yes\n    reachable_on = 127.0.0.1\n    \
+         discovery_name = PositionedRustHub\n    discovery_announce_interval_secs = 0\n    \
+         latitude = {lat}\n    longitude = {lon}\n    height = {height}\n",
+        listener.rns_port()
+    );
+    let storage = temp_storage("disco_position", "node");
+    let config_path = storage.path().join("config");
+    std::fs::write(&config_path, ini).expect("write lnsd config");
+    let config = Config::load(&config_path).expect("lnsd parses the config");
+    let mut node = ReticulumNodeBuilder::new()
+        .config(config)
+        .discovery_announce_job_interval_secs(1)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build node");
+    node.start().await.expect("start node");
+
+    let started = Instant::now();
+    let from_lnsd = discovered_record(&listener, "PositionedRustHub", Duration::from_secs(30))
+        .await
+        .expect("the Python listener discovers lnsd's announce");
+    assert_position(&from_lnsd, "lnsd");
+    let lnsd_after = started.elapsed();
+
+    // rnsd: the same three keys in its own config block, read by the same
+    // listener over a link the listener dials.
+    let rnsd = TestDaemon::start_discoverable_at_position(
+        "PositionedPythonHub",
+        &format!("{lat},{lon},{height}"),
+    )
+    .await
+    .expect("start discoverable rnsd");
+    listener
+        .add_client_interface("127.0.0.1", rnsd.rns_port(), Some("ToRnsd"))
+        .await
+        .expect("listener dials rnsd");
+    // rnsd's announcer thread sleeps its first 60 s job interval out before the
+    // harness's shorter one applies, so its announce is driven by hand, through
+    // the same real announcer code, until the listener has it.
+    let mut from_rnsd = None;
+    let end = Instant::now() + Duration::from_secs(30);
+    while from_rnsd.is_none() && Instant::now() < end {
+        let _ = rnsd.emit_discovery_announce().await;
+        from_rnsd =
+            discovered_record(&listener, "PositionedPythonHub", Duration::from_millis(700)).await;
+    }
+    let from_rnsd = from_rnsd.expect("the Python listener discovers rnsd's announce");
+    assert_position(&from_rnsd, "rnsd");
+
+    eprintln!(
+        "D15 drop-in: lnsd Location : {} (after {lnsd_after:?})\n\
+         D15 drop-in: rnsd Location : {} (after {:?})",
+        from_lnsd["location"],
+        from_rnsd["location"],
+        started.elapsed()
+    );
+
+    node.stop().await.expect("stop node");
+}
