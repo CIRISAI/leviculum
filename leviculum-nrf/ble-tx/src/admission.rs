@@ -206,8 +206,8 @@ pub fn connect_failure_condemns(decision: ConnectDecision) -> bool {
 
 /// The retry pause after a dial that said nothing about its peer, and
 /// the step the peer-failure backoff doubles from (579). It was the
-/// whole backoff until then, on both stacks: the firmware's
-/// `CENTRAL_RETRY_BACKOFF_MS` and lnsd's `SESSION_BACKOFF_MS`.
+/// whole backoff until then, on both stacks: the firmware's central
+/// pass pause ([`scan_pass_pause_ms`]) and lnsd's `SESSION_BACKOFF_MS`.
 pub const DIAL_BACKOFF_BASE_MS: u64 = 5_000;
 
 /// The ceiling of the peer-failure backoff (579).
@@ -272,6 +272,134 @@ impl DialFailure {
     #[must_use]
     pub const fn says_peer(self) -> bool {
         !matches!(self, Self::Transport)
+    }
+}
+
+/// A central dial's setup stage past the connect, in the v2.2 order
+/// (§Connection Phase steps 3 to 6). The connect itself is classified by
+/// each stack from its own error ([`connect_failure_condemns`] on the
+/// board, lnsd's `connect_failure`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialStage {
+    /// Service discovery.
+    Discover,
+    /// The read of the peer's Identity characteristic.
+    IdentityRead,
+    /// Our write of the peer's TX CCCD.
+    Subscribe,
+    /// Our 16-byte identity, written with response.
+    Handshake,
+}
+
+/// What a failed setup stage heard back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageError {
+    /// The peer answered, and the answer was no: discovery found no
+    /// Columba service or an incomplete one, the identity read was not
+    /// 16 bytes, an ATT error refused our write.
+    PeerAnswered,
+    /// Anything else: a timeout, a dropped link, a SoftDevice refusal.
+    Link,
+}
+
+/// What a setup stage's failure says about the peer (leviculum#413,
+/// census rows 127, 128, 134 and 136; 579's classification).
+///
+/// A layout or an identity the peer answered wrongly is not a Columba
+/// peer; a handshake it refused is a peer that will not handshake. A
+/// subscription that failed books as the air's even when the peer
+/// answered it: lnsd books it the same way, and a peer that refuses a
+/// CCCD write but serves the layout has not been seen to exist. Every
+/// stage that heard nothing back is the air's.
+#[must_use]
+pub fn dial_stage_failure(stage: DialStage, error: StageError) -> DialFailure {
+    match (stage, error) {
+        (_, StageError::Link) | (DialStage::Subscribe, StageError::PeerAnswered) => {
+            DialFailure::Transport
+        }
+        (DialStage::Discover | DialStage::IdentityRead, StageError::PeerAnswered) => {
+            DialFailure::NotColumba
+        }
+        (DialStage::Handshake, StageError::PeerAnswered) => DialFailure::NoHandshake,
+    }
+}
+
+/// Whose identity a dial read off the peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadIdentity {
+    /// Our own: a peer mirroring it back, or us from another angle. The
+    /// dial ends, the address is dead-ended, and no dial failure is
+    /// booked, because the address will not be dialled again before the
+    /// dead end lapses.
+    Own,
+    /// Someone else's; the registry decides the link.
+    Peer,
+}
+
+/// Judge the identity a dial read (leviculum#413, census row 129). The
+/// scanner never sees our own advertisements, so `Own` is a peer bug or
+/// a misread, and it must end as a loud line, never as a quiet link to
+/// ourselves.
+#[must_use]
+pub fn judge_read_identity(read: &[u8; 16], own: &[u8; 16]) -> ReadIdentity {
+    if read == own {
+        ReadIdentity::Own
+    } else {
+        ReadIdentity::Peer
+    }
+}
+
+/// How one pass of the board's central task ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanPass {
+    /// The window elected a peer and the dial ran, whatever its outcome.
+    Dialled,
+    /// The window closed with no candidate.
+    Empty,
+    /// The SoftDevice refused or failed the scan.
+    Failed,
+    /// The carrier switched off mid-scan.
+    CarrierOff,
+}
+
+/// The pause before the central task's next pass, `None` for straight
+/// back to the carrier gate (leviculum#413, census rows 148 to 151).
+///
+/// A dial and a failed scan both wait [`DIAL_BACKOFF_BASE_MS`]: the
+/// SoftDevice gets the same breath after a refusal as after a session.
+/// An empty window rescans at once, there being nothing to pace; a
+/// carrier that went off has nothing to pace against either, and the
+/// gate holds the task until it is on again.
+#[must_use]
+pub fn scan_pass_pause_ms(pass: ScanPass) -> Option<u64> {
+    match pass {
+        ScanPass::Dialled | ScanPass::Failed => Some(DIAL_BACKOFF_BASE_MS),
+        ScanPass::Empty | ScanPass::CarrierOff => None,
+    }
+}
+
+/// The pause after an advertisement the SoftDevice refused.
+pub const ADVERTISE_RETRY_MS: u64 = 1_000;
+
+/// How one pass of a peripheral advertising task ended. The carrier
+/// switching off is not a pass: the task goes back to its gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertisePass {
+    /// A central connected and its session has ended.
+    Served,
+    /// The advertisement failed.
+    Failed,
+}
+
+/// The pause before the next advertisement, `None` for at once
+/// (leviculum#413, census row 103). A session that ended frees its slot
+/// for the next central; a refusal waits [`ADVERTISE_RETRY_MS`] rather
+/// than spin the SoftDevice.
+#[must_use]
+pub fn advertise_pass_pause_ms(pass: AdvertisePass) -> Option<u64> {
+    match pass {
+        AdvertisePass::Served => None,
+        AdvertisePass::Failed => Some(ADVERTISE_RETRY_MS),
     }
 }
 
@@ -1687,5 +1815,76 @@ mod tests {
             PHASE_NEIGHBOUR_SLOTS,
             usize::from(PERIPH_SLOTS) + 1 + DEAD_END_SLOTS
         );
+    }
+}
+
+/// The board's central and peripheral loops, stage by stage
+/// (leviculum#413): each failure arm with the answer the air gives it.
+#[cfg(test)]
+mod dial_steps {
+    use super::*;
+
+    #[test]
+    fn a_layout_or_identity_the_peer_answered_wrongly_is_not_columba() {
+        for stage in [DialStage::Discover, DialStage::IdentityRead] {
+            assert_eq!(
+                dial_stage_failure(stage, StageError::PeerAnswered),
+                DialFailure::NotColumba,
+                "{stage:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_handshake_is_a_peer_that_will_not_handshake() {
+        assert_eq!(
+            dial_stage_failure(DialStage::Handshake, StageError::PeerAnswered),
+            DialFailure::NoHandshake
+        );
+    }
+
+    #[test]
+    fn a_refused_subscription_books_as_the_air() {
+        assert_eq!(
+            dial_stage_failure(DialStage::Subscribe, StageError::PeerAnswered),
+            DialFailure::Transport
+        );
+    }
+
+    #[test]
+    fn a_stage_that_heard_nothing_back_is_the_air_at_every_stage() {
+        for stage in [
+            DialStage::Discover,
+            DialStage::IdentityRead,
+            DialStage::Subscribe,
+            DialStage::Handshake,
+        ] {
+            let failure = dial_stage_failure(stage, StageError::Link);
+            assert_eq!(failure, DialFailure::Transport, "{stage:?}");
+            assert!(!failure.says_peer());
+        }
+    }
+
+    #[test]
+    fn a_dial_that_reads_our_own_identity_is_a_self_link() {
+        let own = [0xb2; 16];
+        let mut other = own;
+        other[15] ^= 1;
+        assert_eq!(judge_read_identity(&own, &own), ReadIdentity::Own);
+        assert_eq!(judge_read_identity(&other, &own), ReadIdentity::Peer);
+    }
+
+    #[test]
+    fn a_dial_or_a_failed_scan_pauses_and_an_empty_window_or_a_dark_carrier_does_not() {
+        assert_eq!(scan_pass_pause_ms(ScanPass::Dialled), Some(5_000));
+        assert_eq!(scan_pass_pause_ms(ScanPass::Failed), Some(5_000));
+        assert_eq!(scan_pass_pause_ms(ScanPass::Empty), None);
+        assert_eq!(scan_pass_pause_ms(ScanPass::CarrierOff), None);
+    }
+
+    #[test]
+    fn a_failed_advertisement_pauses_a_second_and_a_served_one_does_not() {
+        assert_eq!(advertise_pass_pause_ms(AdvertisePass::Failed), Some(1_000));
+        assert_eq!(advertise_pass_pause_ms(AdvertisePass::Served), None);
     }
 }

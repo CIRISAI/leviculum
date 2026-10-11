@@ -44,6 +44,7 @@
 use leviculum_core::framing::ble::KEEPALIVE_INTERVAL_MS;
 
 use crate::adv::{identity_hint, IDENTITY_HINT_LEN};
+use crate::drain::DrainRouter;
 
 /// One interface's live links, indexed by the link's drain-table slot —
 /// the same index that selects its outbound queue, so the drain table,
@@ -939,6 +940,13 @@ impl SlotMask {
             _ => false,
         }
     }
+
+    /// Is this slot in the set? The same bit as [`skips`](Self::skips),
+    /// named for a set of targets ([`Delivery::Flood`]).
+    #[must_use]
+    pub fn contains(self, slot: usize) -> bool {
+        self.skips(slot)
+    }
 }
 
 /// What the core's delivery statement made of one outbound packet
@@ -993,6 +1001,49 @@ pub fn plan_fanout<const N: usize>(registry: &PeerRegistry<N>, aim: TxAim) -> Tx
             None => TxFanout::NoLink,
         },
         TxAim::FloodExcept(peer) => TxFanout::FloodExcept(registry.slots_of(&peer)),
+    }
+}
+
+/// Where a planned packet goes, read against the drain table at the
+/// moment of queueing ([`resolve_fanout`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// The routed peer's link, still claimed: queue on `slot` alone.
+    Link {
+        /// The drain-table slot, which selects the link's queue.
+        slot: usize,
+        /// Its connection handle, for the `BLE_TX_ROUTE` line.
+        handle: u16,
+    },
+    /// A routed packet with no live link to carry it: dropped and
+    /// reported (`BLE_TX_ROUTE_MISS`), never flooded ([`TxFanout::NoLink`]).
+    RouteMiss,
+    /// Copy onto every slot in the set; possibly none.
+    Flood(SlotMask),
+}
+
+/// Resolve a [`TxFanout`] against the links the drain table holds now
+/// (leviculum#413, census rows 85 and 86).
+///
+/// The registry and the drain table are two reads. A link that dies
+/// between them leaves the registry's slot unclaimed, and a route to it
+/// is the same decision as [`TxFanout::NoLink`]: a miss, not a flood
+/// and not a queue nobody drains. A flood takes the claimed slots and
+/// leaves out the ones its mask skips (the #422 ingress link).
+pub fn resolve_fanout<const N: usize>(drain: &DrainRouter<N>, fanout: TxFanout) -> Delivery {
+    let live_except = |skip: SlotMask| {
+        (0..N)
+            .filter(|&slot| drain.handle_at(slot).is_some() && !skip.skips(slot))
+            .fold(SlotMask::EMPTY, SlotMask::with)
+    };
+    match fanout {
+        TxFanout::Route(slot) => match drain.handle_at(slot) {
+            Some(handle) => Delivery::Link { slot, handle },
+            None => Delivery::RouteMiss,
+        },
+        TxFanout::NoLink => Delivery::RouteMiss,
+        TxFanout::Flood => Delivery::Flood(live_except(SlotMask::EMPTY)),
+        TxFanout::FloodExcept(mask) => Delivery::Flood(live_except(mask)),
     }
 }
 
@@ -2718,5 +2769,71 @@ mod duel {
         assert_eq!(regb.slot_for(&A_ID), Some(0));
         assert_eq!(rega.peer_count(), 1);
         assert_eq!(regb.peer_count(), 1);
+    }
+}
+
+/// The fan-out read against the drain table (leviculum#413, census rows
+/// 85 and 86): the inputs are the claims and releases the connection
+/// tasks make, in the order the air makes them.
+#[cfg(test)]
+mod delivery {
+    use super::*;
+
+    #[test]
+    fn a_route_to_a_claimed_slot_goes_to_that_link() {
+        let drain: DrainRouter<4> = DrainRouter::new();
+        let (slot, _) = drain.claim_indexed(17).unwrap();
+        assert_eq!(
+            resolve_fanout(&drain, TxFanout::Route(slot)),
+            Delivery::Link { slot, handle: 17 }
+        );
+    }
+
+    /// The registry named the slot, then the link died before the drain
+    /// table was read: a miss, not a flood.
+    #[test]
+    fn a_route_to_a_slot_released_since_the_plan_is_a_miss() {
+        let drain: DrainRouter<4> = DrainRouter::new();
+        let (slot, _) = drain.claim_indexed(17).unwrap();
+        drain.claim_indexed(18).unwrap();
+        drain.release(17);
+        assert_eq!(
+            resolve_fanout(&drain, TxFanout::Route(slot)),
+            Delivery::RouteMiss
+        );
+        assert_eq!(
+            resolve_fanout(&drain, TxFanout::NoLink),
+            Delivery::RouteMiss
+        );
+    }
+
+    #[test]
+    fn a_flood_takes_every_claimed_slot_and_the_ingress_mask_leaves_its_link_out() {
+        let drain: DrainRouter<4> = DrainRouter::new();
+        let (a, _) = drain.claim_indexed(17).unwrap();
+        let (b, _) = drain.claim_indexed(18).unwrap();
+        let (c, _) = drain.claim_indexed(19).unwrap();
+        drain.release(18);
+        let Delivery::Flood(all) = resolve_fanout(&drain, TxFanout::Flood) else {
+            panic!("a flood floods");
+        };
+        assert!(all.contains(a) && all.contains(c));
+        assert!(!all.contains(b), "a released slot is no target");
+        assert!(!all.contains(3), "an unclaimed slot is no target");
+
+        let ingress = SlotMask::EMPTY.with(a);
+        let Delivery::Flood(rest) = resolve_fanout(&drain, TxFanout::FloodExcept(ingress)) else {
+            panic!("a flood floods");
+        };
+        assert_eq!(rest, SlotMask::EMPTY.with(c));
+    }
+
+    #[test]
+    fn a_flood_with_no_live_link_has_no_target() {
+        let drain: DrainRouter<4> = DrainRouter::new();
+        assert_eq!(
+            resolve_fanout(&drain, TxFanout::Flood),
+            Delivery::Flood(SlotMask::EMPTY)
+        );
     }
 }

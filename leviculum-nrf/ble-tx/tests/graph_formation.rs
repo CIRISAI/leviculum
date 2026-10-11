@@ -1112,7 +1112,7 @@ const ORDERS: u64 = 1_000;
 /// harness after [`FALLBACK_AFTER_ROUNDS`] rounds, so a round is 5 s.
 /// That is also the firmware's own search-connect-backoff cycle: one
 /// connect timeout (`CONNECT_TIMEOUT_10MS`, 5 s) or one retry backoff
-/// (`CENTRAL_RETRY_BACKOFF_MS`, 5 s) per pass.
+/// (`scan_pass_pause_ms`, 5 s) per pass.
 const ROUND_MS: u64 = SCAN_FALLBACK_AFTER_MS / FALLBACK_AFTER_ROUNDS as u64;
 
 /// A duration in rounds, rounded down — every period below is stated

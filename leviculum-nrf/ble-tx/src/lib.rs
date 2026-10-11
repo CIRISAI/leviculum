@@ -49,10 +49,12 @@ pub mod session_census;
 pub mod window;
 
 pub use admission::{
-    admit, connect_failure_condemns, dial_backoff_ms, AddrType, Admission, AdvReport,
-    BackoffBooked, DeadEnds, DialBackoff, DialFailure, Exclusion, Ledgers, Local, Neighbour,
-    PeerAddr, PhaseEvent, PhaseNeighbours, PhasePoll, ScanPhase, DEAD_END_SLOTS, DEAD_END_TTL_MS,
-    DIAL_BACKOFF_BASE_MS, DIAL_BACKOFF_CAP_MS, DIAL_BACKOFF_SLOTS, PHASE_NEIGHBOUR_SLOTS,
+    admit, advertise_pass_pause_ms, connect_failure_condemns, dial_backoff_ms, dial_stage_failure,
+    judge_read_identity, scan_pass_pause_ms, AddrType, Admission, AdvReport, AdvertisePass,
+    BackoffBooked, DeadEnds, DialBackoff, DialFailure, DialStage, Exclusion, Ledgers, Local,
+    Neighbour, PeerAddr, PhaseEvent, PhaseNeighbours, PhasePoll, ReadIdentity, ScanPass, ScanPhase,
+    StageError, ADVERTISE_RETRY_MS, DEAD_END_SLOTS, DEAD_END_TTL_MS, DIAL_BACKOFF_BASE_MS,
+    DIAL_BACKOFF_CAP_MS, DIAL_BACKOFF_SLOTS, PHASE_NEIGHBOUR_SLOTS,
 };
 pub use adv::{
     ad_structure_len, free_slots, identity_hint, manufacturer_data, manufacturer_data_with_hint,
@@ -78,9 +80,10 @@ pub use peer::{
     ScanMode,
 };
 pub use registry::{
-    judge_duplicate, plan_fanout, preferred_ble_role, usable_mtu, BleRole, DataSilence, DupRule,
-    DupVerdict, LinkUp, LinkVerdict, Origin, PeerRegistry, SlotMask, TxAim, TxFanout,
-    HANDSHAKE_TIMEOUT_MS, LINK_ABANDONED_MS, LINK_TIMEOUT_MS, MIN_USABLE_MTU,
+    judge_duplicate, plan_fanout, preferred_ble_role, resolve_fanout, usable_mtu, BleRole,
+    DataSilence, Delivery, DupRule, DupVerdict, LinkUp, LinkVerdict, Origin, PeerRegistry,
+    SlotMask, TxAim, TxFanout, HANDSHAKE_TIMEOUT_MS, LINK_ABANDONED_MS, LINK_TIMEOUT_MS,
+    MIN_USABLE_MTU,
 };
 pub use session_census::{HeldBytes, SessionHeld};
 pub use window::{
@@ -504,6 +507,32 @@ impl PacketTx {
     #[must_use]
     pub fn torn(&self) -> bool {
         matches!(self.phase, Phase::Aborted) && self.sent > 0
+    }
+}
+
+/// Whether an abandoned packet ends its link (leviculum#413, census
+/// rows 97, 141 and 142).
+///
+/// `torn` is [`PacketTx::torn`] on the notify path, and on the write
+/// path whether a fragment went out before the failure;
+/// `disconnected` says the link is already gone.
+///
+/// The peripheral's notify path disconnects only on a torn packet: a
+/// head the peer accepted poisons its reassembler, and the wire has no
+/// abort marker, so dropping the link is the only in-band reset (#255).
+/// A packet refused at its first fragment leaves the peer clean and the
+/// link stays; after a disconnect there is nothing left to drop.
+///
+/// The central's write path disconnects on every abort, the first
+/// fragment included: its only failures are a fragment that cannot be
+/// built and a write the SoftDevice refused, and the session ends with
+/// either. No order chose the difference between the roles: the census
+/// lists it as an observation, and this pins it until one decides it.
+#[must_use]
+pub fn abort_disconnects(role: LinkRole, torn: bool, disconnected: bool) -> bool {
+    match role {
+        LinkRole::Peripheral => torn && !disconnected,
+        LinkRole::Central => true,
     }
 }
 
@@ -1067,5 +1096,52 @@ mod tests {
         let (name, len) = gap_name(&[0u8; 16], Some(exact));
         assert_eq!(core::str::from_utf8(&name[..len]).unwrap(), exact);
         assert_eq!(len, DEVICE_NAME_LEN);
+    }
+
+    /// The notify path (census row 97): a torn packet disconnects,
+    /// unless the link is already gone; a refusal at the first fragment
+    /// keeps the link. Driven through [`PacketTx`] with the outcomes the
+    /// SoftDevice gives, so `torn` is what the driver reads.
+    #[test]
+    fn the_notify_path_disconnects_only_on_a_tear_the_peer_still_holds() {
+        let abort_at = |fragment: usize, outcome: NotifyOutcome| {
+            let (mut tx, mut action) = PacketTx::start(3);
+            loop {
+                match action {
+                    Action::Send { index } if index == fragment => {
+                        action = tx.step(Event::Notify(outcome));
+                    }
+                    Action::Send { .. } => action = tx.step(Event::Notify(NotifyOutcome::Sent)),
+                    Action::AwaitDrain { .. } => action = tx.step(Event::Drained),
+                    Action::Abort { reason, .. } => {
+                        return abort_disconnects(
+                            LinkRole::Peripheral,
+                            tx.torn(),
+                            matches!(reason, AbortReason::Disconnected),
+                        );
+                    }
+                    other => panic!("no abort: {other:?}"),
+                }
+            }
+        };
+        let sd_error = NotifyOutcome::Failed(NRF_ERROR_DATA_SIZE);
+        assert!(abort_at(1, sd_error), "a head went out: reset the peer");
+        assert!(
+            !abort_at(0, sd_error),
+            "nothing went out: the peer is clean"
+        );
+        assert!(
+            !abort_at(1, NotifyOutcome::Disconnected),
+            "the link is already gone"
+        );
+    }
+
+    /// The write path (census rows 141 and 142): every abort ends the
+    /// link, the first fragment's included.
+    #[test]
+    fn the_write_path_disconnects_on_every_abort() {
+        assert!(abort_disconnects(LinkRole::Central, true, false));
+        assert!(abort_disconnects(LinkRole::Central, false, false));
+        assert!(abort_disconnects(LinkRole::Central, true, true));
     }
 }

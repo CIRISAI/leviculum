@@ -419,6 +419,24 @@ impl BleDefragmenter {
         self.last_fragment_ms = 0;
     }
 
+    /// [`process`](Self::process) one inbound frame and, when it is
+    /// garbage, [`abandon`](Self::abandon) the reassembly in progress.
+    ///
+    /// `process` refuses a frame with a bad type, a zero `total` or a
+    /// sequence past its `total` without touching the head it holds.
+    /// A receiver that kept that head would complete it with the next
+    /// packet's tail, which on a v2.2 link is indistinguishable from a
+    /// real reassembly (#255). The board's GATT roles take every frame
+    /// through here (leviculum#413, census row 105); lnsd parks an
+    /// orphan tail between the two steps and so calls them apart.
+    pub fn process_or_abandon(&mut self, fragment: &[u8], now_ms: u64) -> DefragResult {
+        let result = self.process(fragment, now_ms);
+        if matches!(result, DefragResult::Error) {
+            self.abandon();
+        }
+        result
+    }
+
     /// Check if the current reassembly has timed out.
     ///
     /// Returns `true` if fragments are pending and the timeout has elapsed
@@ -831,6 +849,61 @@ mod tests {
             other => panic!("Expected Complete, got {:?}", other),
         }
         assert_eq!(defrag.abandoned_count(), 1, "no further discards");
+    }
+
+    /// A garbage frame amid a reassembly: `process` alone keeps the
+    /// head, `process_or_abandon` drops and counts it, so the next
+    /// packet's tail cannot complete it.
+    #[test]
+    fn test_a_garbage_frame_abandons_the_head_it_would_otherwise_keep() {
+        let a: Vec<u8> = vec![0xAA; 300];
+        let b: Vec<u8> = vec![0xBB; 300];
+        let frags_a = fragment_packet(&a, DEFAULT_MTU);
+        let frags_b = fragment_packet(&b, DEFAULT_MTU);
+        let garbage = [0x07, 0x00, 0x01, 0x00, 0x02];
+
+        let mut kept = BleDefragmenter::new();
+        assert_eq!(kept.process(&frags_a[0], 1000), DefragResult::NeedMore);
+        assert_eq!(kept.process(&garbage, 1001), DefragResult::Error);
+        assert_eq!(kept.pending_fragments(), 1, "process alone keeps A's head");
+
+        let mut reset = BleDefragmenter::new();
+        assert_eq!(
+            reset.process_or_abandon(&frags_a[0], 1000),
+            DefragResult::NeedMore
+        );
+        assert_eq!(
+            reset.process_or_abandon(&garbage, 1001),
+            DefragResult::Error
+        );
+        assert_eq!(reset.pending_fragments(), 0);
+        assert_eq!(reset.abandoned_count(), 1, "A's head is a counted loss");
+        // B's END alone has no head to splice onto.
+        assert_eq!(
+            reset.process_or_abandon(&frags_b[1], 1002),
+            DefragResult::Error
+        );
+        assert_eq!(reset.abandoned_count(), 1, "nothing was pending");
+    }
+
+    /// With nothing pending a garbage frame costs nothing, and good
+    /// frames pass through `process_or_abandon` as through `process`.
+    #[test]
+    fn test_process_or_abandon_passes_good_frames_and_counts_no_idle_garbage() {
+        let mut defrag = BleDefragmenter::new();
+        assert_eq!(
+            defrag.process_or_abandon(&[0x07, 0x00, 0x00, 0x00, 0x01], 1000),
+            DefragResult::Error
+        );
+        assert_eq!(defrag.abandoned_count(), 0);
+
+        let data: Vec<u8> = (0..400).map(|i| (i % 256) as u8).collect();
+        let mut result = DefragResult::NeedMore;
+        for frag in fragment_packet(&data, DEFAULT_MTU) {
+            result = defrag.process_or_abandon(&frag, 2000);
+        }
+        assert_eq!(result, DefragResult::Complete(data));
+        assert_eq!(defrag.abandoned_count(), 0);
     }
 
     /// The limitation the counter cannot close, pinned so nobody
