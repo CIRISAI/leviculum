@@ -14,8 +14,9 @@
 //! - [`tail_window`]: what a boot replays: nothing without the magic, the
 //!   whole ring once the writer has gone round it, the bytes written so far
 //!   before that.
-//! - [`replay_lines`]: the lines a boot logs from it. The ring wraps inside
-//!   a line, so the first line is dropped unless it is the whole snapshot.
+//! - [`replay_lines`]: the lines a boot logs from it. A ring the writer
+//!   [`went_round`] wraps inside a line, so its first line is dropped unless
+//!   it is the whole snapshot; a ring it did not keeps every line.
 //! - [`lapped_reader`]: a writer that laps the runtime ring's reader moves
 //!   the reader to the oldest byte still there.
 
@@ -46,14 +47,21 @@ pub fn tail_window(magic: u32, write_pos: usize, cap: usize) -> Option<(usize, u
     Some(ring_window(write_pos, cap))
 }
 
+/// Whether the writer went round a ring of `cap` bytes, so the oldest byte
+/// [`tail_window`] keeps is no longer the first byte the boot wrote.
+pub const fn went_round(write_pos: usize, cap: usize) -> bool {
+    write_pos > cap
+}
+
 /// The lines a boot logs from a replayed `snapshot`, without their line
 /// ends, empty lines skipped, bytes that are not UTF-8 named as such.
 ///
-/// The first line is dropped unless it reaches the end of the snapshot: the
-/// ring wraps inside lines, so the oldest bytes are usually the tail of a
-/// line whose head was overwritten. A snapshot without a line end is one
-/// line and kept.
-pub fn replay_lines(snapshot: &[u8]) -> impl Iterator<Item = &str> {
+/// A tail that [`went_round`] wraps inside lines, so its oldest bytes are
+/// usually the tail of a line whose head was overwritten: its first line is
+/// dropped unless it reaches the end of the snapshot. A tail that did not
+/// starts at the first byte the boot wrote, a line's head, and keeps its
+/// first line. A snapshot without a line end is one line and kept.
+pub fn replay_lines(snapshot: &[u8], went_round: bool) -> impl Iterator<Item = &str> {
     let mut start = 0usize;
     core::iter::from_fn(move || loop {
         if start >= snapshot.len() {
@@ -64,7 +72,7 @@ pub fn replay_lines(snapshot: &[u8]) -> impl Iterator<Item = &str> {
             .position(|&b| b == b'\n')
             .map(|p| start + p + 1)
             .unwrap_or(snapshot.len());
-        let first = start == 0;
+        let first = went_round && start == 0;
         let raw = &snapshot[start..end];
         start = end;
         if first && end != snapshot.len() {
@@ -133,15 +141,37 @@ mod tests {
     }
 
     fn replayed(snapshot: &[u8]) -> Vec<&str> {
-        replay_lines(snapshot).collect()
+        replay_lines(snapshot, true).collect()
     }
 
     #[test]
-    fn the_leading_partial_line_is_dropped() {
+    fn the_leading_partial_line_of_a_tail_that_went_round_is_dropped() {
         assert_eq!(
             replayed(b"ss=12 t=40\n[LORA] tx\n[PN] round\n"),
             ["[LORA] tx", "[PN] round"]
         );
+    }
+
+    #[test]
+    fn a_tail_that_did_not_go_round_keeps_its_first_line() {
+        let snapshot = b"[BOOT] reset=0x4\n[IDENTITY] hash=ab12\n[LORA] tx\n";
+        let write_pos = snapshot.len();
+        let (start, len) = tail_window(TAIL_MAGIC, write_pos, CAP).unwrap();
+        assert_eq!((start, len), (0, snapshot.len()));
+        let lines: Vec<&str> =
+            replay_lines(&snapshot[start..start + len], went_round(write_pos, CAP)).collect();
+        assert_eq!(
+            lines,
+            ["[BOOT] reset=0x4", "[IDENTITY] hash=ab12", "[LORA] tx"]
+        );
+    }
+
+    #[test]
+    fn a_ring_filled_to_its_last_byte_did_not_go_round() {
+        assert!(!went_round(0, CAP));
+        assert!(!went_round(CAP, CAP));
+        assert!(went_round(CAP + 1, CAP));
+        assert!(went_round(usize::MAX, CAP));
     }
 
     #[test]

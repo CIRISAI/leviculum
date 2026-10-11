@@ -164,7 +164,9 @@ async fn main(spawner: Spawner) {
     if let Some(snap) = persistent_log {
         // Which lines of last boot's tail are replayed:
         // `leviculum_boot_trace::tail::replay_lines`.
-        for line in leviculum_boot_trace::tail::replay_lines(&snap.bytes[..snap.len]) {
+        for line in
+            leviculum_boot_trace::tail::replay_lines(&snap.bytes[..snap.len], snap.went_round)
+        {
             log_critical!("[PERSISTENT_LOG] {}", line);
         }
     }

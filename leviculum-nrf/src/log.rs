@@ -304,6 +304,9 @@ impl PersistentTailMirror {
 pub struct PersistentLogSnapshot {
     pub bytes: [u8; PERSISTENT_TAIL_SIZE],
     pub len: usize,
+    /// The writer went round the ring, so `bytes` starts inside a line
+    /// (`leviculum_boot_trace::tail::went_round`).
+    pub went_round: bool,
 }
 
 pub fn take_persistent_log() -> Option<PersistentLogSnapshot> {
@@ -321,7 +324,11 @@ pub fn take_persistent_log() -> Option<PersistentLogSnapshot> {
         }
         // Clear so subsequent calls return None.
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), 0);
-        Some(PersistentLogSnapshot { bytes: out, len })
+        Some(PersistentLogSnapshot {
+            bytes: out,
+            len,
+            went_round: leviculum_boot_trace::tail::went_round(wp, PERSISTENT_TAIL_SIZE),
+        })
     }
 }
 
