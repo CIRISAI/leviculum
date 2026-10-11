@@ -433,6 +433,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_HELD",
         required_keys: &["dst", "hops", "iface", "held"],
     },
+    // An announce the per-interface cap queue held past its life
+    // (`QUEUED_ANNOUNCE_LIFE_MS`, 24 h) and dropped at release instead of
+    // keying, as Python prunes its announce queue by `QUEUED_ANNOUNCE_LIFE`.
+    // `age_ms` is how long it waited, so a log shows the backlog horizon
+    // that dropped it.
+    EventSchema {
+        name: "ANN_QUEUE_STALE",
+        required_keys: &["dst", "hops", "iface", "age_ms"],
+    },
     // OBS-3 (Codeberg #114): endpoint observability. A node acting as the
     // ENDPOINT of a link (accepting an inbound link, delivering locally,
     // generating the establishment proof, answering a remote-management
