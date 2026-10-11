@@ -41,8 +41,12 @@ took the 14 left, so no BLE "none" row is a decision any more. A sixth
 ([below](#the-lora-wave-the-air-paths-faults-and-host-edges)) took 14 rows
 of the LoRa section to the host, the ten dearest decisions of the air path
 and four rig-reached arms of the same decisions, and marked 2 more as no
-decision; 21 LoRa "none" rows are left, all in `announce.rs` and
-`telemetry.rs`. Across the six waves 64 of the 412 rows have moved.
+decision; 21 LoRa "none" rows were left, all in `announce.rs` and
+`telemetry.rs`. A seventh
+([below](#the-telemetry-and-announce-wave-the-reporter-and-the-scheduler-decide-on-the-host))
+took 20 of them and two rig-reached arms of the same decisions to the host,
+and found the twenty-first (244) host-reached already, so no LoRa "none"
+row is left. Across the seven waves 86 of the 412 rows have moved.
 
 ## The rig-cost measure
 
@@ -353,6 +357,66 @@ the transmit and the split frames behind the KISS port, and the host's own
 half of the air, the acquisition jitter and the duty hold, already goes
 through `ChannelAccess` and `DutyHolds`, the same crates.
 
+## The telemetry and announce wave: the reporter and the scheduler decide on the host
+
+Tier T of the LoRa ranking, the 21 rows the sixth wave left, are the
+telemetry reporter's and the announce scheduler's. Each needed the
+three-radio, 1800 s delivery-promise topology plus an induced fault, a
+moving fix or thirty-three announcers; #344 spent three weeks and
+twenty-three comments of rig work on the reporter's arms. The announce
+arms are also where the open cadence decision will land (see below), and
+they are host-tested before that policy changes under them, not after.
+
+Each went to the crate that holds its other half, in a module of its own:
+`leviculum_telemetry_policy::reporter` beside `SendPolicy` and
+`retry_step`, and `leviculum_announce_policy`'s `scheduler` module beside
+`AnnounceCadence` and its `withhold`. The firmware calls them with the
+inputs it read inline, and every log line is unchanged. Two rig-reached
+rows are arms of the same decisions and moved with them: 216 with 217
+(one hand-over for both inbound queues) and 227 with 232 (the debt the
+rewrite pays).
+
+| Rows | What it decides | Now |
+|---|---|---|
+| 208 | a neighbour is new once per boot; the thirty-third displaces the first, round robin | `NeighbourTable`, `leviculum-nrf/announce-policy` |
+| 209 | movement evidence: none for a fixed pin, without a receiver, for `valid=false`, without latitude or longitude | `movement_fix` (`GnssReading`), the same crate; it builds the fix through `Fix::from_degrees`, the one conversion the reporter uses too |
+| 211 | the movement proof is sampled once per interval, booked from the sample taken | `MovementSampler`, the same crate; the resume itself was `AnnounceCadence::note_fix` already |
+| 213 | the own slot is polled before the destination is checked, so a board without one spends the slot | `own_announce`, the same crate |
+| 217 (216) | the newest inbound frame replaces an unread one | `deliver_newest`, `leviculum-nrf/telemetry-policy` |
+| 222 | a flash write is tried three times, 250 ms after each failure, then Lost | `FlashSave` (`SaveStep`), the same crate |
+| 224, 225 | a sensor fix needs latitude and longitude; its accuracy is HDOP times 5 m and absent without HDOP | `Fix::from_degrees`, `accuracy_m`, `HORIZONTAL_UERE_M`, the same crate |
+| 230, 231 | no position source sends nothing, before the key chase; awaiting a key asks for a path once a minute | `key_step` (`KeyStep`), `KEY_REQUEST_INTERVAL_MS`, the same crate |
+| 232 (227) | a hash-only target owes one rewrite of its record, paid on the first tick that holds the key | `KeyRecordDebt`, the same crate |
+| 233 | a retry debt without its payload is forgotten | `owed_retry`, the same crate, beside `retry_step` |
+| 234, 235 | a sensor fix only in presence state Fix; the location is none, the pin, or the sensor | `report_position`, `location_source` (`LocationSource`), the same crate |
+| 236 to 239, 242 | no calendar time withholds `no-clock` and books nothing; every failure after the pre-report announce books it; no path asks and names `no-path` or `iface-offline` | `report_time`, `path_withhold`, `Withhold`, `SendPolicy::note_withheld`, the same crate |
+| 241 | the cadence records a position only if the report carried it | `SendPolicy::reportable_position`, the same crate |
+
+Row 244, only the configured target may request a report, needed no move:
+the reporter passes the target as the allowed sender into
+`leviculum_lxmf::telemetry::screen_telemetry_request`, whose integration
+tests (`leviculum-lxmf/tests/telemetry_request.rs`) already cover no
+target, a foreign sender and a target whose key is not held. The census
+listed it because the target and its identity are read inline.
+
+Two reads moved earlier in the tick and change nothing on the air: the
+target's identity is looked up on every tick rather than only in
+awaiting-key, and the path route is looked up before `has_path` rather
+than after it fails. Both are reads of the node's tables.
+
+### Where the cadence decision plugs in
+
+How fast a board announces when still and when moving, and what counts as
+moving, is still open (300 s mobile, about an hour stationary, a motion
+sensor instead of a GPS delta). When it is decided it changes two
+functions and no wiring: the intervals are
+`AnnounceCadence::configured_interval_ms`
+(`leviculum-nrf/announce-policy/src/cadence.rs`), and the evidence is
+`movement_fix` in the scheduler module, whose input is the board's fixed-pin
+flag and its `GnssReading`. A motion sensor becomes a second input of
+`movement_fix`; `MovementSampler` already decides when it is read, and
+`AnnounceCadence::note_fix` what a proven movement buys.
+
 ## Observations made during the walk
 
 Read from the code, not measured on a board; each is a candidate for its
@@ -551,7 +615,7 @@ own issue, not a finding of this page.
 
 ### LoRa, radio, announce and telemetry (`lora.rs`, `sx1262.rs`, `announce.rs`, `telemetry.rs`)
 
-97 decisions no host test reached on 2026-10-10; 54 more were already a call into a host-built crate and are not listed. Since the sixth wave 17 of the 97 carry host tests, 2 are marked no decision, and 21 of the 34 "none" rows are left, none of them on the LoRa air path.
+97 decisions no host test reached on 2026-10-10; 54 more were already a call into a host-built crate and are not listed. Since the seventh wave 40 of the 97 carry host tests (one of them, 244, a test that existed before the census), 2 are marked no decision, and none of the 34 "none" rows is left.
 
 | # | Where | What it decides | State it reads | Cheapest rig cell | s | radios/boards | Host test |
 |---|---|---|---|---|---|---|---|
@@ -609,49 +673,49 @@ own issue, not a finding of this page.
 | 203 | `leviculum-nrf/src/sx1262.rs:1424` | CAD done: busy iff CAD_DETECTED; timeout goes standby with an error | DIO1, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 204 | `leviculum-nrf/src/sx1262.rs:1486` | standing-window age (clamped) fed to adoption | rx_state | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 205 | `leviculum-nrf/src/sx1262.rs:1503` | a window ends itself iff its timeout is non-zero | window | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 206 | `leviculum-nrf/src/announce.rs:149` | announce set is 2 frames with the PN role, else 1 | propagation_hash | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 207 | `leviculum-nrf/src/announce.rs:184` | the first announce heard from a destination triggers our own at once | NEIGHBOURS | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 208 | `leviculum-nrf/src/announce.rs:264` | neighbour-known test, round-robin eviction at 32 | slots | none | - | - |  |
-| 209 | `leviculum-nrf/src/announce.rs:292` | movement evidence: none for a fixed pin, no GNSS, invalid or no lat/lon | position flags, GNSS_FIX | none | - | - |  |
-| 210 | `leviculum-nrf/src/announce.rs:350` | sleep until the earlier of the announce deadline and the movement sample | cadence, next_sample_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 211 | `leviculum-nrf/src/announce.rs:360` | sample movement on its interval; a resume announces at once | next_sample_ms | none | - | - |  |
-| 212 | `leviculum-nrf/src/announce.rs:398` | no delivery destination, no peer-up announce | delivery_hash | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 213 | `leviculum-nrf/src/announce.rs:444` | no delivery hash: nothing, after the poll consumed the slot | delivery_hash | none | - | - |  |
-| 214 | `leviculum-nrf/src/telemetry.rs:148` | position-source flags gate NoPositionSource | gnss_available, flash | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 215 | `leviculum-nrf/src/telemetry.rs:173` | set or clear the fixed-position bit | present | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 216 | `leviculum-nrf/src/telemetry.rs:189` | inbound target: the newest replaces an unread one | INBOUND_TARGET | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 217 | `leviculum-nrf/src/telemetry.rs:213` | inbound fixed position: the newest replaces an unread one | channel | none | - | - |  |
-| 218 | `leviculum-nrf/src/telemetry.rs:429` | persist answer Durable/Lost, Lost after the 2.5 s deadline | gate, deadline | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 219 | `leviculum-nrf/src/telemetry.rs:571` | a save request displaces an unread older one (six record kinds) | PENDING_SAVE_* | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 220 | `leviculum-nrf/src/telemetry.rs:681` | which record the store task rewrites | select result | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 221 | `leviculum-nrf/src/telemetry.rs:713` | skip the erase when the page is unchanged, answer Durable | flash contents | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 222 | `leviculum-nrf/src/telemetry.rs:726` | flash write retried 3 times at 250 ms, then Lost | flash result | none | - | - |  |
-| 223 | `leviculum-nrf/src/telemetry.rs:764` | Durable iff written | written | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 224 | `leviculum-nrf/src/telemetry.rs:849` | a sensor fix needs lat and lon | readings | none | - | - |  |
-| 225 | `leviculum-nrf/src/telemetry.rs:864` | a sensor location needs HDOP; accuracy is hdop*5 m | readings.hdop | none | - | - |  |
-| 226 | `leviculum-nrf/src/telemetry.rs:1241` | a new target drops the owed proof and retry of the old one | - | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 227 | `leviculum-nrf/src/telemetry.rs:1251` | owe a key persist for a Set with hash only | command, public_key | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 228 | `leviculum-nrf/src/telemetry.rs:1263` | a key-bearing target remembers the identity or logs the rejection | public_key | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 229 | `leviculum-nrf/src/telemetry.rs:1338` | no target, nothing | target | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 230 | `leviculum-nrf/src/telemetry.rs:1349` | NoPositionSource sends nothing, before the key chase | policy.state | none | - | - |  |
-| 231 | `leviculum-nrf/src/telemetry.rs:1357` | AwaitingKey: a known key is ready, else a path request every 60 s | storage, last_key_request_ms | none | - | - |  |
-| 232 | `leviculum-nrf/src/telemetry.rs:1387` | rewrite the flash record once with the resolved key | key_persist_owed | none | - | - |  |
-| 233 | `leviculum-nrf/src/telemetry.rs:1423` | a retry debt without payload is forgotten | retry_payload | none | - | - |  |
-| 234 | `leviculum-nrf/src/telemetry.rs:1495` | sensor fix only in presence state Fix | presence_has_fix | none | - | - |  |
-| 235 | `leviculum-nrf/src/telemetry.rs:1507` | location source: none, fixed or sensor | include_position, possrc | none | - | - |  |
-| 236 | `leviculum-nrf/src/telemetry.rs:1515` | no calendar time: withhold `no-clock` | unix_secs | none | - | - |  |
-| 237 | `leviculum-nrf/src/telemetry.rs:1548` | build failure books airtime and withholds | build result | none | - | - |  |
-| 238 | `leviculum-nrf/src/telemetry.rs:1564` | on-air failure books airtime and withholds | message | none | - | - |  |
-| 239 | `leviculum-nrf/src/telemetry.rs:1575` | no usable path: path request, book airtime, withhold | has_path, path_route | none | - | - |  |
-| 240 | `leviculum-nrf/src/telemetry.rs:1634` | send the report; its route is the interfaces of its own SendPacket actions | send result | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 241 | `leviculum-nrf/src/telemetry.rs:1654` | record the position in the cadence only if included | include_position | none | - | - |  |
-| 242 | `leviculum-nrf/src/telemetry.rs:1673` | send error books airtime and withholds | - | none | - | - |  |
-| 243 | `leviculum-nrf/src/telemetry.rs:1763` | only packets to our own delivery destination are screened | destination | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 244 | `leviculum-nrf/src/telemetry.rs:1766` | only the configured target may request a report | target, storage | none | - | - |  |
-| 245 | `leviculum-nrf/src/telemetry.rs:1770` | not-a-message or no-inbox discards; a request is accepted or rejected | verdict | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 246 | `leviculum-nrf/src/telemetry.rs:1859` | no pending report notes a non-dispatch | pending_line | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 247 | `leviculum-nrf/src/telemetry.rs:1868` | losses are the error, drop and retry interface ids | DispatchResult | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 248 | `leviculum-nrf/src/telemetry.rs:1947` | announce payload: name, no stamp cost, no compression | identity, name | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 206 | `leviculum-nrf/src/announce.rs:153` | announce set is 2 frames with the PN role, else 1 | propagation_hash | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 207 | `leviculum-nrf/src/announce.rs:188` | the first announce heard from a destination triggers our own at once | NEIGHBOURS | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 208 | `leviculum-nrf/src/announce.rs:188` | neighbour-known test, round-robin eviction at 32 | slots | none | - | - | `leviculum_announce_policy::scheduler::tests::a_known_neighbour_buys_nothing`<br>`leviculum_announce_policy::scheduler::tests::a_thirty_third_neighbour_displaces_the_first_round_robin` |
+| 209 | `leviculum-nrf/src/announce.rs:257` | movement evidence: none for a fixed pin, no GNSS, invalid or no lat/lon | position flags, GNSS_FIX | none | - | - | `leviculum_announce_policy::scheduler::tests::a_fixed_pin_offers_no_movement_evidence_whatever_the_receiver_says`<br>`leviculum_announce_policy::scheduler::tests::a_board_without_gnss_offers_no_movement_evidence`<br>`leviculum_announce_policy::scheduler::tests::an_invalid_fix_offers_no_evidence_even_with_coordinates_kept`<br>`leviculum_announce_policy::scheduler::tests::a_valid_fix_without_latitude_or_longitude_offers_none`<br>`leviculum_announce_policy::scheduler::tests::a_valid_fix_is_evidence_with_its_hdop` |
+| 210 | `leviculum-nrf/src/announce.rs:316` | sleep until the earlier of the announce deadline and the movement sample | cadence, sampler | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 211 | `leviculum-nrf/src/announce.rs:326` | sample movement on its interval; a resume announces at once | sampler | none | - | - | `leviculum_announce_policy::scheduler::tests::the_movement_proof_is_sampled_once_per_interval`<br>`leviculum_announce_policy::scheduler::tests::a_resume_after_movement_announces_at_the_sample_that_proved_it`<br>`leviculum_announce_policy::scheduler::tests::a_pinned_board_that_is_carried_never_resumes` |
+| 212 | `leviculum-nrf/src/announce.rs:363` | no delivery destination, no peer-up announce | delivery_hash | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 213 | `leviculum-nrf/src/announce.rs:405` | no delivery hash: nothing, after the poll consumed the slot | delivery_hash | none | - | - | `leviculum_announce_policy::scheduler::tests::a_board_without_a_delivery_destination_spends_its_slot_and_sends_nothing` |
+| 214 | `leviculum-nrf/src/telemetry.rs:153` | position-source flags gate NoPositionSource | gnss_available, flash | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 215 | `leviculum-nrf/src/telemetry.rs:178` | set or clear the fixed-position bit | present | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 216 | `leviculum-nrf/src/telemetry.rs:194` | inbound target: the newest replaces an unread one | INBOUND_TARGET | `board_delivery_promise` | 1800 | 3/1 (>2) | `leviculum_telemetry_policy::reporter::tests::the_newest_inbound_frame_replaces_an_unread_one`<br>`leviculum_telemetry_policy::reporter::tests::a_queue_that_refuses_after_the_discard_reports_the_frame_not_taken` |
+| 217 | `leviculum-nrf/src/telemetry.rs:219` | inbound fixed position: the newest replaces an unread one | channel | none | - | - | `leviculum_telemetry_policy::reporter::tests::the_newest_inbound_frame_replaces_an_unread_one`<br>`leviculum_telemetry_policy::reporter::tests::a_queue_that_refuses_after_the_discard_reports_the_frame_not_taken` |
+| 218 | `leviculum-nrf/src/telemetry.rs:437` | persist answer Durable/Lost, Lost after the 2.5 s deadline | gate, deadline | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 219 | `leviculum-nrf/src/telemetry.rs:579` | a save request displaces an unread older one (six record kinds) | PENDING_SAVE_* | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 220 | `leviculum-nrf/src/telemetry.rs:688` | which record the store task rewrites | select result | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 221 | `leviculum-nrf/src/telemetry.rs:720` | skip the erase when the page is unchanged, answer Durable | flash contents | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 222 | `leviculum-nrf/src/telemetry.rs:745` | flash write retried 3 times at 250 ms, then Lost | flash result | none | - | - | `leviculum_telemetry_policy::reporter::tests::a_flash_that_fails_three_times_is_lost_after_three_pauses`<br>`leviculum_telemetry_policy::reporter::tests::a_flash_that_takes_the_second_write_is_written` |
+| 223 | `leviculum-nrf/src/telemetry.rs:774` | Durable iff written | written | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 224 | `leviculum-nrf/src/telemetry.rs:845` | a sensor fix needs lat and lon | readings | none | - | - | `leviculum_telemetry_policy::reporter::tests::a_sensor_fix_needs_both_latitude_and_longitude` |
+| 225 | `leviculum-nrf/src/telemetry.rs:855` | a sensor location needs HDOP; accuracy is hdop*5 m | readings.hdop | none | - | - | `leviculum_telemetry_policy::reporter::tests::a_sensor_location_is_hdop_times_five_metres`<br>`leviculum_telemetry_policy::reporter::tests::a_sensor_fix_without_hdop_is_a_position_the_policy_will_not_report` |
+| 226 | `leviculum-nrf/src/telemetry.rs:1235` | a new target drops the owed proof and retry of the old one | - | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 227 | `leviculum-nrf/src/telemetry.rs:1245` | owe a key persist for a Set with hash only | command, public_key | `board_delivery_promise` | 1800 | 3/1 (>2) | `leviculum_telemetry_policy::reporter::tests::a_hash_only_target_rewrites_its_record_once_when_the_key_resolves`<br>`leviculum_telemetry_policy::reporter::tests::a_target_that_carried_its_key_or_a_clear_owes_no_rewrite` |
+| 228 | `leviculum-nrf/src/telemetry.rs:1259` | a key-bearing target remembers the identity or logs the rejection | public_key | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 229 | `leviculum-nrf/src/telemetry.rs:1334` | no target, nothing | target | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 230 | `leviculum-nrf/src/telemetry.rs:1348` | NoPositionSource sends nothing, before the key chase | policy.state | none | - | - | `leviculum_telemetry_policy::reporter::tests::a_target_without_a_position_source_sends_nothing_not_even_a_key_request` |
+| 231 | `leviculum-nrf/src/telemetry.rs:1348` | AwaitingKey: a known key is ready, else a path request every 60 s | storage, last_key_request_ms | none | - | - | `leviculum_telemetry_policy::reporter::tests::awaiting_key_asks_for_a_path_once_a_minute_until_the_key_is_known`<br>`leviculum_telemetry_policy::reporter::tests::a_ready_target_goes_on_to_the_report` |
+| 232 | `leviculum-nrf/src/telemetry.rs:1380` | rewrite the flash record once with the resolved key | key_persist_owed | none | - | - | `leviculum_telemetry_policy::reporter::tests::a_hash_only_target_rewrites_its_record_once_when_the_key_resolves` |
+| 233 | `leviculum-nrf/src/telemetry.rs:1415` | a retry debt without payload is forgotten | retry_payload | none | - | - | `leviculum_telemetry_policy::reporter::tests::a_retry_debt_without_its_payload_is_forgotten` |
+| 234 | `leviculum-nrf/src/telemetry.rs:1492` | sensor fix only in presence state Fix | presence_has_fix | none | - | - | `leviculum_telemetry_policy::reporter::tests::a_sensor_fix_counts_only_in_presence_state_fix`<br>`leviculum_telemetry_policy::reporter::tests::a_fixed_pin_replaces_the_sensor_without_gnss_or_with_it` |
+| 235 | `leviculum-nrf/src/telemetry.rs:1504` | location source: none, fixed or sensor | include_position, possrc | none | - | - | `leviculum_telemetry_policy::reporter::tests::the_location_is_none_fixed_or_the_sensor` |
+| 236 | `leviculum-nrf/src/telemetry.rs:1514` | no calendar time: withhold `no-clock` | unix_secs | none | - | - | `leviculum_telemetry_policy::reporter::tests::no_calendar_time_withholds_no_clock_and_books_nothing` |
+| 237 | `leviculum-nrf/src/telemetry.rs:1563` | build failure books airtime and withholds | build result | none | - | - | `leviculum_telemetry_policy::reporter::tests::a_failure_after_the_announce_books_its_airtime_and_withholds` |
+| 238 | `leviculum-nrf/src/telemetry.rs:1573` | on-air failure books airtime and withholds | message | none | - | - | `leviculum_telemetry_policy::reporter::tests::a_failure_after_the_announce_books_its_airtime_and_withholds` |
+| 239 | `leviculum-nrf/src/telemetry.rs:1582` | no usable path: path request, book airtime, withhold | has_path, path_route | none | - | - | `leviculum_telemetry_policy::reporter::tests::no_usable_path_asks_and_withholds_naming_why`<br>`leviculum_telemetry_policy::reporter::tests::a_failure_after_the_announce_books_its_airtime_and_withholds` |
+| 240 | `leviculum-nrf/src/telemetry.rs:1632` | send the report; its route is the interfaces of its own SendPacket actions | send result | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 241 | `leviculum-nrf/src/telemetry.rs:1651` | record the position in the cadence only if included | include_position | none | - | - | `leviculum_telemetry_policy::reporter::tests::the_cadence_records_a_position_only_if_the_report_carried_it` |
+| 242 | `leviculum-nrf/src/telemetry.rs:1670` | send error books airtime and withholds | - | none | - | - | `leviculum_telemetry_policy::reporter::tests::a_failure_after_the_announce_books_its_airtime_and_withholds` |
+| 243 | `leviculum-nrf/src/telemetry.rs:1759` | only packets to our own delivery destination are screened | destination | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 244 | `leviculum-nrf/src/telemetry.rs:1762` | only the configured target may request a report | target, storage | none | - | - | already a call into `leviculum_lxmf::telemetry::screen_telemetry_request`, which takes the target as its allowed sender; the inline part only reads the target and its identity: `leviculum_lxmf` `tests/telemetry_request.rs`: `with_no_target_configured_nobody_is_allowed`<br>`a_request_from_a_foreign_sender_is_not_allowed`<br>`a_request_without_the_targets_key_is_unverifiable` |
+| 245 | `leviculum-nrf/src/telemetry.rs:1766` | not-a-message or no-inbox discards; a request is accepted or rejected | verdict | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 246 | `leviculum-nrf/src/telemetry.rs:1855` | no pending report notes a non-dispatch | pending_line | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 247 | `leviculum-nrf/src/telemetry.rs:1864` | losses are the error, drop and retry interface ids | DispatchResult | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 248 | `leviculum-nrf/src/telemetry.rs:1943` | announce payload: name, no stamp cost, no compression | identity, name | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
 
 ### Main loops, USB control, status and panic handling (`bin/*`, `usb.rs`, `lib.rs`, `remote_status.rs`, `mgmt.rs`, `interface.rs`)
 

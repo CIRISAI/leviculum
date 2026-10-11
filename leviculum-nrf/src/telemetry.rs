@@ -56,10 +56,15 @@ use leviculum_lxmf::telemetry::{
     PhysicalLink, Telemetry, TelemetryRequestVerdict,
 };
 use leviculum_persist_ack::{PersistGate, Persisted, SaveTicket};
+use leviculum_telemetry_policy::reporter::{
+    accuracy_m, deliver_newest, key_step, location_source, owed_retry, path_withhold,
+    report_position, report_time, FlashSave, KeyRecordDebt, KeyStep, LocationSource, SaveStep,
+    Withhold, SAVE_RETRIES,
+};
 use leviculum_telemetry_policy::{
-    choose_position, command_from_wire, retry_step, EmissionRoute, FailureVerdict, Fix, PacketHash,
-    PositionSource, Profile, ProofTracker, ReportReason, RequestOutcome, RetryStep, SendPolicy,
-    TargetCommand, TargetState, FIXED_POSITION_HDOP_E2,
+    command_from_wire, EmissionRoute, FailureVerdict, Fix, PacketHash, PositionSource, Profile,
+    ProofTracker, ReportReason, RequestOutcome, RetryStep, SendPolicy, TargetCommand, TargetState,
+    FIXED_POSITION_HDOP_E2,
 };
 
 /// Re-exported for the same reason [`TargetOutcome`] is: the board
@@ -186,12 +191,13 @@ static INBOUND_TARGET: Channel<CriticalSectionRawMutex, TelemetryTargetWire, 1> 
 /// it was taken; `false` is a main loop that has not drained the previous
 /// one yet, which the host's retry covers.
 pub fn deliver_target(target: TelemetryTargetWire) -> bool {
-    if INBOUND_TARGET.try_send(target).is_err() {
-        let _ = INBOUND_TARGET.try_receive();
-        INBOUND_TARGET.try_send(target).is_ok()
-    } else {
-        true
-    }
+    deliver_newest(
+        target,
+        |t| INBOUND_TARGET.try_send(t),
+        || {
+            let _ = INBOUND_TARGET.try_receive();
+        },
+    )
 }
 
 /// The main loop's end of [`deliver_target`].
@@ -210,12 +216,13 @@ static INBOUND_FIXED_POSITION: Channel<CriticalSectionRawMutex, Option<FixedPosi
 /// loop. Returns whether it was taken; `false` is covered by the host's
 /// retry, exactly like [`deliver_target`].
 pub fn deliver_fixed_position(position: Option<FixedPositionWire>) -> bool {
-    if INBOUND_FIXED_POSITION.try_send(position).is_err() {
-        let _ = INBOUND_FIXED_POSITION.try_receive();
-        INBOUND_FIXED_POSITION.try_send(position).is_ok()
-    } else {
-        true
-    }
+    deliver_newest(
+        position,
+        |p| INBOUND_FIXED_POSITION.try_send(p),
+        || {
+            let _ = INBOUND_FIXED_POSITION.try_receive();
+        },
+    )
 }
 
 /// The main loop's end of [`deliver_fixed_position`].
@@ -398,7 +405,8 @@ impl PendingSave {
 /// with the truth instead of a promise.
 ///
 /// The observed cost of one page write is ~200 ms (#358), and the store
-/// task's own retry budget is [`SAVE_RETRIES`] × [`SAVE_RETRY_MS`] plus
+/// task's own retry budget is [`SAVE_RETRIES`] ×
+/// [`SAVE_RETRY_MS`](leviculum_telemetry_policy::reporter::SAVE_RETRY_MS) plus
 /// three erase-and-write rounds — call it 1.2 s if the SoftDevice keeps
 /// refusing flash access while the radio is busy. 2.5 s covers that twice
 /// over and still lands inside the 3.5 s window lnflash gives one control
@@ -644,10 +652,9 @@ pub fn request_save_mgmt_allow(list: StoredMgmtAllow) -> PendingSave {
 #[repr(align(4))]
 struct Aligned<const N: usize>([u8; N]);
 
-/// How often a failed flash operation is retried; the SoftDevice refuses
-/// flash access while the radio is busy.
-const SAVE_RETRIES: u8 = 3;
-const SAVE_RETRY_MS: u64 = 250;
+// How often a failed flash write is tried and how long each failure
+// pauses: `SAVE_RETRIES` and `SAVE_RETRY_MS`, with the loop that applies
+// them, are `leviculum_telemetry_policy::reporter::FlashSave`.
 
 #[cfg(feature = "softdevice")]
 #[embassy_executor::task]
@@ -722,8 +729,8 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
             continue;
         }
 
-        let mut written = false;
-        for attempt in 1..=SAVE_RETRIES {
+        let mut save = FlashSave::new();
+        let written = loop {
             let result = async {
                 let mut flash = flash.lock().await;
                 flash.erase(page, page + 4096).await?;
@@ -735,21 +742,24 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 flash.write(page + MGMT_ALLOW_OFFSET, &mgmt.0).await
             }
             .await;
-            match result {
-                Ok(()) => {
-                    written = true;
-                    break;
-                }
-                Err(_) => {
+            match save.after_attempt(result.is_ok()) {
+                SaveStep::Written => break true,
+                SaveStep::Failed {
+                    attempt,
+                    wait_ms,
+                    gave_up,
+                } => {
                     crate::log::log_fmt(
                         "[TELEMETRY] ",
                         format_args!("persist write failed, attempt {}/{}", attempt, SAVE_RETRIES),
                     );
-                    embassy_time::Timer::after(embassy_time::Duration::from_millis(SAVE_RETRY_MS))
-                        .await;
+                    embassy_time::Timer::after(embassy_time::Duration::from_millis(wait_ms)).await;
+                    if gave_up {
+                        break false;
+                    }
                 }
             }
-        }
+        };
 
         if written {
             crate::log::log_fmt("[TELEMETRY] ", format_args!("persist saved {}", what));
@@ -787,23 +797,9 @@ pub fn spawn_store_task(
 // Sensor readings
 // ---------------------------------------------------------------------------
 
-/// Horizontal position error in metres per unit of HDOP.
-///
-/// The wire's accuracy slot is metres (`Location.pack`, Sideband
-/// `2000d81`; Columba fills it from Android's `Location.accuracy`), and
-/// standard NMEA carries no accuracy field at all — only HDOP, which is a
-/// geometry factor and not a distance. Turning one into the other needs a
-/// user-equivalent range error, and 5 m is the conventional open-sky
-/// figure for a single-frequency consumer receiver.
-///
-/// This is a **model, stated as one**, in the sense
-/// `docs/src/concepts/regulatory-airtime.md` fixes for any such figure:
-/// it is not a measurement of this antenna in this housing, and a
-/// deployment that has measured its own may say so. What it is not is a
-/// placeholder — it is derived from a number the receiver actually
-/// reported, and when the receiver reports no HDOP the position is not
-/// sent at all.
-pub const HORIZONTAL_UERE_M: f32 = 5.0;
+/// Horizontal position error in metres per unit of HDOP: a model, stated
+/// as one, and argued where the sensor location's accuracy is decided.
+pub use leviculum_telemetry_policy::reporter::HORIZONTAL_UERE_M;
 
 /// What this board could read at the moment a report was due.
 ///
@@ -846,13 +842,7 @@ impl Readings {
     /// The position as the policy wants it: scaled integers plus the
     /// accuracy number the threshold is applied to.
     pub fn fix(&self) -> Option<Fix> {
-        let latitude = self.latitude?;
-        let longitude = self.longitude?;
-        Some(Fix {
-            latitude_e6: (latitude * 1e6) as i32,
-            longitude_e6: (longitude * 1e6) as i32,
-            hdop_e2: self.hdop.map(|h| (h * 100.0).clamp(0.0, 65535.0) as u16),
-        })
+        Fix::from_degrees(self.latitude, self.longitude, self.hdop)
     }
 
     /// The location sensor built from the GNSS readings, or `None` when
@@ -862,7 +852,7 @@ impl Readings {
     /// position's precedence before asking for it.
     fn sensor_location(&self) -> Option<Location> {
         let fix = self.fix()?;
-        let accuracy_m = self.hdop? * HORIZONTAL_UERE_M;
+        let accuracy_m = accuracy_m(self.hdop)?;
         Some(Location::saturating(
             fix.latitude_e6 as i64,
             fix.longitude_e6 as i64,
@@ -1003,20 +993,15 @@ fn fixed_fix(wire: &FixedPositionWire) -> Fix {
 // The reporter
 // ---------------------------------------------------------------------------
 
-/// How often the node re-asks for a path while it is waiting for a
-/// target's key. A path request is one small packet and the answer
-/// carries the identity, so this is the key-resolution loop; 60 s keeps
-/// it well under any announce cadence it might be racing.
-const KEY_REQUEST_INTERVAL_MS: u64 = 60_000;
-
 /// The reporting half of a node: policy, configured target, and the
 /// delivery destination reports are signed by.
 pub struct Reporter {
     policy: SendPolicy,
     target: Option<TelemetryTargetWire>,
     /// The user-set fixed position. While set it replaces the sensor as
-    /// the reported position entirely ([`choose_position`]); the decided
-    /// semantics, not a preference.
+    /// the reported position entirely
+    /// ([`choose_position`](leviculum_telemetry_policy::choose_position));
+    /// the decided semantics, not a preference.
     fixed_position: Option<FixedPositionWire>,
     delivery_hash: DestinationHash,
     /// Monotonic time of the last path request issued while awaiting a
@@ -1053,7 +1038,7 @@ pub struct Reporter {
     /// minutes of nothing on walk 6. Rewriting the record with the key
     /// makes the next boot restore `ready`, which owes the immediate
     /// report like any other newly usable target.
-    key_persist_owed: bool,
+    key_persist_owed: KeyRecordDebt,
     /// The proof wait of the report last counted as sent (#373): the
     /// transport tracks a receipt per single packet and its events —
     /// `PacketDeliveryConfirmed` on a verified proof, `DeliveryFailed`
@@ -1072,6 +1057,8 @@ pub struct Reporter {
     /// `request_path` is unthrottled, the telemetry tick is five-secondly,
     /// and the answer (or a peer-up pull) flips `has_path` — asking again
     /// every tick would be a storm.
+    ///
+    /// [`retry_step`]: leviculum_telemetry_policy::retry_step
     retry_path_requested: bool,
     /// The LXMF bytes of the report between [`tick`](Self::tick) and
     /// [`note_dispatch`](Self::note_dispatch), promoted to
@@ -1131,7 +1118,7 @@ impl Reporter {
             last_withheld: None,
             last_state_line: None,
             pending_line: None,
-            key_persist_owed: false,
+            key_persist_owed: KeyRecordDebt::new(),
             proof: ProofTracker::new(),
             retry_payload: None,
             retry_path_requested: false,
@@ -1160,6 +1147,13 @@ impl Reporter {
                 ),
             );
         }
+    }
+
+    /// Book what a withheld attempt spent ([`Withhold::books_airtime`])
+    /// and state why it was withheld.
+    fn withhold_attempt(&mut self, now_ms: u64, reason: Withhold) {
+        self.policy.note_withheld(now_ms, reason);
+        self.withhold(reason.as_str());
     }
 
     /// Log `reason` once, until something else happens.
@@ -1248,8 +1242,10 @@ impl Reporter {
         // re-applied target whose key is already held) or when it arrives
         // over the air. A frame that carried its key owes nothing: the
         // serial task persists it as sent.
-        self.key_persist_owed =
-            matches!(command, TargetCommand::Set(_)) && wire.public_key.is_none();
+        self.key_persist_owed = KeyRecordDebt::after_target(
+            matches!(command, TargetCommand::Set(_)),
+            wire.public_key.is_some(),
+        );
         let key_known = match command {
             TargetCommand::Clear => {
                 self.target = None;
@@ -1346,32 +1342,29 @@ impl Reporter {
         // a standing state costs one line and not one every five seconds.
         self.note_state();
 
-        if self.policy.state() == TargetState::NoPositionSource {
-            // A target and no answer to "where am I": the node sends
-            // nothing. Ahead of the key resolution below on purpose — a
-            // path request is airtime spent chasing a key for reports that
-            // will never be built.
-            return actions;
-        }
-
-        if self.policy.state() == TargetState::AwaitingKey {
-            if node.storage().get_identity(hash.as_bytes()).is_some() {
+        // A target and no answer to "where am I" sends nothing, not even
+        // the path request a key chase would cost ([`key_step`]).
+        let key_known = node.storage().get_identity(hash.as_bytes()).is_some();
+        match key_step(
+            self.policy.state(),
+            key_known,
+            self.last_key_request_ms,
+            now_ms,
+        ) {
+            KeyStep::Silent | KeyStep::WaitForKey => return actions,
+            KeyStep::Proceed => {}
+            KeyStep::KeyArrived => {
                 if self.policy.note_key_available() {
                     self.note_state();
                 }
-            } else {
+            }
+            KeyStep::AskForKey => {
                 // Resolve the key over the air. A path request is
                 // answered with the destination's announce, which carries
                 // the identity — that is the whole mechanism behind
                 // hash-only configuration.
-                let due = match self.last_key_request_ms {
-                    None => true,
-                    Some(last) => now_ms.saturating_sub(last) >= KEY_REQUEST_INTERVAL_MS,
-                };
-                if due {
-                    self.last_key_request_ms = Some(now_ms);
-                    actions.extend(node.request_path(&hash).actions);
-                }
+                self.last_key_request_ms = Some(now_ms);
+                actions.extend(node.request_path(&hash).actions);
                 return actions;
             }
         }
@@ -1384,14 +1377,13 @@ impl Reporter {
         // persists the host's own hash-only frame and blocks on that save
         // before answering, so a save requested here — at least one tick
         // later — lands after it and is the one the page keeps.
-        if self.key_persist_owed {
+        if self.key_persist_owed.settle(key_known) {
             if let Some(identity) = node.storage().get_identity(hash.as_bytes()) {
                 let enriched = TelemetryTargetWire {
                     public_key: Some(identity.public_key_bytes()),
                     ..target
                 };
                 self.target = Some(enriched);
-                self.key_persist_owed = false;
                 // Nobody acks this save: it is owed to the next boot, not
                 // to a waiting host, so the ticket is dropped rather than
                 // confirmed. A lost write degrades to the old behaviour —
@@ -1420,14 +1412,19 @@ impl Reporter {
         // the retransmission like to any packet. Returns early: one
         // telemetry emission per tick.
         if let Some(first) = self.proof.awaiting_retry() {
-            let Some(payload) = self.retry_payload.take() else {
+            let step = owed_retry(
+                self.retry_payload.is_some(),
+                node.has_path(&hash),
+                self.retry_path_requested,
+            );
+            let (Some(step), Some(payload)) = (step, self.retry_payload.take()) else {
                 // Unreachable by construction (the payload is kept as
                 // long as the debt is), but a debt without bytes can only
                 // be forgotten, not paid.
                 self.proof.clear();
                 return actions;
             };
-            match retry_step(node.has_path(&hash), self.retry_path_requested) {
+            match step {
                 RetryStep::Send => {}
                 RetryStep::Wait => {
                     // The debt stands; the path answer (or a peer-up pull)
@@ -1491,37 +1488,44 @@ impl Reporter {
 
         // Only a receiver in presence state Fix may contribute a sensor
         // position — and a set fixed position replaces the sensor
-        // entirely, whatever the receiver is doing ([`choose_position`]).
-        let sensor_fix = if presence_has_fix {
-            readings.fix()
-        } else {
-            None
-        };
-        let (fix, possrc) =
-            choose_position(self.fixed_position.as_ref().map(fixed_fix), sensor_fix);
+        // entirely, whatever the receiver is doing (`report_position`).
+        let (fix, possrc) = report_position(
+            presence_has_fix,
+            self.fixed_position.as_ref().map(fixed_fix),
+            readings.fix(),
+        );
         let Some(reason) = self.policy.poll(now_ms, fix) else {
             return actions;
         };
 
-        let include_position = fix.map(|f| self.policy.position_is_reportable(f)) == Some(true);
-        let location = match (include_position, possrc, &self.fixed_position) {
-            (false, ..) => None,
-            (true, PositionSource::Fixed, Some(wire)) => {
+        let reported = self.policy.reportable_position(fix);
+        let include_position = reported.is_some();
+        let location = match (
+            location_source(include_position, possrc, self.fixed_position.is_some()),
+            &self.fixed_position,
+        ) {
+            (LocationSource::None, _) => None,
+            (LocationSource::Fixed, Some(wire)) => {
                 Some(fixed_location(wire, readings.unix_secs.unwrap_or_default()))
             }
-            (true, ..) => readings.sensor_location(),
+            (LocationSource::Fixed | LocationSource::Sensor, _) => readings.sensor_location(),
         };
         let telemetry = readings.telemetry(location);
-        let Some(unix_secs) = readings.unix_secs else {
-            // The emission timebase is still below the plausibility floor,
-            // which means it is uptime seconds and not a calendar estimate
-            // at all — the anchor model's "never ahead" rule has nothing
-            // to be applied to. Two concrete harms, not one cosmetic one:
-            // the row lands in 1970 at the receiver, and uptime seconds
-            // repeat across reboots, so two reports from two boots can
-            // collide on Sideband's `(source, ts)` dedup key.
-            self.withhold("no-clock");
-            return actions;
+        let unix_secs = match report_time(readings.unix_secs) {
+            Ok(secs) => secs,
+            Err(withheld) => {
+                // The emission timebase is still below the plausibility
+                // floor, which means it is uptime seconds and not a
+                // calendar estimate at all — the anchor model's "never
+                // ahead" rule has nothing to be applied to. Two concrete
+                // harms, not one cosmetic one: the row lands in 1970 at the
+                // receiver, and uptime seconds repeat across reboots, so
+                // two reports from two boots can collide on Sideband's
+                // `(source, ts)` dedup key. Nothing was spent yet, so
+                // nothing is booked.
+                self.withhold_attempt(now_ms, withheld);
+                return actions;
+            }
         };
 
         // Ask the attempt floor before spending, not only before deciding:
@@ -1556,8 +1560,7 @@ impl Reporter {
             Err(_) => {
                 // The announce above is already on the air. Book it, or
                 // the next tick finds the floor clear and spends another.
-                self.policy.note_airtime_spent(now_ms);
-                self.withhold("no-readings");
+                self.withhold_attempt(now_ms, Withhold::NoReadings);
                 return actions;
             }
         };
@@ -1567,28 +1570,23 @@ impl Reporter {
             // a branch that returns in silence is how nineteen hours of
             // announces left one line in a capture. Same treatment as its
             // two neighbours: book the announce, say why nothing follows.
-            self.policy.note_airtime_spent(now_ms);
-            self.withhold("no-on-air");
+            self.withhold_attempt(now_ms, Withhold::NoOnAir);
             return actions;
         };
 
-        if !node.has_path(&hash) {
-            // No usable route. Distinguish "no entry at all" from "entry
-            // over an offline interface" (#365) — both fall through to a
-            // path request, which the broadcast puts on the carriers that
-            // are still online.
-            let reason = if node.path_route(&hash).is_some() {
-                "iface-offline"
-            } else {
-                "no-path"
-            };
+        // No usable route. Distinguish "no entry at all" from "entry over
+        // an offline interface" (#365) — both fall through to a path
+        // request, which the broadcast puts on the carriers that are still
+        // online.
+        if let Some(withheld) =
+            path_withhold(node.has_path(&hash), node.path_route(&hash).is_some())
+        {
             actions.extend(node.request_path(&hash).actions);
             // The announce went out before the route was known; the path
             // request goes out now. Both are airtime this attempt spent,
             // and this is the branch a node whose target has walked away
             // takes on every tick — the whole of #236's flood.
-            self.policy.note_airtime_spent(now_ms);
-            self.withhold(reason);
+            self.withhold_attempt(now_ms, withheld);
             return actions;
         }
 
@@ -1650,8 +1648,7 @@ impl Reporter {
                 // a full `LORA_OUTGOING` makes this arm succeed and the
                 // dispatch that follows drop the packet, and the report
                 // used to count as sent anyway.
-                self.policy
-                    .note_emitted(now_ms, if include_position { fix } else { None });
+                self.policy.note_emitted(now_ms, reported);
                 self.pending_line = Some(PendingLine {
                     reason,
                     include_position,
@@ -1670,8 +1667,7 @@ impl Reporter {
                 // here exactly as on the three branches above. The cadence
                 // stays unconsumed (`note_emitted` is never reached) and
                 // the reason string is the one `note_dispatch` reuses.
-                self.policy.note_airtime_spent(now_ms);
-                self.withhold("send-failed");
+                self.withhold_attempt(now_ms, Withhold::SendFailed);
             }
         }
         actions
@@ -1878,7 +1874,7 @@ impl Reporter {
             // its failure event matches no tracked hash and falls through
             // `note_failure` as NotTracked.)
             self.pending_payload = None;
-            self.withhold("send-failed");
+            self.withhold(Withhold::SendFailed.as_str());
             return;
         }
         // On the air: from here the proof decides. A report that gets no

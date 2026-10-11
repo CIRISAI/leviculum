@@ -48,17 +48,21 @@
 //!
 //! What this module owes the cadence, on the board's side of the seam:
 //!
-//! * the position samples (`Announcer::sample_movement`, every
-//!   [`MOVEMENT_SAMPLE_INTERVAL_MS`] off the periodic arm's own wake),
+//! * the position samples (`AnnounceGate::sample_movement`, every
+//!   [`MOVEMENT_SAMPLE_INTERVAL_MS`] off the periodic arm's own wake, timed
+//!   by [`MovementSampler`] and judged by
+//!   [`leviculum_announce_policy::movement_fix`]),
 //! * the new-neighbour trigger ([`note_announce_heard`], from the event
 //!   pass),
 //! * the carrier's budget ([`note_duty_budget`], from
 //!   [`crate::lora::AnnounceCap`], the one place that already knows both
 //!   a frame's airtime and the band's lawful allowance).
+//!
+//! [`MOVEMENT_SAMPLE_INTERVAL_MS`]: leviculum_announce_policy::MOVEMENT_SAMPLE_INTERVAL_MS
 
 use leviculum_announce_policy::{
-    AnnounceCadence, AnnounceSlot, Decision, DutyBudget, PeerAnnounceLimiter, Withheld,
-    MOVEMENT_SAMPLE_INTERVAL_MS,
+    own_announce, AnnounceCadence, AnnounceSlot, Decision, DutyBudget, MovementSampler,
+    NeighbourTable, PeerAnnounceLimiter, Withheld,
 };
 use leviculum_core::node::NodeCore;
 use leviculum_core::traits::{Clock, Storage};
@@ -114,7 +118,7 @@ static CADENCE: embassy_sync::blocking_mutex::Mutex<
 /// announce it sends.
 static NEIGHBOURS: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    core::cell::RefCell<NeighbourTable>,
+    core::cell::RefCell<NeighbourTable<NEIGHBOUR_SLOTS>>,
 > = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(NeighbourTable::new()));
 
 /// The stretch last written as an `[ANNOUNCE_DUTY]` line, `0` for "no
@@ -242,82 +246,42 @@ fn log_stretch(now_ms: u64) {
     );
 }
 
-/// The neighbour set, as a fixed table with no allocation: a board with
-/// no heap left must still be able to answer "have I heard this one
-/// before".
-struct NeighbourTable {
-    slots: [Option<[u8; 16]>; NEIGHBOUR_SLOTS],
-    next: usize,
-}
-
-impl NeighbourTable {
-    const fn new() -> Self {
-        Self {
-            slots: [None; NEIGHBOUR_SLOTS],
-            next: 0,
-        }
-    }
-
-    /// Record a neighbour. `true` when it was not already known, which is
-    /// the edge rule 4 fires on. Overflow displaces in round-robin order,
-    /// the cheapest bound that never denies a genuinely new neighbour.
-    fn insert(&mut self, destination: [u8; 16]) -> bool {
-        if self.slots.contains(&Some(destination)) {
-            return false;
-        }
-        self.slots[self.next] = Some(destination);
-        self.next = (self.next + 1) % NEIGHBOUR_SLOTS;
-        true
-    }
-}
-
 /// The board's current position as the movement proof wants it, or `None`
-/// when there is nothing to judge.
-///
-/// `None` in three cases, and each is deliberate:
-///
-/// * no GNSS receiver in this binary, or no fix yet — a board that cannot
-///   observe its position has not proved movement, and the floor is the
-///   safe answer;
-/// * the receiver reports `valid=false` — `GnssFix` keeps the last good
-///   coordinates across non-valid sentences so the display has something
-///   to render, and a stale position offered as evidence is how a board
-///   invents a jump it never made;
-/// * a user has pinned a fixed position — that pin is an assertion that
-///   this board does not move and it replaces the sensor entirely
-///   (`leviculum_telemetry_policy::choose_position`), so the sensor is
-///   not consulted behind the user's back.
+/// when there is nothing to judge: the fixed-pin flag and the receiver's
+/// last reading, judged by [`leviculum_announce_policy::movement_fix`]
+/// (which says why each `None` is deliberate).
 #[must_use]
 pub fn movement_fix() -> Option<leviculum_telemetry_policy::Fix> {
-    if crate::telemetry::position_source_flags() & crate::telemetry::POSITION_SOURCE_FIXED != 0 {
-        return None;
-    }
-    #[cfg(not(feature = "gnss"))]
-    {
-        None
-    }
-    #[cfg(feature = "gnss")]
-    {
-        let fix = crate::baseboard::GNSS_FIX.try_get()?;
-        if !fix.valid {
-            return None;
-        }
-        Some(leviculum_telemetry_policy::Fix {
-            latitude_e6: (fix.latitude? * 1e6) as i32,
-            longitude_e6: (fix.longitude? * 1e6) as i32,
-            hdop_e2: fix.hdop.map(|h| (h * 100.0).clamp(0.0, 65535.0) as u16),
-        })
-    }
+    let fixed_pinned =
+        crate::telemetry::position_source_flags() & crate::telemetry::POSITION_SOURCE_FIXED != 0;
+    leviculum_announce_policy::movement_fix(fixed_pinned, gnss_reading())
+}
+
+/// What the receiver last said, `None` on a binary without one or before
+/// its first sentence.
+#[cfg(feature = "gnss")]
+fn gnss_reading() -> Option<leviculum_announce_policy::GnssReading> {
+    let fix = crate::baseboard::GNSS_FIX.try_get()?;
+    Some(leviculum_announce_policy::GnssReading {
+        valid: fix.valid,
+        latitude: fix.latitude,
+        longitude: fix.longitude,
+        hdop: fix.hdop,
+    })
+}
+
+/// See the `gnss` twin: no receiver in this binary.
+#[cfg(not(feature = "gnss"))]
+fn gnss_reading() -> Option<leviculum_announce_policy::GnssReading> {
+    None
 }
 
 /// The board's announce occasions, and the gates on them.
 pub struct AnnounceGate {
     peers: PeerAnnounceLimiter<PEER_SLOTS>,
-    /// When the movement proof is next owed a position sample. Separate
-    /// from the announce deadline because the two are hours apart on a
-    /// still board: a detector polled only when an announce is due would
-    /// never see the board start moving.
-    next_sample_ms: u64,
+    /// When the movement proof is next owed a position sample
+    /// ([`MovementSampler`] says why that is not the announce deadline).
+    sampler: MovementSampler,
     /// The last critical withhold reason written, so a standing
     /// condition is stated once and not once a minute for as long as it
     /// lasts. Same rule, and the same argument, as
@@ -333,7 +297,7 @@ impl AnnounceGate {
         with_cadence(|cadence| cadence.arm(now_ms));
         Self {
             peers: PeerAnnounceLimiter::new(),
-            next_sample_ms: now_ms.saturating_add(MOVEMENT_SAMPLE_INTERVAL_MS),
+            sampler: MovementSampler::new(now_ms),
             last_withheld: None,
         }
     }
@@ -345,10 +309,12 @@ impl AnnounceGate {
     /// on a still board those are an hour apart, and the proof needs a
     /// position every [`MOVEMENT_SAMPLE_INTERVAL_MS`] to have anything to
     /// reason about when the board is picked up.
+    ///
+    /// [`MOVEMENT_SAMPLE_INTERVAL_MS`]: leviculum_announce_policy::MOVEMENT_SAMPLE_INTERVAL_MS
     #[must_use]
     pub fn periodic_wait_ms(&self, now_ms: u64) -> u64 {
         let announce = with_cadence(|cadence| cadence.wait_ms(AnnounceSlot::Own, now_ms));
-        announce.min(self.next_sample_ms.saturating_sub(now_ms))
+        announce.min(self.sampler.wait_ms(now_ms))
     }
 
     /// Feed the movement proof one position, if a sample is due.
@@ -357,10 +323,9 @@ impl AnnounceGate {
     /// board that has just been proven to be moving announces at once
     /// rather than waiting for the tick.
     fn sample_movement(&mut self, now_ms: u64) {
-        if now_ms < self.next_sample_ms {
+        if !self.sampler.take(now_ms) {
             return;
         }
-        self.next_sample_ms = now_ms.saturating_add(MOVEMENT_SAMPLE_INTERVAL_MS);
         let fix = movement_fix();
         let resumed = with_cadence(|cadence| cadence.note_fix(now_ms, fix));
         if resumed {
@@ -436,12 +401,8 @@ impl AnnounceGate {
         let now_ms = node.now_ms();
         self.sample_movement(now_ms);
         let clock_ok = node.has_plausible_wall_clock();
-        let Some(decision) =
-            with_cadence(|cadence| cadence.poll(AnnounceSlot::Own, now_ms, clock_ok))
-        else {
-            return Vec::new();
-        };
-        let Some(hash) = delivery_hash else {
+        let polled = with_cadence(|cadence| cadence.poll(AnnounceSlot::Own, now_ms, clock_ok));
+        let Some((decision, hash)) = own_announce(polled, delivery_hash) else {
             return Vec::new();
         };
         match decision {

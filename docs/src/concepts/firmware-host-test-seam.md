@@ -139,6 +139,8 @@ because the list below is what is actually left:
 | The duty-hold edge: open once, lift once, the idle-turn lift | `leviculum-queue-budget` (`HoldEdge`) | leviculum#413, 2026-10-10 |
 | The sync backoff a round books before it dials | `leviculum-lxmf` (`Peer::book_sync_attempt`) | leviculum#413, 2026-10-10 |
 | Active delivery: which message is pushed, and when a failed push gives up | `leviculum-lxmf` (`active_delivery`) | leviculum#413, 2026-10-10 |
+| The telemetry reporter's tick: key chase, owed retry, report position, withheld attempts, flash retries | `leviculum-telemetry-policy` (`reporter`) | leviculum#413, 2026-10-11 |
+| The announce scheduler's inputs: new neighbours, movement evidence and sampling, a slot with no destination | `leviculum-announce-policy` (`scheduler`) | leviculum#413, 2026-10-11 |
 
 The answer windows moved as constants, not as functions of the
 modulation. What the modulation moves is the delay they must cover, one

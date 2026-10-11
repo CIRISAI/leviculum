@@ -1418,7 +1418,7 @@ const MEDIA_QUERY_ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
 /// The profile is the one media frame the board answers only after a flash
 /// write: the firmware applies it, then waits for the store task to settle
 /// the page (`crate::telemetry::confirm`) for up to `PERSIST_CONFIRM_WITHIN`,
-/// 2500 ms (`leviculum-nrf/src/telemetry.rs:407`), before it writes either
+/// 2500 ms (`leviculum-nrf/src/telemetry.rs:415`), before it writes either
 /// the report or [`leviculum_core::envelope::REFUSE_PERSIST`]. A 2 s window
 /// called a board whose save was merely slow unanswered although it had
 /// taken the profile (470). The firmware sized its bound to land inside
