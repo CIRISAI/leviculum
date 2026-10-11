@@ -28,7 +28,7 @@ way: a magic value in `GPREGRET`, the retained register that survives a
 soft reset, read by the bootloader on the next boot.
 
 We already drive one of them. The 1200-baud touch writes
-`DFU_MAGIC_UF2_RESET` (`leviculum-nrf/src/usb.rs:232`) and resets, and
+`DFU_MAGIC_UF2_RESET` (`leviculum-nrf/src/usb.rs:233`) and resets, and
 the bootloader comes up as a mass-storage volume. The OTA mode is a
 different constant written to the same register at the same point by the
 same code path.
@@ -117,7 +117,7 @@ pays and that a mesh path pays in full: between the `GPREGRET` write and
 `sys_reset()` there must be no await, no allocation and no logging, and
 under a live SoftDevice the write must go through the SoC syscalls
 rather than the register, or it records a bogus MWU panic per attempt
-(`leviculum-nrf/src/usb.rs:232-254`, Codeberg #249). A mesh-borne
+(`leviculum-nrf/src/usb.rs:233-255`, Codeberg #249). A mesh-borne
 command always arrives with the SoftDevice enabled, so only the syscall
 branch of that code is ever exercised — the branch the cable case takes
 least often.

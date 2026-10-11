@@ -22,13 +22,13 @@ cell it bears on, and the test that would show it.
 
 Where the three agree, verified: the slot is 12 symbol times clamped to
 [24, 100] ms with the 6 ms fast floor (`csma_slot_ms`,
-`leviculum-core/src/rnode.rs:1005`, against
+`leviculum-core/src/rnode.rs:1051`, against
 `reference/RNode_Firmware/Utilities.h:1244-1252`, pinned by exhaustion
 over the reference's own PHY grid); DIFS is two slots with SIFS 0
-(`JITTER_DIFS_SLOTS`, `leviculum-nrf/channel-access/src/lib.rs:84`,
+(`JITTER_DIFS_SLOTS`, `leviculum-nrf/channel-access/src/lib.rs:86`,
 against `reference/RNode_Firmware/Config.h:119`); the preamble
 derivation is the reference's duration-targeted one
-(`derive_preamble_symbols`, `leviculum-core/src/rnode.rs:918`). The
+(`derive_preamble_symbols`, `leviculum-core/src/rnode.rs:964`). The
 host interface and the LNode draw from one shared policy crate
 (`leviculum-channel-access`), so those two cannot diverge from each
 other.
@@ -57,7 +57,7 @@ core of #36/#40/#430). Bears on: the rotation reds (`sent=10 recv=4`,
 
 **D2 — the band-1 window is one slot narrower than a freshly booted
 reference.** Ours draws uniformly over 0..=13 slots (`JITTER_CW_SLOTS`,
-`leviculum-nrf/channel-access/src/lib.rs:88`). The reference boots with
+`leviculum-nrf/channel-access/src/lib.rs:90`). The reference boots with
 `cw_max` declared as 15 (`reference/RNode_Firmware/Config.h:127`) and
 only a band excursion rewrites it to 14 (`update_csma_parameters`,
 `reference/RNode_Firmware/RNode_Firmware.ino:1603-1619`), so a
@@ -76,7 +76,7 @@ to 45..=58 slots at 85 % airtime
 (`reference/RNode_Firmware/RNode_Firmware.ino:1603-1619`,
 `reference/RNode_Firmware/Config.h:108-112`). Ours keeps band 1 and
 doubles a separate contention window per observed CAD-busy, 2 up to 64
-slots (`CAD_CW_MAX`, `leviculum-nrf/channel-access/src/lib.rs:80`). On
+slots (`CAD_CW_MAX`, `leviculum-nrf/channel-access/src/lib.rs:82`). On
 the air: on a channel that is *loaded on average but momentarily
 clear*, a reference neighbour defers wide and we do not — our node wins
 more than its share of contests against loaded RNode neighbours, and
@@ -97,8 +97,8 @@ busy medium restarts only DIFS, `:1635`). Our board spends the draw
 listening and, when a reception cuts the window short, keeps the
 remainder owed and serves it on the next turn
 (`acquisition_jitter_ms` / `jitter_spent`,
-`leviculum-nrf/channel-access/src/lib.rs:343-361`;
-`leviculum-nrf/src/lora.rs:2049-2077`) — same shape, same reason. Our
+`leviculum-nrf/channel-access/src/lib.rs:345-363`;
+`leviculum-nrf/src/lora.rs:2047-2075`) — same shape, same reason. Our
 *host* serves its drawn wait as an uninterruptible sleep
 (`leviculum-std/src/interfaces/rnode.rs:2785-2800`): it cannot sense
 the medium, the modem under it can and does. On the air: equivalent
@@ -107,7 +107,7 @@ spell it differently.
 
 **D5 — bounded forced TX vs the reference's unbounded wait.** After 8
 busy CADs ours transmits anyway (`CAD_MAX_RETRIES`,
-`leviculum-nrf/channel-access/src/lib.rs:65`); the reference waits
+`leviculum-nrf/channel-access/src/lib.rs:67`); the reference waits
 indefinitely and lets the airtime lock be the only bound
 (`tx_queue_handler`, `reference/RNode_Firmware/RNode_Firmware.ino:1623`
 has no give-up). On the air: under a permanently keyed interferer, our
@@ -129,7 +129,7 @@ avoidance, current RSSI above its sampled noise floor plus 11 dB
 `reference/RNode_Firmware/RNode_Firmware.ino:1394-1431`,
 `CSMA_INFR_THRESHOLD_DB`, `reference/RNode_Firmware/Config.h:113`).
 Our board probes with the SX1262's CAD per attempt
-(`leviculum-nrf/src/lora.rs:2090`) and keeps **no noise floor, no
+(`leviculum-nrf/src/lora.rs:2088`) and keeps **no noise floor, no
 interference detection, and no DCD sampling at all**. Three on-air
 consequences: (a) a reference node defers to non-LoRa interference, we
 do not; (b) the reference's latched preamble holds "busy" for up to a
@@ -158,10 +158,10 @@ channel-load row against an LNode.
 
 Where the three agree, verified: two 7 500 ms bins over a 15 s
 short-term window and a 480-bin rolling hour
-(`AIRTIME_BINLEN_MS`, `leviculum-core/src/rnode.rs:1460`, against
+(`AIRTIME_BINLEN_MS`, `leviculum-core/src/rnode.rs:1506`, against
 `reference/RNode_Firmware/Config.h:176-183`); the lock engages at
 `>= limit` with 0 and anything ≥ 100 % read as unlimited
-(`alock_u16_to_fraction`, `leviculum-core/src/rnode.rs:1473`, against
+(`alock_u16_to_fraction`, `leviculum-core/src/rnode.rs:1519`, against
 `reference/RNode_Firmware/RNode_Firmware.ino:948-951` and
 `:1673-1675`); the lock defers and never discards, in all three.
 
@@ -172,9 +172,9 @@ ceiling (`add_airtime`,
 `reference/RNode_Firmware/RNode_Firmware.ino:654-691`). Ours charges
 the Semtech formula — preamble tail 4.25 symbols, payload term
 ceiling-divided, each packet rounded up to the millisecond
-(`airtime_ms_with_preamble`, `leviculum-core/src/rnode.rs:1081`;
+(`airtime_ms_with_preamble`, `leviculum-core/src/rnode.rs:1127`;
 charged via `frame_airtime_cost_ms`,
-`leviculum-core/src/rnode.rs:1687`). Ours therefore books ~4 symbol
+`leviculum-core/src/rnode.rs:1733`). Ours therefore books ~4 symbol
 times more per packet — 8 ms at SF8/125 kHz, 131 ms at SF12/125 kHz —
 and our lock engages marginally earlier at the same cap. On the air:
 nothing a peer can see; a few per mille of duty budget in the lawful
@@ -191,7 +191,7 @@ each update (`reference/RNode_Firmware/RNode_Firmware.ino:688` and
 `:698`), which is sound only while the loop lands in every bin: a bin
 skipped — a loop parked longer than 7.5 s — keeps the airtime it held
 an hour earlier and is counted again. Ours clears the whole skipped
-range (`retire_skipped_bins`, `leviculum-core/src/rnode.rs:1904`). On
+range (`retire_skipped_bins`, `leviculum-core/src/rnode.rs:1950`). On
 the air: a reference node can hold a duty lock on air it spent in the
 *previous* hour; ours cannot. Class: reference defect (leviculum#495),
 deviation ours to fix it. Test: exists —
@@ -247,7 +247,7 @@ it aged under the lock goes out, oldest first, deaf. Ours: the host
 never lets the modem hold more than one frame (D1), sweeps frames the
 hold aged past 18 s (`pop_live_frame`,
 `leviculum-std/src/interfaces/rnode.rs:240`), and the board drops stale
-frames at dequeue (`leviculum-nrf/src/lora.rs:1927-1975`). On the air: a
+frames at dequeue (`leviculum-nrf/src/lora.rs:1933-1977`). On the air: a
 reference relay exiting a duty hold emits a burst of minutes-old
 traffic; ours emits one current frame. Class: deviation ours
 (deliberate; #433). Test: exists (the stale-drop mvr and the field
@@ -270,7 +270,7 @@ hops, then oldest (`drain_announce_queues`,
 
 **D12 — the cap's bitrate is the effective airtime rate, not the
 nominal symbol rate.** `announce_cap_bitrate_bps`
-(`leviculum-core/src/rnode.rs:1733`) prices a 183-byte announce by the
+(`leviculum-core/src/rnode.rs:1779`) prices a 183-byte announce by the
 airtime it actually costs; Python registers the nominal bitrate
 (`updateBitrate`,
 `reference/Reticulum/RNS/Interfaces/RNodeInterface.py:693-699`), which
@@ -342,10 +342,10 @@ burst bound, no peer yield.
 defined and **used nowhere** in the pinned firmware — see the wrong
 claim below. Our board runs windowed RX with an explicit post-TX
 listening window of one reply airtime plus the peer's whole key-up wait
-(`post_tx_rx_window_ms`, `leviculum-nrf/channel-access/src/lib.rs:169`,
+(`post_tx_rx_window_ms`, `leviculum-nrf/channel-access/src/lib.rs:171`,
 the #423 fix), burst bounds of 16 frames / 8 s
-(`leviculum-nrf/src/lora.rs:861-866`), and a peer-turn yield after two
-empty ack windows (`leviculum-nrf/src/lora.rs:2255`). The window
+(`leviculum-nrf/src/lora.rs:855-860`), and a peer-turn yield after two
+empty ack windows (`leviculum-nrf/src/lora.rs:2246`). The window
 teardown/adoption/harvest discipline (`leviculum-nrf/rx-arming`) exists
 only because our RX is windowed; the reference has no teardown to get
 wrong. On the air: ours trades continuous listening for bounded turns;
@@ -375,18 +375,18 @@ packet every time its counter reaches 255, so a 508-byte host frame —
 exactly 2 × 254 — keys **three** packets of 255, 255 and 1 bytes, the
 third carrying the header alone (`transmit`,
 `reference/RNode_Firmware/RNode_Firmware.ino:716-751`, modelled by
-`keyed_packet_layout`, `leviculum-core/src/rnode.rs:1153`). Our LNode
+`keyed_packet_layout`, `leviculum-core/src/rnode.rs:1199`). Our LNode
 splits into at most **two** frames of up to 255 bytes with one shared
-header (`build_lora_frames`, `leviculum-core/src/rnode.rs:2023`), so
+header (`build_lora_frames`, `leviculum-core/src/rnode.rs:2069`), so
 the same 508 bytes cost two preambles instead of three. Both reassemble
 correctly at every receiver — the reference's four RX cases
 (`reference/RNode_Firmware/RNode_Firmware.ino:374-446`) and ours
-(`SplitReassembler`, `leviculum-core/src/rnode.rs:2051`) deliver
+(`SplitReassembler`, `leviculum-core/src/rnode.rs:2097`) deliver
 254+254 and ignore nothing that matters. On the air: different airtime
 for the same packet; the host prices the RNode's version
-(`host_frame_airtime_ms`, `leviculum-core/src/rnode.rs:1185`, the #430
+(`host_frame_airtime_ms`, `leviculum-core/src/rnode.rs:1231`, the #430
 fix) and the board prices its own (`packet_airtime_ms`,
-`leviculum-core/src/rnode.rs:1656`), and the two functions coexist in
+`leviculum-core/src/rnode.rs:1702`), and the two functions coexist in
 one file *because* the two modems genuinely differ. Class: deviation
 ours (deliberate and wire-compatible). Bears on: #430 (closed by the
 hold fix; the model split is its residue).
@@ -399,7 +399,7 @@ with an empty payload) and latches its sequence. The next split packet
 whose 4-bit sequence collides (p = 1/16) is then treated as the second
 part and delivered truncated, while its real second half dangles. Our
 reassembler is immune — a frame under 2 bytes is ignored
-(`leviculum-core/src/rnode.rs:2076-2078`). Reachable only when a host
+(`leviculum-core/src/rnode.rs:2122-2124`). Reachable only when a host
 hands over an exact multiple of 254 bytes; Reticulum's own 500-byte MTU
 never does, test tooling at `HW_MTU` = 508 does. Class: reference
 defect, edge. Bears on: nothing open; recorded so a future
@@ -415,7 +415,7 @@ Verified byte-for-byte against the firmware's indications: CHTM
 `decode_channel_stats`, `leviculum-core/src/rnode.rs:610`, against
 `kiss_indicate_channel_stats`,
 `reference/RNode_Firmware/Utilities.h:959-982`), PHYPRM (six u16s;
-`decode_phy_params`, `leviculum-core/src/rnode.rs:648`, against
+`decode_phy_params`, `leviculum-core/src/rnode.rs:694`, against
 `reference/RNode_Firmware/Utilities.h:996-1013`), CSMA stats (band,
 cw_min, cw_max; consumed into the hold pricing via `FirmwareCsma`,
 `leviculum-std/src/interfaces/rnode.rs:914` — Python only logs them),
@@ -461,7 +461,7 @@ Two asymmetries, neither a defect of ours:
    but the two rationales are the kind that get copied.
 2. **"It even reserves a fixed post-TX yield (CSMA_POST_TX_YIELD_SLOTS)"
    — wrong, the reference never uses it.**
-   `leviculum-nrf/src/lora.rs:882-883` (corrected in 35034019) claimed the reference firmware
+   `leviculum-nrf/src/lora.rs:876-877` (corrected in 35034019) claimed the reference firmware
    reserves a post-TX yield. `CSMA_POST_TX_YIELD_SLOTS` is defined at
    `reference/RNode_Firmware/Config.h:103` and referenced nowhere else
    in the firmware (checked by exhaustive grep over the mirror). The
@@ -470,12 +470,12 @@ Two asymmetries, neither a defect of ours:
    is decoration there, and our explicit window mirrors a discipline
    the reference does not actually implement.
 3. **`CSMA_MAX_CW_MS` says "cw_max=15" and prices 15 slots — the
-   longest band-1 draw is 14.** `leviculum-core/src/rnode.rs:1041-1046`
+   longest band-1 draw is 14.** `leviculum-core/src/rnode.rs:1087-1092`
    derives 360 ms from 15 × 24 ms; `random(cw_min, cw_max)` is
    upper-exclusive, so even the boot-state window's widest draw is 14
    slots (336 ms), and the 24 ms slot itself only holds through
    SF8/125 kHz. Dead code in practice — its only consumer,
-   `compute_spacing_ms` (`leviculum-core/src/rnode.rs:1217`), has no
+   `compute_spacing_ms` (`leviculum-core/src/rnode.rs:1263`), has no
    production caller (tests only), as
    `docs/src/concepts/csma-transmit-window.md` open item 3 already
    records. The same check found `JITTER_MAX_MS` equally caller-less.
@@ -523,7 +523,7 @@ Two asymmetries, neither a defect of ours:
    Mechanism: comment-only edits — "~2 s" → "~1 s
    (`UTIL_UPDATE_INTERVAL_MS`)" at
    `leviculum-std/src/interfaces/rnode.rs:846` and `:873` (done in 35034019), and the
-   post-TX-yield sentence at `leviculum-nrf/src/lora.rs:882-883` (likewise)
+   post-TX-yield sentence at `leviculum-nrf/src/lora.rs:876-877` (likewise)
    rewritten to what the reference does (returns to continuous RX;
    the yield constant is unused). Test: the citation guard anchors the
    corrected lines; no behaviour moves. Cheap, and it is exactly the
@@ -540,7 +540,7 @@ split framing, `AirtimeTracker`, announce-cap bitrate); the policy
 crates `leviculum-channel-access`, `leviculum-queue-budget`,
 `leviculum-tx-spacing`, `leviculum-mute-lease` and the module contract
 of `leviculum-rx-arming`; the LNode transmit loop
-(`leviculum-nrf/src/lora.rs:1692-2289`); the core announce cap
+(`leviculum-nrf/src/lora.rs:1686-2280`); the core announce cap
 (`leviculum-core/src/transport.rs`, the cap/drain/hold paths); the CAD
 and window arithmetic in `leviculum-core/src/sx126x.rs`. Reference
 side: `RNodeInterface.py` (serial fully, Android spot-checked for the

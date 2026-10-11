@@ -177,6 +177,26 @@ pub fn log_fmt(prefix: &str, args: core::fmt::Arguments) {
     LOG_SIGNAL.signal(());
 }
 
+/// [`log_fmt`] without the copy into the persistent crash tail.
+///
+/// For a periodic line that would otherwise own the tail: the 2 KiB that
+/// survive a reset hold about fifteen seconds of a once-a-second 140-byte
+/// line, and a crash would then replay that line and nothing of what led
+/// up to it. Use it only for a line whose next instance says everything
+/// the lost one did (`[LORA_CHTM]`, leviculum#636). For the same reason a
+/// line held back by the runtime-drain gate is not counted in
+/// [`RUNTIME_DROPPED`]: that count tells an operator what was lost, and
+/// thirty of these before the host attached are not a loss.
+pub fn log_fmt_volatile(prefix: &str, args: core::fmt::Arguments) {
+    if !RUNTIME_DRAIN_OPEN.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut buf = [0u8; 1024];
+    let bytes = fmt_into(&mut buf, prefix, args);
+    LOG_RING.write(bytes);
+    LOG_SIGNAL.signal(());
+}
+
 /// Format and write a log message bypassing the runtime-drain gate.
 /// Used for boot-phase logs, panic-PMRT replay, NVIC priority dump,
 /// `[BUG32_RAM]` capture, and anything that must survive a slow-

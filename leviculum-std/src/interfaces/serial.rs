@@ -2416,7 +2416,7 @@ mod tests {
 
     /// The ten bandwidths `RadioConfig::from_wire_config`
     /// (`leviculum-nrf/src/lora.rs`) has an SX1262 register code for, and the
-    /// only ones `bw_code_to_hz` (`leviculum-nrf/src/sx1262.rs:233`) ever
+    /// only ones `bw_code_to_hz` (`leviculum-nrf/src/sx1262.rs:234`) ever
     /// returns. Written out here rather than imported so this test states the
     /// firmware's acceptance set independently of whatever the host computes.
     const FIRMWARE_ACCEPTS_HZ: [u32; 10] = [
@@ -2430,7 +2430,7 @@ mod tests {
     /// `SerialInterface` block naming one builds, spawns, and puts a value on
     /// the wire that `RadioConfig::from_wire_config` returns `None` for. The
     /// legacy contract for a config the driver cannot take is silence
-    /// (`leviculum-nrf/src/usb.rs:779-800`), so the board stays on the PHY it
+    /// (`leviculum-nrf/src/usb.rs:780-800`), so the board stays on the PHY it
     /// already had while the host's airtime bucket goes on pricing every
     /// frame at the bandwidth it asked for.
     #[test]

@@ -337,6 +337,11 @@ pub const TYPE_MGMT_ALLOW: u8 = 0x13;
 /// Read-only, empty payload, answered with [`TYPE_MGMT_ALLOW_REPORT`].
 pub const TYPE_MGMT_ALLOW_QUERY: u8 = 0x14;
 
+/// Read the board's channel ledgers (leviculum#636): the envelope twin of
+/// the RNode's `CMD_STAT_CHTM`. Read-only, empty payload, answered with
+/// [`TYPE_CHANNEL_STATS_REPORT`].
+pub const TYPE_CHANNEL_STATS_QUERY: u8 = 0x15;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -445,6 +450,25 @@ pub const TYPE_MGMT_ALLOW_REPORT: u8 = 0x89;
 /// **USB protocol between our board and our host, not the radio.** Nothing
 /// of this frame goes on the air and no Python-RNS peer ever sees it.
 pub const TYPE_DUTY_HOLD: u8 = 0x8A;
+
+/// Channel-stats report (leviculum#636); payload is exactly a
+/// `CMD_STAT_CHTM` payload, 11 bytes or 8, encoded by
+/// [`crate::rnode::encode_channel_stats`] and read by
+/// [`crate::rnode::decode_channel_stats`]. The answer to
+/// [`TYPE_CHANNEL_STATS_QUERY`].
+///
+/// The modem's own bytes rather than a codec of our own, so a host reads an
+/// LNode's ledgers with the parser it already runs for an RNode's, and the
+/// two cannot come to disagree about a unit: airtime and channel load in
+/// hundredths of a percent, RSSI as `dBm + 157`, interference `0xFF` for
+/// none (`kiss_indicate_channel_stats`,
+/// `reference/RNode_Firmware/Utilities.h:959-985`).
+///
+/// The 8-byte form means the board has not sampled a noise floor yet; it
+/// is never padded with a placeholder floor.
+///
+/// **USB protocol between our board and our host, not the radio.**
+pub const TYPE_CHANNEL_STATS_REPORT: u8 = 0x8B;
 
 /// [`TYPE_DUTY_HOLD`] state byte: the hold lifted, or none was in force.
 pub const DUTY_HOLD_LIFTED: u8 = 0x00;
@@ -1483,6 +1507,27 @@ pub fn media_query_answer(
 }
 
 // ---------------------------------------------------------------------------
+// Channel stats (leviculum#636)
+// ---------------------------------------------------------------------------
+
+/// Encode a complete [`TYPE_CHANNEL_STATS_QUERY`] frame.
+pub fn encode_channel_stats_query() -> Vec<u8> {
+    encode_frame(TYPE_CHANNEL_STATS_QUERY, &[])
+}
+
+/// Encode a complete [`TYPE_CHANNEL_STATS_REPORT`] frame.
+pub fn encode_channel_stats_report(stats: &crate::rnode::ChannelStats) -> Vec<u8> {
+    let (payload, len) = crate::rnode::encode_channel_stats(stats);
+    encode_frame(TYPE_CHANNEL_STATS_REPORT, &payload[..len])
+}
+
+/// Decode a [`TYPE_CHANNEL_STATS_REPORT`] payload: the `CMD_STAT_CHTM`
+/// parser itself, so the 8- and 11-byte forms read exactly as a modem's.
+pub fn decode_channel_stats_report_payload(payload: &[u8]) -> Option<crate::rnode::ChannelStats> {
+    crate::rnode::decode_channel_stats(payload)
+}
+
+// ---------------------------------------------------------------------------
 // Duty hold (board -> host, leviculum#501)
 // ---------------------------------------------------------------------------
 
@@ -1955,6 +2000,10 @@ pub enum ControlAction {
     /// Envelope allow-list query: answer via [`mgmt_allow_answer`].
     /// Read-only, like [`MediaQuery`](Self::MediaQuery).
     MgmtAllowQuery,
+    /// Envelope channel-stats query: answer via
+    /// [`encode_channel_stats_report`]. Read-only, like
+    /// [`MediaQuery`](Self::MediaQuery).
+    ChannelStatsQuery,
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -2164,6 +2213,13 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
                 malformed
             }
         }
+        TYPE_CHANNEL_STATS_QUERY => {
+            if frame.payload.is_empty() {
+                ControlAction::ChannelStatsQuery
+            } else {
+                malformed
+            }
+        }
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -2200,6 +2256,7 @@ mod tests {
         TYPE_PN_CONFIG,
         TYPE_MGMT_ALLOW,
         TYPE_MGMT_ALLOW_QUERY,
+        TYPE_CHANNEL_STATS_QUERY,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -3355,6 +3412,55 @@ mod tests {
                 held: true,
                 lt_ms: 7
             })
+        );
+    }
+
+    #[test]
+    fn a_channel_stats_query_is_classified_and_its_report_reads_as_a_modems() {
+        assert_eq!(
+            classify_control_frame(&encode_channel_stats_query(), ACCEPTED),
+            ControlAction::ChannelStatsQuery
+        );
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_CHANNEL_STATS_QUERY, &[0x00]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_CHANNEL_STATS_QUERY,
+                reason: REFUSE_MALFORMED,
+            }
+        );
+        let stats = crate::rnode::ChannelStats {
+            airtime_short: 300,
+            airtime_long: 1000,
+            channel_load_short: 4250,
+            channel_load_long: 1712,
+            current_rssi: Some(-104),
+            noise_floor: Some(-117),
+            interference: None,
+        };
+        let bytes = encode_channel_stats_report(&stats);
+        let frame = decode_frame(&bytes).expect("a well-formed envelope");
+        assert_eq!(frame.frame_type, TYPE_CHANNEL_STATS_REPORT);
+        // The payload IS a CMD_STAT_CHTM payload: the modem parser reads it.
+        assert_eq!(frame.payload.len(), crate::rnode::CHANNEL_STATS_LEN);
+        assert_eq!(
+            crate::rnode::decode_channel_stats(frame.payload),
+            Some(stats)
+        );
+        assert_eq!(
+            decode_channel_stats_report_payload(frame.payload),
+            Some(stats)
+        );
+        // No noise floor yet: the short form, never a placeholder floor.
+        let unsampled = crate::rnode::ChannelStats {
+            noise_floor: None,
+            ..stats
+        };
+        let bytes = encode_channel_stats_report(&unsampled);
+        let frame = decode_frame(&bytes).expect("a well-formed envelope");
+        assert_eq!(frame.payload.len(), crate::rnode::CHANNEL_STATS_SHORT_LEN);
+        assert_eq!(
+            decode_channel_stats_report_payload(frame.payload).map(|s| s.noise_floor),
+            Some(None)
         );
     }
 

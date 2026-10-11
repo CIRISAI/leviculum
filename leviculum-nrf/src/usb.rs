@@ -84,6 +84,7 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_PN_CONFIG,
     envelope::TYPE_MGMT_ALLOW,
     envelope::TYPE_MGMT_ALLOW_QUERY,
+    envelope::TYPE_CHANNEL_STATS_QUERY,
 ];
 
 /// nRF52840 FICR base address
@@ -1235,6 +1236,28 @@ async fn retic_serial_task(
                                         .await
                                     {
                                         log("SER: mgmt-allow report write failed");
+                                    }
+                                }
+                                ControlAction::ChannelStatsQuery => {
+                                    // Read-only, like the media query. The
+                                    // ledgers' last once-a-second snapshot
+                                    // (leviculum#636), in the modem's own
+                                    // CMD_STAT_CHTM bytes; `busy` only in the
+                                    // instant before the LoRa task's first
+                                    // turn, when there is no snapshot yet.
+                                    let answer = match crate::chtm::last() {
+                                        Some(snapshot) => {
+                                            envelope::encode_channel_stats_report(&snapshot.stats())
+                                        }
+                                        None => envelope::encode_refusal(
+                                            envelope::TYPE_CHANNEL_STATS_QUERY,
+                                            envelope::REFUSE_BUSY,
+                                        ),
+                                    };
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
+                                        log("SER: channel-stats report write failed");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {

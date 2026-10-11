@@ -47,6 +47,7 @@ pub mod ble;
 pub mod boards;
 pub mod boot_count;
 pub mod boot_trace;
+pub mod chtm;
 pub mod clock;
 pub mod dispatch;
 pub mod events;

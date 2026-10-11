@@ -53,6 +53,7 @@ Commands (host → board):
 | 0x12 | PN_CONFIG        | announced stamp cost and required peering cost, one byte each (2 B); `0xFF` in a field keeps the persisted value (#384) |
 | 0x13 | MGMT_ALLOW       | see below — set or clear the remote-management allow-list (#235) |
 | 0x14 | MGMT_ALLOW_QUERY | empty (a query) — answered with MGMT_ALLOW_REPORT |
+| 0x15 | CHANNEL_STATS_QUERY | empty (a query) — answered with CHANNEL_STATS_REPORT (#636) |
 
 Responses (board → host):
 
@@ -68,6 +69,7 @@ Responses (board → host):
 | 0x88 | IDENTITY_REPORT   | `[flags, identity(16), probe(16), lxmf(16)]`, 49 B fixed |
 | 0x89 | MGMT_ALLOW_REPORT | `[flags, count, count × identity(16)]` — see below |
 | 0x8A | DUTY_HOLD         | `[state, lt_ms: u32 BE]`, 5 B; state `0x00` lifted, `0x01` held. Unsolicited on each hold edge, and behind every MEDIA_REPORT — see below |
+| 0x8B | CHANNEL_STATS_REPORT | a `CMD_STAT_CHTM` payload, 11 B, or 8 B before the noise floor is sampled — see below |
 
 Refusal reasons: `0x01` unknown type, `0x02` malformed, `0x03` value
 refused, `0x04` busy, `0x05` unsupported (the envelope layer knows the
@@ -110,6 +112,31 @@ each change (the line its RNode path emits), and clears the flag with
 `cause=iface_down` when the port goes away. **This is the USB protocol
 between our board and our host, not the radio**: nothing of it goes on
 the air, and no Python-RNS peer ever sees it.
+
+### CHANNEL_STATS_QUERY (0x15) — the board's channel ledgers
+
+The envelope twin of an RNode's `CMD_STAT_CHTM` (#636). The report's
+payload is the modem's own byte layout, so a host reads it with the parser
+it already runs for an RNode (`leviculum_core::rnode::decode_channel_stats`):
+
+```text
+[airtime_short: u16 BE] [airtime_long: u16 BE]
+[channel_load_short: u16 BE] [channel_load_long: u16 BE]
+[current_rssi: u8] [noise_floor: u8] [interference: u8]
+```
+
+The four ledgers are hundredths of a percent; the RSSI bytes are
+`dBm + 157`, and `interference` is `0xFF` when none was detected. Until
+the board has averaged its first block of noise samples the report is the
+8-byte form, without the three RSSI bytes, never a placeholder floor.
+
+The board measures these the way the reference modem does: a carrier-detect
+sample (the latched PreambleDetected/HeaderValid IRQ) and an instantaneous
+RSSI read while its receiver listens, its own keyed airtime from the duty
+ledger, a 7.5 s short window and a one-hour long one. It prints the same
+four values once a second as a `[LORA_CHTM]` debug line. The method, and
+where it departs from the reference, is in
+`leviculum-nrf/channel-access/src/load.rs`.
 
 ### MGMT_ALLOW (0x13) and MGMT_ALLOW_QUERY (0x14) — who may read the board
 

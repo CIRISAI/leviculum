@@ -58,6 +58,8 @@
 //! which is what the retry gate's doubling contention window already does
 //! here, reacting to observed CAD-busy instead of to an airtime average.
 
+pub mod load;
+
 /// Maximum CAD attempts before a frame is transmitted even though the
 /// channel appears busy — the documented give-up that keeps a frame from
 /// starving forever (see the crate docs for why this deviates from the

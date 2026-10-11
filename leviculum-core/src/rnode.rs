@@ -641,6 +641,52 @@ pub fn decode_channel_stats(payload: &[u8]) -> Option<ChannelStats> {
     })
 }
 
+/// Length of a single-interface `CMD_STAT_CHTM` payload, the form that
+/// carries the RSSI bytes (`kiss_indicate_channel_stats`,
+/// `reference/RNode_Firmware/Utilities.h:959-985`).
+pub const CHANNEL_STATS_LEN: usize = 11;
+/// Length of the multi-interface `CMD_STAT_CHTM` payload: the four ledgers
+/// and no RSSI bytes.
+pub const CHANNEL_STATS_SHORT_LEN: usize = 8;
+
+/// One RSSI in dBm as the reference's byte, `dbm + rssi_offset` cast to
+/// `u8` (`reference/RNode_Firmware/Utilities.h:965-966`), clamped where the
+/// reference would wrap, and below `ceiling` so a measured value cannot be
+/// read back as the interference byte's "none".
+fn rssi_byte(dbm: i16, ceiling: u8) -> u8 {
+    (dbm + RSSI_OFFSET).clamp(0, ceiling as i16) as u8
+}
+
+/// Encode channel statistics as a `CMD_STAT_CHTM` payload, the inverse of
+/// [`decode_channel_stats`].
+///
+/// The 11-byte form when both `current_rssi` and `noise_floor` are known,
+/// otherwise the 8-byte form, which [`decode_channel_stats`] reads back
+/// with all three RSSI fields `None`. A noise floor not yet sampled is not
+/// sent as a number: the reference would send its initial `-292`
+/// (`reference/RNode_Firmware/Config.h:155`) wrapped into a byte, a value a
+/// host cannot tell from a measurement. Returns the buffer and the length
+/// used.
+pub fn encode_channel_stats(stats: &ChannelStats) -> ([u8; CHANNEL_STATS_LEN], usize) {
+    let mut out = [0u8; CHANNEL_STATS_LEN];
+    out[0..2].copy_from_slice(&stats.airtime_short.to_be_bytes());
+    out[2..4].copy_from_slice(&stats.airtime_long.to_be_bytes());
+    out[4..6].copy_from_slice(&stats.channel_load_short.to_be_bytes());
+    out[6..8].copy_from_slice(&stats.channel_load_long.to_be_bytes());
+    match (stats.current_rssi, stats.noise_floor) {
+        (Some(rssi), Some(noise)) => {
+            out[8] = rssi_byte(rssi, u8::MAX);
+            out[9] = rssi_byte(noise, u8::MAX);
+            out[10] = match stats.interference {
+                Some(dbm) => rssi_byte(dbm, INTERFERENCE_NONE - 1),
+                None => INTERFERENCE_NONE,
+            };
+            (out, CHANNEL_STATS_LEN)
+        }
+        _ => (out, CHANNEL_STATS_SHORT_LEN),
+    }
+}
+
 /// Decode physical parameters from CMD_STAT_PHYPRM payload
 ///
 /// Accepts 12-byte (single-interface) or 10-byte (multi-interface) payloads.
@@ -2367,6 +2413,69 @@ mod tests {
         // Too short
         assert_eq!(decode_firmware_version(&[1]), None);
         assert_eq!(decode_firmware_version(&[]), None);
+    }
+
+    #[test]
+    fn channel_stats_round_trip_through_the_chtm_payload() {
+        let stats = ChannelStats {
+            airtime_short: 300,
+            airtime_long: 1000,
+            channel_load_short: 4250,
+            channel_load_long: 1712,
+            current_rssi: Some(-104),
+            noise_floor: Some(-117),
+            interference: Some(-95),
+        };
+        let (buf, len) = encode_channel_stats(&stats);
+        assert_eq!(len, CHANNEL_STATS_LEN);
+        assert_eq!(
+            buf,
+            [0x01, 0x2C, 0x03, 0xE8, 0x10, 0x9A, 0x06, 0xB0, 53, 40, 62]
+        );
+        assert_eq!(decode_channel_stats(&buf[..len]), Some(stats));
+        let quiet = ChannelStats {
+            interference: None,
+            ..stats
+        };
+        let (buf, len) = encode_channel_stats(&quiet);
+        assert_eq!(buf[10], INTERFERENCE_NONE);
+        assert_eq!(decode_channel_stats(&buf[..len]), Some(quiet));
+    }
+
+    #[test]
+    fn channel_stats_without_a_noise_floor_use_the_short_form() {
+        let stats = ChannelStats {
+            airtime_short: 1,
+            airtime_long: 2,
+            channel_load_short: 3,
+            channel_load_long: 4,
+            current_rssi: Some(-110),
+            noise_floor: None,
+            interference: None,
+        };
+        let (buf, len) = encode_channel_stats(&stats);
+        assert_eq!(len, CHANNEL_STATS_SHORT_LEN);
+        let back = decode_channel_stats(&buf[..len]).unwrap();
+        assert_eq!(back.channel_load_long, 4);
+        assert_eq!((back.current_rssi, back.noise_floor), (None, None));
+    }
+
+    #[test]
+    fn a_measured_interference_never_encodes_as_none() {
+        let stats = ChannelStats {
+            airtime_short: 0,
+            airtime_long: 0,
+            channel_load_short: 0,
+            channel_load_long: 0,
+            current_rssi: Some(120),
+            noise_floor: Some(-400),
+            interference: Some(120),
+        };
+        let (buf, _) = encode_channel_stats(&stats);
+        assert_eq!(
+            (buf[8], buf[9], buf[10]),
+            (u8::MAX, 0, INTERFERENCE_NONE - 1)
+        );
     }
 
     #[test]
@@ -4431,9 +4540,9 @@ mod tests {
 
         for &(at_ms, len) in POCKET_MINUTE_FRAMES.iter() {
             // `lora_task` calls `update` once per turn while a frame is
-            // pending, before it decides to key or hold (lora.rs:1920), and
+            // pending, before it decides to key or hold (lora.rs:1919), and
             // charges the frame only after `radio.transmit` returned Ok
-            // (lora.rs:1161) — i.e. at TX-done, one frame's airtime later.
+            // (lora.rs:1156) — i.e. at TX-done, one frame's airtime later.
             t.update(at_ms);
             t.add_airtime(at_ms + cost(len), cost(len));
         }

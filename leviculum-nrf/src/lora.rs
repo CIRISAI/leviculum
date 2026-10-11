@@ -814,11 +814,7 @@ fn start_duty_hold(hold: &mut leviculum_queue_budget::HoldEdge, now_ms: u64) {
 /// line carries what the next reader of a dark-relay capture needs: the
 /// ledger the lock re-opened at, how long the board advertised nothing, and
 /// how many queued frames the hold aged into stale drops meanwhile.
-fn lift_duty_hold(
-    hold: &mut leviculum_queue_budget::HoldEdge,
-    airtime: &leviculum_core::rnode::AirtimeTracker,
-    now_ms: u64,
-) {
+fn lift_duty_hold(hold: &mut leviculum_queue_budget::HoldEdge, lt_used_ms: u32, now_ms: u64) {
     let Some(lift) = hold.lift(
         now_ms,
         LORA_STALE_DROP_COUNT.load(core::sync::atomic::Ordering::Relaxed),
@@ -831,9 +827,7 @@ fn lift_duty_hold(
         "[LORA] ",
         format_args!(
             "hold lifted lt_ms={} held_for_ms={} dropped_stale={}",
-            airtime.long_term_airtime_ms(),
-            lift.held_for_ms,
-            lift.dropped_stale
+            lt_used_ms, lift.held_for_ms, lift.dropped_stale
         ),
     );
 }
@@ -996,10 +990,12 @@ fn apply_mute(lease: &mut leviculum_mute_lease::MuteLease, config: &RadioConfig,
 ///
 /// Called at radio bring-up and again on every runtime reconfiguration, so a
 /// board reconfigured in the field states its new cap too.
-fn apply_airtime_limits(airtime: &mut leviculum_core::rnode::AirtimeTracker, config: &RadioConfig) {
+fn apply_airtime_limits(config: &RadioConfig) {
     let lt_alock = config.effective_lt_alock();
-    airtime.set_st_limit_u16(config.st_alock);
-    airtime.set_lt_limit_u16(lt_alock);
+    crate::chtm::with(|l| {
+        l.airtime_mut().set_st_limit_u16(config.st_alock);
+        l.airtime_mut().set_lt_limit_u16(lt_alock);
+    });
     LORA_LT_CAP_MS.store(
         leviculum_queue_budget::lt_cap_ms(lt_alock),
         core::sync::atomic::Ordering::Relaxed,
@@ -1062,7 +1058,6 @@ async fn transmit_all_frames(
     data: &[u8],
     rng_state: &mut u32,
     config: &RadioConfig,
-    airtime: &mut leviculum_core::rnode::AirtimeTracker,
     spacer: &mut leviculum_tx_spacing::TxSpacer,
 ) {
     let wait_ms = spacer.wait_ms(embassy_time::Instant::now().as_millis());
@@ -1158,7 +1153,7 @@ async fn transmit_all_frames(
                     config.cr_denom,
                     config.preamble_len,
                 );
-                airtime.add_airtime(now_ms, cost);
+                crate::chtm::with(|l| l.airtime_mut().add_airtime(now_ms, cost));
                 // This frame has left the air. Recorded per frame, so for
                 // a split packet the next packet's gap is measured from
                 // the second frame's end — the last edge on the air.
@@ -1589,7 +1584,6 @@ async fn apply_runtime_config(
     new_cfg: RadioConfig,
     config: &mut RadioConfig,
     access: &mut leviculum_channel_access::ChannelAccess,
-    airtime: &mut leviculum_core::rnode::AirtimeTracker,
     lease: &mut leviculum_mute_lease::MuteLease,
 ) {
     match radio
@@ -1615,7 +1609,7 @@ async fn apply_runtime_config(
             *config = new_cfg;
             publish_running_config(config);
             access.set_phy(config.bw_hz, config.sf, config.cr_denom);
-            apply_airtime_limits(airtime, config);
+            apply_airtime_limits(config);
             CONFIG_APPLIED.signal(());
         }
         Err(e) => crate::log::log_fmt("[LORA] ", format_args!("reconfig FAILED: {:?}", e)),
@@ -1777,10 +1771,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     let mut airtime_since_yield_ms: u64 = 0;
 
     // Regulatory airtime lock (mirrors the RNode firmware). The bin histogram
-    // lives in the task's static future, off the heap (960 bytes). Limits of 0
-    // mean unlimited, so unconfigured devices and tests are never throttled.
-    let mut airtime = leviculum_core::rnode::AirtimeTracker::new();
-    apply_airtime_limits(&mut airtime, &config);
+    // lives in the channel ledger (`crate::chtm`), a static off the heap
+    // (960 bytes), beside the channel-load ledgers it feeds (leviculum#636).
+    // Limits of 0 mean unlimited, so unconfigured devices and tests are
+    // never throttled.
+    apply_airtime_limits(&config);
 
     // On-air spacing knob (#345). Starts at the compiled default, which
     // imposes nothing, so an unconfigured board transmits exactly as it did
@@ -1825,7 +1820,6 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 new_cfg,
                 &mut config,
                 &mut access,
-                &mut airtime,
                 &mut mute_lease,
             )
             .await;
@@ -1863,13 +1857,17 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
         // share (leviculum#494), and a ledger refreshed only under traffic
         // would keep showing a spent budget to a node that, by yielding,
         // sends nothing to refresh it.
-        airtime.update(now_ms);
-        LORA_LT_USED_MS.store(
-            airtime.long_term_airtime_ms(),
-            core::sync::atomic::Ordering::Relaxed,
-        );
-        if hold_started.lifts_when_idle(pending_tx.is_some(), airtime.is_locked()) {
-            lift_duty_hold(&mut hold_started, &airtime, now_ms);
+        let (lt_used_ms, locked) = crate::chtm::with(|l| {
+            l.airtime_mut().update(now_ms);
+            (l.airtime().long_term_airtime_ms(), l.airtime().is_locked())
+        });
+        LORA_LT_USED_MS.store(lt_used_ms, core::sync::atomic::Ordering::Relaxed);
+        // The channel ledgers' once-a-second update (leviculum#636), here as
+        // well as in the receive wait that samples them: a turn spent
+        // keying and backing off samples nothing, and must still report.
+        crate::chtm::update(now_ms);
+        if hold_started.lifts_when_idle(pending_tx.is_some(), locked) {
+            lift_duty_hold(&mut hold_started, lt_used_ms, now_ms);
         }
         if mute_lease.expired_at(now_ms).is_some() {
             // The run's exact total, and it closes the run: the expiry IS
@@ -1917,18 +1915,22 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // `if (!airtime_lock && queue_height > 0)` TX gate). We keep
             // listening during the hold so RX is not starved, then retry.
             let now_ms = embassy_time::Instant::now().as_millis();
-            airtime.update(now_ms);
+            let (st_ms, lt_ms, locked) = crate::chtm::with(|l| {
+                l.airtime_mut().update(now_ms);
+                let a = l.airtime();
+                (
+                    a.short_term_airtime_ms(),
+                    a.long_term_airtime_ms(),
+                    a.is_locked(),
+                )
+            });
             // The one decision, taken in `leviculum_queue_budget`: the lock's
             // state and the frame's age in, hold / key / drop out. The
             // interface never looks at the packet — a link request, an
             // announce and a resource chunk of the same age get the same
             // answer — which is what keeps the rule on this side of the
             // isolation boundary.
-            match leviculum_queue_budget::hold_verdict(
-                frame.enqueued_ms,
-                now_ms as u32,
-                airtime.is_locked(),
-            ) {
+            match leviculum_queue_budget::hold_verdict(frame.enqueued_ms, now_ms as u32, locked) {
                 HoldVerdict::DropStale { age_ms } => {
                     // A sweep only happens under an engaged lock, so it opens
                     // the hold like a held frame does (leviculum#493) — the
@@ -1982,11 +1984,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     // core's flt2dec into the image.
                     crate::log::log_fmt(
                         "[LORA_AIRTIME_LOCK] ",
-                        format_args!(
-                            "st={} lt={} holding",
-                            airtime.short_term_airtime_ms(),
-                            airtime.long_term_airtime_ms()
-                        ),
+                        format_args!("st={} lt={} holding", st_ms, lt_ms),
                     );
                     let hold_ms = post_tx_rx_window_ms(&config);
                     reassembler.check_timeout(rx_timeout_count, 10);
@@ -2011,7 +2009,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 // verdict of Key is also the hold's ordinary end: the lock
                 // disengaged between turns, so the lift is stated before the
                 // frame that proves it goes out (leviculum#493).
-                HoldVerdict::Key => lift_duty_hold(&mut hold_started, &airtime, now_ms),
+                HoldVerdict::Key => lift_duty_hold(&mut hold_started, lt_ms, now_ms),
             }
             let data = &frame.data;
 
@@ -2129,15 +2127,8 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                             access.jitter_slot()
                         ),
                     );
-                    transmit_all_frames(
-                        &mut radio,
-                        data,
-                        &mut rng_state,
-                        &config,
-                        &mut airtime,
-                        &mut spacer,
-                    )
-                    .await;
+                    transmit_all_frames(&mut radio, data, &mut rng_state, &config, &mut spacer)
+                        .await;
                     pending_tx = None;
                     // Counted on every key-up, the one that skips the ack
                     // window below included, so the burst bounds stay

@@ -37,6 +37,7 @@ mod opcode {
     pub const SET_RX: u8 = 0x82;
     pub const GET_RX_BUFFER_STATUS: u8 = 0x13;
     pub const GET_PACKET_STATUS: u8 = 0x14;
+    pub const GET_RSSI_INST: u8 = 0x15;
     pub const SET_CAD_PARAMS: u8 = 0x88;
     pub const SET_CAD: u8 = 0xC5;
     pub const SET_STOP_RX_TIMER_ON_PREAMBLE: u8 = 0x9F;
@@ -669,6 +670,10 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.rx_ext_sf = sf;
         self.rx_ext_bw_hz = bw_code_to_hz(bw);
         self.rx_ext_cr_denom = cr.saturating_add(4);
+        // The channel ledger's carrier detect forgives a latched preamble
+        // for exactly the time the false-preamble release above allows it.
+        let hold_ms = irq::false_preamble_ms(self.rx_ext_bw_hz, sf, preamble_len);
+        crate::chtm::with(|l| l.set_dcd_hold_ms(hold_ms));
         self.set_rf_frequency(freq_hz).await?;
         // Transmit power: one PA config for every output, the configured value
         // passed through to `SetTxParams`, clamped to what the part can do
@@ -1099,17 +1104,33 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             return Err(Error::NotArmed);
         };
 
-        // Wait for DIO1 high via GPIOTE interrupt (hw timeout + margin)
+        // Wait for DIO1 high via GPIOTE interrupt (hw timeout + margin),
+        // in steps of one channel sample (leviculum#636): between edges the
+        // receiver is listening, which is the only time its carrier bits and
+        // RSSI describe the air. A sample is two reads and no command, so
+        // the chip stays in RX throughout; one dropped with the window (the
+        // idle select drops this future) costs nothing, the bus releases
+        // chip select on drop.
         let sw_timeout_ms = if timeout_ms == 0 {
             60_000u64
         } else {
             timeout_ms as u64 + 500
         };
-        let _ = with_timeout(
-            Duration::from_millis(sw_timeout_ms),
-            self.dio1.wait_for_high(),
-        )
-        .await;
+        let started = embassy_time::Instant::now();
+        loop {
+            let waited = started.elapsed().as_millis();
+            if waited >= sw_timeout_ms {
+                break;
+            }
+            let step = (sw_timeout_ms - waited).min(leviculum_channel_access::load::SAMPLE_MS);
+            if with_timeout(Duration::from_millis(step), self.dio1.wait_for_high())
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            self.sample_channel().await;
+        }
         // The terminating IRQ — RxDone or the hardware timeout — has been
         // observed, so the radio has stopped listening. Recorded before the
         // status read below, which is dark time and belongs to the next gap,
@@ -1120,6 +1141,34 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
 
         let flags = self.get_irq_status().await?;
         self.finish_rx(flags, buf).await
+    }
+
+    /// One channel sample for the ledgers (leviculum#636): the latched
+    /// PreambleDetected/HeaderValid bits, as the reference's `dcd()` reads
+    /// them (`reference/RNode_Firmware/sx126x.cpp:495-500`), and the
+    /// instantaneous RSSI, `GetRssiInst` (datasheet §13.5.4: `-raw/2` dBm),
+    /// as its `currentRssi()` does. Neither read clears or commands
+    /// anything. A failed read takes no sample rather than a made-up one.
+    async fn sample_channel(&mut self) {
+        let Ok(flags) = self.get_irq_status().await else {
+            return;
+        };
+        let mut raw = [0u8; 1];
+        if self
+            .read_command(opcode::GET_RSSI_INST, &mut raw)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        crate::chtm::sample(
+            embassy_time::Instant::now().as_millis(),
+            leviculum_channel_access::load::Carrier {
+                preamble: flags & irq::IRQ_PREAMBLE_DETECTED != 0,
+                header: flags & irq::IRQ_HEADER_VALID != 0,
+            },
+            -(raw[0] as i16) / 2,
+        );
     }
 
     /// Take a reception the chip has already completed, without waiting on any
