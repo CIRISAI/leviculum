@@ -91,6 +91,7 @@
 - [When a transport node repeats a data packet](protocol-notes/when-a-transport-node-repeats-a-data-packet.md)
 - [Four things RNS 1.5.x changed](protocol-notes/rns-1-5-x-audit.md)
 - [LoRa air path audit, 2026-10-11](audits/2026-10-11-lora-air-path.md)
+- [Shared-instance RPC and config audit, 2026-10-11](audits/2026-10-11-shared-instance-rpc.md)
 - [Testing quick reference](development-testing.md)
 - [CI pipeline](development-ci.md)
 - [Soak and endurance](soak-and-endurance.md)
