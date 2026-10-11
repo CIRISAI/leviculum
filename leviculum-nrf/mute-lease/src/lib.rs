@@ -126,6 +126,23 @@ impl MuteLease {
         self.lease_s = 0;
     }
 
+    /// Put a freshly applied radio config's mute into force, or lift it.
+    ///
+    /// The rule Codeberg #410 turns on, for the boot config and the runtime
+    /// one alike: a config with `radio_silent` set restarts the lease (it does
+    /// not extend one already running), and a config without it clears the
+    /// mute outright. There is no third outcome. Was `apply_mute` in the
+    /// firmware's `lora.rs`, moved here so a host test holds both arms
+    /// (leviculum#413): no rig cell sends a silent config to a board under
+    /// observation.
+    pub fn apply(&mut self, radio_silent: bool, lease_s: u16, now_ms: u64) {
+        if radio_silent {
+            self.grant(now_ms, lease_s);
+        } else {
+            self.clear();
+        }
+    }
+
     /// Is the board mute at `now_ms`?
     ///
     /// Strictly before the deadline: at exactly `grant_ms + lease_s * 1000`
@@ -273,6 +290,38 @@ mod tests {
         assert_eq!(lease.expired_at(u64::MAX), None);
         assert_eq!(lease.lease_s(), 0);
         assert_eq!(lease.remaining_s(0), 0);
+    }
+
+    /// A silent config restarts a running lease from the moment it is
+    /// applied, with its own length; it does not add to what was left.
+    #[test]
+    fn a_silent_config_restarts_the_lease_it_finds() {
+        let mut lease = MuteLease::new();
+        lease.apply(true, 600, 0);
+        lease.apply(true, 60, 500_000);
+        assert_eq!(lease.lease_s(), 60);
+        assert!(lease.is_muted(559_999));
+        assert!(!lease.is_muted(560_000));
+        // A silent config with no lease of its own takes the default.
+        lease.apply(true, 0, 1_000_000);
+        assert_eq!(lease.lease_s(), DEFAULT_LEASE_S);
+    }
+
+    /// A config that is not silent lifts a running mute at once, with no
+    /// expiry left for the loop to announce, and on a board that was not
+    /// mute it changes nothing.
+    #[test]
+    fn a_config_that_is_not_silent_lifts_the_mute_without_an_expiry() {
+        let mut lease = MuteLease::new();
+        lease.apply(true, 900, 0);
+        lease.apply(false, 900, 1_000);
+        assert!(!lease.is_muted(1_000));
+        assert_eq!(lease.expired_at(u64::MAX), None);
+        assert_eq!(lease.lease_s(), 0);
+
+        let mut fresh = MuteLease::new();
+        fresh.apply(false, 900, 0);
+        assert_eq!(fresh, MuteLease::new());
     }
 
     /// What the status line prints, rounded down, and zero once the board can

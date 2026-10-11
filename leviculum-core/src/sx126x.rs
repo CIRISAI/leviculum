@@ -301,6 +301,48 @@ pub fn tx_timeout_ms(
     (air + SOFT_TIMEOUT_SLACK_MS).min(u32::MAX as u64) as u32
 }
 
+/// Floor under the software wait for `TxDone`, in ms. A frame's computed
+/// timeout ([`tx_timeout_ms`]) is never below it at any real PHY; it bounds a
+/// caller that passes a timeout of nothing.
+pub const TX_WAIT_FLOOR_MS: u32 = 100;
+
+/// How long the driver waits for `TxDone` after `SetTx`, for a frame whose
+/// timeout is `timeout_ms`.
+pub fn tx_wait_ms(timeout_ms: u32) -> u64 {
+    u64::from(timeout_ms.max(TX_WAIT_FLOOR_MS))
+}
+
+/// Whether the IRQ flags read after the transmit wait say the frame left the
+/// air. Only `TxDone` does: a DIO1 edge that raised anything else, or none,
+/// is a transmit that did not complete.
+pub fn tx_left_the_air(irq_flags: u16) -> bool {
+    irq_flags & IRQ_TX_DONE != 0
+}
+
+/// How the driver leaves the transmitter after one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxExit {
+    /// `TxDone` was reported: the chip is back in standby by itself, and the
+    /// front end records the PA as no longer keyed.
+    Done,
+    /// Anything else, an expired wait or a bus error after `SetTx` included:
+    /// force the standby that ends the transmit, or the PA stays recorded as
+    /// keyed and every later receive window is refused.
+    Standby,
+}
+
+/// The exit for a transmit whose wait ended `on_air_ok`. Was inline in the
+/// board driver's `transmit` (`leviculum-nrf/src/sx1262.rs`), moved here
+/// beside the timeout it is the other half of, so a host test holds both
+/// arms (leviculum#413): no rig cell makes the radio fail a transmit.
+pub fn tx_exit(on_air_ok: bool) -> TxExit {
+    if on_air_ok {
+        TxExit::Done
+    } else {
+        TxExit::Standby
+    }
+}
+
 /// Software timeout for one channel-activity detection: the programmed
 /// listening symbols plus the chip's processing tail (about half a symbol,
 /// rounded up to one), plus [`SOFT_TIMEOUT_SLACK_MS`].
@@ -1415,6 +1457,38 @@ mod tests {
         let pre18 = tx_timeout_ms(184, 125_000, 12, 8, 18) as u64;
         let pre8 = tx_timeout_ms(184, 125_000, 12, 8, 8) as u64;
         assert!(pre18 - pre8 >= 327, "preamble delta {}ms", pre18 - pre8);
+    }
+
+    /// The transmit ends in standby on every path but a reported `TxDone`
+    /// (leviculum#413): the PA must not stay recorded as keyed after a wait
+    /// that expired or a bus error after `SetTx`.
+    #[test]
+    fn only_a_reported_tx_done_leaves_the_transmitter_without_a_forced_standby() {
+        assert_eq!(tx_exit(true), TxExit::Done);
+        assert_eq!(tx_exit(false), TxExit::Standby);
+    }
+
+    /// `TxDone` and nothing else says the frame left the air: a DIO1 edge on
+    /// the timeout IRQ, or a read with no flag set, is a failed transmit.
+    #[test]
+    fn a_frame_left_the_air_only_if_tx_done_is_latched() {
+        assert!(tx_left_the_air(IRQ_TX_DONE));
+        assert!(tx_left_the_air(IRQ_TX_DONE | IRQ_TIMEOUT));
+        assert!(!tx_left_the_air(IRQ_TIMEOUT));
+        assert!(!tx_left_the_air(0));
+        assert!(!tx_left_the_air(IRQ_LATCH_ALL & !IRQ_TX_DONE));
+    }
+
+    /// The floor binds only on a timeout below it; every computed frame
+    /// timeout, the unconfigured one included, is above it and passes as is.
+    #[test]
+    fn the_tx_wait_has_a_floor_no_computed_timeout_reaches() {
+        assert_eq!(tx_wait_ms(0), u64::from(TX_WAIT_FLOOR_MS));
+        assert_eq!(tx_wait_ms(TX_WAIT_FLOOR_MS - 1), 100);
+        let smallest = tx_timeout_ms(1, 500_000, 5, 5, 6);
+        assert!(smallest > TX_WAIT_FLOOR_MS, "{smallest}");
+        assert_eq!(tx_wait_ms(smallest), u64::from(smallest));
+        assert_eq!(tx_wait_ms(UNCONFIGURED_WAIT_MS), 1_000);
     }
 
     #[test]

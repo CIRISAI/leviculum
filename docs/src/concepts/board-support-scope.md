@@ -172,13 +172,13 @@ drive them, and being liftable is the same property as being portable:
   (`leviculum-nrf/rx-arming/src/lib.rs:706`). The driver implements both,
   `RxPort` (`leviculum-nrf/src/sx1262.rs:1450`) and `RxWindowProbe`
   (`leviculum-nrf/src/sx1262.rs:1480`), and a test fake implements
-  `RxPort` (`leviculum-nrf/rx-arming/src/lib.rs:1838`) beside it. A second
+  `RxPort` (`leviculum-nrf/rx-arming/src/lib.rs:1868`) beside it. A second
   family writes a third implementation; it does not fork the crate.
 - `channel-access` touches no radio at all. The caller reports what its
   own channel-activity detection said — `cad_clear`
-  (`leviculum-nrf/channel-access/src/lib.rs:323`), `cad_busy`
-  (`leviculum-nrf/channel-access/src/lib.rs:333`), `cad_error`
-  (`leviculum-nrf/channel-access/src/lib.rs:350`) — and the jitter slot is
+  (`leviculum-nrf/channel-access/src/lib.rs:377`), `cad_busy`
+  (`leviculum-nrf/channel-access/src/lib.rs:387`), `cad_error`
+  (`leviculum-nrf/channel-access/src/lib.rs:423`) — and the jitter slot is
   derived from bandwidth, spreading factor and coding rate
   (`jitter_slot_ms`, `leviculum-nrf/channel-access/src/lib.rs:116`), which
   are properties of the modulation rather than of the part. Only the

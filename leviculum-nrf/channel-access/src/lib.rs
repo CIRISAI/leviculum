@@ -180,6 +180,60 @@ pub fn post_tx_rx_window_ms(
         .clamp(1, POST_TX_WINDOW_MAX_MS) as u32
 }
 
+/// Ceiling on a listening wait the transmit path spends inside the channel
+/// access: a CAD backoff, or a part of the acquisition jitter. Neither comes
+/// near it at any PHY the board runs (the widest backoff is
+/// `(CAD_CW_MAX - 1)` slots of at most 100 ms); it bounds a wait whose inputs
+/// went wrong, so one turn cannot park the transmit path for longer.
+pub const LISTEN_WINDOW_MAX_MS: u64 = 10_000;
+
+/// The receive window that spends a listening wait of `wait_ms`: clamped to
+/// at least 1 ms, because the SX1262 reads a zero timeout as "no timeout",
+/// and to at most [`LISTEN_WINDOW_MAX_MS`].
+pub fn listen_window_ms(wait_ms: u64) -> u32 {
+    wait_ms.clamp(1, LISTEN_WINDOW_MAX_MS) as u32
+}
+
+/// What the SX1262's channel-activity detection reported for one probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CadOutcome {
+    /// No LoRa preamble on the channel.
+    Clear,
+    /// A preamble was detected: somebody is keyed.
+    Busy,
+    /// The detection itself failed: the radio, not the channel, refused.
+    Error,
+}
+
+/// What follows a key-up, by the CAD outcome that led to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterKeyUp {
+    /// Listen for the peer's answer: the burst check, the post-TX ack
+    /// window, and the peer-turn yield, after which the channel counts as
+    /// released.
+    AckWindow,
+    /// Straight to the next turn: no burst check, no ack window, and the
+    /// channel is not released, so the next acquisition owes no fresh jitter.
+    NextTurn,
+}
+
+/// What the transmit path does after keying a packet the gate let through.
+///
+/// A packet keyed on a clear channel, or forced out after the busy budget
+/// ran out, opens the ack window like any transmission. A packet forced out
+/// because the radio could not run CAD at all goes straight to the next turn:
+/// the firmware has done so since the retry gate was written, and the
+/// interface counts its airtime toward the burst bound all the same. Was the
+/// `continue` at the end of the CAD error arm in the firmware's `lora_task`,
+/// moved here so a host test pins it (leviculum#413): no rig cell makes the
+/// radio refuse a CAD.
+pub fn after_key_up(outcome: CadOutcome) -> AfterKeyUp {
+    match outcome {
+        CadOutcome::Clear | CadOutcome::Busy => AfterKeyUp::AckWindow,
+        CadOutcome::Error => AfterKeyUp::NextTurn,
+    }
+}
+
 /// What the transmit path must do next, after asking the gate about a CAD
 /// outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +395,25 @@ impl ChannelAccess {
         let slots = (xorshift32(&mut self.rng) as u64) % (self.cw as u64);
         self.cw = core::cmp::min(self.cw.saturating_mul(2), CAD_CW_MAX);
         Verdict::Backoff { slots }
+    }
+
+    /// Feed one CAD outcome to the gate: the single entry the transmit path
+    /// asks, so the three outcomes cannot drift apart in the caller.
+    pub fn cad(&mut self, outcome: CadOutcome) -> Verdict {
+        match outcome {
+            CadOutcome::Clear => self.cad_clear(),
+            CadOutcome::Busy => self.cad_busy(),
+            CadOutcome::Error => self.cad_error(),
+        }
+    }
+
+    /// The receive window a [`Verdict::Backoff`] of `slots` is listened
+    /// through: the slots counted in the reference CSMA slot this access
+    /// draws its jitter in (there is one slot on a shared channel; the second
+    /// one the firmware used to derive from a 500-byte airtime was 27x it at
+    /// SF12, Codeberg #147), as a [`listen_window_ms`].
+    pub fn backoff_window_ms(&self, slots: u64) -> u32 {
+        listen_window_ms(slots.saturating_mul(self.jitter_slot_ms))
     }
 
     /// The CAD operation itself errored: count it against the same budget
@@ -941,5 +1014,95 @@ mod tests {
             }
         }
         assert!(moved, "the backoff ladder ignored the jitter draw");
+    }
+
+    // --- The CAD outcome, the key-up that follows, and the backoff window
+    //     (leviculum#413) ------------------------------------------------
+
+    /// A gate on the bench PHY, fresh for a packet.
+    fn bench_access(seed: u32) -> ChannelAccess {
+        let mut access = ChannelAccess::new(seed);
+        access.set_phy(125_000, 7, 5);
+        access.begin_packet();
+        access
+    }
+
+    #[test]
+    fn the_single_cad_entry_gives_each_outcome_its_own_arm() {
+        // Against a twin fed through the three named calls, so the entry
+        // adds no rule of its own.
+        let mut via_entry = bench_access(0x5EED_0413);
+        let mut named = bench_access(0x5EED_0413);
+        let script = [
+            CadOutcome::Busy,
+            CadOutcome::Error,
+            CadOutcome::Busy,
+            CadOutcome::Clear,
+        ];
+        for outcome in script {
+            let expected = match outcome {
+                CadOutcome::Clear => named.cad_clear(),
+                CadOutcome::Busy => named.cad_busy(),
+                CadOutcome::Error => named.cad_error(),
+            };
+            assert_eq!(via_entry.cad(outcome), expected, "{outcome:?}");
+        }
+        // Busy, error, busy: three attempts spent, then a clear transmits
+        // unforced with them on the line.
+        assert_eq!(via_entry.retries(), 3);
+    }
+
+    #[test]
+    fn a_radio_that_cannot_cad_is_retried_at_once_then_forced_out() {
+        let mut access = bench_access(0x5EED_0180);
+        for _ in 1..CAD_MAX_RETRIES {
+            assert_eq!(access.cad(CadOutcome::Error), Verdict::Retry);
+        }
+        assert_eq!(
+            access.cad(CadOutcome::Error),
+            Verdict::Transmit {
+                forced: true,
+                retries: CAD_MAX_RETRIES
+            }
+        );
+    }
+
+    #[test]
+    fn only_a_key_up_forced_by_cad_errors_skips_the_ack_window() {
+        assert_eq!(after_key_up(CadOutcome::Clear), AfterKeyUp::AckWindow);
+        assert_eq!(after_key_up(CadOutcome::Busy), AfterKeyUp::AckWindow);
+        assert_eq!(after_key_up(CadOutcome::Error), AfterKeyUp::NextTurn);
+    }
+
+    #[test]
+    fn a_backoff_is_listened_through_in_whole_csma_slots() {
+        // SF7/BW125: the 24 ms slot floor. SF12/BW125: the 100 ms ceiling.
+        let access = bench_access(1);
+        assert_eq!(access.backoff_window_ms(3), 3 * 24);
+        let mut slow = ChannelAccess::new(1);
+        slow.set_phy(125_000, 12, 5);
+        assert_eq!(slow.backoff_window_ms(63), 6_300);
+    }
+
+    #[test]
+    fn a_backoff_of_no_slots_still_arms_a_window() {
+        // `slots` is drawn from 0..cw, so zero is an ordinary draw; a zero
+        // timeout would arm the radio with no timeout at all.
+        assert_eq!(bench_access(1).backoff_window_ms(0), 1);
+        assert_eq!(listen_window_ms(0), 1);
+    }
+
+    #[test]
+    fn no_listening_wait_parks_the_transmit_path_past_the_ceiling() {
+        assert_eq!(listen_window_ms(LISTEN_WINDOW_MAX_MS), 10_000);
+        assert_eq!(listen_window_ms(LISTEN_WINDOW_MAX_MS + 1), 10_000);
+        assert_eq!(bench_access(1).backoff_window_ms(u64::MAX), 10_000);
+        // And the widest wait the gate can ask for at the slowest PHY is
+        // below it, so the ceiling never shortens a real backoff.
+        let mut slow = ChannelAccess::new(1);
+        slow.set_phy(125_000, 12, 8);
+        let widest = (CAD_CW_MAX as u64 - 1) * slow.jitter_slot();
+        assert!(widest < LISTEN_WINDOW_MAX_MS, "{widest}");
+        assert_eq!(slow.backoff_window_ms(CAD_CW_MAX as u64 - 1), widest as u32);
     }
 }

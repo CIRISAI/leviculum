@@ -1047,3 +1047,104 @@ fn the_hold_edge_lifts_on_the_first_idle_turn_after_the_rolling_hour_frees_a_bin
     );
     assert!(!edge.lifts_when_idle(false, ledger.is_locked()), "once");
 }
+
+// --- The LoRa interface's outbound verdict (leviculum#413) ----------------
+
+#[test]
+fn a_dark_carrier_swallows_a_packet_however_full_the_queue_is() {
+    let q = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
+    assert_eq!(outbound_verdict(false, &q, MTU), Outbound::Swallow);
+    assert_eq!(q.queued_slots(), 0, "a swallowed packet reserves nothing");
+    // Fill the queue while lit, then switch the carrier off: still Swallow,
+    // never the BufferFull a full queue would answer.
+    while outbound_verdict(true, &q, MTU) == Outbound::Queue {}
+    let full = (q.queued_slots(), q.queued_bytes());
+    assert_eq!(outbound_verdict(false, &q, MTU), Outbound::Swallow);
+    assert_eq!((q.queued_slots(), q.queued_bytes()), full);
+}
+
+#[test]
+fn a_lit_carrier_queues_with_room_and_refuses_with_the_bound_that_bound() {
+    let q = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
+    assert_eq!(outbound_verdict(true, &q, MTU), Outbound::Queue);
+    assert_eq!((q.queued_slots(), q.queued_bytes()), (1, MTU));
+    for _ in 1..LORA_QUEUE_BYTES / MTU {
+        assert_eq!(outbound_verdict(true, &q, MTU), Outbound::Queue);
+    }
+    let before = (q.queued_slots(), q.queued_bytes());
+    assert_eq!(
+        outbound_verdict(true, &q, MTU),
+        Outbound::Refuse(QueueBound::Bytes)
+    );
+    assert_eq!((q.queued_slots(), q.queued_bytes()), before);
+
+    // Small packets bind the slot bound instead.
+    let small = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
+    for _ in 0..LORA_QUEUE_SLOTS {
+        assert_eq!(outbound_verdict(true, &small, 20), Outbound::Queue);
+    }
+    assert_eq!(
+        outbound_verdict(true, &small, 20),
+        Outbound::Refuse(QueueBound::Slots)
+    );
+}
+
+#[test]
+fn a_channel_refusal_hands_the_reserved_room_back() {
+    let q = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
+    assert_eq!(outbound_verdict(true, &q, MTU), Outbound::Queue);
+    q.channel_refused(MTU);
+    assert_eq!((q.queued_slots(), q.queued_bytes()), (0, 0));
+    // Refusal after refusal leaks nothing: the queue still takes a full load.
+    for _ in 0..100 {
+        assert_eq!(outbound_verdict(true, &q, MTU), Outbound::Queue);
+        q.channel_refused(MTU);
+    }
+    for _ in 0..LORA_QUEUE_BYTES / MTU {
+        assert_eq!(outbound_verdict(true, &q, MTU), Outbound::Queue);
+    }
+}
+
+// --- One packet's frames on the air (leviculum#413) ----------------------
+
+#[test]
+fn a_single_frame_that_leaves_the_air_is_charged_and_counted() {
+    let mut tx = PacketTx::new(1);
+    assert!(!tx.sent());
+    assert_eq!(tx.frame_keyed(true), FrameStep::Charge);
+    assert!(tx.sent());
+}
+
+#[test]
+fn a_refused_frame_is_not_charged_and_the_packet_is_not_counted() {
+    let mut tx = PacketTx::new(1);
+    assert_eq!(tx.frame_keyed(false), FrameStep::Abort);
+    assert!(!tx.sent());
+}
+
+#[test]
+fn a_split_packet_whose_first_half_fails_keys_and_charges_nothing_more() {
+    // The firmware breaks on Abort, so the second half is never keyed; the
+    // run says the same if it were asked.
+    let mut tx = PacketTx::new(2);
+    assert_eq!(tx.frame_keyed(false), FrameStep::Abort);
+    assert_eq!(tx.frame_keyed(true), FrameStep::Abort);
+    assert!(!tx.sent());
+}
+
+#[test]
+fn a_split_packet_whose_second_half_fails_keeps_the_first_charge_and_is_not_counted() {
+    let mut tx = PacketTx::new(2);
+    assert_eq!(tx.frame_keyed(true), FrameStep::Charge);
+    assert!(!tx.sent(), "half a split packet is not a sent packet");
+    assert_eq!(tx.frame_keyed(false), FrameStep::Abort);
+    assert!(!tx.sent());
+}
+
+#[test]
+fn a_split_packet_is_counted_once_both_halves_left_the_air() {
+    let mut tx = PacketTx::new(2);
+    assert_eq!(tx.frame_keyed(true), FrameStep::Charge);
+    assert_eq!(tx.frame_keyed(true), FrameStep::Charge);
+    assert!(tx.sent());
+}

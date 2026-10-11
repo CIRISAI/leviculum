@@ -1244,6 +1244,36 @@ where
     Ok(Some((len, meta)))
 }
 
+/// What a receive window does when the turn it belongs to may have a radio
+/// config waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowEntry {
+    /// Arm the window and listen.
+    Arm,
+    /// Arm nothing and end the window at once, not as a reception: the turn
+    /// is about to apply the config, which retunes the chip anyway.
+    StandAside,
+}
+
+/// Whether a window is armed, given whether a config is waiting for the top of
+/// the turn.
+///
+/// A window entered with a config already waiting is not armed: the first
+/// window that saw the config stood the radio down for it (waiting out at most
+/// one frame that was measurably mid-air), and every later window of the same
+/// turn arming again would put a retune behind a listen the turn is about to
+/// abandon. This is what holds the deferral to one per pushed config. Was the
+/// first branch of the firmware's `rx_window`, moved here so a host test pins
+/// it (leviculum#413): no rig cell pushes a config into a turn that has a
+/// second window still to run.
+pub const fn window_entry(config_pending: bool) -> WindowEntry {
+    if config_pending {
+        WindowEntry::StandAside
+    } else {
+        WindowEntry::Arm
+    }
+}
+
 /// How long a site may wait on evidence that is only a carrier.
 ///
 /// Both variants wait out a decoded header the same way — that is a frame on
@@ -3887,5 +3917,13 @@ mod tests {
             "a concluded reception has nothing left to wait for, after={after:?}"
         );
         assert!(!port.state.standby_owed());
+    }
+
+    /// A turn with a config waiting arms no further window; a turn without
+    /// one arms every window it asks for (leviculum#413).
+    #[test]
+    fn a_window_stands_aside_while_a_config_waits_for_its_turn() {
+        assert_eq!(window_entry(true), WindowEntry::StandAside);
+        assert_eq!(window_entry(false), WindowEntry::Arm);
     }
 }

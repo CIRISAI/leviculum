@@ -111,6 +111,50 @@ impl Default for TxSpacer {
     }
 }
 
+/// A spacing the host has set and the transmit path has not taken yet: the
+/// one-slot hand-over between the serial task and the LoRa task.
+///
+/// One slot, because the value is a level and not an event. A second value
+/// arriving while the first is unread means the transmit path has not reached
+/// its next turn yet, and the host is told to retry (`REFUSE_BUSY`) rather
+/// than having a sweep point silently overwritten. The transmit path takes the
+/// value at the top of its turn, before anything is keyed, so it is in force
+/// for the very next transmission and not the one after it.
+///
+/// Was the depth-1 `LORA_TX_SPACING` channel and the two inline branches
+/// around it in the firmware's `lora.rs`, moved here so a host test holds
+/// both (leviculum#413): no rig cell sets a spacing twice inside one turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpacingRequest {
+    pending: Option<u16>,
+}
+
+impl SpacingRequest {
+    /// Nothing waiting.
+    pub const fn new() -> Self {
+        Self { pending: None }
+    }
+
+    /// Hand a spacing over. `false` iff one is already waiting unread, which
+    /// stays as it was; the caller answers the host busy.
+    pub fn offer(&mut self, spacing_ms: u16) -> bool {
+        if self.pending.is_some() {
+            return false;
+        }
+        self.pending = Some(spacing_ms);
+        true
+    }
+
+    /// The transmit path's turn: put a waiting spacing into force on
+    /// `spacer` and free the slot. Returns the value taken, for the log line,
+    /// or `None` when nothing was waiting and `spacer` is untouched.
+    pub fn take_into(&mut self, spacer: &mut TxSpacer) -> Option<u16> {
+        let spacing_ms = self.pending.take()?;
+        spacer.set_spacing_ms(spacing_ms);
+        Some(spacing_ms)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +296,36 @@ mod tests {
         spacer.note_tx_end(10_000);
         assert_eq!(spacer.wait_ms(9_000), 50);
         assert_eq!(spacer.achieved_gap_ms(9_000), Some(0));
+    }
+
+    /// A second spacing while the first is unread is refused and leaves the
+    /// first in place: the host is answered busy, the sweep point it already
+    /// set is not overwritten.
+    #[test]
+    fn a_spacing_set_while_one_is_unread_is_refused_and_overwrites_nothing() {
+        let mut request = SpacingRequest::new();
+        assert!(request.offer(60));
+        assert!(!request.offer(80));
+        let mut spacer = TxSpacer::new(0);
+        assert_eq!(request.take_into(&mut spacer), Some(60));
+        assert_eq!(spacer.spacing_ms(), 60);
+        // Taken, so the slot is free for the next one.
+        assert!(request.offer(80));
+    }
+
+    /// The turn takes a waiting spacing before anything is keyed, so the very
+    /// next packet is spaced by it; a turn with nothing waiting leaves the
+    /// spacing in force alone.
+    #[test]
+    fn the_turn_puts_a_waiting_spacing_in_force_before_the_next_key_up() {
+        let mut clock = FakeClock::new();
+        let mut spacer = TxSpacer::new(0);
+        let mut request = SpacingRequest::new();
+        send_packet(&mut spacer, &mut clock, 200);
+        assert!(request.offer(70));
+        assert_eq!(request.take_into(&mut spacer), Some(70));
+        assert_eq!(send_packet(&mut spacer, &mut clock, 200), 70);
+        assert_eq!(request.take_into(&mut spacer), None);
+        assert_eq!(spacer.spacing_ms(), 70);
     }
 }

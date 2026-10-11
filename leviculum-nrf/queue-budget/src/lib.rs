@@ -603,5 +603,117 @@ impl OwnShare {
     }
 }
 
+/// What the LoRa interface does with a packet the core hands it.
+///
+/// Three outcomes, in the order they are decided: a carrier switched off by
+/// the operator (`lnflash --set-media lora=off`) swallows the packet however
+/// full the queue is, a lit carrier with a full queue refuses it with the
+/// bound that bound, and otherwise the packet is queued with its room already
+/// reserved. Was inline in the firmware's `LoRaInterface::try_send`, moved
+/// here so a host test holds each arm (leviculum#413): no rig cell switches
+/// the LoRa carrier off under traffic or fills the queue to its bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outbound {
+    /// The carrier is off: answer `Ok` and drop the packet. `Ok` and not
+    /// `BufferFull`, because a full buffer promises the packet another
+    /// chance and this one never gets it, so the driver must not re-queue
+    /// it. Nothing is reserved.
+    Swallow,
+    /// The queue is full: answer `BufferFull`, saying which bound refused.
+    /// Nothing is reserved.
+    Refuse(QueueBound),
+    /// Room is reserved: the caller must enqueue the packet, or hand the
+    /// room back through [`QueueBudget::channel_refused`].
+    Queue,
+}
+
+/// Decide what happens to an outbound packet of `len` bytes. On
+/// [`Outbound::Queue`] the room is already reserved in `budget`.
+///
+/// The carrier is read before the queue, so a dark carrier answers the same
+/// whatever the queue holds. The same order as the BLE outbound path
+/// (`leviculum_ble_tx::saturation::outbound_verdict`).
+pub fn outbound_verdict(carrier_on: bool, budget: &QueueBudget, len: usize) -> Outbound {
+    if !carrier_on {
+        return Outbound::Swallow;
+    }
+    match budget.reserve(len) {
+        Ok(()) => Outbound::Queue,
+        Err(bound) => Outbound::Refuse(bound),
+    }
+}
+
+impl QueueBudget {
+    /// The channel refused a packet the budget had already reserved room for:
+    /// hand the room back, so the caller answers `BufferFull` with the queue
+    /// exactly as it found it.
+    ///
+    /// Unreachable while the budget's slot bound is the channel's own
+    /// capacity, which is the firmware's arrangement. Handed back rather than
+    /// asserted because the failure it guards against, a reservation leaked
+    /// on every refusal, closes the queue for good one packet at a time.
+    pub fn channel_refused(&self, len: usize) {
+        self.release(len);
+    }
+}
+
+/// What the transmit path does after one frame of a packet was keyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameStep {
+    /// The frame left the air: charge its airtime to the duty ledger, note
+    /// the end for the spacing knob, and key the next frame if there is one.
+    Charge,
+    /// The radio refused the frame: charge nothing and key no further frame
+    /// of this packet.
+    Abort,
+}
+
+/// One packet's frames on their way to the air: one frame, or the two of a
+/// split packet, keyed back to back.
+///
+/// Only a frame that left the air is charged, mirroring the RNode firmware's
+/// `add_airtime()` after each `transmit()`. A frame the radio refused stops
+/// the packet: the receiver's split reassembler expects the two halves back to
+/// back, so a second half keyed after a failed first would be airtime spent on
+/// a frame nobody can use. The packet counts as sent only if every frame went
+/// out. Was inline in the firmware's `transmit_all_frames`, moved here so a
+/// host test holds each arm (leviculum#413): no rig cell makes the radio
+/// refuse a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketTx {
+    frames: usize,
+    sent: usize,
+    aborted: bool,
+}
+
+impl PacketTx {
+    /// A packet of `frames` frames, none keyed yet.
+    pub const fn new(frames: usize) -> Self {
+        Self {
+            frames,
+            sent: 0,
+            aborted: false,
+        }
+    }
+
+    /// The radio's answer for the next frame: `true` if it reported the frame
+    /// on the air.
+    pub fn frame_keyed(&mut self, on_air: bool) -> FrameStep {
+        if on_air && !self.aborted {
+            self.sent += 1;
+            FrameStep::Charge
+        } else {
+            self.aborted = true;
+            FrameStep::Abort
+        }
+    }
+
+    /// Whether every frame of the packet went out: what the transmit counter
+    /// and the display flash count.
+    pub const fn sent(&self) -> bool {
+        !self.aborted && self.sent == self.frames
+    }
+}
+
 #[cfg(test)]
 mod tests;
