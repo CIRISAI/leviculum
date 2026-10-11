@@ -338,6 +338,22 @@ screen, breaking for scripts that join)**. Test: drop-in — `rnpath
 field; unit — a path row's `interface` equals the `name` the same
 daemon's `interface_stats` reports for that interface.
 
+*Fixed in 81699f9f.* The path table, the transport tables,
+`next_hop_if_name`, and our own link and identity listings now name an
+interface through the same lookup `interface_stats` uses
+(`interface_display_name`, `leviculum-std/src/rpc/handlers.rs:783`): the
+presentation identity a listener gave a spawned interface, otherwise the
+driver's registered name. The case that differed is the accepted
+connection, `tcp_server/<peer>` against `TCPInterface[Client on
+<section>/<peer>]`; a configured TCP client is still `tcp_client_0` in
+both answers, so the two agree, though neither spells the reference's
+`TCPInterface[<name>/<host>:<port>]` for it. Pinned by
+`test_rnpath_table_names_the_interface_rnstatus_reports`: the reference
+`rnpath -tj` against lnsd, joined to `rnstatus -j` by name, finds the
+row, and `rnpath -t` prints `on TCPInterface[Client on TCP
+Server/127.0.0.1:<port>]` (red before: `tcp_server/127.0.0.1:<port>`);
+and by `path_answers_name_interfaces_as_interface_stats_does`.
+
 **D9 — the no-path `next_hop_if_name` answer is `"unknown"`, Python's
 is the string `"None"`.** Python's standalone arm is
 `str(Transport.next_hop_interface(dest))`, which stringifies the
@@ -350,6 +366,15 @@ answers `"unknown"` (`get_next_hop_if_name`,
 with no resolved path prints "on unknown" where rnsd prints nothing.
 Class: wrong answer, edge. Test: covered by the D6 drop-in run's
 verbose mode.
+
+*Fixed in 81699f9f.* The no-path answer is `"None"`
+(`NO_NEXT_HOP_INTERFACE`, `leviculum-std/src/rpc/handlers.rs:1861`), for
+an unknown destination and for a hash of the wrong length alike. Pinned
+by `test_rnprobe_verbose_prints_no_interface_without_a_path`: the
+reference `rnprobe -v` at lnsd's own probe responder, a destination the
+client has a path to and the daemon none, prints `Sent probe 1 (16
+bytes) to <hash>` with no suffix (red before: `... on unknown`); and by
+`next_hop_if_name_without_a_path_is_the_string_none`.
 
 Two permissive edges, noted and harmless: `try_into_hash` accepts and
 truncates an over-long hash where Python's client-side guards refuse
@@ -532,6 +557,14 @@ startup warning naming it, like the IFAC warnings beside it
 (`leviculum-std/src/ini_config.rs:239-283`). Test: unit — parsing a
 config with the key logs a visible "read but not honoured" line.
 
+*Fixed in a26157d1.* The key is parsed, and a config that sets it true
+gets one WARN line at load, beside the IFAC warnings
+(`leviculum-std/src/ini_config.rs:292`): read but not honoured, the
+interface keeps reconnecting by design, restarts belong to the service
+manager. False or unset says nothing, since both daemons then keep their
+interfaces up. The configuration guide lists it. Pinned by
+`panic_on_interface_error_is_named_as_read_but_not_honoured`.
+
 **D14 — tolerant booleans accept files rnsd refuses.** ConfigObj's
 `as_bool` raises on anything outside its vocabulary, and rnsd exits
 255 on the parse error (`reference/Reticulum/RNS/Reticulum.py:328-333`
@@ -580,6 +613,42 @@ Class: **silently ignored config**. Test: drop-in — a config with
 `default_ar_target` set, `rnstatus -A` against both daemons, compare
 the `(t:...)` suffix.
 
+*Fixed in a26157d1*, for the keys that have a seam, and named for the
+rest. The three `default_ar_*` keys are read with Python's validation
+and its `or` fallback, so 0 keeps the default for the target and the
+grace (`leviculum-std/src/ini_config.rs:598`), and become the core's
+node-wide fill (`TransportConfig::default_announce_rate`,
+`leviculum-core/src/transport.rs:1032`, applied in
+`resolve_announce_rate`, `leviculum-core/src/transport.rs:195`); an
+interface's own `announce_rate_*` still wins. Being node-wide, as in the
+reference, the fill reaches configured interfaces, the connections a
+listener spawns and the listener rows alike, for reporting and for
+enforcement. The global `egress_control` is every interface's default
+(`TransportConfig::default_egress_control`,
+`leviculum-core/src/transport.rs:1038`), an interface's own key
+overriding it either way, and `ic_max_held_announces` sets the
+held-announce cap the boards already size. The remaining tunings,
+`ic_burst_hold`, `ic_burst_freq_new`, `ic_burst_freq`,
+`ic_pr_burst_freq_new`, `ic_pr_burst_freq`, `ic_new_time`,
+`ic_burst_penalty`, `ic_held_release_interval` and `ec_pr_freq`, run as
+constants in our limiter, globally and per interface alike; each is now
+named at WARN as read but not honoured
+(`leviculum-std/src/ini_config.rs:627`) instead of dropped in silence.
+Making them tunable is a change to the core limiter with its own tests,
+not a config seam. Measuring this with the reference `rnstatus -A`
+turned up a neighbour: the accepted IPC client's row rendered the fill
+as well, where the reference sets None on every local interface
+(`reference/Reticulum/RNS/Interfaces/LocalInterface.py:428-430`); that
+row now reports none (`announce_rate_of`,
+`leviculum-core/src/transport.rs:10882`), which enforcement already
+did. Pinned by `test_rnstatus_shows_the_configured_default_ar_target`:
+`rnstatus -a -A` against lnsd built from the same file with
+`default_ar_target = 7200` renders `(t:2h/p:0s/g:5)` on the TCP listener
+and on its accepted connection and nothing on the client's own row (red
+before: `(t:1h/p:0s/g:5)` on all three); by
+`test_rpc_interface_stats_round_trip_reads_default_ar_keys` (the old pin
+of 3600/0/5, now one of two cases); and by unit tests per key.
+
 Deliberate, documented deviations, re-confirmed as stated: our
 `discover_interfaces` defaults true against Python's false, collecting
 being locally observable only (`leviculum-std/src/config.rs:204-219`);
@@ -599,16 +668,21 @@ rather than misleading.
 * **`rnstatus`** — connects (storage-derived authkey), renders our
   interface rows with the reference names, modes, rates and radio
   stats; `-l` gets both counts; `-A` shows queued announces on a
-  capped interface (D7, fixed in 2352c749). Visible gaps: `-d`/`-D` read the LOCAL discovery registry files,
+  capped interface (D7, fixed in 2352c749) and the `(t:...)` suffix
+  from a configured `default_ar_target`, none on a LocalInterface row
+  (D16, fixed in a26157d1). Visible gaps: `-d`/`-D` read the LOCAL discovery registry files,
   not the RPC, and our on-disk registry format is ours — not compared
   in this audit (coverage, below). Config-dependent lockouts: D1, D2,
   D12.1.
 * **`rnprobe`** — works end to end (probe destination via
-  `respond_to_probes`, timeout from `first_hop_timeout`); loses the
-  RSSI/SNR/Q decoration on radio paths (D6) and prints "on unknown"
-  where rnsd prints nothing (D9).
-* **`rnpath`** — `-t` works with internal interface names (D8); `-r`
-  prints an error per row (D4); `-D` empties the announce-cap queues
+  `respond_to_probes`, timeout from `first_hop_timeout`); prints the
+  RSSI/SNR/Q decoration on radio paths (D6, fixed in e5f78966; the
+  multi-vport RNode path does not stamp yet); `-v` prints no interface
+  where the daemon holds no path, as against rnsd (D9, fixed in
+  81699f9f).
+* **`rnpath`** — `-t` names each path's interface as `rnstatus` does,
+  so `-tj` joins to `rnstatus -j` by name (D8, fixed in 81699f9f); `-r`
+  prints a rate row per entry (D4, fixed in e5f78966); `-D` empties the announce-cap queues
   (D5, fixed in 2352c749); `-d`, `-x`, `-b`, `-B`, `-U` work with Python's exact return
   semantics.
 * **`rncp`** — pure data path over the LocalInterface plus
