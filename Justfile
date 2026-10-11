@@ -971,6 +971,19 @@ check-core-lock-census:
 check-env-knobs:
     @python3 scripts/check-env-knobs.py
 
+# Codeberg nightly #509: an mvr drew a port, the probe found it free, and its
+# own bind of that number a few instructions later was refused (EADDRINUSE).
+# A number picked before its bind is a handoff anything on the host can win,
+# and a literal is the same handoff for the whole run. This refuses a literal
+# port under leviculum-std/tests/ that scripts/test-port-literals.txt does not
+# admit, and in the mvr tier any listener the test binds itself on a port it
+# chose first, or a drawn port without a `port-handoff:` reason (see
+# leviculum-std/tests/mvr/ports.rs). The selftest injects each fault first.
+[doc('Refuse literal and advance-picked test ports')]
+check-test-ports:
+    @python3 scripts/check-test-ports.py --selftest
+    @python3 scripts/check-test-ports.py
+
 # Codeberg #191c's census, moved forward to the push gate. `just standard`
 # already counts the #[ignore]d tests, but from the BUILT test binaries --
 # `--ignored --list` on every one of them -- so it cannot run here: Tier 0
@@ -1329,7 +1342,7 @@ tree-clean-selftest:
 #   run all still ahead of it. The `~3.5 min` in the recipe's own doc
 #   string is older than half the dependency list.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck check-fuzz-lock changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck check-fuzz-lock changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1361,7 +1374,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
+fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
