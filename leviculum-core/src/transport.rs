@@ -1219,6 +1219,10 @@ pub struct InterfaceStatEntry {
     /// Number of ingress-limited announces currently held for later release on
     /// this interface (Codeberg #87; Python len(Interface.held_announces)).
     pub held_announces: usize,
+    /// Announces waiting in this interface's announce-cap queue, or `None`
+    /// for an interface without a cap and so without a queue (Python
+    /// `len(interface.announce_queue)`, Reticulum.py:1463-1467).
+    pub announce_queue: Option<usize>,
     /// What the interface reports about its own medium, or `None` for a medium
     /// with no airtime to account for (Codeberg #190). See [`LinkProfile`].
     ///
@@ -5600,7 +5604,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:3996. A destination with no cached
+    /// link-request path uses at transport.rs:4000. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6401,7 +6405,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1598 ran in the
+        // Gate on the already-incremented hops (transport.rs:1602 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -9171,6 +9175,29 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
+    /// Empty every interface's announce-cap queue, as `rnpath -D` asks
+    /// (Python `Transport.drop_announce_queues`, Transport.py:3165-3175).
+    /// The holdoff clocks are left as they are: dropping what waits does not
+    /// give back the airtime the last release spent. Returns the number of
+    /// announces dropped.
+    pub fn drop_announce_queues(&mut self) -> usize {
+        let mut dropped = Vec::new();
+        for (iface_idx, cap) in self.interface_announce_caps.iter_mut() {
+            if !cap.queue.is_empty() {
+                dropped.push((*iface_idx, cap.queue.len()));
+                cap.queue.clear();
+            }
+        }
+        for (iface_idx, count) in &dropped {
+            crate::tracing::debug!(
+                event = "ANN_QUEUE_DROPPED",
+                iface = %self.iface_name(*iface_idx),
+                count = count,
+            );
+        }
+        dropped.iter().map(|(_, n)| n).sum()
+    }
+
     /// The announce bandwidth cap share in force for an interface, or `None`
     /// when the interface has no cap entry (nothing registered a bitrate to
     /// take a share of). Read-only counterpart to
@@ -10919,6 +10946,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     .interface_announce_caps
                     .get(&id)
                     .map(|cap| cap.bitrate_bps);
+                let announce_queue = self
+                    .interface_announce_caps
+                    .get(&id)
+                    .map(|cap| cap.queue.len());
                 InterfaceStatEntry {
                     id,
                     name: name.clone(),
@@ -10938,6 +10969,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     pr_burst_active,
                     pr_burst_activated,
                     held_announces,
+                    announce_queue,
                     link_profile: self.interface_link_profiles.get(&id).copied(),
                     hw_mtu: self.interface_hw_mtus.get(&id).copied(),
                 }
@@ -11394,7 +11426,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2512`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2516`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -17627,7 +17659,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7127), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7131), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -19397,6 +19429,61 @@ mod tests {
             assert_eq!(queue.len(), 1);
             assert_eq!(queue[0].dst, fresh_dst);
             assert_eq!(queue[0].hops, 3);
+        }
+
+        /// Shared-instance audit D5 and D7 (645): what `rnstatus -A` and
+        /// `rnpath -D` reach. One announce waits in a capped interface's
+        /// queue: the stats count it while an uncapped interface reports no
+        /// queue at all. The drop empties it, the stats say so, and the
+        /// release once the holdoff has passed puts nothing on the air.
+        #[test]
+        fn dropped_announce_queue_is_counted_then_emptied_and_never_sent() {
+            extern crate alloc;
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            transport.register_interface_bitrate(1, 1000);
+            // `interface_stats` lists the interfaces the driver named.
+            transport.set_interface_name(0, "if0".into());
+            transport.set_interface_name(1, "if1".into());
+
+            let now = transport.clock.now_ms();
+            let cap = transport.interface_announce_caps.get_mut(&1).unwrap();
+            cap.allowed_at_ms = now + 40_000;
+            cap.queue.push_back(QueuedAnnounce {
+                raw: alloc::vec![0xAA; 100],
+                dst: [0x11; TRUNCATED_HASHBYTES],
+                hops: 2,
+                queued_at_ms: now,
+                emitted: 0,
+                peer: None,
+            });
+
+            let queue_of = |t: &mut Transport<MockClock, MemoryStorage>, id: usize| {
+                t.interface_stats()
+                    .into_iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.announce_queue)
+            };
+            assert_eq!(queue_of(&mut transport, 1), Some(Some(1)));
+            assert_eq!(
+                queue_of(&mut transport, 0),
+                Some(None),
+                "uncapped: no queue"
+            );
+
+            assert_eq!(transport.drop_announce_queues(), 1);
+            assert_eq!(queue_of(&mut transport, 1), Some(Some(0)));
+            assert_eq!(transport.drop_announce_queues(), 0, "nothing left to drop");
+
+            transport.clock.advance(41_000);
+            transport.poll();
+            let sent_after = transport
+                .drain_actions()
+                .iter()
+                .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1))
+                .count();
+            assert_eq!(sent_after, 0, "a dropped announce is not released");
         }
 
         /// Audit D15 (631): a queued announce does not live forever. The
@@ -23666,7 +23753,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1598) before
+        // The inbound path increments hops once (transport.rs:1602) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

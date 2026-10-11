@@ -417,6 +417,135 @@ async fn test_rnpath_rate_table_prints_a_row_for_a_rate_entry() {
     cleanup_config_dir(&config_dir);
 }
 
+/// D5 and D7 of the shared-instance audit: the reference `rnstatus -A` shows
+/// what waits in an announce-cap queue on lnsd ("Queued : 1 announce",
+/// `reference/Reticulum/RNS/Utilities/rnstatus.py:542-547`), and `rnpath -D`
+/// empties it (`reference/Reticulum/RNS/Utilities/rnpath.py:386-387`), after
+/// which `rnstatus -A` prints no queue line. Before, the key was always None,
+/// so the line never appeared, and the drop was a constant `true`.
+///
+/// The queue fills deterministically: the daemon relays one announce onto a
+/// TCP client whose configured bitrate (100 bps, 2 bps at the default 2 %
+/// cap) holds the next announce back for several minutes. The first emission
+/// leaves at once, the PATHFINDER retry a few seconds later has to wait, and
+/// a destination holds one slot, so the count is 1 and stays 1.
+#[tokio::test]
+async fn test_rnstatus_shows_and_rnpath_drops_the_announce_queue() {
+    init_tracing();
+
+    let sink_storage = crate::common::temp_storage("announce_queue", "sink");
+    let mut sink = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
+        .storage_path(sink_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build sink");
+    sink.start().await.expect("start sink");
+    let sink_addr = crate::ports::bound_tcp_addr(&sink.tcp_listen_addrs());
+
+    let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let instance_name = format!("annqueue_{}_{}", std::process::id(), test_id);
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let identity_bytes = identity
+        .private_key_bytes()
+        .expect("generated identity must have private keys");
+    let storage = crate::common::temp_storage("announce_queue", "node");
+    let mut node = ReticulumNodeBuilder::new()
+        .identity(identity)
+        .enable_transport(true)
+        .share_instance(true)
+        .instance_name(instance_name.clone())
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
+        .add_tcp_client_with_bitrate(sink_addr, 100)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build daemon");
+    node.start().await.expect("start daemon");
+    let tcp_addr = crate::ports::bound_tcp_addr(&node.tcp_listen_addrs());
+    let config_dir = python_client_ready(&instance_name, &identity_bytes).await;
+
+    let peer_storage = crate::common::temp_storage("announce_queue", "peer");
+    let mut peer = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_client(tcp_addr)
+        .storage_path(peer_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build peer");
+    peer.start().await.expect("start peer");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let dest = leviculum_core::Destination::new(
+        Some(Identity::generate(&mut rand_core::OsRng)),
+        leviculum_core::Direction::In,
+        leviculum_core::DestinationType::Single,
+        "announcequeue",
+        &["held"],
+    )
+    .expect("create destination");
+    let dest_hash = *dest.hash();
+    peer.register_destination(dest);
+    peer.announce_destination(&dest_hash, None)
+        .await
+        .expect("announce");
+
+    let rnstatus_a = |dir: PathBuf| async move {
+        let output = run_python_tool(RNSTATUS_PY, &["-A"], &dir).await;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "rnstatus -A exited with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        );
+        stdout
+    };
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let queued = loop {
+        let stdout = rnstatus_a(config_dir.clone()).await;
+        if stdout.contains("Queued") || tokio::time::Instant::now() >= deadline {
+            break stdout;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("=== rnstatus -A (queue filled) STDOUT ===\n{queued}");
+    let queue_lines: Vec<&str> = queued.lines().filter(|l| l.contains("Queued")).collect();
+    assert_eq!(
+        queue_lines.len(),
+        1,
+        "exactly the capped interface reports a queue:\n{queued}"
+    );
+    assert!(
+        queue_lines[0].contains(": 1 announce") && !queue_lines[0].contains("announces"),
+        "rnstatus -A must show the one queued announce:\n{queued}"
+    );
+
+    let output = run_python_tool(RNPATH_PY, &["-D"], &config_dir).await;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    eprintln!("=== rnpath -D STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}");
+    assert!(
+        output.status.success() && stdout.contains("Dropping announce queues on all interfaces"),
+        "rnpath -D exited with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code()
+    );
+
+    let dropped = rnstatus_a(config_dir.clone()).await;
+    eprintln!("=== rnstatus -A (after rnpath -D) STDOUT ===\n{dropped}");
+    assert!(
+        dropped.contains("Transport Instance"),
+        "rnstatus -A must still answer after the drop:\n{dropped}"
+    );
+    assert!(
+        !dropped.contains("Queued"),
+        "rnpath -D must leave no queued announce:\n{dropped}"
+    );
+
+    cleanup_config_dir(&config_dir);
+}
+
 /// D1 of the shared-instance audit: a config that sets `rpc_key` keys both
 /// ends of the RPC (`reference/Reticulum/RNS/Reticulum.py:509-515`, applied at
 /// `:355-359` and `:1265`). `rnstatus` reading that config must reach lnsd

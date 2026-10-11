@@ -2788,6 +2788,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.interface_announce_cap(id)
     }
 
+    /// Empty every interface's announce-cap queue. See
+    /// [`crate::transport::Transport::drop_announce_queues`].
+    pub fn drop_announce_queues(&mut self) -> usize {
+        self.transport.drop_announce_queues()
+    }
+
     /// Mark an interface as tunnel-capable (Codeberg #64 initiator side).
     ///
     /// The driver calls this when it brings up a tunnel-capable TCP client,

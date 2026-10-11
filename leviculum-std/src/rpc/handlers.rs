@@ -110,7 +110,14 @@ pub(super) fn handle_request(
         }
         RpcRequest::DropPath { destination_hash } => drop_path(core, destination_hash),
         RpcRequest::DropAllVia { destination_hash } => drop_all_via(core, destination_hash),
-        RpcRequest::DropAnnounceQueues => pickle_bool(true),
+        // `rnpath -D` (D5 of the 2026-10-11 shared-instance audit): empty the
+        // announce-cap queues for real. Python's arm returns
+        // `Transport.drop_announce_queues()`, which is None
+        // (Reticulum.py:1236, Transport.py:3165-3175).
+        RpcRequest::DropAnnounceQueues => {
+            core.drop_announce_queues();
+            pickle_none()
+        }
 
         // Per-packet radio readings (D6 of the 2026-10-11 shared-instance
         // audit): answered from the cache the event loop fills from the
@@ -436,6 +443,9 @@ struct StatRow {
     pr_burst_active: bool,
     pr_burst_activated: u64,
     held_announces: usize,
+    /// Announces waiting in the interface's announce-cap queue; `None` for an
+    /// interface without one (D7 of the 2026-10-11 shared-instance audit).
+    announce_queue: Option<usize>,
     ifac_size_bits: Option<i64>,
     /// Reported name of the listener this interface was spawned by, if any.
     parent_name: Option<String>,
@@ -640,7 +650,14 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
             pickle_str_key("held_announces"),
             pickle_int(row.held_announces as i64),
         ),
-        (pickle_str_key("announce_queue"), pickle_none()),
+        // Python reads `len(interface.announce_queue)` (Reticulum.py:1463-1467)
+        // and `rnstatus -A` renders it as "Queued : N announces"
+        // (rnstatus.py:542-547). Ours is the announce-cap queue, which only an
+        // interface with a cap holds; the rest answer None.
+        (
+            pickle_str_key("announce_queue"),
+            opt_int(row.announce_queue.map(|n| n as i64)),
+        ),
         (pickle_str_key("ifac_signature"), pickle_none()),
         (pickle_str_key("ifac_size"), opt_int(row.ifac_size_bits)),
         (pickle_str_key("ifac_netname"), pickle_none()),
@@ -927,6 +944,7 @@ pub(crate) fn build_interface_stats(
             pr_burst_active: entry.pr_burst_active,
             pr_burst_activated: entry.pr_burst_activated,
             held_announces: entry.held_announces,
+            announce_queue: entry.announce_queue,
             ifac_size_bits: ifac_configs
                 .get(&entry.id)
                 .map(|cfg| (cfg.ifac_size() * 8) as i64),
@@ -980,6 +998,7 @@ pub(crate) fn build_interface_stats(
             pr_burst_active: false,
             pr_burst_activated: 0,
             held_announces: 0,
+            announce_queue: None,
             ifac_size_bits: listener.ifac_size_bits,
             parent_name: None,
             radio: None,
@@ -2266,6 +2285,118 @@ mod tests {
             lowest_online_bitrate(&core, &online, &inventory),
             Some(9600)
         );
+    }
+
+    /// D5 and D7 of the 2026-10-11 shared-instance audit, at the RPC
+    /// boundary: two announces relayed onto a capped interface leave one
+    /// waiting in its cap queue, `interface_stats` counts it (and reports no
+    /// queue for the uncapped interface), `drop: announce_queues` answers
+    /// None as Python's arm does (`Reticulum.py:1236`) and empties it.
+    ///
+    /// The relay is real, so the test waits out the rebroadcast jitter: the
+    /// ceiling is `PATHFINDER_RW_MS` with no airtime registered, and the
+    /// first retry is `PATHFINDER_G_MS` later still, so nothing but the two
+    /// first emissions can reach the queue in between.
+    #[test]
+    fn announce_queue_is_reported_and_dropped_over_rpc() {
+        use leviculum_core::transport::{Action, InterfaceId};
+        use leviculum_core::{DestinationType, Direction, Identity};
+
+        const UNCAPPED: usize = 0;
+        const CAPPED: usize = 1;
+        let (mut core, _tmp) = timing_core("announce-queue");
+        core.set_interface_name(UNCAPPED, "if_uncapped".into());
+        core.set_interface_name(CAPPED, "if_capped".into());
+        core.register_interface_bitrate(CAPPED, 1000);
+        let stats = empty_stats_map_local();
+        let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
+
+        let rpc = |core: &mut StdNodeCore, request: Value| -> Value {
+            let encoded = encode_request_msgpack(&request).expect("encode request");
+            let (parsed, codec) = parse_request(&encoded).expect("parse request");
+            let bytes = handle_request(
+                &parsed,
+                core,
+                std::time::Instant::now(),
+                &stats,
+                &inventory,
+                0,
+                None,
+                &crate::rpc::radio_cache::shared(),
+                codec,
+            )
+            .expect("handle request");
+            decode_response_msgpack(&bytes).expect("decode response")
+        };
+        let queue_of = |core: &mut StdNodeCore, name: &str| -> Option<Value> {
+            let request = pickle_dict(vec![(pickle_str_key("get"), pickle_str("interface_stats"))]);
+            let Value::Dict(top) = rpc(core, request) else {
+                panic!("interface_stats must be a dict")
+            };
+            let Some(Value::List(rows)) = top.get(&HashableValue::String("interfaces".into()))
+            else {
+                panic!("interfaces must be a list")
+            };
+            rows.iter().find_map(|row| match row {
+                Value::Dict(row)
+                    if row.get(&HashableValue::String("name".into()))
+                        == Some(&Value::String(name.into())) =>
+                {
+                    row.get(&HashableValue::String("announce_queue".into()))
+                        .cloned()
+                }
+                _ => None,
+            })
+        };
+
+        // Two destinations of a neighbour, heard on the uncapped interface.
+        let (mut peer, _peer_tmp) = timing_core("announce-queue-peer");
+        for aspect in ["one", "two"] {
+            let dest = leviculum_core::Destination::new(
+                Some(Identity::generate(&mut rand_core::OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "queued",
+                &[aspect],
+            )
+            .unwrap();
+            let hash = *dest.hash();
+            peer.register_destination(dest);
+            let out = peer.announce_destination(&hash, None).unwrap();
+            let raw = out
+                .actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("the announce is broadcast");
+            let _ = core.handle_packet(InterfaceId(UNCAPPED), &raw);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(
+            core.announce_jitter_max_ms() + 200,
+        ));
+        let sent = core
+            .handle_timeout()
+            .actions
+            .iter()
+            .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == CAPPED))
+            .count();
+        assert_eq!(sent, 1, "the first relayed announce leaves at once");
+
+        assert_eq!(queue_of(&mut core, "if_capped"), Some(Value::I64(1)));
+        assert_eq!(
+            queue_of(&mut core, "if_uncapped"),
+            Some(Value::None),
+            "an interface without a cap holds no queue"
+        );
+
+        let drop = pickle_dict(vec![(
+            pickle_str_key("drop"),
+            pickle_str("announce_queues"),
+        )]);
+        assert_eq!(rpc(&mut core, drop), Value::None);
+        assert_eq!(queue_of(&mut core, "if_capped"), Some(Value::I64(0)));
     }
 
     /// Listeners are part of the same one interface list Python takes its
@@ -3639,7 +3770,7 @@ mod tests {
     // a peer/instance label that matches none of `interface_type`'s name
     // prefixes, so a LoRa radio is reported as the generic "Interface". That
     // is not only a wrong medium column in rnstatus: `itype` also picks the
-    // bitrate guess (handlers.rs:739-745), so the radio is advertised at 10 Mbps.
+    // bitrate guess (handlers.rs:756-762), so the radio is advertised at 10 Mbps.
     #[test]
     fn interface_type_comes_from_the_transport_not_the_name() {
         use crate::clock::SystemClock;

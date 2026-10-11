@@ -442,6 +442,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_QUEUE_STALE",
         required_keys: &["dst", "hops", "iface", "age_ms"],
     },
+    // An operator emptying the announce-cap queues (`rnpath -D`, the
+    // `drop: announce_queues` RPC verb), one line per interface that held
+    // any, as Python logs "Dropped N announces on <interface>"
+    // (Transport.py:3165-3175). `count` is how many waited there.
+    EventSchema {
+        name: "ANN_QUEUE_DROPPED",
+        required_keys: &["iface", "count"],
+    },
     // OBS-3 (Codeberg #114): endpoint observability. A node acting as the
     // ENDPOINT of a link (accepting an inbound link, delivering locally,
     // generating the establishment proof, answering a remote-management
