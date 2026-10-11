@@ -30,7 +30,6 @@
 //! `with_explicit_hash` or removing the guard in `Destination::announce`)
 //! must turn the negative cell red.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use rand_core::OsRng;
@@ -48,7 +47,7 @@ use crate::common::{
     send_raw_to_daemon, temp_storage, wait_for_announce_for_dest,
     wait_for_node_reannounce_on_daemon, wait_for_responder_established_link,
 };
-use crate::harness::{find_available_ports, TestDaemon};
+use crate::harness::TestDaemon;
 
 /// Build packet bytes for a raw LINK_REQUEST addressed to `dest_hash` and bind
 /// the link to the resulting link id. Mirrors the reference wire format
@@ -135,20 +134,19 @@ async fn test_explicit_hash_registered_normal_traffic_unaffected() {
     ];
 
     let daemon = TestDaemon::start().await.expect("start Python daemon");
-    let (ports, _alloc) = find_available_ports::<2>().await.expect("alloc ports");
-    let node_addr: SocketAddr = format!("127.0.0.1:{}", ports[0]).parse().unwrap();
 
     let _storage = temp_storage("explicit_hash_positive", "node");
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(false)
         .add_tcp_client(daemon.rns_addr())
-        .add_tcp_server(node_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(_storage.path().to_path_buf())
         .build()
         .await
         .expect("build Rust node");
     let mut event_rx = node.take_event_receiver().expect("event receiver");
     node.start().await.expect("start Rust node");
+    let node_addr = crate::ports::bound_tcp_addr(&node.tcp_listen_addrs());
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let (normal_hash, normal_pubkey_hex, explicit_hash, explicit_signing_key) =
@@ -235,19 +233,18 @@ async fn test_explicit_hash_never_announces_no_path_response() {
     ];
 
     let daemon = TestDaemon::start().await.expect("start Python daemon");
-    let (ports, _alloc) = find_available_ports::<2>().await.expect("alloc ports");
-    let node_addr: SocketAddr = format!("127.0.0.1:{}", ports[0]).parse().unwrap();
 
     let _storage = temp_storage("explicit_hash_negative", "node");
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(false)
         .add_tcp_client(daemon.rns_addr())
-        .add_tcp_server(node_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(_storage.path().to_path_buf())
         .build()
         .await
         .expect("build Rust node");
     node.start().await.expect("start Rust node");
+    let node_addr = crate::ports::bound_tcp_addr(&node.tcp_listen_addrs());
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let (normal_hash, _normal_pubkey_hex, explicit_hash, _explicit_signing_key) =

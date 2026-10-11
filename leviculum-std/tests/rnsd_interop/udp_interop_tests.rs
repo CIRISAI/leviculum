@@ -39,6 +39,8 @@ async fn test_rust_receives_announce_from_python_over_udp() {
     let _storage =
         crate::common::temp_storage("test_rust_receives_announce_from_python_over_udp", "node");
     let mut node = ReticulumNodeBuilder::new()
+        // port-handoff: the harness drew this UDP pair for the Python daemon, whose config
+        // needs both ends before either binds.
         .add_udp_interface(rust_listen, py_listen)
         .storage_path(_storage.path().to_path_buf())
         .build()
@@ -107,6 +109,8 @@ async fn test_python_receives_announce_from_rust_over_udp() {
     let _storage =
         crate::common::temp_storage("test_python_receives_announce_from_rust_over_udp", "node");
     let mut node = ReticulumNodeBuilder::new()
+        // port-handoff: the harness drew this UDP pair for the Python daemon, whose config
+        // needs both ends before either binds.
         .add_udp_interface(rust_listen, py_listen)
         .storage_path(_storage.path().to_path_buf())
         .build()
@@ -184,6 +188,8 @@ async fn test_python_receives_announce_from_rust_over_udp_hostname_forward() {
         InterfaceConfig {
             interface_type: "UDPInterface".to_string(),
             listen_ip: Some(rust_listen.ip().to_string()),
+            // port-handoff: the harness drew this UDP pair for the Python daemon, whose
+            // config needs both ends before either binds.
             listen_port: Some(rust_listen.port()),
             forward_ip: Some("localhost".to_string()),
             forward_port: Some(py_listen.port()),
@@ -266,6 +272,8 @@ async fn test_rust_to_python_link_over_udp() {
 
     let _storage = crate::common::temp_storage("test_rust_to_python_link_over_udp", "node");
     let mut node = ReticulumNodeBuilder::new()
+        // port-handoff: the harness drew this UDP pair for the Python daemon, whose config
+        // needs both ends before either binds.
         .add_udp_interface(rust_listen, py_listen)
         .storage_path(_storage.path().to_path_buf())
         .build()

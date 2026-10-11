@@ -59,6 +59,8 @@ const AUTO_MAX_CHANNEL_PAYLOAD: usize = AUTO_LINK_MDU - CHANNEL_OVERHEAD;
 /// — so one test occupies two consecutive numbers, and the allocator has to
 /// hand out both or the successor goes to the next caller.
 fn free_discovery_port() -> u16 {
+    // port-handoff: the peers in a test share this number in their configs,
+    // so it exists before any of them binds.
     port_alloc::free_udp_port_pair()
 }
 
@@ -99,6 +101,7 @@ fn auto_config_for_test(
 fn auto_configs_for_test<const N: usize>(test_name: &str) -> [AutoInterfaceConfig; N] {
     let discovery_port = free_discovery_port();
     std::array::from_fn(|_| {
+        // port-handoff: the data port is a config value the AutoInterface binds.
         auto_config_for_test(test_name, discovery_port, port_alloc::free_udp_port())
     })
 }
@@ -790,6 +793,7 @@ async fn test_auto_group_isolation() {
     let config_a = AutoInterfaceConfig {
         group_id: b"test_alpha".to_vec(),
         discovery_port,
+        // port-handoff: the data port is a config value the AutoInterface binds.
         data_port: port_alloc::free_udp_port(),
         multicast_loopback: true,
         ..Default::default()
@@ -797,6 +801,7 @@ async fn test_auto_group_isolation() {
     let config_b = AutoInterfaceConfig {
         group_id: b"test_alpha".to_vec(),
         discovery_port,
+        // port-handoff: the data port is a config value the AutoInterface binds.
         data_port: port_alloc::free_udp_port(),
         multicast_loopback: true,
         ..Default::default()
@@ -805,6 +810,7 @@ async fn test_auto_group_isolation() {
     let config_c = AutoInterfaceConfig {
         group_id: b"test_beta".to_vec(),
         discovery_port,
+        // port-handoff: the data port is a config value the AutoInterface binds.
         data_port: port_alloc::free_udp_port(),
         multicast_loopback: true,
         ..Default::default()
@@ -937,13 +943,16 @@ async fn test_auto_multicast_address_type_isolation() {
         multicast_address_type: MulticastAddressType::Permanent,
         ..Default::default()
     };
+    // port-handoff: the data port is a config value the AutoInterface binds.
     let config_a = permanent_config(port_alloc::free_udp_port());
+    // port-handoff: the data port is a config value the AutoInterface binds.
     let config_b = permanent_config(port_alloc::free_udp_port());
     // Node C: everything identical except the address type, left at the
     // default the way an `lnsd` node added to a permanent peer group would be.
     let config_c = AutoInterfaceConfig {
         group_id: b"test_mcast_type".to_vec(),
         discovery_port,
+        // port-handoff: the data port is a config value the AutoInterface binds.
         data_port: port_alloc::free_udp_port(),
         multicast_loopback: true,
         ..Default::default()

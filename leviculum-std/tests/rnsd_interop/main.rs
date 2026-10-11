@@ -49,6 +49,8 @@ mod flood_tests;
 mod flow_tests;
 mod group_crypto_tests;
 mod harness;
+/// The host-wide allocator, where `ports::free_port` draws.
+use harness::port_alloc;
 mod held_announce_interop_tests;
 mod identify_loss_proxy;
 mod ifac_interop_tests;
@@ -73,6 +75,10 @@ mod path_gap_tests;
 mod path_recovery_tests;
 mod pipe_interop_tests;
 mod plain_broadcast_tests;
+/// Who picks a port and when: the consumer binds port 0 wherever it can.
+#[path = "../support/ports.rs"]
+#[allow(dead_code)]
+mod ports;
 mod probe_tests;
 mod proof_tests;
 mod propagation_node_interop_tests;

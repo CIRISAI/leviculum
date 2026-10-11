@@ -1403,6 +1403,7 @@ fn read_log(path: &Path) -> String {
 async fn loadtest_tcp_hub_smoke() {
     init_tracing();
     let params = LoadParams::smoke();
+    // port-handoff: the hub is an lnsd process that reads its port from its config file.
     let port = pick_free_tcp_port().expect("hub port");
     let hub = spawn_lnsd_hub(port);
     // Give the listener time to bind.
@@ -1432,6 +1433,7 @@ async fn loadtest_tcp_hub_smoke() {
 async fn loadtest_tcp_hub_soak() {
     init_tracing();
     let params = LoadParams::soak();
+    // port-handoff: the hub is an lnsd process that reads its port from its config file.
     let port = pick_free_tcp_port().expect("hub port");
     let hub = spawn_lnsd_hub(port);
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1467,6 +1469,7 @@ async fn loadtest_tcp_hub_ab_vs_rnsd() {
     params.secs = env_u64("LOADTEST_SECS", 30);
 
     // ---- A: our lnsd hub. ----
+    // port-handoff: the hub is an lnsd process that reads its port from its config file.
     let a_port = pick_free_tcp_port().expect("lnsd hub port");
     let a_hub = spawn_lnsd_hub(a_port);
     tokio::time::sleep(Duration::from_secs(1)).await;

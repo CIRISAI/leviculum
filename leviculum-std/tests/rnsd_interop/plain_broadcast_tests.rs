@@ -27,10 +27,11 @@ async fn test_plain_broadcast_local_client_to_network() {
     init_tracing();
 
     // Phase 1: Port allocation
-    let (ports, _port_alloc) = find_available_ports::<4>()
+    // port-handoff: the Python daemons take these as arguments.
+    let (ports, _port_alloc) = find_available_ports::<3>()
         .await
         .expect("Failed to allocate ports");
-    let [daemon_tcp_port, py_b_rns_port, py_b_cmd_port, py_a_cmd_port] = ports;
+    let [py_b_rns_port, py_b_cmd_port, py_a_cmd_port] = ports;
     let instance_name = format!("broadcast_l2n_{}", std::process::id());
 
     // Phase 2: Start Python daemon B (remote node, TCP server)
@@ -46,14 +47,13 @@ async fn test_plain_broadcast_local_client_to_network() {
 
     // Phase 3: Start Rust daemon (shared instance + TCP client to B)
     let py_b_addr: SocketAddr = format!("127.0.0.1:{}", py_b_rns_port).parse().unwrap();
-    let daemon_tcp_addr: SocketAddr = format!("127.0.0.1:{}", daemon_tcp_port).parse().unwrap();
 
     let _storage = temp_storage("test_plain_broadcast_local_client_to_network", "daemon");
     let mut daemon_node = ReticulumNodeBuilder::new()
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(daemon_tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_tcp_client(py_b_addr)
         .storage_path(_storage.path().to_path_buf())
         .build()
@@ -70,6 +70,7 @@ async fn test_plain_broadcast_local_client_to_network() {
     // Phase 4: Start Python daemon A (shared instance client)
     // Python detects the existing Unix socket and connects as client.
     // Its py_a_rns_port is unused (shared instance client skips TCP).
+    // port-handoff: the Python daemons take these as arguments.
     let (py_a_ports, _py_a_port_alloc_2) = find_available_ports::<2>().await.expect("ports");
     let py_a_rns_port = py_a_ports[0];
     let py_local =
@@ -116,10 +117,11 @@ async fn test_plain_broadcast_network_to_local_client() {
     init_tracing();
 
     // Phase 1: Port allocation
-    let (ports, _port_alloc) = find_available_ports::<4>()
+    // port-handoff: the Python daemons take these as arguments.
+    let (ports, _port_alloc) = find_available_ports::<3>()
         .await
         .expect("Failed to allocate ports");
-    let [daemon_tcp_port, py_b_rns_port, py_b_cmd_port, py_a_cmd_port] = ports;
+    let [py_b_rns_port, py_b_cmd_port, py_a_cmd_port] = ports;
     let instance_name = format!("broadcast_n2l_{}", std::process::id());
 
     // Phase 2: Start Python daemon B (remote node, TCP server)
@@ -129,14 +131,13 @@ async fn test_plain_broadcast_network_to_local_client() {
 
     // Phase 3: Start Rust daemon (shared instance + TCP client to B)
     let py_b_addr: SocketAddr = format!("127.0.0.1:{}", py_b_rns_port).parse().unwrap();
-    let daemon_tcp_addr: SocketAddr = format!("127.0.0.1:{}", daemon_tcp_port).parse().unwrap();
 
     let _storage = temp_storage("test_plain_broadcast_network_to_local_client", "daemon");
     let mut daemon_node = ReticulumNodeBuilder::new()
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(daemon_tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_tcp_client(py_b_addr)
         .storage_path(_storage.path().to_path_buf())
         .build()
@@ -151,6 +152,7 @@ async fn test_plain_broadcast_network_to_local_client() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Phase 4: Start Python daemon A (shared instance client)
+    // port-handoff: the Python daemons take these as arguments.
     let (py_a_ports, _py_a_port_alloc) = find_available_ports::<2>().await.expect("ports");
     let py_a_rns_port = py_a_ports[0];
     let py_local =

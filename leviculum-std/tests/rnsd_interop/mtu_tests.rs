@@ -674,13 +674,6 @@ async fn test_mtu_a0_direct_tcp_full_mtu() {
     use leviculum_core::identity::Identity;
     use leviculum_std::driver::ReticulumNodeBuilder;
 
-    // Allocate a random TCP port
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let tcp_port = listener.local_addr().unwrap().port();
-    drop(listener);
-
-    let tcp_addr: std::net::SocketAddr = format!("127.0.0.1:{}", tcp_port).parse().unwrap();
-
     // Create identity for A (responder) before building node
     let identity_a = Identity::generate(&mut OsRng);
     let pub_key_bytes = identity_a.public_key_bytes();
@@ -700,12 +693,13 @@ async fn test_mtu_a0_direct_tcp_full_mtu() {
     // Node A: TCP server (responder)
     let _storage1 = crate::common::temp_storage("test_mtu_a0_direct_tcp_full_mtu", "node1");
     let mut node_a = ReticulumNodeBuilder::new()
-        .add_tcp_server(tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(_storage1.path().to_path_buf())
         .build()
         .await
         .expect("Failed to build node A");
     node_a.start().await.expect("Failed to start node A");
+    let tcp_addr = crate::ports::bound_tcp_addr(&node_a.tcp_listen_addrs());
     node_a.register_destination(dest_a);
 
     // Small delay to let TCP server bind
@@ -838,6 +832,8 @@ async fn test_mtu_b0_python_to_python_udp_baseline() {
     use crate::harness::find_available_ports;
 
     // Allocate 6 ports: [rns_a, cmd_a, udp_a, rns_b, cmd_b, udp_b]
+    // port-handoff: the Python daemons take these as arguments, and the UDP pairs cross-
+    // connect.
     let (ports, _port_alloc) = find_available_ports::<6>()
         .await
         .expect("Failed to find 6 available ports");
@@ -936,14 +932,11 @@ async fn test_mtu_b1_rust_to_rust_udp_mtu() {
     use leviculum_core::identity::Identity;
     use leviculum_std::driver::ReticulumNodeBuilder;
 
-    // Allocate two UDP port pairs (A and B need to cross-connect)
-    let listener1 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port_a = listener1.local_addr().unwrap().port();
-    drop(listener1);
-
-    let listener2 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port_b = listener2.local_addr().unwrap().port();
-    drop(listener2);
+    // port-handoff: A and B cross-connect over UDP, so each end's number is in
+    // the other's config before either binds.
+    let port_a = crate::port_alloc::free_udp_port();
+    // port-handoff: as above.
+    let port_b = crate::port_alloc::free_udp_port();
 
     // Create identity and destination for A before building the node,
     // so we can extract the signing key for B to use.
@@ -1110,6 +1103,8 @@ async fn test_mtu_b2_rust_to_python_udp() {
 
     let _storage = crate::common::temp_storage("test_mtu_b2_rust_to_python_udp", "node");
     let mut node = ReticulumNodeBuilder::new()
+        // port-handoff: the harness drew this UDP pair for the Python daemon,
+        // whose config needs both ends before either binds.
         .add_udp_interface(rust_listen, py_listen)
         .storage_path(_storage.path().to_path_buf())
         .build()
@@ -1269,6 +1264,8 @@ async fn test_mtu_b3_python_to_rust_udp() {
 
     let _storage = crate::common::temp_storage("test_mtu_b3_python_to_rust_udp", "node");
     let mut node = ReticulumNodeBuilder::new()
+        // port-handoff: the harness drew this UDP pair for the Python daemon,
+        // whose config needs both ends before either binds.
         .add_udp_interface(rust_listen, py_listen)
         .storage_path(_storage.path().to_path_buf())
         .build()
@@ -1626,20 +1623,13 @@ async fn test_mtu_d1_tcp_relay_udp_clamp() {
     use leviculum_core::identity::Identity;
     use leviculum_std::driver::ReticulumNodeBuilder;
 
-    // Allocate ports
-    let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let tcp_port = tcp_listener.local_addr().unwrap().port();
-    drop(tcp_listener);
+    // The relay's TCP server binds port 0 and is read back after its start.
+    // port-handoff: the relay and B cross-connect over UDP, so each end's
+    // number is in the other's config before either binds.
+    let relay_udp_port = crate::port_alloc::free_udp_port();
+    // port-handoff: as above.
+    let b_udp_port = crate::port_alloc::free_udp_port();
 
-    let udp_sock1 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let relay_udp_port = udp_sock1.local_addr().unwrap().port();
-    drop(udp_sock1);
-
-    let udp_sock2 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let b_udp_port = udp_sock2.local_addr().unwrap().port();
-    drop(udp_sock2);
-
-    let tcp_addr: std::net::SocketAddr = format!("127.0.0.1:{}", tcp_port).parse().unwrap();
     let relay_udp_addr: std::net::SocketAddr =
         format!("127.0.0.1:{}", relay_udp_port).parse().unwrap();
     let b_udp_addr: std::net::SocketAddr = format!("127.0.0.1:{}", b_udp_port).parse().unwrap();
@@ -1664,13 +1654,14 @@ async fn test_mtu_d1_tcp_relay_udp_clamp() {
     let _storage1 = crate::common::temp_storage("test_mtu_d1_tcp_relay_udp_clamp", "node1");
     let mut relay = ReticulumNodeBuilder::new()
         .enable_transport(true)
-        .add_tcp_server(tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_udp_interface(relay_udp_addr, b_udp_addr)
         .storage_path(_storage1.path().to_path_buf())
         .build()
         .await
         .expect("Failed to build relay");
     relay.start().await.expect("Failed to start relay");
+    let tcp_addr = crate::ports::bound_tcp_addr(&relay.tcp_listen_addrs());
 
     // Small delay to let TCP server bind
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1807,20 +1798,13 @@ async fn test_mtu_d2_udp_relay_tcp() {
     use leviculum_core::identity::Identity;
     use leviculum_std::driver::ReticulumNodeBuilder;
 
-    // Allocate ports
-    let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let tcp_port = tcp_listener.local_addr().unwrap().port();
-    drop(tcp_listener);
+    // The relay's TCP server binds port 0 and is read back after its start.
+    // port-handoff: the relay and A cross-connect over UDP, so each end's
+    // number is in the other's config before either binds.
+    let relay_udp_port = crate::port_alloc::free_udp_port();
+    // port-handoff: as above.
+    let a_udp_port = crate::port_alloc::free_udp_port();
 
-    let udp_sock1 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let relay_udp_port = udp_sock1.local_addr().unwrap().port();
-    drop(udp_sock1);
-
-    let udp_sock2 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let a_udp_port = udp_sock2.local_addr().unwrap().port();
-    drop(udp_sock2);
-
-    let tcp_addr: std::net::SocketAddr = format!("127.0.0.1:{}", tcp_port).parse().unwrap();
     let relay_udp_addr: std::net::SocketAddr =
         format!("127.0.0.1:{}", relay_udp_port).parse().unwrap();
     let a_udp_addr: std::net::SocketAddr = format!("127.0.0.1:{}", a_udp_port).parse().unwrap();
@@ -1845,13 +1829,14 @@ async fn test_mtu_d2_udp_relay_tcp() {
     let _storage1 = crate::common::temp_storage("test_mtu_d2_udp_relay_tcp", "node1");
     let mut relay = ReticulumNodeBuilder::new()
         .enable_transport(true)
-        .add_tcp_server(tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_udp_interface(relay_udp_addr, a_udp_addr)
         .storage_path(_storage1.path().to_path_buf())
         .build()
         .await
         .expect("Failed to build relay");
     relay.start().await.expect("Failed to start relay");
+    let tcp_addr = crate::ports::bound_tcp_addr(&relay.tcp_listen_addrs());
 
     // Small delay to let TCP server bind
     tokio::time::sleep(Duration::from_millis(200)).await;

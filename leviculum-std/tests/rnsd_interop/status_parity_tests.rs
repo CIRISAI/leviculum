@@ -287,6 +287,8 @@ impl ParityDaemon {
         );
         // The harness allocator hands out a minimum of two ports; the
         // single-interface form uses only the first.
+        // port-handoff: the daemon under test is another process and reads its ports from
+        // its config file.
         let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate port");
         let tcp_ports: Vec<u16> = ports[..n_interfaces].to_vec();
         let tcp_port = tcp_ports[0];

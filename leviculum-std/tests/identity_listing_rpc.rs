@@ -23,6 +23,10 @@ use rand_core::OsRng;
 #[allow(dead_code)]
 mod port_alloc;
 
+#[path = "support/ports.rs"]
+#[allow(dead_code)]
+mod ports;
+
 fn make_dest(identity: Identity, app: &str, aspects: &[&str]) -> Destination {
     Destination::new(
         Some(identity),
@@ -36,8 +40,11 @@ fn make_dest(identity: Identity, app: &str, aspects: &[&str]) -> Destination {
 
 #[tokio::test]
 async fn second_daemon_announce_appears_in_identity_listing() {
-    let port = port_alloc::free_tcp_port();
-    let instance = format!("idlist_{}_{}", std::process::id(), port);
+    let instance = format!(
+        "idlist_{}_{:08x}",
+        std::process::id(),
+        rand_core::RngCore::next_u32(&mut OsRng)
+    );
 
     // Daemon A: transport node, shared instance with the RPC server, probe
     // responder on (so it registers rnstransport.probe under its own name
@@ -59,12 +66,13 @@ async fn second_daemon_announce_appears_in_identity_listing() {
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance.clone())
-        .add_tcp_server(([127, 0, 0, 1], port).into())
+        .add_tcp_server(ports::LOOPBACK_ANY_PORT)
         .storage_path(storage_a.path().to_path_buf())
         .build()
         .await
         .expect("build daemon A");
     node_a.start().await.expect("start daemon A");
+    let port = ports::bound_tcp_addr(&node_a.tcp_listen_addrs()).port();
 
     // Daemon B: connects to A over TCP and announces two destinations of one
     // identity — the probe aspect A knows by name, and a foreign app name A

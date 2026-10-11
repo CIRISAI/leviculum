@@ -19,7 +19,11 @@
 pub mod harness;
 
 /// Who picks a port and when: the consumer binds port 0 wherever it can.
+#[path = "../support/ports.rs"]
 pub mod ports;
+
+/// The host-wide allocator, where `ports::free_port` draws.
+pub use harness::port_alloc;
 
 /// A counting allocator, for the one mvr that measures heap rather than
 /// protocol (`pn_serve_peak_outgrows_the_board_heap`).

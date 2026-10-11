@@ -557,6 +557,8 @@ async fn test_python_autonomously_discovers_lnsd_announcer() {
         .await
         .expect("start discovering daemon");
 
+    // port-handoff: the discovery announce carries the configured port (src/discovery.rs),
+    // not the bound one, so the advertised listener needs its number in the config.
     let advertised_port = pick_free_tcp_port().expect("free advertised port");
     let server_addr = SocketAddr::from(([127, 0, 0, 1], advertised_port));
 
@@ -659,6 +661,8 @@ async fn test_python_discovers_lnsd_encrypted_announcer() {
         .expect("start encrypted discovering daemon");
 
     // Matching node: same network identity as the daemon.
+    // port-handoff: the discovery announce carries the configured port (src/discovery.rs),
+    // not the bound one, so the advertised listener needs its number in the config.
     let match_port = pick_free_tcp_port().expect("match port");
     let storage_match = temp_storage("disco_reverse_enc_match", "node");
     let mut node_match = build_encrypted_announcer_node(
@@ -680,6 +684,8 @@ async fn test_python_discovers_lnsd_encrypted_announcer() {
             .expect("private key bytes"),
     )
     .expect("write wrong identity");
+    // port-handoff: the discovery announce carries the configured port (src/discovery.rs),
+    // not the bound one, so the advertised listener needs its number in the config.
     let mismatch_port = pick_free_tcp_port().expect("mismatch port");
     let storage_mismatch = temp_storage("disco_reverse_enc_mismatch", "node");
     let mut node_mismatch = build_encrypted_announcer_node(

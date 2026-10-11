@@ -132,6 +132,7 @@ async fn test_lns_rpc_query_against_python_rnsd() {
 
     // The harness allocator hands out a minimum of two ports; we use only the
     // first for the single TCP server interface.
+    // port-handoff: the Python rnsd reads it from its config file.
     let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate port");
     let rnsd = spawn_rnsd(ports[0]);
 

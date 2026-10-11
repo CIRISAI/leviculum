@@ -3,7 +3,7 @@
 # check-test-ports`). Format: `<file> <port> <reason>`, one per line.
 #
 # Anything a test binds or dials takes port 0 and reads the port back, or a
-# number drawn at run time (leviculum-std/tests/mvr/ports.rs). A literal is a
+# number drawn at run time (leviculum-std/tests/support/ports.rs). A literal is a
 # port held by whoever got there first (Codeberg nightly #509).
 
 leviculum-std/tests/doc_citations.rs 4242 prose fixture: "127.0.0.1:4242" is a string the citation scanner must NOT read as a path

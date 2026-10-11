@@ -209,6 +209,8 @@ impl TestDaemon {
         let mut last_error = HarnessError::StartupTimeout;
 
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port) = find_two_available_ports()?;
 
             match Self::start_with_ports(rns_port, cmd_port).await {
@@ -246,6 +248,8 @@ impl TestDaemon {
         ];
         let mut last_error = HarnessError::StartupTimeout;
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port) = find_two_available_ports()?;
             match Self::start_with_ports_and_options(rns_port, cmd_port, extra.clone()).await {
                 Ok(daemon) => return Ok(daemon),
@@ -271,6 +275,8 @@ impl TestDaemon {
         ensure_reticulum_submodule()?;
         let mut last_error = HarnessError::StartupTimeout;
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port) = find_two_available_ports()?;
             let extra = vec![
                 "--mgmt-announce-interval-seconds".to_string(),
@@ -296,6 +302,8 @@ impl TestDaemon {
         ensure_reticulum_submodule()?;
         let mut last_error = HarnessError::StartupTimeout;
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port) = find_two_available_ports()?;
             match Self::start_with_ports_and_options(rns_port, cmd_port, extra_args.clone()).await {
                 Ok(daemon) => return Ok(daemon),
@@ -373,7 +381,10 @@ impl TestDaemon {
         ensure_reticulum_submodule()?;
         let mut last_error = HarnessError::StartupTimeout;
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port) = find_two_available_ports()?;
+            // port-handoff: the discovery port is a daemon argument too.
             let backbone_port = pick_free_tcp_port()?;
             let mut extra = Self::discovery_args(name);
             extra.push("--discovery-port".to_string());
@@ -405,7 +416,10 @@ impl TestDaemon {
         ensure_reticulum_submodule()?;
         let mut last_error = HarnessError::StartupTimeout;
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port) = find_two_available_ports()?;
+            // port-handoff: the discovery port is a daemon argument too.
             let backbone_port = pick_free_tcp_port()?;
             let mut extra = Self::discovery_args(name);
             extra.push("--discovery-port".to_string());
@@ -550,6 +564,8 @@ impl TestDaemon {
 
         let mut last_error = None;
         for _ in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port) = find_two_available_ports()?;
             match Self::start_with_ports_and_options(rns_port, cmd_port, extra_args.clone()).await {
                 Ok(daemon) => return Ok(daemon),
@@ -623,6 +639,8 @@ impl TestDaemon {
         let mut last_error = HarnessError::StartupTimeout;
 
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port, udp_listen_port, udp_forward_port) =
                 find_four_available_ports()?;
 
@@ -724,6 +742,8 @@ impl TestDaemon {
         let mut last_error = HarnessError::StartupTimeout;
 
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port) = find_two_available_ports()?;
 
             match Self::start_with_shared_instance_ports(rns_port, cmd_port, instance_name).await {
@@ -842,6 +862,8 @@ impl TestDaemon {
         let mut last_error = HarnessError::StartupTimeout;
 
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port) = find_two_available_ports()?;
 
             match Self::start_with_probes_ports(rns_port, cmd_port).await {
@@ -942,6 +964,8 @@ impl TestDaemon {
         let mut last_error = HarnessError::StartupTimeout;
 
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            // port-handoff: the Python daemon takes both as arguments; a lost
+            // bind times the start out and the loop redraws.
             let (rns_port, cmd_port) = find_two_available_ports()?;
 
             match Self::start_with_ifac_ports(

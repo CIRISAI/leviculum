@@ -43,13 +43,8 @@ pub(crate) async fn start_rust_daemon_with_rpc() -> (
     [u8; 64],
     tempfile::TempDir,
 ) {
-    let (ports, _port_alloc) = find_available_ports::<2>()
-        .await
-        .expect("failed to allocate ports");
-    let tcp_port = ports[0];
     let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let instance_name = format!("rpcinterop_{}_{}", std::process::id(), test_id);
-    let tcp_addr: SocketAddr = format!("127.0.0.1:{}", tcp_port).parse().unwrap();
 
     // Generate identity up front so we can extract private key bytes
     // before handing ownership to the builder.
@@ -64,13 +59,14 @@ pub(crate) async fn start_rust_daemon_with_rpc() -> (
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(storage.path().to_path_buf())
         .build()
         .await
         .expect("Failed to build Rust daemon node");
 
     node.start().await.expect("Failed to start Rust node");
+    let tcp_addr = crate::ports::bound_tcp_addr(&node.tcp_listen_addrs());
 
     // Wait for sockets to be ready
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -824,6 +820,7 @@ impl Drop for ForeignRnsd {
 /// the A/B runs a 1.5.2 rnsd, the positive control below runs the vendored
 /// 1.3.5 rnsd, and both are driven by the same 1.5.2 client.
 async fn start_foreign_rnsd(daemon_root: &Path) -> ForeignRnsd {
+    // port-handoff: the foreign rnsd reads it from its config file.
     let (ports, _port_alloc) = find_available_ports::<2>()
         .await
         .expect("failed to allocate ports");

@@ -184,16 +184,16 @@ async fn test_shared_instance_link_through_daemon() {
     init_tracing();
 
     // Phase 1: Port allocation
-    let (ports, _port_alloc) = find_available_ports::<3>()
+    // port-handoff: the Python daemons take these as arguments.
+    let (ports, _port_alloc) = find_available_ports::<2>()
         .await
         .expect("Failed to allocate ports");
-    let [daemon_tcp_port, py_rns_port, py_cmd_port] = ports;
+    let [py_rns_port, py_cmd_port] = ports;
     let instance_name = format!("linktest_{}", std::process::id());
 
     // Phase 2: Start Rust daemon (in-process)
     // The Rust daemon owns the abstract Unix socket and has a TCP server
     // for Rust node A to connect to.
-    let daemon_tcp_addr: SocketAddr = format!("127.0.0.1:{}", daemon_tcp_port).parse().unwrap();
 
     let _storage1 =
         crate::common::temp_storage("test_shared_instance_link_through_daemon", "node1");
@@ -201,7 +201,7 @@ async fn test_shared_instance_link_through_daemon() {
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(daemon_tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(_storage1.path().to_path_buf())
         .build()
         .await
@@ -210,6 +210,7 @@ async fn test_shared_instance_link_through_daemon() {
         .start()
         .await
         .expect("Failed to start Rust daemon node");
+    let daemon_tcp_addr = crate::ports::bound_tcp_addr(&daemon_node.tcp_listen_addrs());
 
     // Wait for Unix socket listener to be ready
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -390,10 +391,11 @@ async fn test_local_client_initiates_link_through_daemon() {
     init_tracing();
 
     // Phase 1: Port allocation
-    let (ports, _port_alloc) = find_available_ports::<4>()
+    // port-handoff: the Python daemons take these as arguments.
+    let (ports, _port_alloc) = find_available_ports::<3>()
         .await
         .expect("Failed to allocate ports");
-    let [daemon_tcp_port, py_b_rns_port, py_b_cmd_port, py_a_cmd_port] = ports;
+    let [py_b_rns_port, py_b_cmd_port, py_a_cmd_port] = ports;
     let instance_name = format!("lclink_{}", std::process::id());
 
     // Phase 2: Start Python B (remote responder, TCP server)
@@ -408,7 +410,6 @@ async fn test_local_client_initiates_link_through_daemon() {
 
     // Phase 3: Start Rust daemon (shared instance + TCP client to B)
     let py_b_addr: SocketAddr = format!("127.0.0.1:{}", py_b_rns_port).parse().unwrap();
-    let daemon_tcp_addr: SocketAddr = format!("127.0.0.1:{}", daemon_tcp_port).parse().unwrap();
 
     let _storage =
         crate::common::temp_storage("test_local_client_initiates_link_through_daemon", "daemon");
@@ -416,7 +417,7 @@ async fn test_local_client_initiates_link_through_daemon() {
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(daemon_tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_tcp_client(py_b_addr)
         .storage_path(_storage.path().to_path_buf())
         .build()
@@ -430,6 +431,7 @@ async fn test_local_client_initiates_link_through_daemon() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Phase 4: Start Python A (shared instance client, initiator)
+    // port-handoff: the Python daemons take these as arguments.
     let (py_a_ports, _py_a_port_alloc) = find_available_ports::<2>().await.expect("ports");
     let py_a_rns_port = py_a_ports[0];
     let py_a =
@@ -550,10 +552,11 @@ async fn test_non_transport_daemon_relays_local_client_link() {
     init_tracing();
 
     // Phase 1: Port allocation
-    let (ports, _port_alloc) = find_available_ports::<4>()
+    // port-handoff: the Python daemons take these as arguments.
+    let (ports, _port_alloc) = find_available_ports::<3>()
         .await
         .expect("Failed to allocate ports");
-    let [daemon_tcp_port, py_b_rns_port, py_b_cmd_port, py_a_cmd_port] = ports;
+    let [py_b_rns_port, py_b_cmd_port, py_a_cmd_port] = ports;
     let instance_name = format!("notransport_{}", std::process::id());
 
     // Phase 2: Start Python B (remote responder, TCP server)
@@ -568,7 +571,6 @@ async fn test_non_transport_daemon_relays_local_client_link() {
 
     // Phase 3: Start Rust daemon, transport DISABLED
     let py_b_addr: SocketAddr = format!("127.0.0.1:{}", py_b_rns_port).parse().unwrap();
-    let daemon_tcp_addr: SocketAddr = format!("127.0.0.1:{}", daemon_tcp_port).parse().unwrap();
 
     let _storage = crate::common::temp_storage(
         "test_non_transport_daemon_relays_local_client_link",
@@ -578,7 +580,7 @@ async fn test_non_transport_daemon_relays_local_client_link() {
         .enable_transport(false) // <── KEY DIFFERENCE: transport disabled
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(daemon_tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_tcp_client(py_b_addr)
         .storage_path(_storage.path().to_path_buf())
         .build()
@@ -592,6 +594,7 @@ async fn test_non_transport_daemon_relays_local_client_link() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Phase 4: Start Python A (shared instance client)
+    // port-handoff: the Python daemons take these as arguments.
     let (py_a_ports, _py_a_port_alloc) = find_available_ports::<2>().await.expect("ports");
     let py_a_rns_port = py_a_ports[0];
     let py_a =
@@ -692,10 +695,6 @@ async fn test_local_client_builder_link_through_daemon() {
     init_tracing();
 
     // Phase 1: Port allocation
-    let (ports, _port_alloc) = find_available_ports::<2>()
-        .await
-        .expect("Failed to allocate ports");
-    let [daemon_tcp_port, _spare] = ports;
     let instance_name = format!("clientbuilder_{}", std::process::id());
 
     // Each node needs a unique storage path to avoid identity collisions
@@ -706,13 +705,12 @@ async fn test_local_client_builder_link_through_daemon() {
     let rust_a_storage = tmp.join("rust_a");
 
     // Phase 2: Start Rust daemon (in-process)
-    let daemon_tcp_addr: SocketAddr = format!("127.0.0.1:{}", daemon_tcp_port).parse().unwrap();
 
     let mut daemon_node = ReticulumNodeBuilder::new()
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(daemon_tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(daemon_storage)
         .build()
         .await
@@ -721,6 +719,7 @@ async fn test_local_client_builder_link_through_daemon() {
         .start()
         .await
         .expect("Failed to start Rust daemon node");
+    let daemon_tcp_addr = crate::ports::bound_tcp_addr(&daemon_node.tcp_listen_addrs());
 
     // Wait for Unix socket listener to be ready
     tokio::time::sleep(Duration::from_millis(500)).await;

@@ -445,21 +445,26 @@ async fn pump(
     }
 }
 
-/// Listen on `listen_port`, forward to `127.0.0.1:upstream_port`, dropping the
-/// first `identify_drop_budget` LINKIDENTIFY frames travelling towards the
-/// upstream.
+/// Listen on a loopback port the kernel picks, forward to
+/// `127.0.0.1:upstream_port`, dropping the first `identify_drop_budget`
+/// LINKIDENTIFY frames travelling towards the upstream. Returns the port.
 ///
 /// Bound before the call returns so a peer's TCP client cannot race the
-/// accept loop into a refused connect (Codeberg #221).
+/// accept loop into a refused connect (Codeberg #221). Port 0, because a
+/// number drawn first and bound here is the window Codeberg nightly #509 was
+/// lost in (`crate::ports`).
 pub async fn spawn_identify_dropping_proxy(
-    listen_port: u16,
     upstream_port: u16,
     identify_drop_budget: usize,
     log: Arc<Mutex<ProxyLog>>,
-) {
-    let listener = TcpListener::bind(("127.0.0.1", listen_port))
+) -> u16 {
+    let listener = TcpListener::bind(crate::ports::LOOPBACK_ANY_PORT)
         .await
         .expect("bind identify-dropping proxy");
+    let port = listener
+        .local_addr()
+        .expect("identify-dropping proxy address")
+        .port();
     tokio::spawn(async move {
         loop {
             let Ok((downstream, _)) = listener.accept().await else {
@@ -483,4 +488,5 @@ pub async fn spawn_identify_dropping_proxy(
             tokio::spawn(pump(up_rx, down_tx, false, 0, Arc::clone(&log)));
         }
     });
+    port
 }

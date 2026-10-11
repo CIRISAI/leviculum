@@ -16,7 +16,6 @@
 //! cargo test --package leviculum-std --test rnsd_interop interface_mode_tests
 //! ```
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use leviculum_core::identity::Identity;
@@ -24,7 +23,7 @@ use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
 use leviculum_std::driver::ReticulumNodeBuilder;
 
 use crate::common::wait_for_path_on_daemon;
-use crate::harness::{pick_free_tcp_port, TestDaemon};
+use crate::harness::TestDaemon;
 
 /// Build a Rust transport node with a single TCP client interface toward the
 /// Python daemon, carrying the given propagation mode.
@@ -161,24 +160,23 @@ async fn test_gateway_interface_propagates_local_announce() {
 // =========================================================================
 
 /// Build a Rust transport node with a single TCP *server* interface carrying
-/// the given propagation mode, bound on a free local port. Returns the node,
+/// the given propagation mode, bound on a port the kernel picks. Returns the node,
 /// the bound port (so a Python peer can connect into it), and the storage dir.
 async fn start_rust_server_node_with_mode(
     test_name: &str,
     mode: &str,
 ) -> (leviculum_std::driver::ReticulumNode, u16, tempfile::TempDir) {
     let storage = crate::common::temp_storage(test_name, "node");
-    let port = pick_free_tcp_port().expect("free tcp port");
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(true)
-        .add_tcp_server(addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .interface_mode(mode)
         .storage_path(storage.path().to_path_buf())
         .build()
         .await
         .expect("build rust server node");
     node.start().await.expect("start rust server node");
+    let port = crate::ports::bound_tcp_addr(&node.tcp_listen_addrs()).port();
     tokio::time::sleep(Duration::from_secs(1)).await;
     (node, port, storage)
 }

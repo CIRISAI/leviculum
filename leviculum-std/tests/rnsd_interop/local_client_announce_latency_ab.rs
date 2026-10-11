@@ -189,25 +189,26 @@ async fn run_arm(label: &'static str, instance_name: &str, tcp_addr: SocketAddr)
 async fn local_client_announce_latency_matches_the_reference() {
     init_tracing();
 
-    let (ports, _port_alloc) = find_available_ports::<4>()
+    // port-handoff: the reference rnsd takes both as arguments.
+    let (ports, _port_alloc) = find_available_ports::<2>()
         .await
         .expect("Failed to allocate ports");
-    let [rust_tcp_port, py_rns_port, py_cmd_port, _spare] = ports;
+    let [py_rns_port, py_cmd_port] = ports;
 
     // --- Arm R: our lnsd, in process, TCP server + shared instance.
     let rust_instance = format!("abann_rust_{}", std::process::id());
-    let rust_addr: SocketAddr = format!("127.0.0.1:{rust_tcp_port}").parse().unwrap();
     let storage = crate::common::temp_storage("local_client_announce_latency_ab", "lnsd");
     let mut lnsd = ReticulumNodeBuilder::new()
         .enable_transport(true)
         .share_instance(true)
         .instance_name(rust_instance.clone())
-        .add_tcp_server(rust_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(storage.path().to_path_buf())
         .build()
         .await
         .expect("lnsd builds");
     lnsd.start().await.expect("lnsd starts");
+    let rust_addr = crate::ports::bound_tcp_addr(&lnsd.tcp_listen_addrs());
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let rust_arm = run_arm("lnsd", &rust_instance, rust_addr).await;

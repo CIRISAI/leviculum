@@ -424,21 +424,21 @@ async fn test_path_table_accessor_lifecycle() {
 
     // Rust relay bridging daemon <-> node, so the node's path to the
     // daemon's destination is RELAYED (next_hop = relay identity).
-    let relay_port = crate::harness::pick_free_tcp_port().expect("free port");
     let _storage_r = crate::common::temp_storage("test_path_table_accessor_lifecycle", "relay");
     let mut relay = ReticulumNodeBuilder::new()
         .enable_transport(true)
         .add_tcp_client(daemon.rns_addr())
-        .add_tcp_server(([127, 0, 0, 1], relay_port).into())
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(_storage_r.path().to_path_buf())
         .build()
         .await
         .expect("Failed to build relay");
     relay.start().await.expect("Failed to start relay");
+    let relay_addr = crate::ports::bound_tcp_addr(&relay.tcp_listen_addrs());
 
     let _storage_n = crate::common::temp_storage("test_path_table_accessor_lifecycle", "node");
     let mut node = ReticulumNodeBuilder::new()
-        .add_tcp_client(([127, 0, 0, 1], relay_port).into())
+        .add_tcp_client(relay_addr)
         .storage_path(_storage_n.path().to_path_buf())
         .build()
         .await

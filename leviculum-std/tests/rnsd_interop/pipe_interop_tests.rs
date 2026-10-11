@@ -43,6 +43,7 @@ async fn test_pipe_bridge_announce_crosses() {
         "pipe bridge helper missing at {BRIDGE}"
     );
 
+    // port-handoff: the bridge subprocesses take the number as an argument.
     let port = free_tcp_port();
     let storage_a = temp_storage("pipe_announce", "a");
     let storage_b = temp_storage("pipe_announce", "b");

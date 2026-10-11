@@ -32,19 +32,16 @@ use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 use leviculum_std::{EventReceiver, NodeEvent};
 
 /// Host-wide listener-port allocator, shared with the `mvr` and
-/// `rnsd_interop` suites.
+/// `rnsd_interop` suites; `ports` needs it in scope.
 #[path = "support/port_alloc.rs"]
 #[allow(dead_code)]
 mod port_alloc;
 
-/// This file used to draw from a private counter over 58000-58900 — inside
-/// the default `ip_local_port_range` (32768-60999), where an OS-assigned
-/// `bind(0)` anywhere on the host can take a number between this test's probe
-/// and the node's bind. The shared band sits above that ceiling; see
-/// `port_alloc`.
-fn next_port() -> u16 {
-    port_alloc::free_tcp_port()
-}
+/// The server binds port 0 and the client dials what it reports: no number
+/// exists before the listener holds it (Codeberg nightly #509).
+#[path = "support/ports.rs"]
+#[allow(dead_code)]
+mod ports;
 
 struct TestNode {
     node: ReticulumNode,
@@ -68,18 +65,20 @@ async fn start(builder: ReticulumNodeBuilder) -> TestNode {
 /// server → client here, and a dial-out interface does not ingress-limit, so
 /// this needs no burst-limiter carve-out — unlike a harness whose *listener*
 /// receives the announces.
-async fn server(port: u16) -> TestNode {
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    start(
+///
+/// Returns the server and the address its listener bound.
+async fn server() -> (TestNode, SocketAddr) {
+    let srv = start(
         ReticulumNodeBuilder::new()
             .enable_transport(false)
-            .add_tcp_server(addr),
+            .add_tcp_server(ports::LOOPBACK_ANY_PORT),
     )
-    .await
+    .await;
+    let addr = ports::bound_tcp_addr(&srv.node.tcp_listen_addrs());
+    (srv, addr)
 }
 
-async fn client(port: u16) -> TestNode {
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+async fn client(addr: SocketAddr) -> TestNode {
     start(
         ReticulumNodeBuilder::new()
             .enable_transport(false)
@@ -150,9 +149,8 @@ async fn publish_and_learn(
 /// the path (which is exactly the observer the rotation is defending against).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_deregistered_destination_stops_accepting_new_links() {
-    let port = next_port();
-    let srv = server(port).await;
-    let mut cli = client(port).await;
+    let (srv, addr) = server().await;
+    let mut cli = client(addr).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     let (dest, sk, hash) = make_destination("d1");
@@ -189,9 +187,8 @@ async fn a_deregistered_destination_stops_accepting_new_links() {
 /// D2 — idempotent, and harmless for a hash that was never registered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deregistration_is_idempotent_and_an_unknown_hash_is_a_noop() {
-    let port = next_port();
-    let srv = server(port).await;
-    let mut cli = client(port).await;
+    let (srv, addr) = server().await;
+    let mut cli = client(addr).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     let (dest, _sk, hash) = make_destination("d2");
@@ -219,9 +216,8 @@ async fn deregistration_is_idempotent_and_an_unknown_hash_is_a_noop() {
 /// Rotation must not cut live traffic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_established_link_survives_deregistration() {
-    let port = next_port();
-    let mut srv = server(port).await;
-    let mut cli = client(port).await;
+    let (mut srv, addr) = server().await;
+    let mut cli = client(addr).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     let (dest, sk, hash) = make_destination("d3");

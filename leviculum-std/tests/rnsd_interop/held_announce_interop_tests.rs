@@ -56,7 +56,6 @@
 //!     held_announce_interop_tests -- --ignored --nocapture
 //! ```
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
@@ -67,7 +66,7 @@ use leviculum_std::driver::ReticulumNodeBuilder;
 use crate::common::{
     build_announce_raw, init_tracing, send_framed, temp_storage, DAEMON_SETTLE_TIME,
 };
-use crate::harness::{find_available_ports, TestDaemon};
+use crate::harness::TestDaemon;
 
 /// Python MAX_HELD_ANNOUNCES / our MAX_HELD_ANNOUNCES (Interface.py:70).
 const MAX_HELD_ANNOUNCES: usize = 256;
@@ -129,13 +128,6 @@ async fn wait_for_all_paths(
 async fn hold_not_drop_and_visibility_rust_lnsd_dut() {
     init_tracing();
 
-    // The harness allocator hands out a minimum of two ports; only the first
-    // is needed here (the DUT's TCP server bind).
-    let (ports, _port_alloc) = find_available_ports::<2>()
-        .await
-        .expect("allocate DUT tcp port");
-    let dut_tcp_addr: SocketAddr = format!("127.0.0.1:{}", ports[0]).parse().unwrap();
-
     // Downstream receiver (Python rnsd, transport enabled).
     let receiver = TestDaemon::start().await.expect("start receiver daemon");
 
@@ -144,13 +136,14 @@ async fn hold_not_drop_and_visibility_rust_lnsd_dut() {
     let _storage = temp_storage("hold_not_drop_rust_lnsd_dut", "dut");
     let mut dut = ReticulumNodeBuilder::new()
         .enable_transport(true)
-        .add_tcp_server(dut_tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_tcp_client(receiver.rns_addr())
         .storage_path(_storage.path().to_path_buf())
         .build()
         .await
         .expect("build DUT node");
     dut.start().await.expect("start DUT node");
+    let dut_tcp_addr = crate::ports::bound_tcp_addr(&dut.tcp_listen_addrs());
 
     // Let the DUT connect to the receiver.
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -285,24 +278,19 @@ async fn hold_not_drop_and_visibility_python_rnsd_dut() {
 async fn held_queue_caps_at_max_rust_lnsd_dut() {
     init_tracing();
 
-    // Minimum allocation is two ports; only the first is used (DUT TCP server).
-    let (ports, _port_alloc) = find_available_ports::<2>()
-        .await
-        .expect("allocate DUT tcp port");
-    let dut_tcp_addr: SocketAddr = format!("127.0.0.1:{}", ports[0]).parse().unwrap();
-
     let receiver = TestDaemon::start().await.expect("start receiver daemon");
 
     let _storage = temp_storage("held_queue_caps_rust_lnsd_dut", "dut");
     let mut dut = ReticulumNodeBuilder::new()
         .enable_transport(true)
-        .add_tcp_server(dut_tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_tcp_client(receiver.rns_addr())
         .storage_path(_storage.path().to_path_buf())
         .build()
         .await
         .expect("build DUT node");
     dut.start().await.expect("start DUT node");
+    let dut_tcp_addr = crate::ports::bound_tcp_addr(&dut.tcp_listen_addrs());
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let mut injector = TcpStream::connect(dut_tcp_addr)

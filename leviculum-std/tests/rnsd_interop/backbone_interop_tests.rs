@@ -29,7 +29,7 @@ use leviculum_std::config::Config;
 use leviculum_std::driver::ReticulumNodeBuilder;
 
 use crate::common::{init_tracing, parse_dest_hash, temp_storage, wait_for_path_on_node};
-use crate::harness::{find_available_ports, TestDaemon};
+use crate::harness::TestDaemon;
 
 /// Build a `type = BackboneInterface` server config on disk, bound to `port`.
 /// Carries an unknown Backbone-only key (`prioritise`) to exercise the real
@@ -55,16 +55,15 @@ fn write_backbone_server_config(dir: &std::path::Path, port: u16) -> std::path::
 async fn test_backbone_config_dropin_peers_with_python_backbone_client() {
     init_tracing();
 
-    // Reserve a free TCP port for our Backbone/TCP listener.
-    let (ports, _port_alloc) = find_available_ports::<2>().await.expect("allocate port");
-    let server_port = ports[0];
-
     // --- Drop-in parse: a stock Backbone config must load as a TCP server. ---
     let cfg_storage = temp_storage(
         "test_backbone_config_dropin_peers_with_python_backbone_client",
         "config",
     );
-    let cfg_path = write_backbone_server_config(cfg_storage.path(), server_port);
+    // Port 0: the listener takes what the kernel gives it and is read back
+    // after the start (`crate::ports`); `Some(0)` below still proves the
+    // `port` key was read.
+    let cfg_path = write_backbone_server_config(cfg_storage.path(), 0);
     let config = Config::load(&cfg_path).expect("Backbone config must load through Config::load");
     {
         let iface = config
@@ -76,7 +75,7 @@ async fn test_backbone_config_dropin_peers_with_python_backbone_client() {
             "a listen-only BackboneInterface must normalize onto our TCP server"
         );
         assert_eq!(iface.listen_ip, Some("127.0.0.1".to_string()));
-        assert_eq!(iface.listen_port, Some(server_port));
+        assert_eq!(iface.listen_port, Some(0));
     }
 
     // --- Bring up our lnsd from that config. ---
@@ -91,6 +90,7 @@ async fn test_backbone_config_dropin_peers_with_python_backbone_client() {
         .await
         .expect("build lnsd from Backbone config");
     node.start().await.expect("start lnsd");
+    let server_port = crate::ports::bound_tcp_addr(&node.tcp_listen_addrs()).port();
     // Let the TCP listener bind.
     tokio::time::sleep(Duration::from_secs(1)).await;
 

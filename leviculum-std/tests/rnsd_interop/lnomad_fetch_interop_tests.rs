@@ -24,7 +24,6 @@
 //! cargo test -p leviculum-std --test rnsd_interop lnomad_fetch -- --test-threads=1
 //! ```
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use leviculum_std::driver::ReticulumNodeBuilder;
@@ -204,9 +203,9 @@ async fn run_discovery_suite(session: &mut Session, page: &TestDaemon, dest_hex:
 /// lnomad discovers a Python NomadNet node through a Rust `lnsd` shared instance.
 #[tokio::test]
 async fn lnomad_discovers_node_via_lnsd_shared_instance() {
-    let (ports, _alloc) = find_available_ports::<3>().await.expect("allocate ports");
-    let [daemon_tcp_port, page_rns_port, page_cmd_port] = ports;
-    let daemon_tcp: SocketAddr = format!("127.0.0.1:{daemon_tcp_port}").parse().unwrap();
+    // port-handoff: the Python page node takes both as arguments.
+    let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate ports");
+    let [page_rns_port, page_cmd_port] = ports;
     let instance_name = format!("lnomad-disc-lnsd-{}", std::process::id());
 
     let daemon_storage = tempfile::tempdir().expect("daemon storage");
@@ -214,11 +213,12 @@ async fn lnomad_discovers_node_via_lnsd_shared_instance() {
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(daemon_tcp)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(daemon_storage.path().to_path_buf())
         .build_sync()
         .expect("build lnsd daemon");
     daemon.start().await.expect("start lnsd daemon");
+    let daemon_tcp_port = crate::ports::bound_tcp_addr(&daemon.tcp_listen_addrs()).port();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let (page, dest_info) = start_page_node(page_rns_port, page_cmd_port, daemon_tcp_port).await;
@@ -237,9 +237,9 @@ async fn lnomad_discovers_node_via_lnsd_shared_instance() {
 /// lnomad fetches Python-served pages through a Rust `lnsd` shared instance.
 #[tokio::test]
 async fn lnomad_fetches_pages_via_lnsd_shared_instance() {
-    let (ports, _alloc) = find_available_ports::<3>().await.expect("allocate ports");
-    let [daemon_tcp_port, page_rns_port, page_cmd_port] = ports;
-    let daemon_tcp: SocketAddr = format!("127.0.0.1:{daemon_tcp_port}").parse().unwrap();
+    // port-handoff: the Python page node takes both as arguments.
+    let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate ports");
+    let [page_rns_port, page_cmd_port] = ports;
     let instance_name = format!("lnomad-lnsd-{}", std::process::id());
 
     // The lnsd daemon owns the abstract Unix socket and a TCP server for the
@@ -249,11 +249,12 @@ async fn lnomad_fetches_pages_via_lnsd_shared_instance() {
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(daemon_tcp)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(daemon_storage.path().to_path_buf())
         .build_sync()
         .expect("build lnsd daemon");
     daemon.start().await.expect("start lnsd daemon");
+    let daemon_tcp_port = crate::ports::bound_tcp_addr(&daemon.tcp_listen_addrs()).port();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let (page, dest_info) = start_page_node(page_rns_port, page_cmd_port, daemon_tcp_port).await;
@@ -273,6 +274,8 @@ async fn lnomad_fetches_pages_via_lnsd_shared_instance() {
 /// the same driver and page node, drop-in against the reference daemon.
 #[tokio::test]
 async fn lnomad_fetches_pages_via_rnsd_shared_instance() {
+    // port-handoff: the rnsd and the page node are Python processes that take
+    // their ports as arguments.
     let (ports, _alloc) = find_available_ports::<4>().await.expect("allocate ports");
     let [daemon_rns_port, page_rns_port, daemon_cmd_port, page_cmd_port] = ports;
     let instance_name = format!("lnomad-rnsd-{}", std::process::id());
@@ -303,6 +306,8 @@ async fn lnomad_fetches_pages_via_rnsd_shared_instance() {
 /// instance: the same discovery driver, drop-in against the reference daemon.
 #[tokio::test]
 async fn lnomad_discovers_node_via_rnsd_shared_instance() {
+    // port-handoff: the rnsd and the page node are Python processes that take
+    // their ports as arguments.
     let (ports, _alloc) = find_available_ports::<4>().await.expect("allocate ports");
     let [daemon_rns_port, page_rns_port, daemon_cmd_port, page_cmd_port] = ports;
     let instance_name = format!("lnomad-disc-rnsd-{}", std::process::id());

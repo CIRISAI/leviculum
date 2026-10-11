@@ -231,6 +231,7 @@ async fn pipe_announce_crosses_live_python() {
         "pipe bridge helper missing at {BRIDGE}"
     );
 
+    // port-handoff: the bridge subprocesses take the number as an argument.
     let port = free_tcp_port();
     // Python listens, our lnsd connects: same bridge script, mirrored args.
     let py_command = format!("python3 {BRIDGE} listen {port}");

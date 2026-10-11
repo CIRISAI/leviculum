@@ -4,7 +4,6 @@
 //! (via path request response), it should include the receipt-incremented
 //! hop count, not the raw wire hops from the cache.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -14,7 +13,7 @@ use leviculum_std::config::Config;
 use leviculum_std::driver::ReticulumNodeBuilder;
 
 use crate::common::{init_tracing, parse_dest_hash, wait_for_path_on_node};
-use crate::harness::{find_available_ports, TestDaemon};
+use crate::harness::TestDaemon;
 
 /// Unique counter to avoid collisions between parallel tests.
 static PROBE_TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -86,13 +85,8 @@ async fn test_rnprobe_reports_correct_hops() {
     init_tracing();
 
     // Phase 1: Setup
-    let (ports, _port_alloc) = find_available_ports::<2>()
-        .await
-        .expect("Failed to allocate ports");
-    let daemon_tcp_port = ports[0];
     let test_id = PROBE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let instance_name = format!("probetest_{}_{}", std::process::id(), test_id);
-    let daemon_tcp_addr: SocketAddr = format!("127.0.0.1:{}", daemon_tcp_port).parse().unwrap();
 
     // Generate identity up front so we can export it for rnprobe's config dir.
     let identity = Identity::generate(&mut rand_core::OsRng);
@@ -110,7 +104,7 @@ async fn test_rnprobe_reports_correct_hops() {
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(daemon_tcp_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(_storage.path().to_path_buf())
         .build()
         .await
@@ -119,6 +113,7 @@ async fn test_rnprobe_reports_correct_hops() {
         .start()
         .await
         .expect("Failed to start Rust daemon node");
+    let daemon_tcp_addr = crate::ports::bound_tcp_addr(&daemon_node.tcp_listen_addrs());
 
     // Wait for Unix socket listener
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -135,7 +130,7 @@ async fn test_rnprobe_reports_correct_hops() {
 
     // Connect Python to Rust daemon's TCP server
     py_daemon
-        .add_client_interface("127.0.0.1", daemon_tcp_port, Some("ToRustDaemon"))
+        .add_client_interface("127.0.0.1", daemon_tcp_addr.port(), Some("ToRustDaemon"))
         .await
         .expect("Failed to connect Python to Rust daemon");
 

@@ -43,7 +43,6 @@ use leviculum_core::Identity;
 use leviculum_std::driver::ReticulumNodeBuilder;
 use rand_core::OsRng;
 
-use crate::harness::find_available_ports;
 use crate::identify_loss_proxy::{
     prepare_rncp_sender, python_rns_available, run_rncp_sender, spawn_identify_dropping_proxy,
     spawn_rncp_listener, ProxyLog, RncpListener,
@@ -81,20 +80,15 @@ async fn push_with_identify_drops(identify_drop_budget: usize) -> PushOutcome {
     let sender_identity = Identity::generate(&mut OsRng);
     let sender_hash_hex = hex::encode(sender_identity.hash());
 
-    let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate ports");
-    let (python_port, proxy_port) = (ports[0], ports[1]);
+    // port-handoff: the Python rncp listener reads it from its config file.
+    let python_port = crate::ports::free_port();
 
     let (rncp, dest_hash) = spawn_rncp_listener(python_port, &sender_hash_hex, 5, tmp.path());
     let dest_hash_hex = hex::encode(dest_hash.as_bytes());
 
     let log = Arc::new(Mutex::new(ProxyLog::default()));
-    spawn_identify_dropping_proxy(
-        proxy_port,
-        python_port,
-        identify_drop_budget,
-        Arc::clone(&log),
-    )
-    .await;
+    let proxy_port =
+        spawn_identify_dropping_proxy(python_port, identify_drop_budget, Arc::clone(&log)).await;
 
     let proxy_addr: std::net::SocketAddr = format!("127.0.0.1:{proxy_port}")
         .parse()
@@ -279,14 +273,14 @@ async fn python_rncp_sender_fails_on_the_same_dropped_identify() {
     let sender_identity = Identity::generate(&mut OsRng);
     let sender_hash_hex = hex::encode(sender_identity.hash());
 
-    let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate ports");
-    let (python_port, proxy_port) = (ports[0], ports[1]);
+    // port-handoff: the Python rncp listener reads it from its config file.
+    let python_port = crate::ports::free_port();
 
     let (rncp, dest_hash) = spawn_rncp_listener(python_port, &sender_hash_hex, 5, tmp.path());
     let dest_hash_hex = hex::encode(dest_hash.as_bytes());
 
     let log = Arc::new(Mutex::new(ProxyLog::default()));
-    spawn_identify_dropping_proxy(proxy_port, python_port, 1, Arc::clone(&log)).await;
+    let proxy_port = spawn_identify_dropping_proxy(python_port, 1, Arc::clone(&log)).await;
 
     let (sender_config_dir, sender_identity_path) =
         prepare_rncp_sender(tmp.path(), &sender_identity, proxy_port);

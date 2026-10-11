@@ -70,7 +70,7 @@ use crate::common::{
     temp_storage, wait_for_link_established, wait_for_path_on_node, wait_for_path_reannounce,
     wait_for_path_reannounce_on_daemon,
 };
-use crate::harness::{pick_free_tcp_port, TestDaemon};
+use crate::harness::TestDaemon;
 
 // ----------------------------------------------------------------------------
 // WARN capture for relay-1's asymmetry line.
@@ -209,13 +209,8 @@ struct UndercountChain {
 /// until relay-1 has learned an UNDERCOUNTED path to B. Panics on any setup
 /// failure. Same chain used by both the establish and the data-transfer tests.
 async fn setup_undercount_chain() -> UndercountChain {
-    // --- Ports for the three Rust relay servers (the shim binds :0 itself). ---
-    let relay1_port = pick_free_tcp_port().expect("relay-1 port");
-    let relay2_port = pick_free_tcp_port().expect("relay-2 port");
-    let relay3_port = pick_free_tcp_port().expect("relay-3 port");
-    let relay1_addr: SocketAddr = format!("127.0.0.1:{relay1_port}").parse().unwrap();
-    let relay2_addr: SocketAddr = format!("127.0.0.1:{relay2_port}").parse().unwrap();
-    let relay3_addr: SocketAddr = format!("127.0.0.1:{relay3_port}").parse().unwrap();
+    // The three Rust relay servers bind port 0 like the shim, and each is read
+    // back after its start, before the next hop dials it.
 
     // --- Python responder B (link-accepting destination). ---
     let responder = TestDaemon::start().await.expect("start Python responder B");
@@ -239,13 +234,14 @@ async fn setup_undercount_chain() -> UndercountChain {
     let _relay3_storage = temp_storage("lrproof_hop_undercount", "relay3");
     let mut relay3 = ReticulumNodeBuilder::new()
         .enable_transport(true)
-        .add_tcp_server(relay3_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_tcp_client(responder.rns_addr())
         .storage_path(_relay3_storage.path().to_path_buf())
         .build()
         .await
         .expect("build relay-3");
     relay3.start().await.expect("start relay-3");
+    let relay3_addr = crate::ports::bound_tcp_addr(&relay3.tcp_listen_addrs());
 
     // --- relay-2: transport on, TCP server for the shim, TCP client to
     //     relay-3 (lengthens the true chain to 3 hops from relay-1, so the
@@ -254,13 +250,14 @@ async fn setup_undercount_chain() -> UndercountChain {
     let _relay2_storage = temp_storage("lrproof_hop_undercount", "relay2");
     let mut relay2 = ReticulumNodeBuilder::new()
         .enable_transport(true)
-        .add_tcp_server(relay2_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_tcp_client(relay3_addr)
         .storage_path(_relay2_storage.path().to_path_buf())
         .build()
         .await
         .expect("build relay-2");
     relay2.start().await.expect("start relay-2");
+    let relay2_addr = crate::ports::bound_tcp_addr(&relay2.tcp_listen_addrs());
 
     // --- The undercount shim between relay-1 and relay-2. ---
     let (shim_addr, mangled) = spawn_undercount_shim(relay2_addr).await;
@@ -270,13 +267,15 @@ async fn setup_undercount_chain() -> UndercountChain {
     let _relay1_storage = temp_storage("lrproof_hop_undercount", "relay1");
     let mut relay1 = ReticulumNodeBuilder::new()
         .enable_transport(true)
-        .add_tcp_server(relay1_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .add_tcp_client(shim_addr)
         .storage_path(_relay1_storage.path().to_path_buf())
         .build()
         .await
         .expect("build relay-1");
     relay1.start().await.expect("start relay-1");
+    let relay1_addr = crate::ports::bound_tcp_addr(&relay1.tcp_listen_addrs());
+    let relay1_port = relay1_addr.port();
 
     // Let the relay chain's TCP links come up.
     tokio::time::sleep(Duration::from_secs(2)).await;

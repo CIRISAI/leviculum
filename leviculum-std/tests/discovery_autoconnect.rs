@@ -18,7 +18,6 @@
 //! separately-advertised server port, so the auto-connected interface is a
 //! genuinely new link, distinct from the bootstrap one.
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use leviculum_core::discovery::{
@@ -29,18 +28,16 @@ use leviculum_std::config::{Config, InterfaceConfig};
 use leviculum_std::driver::ReticulumNodeBuilder;
 
 /// Host-wide listener-port allocator, shared with the `mvr` and
-/// `rnsd_interop` suites.
+/// `rnsd_interop` suites; `ports::free_port` draws from it.
 #[path = "support/port_alloc.rs"]
 #[allow(dead_code)]
 mod port_alloc;
 
-/// This file used to draw from a private counter based at 53100 — inside the
-/// default `ip_local_port_range`, where an OS-assigned `bind(0)` anywhere on
-/// the host can take a number between the probe and the consumer's bind. The
-/// shared band sits above that ceiling; see `port_alloc`.
-fn next_port() -> u16 {
-    port_alloc::free_tcp_port()
-}
+/// Every listener here binds port 0 and is read back after its node starts,
+/// except where a number has to exist first; those draws say why.
+#[path = "support/ports.rs"]
+#[allow(dead_code)]
+mod ports;
 
 /// Poll `cond` every 100 ms until it returns true or the deadline passes.
 async fn wait_until(deadline: Duration, mut cond: impl FnMut() -> bool) -> bool {
@@ -56,23 +53,20 @@ async fn wait_until(deadline: Duration, mut cond: impl FnMut() -> bool) -> bool 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn discovered_backbone_endpoint_is_auto_connected_and_carries_traffic() {
-    let bootstrap_port = next_port();
-    let backbone_port = next_port();
-    let bootstrap_addr: SocketAddr = format!("127.0.0.1:{bootstrap_port}").parse().unwrap();
-    let backbone_addr: SocketAddr = format!("127.0.0.1:{backbone_port}").parse().unwrap();
-
     // Node B: discoverable server. Bootstrap port carries the discovery
     // announce to A; the backbone port is the endpoint A will auto-connect to.
     let b_storage = tempfile::tempdir().expect("tempdir b");
     let mut node_b = ReticulumNodeBuilder::new()
         .enable_transport(false)
-        .add_tcp_server(bootstrap_addr)
-        .add_tcp_server(backbone_addr)
+        .add_tcp_server(ports::LOOPBACK_ANY_PORT)
+        .add_tcp_server(ports::LOOPBACK_ANY_PORT)
         .storage_path(b_storage.path().to_path_buf())
         .build()
         .await
         .expect("build b");
     node_b.start().await.expect("start b");
+    let [bootstrap_addr, backbone_addr] = ports::bound_tcp_addrs(&node_b.tcp_listen_addrs());
+    let backbone_port = backbone_addr.port();
 
     // Node A: auto-connect enabled, bootstrap client to B.
     let a_storage = tempfile::tempdir().expect("tempdir a");
@@ -238,9 +232,6 @@ const IFAC_NETKEY: &str = "closedkey-151";
 /// destination proves the spawned client authenticates in both directions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn advertised_ifac_record_connects_under_that_ifac() {
-    let server_port = next_port();
-    let server_addr: SocketAddr = format!("127.0.0.1:{server_port}").parse().unwrap();
-
     // Node B: an IFAC-protected TCP server, built through the production
     // config path (network_name/passphrase -> build_ifac_config).
     let mut b_config = Config::default();
@@ -249,13 +240,12 @@ async fn advertised_ifac_record_connects_under_that_ifac() {
         InterfaceConfig {
             interface_type: "TCPServerInterface".to_string(),
             listen_ip: Some("127.0.0.1".to_string()),
-            listen_port: Some(server_port),
+            listen_port: Some(0),
             networkname: Some(IFAC_NETNAME.to_string()),
             passphrase: Some(IFAC_NETKEY.to_string()),
             ..Default::default()
         },
     );
-    let _ = server_addr;
     let b_storage = tempfile::tempdir().expect("tempdir b");
     let mut node_b = ReticulumNodeBuilder::new()
         .enable_transport(false)
@@ -265,6 +255,7 @@ async fn advertised_ifac_record_connects_under_that_ifac() {
         .await
         .expect("build b");
     node_b.start().await.expect("start b");
+    let server_port = ports::bound_tcp_addr(&node_b.tcp_listen_addrs()).port();
 
     // B's probe destination; its announce is the traffic A must authenticate.
     let probe_identity = Identity::generate(&mut rand_core::OsRng);
@@ -355,19 +346,18 @@ async fn advertised_ifac_record_connects_under_that_ifac() {
 /// any IFAC on the spawned client the path is never learned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn autoconnect_inherits_ifac_of_hearing_interface() {
-    let bootstrap_port = next_port();
-    let backbone_port = next_port();
-
     // Node B: bootstrap + backbone TCP servers, both under the operator's
     // IFAC (one closed network), built through the production config path.
+    // Named, so the listeners report in a defined order (`ports`).
     let mut b_config = Config::default();
-    for (name, port) in [("Bootstrap", bootstrap_port), ("Backbone", backbone_port)] {
+    for name in ["Bootstrap", "Backbone"] {
         b_config.interfaces.insert(
             name.to_string(),
             InterfaceConfig {
+                name: name.to_string(),
                 interface_type: "TCPServerInterface".to_string(),
                 listen_ip: Some("127.0.0.1".to_string()),
-                listen_port: Some(port),
+                listen_port: Some(0),
                 networkname: Some(IFAC_NETNAME.to_string()),
                 passphrase: Some(IFAC_NETKEY.to_string()),
                 ..Default::default()
@@ -383,6 +373,9 @@ async fn autoconnect_inherits_ifac_of_hearing_interface() {
         .await
         .expect("build b");
     node_b.start().await.expect("start b");
+    // "Backbone" sorts before "Bootstrap".
+    let [backbone_addr, bootstrap_addr] = ports::bound_tcp_addrs(&node_b.tcp_listen_addrs());
+    let (bootstrap_port, backbone_port) = (bootstrap_addr.port(), backbone_addr.port());
 
     // Node A: an IFAC'd bootstrap client to B (the hearing interface) and
     // auto-connect enabled. No seeded records: A learns of the backbone only
@@ -528,9 +521,14 @@ async fn autoconnect_inherits_ifac_of_hearing_interface() {
 /// auto-connect must fail closed: no `autoconnect/*` interface may appear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ifac_node_refuses_open_discovered_endpoint() {
-    let udp_listen = next_port();
-    let udp_forward = next_port();
-    let target_port = next_port(); // nothing listens; must not even be dialed
+    // port-handoff: the two ends of a UDP interface are both in its config
+    // before it binds either; nothing else listens on them.
+    let udp_listen = ports::free_port();
+    // port-handoff: as above.
+    let udp_forward = ports::free_port();
+    // port-handoff: nothing listens here and nothing may: the record must not
+    // even be dialled, so the number only has to be one nobody serves.
+    let target_port = ports::free_port();
 
     let mut config = Config::default();
     config.interfaces.insert(
@@ -614,8 +612,10 @@ fn read_discovery_records(storage: &std::path::Path) -> Vec<DiscoveredInterfaceR
 /// drops unauthenticated traffic in both directions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn published_ifac_record_connects_under_that_ifac() {
-    let bootstrap_port = next_port();
-    let backbone_port = next_port();
+    // port-handoff: B's discovery announce carries the configured
+    // `listen_port` (src/discovery.rs), not the bound one, so the advertised
+    // backbone needs its number in the config. The bootstrap binds port 0.
+    let backbone_port = ports::free_port();
 
     // Node B: an OPEN bootstrap server (so A can hear anything at all) plus the
     // IFAC-protected backbone it advertises, publishing its access code.
@@ -626,7 +626,7 @@ async fn published_ifac_record_connects_under_that_ifac() {
             name: "Open Bootstrap".to_string(),
             interface_type: "TCPServerInterface".to_string(),
             listen_ip: Some("127.0.0.1".to_string()),
-            listen_port: Some(bootstrap_port),
+            listen_port: Some(0),
             ..Default::default()
         },
     );
@@ -658,6 +658,9 @@ async fn published_ifac_record_connects_under_that_ifac() {
         .await
         .expect("build b");
     node_b.start().await.expect("start b");
+    // "Open Bootstrap" sorts before "Published Backbone".
+    let [bootstrap_addr, _] = ports::bound_tcp_addrs::<2>(&node_b.tcp_listen_addrs());
+    let bootstrap_port = bootstrap_addr.port();
 
     // Node A: an OPEN bootstrap client to B and auto-connect enabled. No IFAC
     // configured, no seeded record -- everything it will authenticate with has
@@ -803,19 +806,20 @@ async fn published_ifac_record_connects_under_that_ifac() {
 /// a second of every teardown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_never_connected_endpoint_is_not_redialled_at_the_detach_rate() {
-    let good_port = next_port();
-    let dead_port = next_port(); // nothing ever listens here
-    let good_addr: SocketAddr = format!("127.0.0.1:{good_port}").parse().unwrap();
+    // port-handoff: nothing ever listens here; the number only has to be one
+    // nobody serves.
+    let dead_port = ports::free_port();
 
     let b_storage = tempfile::tempdir().expect("tempdir b");
     let mut node_b = ReticulumNodeBuilder::new()
         .enable_transport(false)
-        .add_tcp_server(good_addr)
+        .add_tcp_server(ports::LOOPBACK_ANY_PORT)
         .storage_path(b_storage.path().to_path_buf())
         .build()
         .await
         .expect("build b");
     node_b.start().await.expect("start b");
+    let good_port = ports::bound_tcp_addr(&node_b.tcp_listen_addrs()).port();
 
     // Both records are on disk before A starts, so the first auto-connect poll
     // sees them together and the cap (2) covers both: which one ranks higher
@@ -902,26 +906,22 @@ async fn a_never_connected_endpoint_is_not_redialled_at_the_detach_rate() {
 /// must come back rather than leaving A with no way into the network.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_bootstrap_only_interface_is_detached_once_autoconnect_is_satisfied() {
-    let bootstrap_port = next_port();
-    let backbone_port = next_port();
-    let bootstrap_addr: SocketAddr = format!("127.0.0.1:{bootstrap_port}").parse().unwrap();
-    let backbone_addr: SocketAddr = format!("127.0.0.1:{backbone_port}").parse().unwrap();
-
     // Node B: two listeners. The first is the seed entry point A dials with its
     // bootstrap-only client; the second is the endpoint A discovers.
     let b_storage = tempfile::tempdir().expect("tempdir b");
     let mut node_b = ReticulumNodeBuilder::new()
         .enable_transport(false)
-        .add_tcp_server(bootstrap_addr)
-        .add_tcp_server(backbone_addr)
+        .add_tcp_server(ports::LOOPBACK_ANY_PORT)
+        .add_tcp_server(ports::LOOPBACK_ANY_PORT)
         .storage_path(b_storage.path().to_path_buf())
         .build()
         .await
         .expect("build b");
     node_b.start().await.expect("start b");
+    let [bootstrap_addr, backbone_addr] = ports::bound_tcp_addrs(&node_b.tcp_listen_addrs());
 
     let a_storage = tempfile::tempdir().expect("tempdir a");
-    seed_discovered_record(a_storage.path(), backbone_port, None, None, 0xB1);
+    seed_discovered_record(a_storage.path(), backbone_addr.port(), None, None, 0xB1);
     let mut node_a = ReticulumNodeBuilder::new()
         .enable_transport(false)
         .add_tcp_client(bootstrap_addr)

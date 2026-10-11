@@ -33,7 +33,6 @@ use leviculum_core::{Destination, DestinationHash, DestinationType, Direction, I
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 use rand_core::OsRng;
 
-use crate::harness::find_available_ports;
 use crate::identify_loss_proxy::{
     prepare_rncp_sender, python_rns_available, spawn_identify_dropping_proxy, spawn_rncp_sender,
     ProxyLog, CTX_RESOURCE_ADV, CTX_RESOURCE_RCL,
@@ -55,6 +54,8 @@ struct LncpListener {
     save_dir: PathBuf,
     task: tokio::task::JoinHandle<()>,
     node: Arc<ReticulumNode>,
+    /// The port its TCP server bound (port 0, read back after start).
+    port: u16,
 }
 
 impl Drop for LncpListener {
@@ -70,7 +71,6 @@ impl Drop for LncpListener {
 /// listener's `-a` can be written before anything starts, exactly as the
 /// Python-listener direction does it.
 async fn spawn_lncp_listener(
-    tcp_port: u16,
     identity: &Identity,
     allowed: Vec<[u8; 16]>,
     tmp: &std::path::Path,
@@ -92,18 +92,16 @@ async fn spawn_lncp_listener(
     .expect("build listener destination")
     .hash();
 
-    let listen_addr: std::net::SocketAddr = format!("127.0.0.1:{tcp_port}")
-        .parse()
-        .expect("listener addr");
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(false)
-        .add_tcp_server(listen_addr)
+        .add_tcp_server(crate::ports::LOOPBACK_ANY_PORT)
         .storage_path(storage)
         .build()
         .await
         .expect("build listener node");
     let mut events = node.take_event_receiver().expect("event receiver");
     node.start().await.expect("start listener node");
+    let port = crate::ports::bound_tcp_addr(&node.tcp_listen_addrs()).port();
     let node = Arc::new(node);
 
     let task = tokio::spawn({
@@ -135,6 +133,7 @@ async fn spawn_lncp_listener(
         save_dir,
         task,
         node,
+        port,
     }
 }
 
@@ -172,19 +171,15 @@ async fn lncp_listener_rejects_an_advertisement_whose_identify_was_lost() {
     let sender_identity = Identity::generate(&mut OsRng);
     let listener_identity = Identity::generate(&mut OsRng);
 
-    let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate ports");
-    let (listener_port, proxy_port) = (ports[0], ports[1]);
-
-    let log = Arc::new(Mutex::new(ProxyLog::default()));
-    spawn_identify_dropping_proxy(proxy_port, listener_port, 1, Arc::clone(&log)).await;
-
     let listener = spawn_lncp_listener(
-        listener_port,
         &listener_identity,
         vec![*sender_identity.hash()],
         tmp.path(),
     )
     .await;
+
+    let log = Arc::new(Mutex::new(ProxyLog::default()));
+    let proxy_port = spawn_identify_dropping_proxy(listener.port, 1, Arc::clone(&log)).await;
     let dest_hash_hex = hex::encode(listener.dest_hash.as_bytes());
 
     let (sender_config_dir, sender_identity_path) =
@@ -301,19 +296,15 @@ async fn our_sender_and_our_listener_recover_from_a_lost_identify() {
     let sender_identity = Identity::generate(&mut OsRng);
     let listener_identity = Identity::generate(&mut OsRng);
 
-    let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate ports");
-    let (listener_port, proxy_port) = (ports[0], ports[1]);
-
-    let log = Arc::new(Mutex::new(ProxyLog::default()));
-    spawn_identify_dropping_proxy(proxy_port, listener_port, 1, Arc::clone(&log)).await;
-
     let listener = spawn_lncp_listener(
-        listener_port,
         &listener_identity,
         vec![*sender_identity.hash()],
         tmp.path(),
     )
     .await;
+
+    let log = Arc::new(Mutex::new(ProxyLog::default()));
+    let proxy_port = spawn_identify_dropping_proxy(listener.port, 1, Arc::clone(&log)).await;
     let dest_hash_hex = hex::encode(listener.dest_hash.as_bytes());
 
     let proxy_addr: std::net::SocketAddr = format!("127.0.0.1:{proxy_port}")

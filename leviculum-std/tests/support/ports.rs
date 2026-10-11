@@ -1,4 +1,9 @@
-//! Ports for the mvr tier: who picks the number, and when.
+//! Ports for the tests: who picks the number, and when.
+//!
+//! Shared by the `mvr` and `rnsd_interop` suites and the single-file tests by
+//! `#[path]` include. Every including crate also has the host-wide allocator
+//! at `crate::port_alloc` (a `#[path]` module of its own, or a `use` of the
+//! harness's), which is what [`free_port`] draws from.
 //!
 //! A port number picked in advance and bound later is a handoff, and in the
 //! window between the two anything on the host may take it. Codeberg nightly
@@ -48,18 +53,27 @@ pub fn bind_loopback_tcp() -> TcpListener {
 /// The one TCP server address a started node reports, for a node built with
 /// `add_tcp_server(LOOPBACK_ANY_PORT)`.
 pub fn bound_tcp_addr(listen_addrs: &[SocketAddr]) -> SocketAddr {
-    match listen_addrs {
-        [addr] => *addr,
-        other => panic!(
-            "expected the node to report exactly one bound TCP listener after \
-             start(), got {other:?}"
-        ),
-    }
+    let [addr] = bound_tcp_addrs(listen_addrs);
+    addr
+}
+
+/// The `N` TCP server addresses a started node reports, in interface order:
+/// the config-file sections sorted by their `name`, then the builder's
+/// `add_tcp_server` calls in call order (the listener id is the interface
+/// index, `driver/interface_build/tcp.rs`, and the builder sorts the
+/// sections, `driver/builder.rs`).
+pub fn bound_tcp_addrs<const N: usize>(listen_addrs: &[SocketAddr]) -> [SocketAddr; N] {
+    <[SocketAddr; N]>::try_from(listen_addrs).unwrap_or_else(|_| {
+        panic!(
+            "expected the node to report exactly {N} bound TCP listeners after \
+             start(), got {listen_addrs:?}"
+        )
+    })
 }
 
 /// A port number for a consumer that binds it later, outside this process.
 ///
-/// From the host-wide counter in `crate::harness::port_alloc`, above the
+/// From the host-wide counter in `crate::port_alloc`, above the
 /// kernel's ephemeral range and probed free at the time of the call. Between
 /// this call and the consumer's bind the number is unprotected: the counter
 /// keeps every other drawer off it, nothing keeps out a socket that never
@@ -67,5 +81,5 @@ pub fn bound_tcp_addr(listen_addrs: &[SocketAddr]) -> SocketAddr {
 /// [`LOOPBACK_ANY_PORT`] and report back; every call site says why in a
 /// `port-handoff:` comment.
 pub fn free_port() -> u16 {
-    crate::harness::port_alloc::free_tcp_port()
+    crate::port_alloc::free_tcp_port()
 }
