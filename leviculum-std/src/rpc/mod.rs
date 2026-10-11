@@ -33,7 +33,7 @@ use crate::interfaces::InterfaceStatsMap;
 use connection::{read_message, read_message_bounded, server_handshake, write_message};
 use error::RpcError;
 use handlers::handle_request;
-use pickle::parse_request;
+use pickle::parse_requests;
 use radio_cache::SharedPacketRadioCache;
 
 use crate::interfaces::ipc::{
@@ -132,7 +132,8 @@ async fn rpc_accept_loop(
     }
 }
 
-/// Handle a single RPC connection: handshake -> read -> dispatch -> write -> close.
+/// Handle a single RPC connection: handshake -> read -> dispatch and write each
+/// request the dict carries -> close.
 #[allow(clippy::too_many_arguments)]
 async fn handle_rpc_connection(
     mut stream: IpcStream,
@@ -148,27 +149,31 @@ async fn handle_rpc_connection(
     server_handshake(&mut stream, authkey).await?;
 
     let request_bytes = read_message(&mut stream).await?;
-    let (request, codec) = parse_request(&request_bytes)?;
+    let (requests, codec) = parse_requests(&request_bytes)?;
 
-    tracing::debug!("RPC request: {:?} ({:?})", request, codec);
+    // One response per command key, in order, on the same connection, as
+    // Python's `rpc_loop` answers them (see `parse_requests`).
+    for request in &requests {
+        tracing::debug!("RPC request: {:?} ({:?})", request, codec);
 
-    let response_bytes = {
-        let mut core = core.lock_recover();
-        let peer_count = auto_peer_count.total();
-        handle_request(
-            &request,
-            &mut core,
-            start_time,
-            iface_stats_map,
-            inventory,
-            peer_count,
-            discovery_storage,
-            radio_cache,
-            codec,
-        )?
-    };
+        let response_bytes = {
+            let mut core = core.lock_recover();
+            let peer_count = auto_peer_count.total();
+            handle_request(
+                request,
+                &mut core,
+                start_time,
+                iface_stats_map,
+                inventory,
+                peer_count,
+                discovery_storage,
+                radio_cache,
+                codec,
+            )?
+        };
 
-    write_message(&mut stream, &response_bytes).await?;
+        write_message(&mut stream, &response_bytes).await?;
+    }
 
     Ok(())
 }

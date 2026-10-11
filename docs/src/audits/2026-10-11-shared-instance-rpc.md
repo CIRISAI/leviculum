@@ -38,16 +38,16 @@ raw HMAC-MD5 for Python < 3.12 and tagged `{sha256}` for 3.12+
 (`deliver_challenge`, `leviculum-std/src/rpc/connection.rs:140`,
 exercised against simulated legacy clients in the same file's tests);
 the default authkey is SHA-256 over the transport identity's private
-key (`rpc_authkey`, `leviculum-std/src/rpc/mod.rs:184`, against
+key (`rpc_authkey`, `leviculum-std/src/rpc/mod.rs:189`, against
 `reference/Reticulum/RNS/Reticulum.py:355-356`), which is what lets a
 Python client sharing the daemon's storage derive the same key; one
 request per connection, answered and closed
-(`handle_rpc_connection`, `leviculum-std/src/rpc/mod.rs:137`, against
+(`handle_rpc_connection`, `leviculum-std/src/rpc/mod.rs:138`, against
 the accept-recv-reply-close loop,
 `reference/Reticulum/RNS/Reticulum.py:1207-1260`); and a verb the
 server does not know gets no reply and a closed connection on both
-sides (`request_from_value`, `leviculum-std/src/rpc/pickle.rs:316-320`
-and `:394`; Python matches no arm and closes,
+sides (`requests_from_value`, `leviculum-std/src/rpc/pickle.rs:332-336`
+and `:411`; Python matches no arm and closes,
 `reference/Reticulum/RNS/Reticulum.py:1213-1260`). The codec is
 sniffed per request and the response encoded to match, so both the
 msgpack dialect current upstream speaks and the older pickle dialect
@@ -62,7 +62,7 @@ and `:1265`). Our `[reticulum]` parser has no arm for the key, so it
 falls into the tolerated-unknown catch-all
 (`apply_reticulum_key`, `leviculum-std/src/ini_config.rs:568`) and the
 daemon keys its listener with the identity-derived default
-unconditionally (`leviculum-std/src/rpc/mod.rs:184-192`). What a tool
+unconditionally (`leviculum-std/src/rpc/mod.rs:189-197`). What a tool
 sees: `rnstatus` reads the same config file, derives the configured
 key, and fails our HMAC handshake — "Could not get RNS status" against
 a daemon that is up and healthy, with nothing in either log naming the
@@ -109,7 +109,7 @@ dials for the data channel (`spawn_local_server`,
 `leviculum-std/src/interfaces/local.rs:140`; `spawn_local_client`,
 `leviculum-std/src/interfaces/local.rs:468`) and the RPC channel
 (`spawn_rpc_server`, `leviculum-std/src/rpc/mod.rs:50`; `rpc_client_call_at`,
-`leviculum-std/src/rpc/mod.rs:281`), through `bind`
+`leviculum-std/src/rpc/mod.rs:286`), through `bind`
 (`leviculum-std/src/interfaces/ipc.rs:152`) and `connect`
 (`leviculum-std/src/interfaces/ipc.rs:174`). A node takes the
 transport from the config it is built from; our client tools take it from
@@ -134,7 +134,7 @@ response above 128 MiB (`MAX_RESPONSE_LEN`,
 the prefix claims, up to 2 GiB. The whole legitimate request
 vocabulary measures under 130 bytes
 (`rpc_request_vocabulary_fits_under_the_ceiling`,
-`leviculum-std/src/rpc/pickle.rs:990`), so no real client can hit the
+`leviculum-std/src/rpc/pickle.rs:1009`), so no real client can hit the
 ceiling. Class: deviation ours (deliberate, a pre-auth allocation
 fix). No tool-visible consequence.
 
@@ -156,7 +156,7 @@ read the answers:
   stats, battery) and the post-1.3.5 key set a 1.5.2 `rnstatus`
   indexes unguarded (`mtu`, `txdrp`, the sort keys; pinned with types
   and defaults in `test_rpc_interface_stats_round_trip`,
-  `leviculum-std/src/rpc/mod.rs:698`). Display names reproduce the
+  `leviculum-std/src/rpc/mod.rs:703`). Display names reproduce the
   reference's `str(interface)` forms byte for byte, including the
   prefixes `rnstatus` hides rows by and the `Shared Instance[` prefix
   its client arithmetic keys on (`tcp_spawned_name`,
@@ -169,7 +169,7 @@ read the answers:
   `reference/Reticulum/RNS/Utilities/rnstatus.py:432`) reads the same
   against either daemon. Announce-rate defaults follow Python's
   transport branch (3600/0/5 when transport is on, None when off;
-  pinned in `leviculum-std/src/rpc/mod.rs:930-976`).
+  pinned in `leviculum-std/src/rpc/mod.rs:935-981`).
 * **`path_table`** — six keys, units, the direct-path `via` spelled as
   the destination hash exactly as Python's `received_from` makes it
   (`build_path_table`, `leviculum-std/src/rpc/handlers.rs:1113`,
@@ -177,7 +177,7 @@ read the answers:
   `reference/Reticulum/RNS/Transport.py:1741`), `max_hops` honoured
   with None as no-limit, and our own client always sending the key
   because Python's server `KeyError`s without it
-  (`rpc_query`, `leviculum-std/src/rpc/mod.rs:358-368`).
+  (`rpc_query`, `leviculum-std/src/rpc/mod.rs:363-373`).
 * **`link_count` / `first_hop_timeout` / `next_hop`** — the transport
   link table's size, the reference's bitrate-scaled timeout formula,
   and the direct-path destination-hash answer
@@ -194,12 +194,12 @@ read the answers:
   `source`/`until`/`reason`, and the membership bool
   (`build_blackholed_identities`,
   `leviculum-std/src/rpc/handlers.rs:1899`, round-tripped in
-  `test_rpc_blackhole_round_trip`, `leviculum-std/src/rpc/mod.rs:1056`;
+  `test_rpc_blackhole_round_trip`, `leviculum-std/src/rpc/mod.rs:1061`;
   consumed by `rnpath -b/-B/-U`,
   `reference/Reticulum/RNS/Utilities/rnpath.py:185-199`).
 * **`destination_data` and `identity_data`** — all five ops parsed and
   served with Python's booleans
-  (`leviculum-std/src/rpc/pickle.rs:363-392`,
+  (`leviculum-std/src/rpc/pickle.rs:379-408`,
   `leviculum-std/src/rpc/handlers.rs:1979-1985`, against
   `reference/Reticulum/RNS/Reticulum.py:1248-1258`). The
   `identity_data` arm closes the gap the 2026-06-29 conformance pass
@@ -210,7 +210,7 @@ read the answers:
   `medium_path_timeout`, `active_link_count`) — additive; a Python
   `rnsd` asked any of them closes the connection without replying, and
   our callers treat that as "does not know the question"
-  (`rpc_query`'s contract, `leviculum-std/src/rpc/mod.rs:332-341`).
+  (`rpc_query`'s contract, `leviculum-std/src/rpc/mod.rs:337-346`).
 
 **D4 — `rate_table` answers an always-empty `timestamps` list, and
 `rnpath -r` renders an error for every row.** Python's rate entries
@@ -406,14 +406,23 @@ client has a path to and the daemon none, prints `Sent probe 1 (16
 bytes) to <hash>` with no suffix (red before: `... on unknown`); and by
 `next_hop_if_name_without_a_path_is_the_string_none`.
 
-Two permissive edges, noted and harmless: `try_into_hash` accepts and
-truncates an over-long hash where Python's client-side guards refuse
-it (`leviculum-std/src/rpc/handlers.rs:2116-2124`); a request dict
-carrying both `get` and `drop` answers the `get` only, where Python
-would answer both in sequence
-(`request_from_value`, `leviculum-std/src/rpc/pickle.rs:255`;
-`reference/Reticulum/RNS/Reticulum.py:1213-1236`) — no real client
+Two permissive edges, noted and harmless: `try_into_hash` accepted and
+truncated an over-long hash where Python's client-side guards refuse
+it; a request dict carrying both `get` and `drop` answered the `get`
+only, where Python answers both in sequence
+(`reference/Reticulum/RNS/Reticulum.py:1213-1236`) — no real client
 sends either shape.
+
+*Both closed.* `try_into_hash` takes exactly 16 bytes and logs the
+client guard's wording for any other length
+(`leviculum-std/src/rpc/handlers.rs:2123-2129`, the message at
+`:2133`, `rnpath.py:247`); a wrong length is answered as an unknown
+hash, which is what Python's server answers for it. The request parser
+returns one request per command key, in `rpc_loop`'s order
+(`requests_from_value`, `leviculum-std/src/rpc/pickle.rs:270`), and the
+connection writes one response per request (`handle_rpc_connection`,
+`leviculum-std/src/rpc/mod.rs:138`, its loop at `:153-175`). Pinned by `test_try_into_hash`
+and `a_dict_with_get_and_drop_yields_both_in_order`.
 
 ## 3. The LocalInterface: the data channel and its transport semantics
 
@@ -644,7 +653,7 @@ tunes the ingress/egress limiters globally
 per-interface spellings (`leviculum-std/src/ini_config.rs:845-855`)
 but the global ones fall into the catch-all, so our
 transport-enabled defaults are the hardcoded 3600/0/5
-(`leviculum-std/src/rpc/mod.rs:810-826` pins them). A config that
+(`leviculum-std/src/rpc/mod.rs:815-826` pins them). A config that
 raises the global target gets Python's enforcement and ours at the
 defaults — different rebroadcast rate limiting on the same mesh.
 Class: **silently ignored config**. Test: drop-in — a config with
@@ -730,7 +739,7 @@ rather than misleading.
   (closing the 2026-06-29 gap).
 * Our own clients (`lnstatus`, `lnprobe`, `lnpath`, `lncp`,
   `lnstest`) drive the same verbs through one helper surface
-  (`rpc_query`, `leviculum-std/src/rpc/mod.rs:351`), and periculum's
+  (`rpc_query`, `leviculum-std/src/rpc/mod.rs:356`), and periculum's
   `rns` client manifest points the Python tools at lnsd via
   `--client-adapter` — every divergence above is therefore also an
   A/B-validity question, not only a stranger's-first-contact one.
@@ -764,7 +773,7 @@ rather than misleading.
 3. **The memory `project_identity_data_rpc_gap` ("the shared-instance
    RPC does not parse the identity_data retain key") — stale,
    refuted.** The arm exists with tests in both codecs
-   (`leviculum-std/src/rpc/pickle.rs:381-392`, tests at `:1167-1242`)
+   (`leviculum-std/src/rpc/pickle.rs:397-408`, tests at `:1167-1242`)
    and real retain semantics behind it
    (`identity_data_retain`, `leviculum-std/src/rpc/handlers.rs:2009`).
    The memory is updated alongside this audit.
@@ -773,7 +782,7 @@ rather than misleading.
    (`docs/src/guide/lnstatus.md:5-7`) is pinned by the render-parity
    corpus under `leviculum-cli/src/lnstatus_render/` and was not
    re-measured here. The authkey-derivation comment
-   (`leviculum-std/src/rpc/mod.rs:178-183`) matches
+   (`leviculum-std/src/rpc/mod.rs:183-188`) matches
    `reference/Reticulum/RNS/Reticulum.py:355-356` exactly. The
    first-hop-timeout formula comment names Transport.py:2700 and the
    reference line is the function it claims

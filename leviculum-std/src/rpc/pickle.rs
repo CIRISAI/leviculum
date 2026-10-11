@@ -239,28 +239,44 @@ pub(crate) enum RpcRequest {
 
 /// Parse an RPC request, auto-detecting pickle vs msgpack.
 ///
-/// Returns the typed request together with the codec it arrived in, so the
-/// caller can encode the response to match (see [`serialize_response`]).
-pub(crate) fn parse_request(data: &[u8]) -> Result<(RpcRequest, Codec), RpcError> {
+/// Returns the typed requests the dict carries, in answer order, together
+/// with the codec it arrived in, so the caller can encode each response to
+/// match (see [`serialize_response`]).
+pub(crate) fn parse_requests(data: &[u8]) -> Result<(Vec<RpcRequest>, Codec), RpcError> {
     let codec = detect_codec(data);
     let value = match codec {
         Codec::Pickle => serde_pickle::value_from_slice(data, Default::default())
             .map_err(|e| RpcError::Pickle(format!("deserialize: {}", e)))?,
         Codec::Msgpack => msgpack_to_value(data)?,
     };
-    Ok((request_from_value(value)?, codec))
+    Ok((requests_from_value(value)?, codec))
 }
 
-/// Dispatch a decoded request dict (codec-agnostic) into a typed [`RpcRequest`].
-fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
+/// The first request of [`parse_requests`], for tests that send one command.
+#[cfg(test)]
+pub(crate) fn parse_request(data: &[u8]) -> Result<(RpcRequest, Codec), RpcError> {
+    let (mut requests, codec) = parse_requests(data)?;
+    Ok((requests.remove(0), codec))
+}
+
+/// Dispatch a decoded request dict (codec-agnostic) into typed
+/// [`RpcRequest`]s, one per command key it carries, in the order Python's
+/// `rpc_loop` tests them (`get`, `drop`, `blackhole_identity`,
+/// `unblackhole_identity`, `destination_data`, `identity_data`,
+/// Reticulum.py:1213-1258). Python answers each key it finds on the same
+/// connection, one response after the other; answering the first only left a
+/// client that sent two keys waiting on a second response that never came.
+/// No stock client sends more than one, so in practice the list has one entry.
+fn requests_from_value(value: Value) -> Result<Vec<RpcRequest>, RpcError> {
     let dict = match value {
         Value::Dict(d) => d,
         _ => return Err(RpcError::InvalidFormat("expected dict".into())),
     };
+    let mut requests = Vec::new();
 
     // Check for "get" key
     if let Some(get_val) = dict_get_str(&dict, "get") {
-        return match get_val.as_str() {
+        requests.push(match get_val.as_str() {
             "interface_stats" => Ok(RpcRequest::GetInterfaceStats),
             "link_count" => Ok(RpcRequest::GetLinkCount),
             "link_table" => Ok(RpcRequest::GetLinkTable),
@@ -317,12 +333,12 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
                 "unknown get command: {}",
                 other
             ))),
-        };
+        }?);
     }
 
     // Check for "drop" key
     if let Some(drop_val) = dict_get_str(&dict, "drop") {
-        return match drop_val.as_str() {
+        requests.push(match drop_val.as_str() {
             "path" => {
                 let destination_hash = dict_get_bytes(&dict, "destination_hash")
                     .ok_or_else(|| RpcError::InvalidFormat("missing destination_hash".into()))?;
@@ -338,14 +354,14 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
                 "unknown drop command: {}",
                 other
             ))),
-        };
+        }?);
     }
 
     // Check for "blackhole_identity" key
     if let Some(identity_bytes) = dict_get_bytes(&dict, "blackhole_identity") {
         let until = dict_get_float(&dict, "until");
         let reason = dict_get_str(&dict, "reason");
-        return Ok(RpcRequest::BlackholeIdentity {
+        requests.push(RpcRequest::BlackholeIdentity {
             identity_hash: identity_bytes,
             until,
             reason,
@@ -354,7 +370,7 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
 
     // Check for "unblackhole_identity" key
     if let Some(identity_bytes) = dict_get_bytes(&dict, "unblackhole_identity") {
-        return Ok(RpcRequest::UnblackholeIdentity {
+        requests.push(RpcRequest::UnblackholeIdentity {
             identity_hash: identity_bytes,
         });
     }
@@ -363,7 +379,7 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
     if let Some(op) = dict_get_str(&dict, "destination_data") {
         let destination_hash = dict_get_bytes(&dict, "destination_hash")
             .ok_or_else(|| RpcError::InvalidFormat("missing destination_hash".into()))?;
-        return match op.as_str() {
+        requests.push(match op.as_str() {
             "used" => Ok(RpcRequest::DestinationDataUsed { destination_hash }),
             "retain" => Ok(RpcRequest::DestinationDataRetain { destination_hash }),
             "unretain" => Ok(RpcRequest::DestinationDataUnretain { destination_hash }),
@@ -371,7 +387,7 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
                 "unknown destination_data operation: {}",
                 other
             ))),
-        };
+        }?);
     }
 
     // Check for "identity_data" key (retain / unretain operations).
@@ -381,17 +397,20 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
     if let Some(op) = dict_get_str(&dict, "identity_data") {
         let identity_hash = dict_get_bytes(&dict, "identity_hash")
             .ok_or_else(|| RpcError::InvalidFormat("missing identity_hash".into()))?;
-        return match op.as_str() {
+        requests.push(match op.as_str() {
             "retain" => Ok(RpcRequest::IdentityDataRetain { identity_hash }),
             "unretain" => Ok(RpcRequest::IdentityDataUnretain { identity_hash }),
             other => Err(RpcError::InvalidFormat(format!(
                 "unknown identity_data operation: {}",
                 other
             ))),
-        };
+        }?);
     }
 
-    Err(RpcError::InvalidFormat("unrecognized request".into()))
+    if requests.is_empty() {
+        return Err(RpcError::InvalidFormat("unrecognized request".into()));
+    }
+    Ok(requests)
 }
 
 /// Serialize an RPC response value in the given codec.
@@ -1239,5 +1258,33 @@ mod tests {
         ]);
         let data = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
         assert!(parse_request(&data).is_err());
+    }
+
+    /// A dict with both `get` and `drop` yields both requests, `get` first,
+    /// as Python's `rpc_loop` answers both in that order on one connection
+    /// (Reticulum.py:1213-1236). Before, the `drop` was never parsed and its
+    /// response never sent.
+    #[test]
+    fn a_dict_with_get_and_drop_yields_both_in_order() {
+        let hash = vec![0x42u8; 16];
+        let dict = pickle_dict(vec![
+            (pickle_str_key("get"), pickle_str("next_hop")),
+            (pickle_str_key("drop"), pickle_str("path")),
+            (pickle_str_key("destination_hash"), pickle_bytes(&hash)),
+        ]);
+        let data = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
+        let (requests, codec) = parse_requests(&data).unwrap();
+        assert_eq!(codec, Codec::Pickle);
+        match requests.as_slice() {
+            [RpcRequest::GetNextHop {
+                destination_hash: get_hash,
+            }, RpcRequest::DropPath {
+                destination_hash: drop_hash,
+            }] => {
+                assert_eq!(get_hash, &hash);
+                assert_eq!(drop_hash, &hash);
+            }
+            other => panic!("expected [GetNextHop, DropPath], got {other:?}"),
+        }
     }
 }

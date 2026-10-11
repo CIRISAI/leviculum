@@ -2112,15 +2112,31 @@ fn interface_type_from_name(name: &str) -> String {
     }
 }
 
-/// Try to convert a byte slice to a 16-byte hash.
+/// Convert a byte slice to a 16-byte hash, refusing any other length.
+///
+/// An over-long hash used to be truncated to its first 16 bytes and could
+/// then match a path it does not name. Python's server looks the bytes up as
+/// given, so a wrong length simply finds nothing, and its clients refuse it
+/// before sending (`rnpath.py:247`, `rnprobe.py:60`); the debug line carries
+/// their message. Every caller answers a refusal as it answers an unknown
+/// hash.
 fn try_into_hash(bytes: &[u8]) -> Option<[u8; TRUNCATED_HASHBYTES]> {
-    if bytes.len() >= TRUNCATED_HASHBYTES {
-        let mut h = [0u8; TRUNCATED_HASHBYTES];
-        h.copy_from_slice(&bytes[..TRUNCATED_HASHBYTES]);
-        Some(h)
-    } else {
-        None
+    let hash = <[u8; TRUNCATED_HASHBYTES]>::try_from(bytes).ok();
+    if hash.is_none() {
+        tracing::debug!("RPC: {}", invalid_hash_length_message(bytes.len()));
     }
+    hash
+}
+
+/// The client-side guard's wording (`rnpath.py:247`), with the length the
+/// request actually carried.
+fn invalid_hash_length_message(got_bytes: usize) -> String {
+    format!(
+        "Destination length is invalid, must be {} hexadecimal characters ({} bytes), got {} bytes.",
+        TRUNCATED_HASHBYTES * 2,
+        TRUNCATED_HASHBYTES,
+        got_bytes
+    )
 }
 
 /// Compute Unix epoch base from the monotonic start_time.
@@ -2695,7 +2711,13 @@ mod tests {
     #[test]
     fn test_try_into_hash() {
         assert!(try_into_hash(&[0xAB; 16]).is_some());
-        assert!(try_into_hash(&[0xAB; 20]).is_some());
+        // An over-long hash is refused, not truncated to its first 16 bytes.
+        assert!(try_into_hash(&[0xAB; 20]).is_none());
+        assert_eq!(
+            invalid_hash_length_message(20),
+            "Destination length is invalid, must be 32 hexadecimal characters (16 bytes), \
+             got 20 bytes."
+        );
         assert!(try_into_hash(&[0xAB; 15]).is_none());
         assert!(try_into_hash(&[]).is_none());
     }
