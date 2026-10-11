@@ -1,11 +1,18 @@
 <!--
 Vendored fork of nmea0183 0.6.0 for Leviculum (Codeberg #386).
 
-The only change to behaviour: every `str::parse::<f32>()` / `::<f64>()` in
+The first change to behaviour: every `str::parse::<f32>()` / `::<f64>()` in
 the crate is replaced by the fixed-point parse in `src/fixed.rs`, which
 keeps `core::num::dec2flt` (17 044 B of flash) out of the nRF firmware
 image. It is bit-identical to `str::parse` for every NMEA field shape; the
 bound, and what falls outside it, are documented at the top of that file.
+
+One change to the API: a GGA's `time`, `latitude`, `longitude` and `hdop`
+are `Option`s, and a GGA parses as soon as its fix quality and satellite
+count are present (leviculum#413). Upstream returned `GGA(None)` for the
+sentence a receiver sends while it searches for a fix, with those four
+fields blank, so the satellite count of a board without a fix was never
+seen. A GGA without a quality is still `GGA(None)`.
 
 Everything else is upstream. `cargo fmt` rewrapped two lines (a missing
 space in an mtk.rs derive, an under-indented body in coords.rs) because the

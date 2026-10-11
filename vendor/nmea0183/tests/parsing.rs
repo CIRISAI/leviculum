@@ -186,16 +186,16 @@ fn test_correct_gga() {
                 r.unwrap(),
                 Ok(ParseResult::GGA(Some(GGA {
                     source: Source::GPS,
-                    time: datetime::Time {
+                    time: Some(datetime::Time {
                         hours: 14,
                         minutes: 56,
                         seconds: 59.0
-                    },
-                    latitude: TryFrom::try_from(59.944923266667).unwrap(),
-                    longitude: TryFrom::try_from(30.3742499833).unwrap(),
+                    }),
+                    latitude: Some(TryFrom::try_from(59.944923266667).unwrap()),
+                    longitude: Some(TryFrom::try_from(30.3742499833).unwrap()),
                     gps_quality: GPSQuality::DGPS,
                     sat_in_use: 7,
-                    hdop: 0.6,
+                    hdop: Some(0.6),
                     altitude: Some(coords::Altitude { meters: 9.0 }),
                     geoidal_separation: Some(18.0),
                     age_dgps: None,
@@ -207,6 +207,42 @@ fn test_correct_gga() {
         }
     }
     assert!(parsed);
+}
+
+/// A receiver searching for a fix blanks position, but its quality and
+/// satellite count still arrive (Leviculum change, see README.md). A GGA
+/// without even a quality is still no sentence at all.
+#[test]
+fn test_gga_without_a_position_keeps_its_satellite_count() {
+    let mut p = Parser::new();
+    let results: Vec<_> = p
+        .parse_from_bytes(
+            b"$GPGGA,092725.00,,,,,0,05,99.99,,,,,,*68\r\n$GPGGA,,,,,,,,,,,,,,*56\r\n",
+        )
+        .collect();
+    assert_eq!(
+        results,
+        vec![
+            Ok(ParseResult::GGA(Some(GGA {
+                source: Source::GPS,
+                time: Some(datetime::Time {
+                    hours: 9,
+                    minutes: 27,
+                    seconds: 25.0
+                }),
+                latitude: None,
+                longitude: None,
+                gps_quality: GPSQuality::NoFix,
+                sat_in_use: 5,
+                hdop: Some(99.99),
+                altitude: None,
+                geoidal_separation: None,
+                age_dgps: None,
+                dgps_station_id: None
+            }))),
+            Ok(ParseResult::GGA(None)),
+        ]
+    );
 }
 
 #[test]
@@ -221,26 +257,26 @@ fn test_correct_gga_without_altitude() {
                 r.unwrap(),
                 Ok(ParseResult::GGA(Some(GGA {
                     source: Source::GPS,
-                    time: datetime::Time {
+                    time: Some(datetime::Time {
                         hours: 16,
                         minutes: 5,
                         seconds: 45.0
-                    },
-                    latitude: Latitude {
+                    }),
+                    latitude: Some(Latitude {
                         degrees: 50,
                         minutes: 8,
                         seconds: 37.578,
                         hemisphere: Hemisphere::North
-                    },
-                    longitude: Longitude {
+                    }),
+                    longitude: Some(Longitude {
                         degrees: 14,
                         minutes: 22,
                         seconds: 25.344,
                         hemisphere: Hemisphere::East
-                    },
+                    }),
                     gps_quality: GPSQuality::GPS,
                     sat_in_use: 3,
-                    hdop: 3.6,
+                    hdop: Some(3.6),
                     altitude: None,
                     geoidal_separation: Some(45.0),
                     age_dgps: None,
@@ -685,10 +721,17 @@ mod fixed_point_matches_float_parse {
     }
 
     fn check_gga(gga: &GGA, f: &[&str]) {
-        assert_latitude(&gga.latitude, f[2]);
-        assert_longitude(&gga.longitude, f[4]);
-        assert_f32_field(gga.hdop, f[8], "hdop");
-        assert_f32_field(gga.time.seconds, &f[1][4..], "time seconds");
+        assert_latitude(
+            gga.latitude.as_ref().expect("corpus GGA has position"),
+            f[2],
+        );
+        assert_longitude(
+            gga.longitude.as_ref().expect("corpus GGA has position"),
+            f[4],
+        );
+        assert_f32_field(gga.hdop.expect("corpus GGA has hdop"), f[8], "hdop");
+        let time = gga.time.as_ref().expect("corpus GGA has time");
+        assert_f32_field(time.seconds, &f[1][4..], "time seconds");
         match &gga.altitude {
             Some(altitude) => assert_f32_field(altitude.meters, f[9], "altitude"),
             None => assert!(f[9].is_empty(), "altitude absent but field is {}", f[9]),

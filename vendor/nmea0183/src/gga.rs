@@ -9,18 +9,20 @@ use core::time::Duration;
 pub struct GGA {
     /// Navigational system.
     pub source: Source,
-    /// Time of fix in UTC.
-    pub time: Time,
-    /// Latitude in reference datum, typically WGS-84.
-    pub latitude: Latitude,
-    /// Logitude in reference datum, typically WGS-84.
-    pub longitude: Longitude,
+    /// Time of fix in UTC. None before the receiver knows the time.
+    pub time: Option<Time>,
+    /// Latitude in reference datum, typically WGS-84. None while the
+    /// receiver has no position (Leviculum change, see README.md).
+    pub latitude: Option<Latitude>,
+    /// Logitude in reference datum, typically WGS-84. Same as latitude.
+    pub longitude: Option<Longitude>,
     /// Quality of GPS solution.
     pub gps_quality: GPSQuality,
     /// Sattelites in use
     pub sat_in_use: u8,
     /// Horizontal dilusion of presicion. Indicates precision of solution.
-    pub hdop: f32,
+    /// None when the receiver leaves it blank.
+    pub hdop: Option<f32>,
     /// Altitude over ground, typically WGS-84.
     pub altitude: Option<Altitude>,
     /// The difference between reference ellipsoid surface and mean-sea-level.
@@ -49,15 +51,11 @@ impl GGA {
         let age_dgps = common::parse_f32(fields.next())?
             .and_then(|a| Some(Duration::from_millis((a * 1000f32) as u64)));
         let dgps_station_id = common::parse_u16(fields.next())?;
-        if let (
-            Some(time),
-            Some(latitude),
-            Some(longitude),
-            Some(gps_quality),
-            Some(sat_in_use),
-            Some(hdop),
-        ) = (time, latitude, longitude, gps_quality, sat_in_use, hdop)
-        {
+        // A receiver searching for a fix blanks time, position and HDOP but
+        // still reports its quality and satellite count; upstream returned
+        // nothing for it, so the count of a board without a fix was lost
+        // (leviculum#413). Only the two fields every GGA carries are needed.
+        if let (Some(gps_quality), Some(sat_in_use)) = (gps_quality, sat_in_use) {
             Ok(Some(GGA {
                 source,
                 time,

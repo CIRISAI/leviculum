@@ -469,8 +469,10 @@ impl PresenceMachine {
             // snapshot and the timebase stay keyed to RMC/GGA exactly as
             // before.
             ParseResult::GSV(Some(gsv)) => self.gsv.on_gsv(&gsv),
-            // Void RMC/GGA (cold start) and other sentence types carry
-            // no foldable content; they already served as lock evidence.
+            // A void RMC, a GGA without even a fix quality, and other
+            // sentence types carry no foldable content; they already
+            // served as lock evidence. A GGA searching for a fix parses
+            // and is forwarded above: its satellite count is content.
             _ => {}
         }
     }

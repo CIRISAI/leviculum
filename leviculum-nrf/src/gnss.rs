@@ -27,7 +27,8 @@
 //! The machine also aggregates GSV groups into satellites-in-view and
 //! best C/N0 (#324); this task only prints them in the heartbeat as
 //! `sv=` / `cno=`. They are the instrument for config-versus-antenna:
-//! `sat=` is GGA satellites-in-USE and is 0 until a fix exists, so an
+//! `sat=` is GGA satellites-in-USE, which most receivers report as 0
+//! until a fix exists, so an
 //! open-sky session that stays at `valid=false sv=0 cno=0` indicts the
 //! RF path, while many SVs at 35-45 dBHz without a fix indicts
 //! configuration instead.
@@ -369,7 +370,7 @@ pub async fn gnss_task(wiring: GnssWiring) {
 
             // Heartbeat log every 5 s with cumulative counters. Keeps
             // the debug log readable but proves the GNSS pipe is alive.
-            // `sat=` is GGA satellites-in-USE and stays 0 without a fix;
+            // `sat=` is GGA satellites-in-USE, 0 on most receivers without a fix;
             // `sv=`/`cno=` are the GSV in-VIEW count and best C/N0 in
             // dBHz (#324) and move as soon as the antenna hears anything
             // — that is what separates a config problem from a weak RF

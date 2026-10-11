@@ -101,20 +101,26 @@ impl GnssFix {
     }
 
     /// Fold a GGA: the satellite count always; validity is any quality but
-    /// no fix; position, altitude and HDOP only with a fix.
+    /// no fix; position, altitude and HDOP only with a fix that carries a
+    /// position.
+    ///
+    /// A receiver searching for a fix blanks the position fields and still
+    /// counts its satellites; the parser keeps that sentence (the vendored
+    /// nmea0183's one API change), so its count and its lost fix land here.
     pub fn fold_gga(&mut self, gga: &GGA) {
         self.sat_in_use = gga.sat_in_use;
         let fix = !matches!(gga.gps_quality, GPSQuality::NoFix);
         self.valid = fix;
-        if fix {
-            self.latitude = Some(gga.latitude.as_f64());
-            self.longitude = Some(gga.longitude.as_f64());
+        if let (true, Some(lat), Some(lon)) = (fix, &gga.latitude, &gga.longitude) {
+            self.latitude = Some(lat.as_f64());
+            self.longitude = Some(lon.as_f64());
             self.altitude_m = gga.altitude.as_ref().map(|a| a.meters);
             // The accuracy gate's input (#236). Kept with position rather
             // than cleared with time: a stale HDOP mis-scales a position
             // that is itself stale, which is the same class of error, not a
-            // new one.
-            self.hdop = Some(gga.hdop);
+            // new one. Set with the position it describes, so a fix whose
+            // HDOP is blank is a position of unknown quality.
+            self.hdop = gga.hdop;
         }
     }
 }
@@ -210,6 +216,38 @@ mod tests {
         assert_eq!(gate.offer(fix.unix_secs), None);
         fix.fold_rmc(&rmc(RMC_VALID));
         assert_eq!(gate.offer(fix.unix_secs), Some(764_426_119));
+    }
+
+    /// What the firmware folds from one sentence: the presence machine
+    /// forwards a GGA only when the parser returns one
+    /// (`leviculum-nrf/gnss-presence`, `ParseResult::GGA(Some(_))`).
+    fn fold_sentence(fix: &mut GnssFix, body: &str) {
+        match parse(body) {
+            ParseResult::GGA(Some(gga)) => fix.fold_gga(&gga),
+            ParseResult::RMC(Some(rmc)) => fix.fold_rmc(&rmc),
+            _ => {}
+        }
+    }
+
+    /// A receiver searching for a fix blanks the position fields (u-blox,
+    /// MediaTek); the satellite count is the one number it still reports.
+    const GGA_SEARCHING: &str = "GPGGA,092725.00,,,,,0,05,99.99,,,,,,";
+    /// The same before the receiver knows the time or any precision.
+    const GGA_COLD: &str = "GNGGA,,,,,,0,00,,,M,,M,,";
+
+    #[test]
+    fn a_gga_searching_for_a_fix_publishes_its_satellite_count() {
+        let mut fix = GnssFix::empty();
+        fold_sentence(&mut fix, RMC_VALID);
+        fold_sentence(&mut fix, GGA_FIX);
+        let before = fix;
+        fold_sentence(&mut fix, GGA_SEARCHING);
+        assert!(!fix.valid, "a searching receiver has no fix");
+        assert_eq!(fix.sat_in_use, 5);
+        assert_eq!(fix.latitude, before.latitude);
+        assert_eq!(fix.hdop, before.hdop);
+        fold_sentence(&mut fix, GGA_COLD);
+        assert_eq!(fix.sat_in_use, 0);
     }
 
     #[test]

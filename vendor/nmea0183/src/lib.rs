@@ -20,7 +20,7 @@
 //!     if let Some(result) = parser.parse_from_byte(*b) {
 //!         match result {
 //!             Ok(ParseResult::GGA(Some(gga))) => { }, // Got GGA sentence
-//!             Ok(ParseResult::GGA(None)) => { }, // Got GGA sentence without valid data, receiver ok but has no solution
+//!             Ok(ParseResult::GGA(None)) => { }, // Got GGA sentence without even a fix quality
 //!             Ok(_) => {}, // Some other sentences..
 //!             Err(e) => { } // Got parse error
 //!         }
@@ -38,7 +38,7 @@
 //! for result in parser.parse_from_bytes(&nmea[..]) {
 //!     match result {
 //!         Ok(ParseResult::RMC(Some(rmc))) => { }, // Got RMC sentence
-//!         Ok(ParseResult::GGA(None)) => { }, // Got GGA sentence without valid data, receiver ok but has no solution
+//!         Ok(ParseResult::GGA(None)) => { }, // Got GGA sentence without even a fix quality
 //!         Ok(_) => {}, // Some other sentences..
 //!         Err(e) => { } // Got parse error
 //!     }
