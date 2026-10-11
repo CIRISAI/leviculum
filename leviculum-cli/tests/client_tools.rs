@@ -319,3 +319,61 @@ fn lnprobe_gets_a_reply_from_the_daemons_own_probe_responder() {
         "no summary line in: {stdout:?}"
     );
 }
+
+/// D2 of the 2026-10-11 shared-instance audit, our side of the drop-in: lnsd
+/// and `lnstatus` read one config that says `shared_instance_type = tcp`, the
+/// daemon serves both channels on TCP loopback at the configured ports, and
+/// `lnstatus` dials them there, as a Python client reading the same file
+/// would. `lnstatus` attaching to the abstract socket instead would find
+/// nothing, so its status names the TCP shared instance only if it dialled
+/// TCP.
+#[test]
+fn lnstatus_reaches_a_tcp_shared_instance_from_the_same_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let name = format!("sitcp_cli_{}", std::process::id());
+    let data_port = port_alloc::free_tcp_port();
+    let control_port = port_alloc::free_tcp_port();
+    write_config(dir.path(), &name, "");
+    let config = dir.path().join("config");
+    let content = std::fs::read_to_string(&config).expect("read config");
+    std::fs::write(
+        &config,
+        content.replacen(
+            "[reticulum]\n",
+            &format!(
+                "[reticulum]\n  shared_instance_type = tcp\n  \
+                 shared_instance_port = {data_port}\n  \
+                 instance_control_port = {control_port}\n"
+            ),
+            1,
+        ),
+    )
+    .expect("write tcp config");
+    let _daemon = spawn_lnsd(dir.path());
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let text = loop {
+        let out = Command::new(env!("CARGO_BIN_EXE_lnstatus"))
+            .arg("--config")
+            .arg(dir.path())
+            .output()
+            .expect("run lnstatus");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        if text.contains("Transport Instance") || Instant::now() >= deadline {
+            break text;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let log = std::fs::read_to_string(dir.path().join("lnsd-stderr.log")).unwrap_or_default();
+    eprintln!("=== lnstatus (shared_instance_type = tcp) ===\n{text}");
+    assert!(
+        text.contains(&format!("Shared Instance[{data_port}]")),
+        "lnstatus must reach the TCP shared instance:\n{text}\nlnsd:\n{log}"
+    );
+    assert!(
+        log.contains(&format!(
+            "RPC server listening on socket 127.0.0.1:{control_port}"
+        )),
+        "lnsd names the loopback RPC listener:\n{log}"
+    );
+}

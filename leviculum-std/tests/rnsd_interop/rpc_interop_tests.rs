@@ -654,7 +654,102 @@ async fn test_rnpath_table_names_the_interface_rnstatus_reports() {
         "rnpath -t must print the rnstatus name for the path:\n{text}"
     );
 
+    // The configured-client row (647's deviation 3): a second daemon reaches
+    // the first through a `[[Upstream Link]]` TCPClientInterface section and
+    // learns the same path over it. Both answers name that interface as the
+    // reference's `TCPInterface.__str__` renders it,
+    // `TCPInterface[<name>/<host>:<port>]`
+    // (`reference/Reticulum/RNS/Interfaces/TCPInterface.py:443-449`), where
+    // they used to name the driver's `tcp_client_0`.
+    let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let instance2 = format!("rpcinterop_client_{}_{}", std::process::id(), test_id);
+    let identity2 = Identity::generate(&mut rand_core::OsRng);
+    let identity2_bytes = identity2
+        .private_key_bytes()
+        .expect("generated identity must have private keys");
+    let storage2 = crate::common::temp_storage("rnpath_iface_name", "client_daemon");
+    let ini = storage2.path().join("daemon.ini");
+    std::fs::write(
+        &ini,
+        format!(
+            "[reticulum]\n  enable_transport = yes\n\n[interfaces]\n  \
+             [[Upstream Link]]\n    type = TCPClientInterface\n    \
+             enabled = yes\n    target_host = 127.0.0.1\n    \
+             target_port = {}\n",
+            tcp_addr.port()
+        ),
+    )
+    .expect("write daemon config");
+    let config2 = leviculum_std::config::Config::load(&ini).expect("load daemon config");
+    let mut daemon2 = ReticulumNodeBuilder::new()
+        .identity(identity2)
+        .config(config2)
+        .enable_transport(true)
+        .share_instance(true)
+        .instance_name(instance2.clone())
+        .storage_path(storage2.path().to_path_buf())
+        .build()
+        .await
+        .expect("build client daemon");
+    daemon2.start().await.expect("start client daemon");
+    let config_dir2 = python_client_ready(&instance2, &identity2_bytes).await;
+    // A fresh announce, now that the second daemon is attached.
+    peer.announce_destination(&dest_hash, None)
+        .await
+        .expect("announce");
+
+    let expected = format!("TCPInterface[Upstream Link/127.0.0.1:{}]", tcp_addr.port());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let rows2 = loop {
+        let stdout = run_ok(RNPATH_PY, &["-t", "-j"], config_dir2.clone()).await;
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(stdout.trim()).expect("rnpath -tj prints a JSON list");
+        if rows.iter().any(|r| r["hash"] == hash_hex.as_str())
+            || tokio::time::Instant::now() >= deadline
+        {
+            break rows;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    let row2 = rows2
+        .iter()
+        .find(|r| r["hash"] == hash_hex.as_str())
+        .unwrap_or_else(|| panic!("the client daemon never listed {hash_hex}: {rows2:?}"));
+    let client_iface = row2["interface"].as_str().unwrap_or_default().to_string();
+    let status2: serde_json::Value = serde_json::from_str(
+        run_ok(RNSTATUS_PY, &["-j"], config_dir2.clone())
+            .await
+            .trim(),
+    )
+    .expect("rnstatus -j prints JSON");
+    let names2: Vec<String> = status2["interfaces"]
+        .as_array()
+        .expect("rnstatus -j lists interfaces")
+        .iter()
+        .filter_map(|i| i["name"].as_str().map(str::to_owned))
+        .collect();
+    let text2 = run_ok(RNPATH_PY, &["-t"], config_dir2.clone()).await;
+    eprintln!(
+        "=== configured client: rnpath -tj interface: {client_iface}\n\
+         === rnstatus -j names: {names2:?}\n=== rnpath -t STDOUT ===\n{text2}"
+    );
+    assert_eq!(
+        client_iface, expected,
+        "the configured client carries the reference display name"
+    );
+    assert!(
+        names2.contains(&expected),
+        "rnstatus -j names the configured client the same way: {names2:?}"
+    );
+    assert!(
+        text2
+            .lines()
+            .any(|l| l.contains(&format!(" on {expected} expires "))),
+        "rnpath -t prints the reference name for the configured client:\n{text2}"
+    );
+
     cleanup_config_dir(&config_dir);
+    cleanup_config_dir(&config_dir2);
 }
 
 /// D9 of the shared-instance audit: with no path at the daemon,
@@ -926,6 +1021,119 @@ async fn test_rnstatus_with_rpc_key_against_rust_daemon() {
 
     cleanup_config_dir(&keyed_dir);
     cleanup_config_dir(&unkeyed_dir);
+}
+
+/// D2 of the shared-instance audit: `shared_instance_type = tcp` moves BOTH
+/// shared-instance channels to TCP loopback, on Linux too
+/// (`reference/Reticulum/RNS/Reticulum.py:683-694`), so every Python tool
+/// reading that config dials 127.0.0.1 at the configured ports. lnsd built
+/// from the same file has to listen there: the reference `rnstatus` gets the
+/// status, and `ss` shows this process holding both loopback ports. The
+/// negative control: the abstract sockets of the instance are not served.
+/// Red before: lnsd served the abstract pair regardless and `rnstatus`
+/// printed "Could not get RNS status".
+#[tokio::test]
+async fn test_rnstatus_over_tcp_shared_instance_against_rust_daemon() {
+    init_tracing();
+
+    let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let instance_name = format!("sitcp_{}_{}", std::process::id(), test_id);
+    // port-handoff: the one config file names both ports before either side
+    // runs, lnsd binds them and the Python client dials them from it.
+    let data_port = crate::harness::pick_free_tcp_port().expect("free data port");
+    // port-handoff: as above, the RPC channel's port.
+    let control_port = crate::harness::pick_free_tcp_port().expect("free control port");
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let identity_bytes = identity
+        .private_key_bytes()
+        .expect("generated identity must have private keys");
+
+    let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
+    let config_file = config_dir.join("config");
+    let content = std::fs::read_to_string(&config_file).expect("read config");
+    std::fs::write(
+        &config_file,
+        content.replacen(
+            "[reticulum]\n",
+            &format!(
+                "[reticulum]\n  shared_instance_type = tcp\n  \
+                 shared_instance_port = {data_port}\n  \
+                 instance_control_port = {control_port}\n"
+            ),
+            1,
+        ),
+    )
+    .expect("write tcp config");
+    let daemon_config =
+        leviculum_std::config::Config::load(&config_file).expect("load the tcp config");
+    let storage = crate::common::temp_storage("rnstatus_tcp_instance", "node");
+    let mut node = ReticulumNodeBuilder::new()
+        .identity(identity)
+        .config(daemon_config)
+        .enable_transport(true)
+        .share_instance(true)
+        .instance_name(instance_name.clone())
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build daemon");
+    node.start().await.expect("start daemon");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let output = loop {
+        let output = run_python_tool(RNSTATUS_PY, &[], &config_dir).await;
+        if String::from_utf8_lossy(&output.stdout).contains("Transport Instance")
+            || tokio::time::Instant::now() >= deadline
+        {
+            break output;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!(
+        "=== rnstatus (shared_instance_type = tcp) STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}"
+    );
+    assert!(
+        output.status.success() && stdout.contains("Transport Instance"),
+        "rnstatus over the tcp shared instance must reach lnsd:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains(&format!("Shared Instance[{data_port}]")),
+        "the shared-instance row carries the reference's TCP name:\n{stdout}"
+    );
+
+    // Both ports are held by this process, which is the daemon.
+    let ss = std::process::Command::new("ss")
+        .args(["-ltnp"])
+        .output()
+        .expect("ss runs (apt install iproute2)");
+    let listeners = String::from_utf8_lossy(&ss.stdout).into_owned();
+    let pid = format!("pid={},", std::process::id());
+    for port in [data_port, control_port] {
+        let line = listeners
+            .lines()
+            .find(|l| l.contains(&format!("127.0.0.1:{port} ")))
+            .unwrap_or_else(|| panic!("nothing listens on 127.0.0.1:{port}:\n{listeners}"));
+        eprintln!("=== ss -ltnp: {line}");
+        assert!(
+            line.contains(&pid),
+            "127.0.0.1:{port} must be held by lnsd ({pid}): {line}"
+        );
+    }
+
+    // Negative control: the abstract pair is not served in this mode.
+    let ss = std::process::Command::new("ss")
+        .args(["-xl"])
+        .output()
+        .expect("ss runs (apt install iproute2)");
+    let unix_listeners = String::from_utf8_lossy(&ss.stdout);
+    assert!(
+        !unix_listeners.contains(&format!("@rns/{instance_name}")),
+        "no abstract socket of the instance may be served under tcp:\n{unix_listeners}"
+    );
+
+    cleanup_config_dir(&config_dir);
 }
 
 /// Test `rnstatus -l` (link stats) against the Rust daemon.

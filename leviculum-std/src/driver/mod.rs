@@ -842,6 +842,15 @@ fn peer_up_announce(
 /// `TCPServerInterface` sections are skipped: the listener never registers as
 /// an interface, only its accepted connections do, and they inherit their
 /// configuration through `InterfaceInfo` under dynamic ids.
+/// The tunnel interface hash of the configured TCP client at `idx`: the hash
+/// of the driver's internal name `tcp_client_<idx>`, never of the display
+/// name, so naming the interface as the reference does
+/// (`TCPInterface[<name>/<host>:<port>]`) leaves every tunnel id derived from
+/// it unchanged. Takes the index alone so nothing else can move it.
+fn tcp_client_tunnel_hash(idx: usize) -> [u8; 32] {
+    leviculum_core::crypto::full_hash(format!("tcp_client_{idx}").as_bytes())
+}
+
 fn register_interface_config(core: &mut StdNodeCore, idx: usize, iface_config: &InterfaceConfig) {
     if iface_config.interface_type == "TCPServerInterface" {
         return; // IFAC passed to spawn_tcp_server in initialize_interfaces
@@ -856,9 +865,7 @@ fn register_interface_config(core: &mut StdNodeCore, idx: usize, iface_config: &
     // decision ("a non-KISS TCP client wants a tunnel") lives here in
     // the driver; transport treats the hash as opaque bytes.
     if iface_config.interface_type == "TCPClientInterface" {
-        let iface_name = format!("tcp_client_{}", idx);
-        let interface_hash = leviculum_core::crypto::full_hash(iface_name.as_bytes());
-        core.register_tunnel_interface(idx, interface_hash);
+        core.register_tunnel_interface(idx, tcp_client_tunnel_hash(idx));
     }
     if let Some(ifac) = build_ifac_config(iface_config) {
         core.set_ifac_config(idx, ifac);
@@ -1383,6 +1390,10 @@ pub struct ReticulumNode {
     /// listener when it shares an instance and its queries when it is a
     /// client of one; `None` keys both with the identity-derived default.
     rpc_key: Option<Vec<u8>>,
+    /// Where both shared-instance channels live, served or dialled: the
+    /// abstract socket by default, TCP loopback under
+    /// `shared_instance_type = tcp`.
+    shared_instance_transport: crate::interfaces::SharedInstanceTransport,
     /// Time when the node was created (for RPC uptime reporting).
     start_time: std::time::Instant,
     /// Shared interface I/O counters, populated by the event loop.
@@ -1576,6 +1587,7 @@ impl ReticulumNode {
             share_instance_name: None,
             connect_instance_name: None,
             rpc_key: None,
+            shared_instance_transport: Default::default(),
             start_time: std::time::Instant::now(),
             iface_stats_map: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             radio_cache: crate::rpc::radio_cache::shared(),
@@ -2289,6 +2301,7 @@ impl ReticulumNode {
                 crate::interfaces::local::LocalClientConfig {
                     reconnect_notify: Some(reconnect_tx.clone()),
                     disconnect_notify: Some(shared_instance_down_tx.clone()),
+                    transport: self.shared_instance_transport,
                     ..crate::interfaces::local::LocalClientConfig::new(
                         id,
                         instance_name,
@@ -2317,6 +2330,7 @@ impl ReticulumNode {
             let server_id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::interfaces::local::spawn_local_server(
                 instance_name,
+                &self.shared_instance_transport,
                 next_id.clone(),
                 new_iface_tx.clone(),
                 crate::interfaces::local::LOCAL_DEFAULT_BUFFER_SIZE,
@@ -2354,6 +2368,7 @@ impl ReticulumNode {
             };
             if let Err(e) = crate::rpc::spawn_rpc_server(
                 instance_name,
+                &self.shared_instance_transport,
                 Arc::clone(&self.inner),
                 authkey,
                 self.start_time,
@@ -2436,6 +2451,17 @@ impl ReticulumNode {
         self.rpc_key = key;
     }
 
+    /// Serve or dial the shared instance over `transport`.
+    ///
+    /// Called by the builder from `[reticulum] shared_instance_type` and the
+    /// two port keys.
+    pub(crate) fn set_shared_instance_transport(
+        &mut self,
+        transport: crate::interfaces::SharedInstanceTransport,
+    ) {
+        self.shared_instance_transport = transport;
+    }
+
     /// The shared instance this node is a client of, with the key to ask it
     /// with, or `None` when it is no client.
     fn shared_instance_client(&self) -> Option<crate::rpc::SharedInstanceClient> {
@@ -2444,6 +2470,7 @@ impl ReticulumNode {
             .map(|name| crate::rpc::SharedInstanceClient {
                 instance_name: name.clone(),
                 rpc_key: self.rpc_key.clone(),
+                transport: self.shared_instance_transport,
             })
     }
 
@@ -3407,9 +3434,14 @@ impl ReticulumNode {
     /// caller binds `:0` and reads the chosen port back instead of probing a
     /// free port up front and racing every co-tenant for the re-bind
     /// (Codeberg #221).
+    ///
+    /// The shared instance's own loopback listener under
+    /// `shared_instance_type = tcp` is not a TCP server interface and is not
+    /// listed.
     pub fn tcp_listen_addrs(&self) -> Vec<std::net::SocketAddr> {
         let inv = self.inventory.lock_recover();
         inv.listeners()
+            .filter(|(_, row)| row.identity.type_name != "LocalServerInterface")
             .filter_map(|(_, row)| row.bound_addr)
             .collect()
     }
@@ -6435,7 +6467,8 @@ pub(crate) async fn shared_instance_first_hop_timeout_ms(
         crate::rpc::resolve_rpc_authkey(client.rpc_key.as_deref(), core.identity())
     };
     let answer = match authkey {
-        Ok(authkey) => crate::rpc::rpc_query_hash_param(
+        Ok(authkey) => crate::rpc::rpc_query_hash_param_at(
+            &client.transport,
             instance,
             &authkey,
             "first_hop_timeout",
@@ -6477,6 +6510,22 @@ pub(crate) async fn shared_instance_first_hop_timeout_ms(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A configured TCP client now carries the reference display name, but
+    /// its tunnel hash still derives from the internal `tcp_client_<idx>`:
+    /// the values below are the hashes the driver registered before the
+    /// display name changed, so a peer's tunnel table survives the upgrade.
+    #[test]
+    fn a_tcp_client_tunnel_hash_is_the_internal_names_hash() {
+        assert_eq!(
+            crate::storage::hex_encode(&tcp_client_tunnel_hash(0)),
+            "b3d9a19eb933c76d24b1979795e67950386ad4c0a80c4247c6f2d0213b8bfbbd"
+        );
+        assert_eq!(
+            crate::storage::hex_encode(&tcp_client_tunnel_hash(3)),
+            "fe987f1066cdbb7b2f90c5845561ef9596e0c20e08d540763eabd722b078a6e1"
+        );
+    }
 
     /// A radio reading is filed under the hash of the packet the core will
     /// see: on an IFAC interface that is the unwrapped packet, as Python

@@ -72,6 +72,9 @@ pub struct ReticulumNodeBuilder {
     /// Instance name to connect to as a shared instance client.
     /// Mutually exclusive with share_instance.
     connect_instance_name: Option<String>,
+    /// Shared-instance transport override; see
+    /// [`Self::shared_instance_transport`].
+    shared_instance_transport_explicit: Option<crate::interfaces::SharedInstanceTransport>,
     /// Whether the application event channel is constructed at all.
     /// Default true. Daemon-style nodes that have no application code
     /// to consume `NodeEvent`s should set this to false via
@@ -114,6 +117,7 @@ impl ReticulumNodeBuilder {
             autoconnect_discovered_interfaces_explicit: None,
             discover_interfaces_explicit: None,
             connect_instance_name: None,
+            shared_instance_transport_explicit: None,
             events_enabled: true,
             discovery_job_interval_secs_explicit: None,
             core_processor: None,
@@ -718,6 +722,21 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Serve or dial the shared instance over `transport`.
+    ///
+    /// Without this call the transport comes from the config the builder was
+    /// given (`shared_instance_type`, `shared_instance_port`,
+    /// `instance_control_port`), and a builder given no config takes this
+    /// process's [`shared_instance_transport`](crate::interfaces::shared_instance_transport),
+    /// which a client tool sets from the config it read.
+    pub fn shared_instance_transport(
+        mut self,
+        transport: crate::interfaces::SharedInstanceTransport,
+    ) -> Self {
+        self.shared_instance_transport_explicit = Some(transport);
+        self
+    }
+
     /// Set the interval between periodic storage flushes in seconds.
     ///
     /// Crash protection only, normal shutdown flushes via the signal
@@ -802,6 +821,8 @@ impl ReticulumNodeBuilder {
     /// Useful when constructing a node outside of an async runtime.
     pub fn build_sync(mut self) -> Result<ReticulumNode, Error> {
         // Resolve config: pre-loaded > loaded from path > default
+        let config_given = self.loaded_config.is_some()
+            || self.config_path.as_ref().is_some_and(|path| path.exists());
         let config = self.resolve_config()?;
 
         // Apply enable_transport: explicit override > config value
@@ -999,16 +1020,20 @@ impl ReticulumNodeBuilder {
             data_channel_capacity,
         );
         node.outbound_socket_hook = self.outbound_socket_hook.clone();
-        // Capture the configured shared-instance TCP-loopback ports
-        // (`shared_instance_port` / `instance_control_port`, Codeberg #112) for
-        // the AF_INET bind path. Unconditional: the AF_UNIX path never reads
-        // them (it keys by `instance_name`), so this is a no-op there, matching
-        // Python, which only honours the ports when AF_UNIX is unavailable or
-        // `shared_instance_type = tcp`.
-        crate::interfaces::local::set_loopback_ports(
-            config.reticulum.shared_instance_port,
-            config.reticulum.instance_control_port,
-        );
+        // Where both shared-instance channels live (D2 of the 2026-10-11
+        // shared-instance audit; the ports are Codeberg #112): explicit >
+        // the config this builder was given > the process default a client
+        // tool set from its own config. Per node, so two nodes in one
+        // process can sit on different transports.
+        node.set_shared_instance_transport(self.shared_instance_transport_explicit.unwrap_or_else(
+            || {
+                if config_given {
+                    crate::interfaces::SharedInstanceTransport::from_config(&config.reticulum)
+                } else {
+                    crate::interfaces::shared_instance_transport()
+                }
+            },
+        ));
         if share_instance {
             node.set_share_instance(instance_name);
         }

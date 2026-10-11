@@ -184,7 +184,7 @@ implements no RNode KISS command set — there is no `CMD_DETECT`,
 > `SerialInterface` honours [the LoRa keys] too and configures the
 > attached LNode's radio over the serial port — the LNode frames HDLC,
 > so it cannot be driven by the KISS-framed `RNodeInterface`.
-> (`docs/src/guide/configuration.md:364-373`)
+> (`docs/src/guide/configuration.md:360-369`)
 
 ```ini
 [interfaces]

@@ -73,6 +73,17 @@ pub(crate) fn tcp_spawned_name(section: &str, peer: SocketAddr) -> String {
     )
 }
 
+/// `TCPInterface[<section>/<host>:<port>]`, a configured TCP client: the
+/// client `__str__` (TCPInterface.py:443-449) over the `target_host` string as
+/// configured, bracketed when it carries a colon.
+pub(crate) fn tcp_client_name(section: &str, host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("TCPInterface[{section}/[{host}]:{port}]")
+    } else {
+        format!("TCPInterface[{section}/{host}:{port}]")
+    }
+}
+
 /// `Client on <section>`, the spawned interface's `short_name`
 /// (TCPInterface.py:577).
 pub(crate) fn tcp_spawned_short_name(section: &str) -> String {
@@ -158,7 +169,9 @@ pub(crate) struct InterfaceInventory {
     /// interface ids, so a listener id can never collide with an interface id
     /// and the natural ordering stays "in the order the daemon started them".
     listeners: BTreeMap<usize, ListenerRow>,
-    /// Presentation identity of spawned interfaces, by interface id.
+    /// Presentation identity of spawned interfaces, and of configured
+    /// interfaces whose reference name the driver's internal one does not
+    /// carry, by interface id.
     spawned: BTreeMap<usize, InterfaceIdentity>,
     /// The shared-instance server's inventory id, reported first to match the
     /// reference order (Python starts the local interface before the config
@@ -224,6 +237,18 @@ mod tests {
     /// `instance_name = inv_probe_1`.
     #[test]
     fn display_names_match_the_reference() {
+        assert_eq!(
+            tcp_client_name("Upstream Link", "127.0.0.1", 4242),
+            "TCPInterface[Upstream Link/127.0.0.1:4242]"
+        );
+        assert_eq!(
+            tcp_client_name("v6", "fe80::1", 4242),
+            "TCPInterface[v6/[fe80::1]:4242]"
+        );
+        assert_eq!(
+            tcp_client_name("named", "example.org", 4242),
+            "TCPInterface[named/example.org:4242]"
+        );
         assert_eq!(
             tcp_listener_name("Parity TCP Server 0", "127.0.0.1:45911".parse().unwrap()),
             "TCPServerInterface[Parity TCP Server 0/127.0.0.1:45911]"

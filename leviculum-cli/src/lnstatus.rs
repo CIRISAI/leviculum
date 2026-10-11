@@ -278,12 +278,7 @@ async fn main() {
         .config
         .clone()
         .unwrap_or_else(Config::default_config_dir);
-    let config_file = config_dir.join("config");
-    let loaded_config: Option<Config> = if config_file.exists() {
-        Config::load(&config_file).ok()
-    } else {
-        None
-    };
+    let loaded_config: Option<Config> = daemon_rpc::load_config(&config_dir);
     let instance_name = args
         .instance_name
         .clone()

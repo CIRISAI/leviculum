@@ -6,10 +6,12 @@ use std::time::Duration;
 
 use crate::config::InterfaceConfig;
 use crate::error::Error;
+use crate::interfaces::inventory::{self, InterfaceIdentity};
 use crate::interfaces::tcp::{
     spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TcpServerConfig,
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
+use crate::sync_ext::MutexRecover;
 use leviculum_core::transport::InterfaceId;
 
 use super::super::{build_announce_rate_config, build_ifac_config};
@@ -63,6 +65,22 @@ pub(super) fn build_client(
         shutdown: None,
         outbound_socket_hook: ctx.outbound_socket_hook.clone(),
     });
+    // The reference names this interface `TCPInterface[<name>/<host>:<port>]`
+    // in every answer (D8 of the 2026-10-11 shared-instance audit); the
+    // driver's `tcp_client_<idx>` stays the internal id, and the tunnel hash
+    // keeps deriving from it (`tcp_client_tunnel_hash`). A programmatic
+    // client has no section name and keeps the internal one.
+    if !config.name.is_empty() {
+        ctx.inventory.lock_recover().add_spawned(
+            idx,
+            InterfaceIdentity {
+                name: inventory::tcp_client_name(&config.name, target_host, target_port),
+                short_name: config.name.clone(),
+                type_name: "TCPClientInterface",
+                parent: None,
+            },
+        );
+    }
     tracing::info!("TCP client interface for {} (reconnect enabled)", addr);
     Ok(Built::Handles(vec![handle]))
 }

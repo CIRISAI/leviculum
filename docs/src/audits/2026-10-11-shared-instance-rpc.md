@@ -26,10 +26,10 @@ the A/B rule).
 
 Where we match, verified: the control socket is the abstract Unix
 socket `\0rns/{instance_name}/rpc` (`spawn_rpc_server`,
-`leviculum-std/src/rpc/mod.rs:109-121`, against
-`reference/Reticulum/RNS/Reticulum.py:349`), with the TCP-loopback
-fallback on Windows (`loopback_addr`,
-`leviculum-std/src/interfaces/local.rs:204`, against the AF_INET arm,
+`leviculum-std/src/rpc/mod.rs:50-64`, against
+`reference/Reticulum/RNS/Reticulum.py:349`), with TCP loopback under
+`shared_instance_type = tcp` and on Windows (`endpoint`,
+`leviculum-std/src/interfaces/ipc.rs:68`, against the AF_INET arm,
 `reference/Reticulum/RNS/Reticulum.py:352`); the framing is the
 CPython `multiprocessing.connection` 4-byte big-endian length prefix
 (`read_message_bounded`, `leviculum-std/src/rpc/connection.rs:82`);
@@ -38,11 +38,11 @@ raw HMAC-MD5 for Python < 3.12 and tagged `{sha256}` for 3.12+
 (`deliver_challenge`, `leviculum-std/src/rpc/connection.rs:140`,
 exercised against simulated legacy clients in the same file's tests);
 the default authkey is SHA-256 over the transport identity's private
-key (`rpc_authkey`, `leviculum-std/src/rpc/mod.rs:245`, against
+key (`rpc_authkey`, `leviculum-std/src/rpc/mod.rs:184`, against
 `reference/Reticulum/RNS/Reticulum.py:355-356`), which is what lets a
 Python client sharing the daemon's storage derive the same key; one
 request per connection, answered and closed
-(`handle_rpc_connection`, `leviculum-std/src/rpc/mod.rs:198`, against
+(`handle_rpc_connection`, `leviculum-std/src/rpc/mod.rs:137`, against
 the accept-recv-reply-close loop,
 `reference/Reticulum/RNS/Reticulum.py:1207-1260`); and a verb the
 server does not know gets no reply and a closed connection on both
@@ -62,7 +62,7 @@ and `:1265`). Our `[reticulum]` parser has no arm for the key, so it
 falls into the tolerated-unknown catch-all
 (`apply_reticulum_key`, `leviculum-std/src/ini_config.rs:568`) and the
 daemon keys its listener with the identity-derived default
-unconditionally (`leviculum-std/src/rpc/mod.rs:245-253`). What a tool
+unconditionally (`leviculum-std/src/rpc/mod.rs:184-192`). What a tool
 sees: `rnstatus` reads the same config file, derives the configured
 key, and fails our HMAC handshake — "Could not get RNS status" against
 a daemon that is up and healthy, with nothing in either log naming the
@@ -92,10 +92,8 @@ when the key says `tcp` (`reference/Reticulum/RNS/Reticulum.py:683-694`).
 We parse and store the key (`leviculum-std/src/ini_config.rs:415-424`)
 and apply its socket-override rule, but on Unix the daemon serves the
 abstract AF_UNIX pair regardless; only the Windows build reads the
-ports (`CONFIGURED_LOOPBACK_PORTS`,
-`leviculum-std/src/interfaces/local.rs:136`, and the field's own
-honest doc, `leviculum-std/src/config.rs:69-76`). What a tool sees: on
-a Linux host whose config says `tcp`, Python clients dial
+ports (the AF_INET path was compiled for Windows only, and the field's
+own doc said so). What a tool sees: on a Linux host whose config says `tcp`, Python clients dial
 127.0.0.1:37429 and find nothing; lnsd listens where they do not look.
 Class: **silently ignored config (Unix), drop-in break when set**.
 Documented on the config field, so it is a known gap, not a surprise —
@@ -117,9 +115,9 @@ fix). No tool-visible consequence.
 
 Platform note, already stated in the code: the non-Linux Unix fallback
 binds a filesystem socket under the temp directory
-(`bind_rpc_listener`, `leviculum-std/src/rpc/mod.rs:55-72`), which no
+(`bind_unix`, `leviculum-std/src/interfaces/ipc.rs:197-212`), which no
 Python client dials; the macOS/BSD path is community-supported and
-outside the drop-in contract (`leviculum-std/src/rpc/mod.rs:29-31`).
+outside the drop-in contract (`leviculum-std/src/interfaces/ipc.rs:17-20`).
 
 ## 2. The `get` vocabulary and the answers, field by field
 
@@ -133,20 +131,20 @@ read the answers:
   stats, battery) and the post-1.3.5 key set a 1.5.2 `rnstatus`
   indexes unguarded (`mtu`, `txdrp`, the sort keys; pinned with types
   and defaults in `test_rpc_interface_stats_round_trip`,
-  `leviculum-std/src/rpc/mod.rs:719`). Display names reproduce the
+  `leviculum-std/src/rpc/mod.rs:698`). Display names reproduce the
   reference's `str(interface)` forms byte for byte, including the
   prefixes `rnstatus` hides rows by and the `Shared Instance[` prefix
   its client arithmetic keys on (`tcp_spawned_name`,
   `leviculum-std/src/interfaces/inventory.rs:67`;
-  `shared_instance_name`, `leviculum-std/src/interfaces/inventory.rs:85`;
+  `shared_instance_name`, `leviculum-std/src/interfaces/inventory.rs:96`;
   against `reference/Reticulum/RNS/Utilities/rnstatus.py:393-401` and
   `:429-438`). The live client count decrements on disconnect
-  (`retire_from_inventory`, `leviculum-std/src/driver/mod.rs:4145`),
+  (`retire_from_inventory`, `leviculum-std/src/driver/mod.rs:4177`),
   so the `Serving : N programs` line (clients − 1,
   `reference/Reticulum/RNS/Utilities/rnstatus.py:432`) reads the same
   against either daemon. Announce-rate defaults follow Python's
   transport branch (3600/0/5 when transport is on, None when off;
-  pinned in `leviculum-std/src/rpc/mod.rs:950-995`).
+  pinned in `leviculum-std/src/rpc/mod.rs:930-976`).
 * **`path_table`** — six keys, units, the direct-path `via` spelled as
   the destination hash exactly as Python's `received_from` makes it
   (`build_path_table`, `leviculum-std/src/rpc/handlers.rs:1113`,
@@ -154,7 +152,7 @@ read the answers:
   `reference/Reticulum/RNS/Transport.py:1741`), `max_hops` honoured
   with None as no-limit, and our own client always sending the key
   because Python's server `KeyError`s without it
-  (`rpc_query`, `leviculum-std/src/rpc/mod.rs:401-411`).
+  (`rpc_query`, `leviculum-std/src/rpc/mod.rs:358-368`).
 * **`link_count` / `first_hop_timeout` / `next_hop`** — the transport
   link table's size, the reference's bitrate-scaled timeout formula,
   and the direct-path destination-hash answer
@@ -171,7 +169,7 @@ read the answers:
   `source`/`until`/`reason`, and the membership bool
   (`build_blackholed_identities`,
   `leviculum-std/src/rpc/handlers.rs:1899`, round-tripped in
-  `test_rpc_blackhole_round_trip`, `leviculum-std/src/rpc/mod.rs:1074`;
+  `test_rpc_blackhole_round_trip`, `leviculum-std/src/rpc/mod.rs:1056`;
   consumed by `rnpath -b/-B/-U`,
   `reference/Reticulum/RNS/Utilities/rnpath.py:185-199`).
 * **`destination_data` and `identity_data`** — all five ops parsed and
@@ -187,7 +185,7 @@ read the answers:
   `medium_path_timeout`, `active_link_count`) — additive; a Python
   `rnsd` asked any of them closes the connection without replying, and
   our callers treat that as "does not know the question"
-  (`rpc_query`'s contract, `leviculum-std/src/rpc/mod.rs:375-384`).
+  (`rpc_query`'s contract, `leviculum-std/src/rpc/mod.rs:332-341`).
 
 **D4 — `rate_table` answers an always-empty `timestamps` list, and
 `rnpath -r` renders an error for every row.** Python's rate entries
@@ -324,7 +322,7 @@ uses.** Python's `path_table` rows carry `str(interface)` —
 `TCPInterface[Client on ...]`, `RNodeInterface[...]`
 (`reference/Reticulum/RNS/Reticulum.py:1534`). Ours carry the driver's
 internal name — `tcp_client_0` for a configured TCP client (the format
-lives at `leviculum-std/src/driver/mod.rs:859`), `udp_5`,
+lives at `leviculum-std/src/driver/interface_build/tcp.rs:41`), `udp_5`,
 `rnode_channel_2` — because the handlers read `core.interface_name`
 (`build_path_table`, `leviculum-std/src/rpc/handlers.rs:1113`;
 same in `build_transport_tables` and `get_next_hop_if_name`), while
@@ -389,21 +387,21 @@ sends either shape.
 
 Where we match, verified: the data socket is `\0rns/{instance_name}`
 with HDLC framing (flag 0x7E, escape 0x7D;
-`spawn_local_server`, `leviculum-std/src/interfaces/local.rs:262`,
+`spawn_local_server`, `leviculum-std/src/interfaces/local.rs:140`,
 against `reference/Reticulum/RNS/Interfaces/LocalInterface.py:42-51`
 and `:386`); HW_MTU 262144 (`LOCAL_HW_MTU`,
-`leviculum-std/src/interfaces/local.rs:237`, against
+`leviculum-std/src/interfaces/local.rs:112`, against
 `reference/Reticulum/RNS/Interfaces/LocalInterface.py:71`); the
 reported bitrate 1 Gbps (`LOCAL_BITRATE`,
-`leviculum-std/src/interfaces/local.rs:241`, against
+`leviculum-std/src/interfaces/local.rs:116`, against
 `reference/Reticulum/RNS/Interfaces/LocalInterface.py:432`); an
 accepted client is never ingress-limited, which the reference fixes by
 overriding `should_ingress_limit`
-(`leviculum-std/src/interfaces/local.rs:397` and the client side at
+(`leviculum-std/src/interfaces/local.rs:295` and the client side at
 `:621`, against
 `reference/Reticulum/RNS/Interfaces/LocalInterface.py:137-138`); the
 server's short name is "Reticulum" and the client label is the live
-client count (`leviculum-std/src/interfaces/local.rs:285-288` and
+client count (`leviculum-std/src/interfaces/local.rs:170-173` and
 `:313-319`, against
 `reference/Reticulum/RNS/Interfaces/LocalInterface.py:391` and
 `:441`, decremented on disconnect as the reference does at `:355`);
@@ -440,7 +438,7 @@ local-client special cases:
 * **Disconnect/reconnect signalling** — the client drops cached
   routing state on loss and re-announces on recovery, mirroring
   `shared_connection_disappeared`/`reappeared`
-  (`LocalClientConfig`, `leviculum-std/src/interfaces/local.rs:469-486`,
+  (`LocalClientConfig`, `leviculum-std/src/interfaces/local.rs:367-384`,
   against `reference/Reticulum/RNS/Interfaces/LocalInterface.py:281`
   and `:187`).
 
@@ -449,8 +447,8 @@ at the interface.** The reference discards any deframed IPC frame of
 `HEADER_MINSIZE` (19 bytes) or less
 (`reference/Reticulum/RNS/Interfaces/LocalInterface.py:267`); ours
 forwards every non-empty frame
-(`local_interface_task`, `leviculum-std/src/interfaces/local.rs:773`,
-the forward at `leviculum-std/src/interfaces/local.rs:811-815`)
+(`local_interface_task`, `leviculum-std/src/interfaces/local.rs:686`,
+the forward at `leviculum-std/src/interfaces/local.rs:724-735`)
 and relies on packet parsing to refuse it. Semantically a no-op — a
 short frame is unparseable either way — recorded so a future
 malformed-client fuzz finding is not hunted as a transport bug.
@@ -461,8 +459,8 @@ Class: deviation ours, inert.
 (`reference/Reticulum/RNS/Interfaces/LocalInterface.py:63` and
 `:167`); ours starts at 250 ms and backs off to Python's own 8 s
 ceiling (`LOCAL_RECONNECT_BASE`,
-`leviculum-std/src/interfaces/local.rs:456`, `LOCAL_RECONNECT_MAX`,
-`leviculum-std/src/interfaces/local.rs:466`). Local-only timing, no
+`leviculum-std/src/interfaces/local.rs:354`, `LOCAL_RECONNECT_MAX`,
+`leviculum-std/src/interfaces/local.rs:364`). Local-only timing, no
 wire or peer-visible change; a `systemctl restart lnsd` costs a
 client a fraction of a second instead of 8+. Class: deviation ours
 (deliberate, argued at the constants).
@@ -477,7 +475,7 @@ comments and quote stripping to ConfigObj's own rules
 (`strip_value`, `leviculum-std/src/ini_config.rs:1038`); the config
 directory lookup order `/etc/reticulum` → `~/.config/reticulum` →
 `~/.reticulum` (`resolve_config_dir`,
-`leviculum-std/src/config.rs:1164`, against
+`leviculum-std/src/config.rs:1168`, against
 `reference/Reticulum/RNS/Reticulum.py:229-236`); `ifac_size` in bits
 with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:877-883`,
 against `reference/Reticulum/RNS/Reticulum.py:747-750`) and the
@@ -515,7 +513,7 @@ daemon:
 1. **`share_instance`** — Python defaults true
    (`reference/Reticulum/RNS/Reticulum.py:287`); ours defaults false
    (`leviculum-std/src/config.rs:63-64`, resolved unchanged by the
-   builder, `leviculum-std/src/driver/builder.rs:813-815`). A config
+   builder, `leviculum-std/src/driver/builder.rs:834-836`). A config
    that never names the key gives rnsd a shared instance and lnsd
    none: every Python tool answers "No shared RNS instance available"
    against lnsd. This is the central drop-in switch defaulting to the
@@ -529,7 +527,7 @@ daemon:
    when `enabled` or `interface_enabled` is explicitly true and skips
    the section otherwise
    (`reference/Reticulum/RNS/Reticulum.py:950` and `:1056`); ours
-   defaults the field true (`leviculum-std/src/config.rs:507-508`), so
+   defaults the field true (`leviculum-std/src/config.rs:511-512`), so
    a section with no `enabled` key is live under lnsd and dead under
    rnsd.
 
@@ -606,7 +604,7 @@ tunes the ingress/egress limiters globally
 per-interface spellings (`leviculum-std/src/ini_config.rs:843-853`)
 but the global ones fall into the catch-all, so our
 transport-enabled defaults are the hardcoded 3600/0/5
-(`leviculum-std/src/rpc/mod.rs:830-846` pins them). A config that
+(`leviculum-std/src/rpc/mod.rs:810-826` pins them). A config that
 raises the global target gets Python's enforcement and ours at the
 defaults — different rebroadcast rate limiting on the same mesh.
 Class: **silently ignored config**. Test: drop-in — a config with
@@ -651,10 +649,10 @@ of 3600/0/5, now one of two cases); and by unit tests per key.
 
 Deliberate, documented deviations, re-confirmed as stated: our
 `discover_interfaces` defaults true against Python's false, collecting
-being locally observable only (`leviculum-std/src/config.rs:204-219`);
+being locally observable only (`leviculum-std/src/config.rs:208-223`);
 ingress control defaults off for dial-out point-to-point types where
 Python is flat-true (`ingress_control_default_for_type`,
-`leviculum-std/src/config.rs:1021`); the discoverable-mode promotion
+`leviculum-std/src/config.rs:1025`); the discoverable-mode promotion
 fills only an UNSET mode where Python overrides an explicit one
 (`promote_discoverable_modes`, `leviculum-std/src/ini_config.rs:372`).
 Also ignored without a current consumer: `link_mtu_discovery` (no
@@ -692,7 +690,7 @@ rather than misleading.
   (closing the 2026-06-29 gap).
 * Our own clients (`lnstatus`, `lnprobe`, `lnpath`, `lncp`,
   `lnstest`) drive the same verbs through one helper surface
-  (`rpc_query`, `leviculum-std/src/rpc/mod.rs:394`), and periculum's
+  (`rpc_query`, `leviculum-std/src/rpc/mod.rs:351`), and periculum's
   `rns` client manifest points the Python tools at lnsd via
   `--client-adapter` — every divergence above is therefore also an
   A/B-validity question, not only a stranger's-first-contact one.
@@ -710,7 +708,7 @@ rather than misleading.
    direction the sentence does not mean — lnsd accepts bool spellings
    rnsd refuses (D14). The same page's own key table states the
    `share_instance` default `false` honestly
-   (`docs/src/guide/configuration.md:113`), so the document contradicts
+   (`docs/src/guide/configuration.md:109`), so the document contradicts
    its own opening paragraph. *Rewritten in e5f78966*: the paragraph now
    says what the drop-in holds, and a second one says where it does
    not (D12, D2, D14); D1 is fixed in the same commit.
@@ -733,7 +731,7 @@ rather than misleading.
    (`docs/src/guide/lnstatus.md:5-7`) is pinned by the render-parity
    corpus under `leviculum-cli/src/lnstatus_render/` and was not
    re-measured here. The authkey-derivation comment
-   (`leviculum-std/src/rpc/mod.rs:239-244`) matches
+   (`leviculum-std/src/rpc/mod.rs:178-183`) matches
    `reference/Reticulum/RNS/Reticulum.py:355-356` exactly. The
    first-hop-timeout formula comment names Transport.py:2700 and the
    reference line is the function it claims
@@ -769,7 +767,7 @@ All three are fixed in e5f78966; see the *Fixed in* note under each.
 3. **The `rpc_key` lockout (D1).** Mechanism: one parse arm in
    `apply_reticulum_key` (`leviculum-std/src/ini_config.rs:404`)
    storing the hex key, used in place of the identity-derived default
-   when keying the listener (`leviculum-std/src/rpc/mod.rs:109-126`)
+   when keying the listener (`leviculum-std/src/rpc/mod.rs:50-67`)
    and the client helpers. Python's fallback-on-invalid behaviour
    (`reference/Reticulum/RNS/Reticulum.py:513-515`) comes along for
    free. Test: unit — configured key authenticates, identity-derived

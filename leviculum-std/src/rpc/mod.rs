@@ -21,23 +21,12 @@ use std::sync::{Arc, Mutex};
 
 use crate::sync_ext::MutexRecover;
 
-// RPC transport. Python `multiprocessing.connection` runs over Unix sockets on
-// Unix and over TCP loopback (AF_INET, default local_control_port 37429) on
-// Windows; we mirror that so `rnstatus`/`rnpath` interop on each platform. The
-// framing + HMAC auth (connection.rs) are transport-agnostic.
-//
-// Platform support: Linux (abstract Unix sockets) is the tested path, exercised
-// by our CI. The macOS/BSD filesystem-socket and Windows TCP-loopback fallbacks
-// are community-supported and are not exercised by our CI.
-#[cfg(windows)]
-use tokio::net::TcpListener as RpcListener;
-#[cfg(windows)]
-use tokio::net::TcpStream as RpcStream;
-#[cfg(unix)]
-use tokio::net::UnixListener as RpcListener;
-#[cfg(unix)]
-use tokio::net::UnixStream as RpcStream;
-
+// RPC transport. Python `multiprocessing.connection` runs over the abstract
+// Unix socket by default and over TCP loopback (local_control_port 37429)
+// under `shared_instance_type = tcp` or where AF_UNIX is missing
+// (Reticulum.py:348-353); the endpoint resolution, bind and dial are shared
+// with the data channel (`interfaces/ipc.rs`). The framing + HMAC auth
+// (connection.rs) are transport-agnostic.
 use crate::driver::{AutoPeerCount, StdNodeCore};
 use crate::interfaces::inventory::SharedInventory;
 use crate::interfaces::InterfaceStatsMap;
@@ -47,67 +36,20 @@ use handlers::handle_request;
 use pickle::parse_request;
 use radio_cache::SharedPacketRadioCache;
 
-/// Bind the RPC listener for the given abstract name.
-///
-/// On Linux, uses abstract Unix sockets; on other Unix systems, filesystem
-/// sockets in the temp directory.
-#[cfg(unix)]
-fn bind_rpc_listener(
-    abstract_name: &str,
-) -> Result<std::os::unix::net::UnixListener, std::io::Error> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::linux::net::SocketAddrExt;
-        let addr = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        std::os::unix::net::UnixListener::bind_addr(&addr)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let path =
-            std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
-        let _ = std::fs::remove_file(&path);
-        std::os::unix::net::UnixListener::bind(&path)
-    }
-}
+use crate::interfaces::ipc::{
+    shared_instance_transport, IpcEndpoint, IpcListener, IpcStream, SharedInstanceTransport,
+};
 
-/// Windows: bind the RPC listener on TCP loopback (Python-RNS AF_INET fallback).
-#[cfg(windows)]
-fn bind_rpc_listener(abstract_name: &str) -> Result<std::net::TcpListener, std::io::Error> {
-    std::net::TcpListener::bind(crate::interfaces::local::loopback_addr(abstract_name))
-}
-
-/// Connect to an RPC socket by abstract name.
-#[cfg(unix)]
-fn connect_rpc(abstract_name: &str) -> Result<std::os::unix::net::UnixStream, std::io::Error> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::linux::net::SocketAddrExt;
-        let addr = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        std::os::unix::net::UnixStream::connect_addr(&addr)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let path =
-            std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
-        std::os::unix::net::UnixStream::connect(&path)
-    }
-}
-
-/// Windows: connect to the TCP loopback RPC socket.
-#[cfg(windows)]
-fn connect_rpc(abstract_name: &str) -> Result<std::net::TcpStream, std::io::Error> {
-    std::net::TcpStream::connect(crate::interfaces::local::loopback_addr(abstract_name))
-}
-
-/// Spawn the RPC server on abstract Unix socket `\0rns/{instance_name}/rpc`.
+/// Spawn the RPC server on the channel `rns/{instance_name}/rpc`: the
+/// abstract Unix socket `\0rns/{instance_name}/rpc` by default, TCP loopback
+/// under `shared_instance_type = tcp`.
 ///
 /// Accepts connections concurrently (each in its own task).
 /// Each connection: handshake -> read request -> dispatch -> write response -> close.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_rpc_server(
     instance_name: &str,
+    transport: &SharedInstanceTransport,
     core: Arc<Mutex<StdNodeCore>>,
     authkey: impl Into<Arc<[u8]>>,
     start_time: std::time::Instant,
@@ -118,13 +60,10 @@ pub(crate) fn spawn_rpc_server(
     radio_cache: SharedPacketRadioCache,
 ) -> Result<(), std::io::Error> {
     let authkey = authkey.into();
-    let abstract_name = format!("rns/{}/rpc", instance_name);
+    let endpoint = transport.endpoint(&format!("rns/{}/rpc", instance_name));
+    let listener = endpoint.bind()?;
 
-    let std_listener = bind_rpc_listener(&abstract_name)?;
-    std_listener.set_nonblocking(true)?;
-    let listener = RpcListener::from_std(std_listener)?;
-
-    tracing::info!("RPC server listening on socket {}", abstract_name);
+    tracing::info!("RPC server listening on socket {}", endpoint);
 
     tokio::spawn(async move {
         rpc_accept_loop(
@@ -147,7 +86,7 @@ pub(crate) fn spawn_rpc_server(
 /// Accept loop: spawns a task per connection.
 #[allow(clippy::too_many_arguments)]
 async fn rpc_accept_loop(
-    listener: RpcListener,
+    listener: IpcListener,
     core: Arc<Mutex<StdNodeCore>>,
     authkey: Arc<[u8]>,
     start_time: std::time::Instant,
@@ -158,7 +97,7 @@ async fn rpc_accept_loop(
     radio_cache: SharedPacketRadioCache,
 ) {
     loop {
-        let (stream, _addr) = match listener.accept().await {
+        let (stream, _peer_port) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 tracing::warn!("RPC accept error: {}", e);
@@ -196,7 +135,7 @@ async fn rpc_accept_loop(
 /// Handle a single RPC connection: handshake -> read -> dispatch -> write -> close.
 #[allow(clippy::too_many_arguments)]
 async fn handle_rpc_connection(
-    mut stream: RpcStream,
+    mut stream: IpcStream,
     core: &Arc<Mutex<StdNodeCore>>,
     authkey: &[u8],
     start_time: std::time::Instant,
@@ -274,6 +213,8 @@ pub(crate) struct SharedInstanceClient {
     pub instance_name: String,
     /// The config's `rpc_key`; `None` asks with the identity-derived key.
     pub rpc_key: Option<Vec<u8>>,
+    /// Where the instance's RPC channel is.
+    pub transport: SharedInstanceTransport,
 }
 
 /// Parse a config `rpc_key` value as Python does, with `bytes.fromhex`
@@ -319,17 +260,33 @@ const RPC_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 ///
 /// The whole handshake + round-trip is bounded by [`RPC_CLIENT_TIMEOUT`]; on
 /// expiry this returns a `TimedOut` I/O error rather than hanging.
+///
+/// Dials `abstract_name` where this process's shared-instance transport puts
+/// it ([`shared_instance_transport`]); [`rpc_client_call_at`] names the
+/// endpoint itself.
 pub(crate) async fn rpc_client_call(
     abstract_name: &str,
     authkey: &[u8],
     request: &serde_pickle::value::Value,
 ) -> Result<serde_pickle::value::Value, RpcError> {
-    // `connect_rpc` either succeeds quickly or fails fast (ECONNREFUSED /
+    rpc_client_call_at(
+        &shared_instance_transport().endpoint(abstract_name),
+        authkey,
+        request,
+    )
+    .await
+}
+
+/// [`rpc_client_call`] against an explicit endpoint.
+pub(crate) async fn rpc_client_call_at(
+    endpoint: &IpcEndpoint,
+    authkey: &[u8],
+    request: &serde_pickle::value::Value,
+) -> Result<serde_pickle::value::Value, RpcError> {
+    // The connect either succeeds quickly or fails fast (ECONNREFUSED /
     // connection refused if nothing is listening) on the loopback transports we
     // use, so it stays outside the request/response timeout below.
-    let std_stream = connect_rpc(abstract_name)?;
-    std_stream.set_nonblocking(true)?;
-    let mut stream = RpcStream::from_std(std_stream)?;
+    let mut stream = endpoint.connect()?;
 
     // Upstream Python-RNS migrated the shared-instance RPC payload from pickle to
     // msgpack (reference/Reticulum a2ef9782): the client now sends `mp.packb(req)`
@@ -480,7 +437,29 @@ pub async fn rpc_query_hash_param(
     param_key: &str,
     param: &[u8],
 ) -> Result<serde_json::Value, crate::Error> {
-    let abstract_name = format!("rns/{}/rpc", instance_name);
+    rpc_query_hash_param_at(
+        &shared_instance_transport(),
+        instance_name,
+        authkey,
+        get_key,
+        param_key,
+        param,
+    )
+    .await
+}
+
+/// [`rpc_query_hash_param`] over an explicit transport: a client node asks
+/// its daemon where its own config says the daemon is, not where this
+/// process's default points.
+pub(crate) async fn rpc_query_hash_param_at(
+    transport: &SharedInstanceTransport,
+    instance_name: &str,
+    authkey: &[u8],
+    get_key: &str,
+    param_key: &str,
+    param: &[u8],
+) -> Result<serde_json::Value, crate::Error> {
+    let endpoint = transport.endpoint(&format!("rns/{}/rpc", instance_name));
     let entries = vec![
         (pickle::pickle_str_key("get"), pickle::pickle_str(get_key)),
         (
@@ -489,7 +468,7 @@ pub async fn rpc_query_hash_param(
         ),
     ];
     let request = pickle::pickle_dict(entries);
-    let response = rpc_client_call(&abstract_name, authkey, &request)
+    let response = rpc_client_call_at(&endpoint, authkey, &request)
         .await
         .map_err(|e| match e {
             RpcError::Io(io) => crate::Error::Io(io),
@@ -766,6 +745,7 @@ mod tests {
 
         spawn_rpc_server(
             &instance_name,
+            &SharedInstanceTransport::default(),
             Arc::clone(&core),
             authkey,
             start_time,
@@ -960,6 +940,7 @@ mod tests {
 
         spawn_rpc_server(
             &instance_name,
+            &SharedInstanceTransport::default(),
             Arc::clone(&core),
             authkey,
             start_time,
@@ -1023,6 +1004,7 @@ mod tests {
 
         spawn_rpc_server(
             &instance_name,
+            &SharedInstanceTransport::default(),
             Arc::clone(&core),
             authkey,
             start_time,
@@ -1083,6 +1065,7 @@ mod tests {
 
         spawn_rpc_server(
             &instance_name,
+            &SharedInstanceTransport::default(),
             Arc::clone(&core),
             authkey,
             start_time,
@@ -1190,6 +1173,7 @@ mod tests {
 
         spawn_rpc_server(
             &instance_name,
+            &SharedInstanceTransport::default(),
             Arc::clone(&core),
             authkey,
             start_time,
@@ -1282,6 +1266,7 @@ mod tests {
 
         spawn_rpc_server(
             &instance_name,
+            &SharedInstanceTransport::default(),
             Arc::clone(&core),
             authkey,
             start_time,
@@ -1319,6 +1304,7 @@ mod tests {
 
         spawn_rpc_server(
             &instance_name,
+            &SharedInstanceTransport::default(),
             Arc::clone(&core),
             authkey,
             start_time,
@@ -1430,6 +1416,7 @@ mod tests {
 
         spawn_rpc_server(
             &instance_name,
+            &SharedInstanceTransport::default(),
             Arc::clone(&core),
             authkey,
             start_time,
@@ -1487,6 +1474,7 @@ mod tests {
         let instance_name = format!("rpctest_tt_{}", std::process::id());
         spawn_rpc_server(
             &instance_name,
+            &SharedInstanceTransport::default(),
             Arc::clone(&core),
             authkey,
             start_time,
@@ -1637,6 +1625,7 @@ mod tests {
 
         spawn_rpc_server(
             &instance_name,
+            &SharedInstanceTransport::default(),
             Arc::clone(&core),
             authkey,
             start_time,
@@ -1708,6 +1697,7 @@ mod tests {
 
             spawn_rpc_server(
                 &instance_name,
+                &SharedInstanceTransport::default(),
                 Arc::clone(&core),
                 authkey,
                 start_time,

@@ -39,7 +39,7 @@
 //!
 //! On the daemon, an empty `remote_management_allowed` list still
 //! registers the handler and is then consulted per request
-//! (`leviculum-std/src/config.rs:119-127` carries Python's names and
+//! (`leviculum-std/src/config.rs:123-131` carries Python's names and
 //! Python's semantics). **That semantics is deliberately not copied
 //! here.** A daemon runs on a machine with an operator, a config file and
 //! a login; a board is handed to somebody and left on a mast. An
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn an_empty_list_registers_nothing_either() {
         // Where the daemon registers the handler and consults an empty
-        // list per request (`leviculum-std/src/config.rs:119-127`), a board
+        // list per request (`leviculum-std/src/config.rs:123-131`), a board
         // registers no destination at all.
         assert_eq!(
             remote_mgmt_decision(Some(&StoredMgmtAllow::EMPTY)),

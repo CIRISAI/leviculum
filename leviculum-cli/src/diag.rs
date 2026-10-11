@@ -149,8 +149,13 @@ pub async fn build_bundle(opts: &DiagOptions) -> String {
     section_header(&mut out, "Daemon view (shared-instance RPC)");
     let instance_name =
         resolve_instance_name(opts.instance_name.as_deref(), loaded_config.as_ref());
+    crate::daemon_rpc::dial_as_configured(loaded_config.as_ref());
     let _ = writeln!(out, "instance name: {instance_name}");
-    let _ = writeln!(out, "RPC socket:    \\0rns/{instance_name}/rpc");
+    let _ = writeln!(
+        out,
+        "RPC socket:    {}",
+        leviculum_std::interfaces::shared_instance_rpc_socket_display(&instance_name)
+    );
     if opts.no_rpc {
         let _ = writeln!(out, "(skipped: --no-rpc)");
     } else {

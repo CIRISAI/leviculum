@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 
 use leviculum_std::config::Config;
 
-/// Load the config file under `config_dir`, if there is a readable one.
+/// Load the config file under `config_dir`, if there is a readable one, and
+/// point this process's shared-instance dial where that config puts the
+/// daemon ([`dial_as_configured`]).
 ///
 /// Returns `None` for both "no file" and "file present but unparseable"; a
 /// caller that wants to distinguish them reads the file itself. Every value
@@ -24,7 +26,22 @@ pub fn load_config(config_dir: &Path) -> Option<Config> {
     if !config_file.exists() {
         return None;
     }
-    Config::load(&config_file).ok()
+    let config = Config::load(&config_file).ok();
+    dial_as_configured(config.as_ref());
+    config
+}
+
+/// Dial the shared instance, RPC and data channel alike, where `config` says
+/// it is: TCP loopback under `shared_instance_type = tcp`, at the configured
+/// ports, as every Python client reading the same file does
+/// (`reference/Reticulum/RNS/Reticulum.py:683-694`). Without a config the
+/// default, the abstract socket, stands.
+pub fn dial_as_configured(config: Option<&Config>) {
+    if let Some(config) = config {
+        leviculum_std::interfaces::set_shared_instance_transport(
+            leviculum_std::interfaces::SharedInstanceTransport::from_config(&config.reticulum),
+        );
+    }
 }
 
 /// The shared instance a client should address: an explicit override, else the

@@ -67,7 +67,7 @@ wrong value, and it fails silently — see
   on are parsed for compatibility — for example `shared_instance_type`
   and `shared_instance_socket` are read and honoured per RNS 1.3.x
   semantics so an existing `rnsd` config works unchanged
-  (`leviculum-std/src/config.rs:76-82`).
+  (`leviculum-std/src/config.rs:80-86`).
 
 This drop-in property is a deliberate design goal, not an accident.
 It is also what makes honest A/B testing possible: the test harness
@@ -136,7 +136,7 @@ Leviculum defaults it **off** on dial-out point-to-point links —
 `TCPClientInterface`, `BackboneClientInterface`, `UDPInterface`, and an
 `I2PInterface` without `connectable` — and leaves it **on** everywhere
 else, including every listener
-(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:1021`).
+(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:1025`).
 
 Against the rule: the flag decides only whether *we* hold incoming
 announces, so no wire byte and no behaviour a peer observes changes

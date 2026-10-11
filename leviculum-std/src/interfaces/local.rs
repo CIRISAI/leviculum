@@ -1,7 +1,8 @@
-//! Local (Unix socket) interface for shared instance IPC
+//! Local interface for shared instance IPC
 //!
 //! Implements the data channel for Python Reticulum's "shared instance" feature.
-//! A daemon listens on an abstract Unix domain socket (`\0rns/{instance_name}`)
+//! A daemon listens on an abstract Unix domain socket (`\0rns/{instance_name}`),
+//! or on TCP loopback under `shared_instance_type = tcp` (see `ipc.rs`),
 //! and accepts connections from local client programs. Each connection becomes
 //! an `InterfaceHandle` with `is_local_client = true`, which tells core to
 //! forward announces and path requests to/from this client.
@@ -9,149 +10,46 @@
 //! Uses the same HDLC framing as TCP interfaces.
 
 use std::io;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use leviculum_core::constants::MTU;
+use leviculum_core::constants::{HEADER_MINSIZE, MTU};
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::transport::InterfaceId;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use super::inventory::{self as inventory_names, InterfaceIdentity, ListenerRow, SharedInventory};
 use super::{IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket};
 use crate::sync_ext::MutexRecover;
 
-// Platform IPC transport. Unix domain sockets on Unix; TCP loopback on Windows,
-// matching Python-RNS, which falls back to 127.0.0.1 (AF_INET) when AF_UNIX is
-// unavailable (default local_interface_port 37428 / local_control_port 37429).
-// `UnixStream`/`TcpStream` are symmetric (both halves impl AsyncRead/AsyncWrite
-// and `into_split()`), so the I/O code below is unchanged across platforms.
-//
-// Platform support: Linux (abstract Unix sockets) is the tested path, exercised
-// by our CI. The macOS/BSD filesystem-socket and Windows TCP-loopback fallbacks
-// below are community-supported and are not exercised by our CI.
-#[cfg(windows)]
-use tokio::net::TcpListener as LocalListener;
-#[cfg(windows)]
-use tokio::net::TcpStream as LocalStream;
-#[cfg(unix)]
-use tokio::net::UnixListener as LocalListener;
-#[cfg(unix)]
-use tokio::net::UnixStream as LocalStream;
+use super::ipc::{shared_instance_transport, IpcEndpoint, IpcStream, SharedInstanceTransport};
 
-/// Bind a local listener for the given abstract instance name.
-///
-/// On Linux, uses abstract Unix sockets (`\0name`); on other Unix systems,
-/// filesystem sockets in the temp directory.
-#[cfg(unix)]
-fn bind_local_listener(abstract_name: &str) -> Result<std::os::unix::net::UnixListener, io::Error> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::linux::net::SocketAddrExt;
-        let addr = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        std::os::unix::net::UnixListener::bind_addr(&addr)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let path =
-            std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
-        // Remove stale socket file if it exists
-        let _ = std::fs::remove_file(&path);
-        std::os::unix::net::UnixListener::bind(&path)
-    }
-}
-
-/// Windows: bind a TCP loopback listener, matching Python-RNS's AF_INET fallback.
-#[cfg(windows)]
-fn bind_local_listener(abstract_name: &str) -> Result<std::net::TcpListener, io::Error> {
-    std::net::TcpListener::bind(loopback_addr(abstract_name))
-}
-
-/// Connect to a local shared instance by abstract name.
-#[cfg(unix)]
-fn connect_local(abstract_name: &str) -> Result<std::os::unix::net::UnixStream, io::Error> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::linux::net::SocketAddrExt;
-        let addr = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        std::os::unix::net::UnixStream::connect_addr(&addr)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let path =
-            std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
-        std::os::unix::net::UnixStream::connect(&path)
-    }
-}
-
-/// Windows: connect to the TCP loopback shared instance.
-#[cfg(windows)]
-fn connect_local(abstract_name: &str) -> Result<std::net::TcpStream, io::Error> {
-    std::net::TcpStream::connect(loopback_addr(abstract_name))
-}
-
-/// The IPC endpoint `connect_to_shared_instance(name)` dials, spelled for an
-/// operator's eyes: `@rns/<name>` for the Linux abstract socket (the form
-/// `ss -xlp` prints for the daemon side), the filesystem path on other
-/// Unixes, the TCP loopback address on Windows.
+/// The IPC endpoint `connect_to_shared_instance(name)` dials in this process,
+/// spelled for an operator's eyes: `@rns/<name>` for the Linux abstract
+/// socket (the form `ss -xlp` prints for the daemon side), the filesystem
+/// path on other Unixes, the TCP loopback address under
+/// `shared_instance_type = tcp` or on Windows.
 ///
 /// Public so CLI clients can name the socket they are dialling in their
 /// diagnostics. The field defect behind it (Codeberg #427): a client that
 /// timed out could not say which instance it had been talking to, so
 /// "did it even dial the daemon's socket?" was unanswerable without strace.
-/// Kept in this module beside `connect_local` so the display and the dial
-/// cannot drift apart.
+/// Resolved through the same `SharedInstanceTransport::endpoint` the dial
+/// uses, so the display and the dial cannot drift apart.
 pub fn shared_instance_socket_display(instance_name: &str) -> String {
-    let abstract_name = format!("rns/{instance_name}");
-    #[cfg(target_os = "linux")]
-    {
-        format!("@{abstract_name}")
-    }
-    #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        std::env::temp_dir()
-            .join(format!("leviculum-{}", abstract_name.replace('/', "-")))
-            .display()
-            .to_string()
-    }
-    #[cfg(windows)]
-    {
-        loopback_addr(&abstract_name).to_string()
-    }
+    shared_instance_transport()
+        .endpoint(&format!("rns/{instance_name}"))
+        .to_string()
 }
 
-/// Configured TCP-loopback ports for the shared-instance data (`.0`) and RPC
-/// (`.1`) channels (`shared_instance_port` / `instance_control_port`). `0`
-/// means unset, so `loopback_addr` falls back to the Python defaults. Set once
-/// at process startup from the parsed config (see `set_loopback_ports`).
-///
-/// Only the AF_INET (Windows / `shared_instance_type = tcp`) path reads these;
-/// the AF_UNIX path keys the socket by `instance_name` and ignores the ports,
-/// matching Python. The store is unconditional so the config value is captured
-/// on every platform; only the Windows reader consults it.
-static CONFIGURED_LOOPBACK_PORTS: (AtomicU32, AtomicU32) = (AtomicU32::new(0), AtomicU32::new(0));
-
-/// Record the configured shared-instance TCP-loopback ports for later binds.
-///
-/// Called from the node builder with the parsed `shared_instance_port` /
-/// `instance_control_port`. `None` leaves the Python default in force. A no-op
-/// on the AF_UNIX path (the ports are never read there).
-pub(crate) fn set_loopback_ports(
-    shared_instance_port: Option<u16>,
-    instance_control_port: Option<u16>,
-) {
-    CONFIGURED_LOOPBACK_PORTS.0.store(
-        u32::from(shared_instance_port.unwrap_or(0)),
-        Ordering::Relaxed,
-    );
-    CONFIGURED_LOOPBACK_PORTS.1.store(
-        u32::from(instance_control_port.unwrap_or(0)),
-        Ordering::Relaxed,
-    );
+/// The RPC channel's endpoint in this process, spelled as
+/// [`shared_instance_socket_display`] spells the data channel's.
+pub fn shared_instance_rpc_socket_display(instance_name: &str) -> String {
+    shared_instance_transport()
+        .endpoint(&format!("rns/{instance_name}/rpc"))
+        .to_string()
 }
 
 /// Resolve the TCP-loopback port for an abstract shared-instance name.
@@ -163,6 +61,9 @@ pub(crate) fn set_loopback_ports(
 /// stable FNV-1a port so independent *leviculum* peers agree without config
 /// (a leviculum-local convention that does not match Python's port for the same
 /// name). Kept platform-agnostic so the resolution is unit-testable off Windows.
+/// This is the implicit Windows fallback only: an explicit
+/// `shared_instance_type = tcp` takes Python's ports whatever the name
+/// ([`SharedInstanceTransport::endpoint`]).
 #[cfg_attr(not(any(test, windows)), allow(dead_code))]
 pub(crate) fn resolve_loopback_port(
     abstract_name: &str,
@@ -183,32 +84,6 @@ pub(crate) fn resolve_loopback_port(
         "rns/default/rpc" => 37429,
         other => name_to_port(other),
     }
-}
-
-/// Map an abstract instance name to a TCP loopback address (Windows).
-///
-/// Python-RNS, when AF_UNIX is unavailable, binds fixed ports — 37428
-/// (`local_interface_port`) for the shared instance and 37429
-/// (`local_control_port`) for RPC — and, critically, does **not** derive a
-/// port from `instance_name` on the AF_INET path (instance_name only varies
-/// the AF_UNIX socket name; see Reticulum.py). A Windows `rnsd` runs multiple
-/// instances by setting `shared_instance_port`/`instance_control_port`
-/// explicitly, not by hashing the name.
-///
-/// A configured `shared_instance_port` / `instance_control_port` (captured by
-/// `set_loopback_ports`) overrides the default; otherwise the default-instance
-/// path matches 37428/37429 and interops cleanly with a Windows `rnsd`, and a
-/// non-default instance name derives a stable FNV-1a port (see
-/// `resolve_loopback_port`).
-#[cfg(windows)]
-pub(crate) fn loopback_addr(abstract_name: &str) -> std::net::SocketAddr {
-    use std::net::{Ipv4Addr, SocketAddr};
-    let port = resolve_loopback_port(
-        abstract_name,
-        CONFIGURED_LOOPBACK_PORTS.0.load(Ordering::Relaxed) as u16,
-        CONFIGURED_LOOPBACK_PORTS.1.load(Ordering::Relaxed) as u16,
-    );
-    SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
 
 /// Stable FNV-1a hash of a name into the unprivileged 37430..=65534 range.
@@ -246,11 +121,13 @@ const FRAME_BUFFER_MULTIPLIER: usize = 2;
 /// Read buffer multiplier (handles multiple packets per read)
 const READ_BUFFER_MULTIPLIER: usize = 4;
 
-/// Start a local (Unix socket) server for shared instance IPC.
+/// Start a local server for shared instance IPC.
 ///
-/// Binds to an abstract Unix socket at `\0rns/{instance_name}` and spawns an
-/// async accept loop. Each accepted connection becomes an `InterfaceHandle`
-/// sent to the event loop via `new_interface_tx`.
+/// Binds the data channel `rns/{instance_name}` where `transport` puts it:
+/// the abstract Unix socket `\0rns/{instance_name}` by default, TCP loopback
+/// under `shared_instance_type = tcp` (and on Windows). Spawns an async
+/// accept loop; each accepted connection becomes an `InterfaceHandle` sent to
+/// the event loop via `new_interface_tx`.
 ///
 /// The shared-instance server itself carries no packets, so it never becomes
 /// a routable interface; like a TCP listener it is announced to the reporting
@@ -259,8 +136,10 @@ const READ_BUFFER_MULTIPLIER: usize = 4;
 ///
 /// The accept loop exits when the event loop drops `new_interface_rx`
 /// (detected via `Sender::closed()`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_local_server(
     instance_name: &str,
+    transport: &SharedInstanceTransport,
     next_id: Arc<AtomicUsize>,
     new_interface_tx: mpsc::Sender<InterfaceHandle>,
     buffer_size: usize,
@@ -270,18 +149,24 @@ pub(crate) fn spawn_local_server(
 ) -> Result<(), io::Error> {
     // Build abstract socket name: "rns/{instance_name}"
     let abstract_name = format!("rns/{}", instance_name);
+    let endpoint = transport.endpoint(&abstract_name);
 
-    let std_listener = bind_local_listener(&abstract_name)?;
-    std_listener.set_nonblocking(true)?;
-    let listener = LocalListener::from_std(std_listener)?;
+    let listener = endpoint.bind()?;
+    let bound_tcp = listener.tcp_addr();
 
-    tracing::info!("Local server listening on socket {}", abstract_name);
+    tracing::info!("Local server listening on socket {}", endpoint);
 
+    // Python's `str()` of the server: the socket path on AF_UNIX, the bound
+    // port on TCP (LocalInterface.py:497-498).
+    let server_label = match bound_tcp {
+        Some(addr) => addr.port().to_string(),
+        None => abstract_name.clone(),
+    };
     inventory.lock_recover().add_listener(
         server_id,
         ListenerRow {
             identity: InterfaceIdentity {
-                name: inventory_names::shared_instance_name(&abstract_name),
+                name: inventory_names::shared_instance_name(&server_label),
                 // Python names the shared-instance server "Reticulum"
                 // (LocalInterface.py:391).
                 short_name: "Reticulum".to_string(),
@@ -297,7 +182,7 @@ pub(crate) fn spawn_local_server(
             ifac_size_bits: None,
             departed_rxb: 0,
             departed_txb: 0,
-            bound_addr: None,
+            bound_addr: bound_tcp,
         },
     );
 
@@ -308,7 +193,7 @@ pub(crate) fn spawn_local_server(
             tokio::select! {
                 result = listener.accept() => {
                     match result {
-                        Ok((stream, _peer_addr)) => {
+                        Ok((stream, peer_port)) => {
                             let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
                             // Python labels an accepted client with the LIVE
                             // client count at accept time (LocalInterface.py:441
@@ -317,14 +202,27 @@ pub(crate) fn spawn_local_server(
                             // the live one, not a monotonic connection index.
                             let client_num = live_clients.fetch_add(1, Ordering::Relaxed);
                             let name = format!("Local[{}]/{}", instance_name_owned, client_num);
-                            inventory.lock_recover().add_spawned(
-                                id.0,
-                                InterfaceIdentity {
-                                    name: inventory_names::local_client_name(&instance_name_owned),
-                                    short_name: inventory_names::local_client_short_name(
+                            // On TCP Python names the client by its peer port,
+                            // and its `str()` prints that port too
+                            // (LocalInterface.py:433 and :374).
+                            let (display, short_name) = match peer_port {
+                                Some(port) => (
+                                    inventory_names::local_client_name(&port.to_string()),
+                                    port.to_string(),
+                                ),
+                                None => (
+                                    inventory_names::local_client_name(&instance_name_owned),
+                                    inventory_names::local_client_short_name(
                                         client_num,
                                         &instance_name_owned,
                                     ),
+                                ),
+                            };
+                            inventory.lock_recover().add_spawned(
+                                id.0,
+                                InterfaceIdentity {
+                                    name: display,
+                                    short_name,
                                     type_name: "LocalClientInterface",
                                     parent: Some(server_id),
                                 },
@@ -353,12 +251,12 @@ pub(crate) fn spawn_local_server(
     Ok(())
 }
 
-/// Create channels, spawn the I/O task for an accepted Unix stream,
+/// Create channels, spawn the I/O task for an accepted IPC stream,
 /// and return the resulting `InterfaceHandle`.
 fn spawn_local_interface_from_stream(
     id: InterfaceId,
     name: String,
-    stream: LocalStream,
+    stream: IpcStream,
     buffer_size: usize,
 ) -> InterfaceHandle {
     let (incoming_tx, incoming_rx) = mpsc::channel(buffer_size);
@@ -484,6 +382,9 @@ pub(crate) struct LocalClientConfig {
     /// [`LOCAL_RECONNECT_BASE`] / [`LOCAL_RECONNECT_MAX`]; tests shorten
     /// them so a retry schedule can be observed in milliseconds.
     pub backoff: Option<(Duration, Duration)>,
+    /// Where the daemon's data channel is: the abstract socket by default,
+    /// TCP loopback under `shared_instance_type = tcp`.
+    pub transport: SharedInstanceTransport,
 }
 
 impl LocalClientConfig {
@@ -496,6 +397,7 @@ impl LocalClientConfig {
             reconnect_notify: None,
             disconnect_notify: None,
             backoff: None,
+            transport: SharedInstanceTransport::default(),
         }
     }
 }
@@ -564,11 +466,13 @@ fn local_failure_is_loud(attempt: u64) -> bool {
 /// heard them. Packets the driver queues during the outage wait in the
 /// outgoing channel and go out on the new stream.
 pub(crate) fn spawn_local_client(config: LocalClientConfig) -> Result<InterfaceHandle, io::Error> {
-    let abstract_name = format!("rns/{}", config.instance_name);
+    let endpoint = config
+        .transport
+        .endpoint(&format!("rns/{}", config.instance_name));
 
     // The first connect, synchronous: an absent daemon at startup is an
     // error for the caller, not something to wait for.
-    let stream = connect_local_stream(&abstract_name)?;
+    let stream = connect_local_stream(&endpoint)?;
 
     let (incoming_tx, incoming_rx) = mpsc::channel(config.buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(config.buffer_size);
@@ -581,7 +485,7 @@ pub(crate) fn spawn_local_client(config: LocalClientConfig) -> Result<InterfaceH
     let task = LocalClientTask {
         id: config.id,
         name: name.clone(),
-        abstract_name,
+        endpoint,
         base,
         max,
         counters: Arc::clone(&counters),
@@ -633,11 +537,10 @@ pub(crate) fn spawn_local_client(config: LocalClientConfig) -> Result<InterfaceH
 }
 
 /// One connect attempt, wrapped in the error message that names the socket.
-fn connect_local_stream(abstract_name: &str) -> Result<LocalStream, io::Error> {
-    let std_stream =
-        connect_local(abstract_name).map_err(|e| absent_daemon_error(e, abstract_name))?;
-    std_stream.set_nonblocking(true)?;
-    LocalStream::from_std(std_stream)
+fn connect_local_stream(endpoint: &IpcEndpoint) -> Result<IpcStream, io::Error> {
+    endpoint
+        .connect()
+        .map_err(|e| absent_daemon_error(e, &endpoint.to_string()))
 }
 
 /// The reconnect loop for a shared-instance client. Owns the channel
@@ -645,7 +548,7 @@ fn connect_local_stream(abstract_name: &str) -> Result<LocalStream, io::Error> {
 struct LocalClientTask {
     id: InterfaceId,
     name: String,
-    abstract_name: String,
+    endpoint: IpcEndpoint,
     base: Duration,
     max: Duration,
     counters: Arc<InterfaceCounters>,
@@ -659,7 +562,7 @@ impl LocalClientTask {
     /// the daemon is merely absent.
     async fn run(
         self,
-        stream: LocalStream,
+        stream: IpcStream,
         incoming_tx: mpsc::Sender<IncomingPacket>,
         outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     ) {
@@ -699,7 +602,7 @@ impl LocalClientTask {
             tracing::warn!(
                 "{}: lost the shared instance on \"{}\", reconnecting",
                 self.name,
-                self.abstract_name
+                self.endpoint
             );
             if let Some(ref notify) = self.disconnect_notify {
                 let _ = notify.try_send(self.id);
@@ -722,13 +625,13 @@ impl LocalClientTask {
                     tracing::debug!("{}: event loop shut down, not reconnecting", self.name);
                     return;
                 }
-                match connect_local_stream(&self.abstract_name) {
+                match connect_local_stream(&self.endpoint) {
                     Ok(s) => {
                         self.counters.set_online(true);
                         tracing::info!(
                             "{}: reconnected to the shared instance on \"{}\" after {} attempt(s), {:.1?} offline",
                             self.name,
-                            self.abstract_name,
+                            self.endpoint,
                             attempt,
                             outage_start.elapsed()
                         );
@@ -766,67 +669,74 @@ impl LocalClientTask {
     }
 }
 
+/// Whether a deframed IPC frame is long enough to be a packet at all.
+///
+/// The reference discards any frame of `HEADER_MINSIZE` (19) bytes or less
+/// at the interface (`reference/Reticulum/RNS/Interfaces/LocalInterface.py:267`);
+/// so do we, rather than handing the core something it can only refuse
+/// (D10 of the 2026-10-11 shared-instance audit).
+fn is_packet_sized(frame: &[u8]) -> bool {
+    frame.len() > HEADER_MINSIZE
+}
+
 /// I/O task owning the IPC stream.
 ///
 /// Handles bidirectional I/O using HDLC framing, identical to the TCP
-/// interface task. Uses poll_read_ready + try_read for edge-triggered reads.
+/// interface task, over either IPC transport.
 async fn local_interface_task(
     name: String,
-    stream: LocalStream,
+    stream: IpcStream,
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
 ) -> mpsc::Receiver<OutgoingPacket> {
-    let (reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
 
     let mut deframer = Deframer::with_max_frame(LOCAL_HW_MTU as usize);
     let mut read_buf = vec![0u8; MTU * READ_BUFFER_MULTIPLIER];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
+    // Frames dropped for being shorter than any packet, on this connection.
+    let mut short_frames = 0u64;
 
     // Labelled so every exit leaves through one place: the caller (the
     // reconnect loop) takes the outgoing receiver back and hands it to the
     // next connection, so packets queued during an outage survive it.
     'io: loop {
         tokio::select! {
-            // Read path: wait for socket readability, then try_read + deframe
-            result = reader.readable() => {
+            // Read path: `read` is cancel-safe, so losing the race to the
+            // write branch loses no bytes.
+            result = reader.read(&mut read_buf) => {
                 match result {
-                    Ok(()) => {
-                        loop {
-                            match reader.try_read(&mut read_buf) {
-                                Ok(0) => {
-                                    tracing::debug!("Local interface {} disconnected (EOF)", name);
-                                    break 'io;
+                    Ok(0) => {
+                        tracing::debug!("Local interface {} disconnected (EOF)", name);
+                        break 'io;
+                    }
+                    Ok(n) => {
+                        counters.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
+                        let results = deframer.process(&read_buf[..n]);
+                        for r in results {
+                            // HW_MTU enforcement lives in the deframer now.
+                            if matches!(r, DeframeResult::Oversized) {
+                                tracing::trace!(
+                                    "Local {}: frame exceeds HW_MTU, discarded", name);
+                                continue;
+                            }
+                            if let DeframeResult::Frame(data) = r {
+                                if !is_packet_sized(&data) {
+                                    short_frames += 1;
+                                    tracing::debug!(
+                                        "Local {}: {}-byte frame is not over HEADER_MINSIZE, dropped ({} on this connection)",
+                                        name, data.len(), short_frames);
+                                    continue;
                                 }
-                                Ok(n) => {
-                                    counters.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
-                                    let results = deframer.process(&read_buf[..n]);
-                                    for r in results {
-                                        // HW_MTU enforcement lives in the deframer now.
-                                        if matches!(r, DeframeResult::Oversized) {
-                                            tracing::trace!(
-                                                "Local {}: frame exceeds HW_MTU, discarded", name);
-                                            continue;
-                                        }
-                                        if let DeframeResult::Frame(data) = r {
-                                            if incoming_tx.send(IncomingPacket { data, peer: None, radio: None }).await.is_err() {
-                                                break 'io;
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                    break; // no more data, back to select!
-                                }
-                                Err(e) => {
-                                    tracing::debug!("Local interface {} read error: {}", name, e);
+                                if incoming_tx.send(IncomingPacket { data, peer: None, radio: None }).await.is_err() {
                                     break 'io;
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::debug!("Local interface {} readability error: {}", name, e);
+                        tracing::debug!("Local interface {} read error: {}", name, e);
                         break 'io;
                     }
                 }
@@ -873,6 +783,7 @@ mod tests {
     ) -> Result<(), io::Error> {
         spawn_local_server(
             instance_name,
+            &SharedInstanceTransport::default(),
             next_id,
             tx,
             buffer_size,
@@ -886,9 +797,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Connect to a local server in tests, using the platform-appropriate socket.
-    fn test_connect(instance_name: &str) -> std::os::unix::net::UnixStream {
-        let abstract_name = format!("rns/{}", instance_name);
-        connect_local(&abstract_name).unwrap()
+    fn test_connect(instance_name: &str) -> IpcStream {
+        SharedInstanceTransport::default()
+            .endpoint(&format!("rns/{}", instance_name))
+            .connect()
+            .unwrap()
     }
 
     /// The bare `Connection refused` a failed connect produces says nothing
@@ -940,9 +853,7 @@ mod tests {
         spawn_test_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
 
         // Connect as a local client
-        let std_stream = test_connect(&instance_name);
-        std_stream.set_nonblocking(true).unwrap();
-        let _client = tokio::net::UnixStream::from_std(std_stream).unwrap();
+        let _client = test_connect(&instance_name);
 
         // Verify an InterfaceHandle arrives on the channel
         let handle = tokio::time::timeout(Duration::from_secs(2), rx.recv())
@@ -965,9 +876,7 @@ mod tests {
         spawn_test_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
 
         // Connect
-        let std_stream = test_connect(&instance_name);
-        std_stream.set_nonblocking(true).unwrap();
-        let mut client = tokio::net::UnixStream::from_std(std_stream).unwrap();
+        let mut client = test_connect(&instance_name);
 
         let mut handle = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
@@ -975,7 +884,7 @@ mod tests {
             .expect("closed");
 
         // Client sends HDLC-framed packet to server
-        let payload = b"hello-local";
+        let payload = b"hello-local, a packet-sized frame";
         let mut frame_buf = Vec::new();
         leviculum_core::framing::hdlc::frame(payload, &mut frame_buf);
         client.write_all(&frame_buf).await.unwrap();
@@ -988,7 +897,7 @@ mod tests {
         assert_eq!(pkt.data, payload);
 
         // Server sends HDLC-framed packet to client
-        let response = b"reply-local";
+        let response = b"reply-local, a packet-sized frame";
         handle
             .outgoing
             .send(OutgoingPacket {
@@ -1029,9 +938,7 @@ mod tests {
         spawn_test_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
 
         // Connect and immediately drop
-        let std_stream = test_connect(&instance_name);
-        std_stream.set_nonblocking(true).unwrap();
-        let client = tokio::net::UnixStream::from_std(std_stream).unwrap();
+        let client = test_connect(&instance_name);
 
         let mut handle = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
@@ -1059,13 +966,9 @@ mod tests {
         spawn_test_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
 
         // Connect two clients
-        let std1 = test_connect(&instance_name);
-        std1.set_nonblocking(true).unwrap();
-        let _client1 = tokio::net::UnixStream::from_std(std1).unwrap();
+        let _client1 = test_connect(&instance_name);
 
-        let std2 = test_connect(&instance_name);
-        std2.set_nonblocking(true).unwrap();
-        let _client2 = tokio::net::UnixStream::from_std(std2).unwrap();
+        let _client2 = test_connect(&instance_name);
 
         // Both should produce handles
         let h1 = tokio::time::timeout(Duration::from_secs(2), rx.recv())
@@ -1115,7 +1018,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"client-to-server".to_vec().into(),
+                data: b"client-to-server, packet-sized".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1125,14 +1028,14 @@ mod tests {
             .await
             .expect("timeout waiting for server packet")
             .expect("channel closed");
-        assert_eq!(pkt.data, b"client-to-server");
+        assert_eq!(pkt.data, b"client-to-server, packet-sized");
 
         // Server → Client: send data through server handle's outgoing
         server_handle
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"server-to-client".to_vec().into(),
+                data: b"server-to-client, packet-sized".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1142,7 +1045,7 @@ mod tests {
             .await
             .expect("timeout waiting for client packet")
             .expect("channel closed");
-        assert_eq!(pkt.data, b"server-to-client");
+        assert_eq!(pkt.data, b"server-to-client, packet-sized");
     }
 
     #[test]
@@ -1375,7 +1278,7 @@ mod tests {
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"after-the-restart".to_vec().into(),
+                data: b"after-the-restart, packet-sized".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1384,13 +1287,13 @@ mod tests {
             .await
             .expect("timeout waiting for the packet")
             .expect("channel closed");
-        assert_eq!(pkt.data, b"after-the-restart");
+        assert_eq!(pkt.data, b"after-the-restart, packet-sized");
 
         server_handle
             .outgoing
             .send(OutgoingPacket {
                 peer: None,
-                data: b"and-back".to_vec().into(),
+                data: b"and-back, a packet-sized frame".to_vec().into(),
                 high_priority: false,
             })
             .await
@@ -1399,7 +1302,7 @@ mod tests {
             .await
             .expect("timeout waiting for the daemon's packet")
             .expect("channel closed");
-        assert_eq!(pkt.data, b"and-back");
+        assert_eq!(pkt.data, b"and-back, a packet-sized frame");
 
         // The three lines an operator needs: the loss, the retrying, and the
         // recovery. Asserted, because a silent recovery would be half a fix.
@@ -1539,7 +1442,7 @@ mod tests {
             .set_send_buffer_size(4096)
             .unwrap();
         iface_side.set_nonblocking(true).unwrap();
-        let stream = tokio::net::UnixStream::from_std(iface_side).unwrap();
+        let stream = IpcStream::Unix(tokio::net::UnixStream::from_std(iface_side).unwrap());
 
         let (incoming_tx, _incoming_rx) = mpsc::channel(4);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(4);
@@ -1576,5 +1479,144 @@ mod tests {
             tx > 0,
             "peer observed {n} bytes but the tx counter reads {tx}"
         );
+    }
+
+    /// D10 of the 2026-10-11 shared-instance audit: a frame of
+    /// `HEADER_MINSIZE` bytes or less is dropped at the interface, as the
+    /// reference drops it (`LocalInterface.py:267`), and never reaches the
+    /// core. An 18-byte frame and a 19-byte frame go first, a 20-byte frame
+    /// after them; only the 20-byte one arrives.
+    #[tokio::test]
+    async fn a_frame_not_over_header_minsize_never_reaches_the_core() {
+        use std::io::Write as _;
+
+        let (iface_side, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        iface_side.set_nonblocking(true).unwrap();
+        let stream = IpcStream::Unix(tokio::net::UnixStream::from_std(iface_side).unwrap());
+        let (incoming_tx, mut incoming_rx) = mpsc::channel(4);
+        let (_outgoing_tx, outgoing_rx) = mpsc::channel(4);
+        tokio::spawn(local_interface_task(
+            "d10".to_string(),
+            stream,
+            incoming_tx,
+            outgoing_rx,
+            Arc::new(InterfaceCounters::new()),
+        ));
+
+        let mut wire = Vec::new();
+        for len in [18usize, HEADER_MINSIZE, 20] {
+            let mut framed = Vec::new();
+            frame(&vec![0x11u8; len], &mut framed);
+            wire.extend_from_slice(&framed);
+        }
+        peer.write_all(&wire).unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(2), incoming_rx.recv())
+            .await
+            .expect("the 20-byte frame must arrive")
+            .expect("channel open");
+        assert_eq!(
+            first.data.len(),
+            20,
+            "the first frame to reach the core must be the 20-byte one"
+        );
+        assert!(
+            incoming_rx.try_recv().is_err(),
+            "nothing else may reach the core"
+        );
+    }
+
+    /// D2 of the 2026-10-11 shared-instance audit, the data channel: under
+    /// `shared_instance_type = tcp` the server listens on TCP loopback at the
+    /// configured port, a client built from the same transport reaches it
+    /// and packets cross, and the abstract socket is not served.
+    #[tokio::test]
+    async fn tcp_transport_serves_and_dials_the_data_channel_on_loopback() {
+        // Port 0: the kernel picks, and the listener row reports what it
+        // bound, which is how a caller learns it.
+        let transport = SharedInstanceTransport {
+            tcp: true,
+            data_port: Some(0),
+            control_port: None,
+        };
+        let instance_name = format!("tcp_data_{}", std::process::id());
+        let next_id = Arc::new(AtomicUsize::new(100));
+        let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
+        let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
+        spawn_local_server(
+            &instance_name,
+            &transport,
+            next_id,
+            tx,
+            16,
+            7,
+            Arc::clone(&inventory),
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let port = inventory
+            .lock_recover()
+            .listeners()
+            .find(|(id, _)| *id == 7)
+            .and_then(|(_, row)| row.bound_addr)
+            .expect("the TCP listener reports its bound address")
+            .port();
+        let transport = SharedInstanceTransport {
+            data_port: Some(port),
+            ..transport
+        };
+
+        // The abstract socket of that name is not served.
+        let abstract_err = SharedInstanceTransport::default()
+            .endpoint(&format!("rns/{instance_name}"))
+            .connect();
+        assert!(
+            abstract_err.is_err(),
+            "the abstract socket must not be served under tcp"
+        );
+
+        let client = spawn_local_client(LocalClientConfig {
+            transport,
+            ..LocalClientConfig::new(InterfaceId(1), &instance_name, 16)
+        })
+        .unwrap_or_else(|e| panic!("the client must reach the TCP server: {e}"));
+        let mut server_side = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("accept")
+            .expect("handle");
+
+        client
+            .outgoing
+            .send(OutgoingPacket {
+                data: vec![0x22u8; 40].into(),
+                high_priority: false,
+                peer: None,
+            })
+            .await
+            .unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(2), server_side.incoming.recv())
+            .await
+            .expect("packet")
+            .expect("channel open");
+        assert_eq!(got.data.len(), 40);
+
+        // Python's `str()` forms on TCP: the server by its port, an accepted
+        // client by its peer port (LocalInterface.py:497-498, :374).
+        let inv = inventory.lock_recover();
+        let server_name = inv
+            .listeners()
+            .find(|(id, _)| *id == 7)
+            .map(|(_, row)| row.identity.name.clone());
+        let client = inv
+            .identity(100)
+            .map(|i| (i.name.clone(), i.short_name.clone()));
+        drop(inv);
+        assert_eq!(server_name, Some(format!("Shared Instance[{port}]")));
+        let (client_name, client_short) = client.expect("client row registered");
+        assert!(
+            client_short.parse::<u16>().is_ok(),
+            "an accepted TCP client is named by its peer port: {client_short:?}"
+        );
+        assert_eq!(client_name, format!("LocalInterface[{client_short}]"));
     }
 }

@@ -69,9 +69,13 @@ pub struct ReticulumConfig {
     /// Shared-instance transport type from the RNS config (`unix` or `tcp`).
     ///
     /// `None` means unset (Python defaults to AF_UNIX where available).
-    /// Parsed for rnsd drop-in compatibility; lnsd currently only serves
-    /// the abstract AF_UNIX socket keyed by `instance_name`. When set to
-    /// `tcp` it overrides (clears) `shared_instance_socket` per RNS 1.3.x.
+    /// `tcp` moves both shared-instance channels, data and RPC, from the
+    /// abstract AF_UNIX sockets to TCP loopback at
+    /// [`Self::shared_instance_port`] and [`Self::instance_control_port`]
+    /// (37428/37429 by default, the instance name unused), on every platform,
+    /// as rnsd does (`Reticulum.py:683-694`): lnsd listens there, and our
+    /// client tools reading the same file dial there. It also overrides
+    /// (clears) `shared_instance_socket` per RNS 1.3.x.
     #[serde(default)]
     pub shared_instance_type: Option<String>,
     /// Explicit AF_UNIX socket path for the shared instance (RNS 1.3.x).
