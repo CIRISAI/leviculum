@@ -90,7 +90,7 @@ the whole interface did, so every single-link carrier is unchanged and
 so is lnsd's BLE interface, whose peripheral role notifies its
 subscribed centrals as one group and cannot address a subset of them.
 The firmware implements it (`try_send_excluding_peer`,
-`leviculum-nrf/src/ble/mod.rs:698`), where the decision is a pure
+`leviculum-nrf/src/ble/mod.rs:692`), where the decision is a pure
 function of the registry (`TxAim`,
 `leviculum-nrf/ble-tx/src/registry.rs:899`). Without it a path request
 from the phone died at the board: one `InterfaceId` covered both links,
@@ -100,7 +100,7 @@ was the only node able to answer.
 The firmware runs the same shape with fixed ids: serial 0, LoRa 1, BLE
 2, set once at startup (`set_interface_name`,
 `leviculum-nrf/src/bin/t114.rs:291`) and hardcoded in the interface
-itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:630`), with the
+itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:624`), with the
 announce gate naming the same constant (`BLE_IFACE`,
 `leviculum-nrf/src/announce.rs:85`). The fan-out is a task that maps
 the hint onto a per-link queue (`tx_fanout_task`,
@@ -134,12 +134,12 @@ restarts the strict scan phase on that event (`CentralGone`,
 `leviculum-std/src/interfaces/ble/mod.rs:1171`, into `note_reset`,
 `leviculum-std/src/interfaces/ble/links.rs:1703`). The firmware restarts
 its strict phase only when a new neighbour links or the strict rule finds
-a target (`note_phase_event`, `leviculum-nrf/src/ble/columba.rs:1757`,
+a target (`note_phase_event`, `leviculum-nrf/src/ble/columba.rs:1758`,
 under the reset rule `PhaseEvent::resets_strict` in
 `leviculum-nrf/ble-tx/src/admission.rs`, narrowed by #504 so a known
 peer's reconnect and a teardown no longer reset it); a dial that timed
 out records at most a dead end and leaves the clock running
-(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:1865`).
+(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:1866`).
 
 Same protocol, same shared constant, different behaviour after a failed
 dial: lnsd owes another full 30 s strict bound, the board does not.

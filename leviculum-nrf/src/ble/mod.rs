@@ -490,18 +490,13 @@ async fn tx_fanout_task() -> ! {
     loop {
         let (aim, packet) = BLE_OUTGOING.receive().await;
         OUTGOING_HELD.sub(packet.capacity());
-        match columba::plan_fanout(aim) {
-            // `Route` and `NoLink` are only reachable from `Peer`, so
+        // The registry plans, the drain table says which links are
+        // still claimed; `leviculum_ble_tx::resolve_fanout` decides.
+        match leviculum_ble_tx::resolve_fanout(&HVN_DRAIN, columba::plan_fanout(aim)) {
+            // `Link` and `RouteMiss` are only reachable from `Peer`, so
             // the peer is known in both arms.
-            leviculum_ble_tx::TxFanout::Route(slot) => {
+            leviculum_ble_tx::Delivery::Link { slot, handle } => {
                 let hint = aim_peer(aim);
-                let Some(handle) = HVN_DRAIN.handle_at(slot) else {
-                    // The registry named a slot the drain table no longer
-                    // claims: the link died between the two reads. Same
-                    // decision as NoLink.
-                    log_route_miss(&hint, packet.len());
-                    continue;
-                };
                 crate::log::log_fmt(
                     "[BLE ] ",
                     format_args!(
@@ -517,43 +512,42 @@ async fn tx_fanout_task() -> ! {
                 );
                 queue_on_link(slot, packet);
             }
-            leviculum_ble_tx::TxFanout::NoLink => log_route_miss(&aim_peer(aim), packet.len()),
-            leviculum_ble_tx::TxFanout::Flood => {
-                let links = flood(&packet, leviculum_ble_tx::SlotMask::EMPTY);
-                crate::log::log_fmt(
-                    "[BLE ] ",
-                    format_args!("BLE_TX_FLOOD links={} len={}", links, packet.len()),
-                );
-            }
-            // The #422 ingress link: every live link but the one these
-            // bytes came in on. The count is of links actually served,
-            // so a flood of 1 out of 2 links reads as such.
-            leviculum_ble_tx::TxFanout::FloodExcept(mask) => {
-                let excluded = aim_peer(aim);
-                let links = flood(&packet, mask);
-                crate::log::log_fmt(
-                    "[BLE ] ",
-                    format_args!(
-                        "BLE_TX_FLOOD links={} len={} excl_link={:02x}{:02x}{:02x}{:02x}",
-                        links,
-                        packet.len(),
-                        excluded[0],
-                        excluded[1],
-                        excluded[2],
-                        excluded[3]
+            leviculum_ble_tx::Delivery::RouteMiss => log_route_miss(&aim_peer(aim), packet.len()),
+            leviculum_ble_tx::Delivery::Flood(targets) => {
+                let links = flood(&packet, targets);
+                match aim {
+                    // The #422 ingress link: every live link but the one
+                    // these bytes came in on. The count is of links
+                    // actually served, so a flood of 1 out of 2 links
+                    // reads as such.
+                    leviculum_ble_tx::TxAim::FloodExcept(excluded) => crate::log::log_fmt(
+                        "[BLE ] ",
+                        format_args!(
+                            "BLE_TX_FLOOD links={} len={} excl_link={:02x}{:02x}{:02x}{:02x}",
+                            links,
+                            packet.len(),
+                            excluded[0],
+                            excluded[1],
+                            excluded[2],
+                            excluded[3]
+                        ),
                     ),
-                );
+                    _ => crate::log::log_fmt(
+                        "[BLE ] ",
+                        format_args!("BLE_TX_FLOOD links={} len={}", links, packet.len()),
+                    ),
+                }
             }
         }
     }
 }
 
-/// Copy one packet onto every live link the mask does not skip,
-/// answering how many got it.
-fn flood(packet: &[u8], mask: leviculum_ble_tx::SlotMask) -> usize {
+/// Copy one packet onto every link in `targets`, answering how many got
+/// it.
+fn flood(packet: &[u8], targets: leviculum_ble_tx::SlotMask) -> usize {
     let mut links = 0usize;
-    for (index, _) in LINK_OUT.iter().enumerate() {
-        if HVN_DRAIN.handle_at(index).is_none() || mask.skips(index) {
+    for index in 0..LINK_OUT.len() {
+        if !targets.contains(index) {
             continue;
         }
         links += 1;

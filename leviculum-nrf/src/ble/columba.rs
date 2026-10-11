@@ -30,16 +30,18 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
-    addr_value, admit, connect_failure_condemns, dial_preference, fragment_mtu, identity_hint,
+    abort_disconnects, addr_value, admit, advertise_pass_pause_ms, connect_failure_condemns,
+    dial_preference, dial_stage_failure, fragment_mtu, identity_hint, judge_read_identity,
     judge_supervision_timeout, manufacturer_data_with_hint, parse_peer_advertisement,
-    with_free_slots, AdvReport, CandidateTable, ChurnLedger, ChurnPolicy, ConnParams,
-    ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision, DeadEnds,
-    DialBackoff, DialFailure, DialLedger, Exclusion, GattBytes, LedgerPolicy, Ledgers, LinkPhase,
-    LinkRole, LinkUp, LinkVerdict, Local, Origin, OversizeFrom, OversizeLine, PeerAddr,
-    PeerRegistry, PhaseEvent, PhaseNeighbours, ScanMode, ScanPhase, TxGap, ADV_BYTES_USED,
-    CAP_PERIPHERAL_ONLY, DEAD_END_SLOTS, DEAD_END_TTL_MS, DIAL_BACKOFF_BASE_MS, DIAL_BACKOFF_SLOTS,
-    GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, MANUFACTURER_DATA_HINT_LEN,
-    PERIPH_SLOTS, PHASE_NEIGHBOUR_SLOTS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    scan_pass_pause_ms, with_free_slots, AdvReport, AdvertisePass, CandidateTable, ChurnLedger,
+    ChurnPolicy, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine,
+    ConnectDecision, DeadEnds, DialBackoff, DialFailure, DialLedger, DialStage, Exclusion,
+    GattBytes, LedgerPolicy, Ledgers, LinkPhase, LinkRole, LinkUp, LinkVerdict, Local, Origin,
+    OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent, PhaseNeighbours, ReadIdentity,
+    ScanMode, ScanPass, ScanPhase, StageError, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY,
+    DEAD_END_SLOTS, DEAD_END_TTL_MS, DIAL_BACKOFF_SLOTS, GATT_VALUE_MAX, IDENTITY_HINT_LEN,
+    LEGACY_AD_CAPACITY, MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, PHASE_NEIGHBOUR_SLOTS,
+    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -521,7 +523,7 @@ async fn peripheral_task(
             // advertisement hostage, and a failed advertise must not
             // spin-hold it through its backoff.
         };
-        match conn {
+        let pass = match conn {
             Some(conn) => {
                 // Gate-free, `[INFO] ` prefix kept: a central can dial in
                 // before the debug port re-enumerates (#446, ~2.9 s on a
@@ -561,16 +563,18 @@ async fn peripheral_task(
                 // a central may honour it, ignore it, or answer with
                 // something else entirely, all without telling us.
                 log_conn_params(&conn, handle, LinkRole::Peripheral, LinkPhase::Close);
+                AdvertisePass::Served
             }
-            None => {
-                Timer::after_millis(1000).await;
-            }
-        }
+            None => AdvertisePass::Failed,
+        };
         // The slot is free again. The next advertisement this board
         // starts states the higher count; a task already advertising
         // keeps the older, LOWER one until it resolves, which
         // understates our capacity for a while and never overstates it.
         drop(held_slot);
+        if let Some(pause_ms) = advertise_pass_pause_ms(pass) {
+            Timer::after_millis(pause_ms).await;
+        }
     }
 }
 
@@ -710,13 +714,10 @@ fn process_logged(
     slot_index: usize,
 ) -> DefragResult {
     let before = d.abandoned_count();
-    let result = d.process(data, now_ms);
-    if matches!(result, DefragResult::Error) {
-        // Hard reset: a garbage frame amid a reassembly must not leave a
-        // stale head for the next packet's tail to complete (#255), and
-        // the head it discards is a loss this link must report.
-        d.abandon();
-    }
+    // Hard reset on a garbage frame: a stale head must not be left for
+    // the next packet's tail to complete (#255), and the head it
+    // discards is a loss this link must report.
+    let result = d.process_or_abandon(data, now_ms);
     let after = d.abandoned_count();
     if after != before {
         crate::log::log_fmt(
@@ -1691,18 +1692,18 @@ const SCAN_WINDOW_625US: u32 = 48;
 /// seconds it is gone or busy, and the scanner should look again.
 const CONNECT_TIMEOUT_10MS: u16 = 500;
 
-/// Pause after a session ended or an attempt failed, before the next
-/// scan pass. Keeps a refusing/vanishing peer from being hammered; the
-/// address that failed is held longer by [`DIAL_BACKOFF`] when the
-/// failure named the peer (579). The shared crate's base, which lnsd
-/// pauses too.
-const CENTRAL_RETRY_BACKOFF_MS: u64 = DIAL_BACKOFF_BASE_MS;
+// The pause after a session ended or an attempt failed, before the
+// next scan pass, is `leviculum_ble_tx::scan_pass_pause_ms`: the shared
+// crate's `DIAL_BACKOFF_BASE_MS`, which lnsd pauses too. It keeps a
+// refusing or vanishing peer from being hammered; the address that
+// failed is held longer by [`DIAL_BACKOFF`] when the failure named the
+// peer (579).
 
 // The fallback bound itself, `SCAN_FALLBACK_AFTER_MS` (30 s), lives in
 // `leviculum_ble_tx::window` since #375 part 2 — lnsd runs the same
 // clock, and a shared constant cannot drift. The firmware-side
 // arithmetic behind it still holds: one failed strict attempt costs up
-// to [`CONNECT_TIMEOUT_10MS`] (5 s) plus [`CENTRAL_RETRY_BACKOFF_MS`]
+// to [`CONNECT_TIMEOUT_10MS`] (5 s) plus the pass pause
 // (5 s), so 30 s spans several complete search-connect-backoff cycles
 // at the 30 %-duty passive scan cadence
 // ([`SCAN_INTERVAL_625US`]/[`SCAN_WINDOW_625US`]).
@@ -2442,13 +2443,14 @@ async fn central_link(
                 format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=discover err={err:?}"),
             );
             let _ = conn.disconnect();
-            // No service, or one without the Columba characteristics:
-            // not a Columba peer. Anything else is the link's.
-            return Some(match err {
+            // No service, or one without the Columba characteristics,
+            // is the peer's answer. Anything else is the link's.
+            let error = match err {
                 gatt_client::DiscoverError::ServiceNotFound
-                | gatt_client::DiscoverError::ServiceIncomplete => DialFailure::NotColumba,
-                _ => DialFailure::Transport,
-            });
+                | gatt_client::DiscoverError::ServiceIncomplete => StageError::PeerAnswered,
+                _ => StageError::Link,
+            };
+            return Some(dial_stage_failure(DialStage::Discover, error));
         }
     };
     let peer_id = match client.identity_read().await {
@@ -2459,19 +2461,20 @@ async fn central_link(
                 format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=identity err={err:?}"),
             );
             let _ = conn.disconnect();
-            // An identity of the wrong size is no Columba identity, as
+            // An identity of the wrong size is the peer's answer, as
             // lnsd reads it.
-            return Some(match err {
-                gatt_client::ReadError::Truncated => DialFailure::NotColumba,
-                _ => DialFailure::Transport,
-            });
+            let error = match err {
+                gatt_client::ReadError::Truncated => StageError::PeerAnswered,
+                _ => StageError::Link,
+            };
+            return Some(dial_stage_failure(DialStage::IdentityRead, error));
         }
     };
     // Null-hypothesis check first: an unexpected identity may be us
     // from a different angle. The scanner never sees our own PDUs, but
     // a peer could mirror our identity back through a bug, and "linked
     // to myself" must be a loud log line, not a quiet link.
-    if peer_id == *own_identity {
+    if judge_read_identity(&peer_id, own_identity) == ReadIdentity::Own {
         crate::log::log_fmt(
             "[BLE ] ",
             format_args!("BLE_LINK_SELF addr={peer_value:012x} action=disconnect"),
@@ -2609,7 +2612,11 @@ async fn run_central_session(
             format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=subscribe err={err:?}"),
         );
         let _ = conn.disconnect();
-        return Some(DialFailure::Transport);
+        let error = match err {
+            gatt_client::WriteError::Gatt(_) => StageError::PeerAnswered,
+            _ => StageError::Link,
+        };
+        return Some(dial_stage_failure(DialStage::Subscribe, error));
     }
     // The identity handshake: our 16-byte identity hash as the first
     // write, which is how the peripheral — who never scans — learns who
@@ -2629,10 +2636,11 @@ async fn run_central_session(
         let _ = conn.disconnect();
         // The peer answered our identity with an ATT error: it will not
         // handshake. A dropped link says nothing about it.
-        return Some(match err {
-            gatt_client::WriteError::Gatt(_) => DialFailure::NoHandshake,
-            _ => DialFailure::Transport,
-        });
+        let error = match err {
+            gatt_client::WriteError::Gatt(_) => StageError::PeerAnswered,
+            _ => StageError::Link,
+        };
+        return Some(dial_stage_failure(DialStage::Handshake, error));
     }
     note_dial_success(peer_value);
     crate::log::log_fmt(
@@ -2746,7 +2754,7 @@ async fn run_central_session(
                     let fragments =
                         ble_framing::fragment_packet(&packet, fragment_mtu(conn.att_mtu()));
                     let mut sent = 0usize;
-                    let mut torn = false;
+                    let mut aborted = false;
                     for (index, fragment) in fragments.iter().enumerate() {
                         let Some(value) = GattData::new(fragment.as_slice()) else {
                             // Unreachable: `fragment_mtu` caps every
@@ -2770,7 +2778,7 @@ async fn run_central_session(
                                     dropped,
                                 ),
                             );
-                            torn = true;
+                            aborted = true;
                             break;
                         };
                         if let Err(err) = client.rx_write_without_response(&value).await {
@@ -2789,7 +2797,7 @@ async fn run_central_session(
                                     err,
                                 ),
                             );
-                            torn = true;
+                            aborted = true;
                             break;
                         }
                         sent += 1;
@@ -2813,13 +2821,17 @@ async fn run_central_session(
                             ),
                         );
                     }
-                    if torn {
+                    if aborted {
                         // A torn head poisons the peer's reassembler
                         // exactly as on the notify path (see
                         // super::notify): the only in-band reset is
                         // dropping the link. After a write error the
-                        // link is dead anyway; make it official.
-                        let _ = conn.disconnect();
+                        // link is dead anyway; make it official. The
+                        // write path drops it on every abort, the first
+                        // fragment's included (`abort_disconnects`).
+                        if abort_disconnects(LinkRole::Central, sent > 0, false) {
+                            let _ = conn.disconnect();
+                        }
                         return;
                     }
                     BLE_TX_PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -2906,7 +2918,7 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
                 format_args!("BLE_CARRIER_GATE role=central state=on"),
             );
         }
-        match select(
+        let pass = match select(
             find_peer_to_initiate(sd, own_addr_value),
             super::carrier_off(CarrierWaiter::Central),
         )
@@ -2947,19 +2959,23 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
                 if let Some(failure) = central_link(sd, &identity_hash, peer, decision).await {
                     note_dial_failure(peer_value, failure);
                 }
+                ScanPass::Dialled
             }
             // Unreachable in practice — a window only closes after its
             // first candidate — but an empty one is a plain rescan,
             // never a panic.
-            Either::First(Ok(None)) => continue,
+            Either::First(Ok(None)) => ScanPass::Empty,
             Either::First(Err(err)) => {
                 crate::warn!("BLE: scan pass failed err={:?}", err);
+                ScanPass::Failed
             }
             // Carrier switched off mid-scan: dropping the scan future
             // stops the scan. Straight back to the gate, no backoff —
             // there is nothing to pace against while off.
-            Either::Second(()) => continue,
+            Either::Second(()) => ScanPass::CarrierOff,
+        };
+        if let Some(pause_ms) = scan_pass_pause_ms(pass) {
+            Timer::after_millis(pause_ms).await;
         }
-        Timer::after_millis(CENTRAL_RETRY_BACKOFF_MS).await;
     }
 }

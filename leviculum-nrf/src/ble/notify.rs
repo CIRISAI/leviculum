@@ -10,7 +10,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_futures::select::{select, Either};
 use embassy_time::Timer;
 use leviculum_ble_tx::{
-    AbortReason, Action, DrainSlot, Event, NotifyOutcome, PacketTx, TxPktLine, DRAIN_WAIT_MS,
+    abort_disconnects, AbortReason, Action, DrainSlot, Event, LinkRole, NotifyOutcome, PacketTx,
+    TxPktLine, DRAIN_WAIT_MS,
 };
 use nrf_softdevice::ble::gatt_server::{self, NotifyValueError};
 use nrf_softdevice::ble::Connection;
@@ -123,8 +124,12 @@ pub async fn notify_fragments<'a, F>(
                 // the connection; a reconnect is cheaper than a poisoned
                 // stream. Pointless after `Disconnected` — the
                 // connection, and with it the peer's partial state, is
-                // already gone.
-                if tx.torn() && !matches!(reason, AbortReason::Disconnected) {
+                // already gone. Host-tested as `abort_disconnects`.
+                if abort_disconnects(
+                    LinkRole::Peripheral,
+                    tx.torn(),
+                    matches!(reason, AbortReason::Disconnected),
+                ) {
                     let _ = conn.disconnect();
                     crate::log::log_fmt(
                         "[BLE ] ",

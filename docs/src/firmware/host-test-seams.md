@@ -33,7 +33,10 @@ the unmounted-store announce, followed in the next wave (leviculum#413,
 [below](#the-outbound-rounds-failure-arms-and-the-store-gates)), and 9
 in a third ([below](#the-third-wave-and-the-end-of-the-propagation-node-list)),
 which empties the propagation-node "none" tier of decisions: the 5 rows
-left in it are marked "no decision" with the reason.
+left in it are marked "no decision" with the reason. A fourth wave
+([below](#the-ble-wave-faults-only-a-misbehaving-peer-would-cause)) took
+13 of the 35 BLE "none" rows to the host and marked 8 more as no
+decision; 14 BLE "none" rows remain, all decisions.
 
 ## The rig-cost measure
 
@@ -198,6 +201,54 @@ unmounted). The propagation-node decisions a rig cell already reaches (55
 rows, the cell named in each) and the "none" rows of the other four
 sections (35 BLE, 32 LoRa and radio, 27 main loops and USB, 27 stores and
 boot) remain unreached by any host test; they are the next orders' list.
+The BLE rows were the next order's, below.
+
+## The BLE wave: faults only a misbehaving peer would cause
+
+All 35 BLE "none" rows share the measure "none", so they were ranked by the
+cell their branch would need, dearest first. Four tiers fall out:
+
+| Tier | What the cell would need | Rows |
+|---|---|---|
+| A | a fault no stock peer produces: a SoftDevice error at a chosen moment, a link dying inside a two-read window, or a peer built to misbehave (wrong layout, wrong identity, refused writes, garbage framing) | 85, 97, 141, 142, 143, 103, 149, 105, 129, 127, 128, 134, 136 |
+| B | a stalled peer and a burst on four links, so a queue or the drain table fills | 82, 87, 92, 114, 138, 123, 107, 131 |
+| C | a board, a peer, and `--set-media ble=off` mid-session | 83, 91, 101, 116, 144, 146, 150 |
+| D | nothing: unreachable, boot-only or HAL glue | 96, 98, 100, 106, 130, 135, 140 |
+
+Within tier A the rows are in the order listed: the SoftDevice faults and
+the race first, which no input from the air can cause, then the rows a
+purpose-built peer could. The ten dearest decisions are tier A without
+143, which on a second read is an early return: a keepalive the
+SoftDevice refuses ends the outbound half, and the session ends through
+the teardown every other end takes. Two more rows of tier A (134, 136)
+are arms of the same classification as 127 and 128, and one row of tier C
+(150) is an arm of the same match as 149, so they moved with them. Each
+decision moved to the crate that holds its other half; the firmware calls
+it with the inputs it used inline.
+
+| Rows | What it decides | Now |
+|---|---|---|
+| 85 (86) | a route to a slot the drain table no longer claims is a miss, not a flood; a flood takes the claimed slots its mask does not skip | `resolve_fanout` (`Delivery`), `leviculum-nrf/ble-tx/src/registry.rs`, beside `plan_fanout` |
+| 97 | the notify path disconnects on a torn packet unless the link is already gone | `abort_disconnects`, `leviculum-nrf/ble-tx/src/lib.rs`, beside `PacketTx` |
+| 141, 142 | the write path disconnects on every abort, the first fragment's included | `abort_disconnects`, the same function, so the asymmetry below is pinned in one place |
+| 103 | a refused advertisement waits 1 s, a served session none | `advertise_pass_pause_ms`, `leviculum-nrf/ble-tx/src/admission.rs` |
+| 149 (148, 150, 151) | a dial or a failed scan waits the dial backoff base, an empty window or a dark carrier goes straight back to the gate | `scan_pass_pause_ms` (`ScanPass`), `leviculum-nrf/ble-tx/src/admission.rs`; the firmware's `CENTRAL_RETRY_BACKOFF_MS` is gone |
+| 105 | a garbage frame amid a reassembly abandons the head, so the next tail cannot splice onto it | `BleDefragmenter::process_or_abandon`, `leviculum-core/src/framing/ble.rs` |
+| 129 | a dial that reads our own identity is a self link | `judge_read_identity` (`ReadIdentity`), `leviculum-nrf/ble-tx/src/admission.rs` |
+| 127, 128, 134, 136 | what a failed setup stage says about the peer: a wrong layout or identity is not Columba, a refused handshake will not handshake, a refused subscription and every silent stage are the air's | `dial_stage_failure` (`DialStage`, `StageError`), `leviculum-nrf/ble-tx/src/admission.rs`, beside 579's `DialFailure` |
+
+The census text of rows 127, 128 and 134 predates 579, which gave each
+stage a `DialFailure`; the classification is what moved. Mapping the
+SoftDevice's own error types onto `StageError` stays in the firmware as
+HAL glue, as lnsd maps BlueZ errors in `connect_failure`. lnsd does not
+call `dial_stage_failure` or `process_or_abandon` yet: its setup tags
+each stage inline with the same answers, and its receive path parks an
+orphan tail between `process` and `abandon` (#434).
+
+Tier D and row 143 are marked in the table with their reason. What is
+left in the BLE "none" tier is tier B and tier C without 150: 14 rows, all
+reached only through a queue filled on purpose or a carrier switched
+mid-session.
 
 ## Observations made during the walk
 
@@ -214,12 +265,13 @@ own issue, not a finding of this page.
   up and once where the round starts: `leviculum-nrf/src/pn.rs:1546`
   and `leviculum-nrf/src/pn.rs:2606`.
 - A full `BLE_INCOMING` drops a completed packet with no line and no
-  counter, on both GATT roles (`leviculum-nrf/src/ble/columba.rs:975`,
-  `leviculum-nrf/src/ble/columba.rs:2718`).
+  counter, on both GATT roles (`leviculum-nrf/src/ble/columba.rs:976`,
+  `leviculum-nrf/src/ble/columba.rs:2726`).
 - The central disconnects on any failed fragment, the first included,
   where the peripheral disconnects only on a torn packet
-  (`leviculum-nrf/src/ble/columba.rs:2816`,
-  `leviculum-nrf/src/ble/notify.rs:127`).
+  (`leviculum-nrf/src/ble/columba.rs:2832`,
+  `leviculum-nrf/src/ble/notify.rs:128`). Both rules are now one function,
+  `leviculum_ble_tx::abort_disconnects`, whose tests pin the difference.
 
 ## The census
 
@@ -320,73 +372,73 @@ own issue, not a finding of this page.
 | 82 | `leviculum-nrf/src/ble/mod.rs:300` | peer Up/Lost event dropped when the 8-deep queue is full | BLE_PEER_EVENTS | none | - | - |  |
 | 83 | `leviculum-nrf/src/ble/mod.rs:419` | carrier_off resolves only once the media state reads off | media::ble_active | none | - | - |  |
 | 84 | `leviculum-nrf/src/ble/mod.rs:429` | carrier_on blocks the protocol task until media reads on | media::ble_active | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 85 | `leviculum-nrf/src/ble/mod.rs:498` | a Route whose slot is no longer claimed is dropped as a route miss | HVN_DRAIN | none | - | - |  |
-| 86 | `leviculum-nrf/src/ble/mod.rs:556` | flood target filter: skip unclaimed slots and the ingress slot | HVN_DRAIN, SlotMask | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 87 | `leviculum-nrf/src/ble/mod.rs:578` | per-link queue full: drop (BLE_TX_FANOUT_DROP), else count custody | LINK_OUT fill | none | - | - |  |
-| 88 | `leviculum-nrf/src/ble/mod.rs:651` | interface peer count is 0 with the carrier off, else the registry count | media, LIVE_PEERS | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 89 | `leviculum-nrf/src/ble/mod.rs:676` | online iff carrier on and at least one claimed drain slot | media, HVN_DRAIN | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 90 | `leviculum-nrf/src/ble/mod.rs:691` | a peer hint aims at that peer, none floods | peer hint | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 91 | `leviculum-nrf/src/ble/mod.rs:714` | carrier off swallows an outbound packet as Ok | media::ble_active | none | - | - |  |
-| 92 | `leviculum-nrf/src/ble/mod.rs:727` | BLE_OUTGOING full answers BufferFull with an IFACE_FULL line | BLE_OUTGOING | none | - | - |  |
-| 93 | `leviculum-nrf/src/ble/mod.rs:1041` | inconclusive SoftDevice RAM probe skips the RAM-floor guard | probe result | `boot_smoke_t114` | 300 | 1/1 |  |
-| 94 | `leviculum-nrf/src/ble/mod.rs:1058` | SoftDevice RAM above `__sretained` panics at boot | wanted, sd_ceiling | `boot_smoke_t114` | 300 | 1/1 |  |
-| 95 | `leviculum-nrf/src/ble/mod.rs:1243` | columba enabled spawns the BLE tasks, else holds the carrier down | boot media profile | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 96 | `leviculum-nrf/src/ble/notify.rs:78` | notify error class: Resources is QueueFull, Disconnected, other Failed | NotifyValueError | none | - | - |  |
-| 97 | `leviculum-nrf/src/ble/notify.rs:127` | a torn packet not caused by a disconnect disconnects the link (BLE_TX_RESYNC) | tx.torn, AbortReason | none | - | - |  |
-| 98 | `leviculum-nrf/src/ble/notify.rs:144` | Action::Nothing is reported as drop `internal` | action | none | - | - |  |
-| 99 | `leviculum-nrf/src/ble/columba.rs:253` | advertised free slots are PERIPH_SLOTS minus busy | PERIPH_BUSY | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 100 | `leviculum-nrf/src/ble/columba.rs:361` | GATT registration refused: BLE_INIT_FAIL, no BLE tasks | SoftDevice result | none | - | - |  |
-| 101 | `leviculum-nrf/src/ble/columba.rs:468` | peripheral: carrier off stops advertising and waits | media::ble_active | none | - | - |  |
-| 102 | `leviculum-nrf/src/ble/columba.rs:503` | advertise outcome: a conn claims a slot, an error yields None, carrier off restarts | advertise result | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 103 | `leviculum-nrf/src/ble/columba.rs:565` | a failed advertise backs off 1000 ms | conn | none | - | - |  |
-| 104 | `leviculum-nrf/src/ble/columba.rs:666` | supervision-timeout request keeps interval and latency, changes the timeout | ask | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 105 | `leviculum-nrf/src/ble/columba.rs:714` | a defragmenter error abandons the reassembly | DefragResult | none | - | - |  |
-| 106 | `leviculum-nrf/src/ble/columba.rs:781` | a peripheral conn without a handle abandons the session, no disconnect | conn.handle | none | - | - |  |
-| 107 | `leviculum-nrf/src/ble/columba.rs:785` | drain table full abandons the peripheral session, no disconnect | HVN_DRAIN | none | - | - |  |
-| 108 | `leviculum-nrf/src/ble/columba.rs:831` | discard the previous tenancy's queue at claim | LINK_OUT[slot] | `ble_reconnect` | 1200 | 3/2 (>2) |  |
-| 109 | `leviculum-nrf/src/ble/columba.rs:864` | RX classifier: before the handshake a 16-byte write is the identity | handshake_done, len | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 110 | `leviculum-nrf/src/ble/columba.rs:901` | an incoming refusal dead-ends the address, notes the dial ledger, disconnects | link_up result | `ble_room_4` | 900 | 4/4 (>2) |  |
-| 111 | `leviculum-nrf/src/ble/columba.rs:918` | payload before the identity is refused and disconnected (BLE_PRE_HANDSHAKE_REFUSE) | handshake_done, len | `ble_unidentified_central_is_dropped` | 600 | 1/1 |  |
-| 112 | `leviculum-nrf/src/ble/columba.rs:941` | a write shorter than the fragment header is a keepalive, liveness only | len | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 113 | `leviculum-nrf/src/ble/columba.rs:953` | other payload feeds the liveness clock and the defragmenter | len | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 114 | `leviculum-nrf/src/ble/columba.rs:975` | a completed packet is dropped silently when BLE_INCOMING is full | BLE_INCOMING | none | - | - |  |
-| 115 | `leviculum-nrf/src/ble/columba.rs:1022` | a packet before hold-ready is held (logged once) until ready | TxHold | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 85 | `leviculum-nrf/src/ble/mod.rs:495` | a Route whose slot is no longer claimed is dropped as a route miss | HVN_DRAIN | none | - | - | `leviculum_ble_tx::registry::delivery::a_route_to_a_slot_released_since_the_plan_is_a_miss`<br>`leviculum_ble_tx::registry::delivery::a_route_to_a_claimed_slot_goes_to_that_link` |
+| 86 | `leviculum-nrf/src/ble/mod.rs:550` | flood target filter: skip unclaimed slots and the ingress slot | HVN_DRAIN, SlotMask | `ble_mesh_formation` | 600 | 3/2 (>2) | `leviculum_ble_tx::registry::delivery::a_flood_takes_every_claimed_slot_and_the_ingress_mask_leaves_its_link_out`<br>`leviculum_ble_tx::registry::delivery::a_flood_with_no_live_link_has_no_target` |
+| 87 | `leviculum-nrf/src/ble/mod.rs:572` | per-link queue full: drop (BLE_TX_FANOUT_DROP), else count custody | LINK_OUT fill | none | - | - |  |
+| 88 | `leviculum-nrf/src/ble/mod.rs:645` | interface peer count is 0 with the carrier off, else the registry count | media, LIVE_PEERS | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 89 | `leviculum-nrf/src/ble/mod.rs:670` | online iff carrier on and at least one claimed drain slot | media, HVN_DRAIN | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 90 | `leviculum-nrf/src/ble/mod.rs:685` | a peer hint aims at that peer, none floods | peer hint | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 91 | `leviculum-nrf/src/ble/mod.rs:708` | carrier off swallows an outbound packet as Ok | media::ble_active | none | - | - |  |
+| 92 | `leviculum-nrf/src/ble/mod.rs:721` | BLE_OUTGOING full answers BufferFull with an IFACE_FULL line | BLE_OUTGOING | none | - | - |  |
+| 93 | `leviculum-nrf/src/ble/mod.rs:1035` | inconclusive SoftDevice RAM probe skips the RAM-floor guard | probe result | `boot_smoke_t114` | 300 | 1/1 |  |
+| 94 | `leviculum-nrf/src/ble/mod.rs:1052` | SoftDevice RAM above `__sretained` panics at boot | wanted, sd_ceiling | `boot_smoke_t114` | 300 | 1/1 |  |
+| 95 | `leviculum-nrf/src/ble/mod.rs:1237` | columba enabled spawns the BLE tasks, else holds the carrier down | boot media profile | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 96 | `leviculum-nrf/src/ble/notify.rs:79` | notify error class: Resources is QueueFull, Disconnected, other Failed | NotifyValueError | none | - | - | no decision: HAL glue, the SoftDevice error mapped onto `NotifyOutcome`; what each outcome does is `PacketTx`'s, host-tested |
+| 97 | `leviculum-nrf/src/ble/notify.rs:128` | a torn packet not caused by a disconnect disconnects the link (BLE_TX_RESYNC) | tx.torn, AbortReason | none | - | - | `leviculum_ble_tx::tests::the_notify_path_disconnects_only_on_a_tear_the_peer_still_holds` |
+| 98 | `leviculum-nrf/src/ble/notify.rs:149` | Action::Nothing is reported as drop `internal` | action | none | - | - | no decision: unreachable, the driver feeds only the event the action asked for; the machine side is `leviculum_ble_tx::tests::an_event_the_machine_did_not_ask_for_cannot_provoke_a_second_send` |
+| 99 | `leviculum-nrf/src/ble/columba.rs:255` | advertised free slots are PERIPH_SLOTS minus busy | PERIPH_BUSY | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 100 | `leviculum-nrf/src/ble/columba.rs:363` | GATT registration refused: BLE_INIT_FAIL, no BLE tasks | SoftDevice result | none | - | - | no decision: early return at boot, a SoftDevice configuration no air input reaches |
+| 101 | `leviculum-nrf/src/ble/columba.rs:470` | peripheral: carrier off stops advertising and waits | media::ble_active | none | - | - |  |
+| 102 | `leviculum-nrf/src/ble/columba.rs:505` | advertise outcome: a conn claims a slot, an error yields None, carrier off restarts | advertise result | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 103 | `leviculum-nrf/src/ble/columba.rs:575` | a failed advertise backs off 1000 ms | conn | none | - | - | `leviculum_ble_tx::admission::dial_steps::a_failed_advertisement_pauses_a_second_and_a_served_one_does_not` |
+| 104 | `leviculum-nrf/src/ble/columba.rs:670` | supervision-timeout request keeps interval and latency, changes the timeout | ask | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 105 | `leviculum-nrf/src/ble/columba.rs:720` | a defragmenter error abandons the reassembly | DefragResult | none | - | - | `framing::ble::tests::test_a_garbage_frame_abandons_the_head_it_would_otherwise_keep`<br>`framing::ble::tests::test_process_or_abandon_passes_good_frames_and_counts_no_idle_garbage` (`leviculum-core`) |
+| 106 | `leviculum-nrf/src/ble/columba.rs:782` | a peripheral conn without a handle abandons the session, no disconnect | conn.handle | none | - | - | no decision: early return, a connection reads no handle only once it is gone |
+| 107 | `leviculum-nrf/src/ble/columba.rs:786` | drain table full abandons the peripheral session, no disconnect | HVN_DRAIN | none | - | - |  |
+| 108 | `leviculum-nrf/src/ble/columba.rs:832` | discard the previous tenancy's queue at claim | LINK_OUT[slot] | `ble_reconnect` | 1200 | 3/2 (>2) |  |
+| 109 | `leviculum-nrf/src/ble/columba.rs:865` | RX classifier: before the handshake a 16-byte write is the identity | handshake_done, len | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 110 | `leviculum-nrf/src/ble/columba.rs:902` | an incoming refusal dead-ends the address, notes the dial ledger, disconnects | link_up result | `ble_room_4` | 900 | 4/4 (>2) |  |
+| 111 | `leviculum-nrf/src/ble/columba.rs:919` | payload before the identity is refused and disconnected (BLE_PRE_HANDSHAKE_REFUSE) | handshake_done, len | `ble_unidentified_central_is_dropped` | 600 | 1/1 |  |
+| 112 | `leviculum-nrf/src/ble/columba.rs:942` | a write shorter than the fragment header is a keepalive, liveness only | len | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 113 | `leviculum-nrf/src/ble/columba.rs:954` | other payload feeds the liveness clock and the defragmenter | len | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 114 | `leviculum-nrf/src/ble/columba.rs:976` | a completed packet is dropped silently when BLE_INCOMING is full | BLE_INCOMING | none | - | - |  |
+| 115 | `leviculum-nrf/src/ble/columba.rs:1023` | a packet before hold-ready is held (logged once) until ready | TxHold | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
 | 116 | `leviculum-nrf/src/ble/columba.rs:1085` | session end with carrier off: BLE_CARRIER_DROP and disconnect | carrier | none | - | - |  |
-| 117 | `leviculum-nrf/src/ble/columba.rs:1102` | Expired with a known identity is a churn departure, Displaced/HandshakeOverdue are not | LinkEnd | `ble_reconnect` | 1200 | 3/2 (>2) |  |
+| 117 | `leviculum-nrf/src/ble/columba.rs:1103` | Expired with a known identity is a churn departure, Displaced/HandshakeOverdue are not | LinkEnd | `ble_reconnect` | 1200 | 3/2 (>2) |  |
 | 118 | `leviculum-nrf/src/ble/columba.rs:1105` | a link-over end disconnects | LinkEnd | `ble_reconnect` | 1200 | 3/2 (>2) |  |
-| 119 | `leviculum-nrf/src/ble/columba.rs:1221` | a displacement wake for this handle ends the session, a stale one is ignored | DISPLACE_WAKES | `ble_room_4` | 900 | 4/4 (>2) |  |
-| 120 | `leviculum-nrf/src/ble/columba.rs:1366` | Refused: count, LinkRefused phase event, false | LinkUp | `ble_room_4` | 900 | 4/4 (>2) |  |
-| 121 | `leviculum-nrf/src/ble/columba.rs:1393` | Displaced: move the queue, signal the old link, LinkDisplaced phase event | LinkUp | `ble_room_4` | 900 | 4/4 (>2) |  |
-| 122 | `leviculum-nrf/src/ble/columba.rs:1426` | Accepted: PeerEvent::Up only on the first link | first | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 123 | `leviculum-nrf/src/ble/columba.rs:1542` | displacement moves queued packets; a full new queue drops | LINK_OUT | none | - | - |  |
-| 124 | `leviculum-nrf/src/ble/columba.rs:1794` | phase reached fallback: clear PHASE_NEIGHBOURS | poll result | `ble_reconnect` | 1200 | 3/2 (>2) |  |
-| 125 | `leviculum-nrf/src/ble/columba.rs:2185` | advertising report filter: connectable and not a scan response | report type | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 126 | `leviculum-nrf/src/ble/columba.rs:2306` | an Exclusion rejects the candidate (ledger/churn holds logged) | admission outcome | `ble_reconnect` | 1200 | 3/2 (>2) |  |
-| 127 | `leviculum-nrf/src/ble/columba.rs:2437` | discovery failure disconnects, no dead-end and no ledger note | discover result | none | - | - |  |
-| 128 | `leviculum-nrf/src/ble/columba.rs:2454` | identity read failure disconnects, no dead-end and no ledger note | read result | none | - | - |  |
-| 129 | `leviculum-nrf/src/ble/columba.rs:2474` | a peer presenting our own identity: BLE_LINK_SELF, dead-end, disconnect | peer_id, own identity | none | - | - |  |
-| 130 | `leviculum-nrf/src/ble/columba.rs:2497` | a central conn without a handle returns, no disconnect | conn.handle | none | - | - |  |
-| 131 | `leviculum-nrf/src/ble/columba.rs:2501` | drain table full on the central side disconnects | HVN_DRAIN | none | - | - |  |
-| 132 | `leviculum-nrf/src/ble/columba.rs:2518` | discard the previous tenancy's queue before the registry entry (central) | LINK_OUT[slot] | `ble_reconnect` | 1200 | 3/2 (>2) |  |
-| 133 | `leviculum-nrf/src/ble/columba.rs:2522` | an outgoing duplicate refused: dead-end, dial ledger, disconnect, release | link_up result | `ble_room_4` | 900 | 4/4 (>2) |  |
-| 134 | `leviculum-nrf/src/ble/columba.rs:2606` | CCCD subscribe failure disconnects | write result | none | - | - |  |
-| 135 | `leviculum-nrf/src/ble/columba.rs:2619` | a handshake value that cannot be built returns without a disconnect | GattData::new | none | - | - |  |
-| 136 | `leviculum-nrf/src/ble/columba.rs:2624` | handshake write failure disconnects | write result | none | - | - |  |
-| 137 | `leviculum-nrf/src/ble/columba.rs:2688` | central RX: shorter than the header is a keepalive, else payload and defrag | len | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 138 | `leviculum-nrf/src/ble/columba.rs:2718` | central: a completed packet is dropped silently when BLE_INCOMING is full | BLE_INCOMING | none | - | - |  |
-| 139 | `leviculum-nrf/src/ble/columba.rs:2738` | central keepalive is always armed | last_keepalive | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 140 | `leviculum-nrf/src/ble/columba.rs:2751` | a fragment that cannot be built: BLE_TX_DROP, torn | GattData::new | none | - | - |  |
-| 141 | `leviculum-nrf/src/ble/columba.rs:2776` | write-command error: BLE_TX_DROP, torn | write result | none | - | - |  |
-| 142 | `leviculum-nrf/src/ble/columba.rs:2816` | torn on any failed fragment, the first included: disconnect | torn | none | - | - |  |
-| 143 | `leviculum-nrf/src/ble/columba.rs:2830` | keepalive failure ends the outbound half, no disconnect | write result | none | - | - |  |
+| 119 | `leviculum-nrf/src/ble/columba.rs:1222` | a displacement wake for this handle ends the session, a stale one is ignored | DISPLACE_WAKES | `ble_room_4` | 900 | 4/4 (>2) |  |
+| 120 | `leviculum-nrf/src/ble/columba.rs:1367` | Refused: count, LinkRefused phase event, false | LinkUp | `ble_room_4` | 900 | 4/4 (>2) |  |
+| 121 | `leviculum-nrf/src/ble/columba.rs:1394` | Displaced: move the queue, signal the old link, LinkDisplaced phase event | LinkUp | `ble_room_4` | 900 | 4/4 (>2) |  |
+| 122 | `leviculum-nrf/src/ble/columba.rs:1427` | Accepted: PeerEvent::Up only on the first link | first | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 123 | `leviculum-nrf/src/ble/columba.rs:1543` | displacement moves queued packets; a full new queue drops | LINK_OUT | none | - | - |  |
+| 124 | `leviculum-nrf/src/ble/columba.rs:1795` | phase reached fallback: clear PHASE_NEIGHBOURS | poll result | `ble_reconnect` | 1200 | 3/2 (>2) |  |
+| 125 | `leviculum-nrf/src/ble/columba.rs:2186` | advertising report filter: connectable and not a scan response | report type | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 126 | `leviculum-nrf/src/ble/columba.rs:2307` | an Exclusion rejects the candidate (ledger/churn holds logged) | admission outcome | `ble_reconnect` | 1200 | 3/2 (>2) |  |
+| 127 | `leviculum-nrf/src/ble/columba.rs:2438` | discovery failure disconnects, no dead-end and no ledger note | discover result | none | - | - | `leviculum_ble_tx::admission::dial_steps::a_layout_or_identity_the_peer_answered_wrongly_is_not_columba`<br>`leviculum_ble_tx::admission::dial_steps::a_stage_that_heard_nothing_back_is_the_air_at_every_stage` |
+| 128 | `leviculum-nrf/src/ble/columba.rs:2456` | identity read failure disconnects, no dead-end and no ledger note | read result | none | - | - | `leviculum_ble_tx::admission::dial_steps::a_layout_or_identity_the_peer_answered_wrongly_is_not_columba`<br>`leviculum_ble_tx::admission::dial_steps::a_stage_that_heard_nothing_back_is_the_air_at_every_stage` |
+| 129 | `leviculum-nrf/src/ble/columba.rs:2477` | a peer presenting our own identity: BLE_LINK_SELF, dead-end, disconnect | peer_id, own identity | none | - | - | `leviculum_ble_tx::admission::dial_steps::a_dial_that_reads_our_own_identity_is_a_self_link` |
+| 130 | `leviculum-nrf/src/ble/columba.rs:2500` | a central conn without a handle returns, no disconnect | conn.handle | none | - | - | no decision: early return, as row 106 |
+| 131 | `leviculum-nrf/src/ble/columba.rs:2504` | drain table full on the central side disconnects | HVN_DRAIN | none | - | - |  |
+| 132 | `leviculum-nrf/src/ble/columba.rs:2521` | discard the previous tenancy's queue before the registry entry (central) | LINK_OUT[slot] | `ble_reconnect` | 1200 | 3/2 (>2) |  |
+| 133 | `leviculum-nrf/src/ble/columba.rs:2525` | an outgoing duplicate refused: dead-end, dial ledger, disconnect, release | link_up result | `ble_room_4` | 900 | 4/4 (>2) |  |
+| 134 | `leviculum-nrf/src/ble/columba.rs:2609` | CCCD subscribe failure disconnects | write result | none | - | - | `leviculum_ble_tx::admission::dial_steps::a_refused_subscription_books_as_the_air` |
+| 135 | `leviculum-nrf/src/ble/columba.rs:2626` | a handshake value that cannot be built returns without a disconnect | GattData::new | none | - | - | no decision: unreachable, a 16-byte value is under `GATT_VALUE_MAX` |
+| 136 | `leviculum-nrf/src/ble/columba.rs:2631` | handshake write failure disconnects | write result | none | - | - | `leviculum_ble_tx::admission::dial_steps::a_refused_handshake_is_a_peer_that_will_not_handshake` |
+| 137 | `leviculum-nrf/src/ble/columba.rs:2696` | central RX: shorter than the header is a keepalive, else payload and defrag | len | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 138 | `leviculum-nrf/src/ble/columba.rs:2726` | central: a completed packet is dropped silently when BLE_INCOMING is full | BLE_INCOMING | none | - | - |  |
+| 139 | `leviculum-nrf/src/ble/columba.rs:2746` | central keepalive is always armed | last_keepalive | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 140 | `leviculum-nrf/src/ble/columba.rs:2759` | a fragment that cannot be built: BLE_TX_DROP, torn | GattData::new | none | - | - | no decision: unreachable, `fragment_mtu` caps every fragment at `GATT_VALUE_MAX` |
+| 141 | `leviculum-nrf/src/ble/columba.rs:2784` | write-command error: BLE_TX_DROP, torn | write result | none | - | - | `leviculum_ble_tx::tests::the_write_path_disconnects_on_every_abort` |
+| 142 | `leviculum-nrf/src/ble/columba.rs:2832` | torn on any failed fragment, the first included: disconnect | torn | none | - | - | `leviculum_ble_tx::tests::the_write_path_disconnects_on_every_abort` |
+| 143 | `leviculum-nrf/src/ble/columba.rs:2842` | keepalive failure ends the outbound half, no disconnect | write result | none | - | - | no decision: early return, the session ends through the teardown every end takes |
 | 144 | `leviculum-nrf/src/ble/columba.rs:2762` | central carrier off: BLE_CARRIER_DROP and disconnect | carrier | none | - | - |  |
-| 145 | `leviculum-nrf/src/ble/columba.rs:2866` | central Expired is a churn departure; any link-over end disconnects | LinkEnd | `ble_reconnect` | 1200 | 3/2 (>2) |  |
-| 146 | `leviculum-nrf/src/ble/columba.rs:2898` | central task: carrier off, no scanning or dialling | media::ble_active | none | - | - |  |
-| 147 | `leviculum-nrf/src/ble/columba.rs:2922` | chosen target: fallback verdict is FallbackTarget, else StrictTarget | decision | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 148 | `leviculum-nrf/src/ble/columba.rs:2954` | an empty scan window rescans at once | scan result | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 149 | `leviculum-nrf/src/ble/columba.rs:2955` | a scan error waits 5 s | scan result | none | - | - |  |
-| 150 | `leviculum-nrf/src/ble/columba.rs:2961` | carrier off mid-scan returns to the gate without backoff | carrier | none | - | - |  |
-| 151 | `leviculum-nrf/src/ble/columba.rs:2963` | 5 s backoff after every dial attempt and session end | CENTRAL_RETRY_BACKOFF_MS | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 145 | `leviculum-nrf/src/ble/columba.rs:2878` | central Expired is a churn departure; any link-over end disconnects | LinkEnd | `ble_reconnect` | 1200 | 3/2 (>2) |  |
+| 146 | `leviculum-nrf/src/ble/columba.rs:2910` | central task: carrier off, no scanning or dialling | media::ble_active | none | - | - |  |
+| 147 | `leviculum-nrf/src/ble/columba.rs:2934` | chosen target: fallback verdict is FallbackTarget, else StrictTarget | decision | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 148 | `leviculum-nrf/src/ble/columba.rs:2967` | an empty scan window rescans at once | scan result | `ble_mesh_formation` | 600 | 3/2 (>2) | `leviculum_ble_tx::admission::dial_steps::a_dial_or_a_failed_scan_pauses_and_an_empty_window_or_a_dark_carrier_does_not` |
+| 149 | `leviculum-nrf/src/ble/columba.rs:2968` | a scan error waits 5 s | scan result | none | - | - | `leviculum_ble_tx::admission::dial_steps::a_dial_or_a_failed_scan_pauses_and_an_empty_window_or_a_dark_carrier_does_not` |
+| 150 | `leviculum-nrf/src/ble/columba.rs:2975` | carrier off mid-scan returns to the gate without backoff | carrier | none | - | - | `leviculum_ble_tx::admission::dial_steps::a_dial_or_a_failed_scan_pauses_and_an_empty_window_or_a_dark_carrier_does_not` |
+| 151 | `leviculum-nrf/src/ble/columba.rs:2977` | 5 s backoff after every dial attempt and session end | CENTRAL_RETRY_BACKOFF_MS | `ble_mesh_formation` | 600 | 3/2 (>2) | `leviculum_ble_tx::admission::dial_steps::a_dial_or_a_failed_scan_pauses_and_an_empty_window_or_a_dark_carrier_does_not` |
 
 ### LoRa, radio, announce and telemetry (`lora.rs`, `sx1262.rs`, `announce.rs`, `telemetry.rs`)
 
