@@ -408,7 +408,7 @@ we can change is our own.
 2. `JITTER_CW_SLOTS` mirrors the reference's post-excursion band-1
    window, 14 draws, where a freshly booted reference uses 15. See
    question 2.
-3. `CSMA_DIFS_MS` and `CSMA_MAX_CW_MS` (`leviculum-core/src/rnode.rs:1041`)
+3. `CSMA_DIFS_MS` and `CSMA_MAX_CW_MS` (`leviculum-core/src/rnode.rs:1038-1046`)
    are millisecond constants pinned to a 24 ms slot and are therefore
    wrong at every SF above 8. Their only consumer is `compute_spacing_ms`
    (`leviculum-core/src/rnode.rs:1216`), which has no caller: the host

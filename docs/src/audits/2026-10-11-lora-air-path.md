@@ -257,15 +257,15 @@ measurement in `docs/src/concepts/regulatory-airtime.md`).
 
 Where we match Python, verified: 2 % default cap over the interface
 bitrate (`DEFAULT_ANNOUNCE_CAP_PERCENT`,
-`leviculum-core/src/constants.rs:384`, against
+`leviculum-core/src/constants.rs:391`, against
 `reference/Reticulum/RNS/Reticulum.py:114`); local announces
 (`hops == 0`) bypass the cap (`leviculum-core/src/transport.rs:12246`,
 against `reference/Reticulum/RNS/Transport.py:1246-1250`); the queue
 holds one slot per destination, a newer emission replacing an older
-(`leviculum-core/src/transport.rs:12438-12456`, against
+(`leviculum-core/src/transport.rs:12444-12462`, against
 `reference/Reticulum/RNS/Transport.py:1267-1281`); release picks lowest
 hops, then oldest (`drain_announce_queues`,
-`leviculum-core/src/transport.rs:12584-12594`, against
+`leviculum-core/src/transport.rs:12607-12617`, against
 `reference/Reticulum/RNS/Interfaces/Interface.py:339-343`).
 
 **D12 — the cap's bitrate is the effective airtime rate, not the
@@ -294,9 +294,9 @@ is empty** (`if not queued_announces and outbound_time > ...`,
 `reference/Reticulum/RNS/Transport.py:1256-1257`); a non-empty queue
 forces queueing, so release order is always the min-hops draw. Ours
 transmits immediately whenever `now >= cap.allowed_at_ms`
-(`leviculum-core/src/transport.rs:12421`) **without consulting the
+(`leviculum-core/src/transport.rs:12427`, before 9b4515b1) **without consulting the
 queue**, and the queue only drains on the poll cadence
-(`drain_announce_queues`, `leviculum-core/src/transport.rs:12558`,
+(`drain_announce_queues`, `leviculum-core/src/transport.rs:12566`,
 called from `poll`, `leviculum-core/src/transport.rs:4605`). In the
 window between the holdoff elapsing and the next poll — up to one poll
 interval, per holdoff cycle — a fresh announce, whatever its hop count,
@@ -310,12 +310,15 @@ dual-cluster saturation cell). Test that would show it: a core unit —
 cap armed and queue non-empty, advance the clock past `allowed_at_ms`
 without running the periodic job, broadcast a fresh 3-hop announce,
 assert the queued 1-hop announce still leaves first.
+Fixed in 9b4515b1: the immediate send also requires an empty queue, in
+the broadcast path and the peer re-offer path alike; test
+`fresh_announce_does_not_jump_the_cap_queue`.
 
 **D15 — queued announces never go stale (unintended).** Python drops
 queue entries older than `QUEUED_ANNOUNCE_LIFE` = 24 h at release time
 (`reference/Reticulum/RNS/Interfaces/Interface.py:330-337`,
 `reference/Reticulum/RNS/Reticulum.py:112`). Our drain has no age check
-(`leviculum-core/src/transport.rs:12558-12608`): an entry leaves only
+(`leviculum-core/src/transport.rs:12566-12631`): an entry leaves only
 by being sent or replaced by a newer emission. The per-destination slot
 bounds the damage, but a destination that announced once and went away
 stays queued indefinitely, and at a saturated LoRa cap (a 183-byte
@@ -324,6 +327,9 @@ the hours Python serves. On the air: we eventually key announces a
 Python relay would have discarded as dead. Class: **spec gap ours**.
 Test: core unit — queue an announce, advance the clock past 24 h, run
 the drain, assert it is dropped rather than transmitted.
+Fixed in 9b4515b1: `QUEUED_ANNOUNCE_LIFE_MS` (24 h) prunes the queue at
+release with an `ANN_QUEUE_STALE` debug line; test
+`queued_announce_older_than_its_life_is_dropped_at_release`.
 
 ## 5. The receive window after TX
 
@@ -441,7 +447,7 @@ Two asymmetries, neither a defect of ours:
 ## Wrong claims in our own tree, verified or refuted
 
 1. **"The RNode emits CMD_STAT_CHTM every ~2 s" — wrong, it is ~1 s.**
-   `leviculum-std/src/interfaces/rnode.rs:846` (the
+   `leviculum-std/src/interfaces/rnode.rs:846` (corrected in 35034019; the
    `TX_GATED_EVENT_AFTER` rationale) and `:873` (the `READY_POLL_MAX`
    rationale, "one CHTM stat cadence") both claim ~2 s. The firmware's
    idle cadence is `UTIL_UPDATE_INTERVAL_MS` = 1000
@@ -455,7 +461,7 @@ Two asymmetries, neither a defect of ours:
    but the two rationales are the kind that get copied.
 2. **"It even reserves a fixed post-TX yield (CSMA_POST_TX_YIELD_SLOTS)"
    — wrong, the reference never uses it.**
-   `leviculum-nrf/src/lora.rs:882-883` claims the reference firmware
+   `leviculum-nrf/src/lora.rs:882-883` (corrected in 35034019) claimed the reference firmware
    reserves a post-TX yield. `CSMA_POST_TX_YIELD_SLOTS` is defined at
    `reference/RNode_Firmware/Config.h:103` and referenced nowhere else
    in the firmware (checked by exhaustive grep over the mirror). The
@@ -464,7 +470,7 @@ Two asymmetries, neither a defect of ours:
    is decoration there, and our explicit window mirrors a discipline
    the reference does not actually implement.
 3. **`CSMA_MAX_CW_MS` says "cw_max=15" and prices 15 slots — the
-   longest band-1 draw is 14.** `leviculum-core/src/rnode.rs:1044-1046`
+   longest band-1 draw is 14.** `leviculum-core/src/rnode.rs:1041-1046`
    derives 360 ms from 15 × 24 ms; `random(cw_min, cw_max)` is
    upper-exclusive, so even the boot-state window's widest draw is 14
    slots (336 ms), and the 24 ms slot itself only holds through
@@ -472,8 +478,9 @@ Two asymmetries, neither a defect of ours:
    `compute_spacing_ms` (`leviculum-core/src/rnode.rs:1217`), has no
    production caller (tests only), as
    `docs/src/concepts/csma-transmit-window.md` open item 3 already
-   records. The same check found `JITTER_MAX_MS`
-   (`leviculum-core/src/rnode.rs:1032`) equally caller-less.
+   records. The same check found `JITTER_MAX_MS` equally caller-less.
+   Corrected in 35034019: the comment states the true widths and why
+   the value stays; `JITTER_MAX_MS` is deleted.
 4. **Claims that held.** Spot-checked against the mirror and correct:
    the CMD_READY query protocol citations
    (`leviculum-std/src/interfaces/rnode.rs:858-868`), the
@@ -495,7 +502,7 @@ Two asymmetries, neither a defect of ours:
 ## The three I would fix first
 
 1. **The announce-cap queue jump (D14).** Mechanism: the immediate-send
-   branch at `leviculum-core/src/transport.rs:12421` tests only the
+   branch at `leviculum-core/src/transport.rs:12427` (before 9b4515b1) tested only the
    holdoff; Python additionally requires the queue empty
    (`reference/Reticulum/RNS/Transport.py:1256-1257`). One added
    condition (`&& cap.queue.is_empty()`) restores the min-hops release
@@ -505,7 +512,7 @@ Two asymmetries, neither a defect of ours:
    possible change with a mesh-visible win under exactly the load the
    propagation Leitstern cares about.
 2. **Stale cap-queue entries (D15).** Mechanism: no age check in
-   `drain_announce_queues` (`leviculum-core/src/transport.rs:12558`);
+   `drain_announce_queues` (`leviculum-core/src/transport.rs:12566`);
    add Python's `QUEUED_ANNOUNCE_LIFE` prune at release (drop entries
    older than 24 h before selection, as
    `reference/Reticulum/RNS/Interfaces/Interface.py:330-337` does).
@@ -515,8 +522,8 @@ Two asymmetries, neither a defect of ours:
 3. **The two self-disagreeing rationales (wrong claims 1 and 2).**
    Mechanism: comment-only edits — "~2 s" → "~1 s
    (`UTIL_UPDATE_INTERVAL_MS`)" at
-   `leviculum-std/src/interfaces/rnode.rs:846` and `:873`, and the
-   post-TX-yield sentence at `leviculum-nrf/src/lora.rs:882-883`
+   `leviculum-std/src/interfaces/rnode.rs:846` and `:873` (done in 35034019), and the
+   post-TX-yield sentence at `leviculum-nrf/src/lora.rs:882-883` (likewise)
    rewritten to what the reference does (returns to continuous RX;
    the yield constant is unused). Test: the citation guard anchors the
    corrected lines; no behaviour moves. Cheap, and it is exactly the
