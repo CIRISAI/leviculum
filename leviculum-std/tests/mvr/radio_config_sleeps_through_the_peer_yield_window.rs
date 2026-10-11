@@ -273,8 +273,13 @@ fn a_repeat_of_the_queued_config_is_not_undeliverable() {
         .find("ConfigDelivery::Undeliverable")
         .expect("the full-channel branch no longer refuses at all");
     let branch = &usb[full_arm..full_arm + refusal];
+    // The comparison itself is `leviculum_usb_policy::full_slot`, graded on
+    // the host by `leviculum-nrf/usb-policy/tests/seam.rs`; what only the
+    // firmware source can show is that this branch asks it, with the record
+    // of what is in the slot, before it reaches the refusal.
     assert!(
-        branch.contains("crate::lora::pending_config() == Some(wire)"),
+        branch.contains("leviculum_usb_policy::full_slot(crate::lora::pending_config(), wire)")
+            && branch.contains("FullSlot::AlreadyQueued"),
         "apply_radio_config refuses a full slot without asking whether the \
          slot holds this very config; the host's retry of its own config is \
          then answered undeliverable, which is how one slow apply became \

@@ -620,12 +620,20 @@ fn a_taskless_boot_answers_out_of_the_media_state_and_the_shared_decision() {
     // from the channel's fullness would take the wedge route on the very
     // boot the wedge is fatal on.
     let gate = usb
-        .find("if !crate::media::lora_booted() {")
+        .find("leviculum_usb_policy::config_route(crate::media::lora_booted())")
         .expect("apply_radio_config no longer asks the media state what booted");
     let stored = usb[gate..]
         .find("ConfigDelivery::Stored")
         .expect("the taskless branch no longer reaches the stored outcome");
     let branch = &usb[gate..gate + stored];
+    // Which boot takes the page route is `leviculum_usb_policy::config_route`,
+    // graded on the host by `leviculum-nrf/usb-policy/tests/seam.rs`; the
+    // board has to take it on that decision's `Store`, not on its own.
+    assert!(
+        branch.contains("leviculum_usb_policy::ConfigRoute::Store"),
+        "apply_radio_config asks the media state what booted but no longer \
+         routes on the shared decision's `Store`: {branch}"
+    );
     assert!(
         branch.contains("request_save_confirmed"),
         "the taskless branch answers before the page write is confirmed, so \
