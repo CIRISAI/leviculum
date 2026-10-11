@@ -227,8 +227,8 @@ Python walks every interface's announce queue and empties it
 return is None either way, and `rnpath -D` prints "Dropping announce
 queues on all interfaces..." trusting the daemon did it
 (`reference/Reticulum/RNS/Utilities/rnpath.py:386-387`). Our dispatch
-arm is a constant: `pickle_bool(true)` with no call into the core
-(`leviculum-std/src/rpc/handlers.rs:113`) — while the core does hold
+arm (`leviculum-std/src/rpc/handlers.rs:117`) was a constant:
+`pickle_bool(true)` with no call into the core — while the core does hold
 per-interface announce-cap queues that the verb is about
 (`drain_announce_queues`, `leviculum-core/src/transport.rs:12610`).
 What the operator sees: the command reports success and the queued
@@ -238,6 +238,21 @@ honest). Bears on: announce propagation debugging under a saturated
 cap (the D14/D15 family of the air-path audit). Test: unit — queue an
 announce under a capped interface, issue the RPC, assert the queue is
 empty and nothing transmits at the next drain.
+
+*Fixed in 2352c749.* The arm calls `drop_announce_queues`
+(`leviculum-core/src/transport.rs:9183`, reached through
+`NodeCore::drop_announce_queues`, `leviculum-core/src/node/mod.rs:2793`),
+which empties every interface's cap queue, leaves the holdoff clocks as
+they are, and logs `ANN_QUEUE_DROPPED iface= count=` per interface that
+held any, as the reference logs "Dropped N announces on <interface>". The
+answer is None, Python's (`reference/Reticulum/RNS/Reticulum.py:1236`).
+Pinned by `dropped_announce_queue_is_counted_then_emptied_and_never_sent`
+(core: the release after the holdoff sends nothing),
+`announce_queue_is_reported_and_dropped_over_rpc` (the verb answers None
+and the queue reads 0 after it) and
+`test_rnstatus_shows_and_rnpath_drops_the_announce_queue` (the reference
+`rnpath -D` against lnsd, after which `rnstatus -A` shows no queue line;
+red before with the queue line still printed).
 
 **D6 — `packet_rssi` / `packet_snr` / `packet_q` always answer
 None, so `rnprobe` against lnsd never prints RSSI/SNR on a LoRa
@@ -279,9 +294,9 @@ RSSI/SNR to stamp from.
 `len(interface.announce_queue)` whenever the interface holds one
 (`reference/Reticulum/RNS/Reticulum.py:1463-1467`) and `rnstatus -A`
 renders "Queued : N announces"
-(`reference/Reticulum/RNS/Utilities/rnstatus.py:542-547`). Ours emits
+(`reference/Reticulum/RNS/Utilities/rnstatus.py:542-547`). Ours emitted
 the key as None unconditionally
-(`leviculum-std/src/rpc/handlers.rs:643`) while the core maintains
+(`leviculum-std/src/rpc/handlers.rs:658`) while the core maintains
 exactly that queue per interface (the announce-cap queue,
 `leviculum-core/src/transport.rs:12610`). Class: **missing answer**
 (None where a number exists). Bears on: observing a saturated LoRa
@@ -289,6 +304,19 @@ cap, which is the state the air-path audit's D14/D15 lived in — the
 operator-visible gauge for it is missing. Test: unit — queue one
 capped announce, `interface_stats` answers `announce_queue: 1`;
 drop-in — `rnstatus -A` under a saturated cap on both daemons.
+
+*Fixed in 2352c749.* The core's interface stats carry the cap-queue length
+(`announce_queue`, `leviculum-core/src/transport.rs:1225`) for an
+interface that holds a cap, and None for one without; the row answers
+that, so `rnstatus -A` renders the line for a capped interface with a
+backlog and nothing otherwise, as against rnsd (it prints the line only
+for a count above zero). Python's base `Interface` always holds a list, so
+rnsd answers 0 where we answer None for an uncapped interface; no
+reference reader tells the two apart. Pinned by
+`test_rnstatus_shows_and_rnpath_drops_the_announce_queue`: the reference
+`rnstatus -A` against lnsd prints `Queued    : 1 announce` under the
+TCP client capped at 100 bps (red before: no queue line within 30 s), and
+by the handler and core tests named under D5.
 
 **D8 — the path answers name interfaces by driver-internal label, not
 by the reference display name the same daemon's `interface_stats`
@@ -571,8 +599,8 @@ rather than misleading.
 
 * **`rnstatus`** — connects (storage-derived authkey), renders our
   interface rows with the reference names, modes, rates and radio
-  stats; `-l` gets both counts. Visible gaps: `-A` never shows queued
-  announces (D7); `-d`/`-D` read the LOCAL discovery registry files,
+  stats; `-l` gets both counts; `-A` shows queued announces on a
+  capped interface (D7, fixed in 2352c749). Visible gaps: `-d`/`-D` read the LOCAL discovery registry files,
   not the RPC, and our on-disk registry format is ours — not compared
   in this audit (coverage, below). Config-dependent lockouts: D1, D2,
   D12.1.
@@ -581,8 +609,8 @@ rather than misleading.
   RSSI/SNR/Q decoration on radio paths (D6) and prints "on unknown"
   where rnsd prints nothing (D9).
 * **`rnpath`** — `-t` works with internal interface names (D8); `-r`
-  prints an error per row (D4); `-D` claims success and does nothing
-  (D5); `-d`, `-x`, `-b`, `-B`, `-U` work with Python's exact return
+  prints an error per row (D4); `-D` empties the announce-cap queues
+  (D5, fixed in 2352c749); `-d`, `-x`, `-b`, `-B`, `-U` work with Python's exact return
   semantics.
 * **`rncp`** — pure data path over the LocalInterface plus
   `first_hop_timeout`; both verified above; nothing rncp reads is in
@@ -679,7 +707,8 @@ All three are fixed in e5f78966; see the *Fixed in* note under each.
 
 D5 (the announce-queue drop no-op) and D7 (the None gauge) are the
 next pair and share one seam: both want the core's announce-cap
-queues exposed to the RPC layer, so they are one batch, not two.
+queues exposed to the RPC layer, so they are one batch, not two. Both
+fixed in 2352c749.
 
 ## Coverage
 
