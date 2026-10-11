@@ -1382,6 +1382,12 @@ async fn retic_serial_task(
                     if write_ok && !frame_buf.is_empty() && frame_buf.len() % 64 == 0 {
                         let _ = write_packet_host_gated(&mut tx, &control, &[]).await;
                     }
+                    // Counted once it reached the host, not when the queue
+                    // took it (`leviculum_usb_policy::tx_counted`).
+                    crate::iface_bytes::note_tx(
+                        crate::iface_bytes::SERIAL,
+                        leviculum_usb_policy::tx_counted(write_ok, data.len()),
+                    );
                 }
             }
         }

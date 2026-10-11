@@ -40,7 +40,8 @@
 //! deframe it, drop a frame a silent host tore ([`read_timeout_ms`]), or end
 //! the session on a disconnect so the next one starts with an empty
 //! deframer. [`offered`] is the serial interface's side of the queue in
-//! front of the writer: what is counted, and when a packet is dropped.
+//! front of the writer: when a packet is dropped. [`tx_counted`] is the
+//! writer's side: what reached a host and is counted.
 //!
 //! # The debug port's drain
 //!
@@ -533,26 +534,38 @@ pub const OUTGOING_DEPTH: usize = 8;
 /// queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Offered {
-    /// Queued, and this many bytes counted as sent: the unframed packet, as
-    /// the reference counts it where the interface accepts it for the medium
-    /// (`RNodeInterface.py:725`). The HDLC framing the writer adds is outside
-    /// the count.
-    Queued {
-        /// Bytes added to the interface's TX counter.
-        counted: usize,
-    },
+    /// Queued for the writer. Nothing is counted yet: the writer still drops
+    /// a frame when the host closes the port before it is read, and counts
+    /// what it wrote ([`tx_counted`]).
+    Queued,
     /// The queue was full: the packet is dropped, nothing is counted, and the
     /// caller sees `BufferFull` with an `[IFACE_FULL]` line naming the depth.
     Full,
 }
 
-/// The interface's answer for a packet of `len` bytes the queue did or did
-/// not take.
-pub fn offered(accepted: bool, len: usize) -> Offered {
+/// The interface's answer for a packet the queue did or did not take.
+pub fn offered(accepted: bool) -> Offered {
     if accepted {
-        Offered::Queued { counted: len }
+        Offered::Queued
     } else {
         Offered::Full
+    }
+}
+
+/// Bytes the serial TX counter adds for a packet of `len` unframed bytes
+/// whose framed write did or did not reach the host: the unframed packet
+/// once every chunk was written, nothing for a frame the writer dropped.
+///
+/// The reference counts the unframed `datalen` after the serial write
+/// returned (`RNodeInterface.py:724-725`); a write that fails raises before
+/// it. The HDLC framing the writer adds is outside the count. Until
+/// leviculum#413's census the board counted where the queue took the packet,
+/// so a frame dropped because no host read the port was counted as sent.
+pub fn tx_counted(written: bool, len: usize) -> usize {
+    if written {
+        len
+    } else {
+        0
     }
 }
 

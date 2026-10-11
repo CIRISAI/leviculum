@@ -49,14 +49,12 @@ impl Interface for EmbeddedInterface<'_> {
 
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
         let accepted = self.sender.try_send(data.to_vec()).is_ok();
-        // What is counted and when a packet is dropped is
-        // `leviculum_usb_policy::offered`, host-tested against a host that
-        // holds DTR up and does not read.
-        match leviculum_usb_policy::offered(accepted, data.len()) {
-            leviculum_usb_policy::Offered::Queued { counted } => {
-                crate::iface_bytes::note_tx(crate::iface_bytes::SERIAL, counted);
-                Ok(())
-            }
+        // When a packet is dropped is `leviculum_usb_policy::offered`,
+        // host-tested against a host that holds DTR up and does not read.
+        // The bytes are counted by the writer once they reached the host
+        // (`leviculum_usb_policy::tx_counted`, in `usb.rs`).
+        match leviculum_usb_policy::offered(accepted) {
+            leviculum_usb_policy::Offered::Queued => Ok(()),
             leviculum_usb_policy::Offered::Full => {
                 // Codeberg #344: the frame is going nowhere and the caller sees
                 // only `BufferFull`. Say it at the interface, where the depth

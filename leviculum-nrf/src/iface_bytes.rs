@@ -20,6 +20,9 @@
 //! * **tx** is counted in each `Interface::try_send` impl, on the success
 //!   path only. A packet the media profile drops with the carrier off, or one
 //!   the outbound queue refuses, never entered the medium and is not counted.
+//!   The serial interface counts later, in the transport writer once the
+//!   frame reached the host (`leviculum_usb_policy::tx_counted`): its queue
+//!   takes packets a host that closes the port never reads.
 //! * **rx** is counted where the medium's task hands the packet to the main
 //!   loop's channel, which is this firmware's `process_incoming`.
 //!

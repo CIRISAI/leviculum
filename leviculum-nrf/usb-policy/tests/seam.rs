@@ -590,39 +590,30 @@ fn an_idle_timeout_leaves_the_next_frame_alone() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_queued_packet_counts_its_unframed_bytes() {
+fn a_written_packet_counts_its_unframed_bytes() {
     // A packet whose framing grows it: two bytes that need escaping.
     let packet = [0x7Eu8, 0x7D, 0x01, 0x02];
     let mut framed = Vec::new();
     frame(&packet, &mut framed);
     assert!(framed.len() > packet.len());
-    assert_eq!(
-        offered(true, packet.len()),
-        Offered::Queued {
-            counted: packet.len()
-        }
-    );
+    assert_eq!(offered(true), Offered::Queued);
+    assert_eq!(tx_counted(true, packet.len()), packet.len());
 }
 
 /// A host that holds DTR up and does not read: the writer pends on the first
 /// packet, the queue fills behind it, and the packet past its depth is
-/// dropped uncounted.
+/// dropped. Nothing is counted while nothing is read.
 #[test]
 fn the_packet_past_a_full_queue_is_dropped_uncounted() {
     let mut queued = 0usize;
-    let mut counted = 0usize;
     let mut full = 0usize;
     for _ in 0..OUTGOING_DEPTH + 3 {
-        match offered(queued < OUTGOING_DEPTH, 100) {
-            Offered::Queued { counted: n } => {
-                queued += 1;
-                counted += n;
-            }
+        match offered(queued < OUTGOING_DEPTH) {
+            Offered::Queued => queued += 1,
             Offered::Full => full += 1,
         }
     }
     assert_eq!(queued, 8);
-    assert_eq!(counted, 800);
     assert_eq!(full, 3);
 }
 
@@ -802,4 +793,20 @@ fn a_full_slot_with_no_published_config_gets_the_grace_send() {
     // The slot is full but the LoRa task has not published what it holds
     // (the boot window before its first config): never treated as a repeat.
     assert_eq!(full_slot(None, eu_default()), FullSlot::GraceSend);
+}
+
+// The serial TX counter counts what reached a host (leviculum#413, the third
+// observation of the census): the reference adds `datalen` after the serial
+// write returned (`RNodeInterface.py:724-725`), and a write that times out
+// raises before it. A packet the queue took and the writer then dropped
+// because no host read the port never left the board.
+#[test]
+fn a_packet_the_writer_drops_unread_is_not_counted() {
+    assert_eq!(offered(true), Offered::Queued);
+    // The host then closes the port and the writer drops the frame.
+    assert_eq!(
+        tx_counted(false, 100),
+        0,
+        "counted before the writer knew it would be dropped"
+    );
 }
