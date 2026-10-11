@@ -925,6 +925,7 @@ dependencies = [
  "embassy-sync 0.7.2",
  "heapless 0.8.0",
  "leviculum-core",
+ "leviculum-heap-budget",
 ]
 
 [[package]]

@@ -36,6 +36,7 @@
 
 pub mod admission;
 pub mod adv;
+pub mod carrier;
 pub mod churn_ledger;
 pub mod conn_params;
 pub mod dial_ledger;
@@ -45,6 +46,7 @@ pub mod gatt_bytes;
 pub mod hold;
 pub mod peer;
 pub mod registry;
+pub mod saturation;
 pub mod session_census;
 pub mod window;
 
@@ -62,6 +64,7 @@ pub use adv::{
     CAP_PERIPHERAL_ONLY, COMPANY_ID, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY,
     MANUFACTURER_DATA_HINT_LEN, MANUFACTURER_DATA_LEN, PERIPH_SLOTS, PROTOCOL_VERSION,
 };
+pub use carrier::{CarrierPath, CarrierState, CarrierStep, StandDown};
 pub use churn_ledger::{ChurnLedger, ChurnPolicy, LeaveNoted};
 pub use conn_params::{
     judge_supervision_timeout, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq,
@@ -84,6 +87,10 @@ pub use registry::{
     DataSilence, Delivery, DupRule, DupVerdict, LinkUp, LinkVerdict, Origin, PeerRegistry,
     SlotMask, TxAim, TxFanout, HANDSHAKE_TIMEOUT_MS, LINK_ABANDONED_MS, LINK_TIMEOUT_MS,
     MIN_USABLE_MTU,
+};
+pub use saturation::{
+    drain_table_refusal, incoming_verdict, link_queue_verdict, outbound_verdict,
+    peer_event_verdict, ClaimRefused, Enqueue, Fill, LinkItem, Outbound, PeerEventKind,
 };
 pub use session_census::{HeldBytes, SessionHeld};
 pub use window::{

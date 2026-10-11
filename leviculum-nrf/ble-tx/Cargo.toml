@@ -33,3 +33,7 @@ critical-section = { version = "1", features = ["std"] }
 # version. Already in the tree — leviculum-nrf's `heapless_v8` is the
 # same 0.8 line.
 heapless = { version = "0.8", default-features = false }
+# The firmware's queue depth and link count, for the saturation tests
+# (`saturation.rs`): a board with every link live and every queue at
+# its real depth, not at a copy of it.
+leviculum-heap-budget = { path = "../heap-budget" }
