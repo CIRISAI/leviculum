@@ -578,6 +578,7 @@ pub fn init_heap() {
 }
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use leviculum_boot_trace::postmortem::{self, RecordMagic};
 
 static PANIC_LED_ARMED: AtomicBool = AtomicBool::new(false);
 static PANIC_LED_PORT: AtomicU8 = AtomicU8::new(0);
@@ -695,8 +696,10 @@ pub fn set_hardfault_led(port: u8, pin: u8, active_low: bool) {
 /// Bumped to 1024 (was 256) so the SoftDevice's "memory access violation"
 /// message — which encodes PC + PREGION at the END of the string — survives
 /// the buffer cap. The 256-char limit was cutting off precisely the
-/// diagnostic data we need to pinpoint the offending instruction.
-pub const PANIC_MSG_MAX: usize = 1024;
+/// diagnostic data we need to pinpoint the offending instruction. The value
+/// and the ring arithmetic around it are host-tested in
+/// `leviculum_boot_trace::postmortem`.
+pub const PANIC_MSG_MAX: usize = leviculum_boot_trace::postmortem::PANIC_MSG_MAX;
 
 /// Snapshot returned by `take_panic_postmortem()`.
 #[derive(Clone, Copy)]
@@ -727,35 +730,31 @@ struct PanicPmRaw {
 /// an overlong message at the wrong offset. Bump this whenever the
 /// record's layout or the meaning of a field changes, so stale records
 /// are rejected instead of misparsed.
-const PANIC_PM_MAGIC: u32 = 0xBADD_CAF1;
-
-/// Same record, already replayed once by a boot. `take_panic_postmortem`
-/// downgrades a fresh record to this instead of erasing it, so the
-/// debug-port query ([`postmortem_query`]) can still retrieve the
-/// evidence after the boot replay was lost to log-ring lapping. The next
-/// panic overwrites the record with a fresh magic; only power loss or a
-/// reflash wipes it.
-const PANIC_PM_MAGIC_SEEN: u32 = 0xBADD_CAF2;
+///
+/// The fresh magic has a twin for a record already replayed once by a
+/// boot: `take_panic_postmortem` downgrades a fresh record to it instead of
+/// erasing it, so the debug-port query ([`postmortem_query`]) can still
+/// retrieve the evidence after the boot replay was lost to log-ring
+/// lapping. The next panic overwrites the record with a fresh magic; only
+/// power loss or a reflash wipes it. Both, and which read accepts which,
+/// are `leviculum_boot_trace::postmortem::PANIC_RECORD`.
+const PANIC_PM: RecordMagic = postmortem::PANIC_RECORD;
 
 #[link_section = ".retained"]
-static mut PANIC_PM: core::mem::MaybeUninit<PanicPmRaw> = core::mem::MaybeUninit::uninit();
+static mut PANIC_PM_RECORD: core::mem::MaybeUninit<PanicPmRaw> = core::mem::MaybeUninit::uninit();
 
 /// Decode the ring-stored record at `p`. Caller has validated the magic.
 ///
 /// The panic handler writes the buffer as a ring keeping the LAST
-/// `PANIC_MSG_MAX` bytes; on overflow the oldest surviving byte sits at
-/// `total % PANIC_MSG_MAX`. Linearise on the way out.
+/// `PANIC_MSG_MAX` bytes; `postmortem::ring_window` says where the oldest
+/// surviving byte sits. Linearise on the way out.
 unsafe fn read_panic_pm(p: *const PanicPmRaw) -> PanicPostMortem {
     let total = core::ptr::read_volatile(core::ptr::addr_of!((*p).len)) as usize;
-    let (start, len) = if total > PANIC_MSG_MAX {
-        (total % PANIC_MSG_MAX, PANIC_MSG_MAX)
-    } else {
-        (0, total)
-    };
+    let (start, len) = postmortem::ring_window(total, PANIC_MSG_MAX);
     let mut bytes = [0u8; PANIC_MSG_MAX];
     let src = core::ptr::addr_of!((*p).bytes).cast::<u8>();
     for (i, slot) in bytes.iter_mut().enumerate().take(len) {
-        *slot = core::ptr::read_volatile(src.add((start + i) % PANIC_MSG_MAX));
+        *slot = core::ptr::read_volatile(src.add(postmortem::ring_slot(start + i, PANIC_MSG_MAX)));
     }
     PanicPostMortem { len, total, bytes }
 }
@@ -763,17 +762,15 @@ unsafe fn read_panic_pm(p: *const PanicPmRaw) -> PanicPostMortem {
 /// Read the panic message captured before the last soft-reset and mark
 /// it seen. Returns `Some(_)` exactly once after a panic, `None`
 /// otherwise — but the record itself stays in `.uninit` (downgraded to
-/// `PANIC_PM_MAGIC_SEEN`) so [`peek_panic_postmortem`] can re-read it.
+/// its seen magic) so [`peek_panic_postmortem`] can re-read it.
 pub fn take_panic_postmortem() -> Option<PanicPostMortem> {
     unsafe {
-        let p = core::ptr::addr_of_mut!(PANIC_PM).cast::<PanicPmRaw>();
+        let p = core::ptr::addr_of_mut!(PANIC_PM_RECORD).cast::<PanicPmRaw>();
         let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-        if magic != PANIC_PM_MAGIC {
-            return None;
-        }
+        let seen = PANIC_PM.take(magic)?;
         let pm = read_panic_pm(p);
         // Mark seen (not erased) so boots don't re-log but the query can.
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), PANIC_PM_MAGIC_SEEN);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), seen);
         Some(pm)
     }
 }
@@ -783,9 +780,9 @@ pub fn take_panic_postmortem() -> Option<PanicPostMortem> {
 /// path; safe to call any number of times.
 pub fn peek_panic_postmortem() -> Option<PanicPostMortem> {
     unsafe {
-        let p = core::ptr::addr_of!(PANIC_PM).cast::<PanicPmRaw>();
+        let p = core::ptr::addr_of!(PANIC_PM_RECORD).cast::<PanicPmRaw>();
         let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-        if magic != PANIC_PM_MAGIC && magic != PANIC_PM_MAGIC_SEEN {
+        if !PANIC_PM.peek(magic) {
             return None;
         }
         Some(read_panic_pm(p))
@@ -809,8 +806,14 @@ mod panic_handler {
     }
     impl core::fmt::Write for ByteWriter<'_> {
         fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let cap = self.buf.len();
             for &b in s.as_bytes() {
-                self.buf[self.pos % self.buf.len()] = b;
+                if let Some(slot) = self
+                    .buf
+                    .get_mut(super::postmortem::ring_slot(self.pos, cap))
+                {
+                    *slot = b;
+                }
                 self.pos += 1;
             }
             Ok(())
@@ -825,7 +828,7 @@ mod panic_handler {
         // log it. LOG_CHANNEL is unusable here — the executor is dead
         // and would never drain it.
         unsafe {
-            let p = core::ptr::addr_of_mut!(super::PANIC_PM).cast::<super::PanicPmRaw>();
+            let p = core::ptr::addr_of_mut!(super::PANIC_PM_RECORD).cast::<super::PanicPmRaw>();
             let buf_ptr = core::ptr::addr_of_mut!((*p).bytes).cast::<u8>();
             let buf_slice = core::slice::from_raw_parts_mut(buf_ptr, super::PANIC_MSG_MAX);
             let mut writer = ByteWriter {
@@ -835,53 +838,24 @@ mod panic_handler {
             let _ = core::fmt::write(&mut writer, format_args!("{}", info));
             core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).len), writer.pos as u32);
             // Magic last — partial write must not appear valid.
-            core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), super::PANIC_PM_MAGIC);
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), super::PANIC_PM.fresh);
         }
 
-        if !super::PANIC_LED_ARMED.load(Ordering::Relaxed) {
-            // No LED configured — reset immediately so the next boot
-            // logs the post-mortem.
+        // No LED configured: reset immediately so the next boot logs the
+        // post-mortem. Else blink (~5 s of visual indication), then reset.
+        let super::postmortem::FaultExit::BlinkThenReset { cycles } =
+            super::postmortem::fault_exit(super::PANIC_LED_ARMED.load(Ordering::Relaxed))
+        else {
             cortex_m::peripheral::SCB::sys_reset();
-        }
-
-        // Direct register pokes to avoid any allocation or HAL state.
-        // P0_BASE = 0x5000_0000, P1_BASE = 0x5000_0300.
-        let port = super::PANIC_LED_PORT.load(Ordering::Relaxed);
-        let pin = super::PANIC_LED_PIN.load(Ordering::Relaxed);
-        let active_low = super::PANIC_LED_ACTIVE_LOW.load(Ordering::Relaxed);
-        let port_base: u32 = if port == 1 { 0x5000_0300 } else { 0x5000_0000 };
-        let pin_mask: u32 = 1u32 << (pin & 31);
-        let dirset = port_base + 0x518;
-        let outset = port_base + 0x508;
-        let outclr = port_base + 0x50C;
-        // (set_on, set_off): write to OUTCLR to drive low, OUTSET to drive high
-        let (reg_on, reg_off) = if active_low {
-            (outclr, outset)
-        } else {
-            (outset, outclr)
         };
 
-        unsafe {
-            core::ptr::write_volatile(dirset as *mut u32, pin_mask);
-        }
-
-        // Blink ~25 cycles (~5 s of visual indication), then reset so the
-        // next boot can log the captured panic message.
-        for _ in 0..25u32 {
-            unsafe {
-                core::ptr::write_volatile(reg_on as *mut u32, pin_mask);
-            }
-            for _ in 0..2_000_000u32 {
-                cortex_m::asm::nop();
-            }
-            unsafe {
-                core::ptr::write_volatile(reg_off as *mut u32, pin_mask);
-            }
-            for _ in 0..2_000_000u32 {
-                cortex_m::asm::nop();
-            }
-        }
-        cortex_m::peripheral::SCB::sys_reset();
+        // Direct register pokes to avoid any allocation or HAL state.
+        let led = super::postmortem::led_registers(
+            super::PANIC_LED_PORT.load(Ordering::Relaxed),
+            super::PANIC_LED_PIN.load(Ordering::Relaxed),
+            super::PANIC_LED_ACTIVE_LOW.load(Ordering::Relaxed),
+        );
+        unsafe { super::blink_then_reset(led, cycles) }
     }
 }
 
@@ -905,17 +879,13 @@ pub struct HardfaultPostMortem {
 }
 
 /// Distinct from `paint_stack`'s `0xDEADBEEF` canary so a stray canary
-/// word cannot masquerade as a valid PM. Versioned like
-/// [`PANIC_PM_MAGIC`]: bump it if this record's layout ever changes, so
-/// a record left in `.uninit` by an older image is rejected rather than
-/// misparsed.
-const HARDFAULT_PM_MAGIC: u32 = 0xC0FF_EE12;
-
-/// Already-replayed marker, mirroring [`PANIC_PM_MAGIC_SEEN`]: the boot
-/// read downgrades to this instead of erasing, keeping the record
-/// retrievable via the debug-port query until the next fault or power
-/// loss.
-const HARDFAULT_PM_MAGIC_SEEN: u32 = 0xC0FF_EE13;
+/// word cannot masquerade as a valid PM. Versioned like [`PANIC_PM`]: bump
+/// it if this record's layout ever changes, so a record left in `.uninit`
+/// by an older image is rejected rather than misparsed. Its
+/// already-replayed twin mirrors the panic record's: the boot read
+/// downgrades to it instead of erasing, keeping the record retrievable via
+/// the debug-port query until the next fault or power loss.
+const HARDFAULT_PM: RecordMagic = postmortem::HARDFAULT_RECORD;
 
 /// Survives `sys_reset` because `.retained` (memory.x) is `NOLOAD` —
 /// values in RAM are not zeroed by the runtime startup — and sits below
@@ -924,7 +894,7 @@ const HARDFAULT_PM_MAGIC_SEEN: u32 = 0xC0FF_EE13;
 /// bootloader's stack; it could not have survived a single reset (see
 /// `boot_trace::BOOT_TRACE` for the full story).
 #[link_section = ".retained"]
-static mut HARDFAULT_PM: core::mem::MaybeUninit<HardfaultPostMortem> =
+static mut HARDFAULT_PM_RECORD: core::mem::MaybeUninit<HardfaultPostMortem> =
     core::mem::MaybeUninit::uninit();
 
 /// Decode the record at `p`. Caller has validated the magic.
@@ -948,14 +918,12 @@ unsafe fn read_hardfault_pm(p: *const HardfaultPostMortem) -> HardfaultPostMorte
 /// [`peek_hardfault_postmortem`].
 pub fn take_hardfault_postmortem() -> Option<HardfaultPostMortem> {
     unsafe {
-        let p = core::ptr::addr_of_mut!(HARDFAULT_PM).cast::<HardfaultPostMortem>();
+        let p = core::ptr::addr_of_mut!(HARDFAULT_PM_RECORD).cast::<HardfaultPostMortem>();
         let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-        if magic != HARDFAULT_PM_MAGIC {
-            return None;
-        }
+        let seen = HARDFAULT_PM.take(magic)?;
         let pm = read_hardfault_pm(p);
         // Mark seen (not erased) so boots don't re-log but the query can.
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), HARDFAULT_PM_MAGIC_SEEN);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), seen);
         Some(pm)
     }
 }
@@ -965,9 +933,9 @@ pub fn take_hardfault_postmortem() -> Option<HardfaultPostMortem> {
 /// query path; safe to call any number of times.
 pub fn peek_hardfault_postmortem() -> Option<HardfaultPostMortem> {
     unsafe {
-        let p = core::ptr::addr_of!(HARDFAULT_PM).cast::<HardfaultPostMortem>();
+        let p = core::ptr::addr_of!(HARDFAULT_PM_RECORD).cast::<HardfaultPostMortem>();
         let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-        if magic != HARDFAULT_PM_MAGIC && magic != HARDFAULT_PM_MAGIC_SEEN {
+        if !HARDFAULT_PM.peek(magic) {
             return None;
         }
         Some(read_hardfault_pm(p))
@@ -1067,7 +1035,7 @@ unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
     // Save register snapshot first — even if the LED arming is absent
     // (unlikely on a configured board), the post-mortem is the
     // diagnostic of record.
-    let p = core::ptr::addr_of_mut!(HARDFAULT_PM).cast::<HardfaultPostMortem>();
+    let p = core::ptr::addr_of_mut!(HARDFAULT_PM_RECORD).cast::<HardfaultPostMortem>();
     core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).pc), ef.pc());
     core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).lr), ef.lr());
     core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r0), ef.r0());
@@ -1077,38 +1045,40 @@ unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
     core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r12), ef.r12());
     core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).xpsr), ef.xpsr());
     // Magic last so a partial write can't masquerade as a valid PM.
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), HARDFAULT_PM_MAGIC);
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), HARDFAULT_PM.fresh);
 
-    if !HARDFAULT_LED_ARMED.load(Ordering::Relaxed) {
-        // No LED configured — reset immediately so the next boot can
-        // log the post-mortem.
+    // No LED configured: reset immediately so the next boot can log the
+    // post-mortem. Else blink (~5 s of visual indication), then reset.
+    let postmortem::FaultExit::BlinkThenReset { cycles } =
+        postmortem::fault_exit(HARDFAULT_LED_ARMED.load(Ordering::Relaxed))
+    else {
         cortex_m::peripheral::SCB::sys_reset();
-    }
-
-    let port = HARDFAULT_LED_PORT.load(Ordering::Relaxed);
-    let pin = HARDFAULT_LED_PIN.load(Ordering::Relaxed);
-    let active_low = HARDFAULT_LED_ACTIVE_LOW.load(Ordering::Relaxed);
-    let port_base: u32 = if port == 1 { 0x5000_0300 } else { 0x5000_0000 };
-    let pin_mask: u32 = 1u32 << (pin & 31);
-    let dirset = port_base + 0x518;
-    let outset = port_base + 0x508;
-    let outclr = port_base + 0x50C;
-    let (reg_on, reg_off) = if active_low {
-        (outclr, outset)
-    } else {
-        (outset, outclr)
     };
+    let led = postmortem::led_registers(
+        HARDFAULT_LED_PORT.load(Ordering::Relaxed),
+        HARDFAULT_LED_PIN.load(Ordering::Relaxed),
+        HARDFAULT_LED_ACTIVE_LOW.load(Ordering::Relaxed),
+    );
+    blink_then_reset(led, cycles)
+}
 
-    core::ptr::write_volatile(dirset as *mut u32, pin_mask);
-
-    // Blink ~25 cycles for ~5 s of visual indication, then reset so the
-    // next boot can log the captured post-mortem.
-    for _ in 0..25u32 {
-        core::ptr::write_volatile(reg_on as *mut u32, pin_mask);
+/// The fault blink both handlers end in: `cycles` on/off periods of the LED
+/// `led` names, then `sys_reset` so the next boot can log the captured
+/// post-mortem. Direct register pokes, no allocation, no HAL state.
+///
+/// # Safety
+///
+/// Writes the GPIO registers `led` names; only for a fault handler, which
+/// owns the core until the reset.
+#[cfg(not(test))]
+unsafe fn blink_then_reset(led: postmortem::LedRegisters, cycles: u32) -> ! {
+    core::ptr::write_volatile(led.dirset as *mut u32, led.mask);
+    for _ in 0..cycles {
+        core::ptr::write_volatile(led.on as *mut u32, led.mask);
         for _ in 0..2_000_000u32 {
             cortex_m::asm::nop();
         }
-        core::ptr::write_volatile(reg_off as *mut u32, pin_mask);
+        core::ptr::write_volatile(led.off as *mut u32, led.mask);
         for _ in 0..2_000_000u32 {
             cortex_m::asm::nop();
         }

@@ -39,8 +39,8 @@ const PERSISTENT_TAIL_MAGIC: u32 = 0x10A9_11A1;
 /// before the host gets a chance to read the boot-critical lines.
 /// Boot-critical paths use `log_fmt_critical` / `log_critical!` and
 /// bypass this gate. Set by `usb::debug_writer_task` on first
-/// DTR-assert observation, or by `runtime_drain_open_timeout_task`
-/// after 30 s.
+/// DTR-assert observation, or after 30 s without one
+/// (`leviculum_usb_policy::drain_wake`).
 pub static RUNTIME_DRAIN_OPEN: AtomicBool = AtomicBool::new(false);
 /// Counter for runtime log lines dropped because RUNTIME_DRAIN_OPEN
 /// was still false. Logged once at gate-open so the field operator
@@ -334,8 +334,8 @@ pub fn take_persistent_log() -> Option<PersistentLogSnapshot> {
 
 /// Marks the runtime-drain gate as open so subsequent `log_fmt`
 /// (and `info!`/`warn!`) calls land in LOG_RING. Idempotent. Called
-/// by `usb::debug_writer_task` on first DTR-assert observation, and
-/// by `usb::runtime_drain_open_timeout_task` after 30 s.
+/// by `usb::debug_writer_task` on first DTR-assert observation, or
+/// after 30 s without one (`leviculum_usb_policy::drain_wake`).
 pub fn open_runtime_drain() {
     if !RUNTIME_DRAIN_OPEN.swap(true, Ordering::Relaxed) {
         let dropped = RUNTIME_DROPPED.load(Ordering::Relaxed);

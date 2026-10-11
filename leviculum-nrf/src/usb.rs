@@ -23,6 +23,7 @@ use embassy_usb::control::{OutResponse, Request};
 use embassy_usb::{Builder, Config, Handler, UsbDevice};
 use leviculum_core::envelope::{self, ConfigDelivery, ControlAction};
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
+use leviculum_usb_policy::{ReadOutcome, ReaderStep};
 use static_cell::StaticCell;
 
 use crate::boards::BoardConfig;
@@ -39,9 +40,13 @@ static CDC_DEBUG_STATE: StaticCell<State<'static>> = StaticCell::new();
 static CDC_RETIC_STATE: StaticCell<State<'static>> = StaticCell::new();
 static BAUD_TOUCH: StaticCell<BaudTouchHandler> = StaticCell::new();
 
+/// Depth of the queue the serial interface feeds the transport writer
+/// (`leviculum_usb_policy::offered` says what a full one drops).
+const OUTGOING_DEPTH: usize = leviculum_usb_policy::OUTGOING_DEPTH;
+
 /// Channels for serial interface: NodeCore ↔ USB CDC-ACM
 static INCOMING_CHANNEL: Channel<CriticalSectionRawMutex, Vec<u8>, 8> = Channel::new();
-static OUTGOING_CHANNEL: Channel<CriticalSectionRawMutex, Vec<u8>, 8> = Channel::new();
+static OUTGOING_CHANNEL: Channel<CriticalSectionRawMutex, Vec<u8>, OUTGOING_DEPTH> = Channel::new();
 
 /// Wall-time injections from the host (#238 envelope, `TYPE_WALL_TIME`).
 /// The node core owns the calendar, so the serial task hands the value to
@@ -119,7 +124,7 @@ pub struct SerialChannels {
     /// Receive packets from USB (deframed by serial task)
     pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 8>,
     /// Send packets to USB (serial task frames and writes)
-    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 8>,
+    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, OUTGOING_DEPTH>,
     /// Receive host wall-time injections (#238 `TYPE_WALL_TIME`); the main
     /// loop calls the calendar seam and answers via `outgoing_tx`.
     pub wall_time_rx: Receiver<'static, CriticalSectionRawMutex, u64, 1>,
@@ -133,9 +138,11 @@ pub struct SerialChannels {
 ///
 /// Returns channel endpoints for the Reticulum serial interface.
 ///
-/// Spawns three tasks:
+/// Spawns four tasks:
 /// - `usb_task`: drives the USB bus state machine
-/// - `debug_writer_task`: drains log channel to CDC-ACM port 0
+/// - `debug_writer_task`: drains log channel to CDC-ACM port 0, and opens the
+///   runtime-drain gate
+/// - `debug_reader_task`: the single-byte commands on CDC-ACM port 0
 /// - `retic_serial_task`: HDLC-framed bidirectional I/O on CDC-ACM port 1
 pub fn init(
     spawner: &Spawner,
@@ -182,7 +189,6 @@ pub fn init(
     spawner.must_spawn(usb_task(usb_dev));
     spawner.must_spawn(debug_writer_task(cdc_debug_tx));
     spawner.must_spawn(debug_reader_task(cdc_debug_rx));
-    spawner.must_spawn(runtime_drain_open_timeout_task());
     spawner.must_spawn(retic_serial_task(
         cdc_retic,
         INCOMING_CHANNEL.sender(),
@@ -262,22 +268,33 @@ async fn usb_task(mut usb: UsbDevice<'static, UsbDriver>) {
     usb.run().await;
 }
 
+/// The debug port's writer. Each wake is `leviculum_usb_policy::drain_wake`:
+/// write the log ring out while a host holds DTR up, never without one, and
+/// open the runtime-drain gate on the first host or after 30 s headless, so
+/// the LoRa task and the tracing subscriber stop dropping their output.
 #[embassy_executor::task]
 async fn debug_writer_task(mut cdc: cdc_acm::Sender<'static, UsbDriver>) {
-    use embassy_time::{with_timeout, Duration};
+    use embassy_time::{with_timeout, Duration, Instant};
+    use leviculum_usb_policy::{drain_continues, drain_wake, DebugWrite, DrainWake};
 
     let mut chunk = [0u8; 64];
     loop {
-        // Wait for new data or check every 100ms (catches DTR changes)
-        let _ = with_timeout(Duration::from_millis(100), LOG_SIGNAL.wait()).await;
+        // Wait for new data, or wake every poll period: that is what sees a
+        // DTR change and the headless deadline.
+        let _ = with_timeout(
+            Duration::from_millis(leviculum_usb_policy::DEBUG_POLL_MS),
+            LOG_SIGNAL.wait(),
+        )
+        .await;
 
-        // Only send if host has the port open
-        if !cdc.dtr() {
-            continue;
+        match drain_wake(cdc.dtr(), Instant::now().as_millis()) {
+            DrainWake::Wait => continue,
+            DrainWake::OpenGate => {
+                crate::log::open_runtime_drain();
+                continue;
+            }
+            DrainWake::Drain => crate::log::open_runtime_drain(),
         }
-        // First DTR-assert observation opens the runtime-drain gate so
-        // the LoRa task / tracing subscriber stop dropping their output.
-        crate::log::open_runtime_drain();
 
         // Drain ring buffer to USB
         loop {
@@ -285,9 +302,18 @@ async fn debug_writer_task(mut cdc: cdc_acm::Sender<'static, UsbDriver>) {
             if n == 0 {
                 break;
             }
-            match with_timeout(Duration::from_millis(50), cdc.write_packet(&chunk[..n])).await {
-                Ok(Ok(())) => {}
-                _ => break, // USB error or timeout
+            let write = match with_timeout(
+                Duration::from_millis(leviculum_usb_policy::DEBUG_WRITE_WITHIN_MS),
+                cdc.write_packet(&chunk[..n]),
+            )
+            .await
+            {
+                Ok(Ok(())) => DebugWrite::Written,
+                Ok(Err(_)) => DebugWrite::Failed,
+                Err(_) => DebugWrite::TimedOut,
+            };
+            if !drain_continues(write) {
+                break;
             }
         }
     }
@@ -335,17 +361,6 @@ async fn debug_reader_task(mut cdc: cdc_acm::Receiver<'static, UsbDriver>) {
             }
         }
     }
-}
-
-/// Headless-fallback opener for the runtime-drain gate. If no host
-/// asserts DTR within 30 s of boot, open the gate anyway so field
-/// deployments without a debug host don't accumulate dropped output
-/// indefinitely.
-#[embassy_executor::task]
-pub(crate) async fn runtime_drain_open_timeout_task() {
-    use embassy_time::{Duration, Timer};
-    Timer::after(Duration::from_secs(30)).await;
-    crate::log::open_runtime_drain();
 }
 
 /// Lightweight log helpers for serial task diagnostics (no format_args overhead)
@@ -659,11 +674,25 @@ async fn persist_outcome(
     crate::telemetry::confirm(request()).await
 }
 
-/// Incomplete frame timeout. Python uses 100ms but also sets low_latency mode
-/// so frames arrive as bulk USB packets. Without low_latency, byte-by-byte USB
-/// delivery needs more time. 500ms gives 34x margin for a 167-byte frame at
-/// 115200 (`leviculum_usb_policy::frame_timeout_margin`, host-tested).
-const FRAME_TIMEOUT_MS: u64 = leviculum_usb_policy::FRAME_TIMEOUT_MS;
+/// Run the reader's step for a read that brought no bytes, the step
+/// `leviculum_usb_policy::reader_step` decides, host-tested with a reset frame
+/// torn by a disconnect and by a silent host (leviculum#359). True when the
+/// session ends: the task goes back to `wait_connection`, and the deframer is
+/// reset when the next connection comes.
+fn read_without_bytes(outcome: ReadOutcome, deframer: &mut Deframer) -> bool {
+    match leviculum_usb_policy::reader_step(outcome, deframer.is_in_frame()) {
+        ReaderStep::Rewait => {
+            log("SER: USB disconnect");
+            true
+        }
+        ReaderStep::DropPartial => {
+            log("SER: frame timeout, reset");
+            deframer.reset();
+            false
+        }
+        ReaderStep::Deframe | ReaderStep::Idle => false,
+    }
+}
 
 /// The LoRa duty hold as it stands, and the rolling hour's keyed airtime as
 /// the LoRa task last published it, for a `TYPE_DUTY_HOLD` frame.
@@ -683,7 +712,7 @@ fn duty_hold_now() -> (bool, u32) {
 async fn retic_serial_task(
     cdc: CdcAcmClass<'static, UsbDriver>,
     incoming_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 8>,
-    outgoing_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 8>,
+    outgoing_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, OUTGOING_DEPTH>,
     config_tx: Sender<'static, CriticalSectionRawMutex, crate::lora::RadioConfig, 1>,
 ) {
     let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU);
@@ -705,12 +734,11 @@ async fn retic_serial_task(
         deframer.reset();
 
         loop {
-            // Conditional timeout: 100ms when mid-frame, ~infinite when idle
-            let timeout_dur = if deframer.is_in_frame() {
-                Duration::from_millis(FRAME_TIMEOUT_MS)
-            } else {
-                Duration::from_secs(3600)
-            };
+            // The frame timeout while a frame is open, an hour otherwise
+            // (`leviculum_usb_policy::read_timeout_ms`).
+            let timeout_dur = Duration::from_millis(leviculum_usb_policy::read_timeout_ms(
+                deframer.is_in_frame(),
+            ));
 
             match select3(
                 with_timeout(timeout_dur, rx.read_packet(&mut read_buf)),
@@ -1288,14 +1316,14 @@ async fn retic_serial_task(
                 }
                 // USB disconnect
                 Either3::First(Ok(Err(_))) => {
-                    log("SER: USB disconnect");
-                    break;
+                    if read_without_bytes(ReadOutcome::Disconnected, &mut deframer) {
+                        break;
+                    }
                 }
                 // Frame timeout
                 Either3::First(Err(_)) => {
-                    if deframer.is_in_frame() {
-                        log("SER: frame timeout, reset");
-                        deframer.reset();
+                    if read_without_bytes(ReadOutcome::TimedOut, &mut deframer) {
+                        break;
                     }
                 }
                 // The LoRa duty hold opened or lifted (leviculum#501): tell

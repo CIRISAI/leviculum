@@ -14,11 +14,18 @@ use leviculum_core::InterfaceId;
 /// The `retic_serial_task` reads from the other end, frames with HDLC,
 /// and writes to USB CDC-ACM.
 pub struct EmbeddedInterface<'a> {
-    sender: Sender<'a, CriticalSectionRawMutex, Vec<u8>, 8>,
+    sender: Sender<'a, CriticalSectionRawMutex, Vec<u8>, { leviculum_usb_policy::OUTGOING_DEPTH }>,
 }
 
 impl<'a> EmbeddedInterface<'a> {
-    pub fn new(sender: Sender<'a, CriticalSectionRawMutex, Vec<u8>, 8>) -> Self {
+    pub fn new(
+        sender: Sender<
+            'a,
+            CriticalSectionRawMutex,
+            Vec<u8>,
+            { leviculum_usb_policy::OUTGOING_DEPTH },
+        >,
+    ) -> Self {
         Self { sender }
     }
 }
@@ -41,15 +48,16 @@ impl Interface for EmbeddedInterface<'_> {
     }
 
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
-        let bytes = data.len();
-        self.sender
-            .try_send(data.to_vec())
-            // The reference counts the unframed packet where the interface
-            // accepts it for the medium (`RNodeInterface.py:725`); HDLC
-            // framing is added downstream and is outside the count, as it is
-            // there.
-            .map(|()| crate::iface_bytes::note_tx(crate::iface_bytes::SERIAL, bytes))
-            .map_err(|_| {
+        let accepted = self.sender.try_send(data.to_vec()).is_ok();
+        // What is counted and when a packet is dropped is
+        // `leviculum_usb_policy::offered`, host-tested against a host that
+        // holds DTR up and does not read.
+        match leviculum_usb_policy::offered(accepted, data.len()) {
+            leviculum_usb_policy::Offered::Queued { counted } => {
+                crate::iface_bytes::note_tx(crate::iface_bytes::SERIAL, counted);
+                Ok(())
+            }
+            leviculum_usb_policy::Offered::Full => {
                 // Codeberg #344: the frame is going nowhere and the caller sees
                 // only `BufferFull`. Say it at the interface, where the depth
                 // that filled is known. Error path, so the cost is irrelevant;
@@ -64,7 +72,8 @@ impl Interface for EmbeddedInterface<'_> {
                         data.len()
                     ),
                 );
-                InterfaceError::BufferFull
-            })
+                Err(InterfaceError::BufferFull)
+            }
+        }
     }
 }
