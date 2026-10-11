@@ -27,15 +27,16 @@
 //!
 //! # Reference
 //!
-//! The jitter's parameters are the RNode firmware's CSMA band-1 (idle
-//! channel) draw, taken from the vendored source
+//! The jitter's parameters are the RNode firmware's CSMA draw, band 1
+//! here and the wider bands in the next section, taken from the vendored
+//! source
 //! (`reference/RNode_Firmware`):
 //!
 //! * every transmission waits DIFS = `CSMA_SIFS_MS + 2 * csma_slot_ms`
 //!   with SIFS = 0, i.e. two slots (Config.h:102, Config.h:119), then a
 //!   contention window of `random(cw_min, cw_max)` slots
 //!   (RNode_Firmware.ino:1625-1627, Arduino `random` upper-exclusive);
-//!   at ≤ 7 % channel airtime the band-1 window is `cw_min = 0`,
+//!   at ≤ 7 % own airtime the band-1 window is `cw_min = 0`,
 //!   `cw_max = band * CSMA_CW_PER_BAND_WINDOWS - 1` = 14
 //!   (Config.h:108-111, RNode_Firmware.ino:1614-1617), so the
 //!   idle-channel draw is uniform over 0..=13 slots. The reference
@@ -53,10 +54,53 @@
 //! * there is **no host-visible way to disable this**: `tx_queue_handler`
 //!   (RNode_Firmware.ino:1623) runs it for every queued packet.
 //!
-//! Only the band-1 draw is mirrored, not the airtime-scaled band
-//! escalation: the escalation widens the window under sustained load,
-//! which is what the retry gate's doubling contention window already does
-//! here, reacting to observed CAD-busy instead of to an airtime average.
+//! # The airtime band (leviculum#637)
+//!
+//! The reference widens that window with its own keyed airtime. The rule,
+//! to the line:
+//!
+//! * **Input.** `airtime`, the node's OWN transmit share over the current
+//!   and previous 7.5 s bins (`update_airtime`, RNode_Firmware.ino:693-698),
+//!   not the channel load: `total_channel_util`, which adds everyone else's
+//!   carrier, feeds only the stat frame and the long bins
+//!   (RNode_Firmware.ino:1458-1464). The board keeps the same figure in its
+//!   duty ledger, [`load::ChannelLedger::airtime_short_bp`].
+//! * **Band.** `update_csma_parameters` (RNode_Firmware.ino:1603-1619)
+//!   takes `airtime_pct = (int)(airtime*100)`; at or below
+//!   `CSMA_BAND_1_MAX_AIRTIME`, 7, it is band 1, above it
+//!   `map(airtime_pct + 7, 7, CSMA_BAND_N_MIN_AIRTIME, 2, CSMA_CW_BANDS)`
+//!   with 85 and 4 (Config.h:108, Config.h:111-112), capped at 4. Arduino's
+//!   `map` is the truncating `(x - in_min) * (out_max - out_min) /
+//!   (in_max - in_min) + out_min`, so with the `+ 7` the edges fall at
+//!   8 %, 39 % and 78 % (band 4 starts below the 85 the constant names).
+//!   [`csma_band`].
+//! * **Window.** A band change rewrites `cw_min = (band - 1) * 15` and
+//!   `cw_max = band * 15 - 1` (`CSMA_CW_PER_BAND_WINDOWS`, Config.h:110;
+//!   RNode_Firmware.ino:1615-1617), and the draw is `random(cw_min,
+//!   cw_max)`, upper-exclusive: 0..=13, 15..=28, 30..=43 and 45..=58 slots.
+//!   The bands are disjoint, so a node in band 2 never keys before one in
+//!   band 1 released by the same frame. [`band_window`].
+//! * **When.** The band is re-evaluated on every `update_airtime`: after
+//!   each transmission (RNode_Firmware.ino:644) and once per second of
+//!   status sampling (RNode_Firmware.ino:1467, `:709`). The draw takes the
+//!   band in force when a contention starts (`csma_cw == -1`,
+//!   RNode_Firmware.ino:1625-1627) and keeps it until the queue is flushed
+//!   (`:1646`).
+//!
+//! [`ChannelAccess::set_airtime_short`] is that re-evaluation; the board's
+//! transmit path calls it with the duty ledger's figure before every ask for
+//! the acquisition wait, which is at least as fresh as the reference's. A
+//! fresh draw takes the band in force and keeps it for the acquisition. An
+//! access never told its airtime stays in band 1, which is the host's RNode
+//! interface: the modem under it runs this rule itself, on its own keyed
+//! time, and a second band on the host would count the same airtime twice.
+//!
+//! The CAD retry gate's doubling window below is a separate, second
+//! mechanism and is not banded: it reacts to a probe that found a preamble,
+//! which the reference has no counterpart for (it waits on `medium_free`).
+//! [`widest_acquisition_wait_ms`] and the post-TX window it sizes still
+//! budget a band-1 peer; a peer above 7 % airtime can key up later than
+//! that window. Widening it is a separate radio-behaviour change.
 
 pub mod load;
 
@@ -71,21 +115,56 @@ pub const CAD_MAX_RETRIES: u8 = 8;
 pub const CAD_CW_INITIAL: u8 = 2;
 /// Maximum contention window (slots) after exponential back-off.
 ///
-/// The reference has no doubling window; it widens a fixed one by airtime
-/// band, `cw_max = band * CSMA_CW_PER_BAND_WINDOWS - 1`, so its widest draw
-/// is band 4's 45..=58 slots (Config.h:108-111,
-/// RNode_Firmware.ino:1614-1617). Ours is 0..=63, one band-width above that
-/// ceiling and reached by observed CAD-busy rather than by an airtime
-/// average — the substitution the crate docs above describe. In slot times
-/// the two ceilings are 5.8 s and 6.3 s at the 100 ms slot, which is what
-/// makes the escalation comparable rather than merely analogous.
+/// The reference has no doubling window on a busy probe; its widest draw is
+/// band 4's 45..=58 slots, taken on airtime (see the crate docs). Ours is
+/// 0..=63, reached by observed CAD-busy. In slot times the two ceilings are
+/// 5.8 s and 6.3 s at the 100 ms slot.
 pub const CAD_CW_MAX: u8 = 64;
+
+/// Airtime bands (`CSMA_CW_BANDS`, reference Config.h:108).
+pub const CSMA_CW_BANDS: u8 = 4;
+/// Slots per band (`CSMA_CW_PER_BAND_WINDOWS`, reference Config.h:110).
+pub const CSMA_CW_PER_BAND_WINDOWS: u32 = 15;
+/// The highest own-airtime percentage still in band 1
+/// (`CSMA_BAND_1_MAX_AIRTIME`, reference Config.h:111).
+pub const CSMA_BAND_1_MAX_AIRTIME_PCT: u32 = 7;
+/// The `in_max` of the band map (`CSMA_BAND_N_MIN_AIRTIME`, reference
+/// Config.h:112). With the map's `+ 7` shift band 4 starts at 78 %.
+pub const CSMA_BAND_N_MIN_AIRTIME_PCT: u32 = 85;
+
+/// The reference's CSMA band for an own short-term airtime in hundredths of
+/// a percent (`update_csma_parameters`, RNode_Firmware.ino:1603-1612; the
+/// rule is in the crate docs).
+pub fn csma_band(airtime_short_bp: u16) -> u8 {
+    // `(int)(airtime*100)`: hundredths of a percent truncated to percent.
+    let pct = (airtime_short_bp / 100) as u32;
+    if pct <= CSMA_BAND_1_MAX_AIRTIME_PCT {
+        return 1;
+    }
+    let at = pct + CSMA_BAND_1_MAX_AIRTIME_PCT;
+    // Arduino `map(at, 7, 85, 2, 4)`, integer and truncating.
+    let band = (at - CSMA_BAND_1_MAX_AIRTIME_PCT) * (CSMA_CW_BANDS as u32 - 2)
+        / (CSMA_BAND_N_MIN_AIRTIME_PCT - CSMA_BAND_1_MAX_AIRTIME_PCT)
+        + 2;
+    band.min(CSMA_CW_BANDS as u32) as u8
+}
+
+/// A band's `(cw_min, cw_max)`, drawn as `random(cw_min, cw_max)`,
+/// upper-exclusive (reference RNode_Firmware.ino:1615-1617, `:1626`). A band
+/// outside 1..=4 is taken as the nearest one.
+pub fn band_window(band: u8) -> (u32, u32) {
+    let band = band.clamp(1, CSMA_CW_BANDS) as u32;
+    (
+        (band - 1) * CSMA_CW_PER_BAND_WINDOWS,
+        band * CSMA_CW_PER_BAND_WINDOWS - 1,
+    )
+}
 
 /// DIFS in slots: `CSMA_SIFS_MS + 2 * csma_slot_ms` with SIFS = 0
 /// (reference Config.h:102, Config.h:119).
 pub const JITTER_DIFS_SLOTS: u64 = 2;
-/// Number of equally likely jitter draws: band-1 `random(0, 14)` is
-/// uniform over 0..=13 slots (reference Config.h:108-111,
+/// Number of equally likely jitter draws in every band; band 1's
+/// `random(0, 14)` is uniform over 0..=13 slots (reference Config.h:108-111,
 /// RNode_Firmware.ino:1626, Arduino `random` upper-exclusive).
 pub const JITTER_CW_SLOTS: u32 = 14;
 /// One jitter slot is 12 symbol times (reference Config.h:107).
@@ -265,6 +344,8 @@ pub struct ChannelAccess {
     jitter_owed: bool,
     jitter_remaining_ms: u64,
     jitter_was_drawn: bool,
+    band: u8,
+    drawn_band: u8,
     attempt: u8,
     cw: u8,
 }
@@ -295,6 +376,8 @@ impl ChannelAccess {
             jitter_owed: true,
             jitter_remaining_ms: 0,
             jitter_was_drawn: false,
+            band: 1,
+            drawn_band: 1,
             attempt: 0,
             cw: CAD_CW_INITIAL,
         }
@@ -309,6 +392,20 @@ impl ChannelAccess {
     /// The jitter slot in force, for the `[LORA_JITTER]` line.
     pub const fn jitter_slot(&self) -> u64 {
         self.jitter_slot_ms
+    }
+
+    /// Re-evaluate the airtime band from the node's own short-term airtime
+    /// in hundredths of a percent ([`csma_band`]), the reference's
+    /// `update_csma_parameters`. Takes effect at the next fresh draw; a wait
+    /// already drawn keeps its band.
+    pub fn set_airtime_short(&mut self, airtime_short_bp: u16) {
+        self.band = csma_band(airtime_short_bp);
+    }
+
+    /// The band the current acquisition's wait was drawn in, for the
+    /// `[LORA_JITTER]` and `[LORA_CSMA_TX]` lines.
+    pub const fn drawn_band(&self) -> u8 {
+        self.drawn_band
     }
 
     /// The channel was yielded back (a post-TX listening window ran, or is
@@ -329,8 +426,9 @@ impl ChannelAccess {
     }
 
     /// The randomised pre-TX wait this acquisition still owes, in ms: on
-    /// the first ask after a channel release, DIFS plus a uniform draw of
-    /// 0..=13 slots ([`JITTER_DIFS_SLOTS`], [`JITTER_CW_SLOTS`]); on every
+    /// the first ask after a channel release, DIFS plus a uniform draw over
+    /// the window of the band in force ([`JITTER_DIFS_SLOTS`],
+    /// [`band_window`]; 0..=13 slots in band 1); on every
     /// later ask, whatever is LEFT of that draw after the caller has
     /// reported what it actually listened through ([`Self::jitter_spent`]),
     /// and `0` once the whole wait has been served.
@@ -345,7 +443,11 @@ impl ChannelAccess {
     pub fn acquisition_jitter_ms(&mut self) -> u64 {
         if self.jitter_owed {
             self.jitter_owed = false;
-            let draw = (xorshift32(&mut self.rng) % JITTER_CW_SLOTS) as u64;
+            let (cw_min, cw_max) = band_window(self.band);
+            // Band 1 is `% JITTER_CW_SLOTS` from 0, the draw it always was,
+            // so the random stream of an unbanded access is unchanged.
+            let draw = (cw_min + xorshift32(&mut self.rng) % (cw_max - cw_min)) as u64;
+            self.drawn_band = self.band;
             self.jitter_remaining_ms = (JITTER_DIFS_SLOTS + draw) * self.jitter_slot_ms;
             self.jitter_was_drawn = true;
         } else {
@@ -1106,5 +1208,127 @@ mod tests {
         let widest = (CAD_CW_MAX as u64 - 1) * slow.jitter_slot();
         assert!(widest < LISTEN_WINDOW_MAX_MS, "{widest}");
         assert_eq!(slow.backoff_window_ms(CAD_CW_MAX as u64 - 1), widest as u32);
+    }
+
+    // --- The airtime band (leviculum#637, audit 2026-10-11 D3) ---------
+
+    /// The slots an acquisition at `airtime_bp` draws, over a spread of
+    /// seeds and channel releases: (lowest, highest, widest wait in ms).
+    fn band_draws(airtime_bp: u16, bw: u32, sf: u8, cr: u8) -> (u64, u64, u64) {
+        let (mut lo, mut hi, mut widest) = (u64::MAX, 0, 0);
+        for seed in 1..=200u32 {
+            let mut access = ChannelAccess::new(seed);
+            access.set_phy(bw, sf, cr);
+            access.set_airtime_short(airtime_bp);
+            for _ in 0..20 {
+                access.channel_released();
+                let wait = access.acquisition_jitter_ms();
+                assert!(access.jitter_was_drawn());
+                let slot = access.jitter_slot();
+                assert!(wait.is_multiple_of(slot), "whole slots only, got {wait}");
+                let slots = wait / slot - JITTER_DIFS_SLOTS;
+                lo = lo.min(slots);
+                hi = hi.max(slots);
+                widest = widest.max(wait);
+            }
+        }
+        (lo, hi, widest)
+    }
+
+    #[test]
+    fn the_band_follows_the_reference_map_to_the_percent() {
+        // `update_csma_parameters` (RNode_Firmware.ino:1603-1619): at most
+        // 7 % is band 1; above it, `map(pct + 7, 7, 85, 2, 4)`, Arduino's
+        // truncating `(x - 7) * 2 / 78 + 2`, capped at 4. The +7 shift puts
+        // the band edges at 39 % and 78 %, not at the constants' 85 %.
+        let pct = |p: u16| p * 100;
+        assert_eq!(csma_band(0), 1);
+        assert_eq!(csma_band(pct(7)), 1);
+        // `(int)(airtime*100)` truncates, so 7.99 % is still 7.
+        assert_eq!(csma_band(pct(8) - 1), 1);
+        assert_eq!(csma_band(pct(8)), 2);
+        assert_eq!(csma_band(pct(38) + 99), 2);
+        assert_eq!(csma_band(pct(39)), 3);
+        assert_eq!(csma_band(pct(77) + 99), 3);
+        assert_eq!(csma_band(pct(78)), 4);
+        assert_eq!(csma_band(pct(100)), 4);
+        assert_eq!(csma_band(u16::MAX), 4);
+        // Each band's `cw_min = (band - 1) * 15`, `cw_max = band * 15 - 1`.
+        assert_eq!(band_window(1), (0, 14));
+        assert_eq!(band_window(2), (15, 29));
+        assert_eq!(band_window(3), (30, 44));
+        assert_eq!(band_window(4), (45, 59));
+        // Band 1 is the window the jitter has always drawn in.
+        assert_eq!(band_window(1).1 - band_window(1).0, JITTER_CW_SLOTS);
+    }
+
+    #[test]
+    fn an_acquisition_draws_in_the_band_of_its_own_airtime() {
+        // The red this order opened on: the window was band 1 whatever the
+        // board had keyed, so beside reference modems that widen theirs a
+        // busy board keyed up in less than its share of the wait. Airtime
+        // 0, 30, 60 and 90 % land in bands 1, 2, 3 and 4, each drawn
+        // uniformly over `random(cw_min, cw_max)`, upper-exclusive
+        // (RNode_Firmware.ino:1626): every edge is reached, none passed.
+        for (bp, band, lo, hi) in [
+            (0u16, 1u8, 0u64, 13u64),
+            (3_000, 2, 15, 28),
+            (6_000, 3, 30, 43),
+            (9_000, 4, 45, 58),
+        ] {
+            let (got_lo, got_hi, _) = band_draws(bp, 125_000, 7, 5);
+            assert_eq!((got_lo, got_hi), (lo, hi), "airtime {bp} bp");
+            let mut access = ChannelAccess::new(1);
+            access.set_airtime_short(bp);
+            access.acquisition_jitter_ms();
+            assert_eq!(access.drawn_band(), band, "airtime {bp} bp");
+        }
+    }
+
+    #[test]
+    fn below_the_first_edge_the_draws_are_the_band_one_draws_of_before() {
+        // At or below 7 % nothing changes: the same seed draws the same
+        // waits whether the board was told its airtime or not, so a board
+        // on a quiet channel keys exactly as it did, and so does the host's
+        // RNode interface, which never tells it.
+        for bp in [0u16, 400, 700, 799] {
+            let mut told = ChannelAccess::new(0x0637);
+            let mut untold = ChannelAccess::new(0x0637);
+            told.set_airtime_short(bp);
+            for _ in 0..50 {
+                told.channel_released();
+                untold.channel_released();
+                assert_eq!(told.acquisition_jitter_ms(), untold.acquisition_jitter_ms());
+                assert_eq!(told.drawn_band(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn the_band_is_taken_at_the_draw_and_kept_for_the_acquisition() {
+        // The reference draws `csma_cw` once per contention and keeps it
+        // until the queue is flushed (RNode_Firmware.ino:1625-1646); a band
+        // change mid-wait moves the next contention, not this one.
+        let mut access = ChannelAccess::new(9);
+        access.set_airtime_short(9_000);
+        let drawn = access.acquisition_jitter_ms();
+        access.set_airtime_short(0);
+        access.jitter_spent(1);
+        assert_eq!(access.acquisition_jitter_ms(), drawn - 1);
+        assert!(!access.jitter_was_drawn());
+        assert_eq!(access.drawn_band(), 4);
+        access.channel_released();
+        access.acquisition_jitter_ms();
+        assert_eq!(access.drawn_band(), 1);
+    }
+
+    #[test]
+    fn the_widest_band_draw_stays_inside_the_listening_ceiling() {
+        // Band 4 at the 100 ms slot ceiling: DIFS plus 58 slots, 6 s.
+        let (_, hi, widest) = band_draws(load::FULL_BP as u16, 125_000, 12, 8);
+        assert_eq!(hi, 58);
+        assert_eq!(widest, (JITTER_DIFS_SLOTS + 58) * JITTER_SLOT_MAX_MS);
+        assert!(widest <= LISTEN_WINDOW_MAX_MS, "{widest}");
+        assert_eq!(listen_window_ms(widest), widest as u32);
     }
 }

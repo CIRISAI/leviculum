@@ -25,7 +25,7 @@ Where the three agree, verified: the slot is 12 symbol times clamped to
 `leviculum-core/src/rnode.rs:1051`, against
 `reference/RNode_Firmware/Utilities.h:1244-1252`, pinned by exhaustion
 over the reference's own PHY grid); DIFS is two slots with SIFS 0
-(`JITTER_DIFS_SLOTS`, `leviculum-nrf/channel-access/src/lib.rs:86`,
+(`JITTER_DIFS_SLOTS`, `leviculum-nrf/channel-access/src/lib.rs:165`,
 against `reference/RNode_Firmware/Config.h:119`); the preamble
 derivation is the reference's duration-targeted one
 (`derive_preamble_symbols`, `leviculum-core/src/rnode.rs:964`). The
@@ -57,7 +57,7 @@ core of #36/#40/#430). Bears on: the rotation reds (`sent=10 recv=4`,
 
 **D2 — the band-1 window is one slot narrower than a freshly booted
 reference.** Ours draws uniformly over 0..=13 slots (`JITTER_CW_SLOTS`,
-`leviculum-nrf/channel-access/src/lib.rs:90`). The reference boots with
+`leviculum-nrf/channel-access/src/lib.rs:169`). The reference boots with
 `cw_max` declared as 15 (`reference/RNode_Firmware/Config.h:127`) and
 only a band excursion rewrites it to 14 (`update_csma_parameters`,
 `reference/RNode_Firmware/RNode_Firmware.ino:1603-1619`), so a
@@ -76,13 +76,12 @@ to 45..=58 slots at 85 % airtime
 (`reference/RNode_Firmware/RNode_Firmware.ino:1603-1619`,
 `reference/RNode_Firmware/Config.h:108-112`). Ours keeps band 1 and
 doubles a separate contention window per observed CAD-busy, 2 up to 64
-slots (`CAD_CW_MAX`, `leviculum-nrf/channel-access/src/lib.rs:82`). On
+slots (`CAD_CW_MAX`, `leviculum-nrf/channel-access/src/lib.rs:122`). On
 the air: on a channel that is *loaded on average but momentarily
 clear*, a reference neighbour defers wide and we do not — our node wins
 more than its share of contests against loaded RNode neighbours, and
 the asymmetry grows with load. Class: deviation ours (deliberate; the
-crate docs at `leviculum-nrf/channel-access/src/lib.rs:56-59` argue the
-substitution). Bears on: periculum#61 (the channel-loaded note) — this
+crate docs argued the substitution). Bears on: periculum#61 (the channel-loaded note) — this
 is the one CSMA divergence that only shows under sustained load, which
 no current cell measures. Test that would show it: an emulator census
 with asymmetric offered load (one leviculum node, one scripted
@@ -97,8 +96,8 @@ busy medium restarts only DIFS, `:1635`). Our board spends the draw
 listening and, when a reception cuts the window short, keeps the
 remainder owed and serves it on the next turn
 (`acquisition_jitter_ms` / `jitter_spent`,
-`leviculum-nrf/channel-access/src/lib.rs:345-363`;
-`leviculum-nrf/src/lora.rs:2047-2075`) — same shape, same reason. Our
+`leviculum-nrf/channel-access/src/lib.rs:443-465`;
+`leviculum-nrf/src/lora.rs:2052-2085`) — same shape, same reason. Our
 *host* serves its drawn wait as an uninterruptible sleep
 (`leviculum-std/src/interfaces/rnode.rs:2785-2800`): it cannot sense
 the medium, the modem under it can and does. On the air: equivalent
@@ -107,7 +106,7 @@ spell it differently.
 
 **D5 — bounded forced TX vs the reference's unbounded wait.** After 8
 busy CADs ours transmits anyway (`CAD_MAX_RETRIES`,
-`leviculum-nrf/channel-access/src/lib.rs:67`); the reference waits
+`leviculum-nrf/channel-access/src/lib.rs:111`); the reference waits
 indefinitely and lets the airtime lock be the only bound
 (`tx_queue_handler`, `reference/RNode_Firmware/RNode_Firmware.ino:1623`
 has no give-up). On the air: under a permanently keyed interferer, our
@@ -129,7 +128,7 @@ avoidance, current RSSI above its sampled noise floor plus 11 dB
 `reference/RNode_Firmware/RNode_Firmware.ino:1394-1431`,
 `CSMA_INFR_THRESHOLD_DB`, `reference/RNode_Firmware/Config.h:113`).
 Our board probes with the SX1262's CAD per attempt
-(`leviculum-nrf/src/lora.rs:2088`) and keeps **no noise floor, no
+(`leviculum-nrf/src/lora.rs:2098`) and keeps **no noise floor, no
 interference detection, and no DCD sampling at all**. Three on-air
 consequences: (a) a reference node defers to non-LoRa interference, we
 do not; (b) the reference's latched preamble holds "busy" for up to a
@@ -342,10 +341,10 @@ burst bound, no peer yield.
 defined and **used nowhere** in the pinned firmware — see the wrong
 claim below. Our board runs windowed RX with an explicit post-TX
 listening window of one reply airtime plus the peer's whole key-up wait
-(`post_tx_rx_window_ms`, `leviculum-nrf/channel-access/src/lib.rs:171`,
+(`post_tx_rx_window_ms`, `leviculum-nrf/channel-access/src/lib.rs:250`,
 the #423 fix), burst bounds of 16 frames / 8 s
 (`leviculum-nrf/src/lora.rs:855-860`), and a peer-turn yield after two
-empty ack windows (`leviculum-nrf/src/lora.rs:2246`). The window
+empty ack windows (`leviculum-nrf/src/lora.rs:2257`). The window
 teardown/adoption/harvest discipline (`leviculum-nrf/rx-arming`) exists
 only because our RX is windowed; the reference has no teardown to get
 wrong. On the air: ours trades continuous listening for bounded turns;
@@ -540,7 +539,7 @@ split framing, `AirtimeTracker`, announce-cap bitrate); the policy
 crates `leviculum-channel-access`, `leviculum-queue-budget`,
 `leviculum-tx-spacing`, `leviculum-mute-lease` and the module contract
 of `leviculum-rx-arming`; the LNode transmit loop
-(`leviculum-nrf/src/lora.rs:1686-2280`); the core announce cap
+(`leviculum-nrf/src/lora.rs:1686-2291`); the core announce cap
 (`leviculum-core/src/transport.rs`, the cap/drain/hold paths); the CAD
 and window arithmetic in `leviculum-core/src/sx126x.rs`. Reference
 side: `RNodeInterface.py` (serial fully, Android spot-checked for the

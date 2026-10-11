@@ -2024,8 +2024,8 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             );
 
             // Acquisition jitter: the first key-up after a channel release
-            // waits a randomised, listened-through window (reference band-1
-            // draw, see leviculum_channel_access) before it probes. CAD
+            // waits a randomised, listened-through window (the reference's
+            // banded draw, see leviculum_channel_access) before it probes. CAD
             // alone cannot de-tile two senders whose transmissions share a
             // trigger — co-started probe announces, rebroadcasts of the
             // same received frame — because both probe a channel neither
@@ -2044,6 +2044,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // through to CAD. Wall-clock elapsed (floor 1 ms so a radio
             // erroring out instantly still drains the debt) bounds the
             // resumes at the drawn window.
+            //
+            // The draw's window widens with our own short-term airtime, the
+            // reference's CSMA band (leviculum#637): the duty ledger was
+            // brought up to now on this turn, before the lock gate above.
+            access.set_airtime_short(crate::chtm::with(|l| l.airtime_short_bp()));
             let jitter_ms = access.acquisition_jitter_ms();
             if jitter_ms > 0 {
                 crate::log::log_fmt(
@@ -2052,7 +2057,12 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     } else {
                         "[LORA_JITTER_RESUME] "
                     },
-                    format_args!("wait_ms={} slot_ms={}", jitter_ms, access.jitter_slot()),
+                    format_args!(
+                        "wait_ms={} slot_ms={} band={}",
+                        jitter_ms,
+                        access.jitter_slot(),
+                        access.drawn_band()
+                    ),
                 );
                 let rx_ms = leviculum_channel_access::listen_window_ms(jitter_ms);
                 reassembler.check_timeout(rx_timeout_count, 10);
@@ -2121,10 +2131,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     crate::log::log_fmt(
                         "[LORA_CSMA_TX] ",
                         format_args!(
-                            "retries={} forced={} slot_ms={}",
+                            "retries={} forced={} slot_ms={} band={}",
                             retries,
                             forced,
-                            access.jitter_slot()
+                            access.jitter_slot(),
+                            access.drawn_band()
                         ),
                     );
                     transmit_all_frames(&mut radio, data, &mut rng_state, &config, &mut spacer)

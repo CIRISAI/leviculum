@@ -85,8 +85,9 @@
 //!
 //! Nothing here decides anything on the air. The CSMA band escalation the
 //! reference drives from the short airtime (D3,
-//! `reference/RNode_Firmware/RNode_Firmware.ino:1603-1619`) is a separate
-//! order; this is the input it would read.
+//! `reference/RNode_Firmware/RNode_Firmware.ino:1603-1619`) reads
+//! [`ChannelLedger::airtime_short_bp`] and lives in the crate root
+//! (leviculum#637).
 
 use core::fmt;
 
@@ -400,10 +401,7 @@ impl ChannelLedger {
         self.last_update_ms = Some(now_ms);
 
         self.airtime.update(now_ms);
-        let airtime_short = bp(
-            self.airtime.short_term_airtime_ms() as u64,
-            2 * AIRTIME_BINLEN_MS,
-        );
+        let airtime_short = self.airtime_short_bp();
         let airtime_long = bp(
             self.airtime.long_term_airtime_ms() as u64,
             AIRTIME_LONGTERM_MS,
@@ -434,6 +432,17 @@ impl ChannelLedger {
         };
         self.last = snapshot;
         Some(snapshot)
+    }
+
+    /// Our keyed airtime over the current and previous 7.5 s bins as of the
+    /// duty ledger's last update, in hundredths of a percent: the
+    /// reference's `airtime`, which selects its CSMA band
+    /// ([`crate::ChannelAccess::set_airtime_short`]).
+    pub fn airtime_short_bp(&self) -> u16 {
+        bp(
+            self.airtime.short_term_airtime_ms() as u64,
+            2 * AIRTIME_BINLEN_MS,
+        )
     }
 
     /// The snapshot of the last update, `None` before the first.
