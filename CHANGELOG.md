@@ -636,6 +636,10 @@ Toolchain: Rust 1.97.1
   serial interface's TX byte counter no longer counts packets the board
   dropped because the host closed the port before reading them.
 
+- A board whose GNSS receiver lost its fix kept reporting the last time it
+  had; it now reports no time until the receiver has a fix again
+  (leviculum#633, refs #398).
+
 - A board propagation node answers large offers without running out of heap
   (leviculum#388). When a peer wanted messages, the board read every wanted
   body, encoded them into one envelope and cut the transfer from it, all at

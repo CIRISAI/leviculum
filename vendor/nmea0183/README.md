@@ -7,12 +7,20 @@ keeps `core::num::dec2flt` (17 044 B of flash) out of the nRF firmware
 image. It is bit-identical to `str::parse` for every NMEA field shape; the
 bound, and what falls outside it, are documented at the top of that file.
 
-One change to the API: a GGA's `time`, `latitude`, `longitude` and `hdop`
-are `Option`s, and a GGA parses as soon as its fix quality and satellite
-count are present (leviculum#413). Upstream returned `GGA(None)` for the
-sentence a receiver sends while it searches for a fix, with those four
-fields blank, so the satellite count of a board without a fix was never
-seen. A GGA without a quality is still `GGA(None)`.
+The first change to the API: a GGA's `time`, `latitude`, `longitude` and
+`hdop` are `Option`s, and a GGA parses as soon as its fix quality and
+satellite count are present (leviculum#413). Upstream returned `GGA(None)`
+for the sentence a receiver sends while it searches for a fix, with those
+four fields blank, so the satellite count of a board without a fix was
+never seen. A GGA without a quality is still `GGA(None)`.
+
+A second change to the API: an RMC's `datetime`, `latitude`, `longitude`
+and `speed` are `Option`s, and a void RMC (status `V`) parses with
+whatever it carries (leviculum#633). Upstream returned `RMC(None)` for the
+sentence a receiver sends once it has lost its fix, with position and
+speed blank, so the caller kept the time of the last valid sentence as if
+the receiver still vouched for it. A valid RMC (status `A`) still needs all
+four and is `RMC(None)` without them.
 
 Everything else is upstream. `cargo fmt` rewrapped two lines (a missing
 space in an mtk.rs derive, an under-indented body in coords.rs) because the

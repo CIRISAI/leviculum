@@ -79,24 +79,30 @@ impl GnssFix {
 
     /// Fold an RMC: a valid one sets position, time, speed and course; an
     /// invalid one clears only the time.
+    ///
+    /// A receiver that has lost its fix blanks position and speed and may
+    /// keep the date; the parser keeps that sentence (the vendored
+    /// nmea0183's second API change), so the time it no longer vouches for
+    /// is cleared here instead of outliving the fix.
     pub fn fold_rmc(&mut self, rmc: &RMC) {
-        self.valid = rmc.mode.is_valid();
-        if self.valid {
-            self.latitude = Some(rmc.latitude.as_f64());
-            self.longitude = Some(rmc.longitude.as_f64());
-            // RMC UTC is already leap-second-corrected by the receiver —
-            // converted as-is, never via raw GPS time (#166,
-            // time-and-clocks.md).
-            self.unix_secs = unix_secs_from_rmc_utc(&rmc.datetime);
+        let valid = rmc.mode.is_valid();
+        self.valid = valid;
+        // A stale time claim must not outlive the fix that made it:
+        // position keeps last-good for the display, time does not. RMC UTC
+        // is already leap-second-corrected by the receiver — converted
+        // as-is, never via raw GPS time (#166, time-and-clocks.md).
+        self.unix_secs = match (valid, &rmc.datetime) {
+            (true, Some(datetime)) => unix_secs_from_rmc_utc(datetime),
+            _ => None,
+        };
+        if let (true, Some(lat), Some(lon)) = (valid, &rmc.latitude, &rmc.longitude) {
+            self.latitude = Some(lat.as_f64());
+            self.longitude = Some(lon.as_f64());
             // Movement, for the telemetry location sensor (#236). Course is
             // absent while stationary on most receivers, so it is carried
             // as absent rather than as zero.
-            self.speed_mps = Some(rmc.speed.as_mps());
+            self.speed_mps = rmc.speed.as_ref().map(|s| s.as_mps());
             self.bearing_deg = rmc.course.as_ref().map(|c| c.degrees);
-        } else {
-            // A stale time claim must not outlive the fix that made it:
-            // position keeps last-good for the display, time does not.
-            self.unix_secs = None;
         }
     }
 
@@ -219,8 +225,9 @@ mod tests {
     }
 
     /// What the firmware folds from one sentence: the presence machine
-    /// forwards a GGA only when the parser returns one
-    /// (`leviculum-nrf/gnss-presence`, `ParseResult::GGA(Some(_))`).
+    /// forwards a GGA or an RMC only when the parser returns one
+    /// (`leviculum-nrf/gnss-presence`, `ParseResult::GGA(Some(_))`,
+    /// `ParseResult::RMC(Some(_))`).
     fn fold_sentence(fix: &mut GnssFix, body: &str) {
         match parse(body) {
             ParseResult::GGA(Some(gga)) => fix.fold_gga(&gga),
@@ -248,6 +255,32 @@ mod tests {
         assert_eq!(fix.hdop, before.hdop);
         fold_sentence(&mut fix, GGA_COLD);
         assert_eq!(fix.sat_in_use, 0);
+    }
+
+    /// A receiver that has lost its fix blanks position, speed and course
+    /// and keeps the time and date it still knows (u-blox, MediaTek).
+    const RMC_LOST_FIX: &str = "GPRMC,092725.00,V,,,,,,,110126,,,N";
+    /// The same before the receiver knows the time or the date.
+    const RMC_COLD: &str = "GNRMC,,V,,,,,,,,,,N";
+
+    #[test]
+    fn a_void_rmc_with_blank_fields_clears_the_time() {
+        let mut fix = GnssFix::empty();
+        fold_sentence(&mut fix, RMC_VALID);
+        let before = fix;
+        fold_sentence(&mut fix, RMC_LOST_FIX);
+        assert!(!fix.valid, "a void RMC is no fix");
+        assert_eq!(
+            fix.unix_secs, None,
+            "a receiver that lost its fix no longer vouches for the time"
+        );
+        assert_eq!(fix.latitude, before.latitude);
+        assert_eq!(fix.longitude, before.longitude);
+        assert_eq!(fix.speed_mps, before.speed_mps);
+
+        fold_sentence(&mut fix, RMC_VALID);
+        fold_sentence(&mut fix, RMC_COLD);
+        assert_eq!(fix.unix_secs, None);
     }
 
     #[test]

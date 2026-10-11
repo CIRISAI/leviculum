@@ -693,13 +693,15 @@ own issue, not a finding of this page.
   satellite count of a no-fix sentence was never published. Found in the
   ninth wave; confirmed and fixed, see
   [below](#three-observations-measured-three-decisions-moved).
-- A void RMC with blank fields parses to nothing too
+- A void RMC with blank fields parsed to nothing too
   (`vendor/nmea0183/src/rmc.rs`, date or position missing), so on a receiver
-  that blanks them a lost fix does not clear `unix_secs` or `valid` from the
-  RMC side. Found while measuring the GGA observation; a probe folding
-  `GPRMC,092725.00,V,,,,,,,110126,,,N` after a valid RMC kept the old
-  `unix_secs`. Not fixed: a candidate for its own issue. The GGA fix now
-  clears `valid` on such a receiver; the time stays.
+  that blanks them a lost fix did not clear `unix_secs` or `valid` from the
+  RMC side. Found while measuring the GGA observation; confirmed and fixed
+  in leviculum#633: the vendored parser keeps a void RMC with whatever it
+  carries (`vendor/nmea0183/README.md`), and
+  `leviculum_gnss_time::fix::tests::a_void_rmc_with_blank_fields_clears_the_time`,
+  red before the fix, folds `GPRMC,092725.00,V,,,,,,,110126,,,N` after a
+  valid RMC and reads `unix_secs` `None` and `valid` false.
 
 ## The census
 

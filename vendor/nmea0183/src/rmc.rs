@@ -8,14 +8,16 @@ use crate::Source;
 pub struct RMC {
     /// Navigational system.
     pub source: Source,
-    /// Date and time of fix in UTC.
-    pub datetime: DateTime,
-    /// Latitude in reference datum, mostly WGS-84.
-    pub latitude: Latitude,
-    /// Logitude in reference datum, mostly WGS-84.
-    pub longitude: Longitude,
-    /// Speed over ground.
-    pub speed: Speed,
+    /// Date and time of fix in UTC. Always present when the status is
+    /// valid; None on a void RMC that leaves it blank (Leviculum change,
+    /// see README.md).
+    pub datetime: Option<DateTime>,
+    /// Latitude in reference datum, mostly WGS-84. Same as datetime.
+    pub latitude: Option<Latitude>,
+    /// Logitude in reference datum, mostly WGS-84. Same as datetime.
+    pub longitude: Option<Longitude>,
+    /// Speed over ground. Same as datetime.
+    pub speed: Option<Speed>,
     /// Course over ground. Some receivers do not report it when no movement.
     pub course: Option<Course>,
     /// Magnetic course over ground (angle to magnetic North pole). Receiver may not report it.
@@ -44,9 +46,14 @@ impl RMC {
         let mode = Mode::from_some_str_or_status(fields.next(), &status)?;
 
         let datetime = DateTime::from_date_and_time(date, time)?;
-        if let (Some(datetime), Some(latitude), Some(longitude), Some(speed)) =
-            (datetime, latitude, longitude, speed)
-        {
+        // A receiver that has lost its fix sends a void RMC with position,
+        // speed and often the date blank; upstream returned nothing for it,
+        // so the caller kept the time of the last valid sentence as if the
+        // receiver still vouched for it (leviculum#633). A void RMC now
+        // parses with whatever it carries; a valid one still needs all four.
+        let complete =
+            datetime.is_some() && latitude.is_some() && longitude.is_some() && speed.is_some();
+        if complete || status == Status::NotValid {
             Ok(Some(RMC {
                 source,
                 datetime,

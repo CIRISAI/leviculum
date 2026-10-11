@@ -137,7 +137,7 @@ mod tests {
     fn assert_sentence_unix(sentence: &str, expected: u64) {
         let rmc = parse_rmc(sentence);
         assert_eq!(
-            unix_secs_from_rmc_utc(&rmc.datetime),
+            unix_secs_from_rmc_utc(rmc.datetime.as_ref().expect("a valid RMC has a date")),
             Some(expected),
             "sentence {sentence:?}"
         );
@@ -196,8 +196,9 @@ mod tests {
     fn fractional_seconds_truncate_backwards() {
         let mut rmc =
             parse_rmc("$GPRMC,225446,A,4916.45,N,12311.12,W,000.5,054.7,191194,020.3,E*68");
-        rmc.datetime.time.seconds = 46.99;
-        assert_eq!(unix_secs_from_rmc_utc(&rmc.datetime), Some(785_285_686));
+        let datetime = rmc.datetime.as_mut().expect("a valid RMC has a date");
+        datetime.time.seconds = 46.99;
+        assert_eq!(unix_secs_from_rmc_utc(datetime), Some(785_285_686));
     }
 
     // A valid fix seeds exactly once: after the seam accepts one value,

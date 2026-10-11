@@ -147,7 +147,7 @@ fn test_correct_rmc() {
                 r.unwrap(),
                 Ok(ParseResult::RMC(Some(RMC {
                     source: Source::GPS,
-                    datetime: datetime::DateTime {
+                    datetime: Some(datetime::DateTime {
                         date: datetime::Date {
                             day: 20,
                             month: 9,
@@ -158,10 +158,10 @@ fn test_correct_rmc() {
                             minutes: 55,
                             seconds: 4.049
                         }
-                    },
-                    latitude: TryFrom::try_from(55.703981666666664).unwrap(),
-                    longitude: TryFrom::try_from(37.69343833333333).unwrap(),
-                    speed: coords::Speed::from_knots(0.06),
+                    }),
+                    latitude: Some(TryFrom::try_from(55.703981666666664).unwrap()),
+                    longitude: Some(TryFrom::try_from(37.69343833333333).unwrap()),
+                    speed: Some(coords::Speed::from_knots(0.06)),
                     course: Some(From::from(25.82)),
                     magnetic: None,
                     mode: Mode::Autonomous
@@ -245,6 +245,60 @@ fn test_gga_without_a_position_keeps_its_satellite_count() {
     );
 }
 
+/// A receiver that has lost its fix blanks position and speed and keeps
+/// the time and date; one before any fix blanks those too. Both parse, so
+/// the caller sees the receiver withdraw its claim (Leviculum change, see
+/// README.md). A valid RMC with a blank position is still no sentence.
+#[test]
+fn test_void_rmc_without_a_position_parses() {
+    fn line(body: &str) -> String {
+        let sum = body.bytes().fold(0u8, |acc, b| acc ^ b);
+        format!("${body}*{sum:02X}\r\n")
+    }
+    let input = line("GPRMC,092725.00,V,,,,,,,110126,,,N")
+        + &line("GNRMC,,V,,,,,,,,,,N")
+        + &line("GPRMC,092725.00,A,,,,,,,110126,,,A");
+    let mut p = Parser::new();
+    let results: Vec<_> = p.parse_from_bytes(input.as_bytes()).collect();
+    assert_eq!(
+        results,
+        vec![
+            Ok(ParseResult::RMC(Some(RMC {
+                source: Source::GPS,
+                datetime: Some(datetime::DateTime {
+                    date: datetime::Date {
+                        day: 11,
+                        month: 1,
+                        year: 2026
+                    },
+                    time: datetime::Time {
+                        hours: 9,
+                        minutes: 27,
+                        seconds: 25.0
+                    }
+                }),
+                latitude: None,
+                longitude: None,
+                speed: None,
+                course: None,
+                magnetic: None,
+                mode: Mode::NotValid
+            }))),
+            Ok(ParseResult::RMC(Some(RMC {
+                source: Source::GNSS,
+                datetime: None,
+                latitude: None,
+                longitude: None,
+                speed: None,
+                course: None,
+                magnetic: None,
+                mode: Mode::NotValid
+            }))),
+            Ok(ParseResult::RMC(None)),
+        ]
+    );
+}
+
 #[test]
 fn test_correct_gga_without_altitude() {
     let mut p = Parser::new();
@@ -302,7 +356,7 @@ fn test_correct_rmc2() {
                 r.unwrap(),
                 Ok(ParseResult::RMC(Some(RMC {
                     source: Source::GPS,
-                    datetime: datetime::DateTime {
+                    datetime: Some(datetime::DateTime {
                         date: datetime::Date {
                             day: 21,
                             month: 4,
@@ -313,10 +367,10 @@ fn test_correct_rmc2() {
                             minutes: 36,
                             seconds: 50.0
                         }
-                    },
-                    latitude: TryFrom::try_from(-55.810116666666666).unwrap(),
-                    longitude: TryFrom::try_from(-37.65645).unwrap(),
-                    speed: coords::Speed::from_knots(0.01),
+                    }),
+                    latitude: Some(TryFrom::try_from(-55.810116666666666).unwrap()),
+                    longitude: Some(TryFrom::try_from(-37.65645).unwrap()),
+                    speed: Some(coords::Speed::from_knots(0.01)),
                     course: Some(From::from(255.6)),
                     magnetic: Some(From::from(246.90001)),
                     mode: Mode::Autonomous
@@ -541,7 +595,7 @@ fn test_parser_iterator() {
             iter.next().unwrap(),
             Ok(ParseResult::RMC(Some(RMC {
                 source: Source::GPS,
-                datetime: datetime::DateTime {
+                datetime: Some(datetime::DateTime {
                     date: datetime::Date {
                         day: 20,
                         month: 9,
@@ -552,10 +606,10 @@ fn test_parser_iterator() {
                         minutes: 55,
                         seconds: 4.049
                     }
-                },
-                latitude: TryFrom::try_from(55.703981666666664).unwrap(),
-                longitude: TryFrom::try_from(37.69343833333333).unwrap(),
-                speed: coords::Speed::from_knots(0.06),
+                }),
+                latitude: Some(TryFrom::try_from(55.703981666666664).unwrap()),
+                longitude: Some(TryFrom::try_from(37.69343833333333).unwrap()),
+                speed: Some(coords::Speed::from_knots(0.06)),
                 course: Some(From::from(25.82)),
                 magnetic: None,
                 mode: Mode::Autonomous
@@ -579,7 +633,7 @@ fn test_parser_iterator() {
             iter.next().unwrap(),
             Ok(ParseResult::RMC(Some(RMC {
                 source: Source::GPS,
-                datetime: datetime::DateTime {
+                datetime: Some(datetime::DateTime {
                     date: datetime::Date {
                         day: 20,
                         month: 9,
@@ -590,10 +644,10 @@ fn test_parser_iterator() {
                         minutes: 55,
                         seconds: 4.049
                     }
-                },
-                latitude: TryFrom::try_from(55.703981666666664).unwrap(),
-                longitude: TryFrom::try_from(37.69343833333333).unwrap(),
-                speed: coords::Speed::from_knots(0.06),
+                }),
+                latitude: Some(TryFrom::try_from(55.703981666666664).unwrap()),
+                longitude: Some(TryFrom::try_from(37.69343833333333).unwrap()),
+                speed: Some(coords::Speed::from_knots(0.06)),
                 course: Some(From::from(25.82)),
                 magnetic: None,
                 mode: Mode::Autonomous
@@ -743,10 +797,18 @@ mod fixed_point_matches_float_parse {
     }
 
     fn check_rmc(rmc: &RMC, f: &[&str]) {
-        assert_latitude(&rmc.latitude, f[3]);
-        assert_longitude(&rmc.longitude, f[5]);
-        assert_f32_field(rmc.speed.as_knots(), f[7], "speed");
-        assert_f32_field(rmc.datetime.time.seconds, &f[1][4..], "time seconds");
+        assert_latitude(
+            rmc.latitude.as_ref().expect("corpus RMC has position"),
+            f[3],
+        );
+        assert_longitude(
+            rmc.longitude.as_ref().expect("corpus RMC has position"),
+            f[5],
+        );
+        let speed = rmc.speed.as_ref().expect("corpus RMC has speed");
+        assert_f32_field(speed.as_knots(), f[7], "speed");
+        let datetime = rmc.datetime.as_ref().expect("corpus RMC has a date");
+        assert_f32_field(datetime.time.seconds, &f[1][4..], "time seconds");
         let course = rmc.course.as_ref().expect("corpus RMC all report course");
         assert_f32_field(course.degrees, f[8], "course");
         // Magnetic course is derived, not parsed: true course minus (east)

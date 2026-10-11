@@ -23,7 +23,7 @@ fn invalid_rmc() -> Vec<u8> {
 
 /// Cold-start void RMC as a real receiver emits it indoors before any
 /// satellite: every data field empty, mode N. Parses checksum-clean to
-/// `RMC(None)`.
+/// an RMC with every field `None` and is forwarded for the fold.
 fn void_rmc() -> Vec<u8> {
     nmea("GNRMC,,V,,,,,,,,,,N")
 }
