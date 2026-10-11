@@ -842,12 +842,12 @@ pub(crate) const RNODE_DEFAULT_BUFFER_SIZE: usize = 64;
 const FLOW_CONTROL_QUEUE_LIMIT: usize = 64;
 
 /// How long the CMD_READY flow-control gate may hold queued frames before the
-/// io task reports it. One firmware channel-stat cadence: the
-/// RNode emits CMD_STAT_CHTM every ~2 s, while a READY normally follows a TX
-/// within one packet airtime — sub-second at every supported rate. A gate
-/// still closed after a full stat cadence is no longer ordinary airtime wait;
-/// it is the duty-lock shape (no TX completion ⇒ no READY,
-/// `RNode_Firmware.ino:1624`).
+/// io task reports it. Two firmware channel-stat cadences: the RNode emits
+/// CMD_STAT_CHTM every ~1 s (`UTIL_UPDATE_INTERVAL_MS`, `RNode_Firmware/Config.h:179`),
+/// while a READY normally follows a TX within one packet airtime — sub-second
+/// at every supported rate. A gate still closed after two stat cadences is no
+/// longer ordinary airtime wait; it is the duty-lock shape (no TX completion ⇒
+/// no READY, `RNode_Firmware.ino:1624`).
 const TX_GATED_EVENT_AFTER: Duration = Duration::from_secs(2);
 
 /// Repeat cadence for `RNODE_TX_GATED` while the gate stays closed. Bounded
@@ -870,10 +870,10 @@ const READY_QUERY_FRAME: [u8; 4] = [kiss::FEND, rnode::CMD_READY, 0x00, kiss::FE
 /// Ceiling for the CMD_READY re-query backoff while the gate is closed.
 /// Under a duty lock the firmware queue stays full for minutes, and the
 /// poll shares the serial line the modem also uses to deliver RX frames —
-/// so the cadence must flatten out. 2 s (one CHTM stat cadence) bounds the
-/// chatter to a 4-byte frame every 2 s while capping worst-case
-/// gate-release latency at the same interval the firmware already uses
-/// for its own periodic reporting.
+/// so the cadence must flatten out. 2 s (two CHTM stat cadences of 1 s,
+/// `RNode_Firmware/Config.h:179`) bounds the chatter to a 4-byte frame every
+/// 2 s while capping worst-case gate-release latency at
+/// [`TX_GATED_EVENT_AFTER`], the interval after which a closed gate is reported.
 const READY_POLL_MAX: Duration = Duration::from_secs(2);
 
 /// First re-query delay after a TX or an unanswered/negative CMD_READY

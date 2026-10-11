@@ -877,11 +877,11 @@ fn xorshift32(state: &mut u32) -> u32 {
 /// outgoing item is drained. Half-duplex turn-taking: a busy transmitter must
 /// yield the channel back to RX between sends or it never hears the peer's
 /// acks, retransmits, and the link dies via retry exhaustion (#23). The RNode
-/// firmware achieves the same by returning to continuous RX after each TX and
-/// gating the next TX behind a CSMA wait (DIFS + contention window) during
-/// which the radio listens; it even reserves a fixed post-TX yield
-/// (CSMA_POST_TX_YIELD_SLOTS). We mirror that discipline with an explicit
-/// bounded window.
+/// firmware returns to continuous RX after each queue drain (`lora_receive`,
+/// `RNode_Firmware.ino:599`) and gates the next TX behind a CSMA wait (DIFS +
+/// contention window) during which the radio listens. It has no post-TX yield:
+/// `CSMA_POST_TX_YIELD_SLOTS` (`RNode_Firmware/Config.h:103`) is used nowhere,
+/// so our explicit bounded window is stricter than the reference, not a copy.
 ///
 /// Sized to one full single-frame reply airtime at the current profile plus
 /// the peer's whole turnaround — its host processing plus the widest wait it

@@ -1027,10 +1027,6 @@ pub fn csma_slot_ms(bandwidth_hz: u32, sf: u8, cr: u8) -> u64 {
     slot_ms
 }
 
-/// Maximum random jitter (ms) for the first packet after idle.
-/// Matches Python's PATHFINDER_RW = 0.5s.
-pub const JITTER_MAX_MS: u64 = 500;
-
 /// Minimum spacing (ms) between consecutive serial writes.
 /// Prevents overrunning the serial buffer (508 bytes at 115200 baud ≈ 44ms).
 /// For CSMA-fair pacing, use `compute_spacing_ms()` instead, this constant
@@ -1041,8 +1037,12 @@ pub const MIN_SPACING_MS: u64 = 50;
 /// clear before starting the contention window. From RNode_Firmware Config.h.
 pub const CSMA_DIFS_MS: u64 = 48;
 
-/// Firmware CSMA maximum contention window (ms). 15 slots × 24ms = 360ms.
-/// From RNode_Firmware Config.h: csma_slot_ms=24, cw_max=15.
+/// Upper bound (ms) on the firmware's CSMA contention wait: 15 slots of 24 ms, one slot
+/// wider than it ever waits. Arduino `random` excludes its upper bound, so the boot window's
+/// `random(0, 15)` (`RNode_Firmware/Config.h:126-127`, `RNode_Firmware.ino:1626`) waits at most
+/// 14 slots = 336 ms, band 1 (`cw_max` = 14, `RNode_Firmware.ino:1617`) 13 = 312 ms. Kept at 360:
+/// its only reader, [`compute_spacing_ms`], has no production caller, and the census mvr
+/// `burst_continuation_contends_inside_its_own_answer` pins its numbers on this value.
 pub const CSMA_MAX_CW_MS: u64 = 360;
 
 /// Safety margin (ms) added to airtime-based pacing to absorb firmware
