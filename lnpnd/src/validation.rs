@@ -44,6 +44,8 @@ use leviculum_core::LinkId;
 use leviculum_lxmf::constants::{LXMF_OVERHEAD, STAMP_SIZE, WORKBLOCK_EXPAND_ROUNDS_PN};
 use leviculum_lxmf::{CooperativeStamper, PeerSyncEnvelope, PropagationUpload, TransientId};
 
+use crate::peering::SyncSender;
+
 /// Validate (or measure) one inbound message's propagation stamp.
 ///
 /// At a minimum cost above 0 this is the reference's `validate_pn_stamp`
@@ -96,11 +98,11 @@ pub(crate) struct ValidationJob {
     pub data: Vec<u8>,
     /// The packet's queued proof hash ([`Carrier::Packet`] only).
     pub proof: Option<[u8; 32]>,
-    /// The link's validated sync peer at enqueue ([`Carrier::Resource`]
-    /// only): captured when the resource concluded, because the peer may
-    /// tear the link down — erasing the peering runtime's link state —
-    /// before the verdicts drain.
-    pub sync_peer: Option<[u8; 16]>,
+    /// The resource's sender at enqueue ([`Carrier::Resource`] only; the
+    /// default for a packet): captured when the resource concluded, because
+    /// the peer may tear the link down — erasing the peering runtime's link
+    /// state and the core's link — before the verdicts drain.
+    pub sender: SyncSender,
     /// [`leviculum_lxmf::PropagationNode::min_accepted_cost`] at enqueue.
     pub min_cost: u8,
     /// [`leviculum_lxmf::PropagationNode::compute_stamp_value`] at enqueue.
@@ -116,8 +118,8 @@ pub(crate) struct ValidationDone {
     pub carrier: Carrier,
     pub data: Vec<u8>,
     pub proof: Option<[u8; 32]>,
-    /// [`ValidationJob::sync_peer`], carried through unchanged.
-    pub sync_peer: Option<[u8; 16]>,
+    /// [`ValidationJob::sender`], carried through unchanged.
+    pub sender: SyncSender,
     pub verdicts: HashMap<TransientId, Option<u16>>,
 }
 
@@ -213,7 +215,7 @@ fn run_worker(jobs: &Receiver<ValidationJob>, results: &Sender<ValidationDone>) 
             carrier: job.carrier,
             data: job.data,
             proof: job.proof,
-            sync_peer: job.sync_peer,
+            sender: job.sender,
             verdicts,
         };
         if results.send(done).is_err() {

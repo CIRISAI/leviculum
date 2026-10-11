@@ -131,6 +131,28 @@ impl InboundSync {
     }
 }
 
+/// Who sent an inbound resource, as its link said while it was still up
+/// ([`PeeringRuntime::sync_sender`]).
+///
+/// Captured when the resource concludes and carried through the validation
+/// worker into [`PeeringRuntime::begin_sync_resource`], which runs after the
+/// worker. By then the peer has usually torn the link down: it closes as
+/// soon as its transfer concludes, and a one-message sync takes 4 ms
+/// (642, `lnpnd_recalls_its_peer_after_a_restart`). Reading the link at
+/// that point answered `None`, so a restarted node with no path declined
+/// the peer as `too_deep` (643). Nothing here re-reads the link later.
+#[derive(Clone, Default)]
+pub(crate) struct SyncSender {
+    /// [`PeeringRuntime::validated_peer`]: the remote whose `/offer`
+    /// peering key validated on this link.
+    pub validated_peer: Option<[u8; 16]>,
+    /// The identity the link identified as, if it did. Boxed: an identity
+    /// is several hundred bytes, and this rides in every queued payload.
+    pub identity: Option<Box<Identity>>,
+    /// [`Link::hops`](leviculum_core::link::Link::hops) of the link.
+    pub link_hops: Option<u8>,
+}
+
 /// What a completed inbound resource turned out to be
 /// ([`PeeringRuntime::begin_sync_resource`]).
 pub(crate) enum InboundSyncStart {
@@ -160,6 +182,11 @@ pub(crate) struct PeeringRuntime {
     /// `max_inbound_syncs` (`accepted_offer_links`,
     /// `reference/LXMF/LXMF/LXMRouter.py:2197-2204`).
     inbound_transfers: HashSet<LinkId>,
+    /// The identity and hop count of each inbound link a resource was
+    /// accepted on, read when the advertisement arrived: the link is
+    /// certainly alive then, and may not be by the time the resource's
+    /// [`SyncSender`] is taken (643).
+    inbound_link_facts: HashMap<LinkId, (Option<Identity>, Option<u8>)>,
     outbound: Option<OutboundSync>,
     mining: Option<MiningJob>,
     last_synced: Option<[u8; 16]>,
@@ -224,6 +251,7 @@ impl PeeringRuntime {
             our_identity_hash,
             validated_links: HashMap::new(),
             inbound_transfers: HashSet::new(),
+            inbound_link_facts: HashMap::new(),
             outbound: None,
             mining: None,
             last_synced: None,
@@ -748,11 +776,39 @@ impl PeeringRuntime {
         );
     }
 
-    /// Track an accepted inbound resource for `max_inbound_syncs`.
-    pub(crate) fn on_inbound_resource_accepted(&mut self, link_id: &LinkId) {
+    /// Track an accepted inbound resource for `max_inbound_syncs`, and note
+    /// who its link is while the link is certainly up ([`SyncSender`]).
+    pub(crate) fn on_inbound_resource_accepted(&mut self, core: &Core, link_id: &LinkId) {
         if self.validated_links.contains_key(link_id) {
             self.inbound_transfers.insert(*link_id);
         }
+        self.inbound_link_facts
+            .insert(*link_id, Self::link_facts(core, link_id));
+    }
+
+    /// The sender of a resource that just concluded on `link_id`: the
+    /// validated peer, and the link's identity and hops as noted at the
+    /// advertisement, or as the link answers now when nothing was noted.
+    /// Taken by the engine at the conclusion and carried through the
+    /// validation worker, never re-read after it (643).
+    pub(crate) fn sync_sender(&self, core: &Core, link_id: &LinkId) -> SyncSender {
+        let (identity, link_hops) = self
+            .inbound_link_facts
+            .get(link_id)
+            .cloned()
+            .unwrap_or_else(|| Self::link_facts(core, link_id));
+        SyncSender {
+            validated_peer: self.validated_peer(link_id),
+            identity: identity.map(Box::new),
+            link_hops,
+        }
+    }
+
+    fn link_facts(core: &Core, link_id: &LinkId) -> (Option<Identity>, Option<u8>) {
+        (
+            core.get_remote_identity(link_id).cloned(),
+            core.link(link_id).map(|link| link.hops()),
+        )
     }
 
     /// The peer behind an inbound link whose `/offer` peering key
@@ -820,16 +876,17 @@ impl PeeringRuntime {
     /// invalid stamp tears down and throttles the sender for
     /// `PN_STAMP_THROTTLE` (`:2440-2450`).
     ///
-    /// `validated_peer` is [`Self::validated_peer`] as of the moment the
-    /// resource concluded, captured by the caller: with validation on the
-    /// worker, the drain may run after a `LinkClosed` already cleared the
-    /// map (the reference peer tears its link down as soon as the transfer
-    /// concludes), and a late lookup here would drop the whole batch.
+    /// `sender` is [`Self::sync_sender`] as of the moment the resource
+    /// concluded, captured by the caller: with validation on the worker,
+    /// the drain may run after a `LinkClosed` already cleared the map and
+    /// the core forgot the link (the reference peer tears its link down as
+    /// soon as the transfer concludes), and a late lookup here would drop
+    /// the whole batch, or decline its sender as too deep (643).
     pub(crate) fn begin_sync_resource(
         &mut self,
         core: &mut Core,
         link_id: &LinkId,
-        validated_peer: Option<[u8; 16]>,
+        sender: SyncSender,
         data: &[u8],
         out: &mut TickOutput,
     ) -> InboundSyncStart {
@@ -847,15 +904,24 @@ impl PeeringRuntime {
         // upload from a real propagation node therefore peers it too, which
         // is why this sits above the client-upload return below.
         //
-        // `validated_peer` first, the live link second: with validation on
-        // the worker this may run after the peer already tore its link down
-        // (see the doc comment above), and the captured hash outlives that.
-        let link_identity = core.get_remote_identity(link_id).cloned();
-        let link_hops = core.link(link_id).map(|link| link.hops());
+        // All of it as captured when the resource concluded, never the live
+        // link: with validation on the worker this may run after the peer
+        // already tore its link down (see the doc comment above).
+        let SyncSender {
+            validated_peer,
+            identity: link_identity,
+            link_hops,
+        } = sender;
         let remote_of_link =
-            validated_peer.or_else(|| link_identity.as_ref().map(Self::propagation_hash_of));
+            validated_peer.or_else(|| link_identity.as_deref().map(Self::propagation_hash_of));
         if let Some(remote) = remote_of_link {
-            self.peer_from_recalled_announce(core, remote, link_identity.as_ref(), link_hops, now);
+            self.peer_from_recalled_announce(
+                core,
+                remote,
+                link_identity.as_deref(),
+                link_hops,
+                now,
+            );
         }
 
         let Some(remote_hash) = validated_peer else {
@@ -1051,8 +1117,9 @@ impl PeeringRuntime {
     /// link longer than `autopeer_maxdepth` is declined as before. Wire
     /// unchanged; the semantic difference is that we peer back sooner than
     /// a Python node would (decision: Lew, 2026-10-09, 556). `link_hops` is
-    /// `None` when the link is already gone, since validation runs on a
-    /// worker and may conclude after the peer tore it down.
+    /// read while the link is up ([`SyncSender`]), so a peer that tears the
+    /// link down before validation concludes is still judged by it (643);
+    /// it is `None` only when the core never knew the link.
     fn peer_from_recalled_announce(
         &mut self,
         core: &Core,
@@ -1703,6 +1770,7 @@ impl PeeringRuntime {
     pub(crate) fn on_link_closed(&mut self, link_id: &LinkId) {
         self.validated_links.remove(link_id);
         self.inbound_transfers.remove(link_id);
+        self.inbound_link_facts.remove(link_id);
         let Some(sync) = self.outbound.as_ref() else {
             return;
         };

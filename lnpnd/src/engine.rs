@@ -48,7 +48,7 @@ use leviculum_lxmf::{
 };
 
 use crate::mailbox::{MailboxConfig, MailboxRuntime};
-use crate::peering::{InboundSync, InboundSyncStart, PeeringRuntime};
+use crate::peering::{InboundSync, InboundSyncStart, PeeringRuntime, SyncSender};
 use crate::validation::{
     validate_stamp_value, Carrier, ValidationDone, ValidationJob, ValidationWorker,
 };
@@ -277,9 +277,9 @@ enum Pending {
     Resource {
         link_id: LinkId,
         data: Vec<u8>,
-        /// The link's validated sync peer as of the moment the resource
-        /// concluded; see [`ValidationJob::sync_peer`].
-        sync_peer: Option<[u8; 16]>,
+        /// The resource's sender as of the moment it concluded; see
+        /// [`ValidationJob::sender`].
+        sender: SyncSender,
         verdicts: Verdicts,
     },
     /// A validated peer's batch, part-way through its messages.
@@ -319,7 +319,7 @@ impl Pending {
             carrier,
             data,
             proof,
-            sync_peer,
+            sender,
             verdicts,
         } = done;
         let verdicts = Verdicts::Ground(verdicts);
@@ -333,7 +333,7 @@ impl Pending {
             Carrier::Resource => Pending::Resource {
                 link_id,
                 data,
-                sync_peer,
+                sender,
                 verdicts,
             },
         }
@@ -1207,11 +1207,11 @@ impl<S: PropagationStore> Engine<S> {
             Pending::Resource {
                 link_id,
                 data,
-                sync_peer,
+                sender,
                 verdicts,
             } => match ready
                 .peering
-                .begin_sync_resource(core, &link_id, sync_peer, &data, out)
+                .begin_sync_resource(core, &link_id, sender, &data, out)
             {
                 InboundSyncStart::Batch(job) => {
                     // Classification stores nothing; the batch goes back to
@@ -1269,26 +1269,28 @@ impl<S: PropagationStore> Engine<S> {
     /// hook, because a peer's batch is as many durable appends as it has
     /// messages and they may not all run under one core lock.
     ///
-    /// The validated sync peer is captured NOW, not at the drain: the
-    /// reference peer tears its link down as soon as its transfer
-    /// concludes, and the `LinkClosed` that follows clears the peering
-    /// runtime's link state while the stamps may still be on the worker.
+    /// The sender — validated sync peer, the link's identity and hops — is
+    /// captured NOW, not at the drain: the reference peer tears its link
+    /// down as soon as its transfer concludes, and the `LinkClosed` that
+    /// follows clears the peering runtime's link state, and the core's
+    /// link with it, while the stamps may still be on the worker (643).
     fn on_inbound_resource_completed(
         &mut self,
         ready: &mut Ready<S>,
+        core: &StdNodeCoreRef<'_>,
         link_id: &LinkId,
         data: &[u8],
     ) {
         let min_cost = ready.min_cost;
         let compute_value = ready.node.compute_stamp_value();
-        let sync_peer = ready.peering.validated_peer(link_id);
+        let sender = ready.peering.sync_sender(core, link_id);
         if ValidationWorker::worth_deferring(min_cost, compute_value) {
             self.validation.enqueue(ValidationJob {
                 link_id: *link_id,
                 carrier: Carrier::Resource,
                 data: data.to_vec(),
                 proof: None,
-                sync_peer,
+                sender,
                 min_cost,
                 compute_value,
             });
@@ -1296,7 +1298,7 @@ impl<S: PropagationStore> Engine<S> {
             self.pending.push_back(Pending::Resource {
                 link_id: *link_id,
                 data: data.to_vec(),
-                sync_peer,
+                sender,
                 verdicts: Verdicts::Inline {
                     min_cost,
                     compute_value,
@@ -1459,7 +1461,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                         carrier: Carrier::Packet,
                         data: data.clone(),
                         proof,
-                        sync_peer: None,
+                        sender: SyncSender::default(),
                         min_cost,
                         compute_value,
                     });
@@ -1490,7 +1492,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 let accept = ready.peering.admits_resource_on(core, link_id)
                     && ready.node.accepts_resource_of(*data_size);
                 let verdict = if accept {
-                    ready.peering.on_inbound_resource_accepted(link_id);
+                    ready.peering.on_inbound_resource_accepted(core, link_id);
                     core.accept_resource(link_id)
                 } else {
                     core.reject_resource(link_id)
@@ -1506,7 +1508,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 is_sender: false,
                 ..
             } if Self::owns_link(core, &ready, link_id) => {
-                self.on_inbound_resource_completed(&mut ready, link_id, data);
+                self.on_inbound_resource_completed(&mut ready, core, link_id, data);
             }
             // Our outbound sync resource concluded (or failed).
             NodeEvent::ResourceCompleted {
@@ -1980,7 +1982,7 @@ mod tests {
             timestamp: 1.0,
             messages: vec![stamped(0x01), stamped(0x02)],
         };
-        engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope.encode());
+        engine.on_inbound_resource_completed(&mut ready, &core, &link_id, &envelope.encode());
         // The close lands before any drain could run — the deterministic
         // stand-in for the LinkClosed event the engine routes here.
         ready.peering.on_link_closed(&link_id);
@@ -2053,9 +2055,9 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             let mut out = TickOutput::empty();
-            engine.on_inbound_resource_completed(&mut ready, &client_link, &envelope);
+            engine.on_inbound_resource_completed(&mut ready, &core, &client_link, &envelope);
             absorb(&mut engine, &mut ready, &mut core, &mut out);
-            engine.on_inbound_resource_completed(&mut ready, &peer_link, &envelope);
+            engine.on_inbound_resource_completed(&mut ready, &core, &peer_link, &envelope);
             absorb(&mut engine, &mut ready, &mut core, &mut out);
         });
         engine.state = State::Ready(ready);
@@ -2254,7 +2256,7 @@ mod tests {
         }
         .encode();
         let mut out = TickOutput::empty();
-        engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+        engine.on_inbound_resource_completed(&mut ready, &core, &link_id, &envelope);
         absorb(&mut engine, &mut ready, &mut core, &mut out);
         engine.state = State::Ready(ready);
 
@@ -2309,7 +2311,7 @@ mod tests {
         }
         .encode();
         let mut out = TickOutput::empty();
-        engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+        engine.on_inbound_resource_completed(&mut ready, &core, &link_id, &envelope);
         absorb(&mut engine, &mut ready, &mut core, &mut out);
         let stored = ready.node.store().count().unwrap_or(0);
         engine.state = State::Ready(ready);
@@ -2369,7 +2371,7 @@ mod tests {
                 messages: vec![synced_message(0x10 + index as u8)],
             }
             .encode();
-            engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+            engine.on_inbound_resource_completed(&mut ready, &core, &link_id, &envelope);
             absorb(&mut engine, &mut ready, &mut core, &mut out);
         }
         let stored = ready.node.store().count().unwrap_or(0);
@@ -2446,7 +2448,7 @@ mod tests {
                     messages: vec![synced_message(0x20 + index as u8)],
                 }
                 .encode();
-                engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+                engine.on_inbound_resource_completed(&mut ready, &core, &link_id, &envelope);
                 await_validation(&mut engine);
                 absorb(&mut engine, &mut ready, &mut core, &mut out);
             }
@@ -2485,11 +2487,19 @@ mod tests {
     /// and the link knows how far away it is. A link inside
     /// `autopeer_maxdepth` peers the node as `inbound_sync`; a link beyond
     /// it is still declined `too_deep`, so the depth rule is read off the
-    /// link rather than switched off.
+    /// link rather than switched off. The link is closed before the
+    /// validation comes back, as it is in the cell (643): its hops are
+    /// read while it still exists. With `advertised`, the core forgets the
+    /// link even before the resource concludes, and only what was noted at
+    /// the advertisement is left to judge by.
     #[test]
     fn a_pathless_node_syncing_over_a_link_is_judged_by_the_links_hops() {
-        for (link_hops, expected) in [(1u8, ("add", "inbound_sync")), (2, ("decline", "too_deep"))]
-        {
+        for (link_hops, expected, advertised) in [
+            (1u8, ("add", "inbound_sync"), false),
+            (2, ("decline", "too_deep"), false),
+            (1, ("add", "inbound_sync"), true),
+            (2, ("decline", "too_deep"), true),
+        ] {
             let server_dir = tempfile::tempdir().expect("tempdir");
             let client_dir = tempfile::tempdir().expect("tempdir");
             let mut server = core(server_dir.path());
@@ -2548,7 +2558,20 @@ mod tests {
             }
             .encode();
             let mut out = TickOutput::empty();
-            engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+            if advertised {
+                ready
+                    .peering
+                    .on_inbound_resource_accepted(&server, &link_id);
+                let _ = server.close_link(&link_id);
+            }
+            engine.on_inbound_resource_completed(&mut ready, &server, &link_id, &envelope);
+            // 643: the peer tears the link down the moment its transfer
+            // concludes, before the worker hands the validation back (a
+            // one-message sync took 4 ms on the cell, the close followed at
+            // once). The core forgets the link, and so does the engine.
+            let _ = server.close_link(&link_id);
+            ready.peering.on_link_closed(&link_id);
+            assert!(server.link(&link_id).is_none(), "the link must be gone");
             await_validation(&mut engine);
             absorb(&mut engine, &mut ready, &mut server, &mut out);
             let stored = ready.node.store().count().unwrap_or(0);
@@ -2569,12 +2592,12 @@ mod tests {
             assert_eq!(
                 operator,
                 vec![(expected.0, pathless, expected.1)],
-                "a link of {link_hops} hops at autopeer_maxdepth 1"
+                "a link of {link_hops} hops at autopeer_maxdepth 1, advertised {advertised}"
             );
             assert_eq!(
                 peer_count(&engine),
                 usize::from(expected.0 == "add"),
-                "a link of {link_hops} hops at autopeer_maxdepth 1"
+                "a link of {link_hops} hops at autopeer_maxdepth 1, advertised {advertised}"
             );
         }
     }
@@ -2788,7 +2811,7 @@ mod tests {
         }
         .encode();
         let mut out = TickOutput::empty();
-        engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+        engine.on_inbound_resource_completed(&mut ready, &core, &link_id, &envelope);
         await_validation(&mut engine);
         absorb(&mut engine, &mut ready, &mut core, &mut out);
         engine.state = State::Ready(ready);
@@ -3378,7 +3401,7 @@ mod inbound_sync_slices {
         .encode();
         // The event arm's call, with the batch already transferred: what
         // follows is only the storing of it.
-        engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+        engine.on_inbound_resource_completed(&mut ready, &core, &link_id, &envelope);
         engine.state = State::Ready(ready);
         // The verdicts first: the hooks below measure the storing alone.
         super::tests::await_validation(&mut engine);
