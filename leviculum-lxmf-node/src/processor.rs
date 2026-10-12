@@ -40,6 +40,7 @@
 //! `NodeCore::send_resource` (141 ms for 1 MiB), is never reached: the router
 //! drives resource sends through the three-phase form itself.
 
+use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Instant;
@@ -434,6 +435,10 @@ pub struct LxmfHelperProcessor {
     /// hooks to it and translates its events into `EVENT` lines, so the
     /// conformance corpus exercises the shipped role, not a test double.
     pn: Option<PnEmbed>,
+    /// The deadline (core ms) of the `sync` round the driver is waiting on,
+    /// or `None` when it is waiting on none. A `Cell` because the round ends
+    /// inside [`Self::report`], which runs under `absorb`'s shared borrow.
+    pending_sync: Cell<Option<u64>>,
 }
 
 /// The embedded propagation node and its event drain.
@@ -474,6 +479,7 @@ impl LxmfHelperProcessor {
             waits: Vec::new(),
             builds_inflight: HashSet::new(),
             pn: None,
+            pending_sync: Cell::new(None),
         }
     }
 
@@ -565,6 +571,25 @@ impl LxmfHelperProcessor {
         }
     }
 
+    /// Start waiting on a `sync` round that ends at `deadline_ms` at the latest.
+    fn expect_sync(&self, deadline_ms: u64) {
+        self.pending_sync.set(Some(deadline_ms));
+    }
+
+    /// Give up on the outstanding `sync` round once its budget is spent:
+    /// `periculum/assets/scripts/lxmf_node.py:816-831` polls until its deadline and then reports
+    /// `sync_timeout`, and the driver reads that line, not our silence.
+    fn poll_sync(&self, now_ms: u64) {
+        if self
+            .pending_sync
+            .get()
+            .is_some_and(|deadline| now_ms >= deadline)
+        {
+            self.pending_sync.set(None);
+            self.emitter.error("sync_timeout");
+        }
+    }
+
     /// Turn one router event into the helper's externally visible behaviour.
     fn report(&self, event: RouterEvent) {
         match event {
@@ -615,6 +640,7 @@ impl LxmfHelperProcessor {
                 let _ = self.stamps.send(StampJob::Propagation(request));
             }
             RouterEvent::PropagationSyncComplete(result) => {
+                self.pending_sync.set(None);
                 self.emitter.event(
                     "lxmf_sync_done",
                     &[
@@ -632,6 +658,21 @@ impl LxmfHelperProcessor {
                     "[lxmf-node] resource build pending id={}",
                     hex_encode(&id)
                 ));
+            }
+            // A round the router gave up on (`PR_NO_PATH` 0xf0 and above,
+            // `LXMRouter.py:73-78`) is the step's verdict, spelled as
+            // `periculum/assets/scripts/lxmf_node.py:827-828` spells it so the driver's retry
+            // recognises it. Only for a round the driver asked for and is
+            // still waiting on; every other state change stays a diagnostic.
+            RouterEvent::PropagationSyncState(status)
+                if status.state as u8 >= 0xf0 && self.pending_sync.get().is_some() =>
+            {
+                self.pending_sync.set(None);
+                self.emitter.log(format!(
+                    "[lxmf-node] router event: PropagationSyncState({status:?})"
+                ));
+                self.emitter
+                    .error(&format!("sync_failed_state_{:#x}", status.state as u8));
             }
             // The rest are diagnostics. Python's helper reports nothing for
             // any of them, and adding events the driver does not know would
@@ -935,13 +976,19 @@ impl LxmfHelperProcessor {
                 SendRequest::chat(peer, body, body_b64, DeliveryMethod::Propagated),
                 out,
             ),
-            Command::Sync => {
+            Command::Sync { timeout_secs } => {
+                // Armed before the request: a round can fail inside it, and
+                // that state change is reported against this wait.
+                self.expect_sync(core.now_ms().saturating_add((timeout_secs * 1000.0) as u64));
                 match ready
                     .router
                     .request_messages_from_propagation_node(core, None)
                 {
                     Ok(output) => self.absorb(ready, core, output, out),
-                    Err(e) => self.emitter.error(&format!("sync failed: {e:?}")),
+                    Err(e) => {
+                        self.pending_sync.set(None);
+                        self.emitter.error(&format!("sync failed: {e:?}"));
+                    }
                 }
             }
             Command::Quit => {
@@ -1362,6 +1409,9 @@ impl CoreProcessor for LxmfHelperProcessor {
             Ok(output) => self.absorb(&mut ready, core, output, &mut out),
             Err(e) => self.emitter.error(&format!("router tick: {e:?}")),
         }
+        // After the router's tick, so a round that completed or failed in
+        // this very tick is reported as such rather than as a timeout.
+        self.poll_sync(core.now_ms());
         self.dispatch_resource_builds(&mut ready);
 
         self.state = State::Ready(ready);
@@ -1385,6 +1435,9 @@ mod tests {
     use super::*;
 
     use leviculum_core::node::NodeCoreBuilder;
+    use leviculum_lxmf::router::{
+        PropagationClientState, PropagationSyncResult, PropagationSyncStatus,
+    };
     use leviculum_std::driver::{StdClock, StdStorage};
 
     /// Everything the helper needs to be driven, minus the node.
@@ -1609,5 +1662,106 @@ mod tests {
         ] {
             assert!(row.contains(token), "no {token} in {row}");
         }
+    }
+
+    fn drain_events(lines_rx: &std::sync::mpsc::Receiver<Out>) -> Vec<String> {
+        std::iter::from_fn(|| lines_rx.try_recv().ok())
+            .filter_map(|line| match line {
+                Out::Event(line) => Some(line),
+                Out::Log(_) | Out::Telemetry(_) => None,
+            })
+            .collect()
+    }
+
+    fn sync_state(state: PropagationClientState) -> RouterEvent {
+        RouterEvent::PropagationSyncState(PropagationSyncStatus {
+            state,
+            progress: 0.0,
+            transfer_size: None,
+        })
+    }
+
+    /// 676: a round the router gave up on is reported the way Python's helper
+    /// reports it, `EVENT lxmf_error detail=sync_failed_state_0x<hex>`
+    /// (`periculum/assets/scripts/lxmf_node.py:827-828`, `{state:#x}`), because
+    /// that detail is what the driver's retry keys on
+    /// (`periculum/src/executor.rs`, `sync_failure_is_terminal`). Before, the
+    /// state only reached stderr and the step timed out instead of retrying.
+    /// The states on the way there stay silent, and the round is reported once.
+    #[test]
+    fn a_failed_sync_round_is_reported_as_the_python_helper_spells_it() {
+        let (processor, lines_rx) = helper("sync-failed-test");
+        processor.expect_sync(u64::MAX);
+
+        for state in [
+            PropagationClientState::LinkEstablishing,
+            PropagationClientState::LinkEstablished,
+            PropagationClientState::RequestSent,
+        ] {
+            processor.report(sync_state(state));
+        }
+        assert_eq!(drain_events(&lines_rx), Vec::<String>::new());
+
+        processor.report(sync_state(PropagationClientState::TransferFailed));
+        processor.report(sync_state(PropagationClientState::LinkFailed));
+        let events = drain_events(&lines_rx);
+        assert_eq!(events.len(), 1, "one round, one verdict: {events:?}");
+        assert!(
+            events[0].starts_with("EVENT lxmf_error detail=sync_failed_state_0xf2 t="),
+            "{}",
+            events[0]
+        );
+    }
+
+    /// Python's helper only judges a round it was asked for; a router state
+    /// change with no `sync` outstanding is a diagnostic, not a step verdict.
+    #[test]
+    fn a_failed_state_without_a_sync_outstanding_is_not_an_error() {
+        let (processor, lines_rx) = helper("sync-unasked-test");
+        processor.report(sync_state(PropagationClientState::LinkFailed));
+        assert_eq!(drain_events(&lines_rx), Vec::<String>::new());
+    }
+
+    /// The `sync` argument is the round's budget: past it the helper says
+    /// `sync_timeout`, as `periculum/assets/scripts/lxmf_node.py:831` does when its poll deadline
+    /// expires, and only once.
+    #[test]
+    fn a_sync_round_past_its_budget_reports_sync_timeout() {
+        let (processor, lines_rx) = helper("sync-timeout-test");
+        processor.expect_sync(10_000);
+
+        processor.poll_sync(9_999);
+        assert_eq!(drain_events(&lines_rx), Vec::<String>::new());
+
+        processor.poll_sync(10_000);
+        processor.poll_sync(20_000);
+        let events = drain_events(&lines_rx);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(
+            events[0].starts_with("EVENT lxmf_error detail=sync_timeout t="),
+            "{}",
+            events[0]
+        );
+    }
+
+    /// A completed round ends the wait: no timeout follows the count.
+    #[test]
+    fn a_completed_sync_round_is_not_timed_out_afterwards() {
+        let (processor, lines_rx) = helper("sync-done-test");
+        processor.expect_sync(10_000);
+        processor.report(RouterEvent::PropagationSyncComplete(
+            PropagationSyncResult {
+                received: 2,
+                duplicates: 0,
+            },
+        ));
+        processor.poll_sync(20_000);
+        let events = drain_events(&lines_rx);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(
+            events[0].starts_with("EVENT lxmf_sync_done count=2 duplicates=0 t="),
+            "{}",
+            events[0]
+        );
     }
 }

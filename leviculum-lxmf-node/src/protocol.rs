@@ -120,10 +120,13 @@ pub enum Command {
         body: Vec<u8>,
         body_b64: String,
     },
-    /// `sync` — drain this client's mailbox from the selected propagation
-    /// node (list, fetch, confirm-purge). Emits
-    /// `lxmf_sync_done count=<n> duplicates=<n>` when the round completes.
-    Sync,
+    /// `sync [timeout_secs]` — drain this client's mailbox from the selected
+    /// propagation node (list, fetch, confirm-purge). Emits
+    /// `lxmf_sync_done count=<n> duplicates=<n>` when the round completes,
+    /// `lxmf_error detail=sync_failed_state_0x<hex>` when the router gives it
+    /// up, and `lxmf_error detail=sync_timeout` once `timeout_secs` (default
+    /// 60, `periculum/assets/scripts/lxmf_node.py:794`) passes without either.
+    Sync { timeout_secs: f64 },
     /// `quit`
     Quit,
 }
@@ -168,14 +171,7 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, CommandError> {
                 ));
             };
             let peer = parse_destination_hash(hash)?;
-            let timeout_secs: f64 = timeout
-                .parse()
-                .map_err(|_| CommandError::new(format!("could not convert to float: {timeout}")))?;
-            if !timeout_secs.is_finite() || timeout_secs < 0.0 {
-                return Err(CommandError::new(format!(
-                    "timeout must be a non-negative finite number of seconds: {timeout}"
-                )));
-            }
+            let timeout_secs = parse_timeout(timeout)?;
             Ok(Some(Command::WaitForPeer { peer, timeout_secs }))
         }
         "send" => {
@@ -290,10 +286,27 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, CommandError> {
                 body_b64: body_b64.to_string(),
             }))
         }
-        "sync" => Ok(Some(Command::Sync)),
+        "sync" => {
+            let timeout_secs = parts.next().map_or(Ok(60.0), parse_timeout)?;
+            Ok(Some(Command::Sync { timeout_secs }))
+        }
         "quit" => Ok(Some(Command::Quit)),
         other => Err(CommandError::new(format!("unknown command: {other}"))),
     }
+}
+
+/// Parse a timeout in seconds. Python takes `float(...)`, so fractions are
+/// accepted; a negative or non-finite budget is a scenario typo.
+fn parse_timeout(timeout: &str) -> Result<f64, CommandError> {
+    let timeout_secs: f64 = timeout
+        .parse()
+        .map_err(|_| CommandError::new(format!("could not convert to float: {timeout}")))?;
+    if !timeout_secs.is_finite() || timeout_secs < 0.0 {
+        return Err(CommandError::new(format!(
+            "timeout must be a non-negative finite number of seconds: {timeout}"
+        )));
+    }
+    Ok(timeout_secs)
 }
 
 /// Parse a Reticulum destination hash: exactly 16 bytes of hex.
@@ -495,6 +508,17 @@ mod tests {
                 body_b64: "aGVsbG8=".to_string(),
             }))
         );
+        // 676: the driver sends `sync <budget>`; the budget used to be
+        // dropped here, so the helper never timed a round out.
+        assert_eq!(
+            parse_command("sync 94"),
+            Ok(Some(Command::Sync { timeout_secs: 94.0 }))
+        );
+        assert_eq!(
+            parse_command("sync"),
+            Ok(Some(Command::Sync { timeout_secs: 60.0 }))
+        );
+        assert!(parse_command("sync soon").is_err());
         assert_eq!(parse_command("quit"), Ok(Some(Command::Quit)));
     }
 

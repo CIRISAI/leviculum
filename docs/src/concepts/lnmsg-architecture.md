@@ -206,7 +206,7 @@ wrong: `RouterOutput.core.events` contains `NodeEvent`s that must be fed
 drains. This is exactly Codeberg #204's subject. `leviculum-lxmf-node`
 implements it with a bounded worklist and says why the bound is the
 consumer's choice (`MAX_ABSORB_ROUNDS`,
-`leviculum-lxmf-node/src/processor.rs:82-92`, `absorb` at `:392-394`). A
+`leviculum-lxmf-node/src/processor.rs:83-93`, `absorb` at `:534-540`). A
 client that forgets this will silently never see incoming messages.
 
 ### `RouterEvent`
@@ -489,7 +489,7 @@ carries hard obligations:
 - The processor needs its own periodic slot to drain its command queue,
   because an event tap can never initiate anything. `leviculum-lxmf-node`
   uses 200 ms (`POLL_INTERVAL_MS`,
-  `leviculum-lxmf-node/src/processor.rs:80`).
+  `leviculum-lxmf-node/src/processor.rs:81`).
 
 This is a strong constraint and a gift at the same time: it means the
 "model" that talks to the network is a synchronous state machine with a
