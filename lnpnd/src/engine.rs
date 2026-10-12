@@ -1671,9 +1671,20 @@ mod tests {
     /// The role's default config at stamp cost 0: these tests sync and
     /// upload messages carrying placeholder stamps, which the shipped
     /// default of 13 would reject as invalid.
+    ///
+    /// And without the host's value pricing at cost 0 (leviculum#442 D6):
+    /// that is a workblock expansion per message, about 75 ms each in a
+    /// debug build on the coder host, and none of these tests is about
+    /// pricing. Left on, every ingest went through the worker and a
+    /// 105-message sync made the slice test a race between the forge
+    /// runner's CPU and a wall clock (Woodpecker 511). The tests that ARE
+    /// about pricing turn it back on: `a_peerless_host_computes_stamp_values_at_cost_zero`
+    /// by config, `a_deferred_sync_survives_the_peer_closing_the_link_before_the_drain`
+    /// by the peer-demand flag.
     pub(super) fn cost_free() -> PropagationNodeConfig {
         PropagationNodeConfig {
             stamp_cost: 0,
+            always_compute_stamp_value: false,
             ..PropagationNodeConfig::default()
         }
     }
@@ -1685,9 +1696,20 @@ mod tests {
         Engine<MemoryPropagationStore>,
         std::sync::mpsc::Receiver<EngineEvent>,
     ) {
+        engine_configured(cost_free(), control_allowed, mailbox)
+    }
+
+    fn engine_configured(
+        node_config: PropagationNodeConfig,
+        control_allowed: Vec<[u8; 16]>,
+        mailbox: Option<MailboxConfig>,
+    ) -> (
+        Engine<MemoryPropagationStore>,
+        std::sync::mpsc::Receiver<EngineEvent>,
+    ) {
         Engine::new(EngineConfig {
             identity: leviculum_std::generate_identity(),
-            node_config: cost_free(),
+            node_config,
             store: MemoryPropagationStore::new(64_000),
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
@@ -1925,7 +1947,12 @@ mod tests {
     fn a_peerless_host_computes_stamp_values_at_cost_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, _events) = engine_with(Vec::new(), None);
+        // The host's shipped default, which `cost_free` turns off.
+        let host = PropagationNodeConfig {
+            stamp_cost: 0,
+            ..PropagationNodeConfig::default()
+        };
+        let (mut engine, _events) = engine_configured(host, Vec::new(), None);
         let start_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, start_ms);
         match &mut engine.state {
@@ -1987,7 +2014,9 @@ mod tests {
         ready.peering.on_link_closed(&link_id);
         engine.state = State::Ready(ready);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Liveness, not speed: the two stamps are ground on the worker, at
+        // whatever pace the machine running the test allows.
+        let deadline = std::time::Instant::now() + WORKER_LIVENESS;
         loop {
             let now_ms = core.now_ms();
             let _ = engine.on_tick(&mut core, now_ms);
@@ -2178,14 +2207,26 @@ mod tests {
         panic!("the store queue did not drain");
     }
 
+    /// How long the validation worker may go without answering before a
+    /// test calls it hung. A liveness bound, not a speed bound: a wall-clock
+    /// budget for the whole wait measured the runner's CPU, and a fixed 10 s
+    /// went red on the forge for a worker that was grinding correctly
+    /// (Woodpecker 511, 105 messages at about 75 ms each in debug).
+    pub(super) const WORKER_LIVENESS: std::time::Duration = std::time::Duration::from_secs(60);
+
     /// Move every deferred validation onto the store queue, waiting for the
-    /// worker as the driver's next hook would. Bounded, so a worker that
-    /// never answers fails the test instead of hanging it.
+    /// worker as the driver's next hook would. Bounded by progress, so a
+    /// worker that stops answering fails the test instead of hanging it,
+    /// while a slow machine only waits longer: every answer restarts the
+    /// [`WORKER_LIVENESS`] budget.
     pub(super) fn await_validation<S: PropagationStore>(engine: &mut Engine<S>) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut deadline = std::time::Instant::now() + WORKER_LIVENESS;
         while engine.validation.busy() {
             match engine.validation.try_recv() {
-                Some(done) => engine.pending.push_back(Pending::from_validated(done)),
+                Some(done) => {
+                    engine.pending.push_back(Pending::from_validated(done));
+                    deadline = std::time::Instant::now() + WORKER_LIVENESS;
+                }
                 None if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(1))
                 }
@@ -3412,6 +3453,9 @@ mod inbound_sync_slices {
         engine.on_inbound_resource_completed(&mut ready, &core, &link_id, &envelope);
         engine.state = State::Ready(ready);
         // The verdicts first: the hooks below measure the storing alone.
+        // At `cost_free` they are inline constants and this returns at
+        // once; the slicing under test is the same either way, because
+        // both kinds of verdict queue onto the one store queue.
         super::tests::await_validation(&mut engine);
 
         let mut worst_hold = Duration::ZERO;
