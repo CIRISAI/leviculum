@@ -16,6 +16,19 @@
 //!    - `responder_tests` - Link responder tests (Rust as responder)
 //!    - `flow_tests` - End-to-end flow tests
 //!
+//! ## Fixtures
+//!
+//! - `harness::TestDaemon` - `scripts/test_daemon.py`, a Python RNS daemon
+//!   with a JSON command port; most tests here drive it.
+//! - `rpc_interop_tests::start_rust_daemon_with_rpc` - our shared instance
+//!   with the Python CLI tools (`rnstatus`, `rnpath`, `rnprobe`) as clients.
+//! - `lxmd_peer` - the stock reference `lxmd` (`reference/LXMF`, run as
+//!   `python3 -m LXMF.Utilities.lxmd` with a config the test writes) as a
+//!   propagation-node peer of lnpnd's production engine, both local clients
+//!   of one in-process shared instance. Reads lxmd's log and message store,
+//!   lnpnd's engine events and `/pn/get/stats`. Used by
+//!   `lxmd_drop_in_tests` (peering both ways, D6 re-pricing, rotation).
+//!
 //! ## Running Tests
 //!
 //! ```sh
@@ -66,6 +79,8 @@ mod lnomad_fetch_interop_tests;
 mod loadtest_tcp_hub_tests;
 mod local_client_announce_latency_ab;
 mod lrproof_hop_undercount_interop_tests;
+mod lxmd_drop_in_tests;
+mod lxmd_peer;
 mod lxmf_interop_tests;
 mod mtu_tests;
 mod multihop_tests;

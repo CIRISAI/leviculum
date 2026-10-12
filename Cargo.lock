@@ -2133,6 +2133,7 @@ dependencies = [
  "leviculum-queue-budget",
  "libc",
  "lnomad",
+ "lnpnd",
  "md-5",
  "rand_core 0.6.4",
  "regex",

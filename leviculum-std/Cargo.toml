@@ -136,6 +136,10 @@ lnomad = { path = "../lnomad" }
 # exercises the tool's own push loop rather than a copy of it. Dev-only cycle,
 # same shape as lnomad above.
 leviculum-cli = { path = "../leviculum-cli" }
+# lnpnd's production Engine, attached to a shared instance beside a stock
+# lxmd so the propagation drop-ins (the `lxmd_peer` fixture) test the
+# daemon's own wiring, not a copy. Dev-only cycle, same shape as above.
+lnpnd = { path = "../lnpnd" }
 # The board's heap budget (`HEAP_SIZE`, `SERVE_MARGIN_BYTES`,
 # `SERVE_RESOURCE_SDU`, the announced limits), read by the propagation
 # serve mvrs instead of mirrored as literals that drift the day the
