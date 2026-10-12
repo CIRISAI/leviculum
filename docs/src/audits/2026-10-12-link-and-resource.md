@@ -119,7 +119,7 @@ reaches the air. Class: **deviation ours (deliberate), inert on the
 wire**. Pinned by the existing #66/#129 tests.
 
 **D3 — RTT packet retransmits, and what they do to a Python
-responder.** *Resolved (#662): the retry is gone.* Python sends LRRTT once
+responder.** *Resolved in 6ce12a66 (#662): the retry is gone.* Python sends LRRTT once
 (`reference/Reticulum/RNS/Link.py:440-442`). Ours retransmitted it up to
 five times at `max(3×rtt, 10 s)` until any inbound packet confirmed the
 responder was alive (`check_rtt_retry` and `needs_rtt_retry`, both
@@ -150,7 +150,10 @@ packet once, as the reference does, and a lost LRRTT leaves the
 responder unactivated and the link ends on its own timers, which is
 what two Python nodes do. Pinned by
 `test_rtt_packet_sent_once_to_silent_responder` in
-`leviculum-core/src/node/mod.rs`.
+`leviculum-core/src/node/mod.rs`. On 6ce12a66 the same two cells read: control,
+one callback, the responder's rtt 1.419 s against our measured 1419 ms,
+keepalive 291.9 s, one LRRTT on the air; lost, the one LRRTT dropped,
+no callback, and no link left on the responder by its report at 170 s.
 
 **D4 — the responder takes the initiator's RTT verbatim; the
 reference takes the max with its own measurement.** Python:
@@ -686,7 +689,7 @@ machinery above (as the #374 lock did), never from ratchets.
    in the propagation-node lane: a sync and a message delivery sharing
    one link is exactly the two-ADV case.
 3. **D3, stop RTT retries from reshaping a Python responder.**
-   *Resolved (#662): the retry is gone; 659 measured six callbacks on a
+   *Resolved in 6ce12a66 (#662): the retry is gone; 659 measured six callbacks on a
    responder that lost nothing, so no cap would have contained it.* The
    retry is right (it closes a real LoRa establishment hole), but each
    duplicate LRRTT makes a Python responder re-run its established
