@@ -29,24 +29,19 @@ use leviculum_lxmf::propagation_node::{
     serve_cap_for_live_heap, serve_cap_for_peak, serve_peak_bytes,
 };
 
-/// Heap size in bytes (64 KiB).
+/// Heap size in bytes (96 KiB).
 ///
-/// Bumped DOWN from 96 KiB after the Bug #32 RNG fix. Sequence:
-/// 1. Direct-RNG-access panic (~26 s cycle) was the dominant fault.
-/// 2. RNG fix landed (commit f093099) → device runs longer, exposing
-///    a SECOND failure mode: stack overflow into BSS, manifesting as
-///    HardFault in `embassy_sync::AtomicWaker::wake` (Cell::replace
-///    on corrupted memory), `embedded_alloc::llff:78` allocator
-///    panic, or PC=0x0 jumps. Stack peak runs into __ebss territory.
-/// 3. Reducing heap from 96 KiB to 64 KiB shifts __ebss DOWN by 32
-///    KiB, giving stack 32 KiB more headroom. Observed `heap_used`
-///    peak is ~50 KiB (78% of 64 KiB pool); fits with 14 KiB margin.
-///    With 96 KiB pool, stack peak crashed into BSS within ~25 s.
-///
-/// Earlier "stack_free=0 was a measurement artifact" diagnosis (in
-/// Stage 1B's commit message) was WRONG — the artifact was real
-/// for the OLD stack_free implementation (commit 42f05e2 fixes that),
-/// but stack overflow at HEAP=96K is also real. Both bugs coexist.
+/// History, because the number moved twice. It was bumped DOWN from
+/// 96 KiB to 64 KiB after the Bug #32 RNG fix: with the stack growing
+/// down into `.bss`, a 96 KiB pool left the stack peak crashing into BSS
+/// within ~25 s (HardFaults in `AtomicWaker::wake`, `llff` allocator
+/// panics, PC=0x0 jumps). 64 KiB then ran out under sustained LoRa load
+/// (Codeberg #50: the pool filled to its ~62 KiB working set and an
+/// allocation failed), and 574844cf raised it back to 96 KiB together with
+/// flip-link, which places the stack at the bottom of RAM so an overflow
+/// faults cleanly instead of corrupting the heap. That pairing is what
+/// makes 96 KiB safe; the remaining constraint on growing it further is
+/// the stack's own peak (`docs/src/firmware/heap-budget.md`).
 ///
 /// Public since #388: the boot `HEAP_BUDGET` assertion
 /// (`leviculum_nrf::heap_census::log_budget_and_assert`) judges its total against
@@ -68,6 +63,31 @@ pub const BOARD_INCOMING_RESOURCES_PER_LINK: usize = 1;
 /// ([`BOARD_SYNC_LIMIT_KB`]) and the boot `HEAP_BUDGET`'s
 /// reserve term cannot drift apart (#388).
 pub const MAX_INCOMING_RESOURCE_BYTES: usize = 8 * 1024;
+
+/// How many incoming resources the whole board carries at once, over every
+/// link together: the count [`budget_reserve`] funds at
+/// [`MAX_INCOMING_RESOURCE_BYTES`] each. One. The propagation role refuses
+/// an advertisement past it with the same immediate RCL a second resource on
+/// one link gets ([`BOARD_INCOMING_RESOURCES_PER_LINK`], Codeberg #657), so
+/// the gate admits what the plan funds instead of the four concurrent
+/// transfers four links could otherwise bring (audit 2026-10-12 D14, 24 576 B
+/// the heap does not have). Client uploads and peer syncs count alike.
+pub const INCOMING_RESOURCES_FUNDED: usize = 1;
+
+/// Whether the propagation role takes an advertised incoming resource:
+/// within the announced sync limit (`within_sync_limit`, the role's
+/// `accepts_resource_of`), and while fewer than
+/// [`INCOMING_RESOURCES_FUNDED`] incoming resources are already in flight
+/// across every link of the node (`in_flight`, read off the core's link
+/// table at the advertisement). A refusal is the RCL the core sends for a
+/// rejected advertisement, so the sender fails it at once and retries
+/// later: a client after its own backoff, a peer after its sync interval.
+/// Latency, where admitting it was a heap the plan does not have.
+///
+/// Today's gate (the audit's D14) asked the first question only.
+pub const fn admits_incoming_resource(within_sync_limit: bool, in_flight: usize) -> bool {
+    within_sync_limit && in_flight < INCOMING_RESOURCES_FUNDED
+}
 
 /// Slots in the per-connection HVN drain table (`HVN_DRAIN`, `leviculum-nrf/src/ble/mod.rs`).
 ///
@@ -346,9 +366,11 @@ pub const fn budget_per_link() -> usize {
 }
 
 /// The budget's `reserve=` term (fragmentation + shared BLE channels +
-/// one incoming resource at the binaries' cap).
+/// [`INCOMING_RESOURCES_FUNDED`] incoming resources at the binaries' cap).
 pub const fn budget_reserve() -> usize {
-    FRAG_RESERVE_BYTES + CHANNEL_BUDGET_BYTES + MAX_INCOMING_RESOURCE_BYTES
+    FRAG_RESERVE_BYTES
+        + CHANNEL_BUDGET_BYTES
+        + INCOMING_RESOURCES_FUNDED * MAX_INCOMING_RESOURCE_BYTES
 }
 
 /// How many endpoint links a node box of `node_box` bytes affords — the

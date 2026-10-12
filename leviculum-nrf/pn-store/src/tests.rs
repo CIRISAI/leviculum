@@ -771,3 +771,215 @@ fn an_append_into_a_full_region_lands_and_its_retry_is_a_duplicate() {
     );
     assert_eq!(role.store().pending_ops(), 0, "and not stored twice");
 }
+
+// ---- stamp values at cost 0 (audit 2026-10-12 D10) ----
+
+/// A client upload for destination 7 whose stamp is worth at least
+/// `at_least`, found against the real 1000-round workblock the way the board
+/// measures one. Returns the envelope, its transient id and the value.
+fn priced_upload(at_least: u16) -> (Vec<u8>, [u8; 32], u16) {
+    let mut lxmf = vec![7u8; DESTINATION_LENGTH];
+    lxmf.resize(200, 0x5A);
+    let probe = leviculum_lxmf::PropagationUpload::single(1_700_000_000.0, lxmf.clone(), [0; 32]);
+    let transient_id = *leviculum_lxmf::PropagationUpload::decode(&probe.encode())
+        .unwrap()
+        .transient_id();
+    let stream = workblock(&transient_id);
+    for n in 0u64.. {
+        let mut stamp = [0u8; 32];
+        stamp[..8].copy_from_slice(&n.to_le_bytes());
+        let value = stream.value(&stamp);
+        if value >= at_least {
+            let bytes =
+                leviculum_lxmf::PropagationUpload::single(1_700_000_000.0, lxmf, stamp).encode();
+            return (bytes, transient_id, value);
+        }
+    }
+    unreachable!("the counter space holds a stamp of every value")
+}
+
+/// The fully expanded workblock of `transient_id`, as the board's grind
+/// leaves it after its last slice.
+fn workblock(transient_id: &[u8; 32]) -> leviculum_lxmf::WorkblockStream {
+    use leviculum_lxmf::constants::WORKBLOCK_EXPAND_ROUNDS_PN;
+    let mut stream = leviculum_lxmf::WorkblockStream::new(WORKBLOCK_EXPAND_ROUNDS_PN);
+    stream.advance(transient_id, WORKBLOCK_EXPAND_ROUNDS_PN);
+    stream
+}
+
+/// A stock peer announcing the reference's cost 16 with flexibility 3
+/// (`PROPAGATION_COST`, `reference/LXMF/LXMF/LXMRouter.py:54`): it takes
+/// only ids worth 13 or more.
+fn demanding_peer() -> leviculum_lxmf::peering::PeerTable {
+    use leviculum_lxmf::peering::{PeerTable, PeeringConfig};
+    use leviculum_lxmf::propagation::PropagationNodeAnnounce;
+    let mut table = PeerTable::new(PeeringConfig::default());
+    let announce = PropagationNodeAnnounce {
+        legacy_support: false,
+        timebase: 1,
+        enabled: true,
+        transfer_limit_kb: 256,
+        sync_limit_kb: 10_240,
+        stamp_cost: 16,
+        stamp_cost_flexibility: 3,
+        peering_cost: 18,
+        metadata: vec![],
+    };
+    let _ = table.handle_announce([1; 16], &announce, Some(2), 200, false);
+    assert_eq!(table.get(&[1; 16]).expect("peered").min_accepted_cost(), 13);
+    table
+}
+
+/// What the demanding peer would be offered from `store` now.
+fn offered_to_demanding_peer(store: &PnStore<SharedRegion>) -> Vec<[u8; 32]> {
+    use leviculum_lxmf::peering::{build_offer, OFFER_BYTES_LIMIT};
+    let table = demanding_peer();
+    let peer = table.get(&[1; 16]).expect("peered");
+    build_offer(peer, &directory(store), OFFER_BYTES_LIMIT)
+        .map(|plan| plan.ids)
+        .unwrap_or_default()
+}
+
+/// D10, the accept half: a board configured at a cost its flexibility
+/// cancels (min accepted cost 0) takes a message before it has met any
+/// demanding peer. The board's own role, over the board's store, must store
+/// the stamp's true value, or a stock peer that peers later is never
+/// offered it (`build_offer` steps its cursor past a low-valued id for good,
+/// `reference/LXMF/LXMF/LXMPeer.py:340`).
+#[test]
+fn a_message_accepted_at_cost_0_before_any_demanding_peer_is_offered_to_one() {
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let mut role = PropagationNode::new(
+        PnStore::new(region.clone(), SECTORS),
+        board_role_config(3, 1, b"board".to_vec(), 4_000),
+    );
+    assert_eq!(role.min_accepted_cost(), 0, "cost 3 less flexibility 3");
+
+    let (bytes, transient_id, value) = priced_upload(13);
+    // The board's grind, as `Engine::validate_step` runs it: the role asks
+    // for a value only when it wants one, and then gets the measured one.
+    let outcome = role.handle_upload(&bytes, 1000, |id, stamp| Some(workblock(id).value(stamp)));
+    let leviculum_lxmf::UploadOutcome::Accepted { stamp_value, .. } = outcome else {
+        panic!("expected acceptance, got {outcome:?}");
+    };
+    flush_messages(role.store_mut(), &region, &mut log);
+
+    assert_eq!(stamp_value as u16, value, "stored at its true value");
+    assert_eq!(offered_to_demanding_peer(role.store()), vec![transient_id]);
+}
+
+/// D10, the boot half: a store an older board wrote holds value 0 for what
+/// it took at cost 0 (and two other records: one truly worth 0, one priced
+/// below the peer's minimum).
+/// Before the walk the demanding peer is offered nothing; after it the
+/// valuable message is offered at its true value, nothing else was
+/// re-written, the marker is down, and the next boot owes no walk.
+#[test]
+fn a_store_at_value_0_is_offered_once_the_boot_walk_priced_it() {
+    use leviculum_lxmf::propagation::PropagationUpload;
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let mut store = PnStore::new(region.clone(), SECTORS);
+
+    let (bytes, valuable, value) = priced_upload(13);
+    let body = |bytes: &[u8]| {
+        let upload = PropagationUpload::decode(bytes).unwrap();
+        let mut body = upload.unstamped_lxmf().to_vec();
+        body.extend_from_slice(upload.propagation_stamp());
+        body
+    };
+    store.append(&valuable, 1000, 0, &body(&bytes)).unwrap();
+    // A stamp truly worth 0: the walk measures it and leaves it in place.
+    let mut worthless = None;
+    for seed in 0u8.. {
+        let upload = upload(seed);
+        let decoded = PropagationUpload::decode(&upload).unwrap();
+        if workblock(decoded.transient_id()).value(decoded.propagation_stamp()) == 0 {
+            worthless = Some((*decoded.transient_id(), body(&upload)));
+            break;
+        }
+    }
+    let (worthless, worthless_body) = worthless.expect("half of all stamps are worth 0");
+    store.append(&worthless, 1001, 0, &worthless_body).unwrap();
+    store
+        .append(&key(9), 1002, 5, &msg_body(7, FIELD_BODY))
+        .unwrap();
+    flush_messages(&mut store, &region, &mut log);
+
+    assert!(
+        offered_to_demanding_peer(&store).is_empty(),
+        "stored at 0, the message is below the peer's minimum"
+    );
+
+    let mut walk = RepriceWalk::at_boot(&store).expect("no marker yet: a walk is owed");
+    let mut measured = 0;
+    let mut rewritten = 0;
+    while let Some(next) = walk.next(&store) {
+        measured += 1;
+        let value = workblock(&next.transient_id).value(&next.stamp);
+        rewritten += walk.priced(&mut store, value) as u32;
+        flush_messages(&mut store, &region, &mut log);
+    }
+    walk.finish(&mut store);
+    flush_messages(&mut store, &region, &mut log);
+
+    assert_eq!(
+        measured, 2,
+        "the two value-0 records, and not the priced one"
+    );
+    assert_eq!(rewritten, 1, "only the valuable one is re-written");
+    let entries = directory(&store);
+    assert_eq!(entries.len(), 3, "re-written, not duplicated");
+    let stored = entries
+        .iter()
+        .find(|entry| entry.transient_id == valuable)
+        .expect("still stored");
+    assert_eq!(stored.stamp_value as u16, value);
+    assert_eq!(stored.received_at, 1000, "the receive time travels along");
+    assert_eq!(offered_to_demanding_peer(&store), vec![valuable]);
+    assert_eq!(
+        store.read_body(&valuable).unwrap(),
+        Some(body(&bytes)),
+        "the body is the same bytes"
+    );
+
+    assert!(store.stamp_values_true());
+    let rebooted = PnStore::new(region.clone(), SECTORS);
+    assert_eq!(RepriceWalk::at_boot(&rebooted), None, "the walk runs once");
+}
+
+/// A re-write whose purge never reached flash leaves the message twice;
+/// pricing it again keeps one copy at the right value.
+#[test]
+fn a_rewrite_interrupted_before_its_purge_heals_on_the_next_walk() {
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let mut store = PnStore::new(region.clone(), SECTORS);
+    store
+        .append(&key(1), 5, 0, &msg_body(7, FIELD_BODY))
+        .unwrap();
+    flush_messages(&mut store, &region, &mut log);
+
+    assert!(store.set_stamp_value(&key(1), 14));
+    // The append lands; the board resets before the purge.
+    let append = store.peek_op().cloned().unwrap();
+    block_on(apply(&mut log, &append));
+    sync(&region, &mut log);
+    assert_eq!(directory(&PnStore::new(region.clone(), SECTORS)).len(), 2);
+
+    let mut store = PnStore::new(region.clone(), SECTORS);
+    let mut walk = RepriceWalk::at_boot(&store).expect("no marker");
+    assert_eq!(
+        walk.next(&store).map(|next| next.transient_id),
+        Some(key(1))
+    );
+    assert!(walk.priced(&mut store, 14));
+    flush_messages(&mut store, &region, &mut log);
+    let entries = directory(&store);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].stamp_value, 14);
+}

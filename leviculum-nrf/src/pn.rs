@@ -248,15 +248,16 @@ use leviculum_lxmf::propagation::{
     MessageListResponse, PeerError, PropagationNodeAnnounce, TransientId,
 };
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
-use leviculum_lxmf::propagation_node::{get_mailbox, offer_remote, propagation_hash_of};
+use leviculum_lxmf::propagation_node::{
+    get_mailbox, link_idle_past_bound, offer_remote, propagation_hash_of,
+};
 use leviculum_lxmf::propagation_store::StoredMessage;
 use leviculum_lxmf::sync_round::{round_deadline_ms, round_step, RoundEvent, RoundStep, RoundView};
 use leviculum_lxmf::{
-    CooperativeStamper, Eviction, EvictionReason, GetOutcome, PropagationNode,
-    PropagationNodeConfig, PropagationStore, StampCancel, UploadOutcome, WorkblockStream,
-    MESSAGE_GET_PATH,
+    CooperativeStamper, Eviction, EvictionReason, GetOutcome, PropagationNode, PropagationStore,
+    StampCancel, UploadOutcome, WorkblockStream, MESSAGE_GET_PATH,
 };
-use leviculum_pn_store::{settle_message_op, FlushOp, PnPeerStore, PnStore, Region};
+use leviculum_pn_store::{settle_message_op, FlushOp, PnPeerStore, PnStore, Region, RepriceWalk};
 use leviculum_queue_budget::{OwnShare, OwnVerdict, OWN_TRAFFIC_SHARE_PERMILLE};
 use leviculum_record_log::SECTOR_SIZE;
 use leviculum_sync_batch::{AfterClose, Arrival};
@@ -382,6 +383,12 @@ const MAINTENANCE_SECS: u64 = 480;
 
 /// `PN_STATS` cadence (instruction item 3).
 const STATS_SECS: u64 = 300;
+
+/// The longest the loop sleeps before the idle-link sweep looks again
+/// ([`Engine::tick_idle_links`]). The sweep also runs on every settle pass
+/// the loop makes for other reasons; this only bounds a quiet board, where
+/// a link idle past the 180 s bound goes at most this much later.
+const IDLE_SWEEP_MS: u64 = 15_000;
 
 /// `/offer` request timeout, as on the host.
 const OFFER_REQUEST_TIMEOUT_MS: u64 = 60_000;
@@ -731,6 +738,11 @@ struct Grind {
     /// Settle passes this grind has taken, reported as `slices=` so a capture
     /// says whether the slicing ran at all.
     slices: u32,
+    /// The grind measures a stored record for the boot walk
+    /// ([`Engine::reprice_step`]) rather than judging a work item. Such a
+    /// grind runs to its end before queued work starts its own: the one
+    /// stream cannot hold two materials.
+    reprice: bool,
 }
 
 /// What one slice of [`Engine::validate_step`] leaves the caller with.
@@ -780,6 +792,11 @@ pub struct Engine {
     /// one: the engine validates one message at a time either way, and the
     /// slicing changed how long one takes, not how many run.
     grind: Option<Grind>,
+    /// The boot walk that prices value-0 records an older board stored
+    /// (audit 2026-10-12 D10), while one is owed. A cursor and the record in
+    /// hand, never a list ([`RepriceWalk`]); its workblock is [`Self::grind`],
+    /// the same parked stream an upload's uses, so the walk adds no heap.
+    reprice: Option<RepriceWalk>,
     /// The largest modelled transient per operation since boot.
     peaks: EnginePeaks,
     /// What the BOOT plan funds one fetch to serve
@@ -838,33 +855,19 @@ impl Engine {
         let name = crate::name::mesh_name(&identity_hash);
         let serve_boot_cap =
             crate::heap_census::budget_serve_cap(core::mem::size_of::<NodeCore<R, C, S>>());
-        let role_config = PropagationNodeConfig {
-            stamp_cost: config.stamp_cost,
-            peering_cost: config.peering_cost,
-            name: Some(name.as_bytes().to_vec()),
-            transfer_limit_kb: BOARD_TRANSFER_LIMIT_KB,
-            // The announced sync appetite must fit both the resource cap
-            // and the heap budget (#388); derived from what the board can
-            // afford to answer (order 511) — see BOARD_SYNC_LIMIT_KB.
-            sync_limit_kb: BOARD_SYNC_LIMIT_KB,
-            // The fetch is bounded apart from the announcement, so the
-            // smaller derived limit does not shrink what a client gets.
-            serve_limit_bytes: Some(leviculum_heap_budget::BOARD_SERVE_LIMIT_BYTES),
-            // What one fetch may SERVE, from the same boot arithmetic
-            // the `HEAP_BUDGET serve_cap=` line prints — the node box is
-            // this generic's own size, so the printed number and the
-            // enforced one are one expression. Below the announced sync
-            // limit whenever the plan funds less than it announces,
-            // which is today, on every board. It is the FLOOR: every
-            // `/get` re-reads it against the heap the board has at that
-            // moment (`SERVE_CAP`, `answer_get_work`).
-            serve_cap_bytes: Some(serve_boot_cap),
-            // The board saves the workblock expansion at cost 0 while no
-            // peer demands a value (leviculum#442 D6); the host computes.
-            always_compute_stamp_value: false,
-            ..PropagationNodeConfig::default()
-        };
-        let mut role = PropagationNode::new(store, role_config);
+        // The board's configuration lives in `leviculum-pn-store`, where the
+        // host tests run it (audit 2026-10-12 D10): the limits from the heap
+        // budget, and `serve_cap_bytes` from the same boot arithmetic the
+        // `HEAP_BUDGET serve_cap=` line prints — the node box is this
+        // generic's own size, so the printed number and the enforced one are
+        // one expression.
+        let role_config = leviculum_pn_store::board_role_config(
+            config.stamp_cost,
+            config.peering_cost,
+            name.as_bytes().to_vec(),
+            serve_boot_cap,
+        );
+        let role = PropagationNode::new(store, role_config);
 
         let peer_store = PnPeerStore::new(region);
         let mut peers = PeerTable::new(PeeringConfig {
@@ -876,7 +879,10 @@ impl Engine {
         if let Ok(records) = peer_store.load_all() {
             peers.restore(records);
         }
-        role.set_compute_stamp_value(peers.max_peer_min_cost() > 0);
+        // A store an older board wrote may hold value 0 for what it took
+        // before its first demanding peer: priced once, in the background,
+        // before the marker says the region is true (D10).
+        let reprice = RepriceWalk::at_boot(role.store());
 
         ROLE_ACTIVE.store(true, Ordering::Relaxed);
         crate::log::log_fmt_critical(
@@ -888,6 +894,9 @@ impl Engine {
                 pages
             ),
         );
+        if reprice.is_some() {
+            crate::log::log_fmt_critical("PN_REPRICE ", format_args!("walk=start"));
+        }
 
         Some(Self {
             role,
@@ -916,6 +925,7 @@ impl Engine {
             too_large: Vec::with_capacity(TOO_LARGE_SLOTS),
             own_share: OwnShare::new(),
             grind: None,
+            reprice,
             peaks: EnginePeaks::default(),
             serve_boot_cap,
         })
@@ -991,6 +1001,7 @@ impl Engine {
         }
         if !self.work.is_empty()
             || self.sync_batch.is_some()
+            || self.reprice.is_some()
             || self.role.store().pending_ops() > 0
             || self.peer_store.pending_ops() > 0
         {
@@ -1001,6 +1012,7 @@ impl Engine {
         }));
         due = due.min(self.next_maintenance_at_ms.max(now_ms + 1));
         due = due.min(self.next_stats_at_ms.max(now_ms + 1));
+        due = due.min(now_ms.saturating_add(IDLE_SWEEP_MS));
         due = due.min(self.next_sync_at_ms.max(now_ms + 1));
         if let Some(sync) = &self.outbound {
             due = due.min(sync.deadline_ms);
@@ -1181,8 +1193,23 @@ impl Engine {
                 link_id, data_size, ..
             } if self.owns_link(node, link_id) => {
                 // Refused before it moves when above the announced
-                // per-sync limit (`reference/LXMF/LXMF/LXMRouter.py:2220-2224`).
-                let accept = self.role.accepts_resource_of(*data_size);
+                // per-sync limit (`reference/LXMF/LXMF/LXMRouter.py:2220-2224`),
+                // and — the board's own rule (audit 2026-10-12 D14) — when
+                // the incoming resources already in flight over every link
+                // are what the heap reserve funds. Client uploads and peer
+                // syncs count alike; the refusal is the same immediate RCL,
+                // so the sender retries instead of the board dying of a
+                // transfer its plan never funded (#388).
+                let within_limit = self.role.accepts_resource_of(*data_size);
+                let in_flight: usize = node
+                    .links()
+                    .map(|(_, link)| link.incoming_resource_count())
+                    .sum();
+                let accept =
+                    leviculum_heap_budget::admits_incoming_resource(within_limit, in_flight);
+                if within_limit && !accept {
+                    Self::log_reject("resources_busy", "resource");
+                }
                 let verdict = if accept {
                     if self.validated_links.contains_key(link_id) {
                         self.inbound_transfers.push(*link_id);
@@ -1247,52 +1274,7 @@ impl Engine {
                     data: data.clone(),
                 });
             }
-            NodeEvent::LinkClosed { link_id, .. } => {
-                self.proofs.forget(link_id);
-                self.validated_links.remove(link_id);
-                self.inbound_transfers.retain(|held| held != link_id);
-                // Two cases for a close that lands on the batch's own link,
-                // told apart by whether anything is still resident
-                // (`leviculum_sync_batch::SyncBatch::after_close`):
-                //
-                // * `KeepDraining` — the messages are HERE, whole and
-                //   decoded, and only their stamps are still owed. This
-                //   sender is finished, not gone: it proved its resource and
-                //   tore the link down in the same breath, as the reference
-                //   does (`reference/LXMF/LXMF/LXMPeer.py:499-503`). The
-                //   grind runs on to the end of the batch and the round is
-                //   concluded by `perform_sync_step` like any other. Until
-                //   eb9b8b7a this arm concluded here instead, which dropped
-                //   the whole unjudged tail — 6 of 7 messages on the rig
-                //   (`lora_pn_board_offer_past_the_link`, 2026-09-24).
-                // * `Conclude` — nothing left to judge. Logging the round
-                //   here rather than waiting for a settle pass keeps a spent
-                //   batch from standing in the way of the next `/offer`.
-                //
-                // A link that dies while the resource is still IN FLIGHT
-                // never reaches either: the batch is built from the decoded
-                // envelope once the transfer concluded, so there is no batch
-                // yet and `sync_batch` is `None`.
-                let after_close = self
-                    .sync_batch
-                    .as_ref()
-                    .filter(|batch| batch.link_id == *link_id)
-                    .map(|batch| batch.drain.after_close());
-                if after_close == Some(AfterClose::Conclude) {
-                    self.conclude_sync_batch();
-                }
-                if self
-                    .outbound
-                    .as_ref()
-                    .is_some_and(|sync| sync.link_id == *link_id)
-                {
-                    let peer = self.outbound.as_ref().map(|s| s.peer).unwrap_or_default();
-                    self.outbound = None;
-                    if let Some(held) = self.peers.get_mut(&peer) {
-                        held.state = SyncPhase::Idle;
-                    }
-                }
-            }
+            NodeEvent::LinkClosed { link_id, .. } => self.on_link_closed(link_id),
             NodeEvent::PacketDeliveryConfirmed { packet_hash } => {
                 if let Some(active) = &self.active {
                     if &active.packet_hash == packet_hash {
@@ -1334,6 +1316,57 @@ impl Engine {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Everything a closed link takes with it: the per-link maps, the
+    /// in-flight outbound round on it, and a sync batch with nothing left
+    /// to judge. Run for a `LinkClosed` event and for the engine's own idle
+    /// teardown, whose close never comes back as an event.
+    fn on_link_closed(&mut self, link_id: &LinkId) {
+        self.proofs.forget(link_id);
+        self.validated_links.remove(link_id);
+        self.inbound_transfers.retain(|held| held != link_id);
+        // Two cases for a close that lands on the batch's own link,
+        // told apart by whether anything is still resident
+        // (`leviculum_sync_batch::SyncBatch::after_close`):
+        //
+        // * `KeepDraining` — the messages are HERE, whole and
+        //   decoded, and only their stamps are still owed. This
+        //   sender is finished, not gone: it proved its resource and
+        //   tore the link down in the same breath, as the reference
+        //   does (`reference/LXMF/LXMF/LXMPeer.py:499-503`). The
+        //   grind runs on to the end of the batch and the round is
+        //   concluded by `perform_sync_step` like any other. Until
+        //   eb9b8b7a this arm concluded here instead, which dropped
+        //   the whole unjudged tail — 6 of 7 messages on the rig
+        //   (`lora_pn_board_offer_past_the_link`, 2026-09-24).
+        // * `Conclude` — nothing left to judge. Logging the round
+        //   here rather than waiting for a settle pass keeps a spent
+        //   batch from standing in the way of the next `/offer`.
+        //
+        // A link that dies while the resource is still IN FLIGHT
+        // never reaches either: the batch is built from the decoded
+        // envelope once the transfer concluded, so there is no batch
+        // yet and `sync_batch` is `None`.
+        let after_close = self
+            .sync_batch
+            .as_ref()
+            .filter(|batch| batch.link_id == *link_id)
+            .map(|batch| batch.drain.after_close());
+        if after_close == Some(AfterClose::Conclude) {
+            self.conclude_sync_batch();
+        }
+        if self
+            .outbound
+            .as_ref()
+            .is_some_and(|sync| sync.link_id == *link_id)
+        {
+            let peer = self.outbound.as_ref().map(|s| s.peer).unwrap_or_default();
+            self.outbound = None;
+            if let Some(held) = self.peers.get_mut(&peer) {
+                held.state = SyncPhase::Idle;
+            }
         }
     }
 
@@ -1447,8 +1480,6 @@ impl Engine {
                 }
             }
         }
-        self.role
-            .set_compute_stamp_value(self.peers.max_peer_min_cost() > 0);
     }
 
     fn log_peer(&self, action: &str, destination_hash: &[u8; 16], reason: &str) {
@@ -2087,8 +2118,6 @@ impl Engine {
         // schedule the sync pass instead of waiting out the interval,
         // exactly as the announce path's `Added` arm does.
         self.next_sync_at_ms = 0;
-        self.role
-            .set_compute_stamp_value(self.peers.max_peer_min_cost() > 0);
     }
 
     fn conclude_sync_batch(&mut self) {
@@ -2099,7 +2128,11 @@ impl Engine {
         // another message's workblock, so it is abandoned here rather than
         // inherited. A link closing under the batch is no longer one of
         // these cases: it leaves the grind alone (`on_events`, `LinkClosed`).
-        self.abandon_grind("batch_concluded");
+        // Nor is the boot walk's grind: it measures a stored record, not a
+        // message of this batch.
+        if !self.grind.as_ref().is_some_and(|grind| grind.reprice) {
+            self.abandon_grind("batch_concluded");
+        }
         if let Some(batch) = self.sync_batch.take() {
             crate::log::log_fmt(
                 "PN_SYNC ",
@@ -2231,9 +2264,16 @@ impl Engine {
         self.tick_announce(node, now_ms, &mut out);
         self.tick_maintenance(node, now_ms);
         self.tick_stats(now_ms);
+        self.tick_idle_links(node, now_ms, &mut out);
         self.tick_sync(node, now_ms, &mut out);
 
-        if let Some(work) = self.work.pop_front() {
+        if self.grind.as_ref().is_some_and(|grind| grind.reprice) {
+            // The walk's record is mid-workblock: it finishes first, because
+            // the one parked stream cannot be handed to another material.
+            // At most one workblock (~3.7 s of slices) of delay for queued
+            // work, the same an upload ahead of it in the queue costs.
+            self.reprice_step();
+        } else if let Some(work) = self.work.pop_front() {
             // A work item whose stamp grind is only part-expanded comes back
             // out of `perform` untouched and goes to the FRONT: the next pass
             // is owed the same item, and a queue that reordered under a parked
@@ -2244,10 +2284,63 @@ impl Engine {
             }
         } else if self.sync_batch.is_some() {
             self.perform_sync_step(node, &mut out).await;
+        } else if self.reprice.is_some() {
+            // Lowest priority: the walk takes a pass only when no upload,
+            // request or sync message wants one.
+            self.reprice_step();
         }
 
         self.flush(node).await;
         out
+    }
+
+    /// One settle pass of the boot walk (audit 2026-10-12 D10): pick the
+    /// next value-0 record when no grind is parked, expand one slice of its
+    /// workblock, and when the last slice lands queue the record re-written
+    /// under its true value (the flush at the end of `settle` writes it).
+    /// The walk's end queues the marker that keeps the next boot from
+    /// walking again.
+    ///
+    /// Zero new heap: the workblock is the existing [`Grind`] (a SHA-256
+    /// state and two 32-byte arrays, inline in the engine), the walk is a
+    /// cursor ([`RepriceWalk`]), and the one transient is the re-written
+    /// body in the flush queue, at most one record and only while no work
+    /// item or sync message is held, so it sits where an upload's body
+    /// would.
+    fn reprice_step(&mut self) {
+        if self.grind.as_ref().is_some_and(|grind| !grind.reprice) {
+            // Not the walk's stream: its owner resumes it.
+            return;
+        }
+        let Some(walk) = self.reprice.as_mut() else {
+            return;
+        };
+        let material = if self.grind.is_none() {
+            match walk.next(self.role.store()) {
+                Some(next) => Some((next.transient_id, next.stamp)),
+                None => {
+                    if let Some(walk) = self.reprice.take() {
+                        walk.finish(self.role.store_mut());
+                    }
+                    crate::log::log_fmt_critical("PN_REPRICE ", format_args!("walk=done"));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let value = match self.validate_step(true, move || material) {
+            ValidateStep::Parked => return,
+            ValidateStep::Done(value) => value.unwrap_or(0),
+        };
+        let Some(walk) = self.reprice.as_mut() else {
+            return;
+        };
+        let rewritten = walk.priced(self.role.store_mut(), value);
+        crate::log::log_fmt(
+            "PN_REPRICE ",
+            format_args!("value={} rewritten={}", value, rewritten as u8),
+        );
     }
 
     fn harvest_mining(&mut self) {
@@ -2423,6 +2516,54 @@ impl Engine {
         for dropped in self.peers.cull(now) {
             let _ = self.peer_store.remove(&dropped);
             self.log_peer("drop", &dropped, "unreachable");
+        }
+    }
+
+    /// Tear down every inbound propagation link that has carried no payload
+    /// past the reference's bound, as `lnpnd`'s `close_idle_links` does, by
+    /// the same rule
+    /// ([`leviculum_lxmf::propagation_node::link_idle_past_bound`]; audit
+    /// 2026-10-12 D15). Keepalives do not count. Without it a client that
+    /// walked away held one of the board's four link slots for the core's
+    /// stale rule, ~725 s, against `lnpnd`'s 180, and the next phone met
+    /// `LINK_REFUSED` meanwhile.
+    ///
+    /// No list: each round finds one idle link in the core's table and
+    /// closes it, so the walk allocates nothing, and it is bounded by the
+    /// table's size in case a close ever left its entry behind.
+    fn tick_idle_links<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        now_ms: u64,
+        out: &mut TickOutput,
+    ) where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        for _ in 0..node.link_count() {
+            let idle = node.links().find_map(|(link_id, link)| {
+                let idle_ms = link.no_data_for_ms(now_ms);
+                (!link.is_initiator()
+                    && link.destination_hash() == &self.dest_hash
+                    && link_idle_past_bound(idle_ms))
+                .then(|| (*link_id, idle_ms.unwrap_or(0)))
+            });
+            let Some((link_id, idle_ms)) = idle else {
+                return;
+            };
+            crate::log::log_fmt(
+                "PN_LINK ",
+                format_args!(
+                    "idle_close link={} idle_s={}",
+                    Hex(&link_id.as_bytes()[..8]),
+                    idle_ms / 1000
+                ),
+            );
+            // The close's `LinkClosed` rides `out` and never comes back to
+            // `on_events`, so the engine forgets the link here.
+            self.on_link_closed(&link_id);
+            out.merge(node.close_link(&link_id));
         }
     }
 
@@ -2741,12 +2882,20 @@ impl Engine {
     ///
     /// `material` is called only when no grind is in flight, so resuming a
     /// stamp costs no re-decode of the upload it came out of.
-    fn validate_step<F>(&mut self, material: F) -> ValidateStep
+    ///
+    /// `reprice` measures a stored record's true value for the boot walk: at
+    /// cost 0, whatever the announced cost, because the walk wants the
+    /// value and judges nothing.
+    fn validate_step<F>(&mut self, reprice: bool, material: F) -> ValidateStep
     where
         F: FnOnce() -> Option<(TransientId, [u8; STAMP_SIZE])>,
     {
-        let min_cost = self.role.min_accepted_cost();
-        let compute = self.role.compute_stamp_value();
+        let min_cost = if reprice {
+            0
+        } else {
+            self.role.min_accepted_cost()
+        };
+        let compute = reprice || self.role.compute_stamp_value();
         if min_cost == 0 && !compute {
             // No workblock is walked at all, exactly as before: nothing to
             // slice, and no pass to spend.
@@ -2762,6 +2911,7 @@ impl Engine {
                 stream: WorkblockStream::new(WORKBLOCK_EXPAND_ROUNDS_PN),
                 started: embassy_time::Instant::now(),
                 slices: 0,
+                reprice,
             });
         }
         let Some(grind) = self.grind.as_mut() else {
@@ -2859,7 +3009,7 @@ impl Engine {
                 // expanded, so everything ahead of the grind would run fifty
                 // times over. `validate_step` only calls the closure on the
                 // first slice, so the decode is paid once too.
-                let precomputed = match self.validate_step(|| {
+                let precomputed = match self.validate_step(false, || {
                     leviculum_lxmf::propagation::PropagationUpload::decode(&data)
                         .ok()
                         .map(|upload| (*upload.transient_id(), *upload.propagation_stamp()))
@@ -3132,7 +3282,7 @@ impl Engine {
         // The same acceptance path as a client upload
         // (`reference/LXMF/LXMF/LXMRouter.py:2430-2436`).
         let precomputed = if message.len() > STAMP_SIZE {
-            match self.validate_step(|| {
+            match self.validate_step(false, || {
                 let (unstamped, stamp_bytes) = message.split_at(message.len() - STAMP_SIZE);
                 let transient_id = leviculum_core::crypto::full_hash(unstamped);
                 let mut stamp = [0u8; STAMP_SIZE];

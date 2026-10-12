@@ -9,6 +9,10 @@ description = "Propagation-node store adapters over the record log (host-testabl
 [dependencies]
 leviculum-record-log = { path = "../record-log" }
 leviculum-lxmf = { path = "../../leviculum-lxmf", default-features = false }
+# The board's announced limits, which `board_role_config` hands the role.
+leviculum-heap-budget = { path = "../heap-budget" }
 
 [dev-dependencies]
 leviculum-record-log = { path = "../record-log", features = ["sim"] }
+# The streaming workblock, so the tests price a stamp the way the board does.
+leviculum-lxmf = { path = "../../leviculum-lxmf", default-features = false, features = ["pow"] }

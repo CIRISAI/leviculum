@@ -33,7 +33,7 @@ use leviculum_core::{
     Destination, DestinationHash, DestinationType, Direction, Identity, LinkId, ProofStrategy,
     RequestError, RequestPolicy,
 };
-use leviculum_lxmf::constants::{PROPAGATION_LINK_MAX_INACTIVITY_SECS, STAMP_SIZE};
+use leviculum_lxmf::constants::STAMP_SIZE;
 use leviculum_lxmf::control::{
     encode_control_ack, encode_control_error, ControlNodeStats, CONTROL_ASPECTS, STATS_GET_PATH,
     SYNC_REQUEST_PATH, UNPEER_REQUEST_PATH,
@@ -44,6 +44,7 @@ use leviculum_lxmf::peering::{
 };
 use leviculum_lxmf::propagation::{MessageListResponse, PeerError};
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
+use leviculum_lxmf::propagation_node::link_idle_past_bound;
 use leviculum_lxmf::{
     Eviction, EvictionReason, FetchPlan, GetOutcome, Message, PropagationNode,
     PropagationNodeConfig, PropagationStore, TransientId, UploadOutcome, MESSAGE_GET_PATH,
@@ -241,7 +242,8 @@ pub struct Engine<S> {
     /// Links peers and clients opened to the propagation destination,
     /// the reference's `active_propagation_links`
     /// (`reference/LXMF/LXMF/LXMRouter.py:2194`): each is torn down once
-    /// it carries no payload for [`PROPAGATION_LINK_MAX_INACTIVITY_SECS`].
+    /// it carries no payload for
+    /// [`PROPAGATION_LINK_MAX_INACTIVITY_SECS`](leviculum_lxmf::constants::PROPAGATION_LINK_MAX_INACTIVITY_SECS).
     inbound_links: HashSet<LinkId>,
     next_announce_at: Option<u64>,
     announce_interval_secs: u64,
@@ -941,8 +943,10 @@ impl<S: PropagationStore> Engine<S> {
     }
 
     /// Tear down every inbound propagation link that carried no payload
-    /// for more than [`PROPAGATION_LINK_MAX_INACTIVITY_SECS`], as the
-    /// reference's `clean_links` does
+    /// for more than
+    /// [`PROPAGATION_LINK_MAX_INACTIVITY_SECS`](leviculum_lxmf::constants::PROPAGATION_LINK_MAX_INACTIVITY_SECS),
+    /// by the rule the board's idle sweep shares
+    /// ([`link_idle_past_bound`]), as the reference's `clean_links` does
     /// (`reference/LXMF/LXMF/LXMRouter.py:968-974`). Keepalives do not
     /// count: the core's own watchdog lets them hold a silent link open
     /// indefinitely, which on a public node fills the link table with
@@ -957,8 +961,8 @@ impl<S: PropagationStore> Engine<S> {
             .inbound_links
             .iter()
             .filter_map(|link_id| {
-                let idle_secs = core.link(link_id)?.no_data_for_ms(now_ms)? / 1000;
-                (idle_secs > PROPAGATION_LINK_MAX_INACTIVITY_SECS).then_some((*link_id, idle_secs))
+                let idle_ms = core.link(link_id)?.no_data_for_ms(now_ms);
+                link_idle_past_bound(idle_ms).then_some((*link_id, idle_ms? / 1000))
             })
             .collect();
         for (link_id, idle_secs) in idle {

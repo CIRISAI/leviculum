@@ -57,11 +57,24 @@
 //! The record log's tag byte is opaque; this crate assigns it. A message
 //! record's tag is its stamp value, clamped to [`MESSAGE_TAG_MAX`] — a
 //! stamp value above 127 has probability 2^-127 and the clamp only ever
-//! understates value, never invents it. [`TAG_PEER`] marks peer records
-//! and `TAG_BENCH` (0xB0, `leviculum-nrf/src/record_store.rs`) marks the
-//! bench instrument's synthetic records; both are above the clamp, so
-//! neither is ever visible to the message role and bench records survive
+//! understates value, never invents it. [`TAG_PEER`] marks peer records,
+//! [`TAG_PRICED`] the one marker record [`PnStore::stamp_values_true`]
+//! reads, and `TAG_BENCH` (0xB0, `leviculum-nrf/src/record_store.rs`) marks
+//! the bench instrument's synthetic records; all three are above the clamp,
+//! so none is ever visible to the message role and bench records survive
 //! in place, invisible, until their page is reclaimed.
+//!
+//! # Re-pricing a store at value 0 (audit 2026-10-12 D10)
+//!
+//! A board built before the audit stored value 0 for everything it took at
+//! cost 0 before its first demanding peer, and a stock peer never takes an
+//! id below its minimum (`reference/LXMF/LXMF/LXMPeer.py:340`). Because the
+//! value IS the record's tag and the log is append-only, the true value is
+//! written by re-appending the record under its new tag and purging the old
+//! ([`PnStore::set_stamp_value`]): same key, same receive time, same body, a
+//! new and higher sequence, which every peer's cursor stands below. The
+//! records to price are found one at a time ([`PnStore::next_unpriced`]),
+//! so the walk holds a cursor and never a list.
 
 #![no_std]
 
@@ -89,6 +102,14 @@ pub const MESSAGE_TAG_MAX: u8 = 0x7F;
 
 /// Tag of a persisted peer record ([`PnPeerStore`]).
 pub const TAG_PEER: u8 = 0xA0;
+
+/// Tag of the marker record that says every message record in the region
+/// carries its true stamp value ([`PnStore::stamp_values_true`]).
+pub const TAG_PRICED: u8 = 0xA1;
+
+/// Key of the [`TAG_PRICED`] marker: no transient id, because the tag
+/// already keeps it out of every message read.
+const PRICED_KEY: [u8; KEY_LEN] = *b"leviculum stamp values are true.";
 
 /// `LVR1`, the page-header magic, restated from the record log's layout
 /// (`leviculum-nrf/record-log/src/lib.rs`) because the log does not
@@ -264,6 +285,127 @@ pub fn settle_message_op<R: Region>(
     done
 }
 
+/// One message record [`PnStore::next_unpriced`] found at value 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unpriced {
+    pub transient_id: [u8; 32],
+    /// The record's [`sequence`]: where the walk's cursor moves once it is
+    /// priced.
+    pub sequence: u64,
+    /// The propagation stamp, the body's last [`STAMP_LEN`] bytes.
+    pub stamp: [u8; STAMP_LEN],
+}
+
+/// The one-lap walk that prices a store's value-0 records at boot (see
+/// the module docs), as `lnpnd` re-prices its store before it starts
+/// (`reprice_stored_values`, `lnpnd/src/validation.rs`).
+///
+/// It holds a cursor and the record in hand, never a list: the next record
+/// is found by one [`scan`] ([`PnStore::next_unpriced`]) when the previous
+/// one is priced, so the walk costs the same few dozen bytes whether the
+/// store holds one record or a full region. The workblock itself is the
+/// caller's (on the board, the engine's sliced grind, which already exists
+/// for uploads); the walk only says which stamp to measure next and what to
+/// do with the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepriceWalk {
+    /// The sequence of the last record priced, or `None` before the first.
+    after: Option<u64>,
+    /// The newest sequence when the walk began: its one lap ends there.
+    upto: u64,
+    /// The record whose stamp is being measured, and its sequence.
+    current: Option<([u8; 32], u64)>,
+}
+
+impl RepriceWalk {
+    /// The walk this boot owes, or `None` when the region already carries
+    /// the [`TAG_PRICED`] marker.
+    pub fn at_boot<R: Region>(store: &PnStore<R>) -> Option<Self> {
+        if store.stamp_values_true() {
+            return None;
+        }
+        Some(Self {
+            after: None,
+            upto: store.newest_sequence().unwrap_or(0),
+            current: None,
+        })
+    }
+
+    /// The next record to measure, remembered as the one in hand; `None`
+    /// once the lap is done, after which [`Self::finish`] is owed.
+    pub fn next<R: Region>(&mut self, store: &PnStore<R>) -> Option<Unpriced> {
+        let next = store.next_unpriced(self.after, self.upto)?;
+        self.current = Some((next.transient_id, next.sequence));
+        Some(next)
+    }
+
+    /// The record in hand measured `value`: queue its re-write when the
+    /// value is above 0 and move the cursor past it either way. Returns
+    /// whether a re-write was queued.
+    pub fn priced<R: Region>(&mut self, store: &mut PnStore<R>, value: u16) -> bool {
+        let Some((transient_id, sequence)) = self.current.take() else {
+            return false;
+        };
+        self.after = Some(sequence);
+        value > 0 && store.set_stamp_value(&transient_id, value.min(u8::MAX as u16) as u8)
+    }
+
+    /// The lap is done: queue the marker, so the next boot does not walk
+    /// again.
+    pub fn finish<R: Region>(self, store: &mut PnStore<R>) {
+        store.mark_stamp_values_true();
+    }
+}
+
+/// Length of the propagation stamp that ends every stored message body
+/// (`lxmf_data ‖ stamp`).
+pub const STAMP_LEN: usize = leviculum_lxmf::constants::STAMP_SIZE;
+
+/// The role's configuration on a board: the announced costs and name from
+/// the persisted config, the limits from the heap budget
+/// (`leviculum-heap-budget`), and `serve_cap_bytes` as the boot plan funds
+/// it. `leviculum_nrf::pn::Engine::new` builds its role from this, so the
+/// host tests below run the configuration the board runs.
+pub fn board_role_config(
+    stamp_cost: u8,
+    peering_cost: u8,
+    name: Vec<u8>,
+    serve_cap_bytes: usize,
+) -> leviculum_lxmf::PropagationNodeConfig {
+    use leviculum_heap_budget::{
+        BOARD_SERVE_LIMIT_BYTES, BOARD_SYNC_LIMIT_KB, BOARD_TRANSFER_LIMIT_KB,
+    };
+    leviculum_lxmf::PropagationNodeConfig {
+        stamp_cost,
+        peering_cost,
+        name: Some(name),
+        transfer_limit_kb: BOARD_TRANSFER_LIMIT_KB,
+        // The announced sync appetite must fit both the resource cap and
+        // the heap budget (#388); derived from what the board can afford to
+        // answer (order 511) — see BOARD_SYNC_LIMIT_KB.
+        sync_limit_kb: BOARD_SYNC_LIMIT_KB,
+        // The fetch is bounded apart from the announcement, so the smaller
+        // derived limit does not shrink what a client gets.
+        serve_limit_bytes: Some(BOARD_SERVE_LIMIT_BYTES),
+        // What one fetch may SERVE, from the same boot arithmetic the
+        // `HEAP_BUDGET serve_cap=` line prints. Below the announced sync
+        // limit whenever the plan funds less than it announces, which is
+        // today, on every board. It is the FLOOR: every `/get` re-reads it
+        // against the heap the board has at that moment (`SERVE_CAP`).
+        serve_cap_bytes: Some(serve_cap_bytes),
+        // Every accepted message is priced, at cost 0 too, as the host does
+        // (leviculum#442 D6). Until the audit of 2026-10-12 (D10) the board
+        // skipped the workblock while no peer demanded a value and stored 0,
+        // which every stock peer that peered later skipped for good
+        // (`reference/LXMF/LXMF/LXMPeer.py:340`): a fresh board's whole early
+        // store never propagated. The price is the 1000-round workblock per
+        // accept, ~3.7 s of CPU in sliced settle passes, after the upload's
+        // proof has already left (#397), so no round trip waits on it.
+        always_compute_stamp_value: true,
+        ..leviculum_lxmf::PropagationNodeConfig::default()
+    }
+}
+
 /// The message-store half: [`PropagationStore`] over the region.
 pub struct PnStore<R> {
     region: R,
@@ -318,6 +460,124 @@ impl<R: Region> PnStore<R> {
             FlushOp::Append { key: k, body, .. } if k == key => Some(body.as_slice()),
             _ => None,
         })
+    }
+
+    /// Whether the region carries the [`TAG_PRICED`] marker: every message
+    /// record in it holds its true stamp value, so a value-0 record is worth
+    /// 0 and pricing it again would only spend a workblock. Queued writes
+    /// count, so a marker appended this boot answers before its flush.
+    ///
+    /// The marker lives in the log like any record and goes when the
+    /// round-robin reclaim reaches its page. Every record older than it goes
+    /// first or with it, and it is appended after the last record the
+    /// re-pricing walk looked at, so a region that lost its marker holds
+    /// nothing written before the walk: only records priced at accept. The
+    /// walk then runs once more for the CPU of their value-0 workblocks, and
+    /// writes nothing but a new marker.
+    pub fn stamp_values_true(&self) -> bool {
+        if self.queue.iter().any(|op| {
+            matches!(op, FlushOp::Append { tag, key, .. } if *tag == TAG_PRICED && *key == PRICED_KEY)
+        }) {
+            return true;
+        }
+        let mut found = false;
+        self.region.with_bytes(|bytes| {
+            scan(bytes, |record| {
+                found |= record.live && record.tag == TAG_PRICED && record.key == &PRICED_KEY;
+            })
+        });
+        found
+    }
+
+    /// Queue the [`TAG_PRICED`] marker (see [`Self::stamp_values_true`]).
+    pub fn mark_stamp_values_true(&mut self) {
+        self.queue.push_back(FlushOp::Append {
+            key: PRICED_KEY,
+            time: 0,
+            tag: TAG_PRICED,
+            body: Vec::new(),
+        });
+    }
+
+    /// The oldest durable message record stored at value 0 whose sequence
+    /// lies after `after` (from the start when `None`) and at or below
+    /// `upto`, with the stamp its body ends in. `upto` is the newest
+    /// sequence when the walk began, which keeps the walk to one lap: what
+    /// arrives during it is priced at accept, and a record this walk
+    /// re-appended carries its new tag and a sequence above `upto` anyway.
+    ///
+    /// One [`scan`]; nothing is allocated.
+    pub fn next_unpriced(&self, after: Option<u64>, upto: u64) -> Option<Unpriced> {
+        let mut next: Option<Unpriced> = None;
+        self.scan_messages(|record| {
+            let sequence = record.sequence();
+            if record.tag != 0
+                || after.is_some_and(|after| sequence <= after)
+                || sequence > upto
+                || record.body.len() < MIN_BODY_LEN
+                || next.as_ref().is_some_and(|held| held.sequence <= sequence)
+            {
+                return;
+            }
+            let mut stamp = [0u8; STAMP_LEN];
+            stamp.copy_from_slice(&record.body[record.body.len() - STAMP_LEN..]);
+            next = Some(Unpriced {
+                transient_id: *record.key,
+                sequence,
+                stamp,
+            });
+        });
+        next
+    }
+
+    /// Queue the record of `transient_id` re-written under the tag `value`:
+    /// an append of the same key, receive time and body under the new tag,
+    /// then a purge of every older record of that key, in that order, so a
+    /// flush interrupted between the two leaves the message on the part
+    /// twice rather than not at all (and the next walk purges the
+    /// leftover). `false`, with nothing queued, when the message is no
+    /// longer stored or already carries that value.
+    ///
+    /// The append holds one copy of the body (at most
+    /// [`leviculum_record_log::MAX_BODY`]) until its flush, as an upload's
+    /// append does.
+    pub fn set_stamp_value(&mut self, transient_id: &[u8; 32], value: u8) -> bool {
+        let tag = value.min(MESSAGE_TAG_MAX);
+        let mut rewrite: Option<FlushOp> = None;
+        self.scan_messages(|record| {
+            if record.key == transient_id && rewrite.is_none() && record.tag != tag {
+                rewrite = Some(FlushOp::Append {
+                    key: *transient_id,
+                    time: record.time,
+                    tag,
+                    body: record.body.to_vec(),
+                });
+            }
+        });
+        let Some(rewrite) = rewrite else {
+            return false;
+        };
+        let at = self.queue.len();
+        self.queue.push_back(rewrite);
+        let queue = &mut self.queue;
+        self.region.with_bytes(|bytes| {
+            scan(bytes, |record| {
+                let masked = queue.iter().any(
+                    |op| matches!(op, FlushOp::Purge { offset, .. } if *offset == record.offset),
+                );
+                if record.live
+                    && record.tag <= MESSAGE_TAG_MAX
+                    && record.key == transient_id
+                    && !masked
+                {
+                    queue.push_back(FlushOp::Purge {
+                        offset: record.offset,
+                        key: *transient_id,
+                    });
+                }
+            })
+        });
+        at < self.queue.len()
     }
 
     fn scan_messages(&self, mut visit: impl FnMut(&RawRecord<'_>)) {

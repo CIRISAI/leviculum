@@ -710,6 +710,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.links.get_mut(&resolved).map(Box::as_mut)
     }
 
+    /// Every entry of the link table with the id it is keyed by, pending
+    /// and active alike. For an application sweep over its own links (the
+    /// board's propagation role lets idle inbound links go, and counts the
+    /// incoming resources every link carries); an inbound link is keyed by
+    /// the id its events reported, because only initiator links are ever
+    /// re-keyed (Codeberg #66).
+    pub fn links(&self) -> impl Iterator<Item = (&LinkId, &crate::link::Link)> {
+        self.links.iter().map(|(id, link)| (id, link.as_ref()))
+    }
+
     /// Total live entries in the link table, pending and active alike —
     /// the count the `max_links` cap (#388) is enforced against.
     pub fn link_count(&self) -> usize {

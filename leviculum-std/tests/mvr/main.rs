@@ -86,7 +86,7 @@ pub mod alloc_probe {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// The board heap the measurement is for
-    /// (`HEAP_SIZE`, `leviculum-nrf/heap-budget/src/lib.rs:54`). A single block
+    /// (`HEAP_SIZE`, `leviculum-nrf/heap-budget/src/lib.rs:49`). A single block
     /// bigger than this is host-only by construction; see the module
     /// doc.
     pub const BLOCK_CEILING_BYTES: usize = 32 * 1024;

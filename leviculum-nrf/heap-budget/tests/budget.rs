@@ -319,3 +319,36 @@ fn the_held_announce_hold_against_its_slice() {
     assert!(core_default > HEAP_SIZE);
     assert_eq!(held_announce_bytes(0, BOARD_HOLDING_INTERFACES), 0);
 }
+
+/// Audit 2026-10-12 D14: four links (two phones uploading, a peer syncing,
+/// a third client) each advertise a resource at the announced sync limit,
+/// one after the other while the earlier ones are still in flight. The
+/// reserve funds [`INCOMING_RESOURCES_FUNDED`] of them at the binaries' cap;
+/// the gate admits exactly that many and refuses the rest, whoever sends
+/// them. When the admitted one concludes, the next advertisement is taken.
+#[test]
+fn four_links_advertising_at_once_get_what_the_reserve_funds() {
+    use leviculum_heap_budget::{admits_incoming_resource, INCOMING_RESOURCES_FUNDED};
+    let size = BOARD_SYNC_LIMIT_KB * 1000;
+    assert!(size as usize <= MAX_INCOMING_RESOURCE_BYTES);
+    let within = size <= BOARD_SYNC_LIMIT_KB * 1000;
+
+    let mut in_flight = 0;
+    let mut admitted = Vec::new();
+    for link in ["phone-a", "phone-b", "peer", "phone-c"] {
+        if admits_incoming_resource(within, in_flight) {
+            in_flight += 1;
+            admitted.push(link);
+        }
+    }
+    assert_eq!(admitted, vec!["phone-a"], "one admitted, three refused");
+    assert_eq!(in_flight, INCOMING_RESOURCES_FUNDED);
+    // Closed by admission, not by funding: the reserve term did not move.
+    assert_eq!(budget_reserve(), 18_848);
+
+    // The admitted transfer concluded: the next advertisement is taken.
+    in_flight -= 1;
+    assert!(admits_incoming_resource(within, in_flight));
+    // Over the sync limit is refused whatever is in flight.
+    assert!(!admits_incoming_resource(false, 0));
+}

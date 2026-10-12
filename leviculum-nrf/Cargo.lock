@@ -1091,6 +1091,7 @@ version = "0.1.0"
 name = "leviculum-pn-store"
 version = "0.1.0"
 dependencies = [
+ "leviculum-heap-budget",
  "leviculum-lxmf",
  "leviculum-record-log",
 ]

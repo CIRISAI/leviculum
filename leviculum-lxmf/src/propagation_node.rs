@@ -527,6 +527,24 @@ pub fn propagation_hash_of(identity: &Identity) -> [u8; DESTINATION_LENGTH] {
     *Destination::compute_destination_hash(&name_hash, identity.hash()).as_bytes()
 }
 
+/// Whether an inbound propagation link that has carried no payload for
+/// `no_data_for_ms` is torn down: strictly above
+/// [`PROPAGATION_LINK_MAX_INACTIVITY_SECS`](crate::constants::PROPAGATION_LINK_MAX_INACTIVITY_SECS)
+/// whole seconds, as `clean_links` does
+/// (`reference/LXMF/LXMF/LXMRouter.py:968-974`). The input is the core's
+/// `Link::no_data_for_ms`, which keepalives do not reset, so a client that
+/// walked away without closing is let go even while its stack answers
+/// keepalives; `None` (a link not yet established) is never idle.
+///
+/// One rule for both stacks: `lnpnd`'s `close_idle_links` and the board's
+/// idle sweep (`leviculum-nrf/src/pn.rs`, audit 2026-10-12 D15) both ask
+/// here, so a board no longer holds a silent link for the core's ~725 s
+/// stale rule while `lnpnd` lets it go after 180.
+pub fn link_idle_past_bound(no_data_for_ms: Option<u64>) -> bool {
+    no_data_for_ms
+        .is_some_and(|ms| ms / 1000 > crate::constants::PROPAGATION_LINK_MAX_INACTIVITY_SECS)
+}
+
 /// Who sent an inbound `/offer`, as the gates and the peering-key check
 /// need it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

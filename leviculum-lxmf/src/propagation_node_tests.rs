@@ -1138,3 +1138,27 @@ fn an_offer_over_an_identified_link_names_the_identity_and_its_propagation_desti
         })
     );
 }
+
+/// Audit 2026-10-12 D15: an inbound propagation link is let go strictly
+/// above 180 s without payload (`reference/LXMF/LXMF/LXMRouter.py:970`),
+/// read on the whole-second clock `lnpnd` and the board both feed it. A
+/// link not yet established has no data clock and is never idle.
+#[test]
+fn an_idle_inbound_link_is_let_go_strictly_above_the_reference_bound() {
+    use crate::constants::PROPAGATION_LINK_MAX_INACTIVITY_SECS as BOUND;
+    assert!(!link_idle_past_bound(None));
+    assert!(!link_idle_past_bound(Some(0)));
+    assert!(
+        !link_idle_past_bound(Some(BOUND * 1000)),
+        "at the bound it stays"
+    );
+    assert!(
+        !link_idle_past_bound(Some(BOUND * 1000 + 999)),
+        "a fraction of a second past is still the bound's second"
+    );
+    assert!(link_idle_past_bound(Some((BOUND + 1) * 1000)));
+    assert!(
+        link_idle_past_bound(Some(725_000)),
+        "the core's stale horizon"
+    );
+}

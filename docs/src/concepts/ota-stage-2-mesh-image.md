@@ -38,7 +38,7 @@ write") — still 440 KB short of two banks.
 So there is no A/B bank internally, and the alternative — erase the
 running image and write the new one from a transfer held in RAM — is not
 an alternative at all. It fails on two counts: the board has 96 KiB of
-heap (`HEAP_SIZE`, `leviculum-nrf/heap-budget/src/lib.rs:54`) against a 605 KiB
+heap (`HEAP_SIZE`, `leviculum-nrf/heap-budget/src/lib.rs:49`) against a 605 KiB
 image, and a power cut during the write leaves a board with no image and
 no copy of one. **Staging on flash the copier does not erase is not an
 optimisation; it is the property that makes the operation survivable.**
@@ -189,7 +189,7 @@ held 51 662 B live before Codeberg #384 B1 and 29 842 B after it, and
 before either, a board died on a 5 446 B allocation between serving a
 request and answering it — `PN_GET … bytes=5376` as the last line of one
 boot and `PANIC_PMRT … "memory allocation of 5446 bytes failed"` on the
-next (`leviculum-nrf/heap-budget/src/lib.rs:186-211`, pinned by
+next (`leviculum-nrf/heap-budget/src/lib.rs:206-231`, pinned by
 `leviculum-std/tests/mvr/pn_serve_peak_outgrows_the_board_heap.rs`). A
 path that holds one whole copy of 5 KB killed a board; 605 KB is not a
 question of tuning.
