@@ -396,6 +396,20 @@ struct Effective {
     loglevel: u64,
 }
 
+/// The peer table's configuration from the resolved settings.
+fn peering_config(effective: &Effective) -> leviculum_lxmf::PeeringConfig {
+    leviculum_lxmf::PeeringConfig {
+        max_peers: effective.max_peers,
+        autopeer: effective.autopeer,
+        autopeer_maxdepth: effective.autopeer_maxdepth,
+        peering_cost: effective.peering_cost,
+        remote_peering_cost_max: effective.remote_peering_cost_max,
+        max_inbound_syncs: effective.max_inbound_syncs,
+        from_static_only: effective.from_static_only,
+        static_peers: effective.static_peers.clone(),
+    }
+}
+
 fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::ConfigError> {
     // `enable_node = no` would ask for an lxmd that is only a mailbox;
     // that job is lnmsg's. Refusing beats silently running the role the
@@ -637,16 +651,7 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         name: effective.node_name.clone().map(String::into_bytes),
         ..leviculum_lxmf::PropagationNodeConfig::default()
     };
-    let peering = leviculum_lxmf::PeeringConfig {
-        max_peers: effective.max_peers,
-        autopeer: effective.autopeer,
-        autopeer_maxdepth: effective.autopeer_maxdepth,
-        peering_cost: effective.peering_cost,
-        remote_peering_cost_max: effective.remote_peering_cost_max,
-        max_inbound_syncs: effective.max_inbound_syncs,
-        from_static_only: effective.from_static_only,
-        static_peers: effective.static_peers.clone(),
-    };
+    let peering = peering_config(&effective);
     let peer_store = match leviculum_std::FilePeerStore::open(data_dir.join("peers")) {
         Ok(store) => store,
         Err(error) => return failure(format!("peer store: {error}")),
@@ -1061,6 +1066,39 @@ mod tests {
         let effective = resolve(&args, &file).expect("resolves");
         assert_eq!(effective.autopeer_maxdepth, 6);
         assert_eq!(lnpnd::config::DEFAULT_AUTOPEER_MAXDEPTH, 6);
+    }
+
+    /// The resolved default reaches the peer table: a stock node announcing
+    /// from six hops is peered, one at seven is declined
+    /// (leviculum#442 D10).
+    #[test]
+    fn an_unset_autopeer_depth_peers_at_six_hops_and_declines_at_seven() {
+        use leviculum_lxmf::peering::{DeclineReason, PeerChange, PeerTable};
+        use leviculum_lxmf::propagation::PropagationNodeAnnounce;
+
+        let file = RawConfig::parse("[propagation]\nenable_node = yes\n").expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        let effective = resolve(&args, &file).expect("resolves");
+        let mut table = PeerTable::new(peering_config(&effective));
+        let announce = PropagationNodeAnnounce {
+            legacy_support: false,
+            timebase: 1,
+            enabled: true,
+            transfer_limit_kb: 256,
+            sync_limit_kb: 10_240,
+            stamp_cost: 16,
+            stamp_cost_flexibility: 3,
+            peering_cost: 18,
+            metadata: vec![],
+        };
+        assert_eq!(
+            table.handle_announce([6; 16], &announce, Some(6), 100, false),
+            PeerChange::Added
+        );
+        assert_eq!(
+            table.handle_announce([7; 16], &announce, Some(7), 100, false),
+            PeerChange::Declined(DeclineReason::TooDeep)
+        );
     }
 
     /// The template lines show the value an unset key resolves to, so an
