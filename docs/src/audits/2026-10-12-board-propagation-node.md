@@ -186,6 +186,24 @@ Price: ~16 B flash per configured hash in the config page plus the
 already fund; code only.
 Test: board engine test — a configured static hash survives
 `cull` at +15 days and bypasses `InboundGate` throttles.
+**Fixed in 0e02ccde**: the static peers are one record of the PN log,
+`TAG_STATIC` (0xA3), its body the destination hashes, 16 B each, at most
+16 (`BOARD_LIST_MAX`, the table's cap), written by `lnflash
+--static-peer` over the USB-only frame `TYPE_PN_LIST` (0x16). The engine
+reads it at boot into `board_peering_config`, then follows the
+reference's order as lnpnd does: restore, `activate_static_peers`, and a
+path request for each static peer never heard on the first settle pass
+(`PN_PEER action=add reason=static`, `PN_LISTS static_peers=`). The
+board has no rotation; the cull is the removal static peers are exempt
+from. The record-store task is the record's only writer and rewrites it
+when its copy ages into the older half of the region, so reclaim never
+takes it. Heap: 16 B per configured hash in the config list, the table
+entries as before; 0 B unset. Pinned by
+`a_static_peer_set_at_flash_time_is_in_the_table_at_boot_and_never_culled`
+(`leviculum-nrf/pn-store/src/tests.rs`: boot read, table entry before
+any announce, path owed, cull at +15 days and a rotation pass both
+empty), red before the fix (no record, no list), and the reclaim rule by
+`a_board_list_ageing_into_the_older_half_is_rewritten_unchanged`.
 
 **D5 — the peer-back recall is RAM-only and does not survive a
 reset.** Both stacks peer back a node whose sync lands by recalling
@@ -683,6 +701,19 @@ What an operator sees: a board mailbox cannot be restricted to a
 user set. Class: semantic. Price: 16 B flash per hash plus a lookup
 on `/get`; 0 heap if read from the config page.
 Test: board twin of lnpnd's auth tests once the surface exists.
+**Fixed in 0e02ccde**, both lists, as `TAG_AUTH` (0xA4) and
+`TAG_CONTROL` (0xA5) records of the PN log, 16 B per hash, at most 16
+each, written by `lnflash --auth-allowed` / `--control-allowed` (and
+`--clear-*`) like the static peers. The engine reads the auth list at
+boot; a `/get` from an identity off a non-empty list is answered
+`ERROR_NO_ACCESS` (`board_get_mailbox`, `leviculum-nrf/pn-store`), the
+answer lnpnd gives from its `auth_allowed` check before `handle_get`,
+and an empty list is open as before. Heap: 16 B per listed identity, 0 B
+unset. The control list is stored and counted (`PN_LISTS
+control_allowed=`) but not held: the board has no control destination
+to consult it until D17. Uploads stay open, as on lnpnd. Pinned by
+`an_unlisted_client_is_refused_its_mailbox_and_a_listed_one_served` and
+`each_list_is_its_own_record_and_an_over_long_one_is_refused`.
 
 ## 5. Restart
 
