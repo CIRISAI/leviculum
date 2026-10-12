@@ -224,7 +224,7 @@ timing**. Test: already pinned; the airtime side would be an A/B frame
 count over an idle hour, lnsd vs rnsd.
 
 **D7 — inbound link packets are not pinned to the attached
-interface.** The reference refuses any link-addressed packet that
+interface.** *Fixed in cb3c1d23.* The reference refuses any link-addressed packet that
 arrives on a different interface than the link is attached to, loudly
 (`reference/Reticulum/RNS/Link.py:975-977`: "Someone might be trying
 to manipulate your communication!"). Our dispatch has no interface
@@ -241,6 +241,20 @@ here and goes dead on a Python node — a robustness *gain* with a
 hardening cost. Class: **semantic**. Test: two-interface mvr — capture
 a resource part on iface A, inject on iface B; ours currently accepts,
 the reference refuses.
+
+(Fixed in cb3c1d23, #658: `handle_link_data` takes the arrival
+interface and the resource-proof arm of `handle_link_proof` checks it
+too; a mismatch is dropped before stale recovery and counted as
+`link-iface-mismatch`, `refuse_off_link_interface`,
+`leviculum-core/src/node/link_management.rs:1405`. The mvr is
+`leviculum-core/src/node/mvr_link_iface_pinning.rs`.) What the gap gave
+us by accident is left undone on purpose: re-pinning a *stale* link to
+the interface its packets moved to would keep a link alive whose path
+genuinely changed, where a Python node lets it die. That is a deviation
+from the reference that may well serve Priority 1, but it is a decision
+of its own for the reviewer, to be measured (how often does a live
+link's path move between interfaces, and does re-pinning only a Stale
+link keep the replay hardening?), not a side effect of this fix.
 
 **D8 — keepalive accounting is looser than the reference's by two
 small steps.** (a) We refresh the inbound clock before validating the
