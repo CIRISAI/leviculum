@@ -421,13 +421,13 @@ inert (local API), noted because the next engine that moves the check
 *after* storage breaks the reference's contract.
 
 **D12 — one incoming resource per link; the reference runs a list.**
-Python keeps `incoming_resources` as a list, dispatches every RESOURCE
+*Fixed in 1d727b68.* Python keeps `incoming_resources` as a list, dispatches every RESOURCE
 part across it (`reference/Reticulum/RNS/Link.py:1163-1166`) and
 dedups only same-hash re-advertisements (`has_incoming_resource`,
 `reference/Reticulum/RNS/Link.py:1311`). Ours held exactly one
 `Option<IncomingResource>` per link and ignored any ADV for a
 *different* hash while one was in flight — the #404 re-REQ answered
-only a repeat of the *same* resource. (Fixed by #657: a link now keeps
+only a repeat of the *same* resource. (Fixed in 1d727b68, #657: a link now keeps
 a list, `leviculum-core/src/link/mod.rs:530`, a repeat still draws the
 re-REQ, `leviculum-core/src/node/link_management.rs:2563`, and a new
 hash beyond the per-link bound is refused with an RCL,
@@ -701,9 +701,9 @@ Reading the reference beside our comments caught four citations that
 point at the wrong reference line. All four are prose-only (the
 citation guard existence-checks `Resource.py:NNN` spellings but they
 carry no `reference/` path, so they were never drift-checked). None
-change behaviour; the constants beside them are correct. All four were
-rewritten in the `reference/` form at the live lines by #657; the
-locations below are where the comments sit now.
+change behaviour; the constants beside them are correct. All four are
+fixed in 1d727b68 (#657), rewritten in the `reference/` form at the
+live lines; the locations below are where the comments sit now.
 
 1. `leviculum-core/src/resource/mod.rs:166` said `RETRY_GRACE_TIME =
    0.25` is at "Resource.py:133"; it is at
