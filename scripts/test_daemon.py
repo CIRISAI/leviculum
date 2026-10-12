@@ -817,18 +817,34 @@ class TestDaemon:
             data = bytes.fromhex(data_hex)
             metadata = bytes.fromhex(metadata_hex) if metadata_hex else None
 
-            if params.get("concurrent"):
-                # A stock sender queues a resource behind the one it is
-                # already sending on this link (Resource.py:522-524 polls
-                # Link.ready_for_new_resource, Link.py:1331). Lift that gate
-                # on this link so a second resource is advertised while the
-                # first is in flight, the case a receiver must take or refuse
-                # (Codeberg #657). The sender side keeps a list and matches
-                # requests and proofs by hash, so it serves both.
-                link.ready_for_new_resource = lambda: True
-
             resource = RNS.Resource(data, link, metadata=metadata, advertise=True)
             return {"result": {"resource_hash": resource.hash.hex()}}
+
+        elif method == "send_resources_concurrently":
+            # Advertise several resources on one link back to back, before
+            # any of them can have moved a part (Codeberg #657). A stock
+            # sender queues a resource behind the one it is already sending
+            # on the link (Resource.py:522-524 polls
+            # Link.ready_for_new_resource, Link.py:1331); lift that gate on
+            # this link. The advertise jobs run here, in order, instead of
+            # on the threads advertise() starts: every advertisement is on
+            # the wire before this call returns, so on the in-order path to
+            # the receiver the last one precedes every part of the first,
+            # which cannot flow before the receiver's request comes back.
+            # The sender keeps a list and matches requests and proofs by
+            # hash, so it serves them all.
+            link_hash = params.get("link_hash")
+            link = self.links.get(link_hash)
+            if not link:
+                return {"error": f"link {link_hash} not found"}
+            link.ready_for_new_resource = lambda: True
+            resources = [
+                RNS.Resource(bytes.fromhex(data_hex), link, advertise=False)
+                for data_hex in params.get("data", [])
+            ]
+            for resource in resources:
+                resource._Resource__advertise_job()
+            return {"result": {"resource_hashes": [r.hash.hex() for r in resources]}}
 
         elif method == "get_received_resources":
             return {"result": self.received_resources}

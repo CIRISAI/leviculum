@@ -592,11 +592,13 @@ async fn test_python_sends_large_resource_to_rust() {
 ///
 /// A stock Python sender queues the second behind the first
 /// (`ready_for_new_resource`), so the daemon lifts that gate on this link
-/// (`send_resource_concurrent`). The first is 51 KB, many request windows
-/// long, so the second advertisement lands while it runs. Before #657 lnsd
-/// ignored that advertisement and started the second transfer only on a
-/// re-advertisement after the first had freed the link; the order of the
-/// receiver's events tells the two apart.
+/// and sends both advertisements before it answers
+/// (`send_resources_concurrently`): the second reaches lnsd before any
+/// part of the first can. Before #657 lnsd ignored that advertisement and
+/// started the second transfer only on a re-advertisement after the first
+/// had freed the link; the order of the receiver's events tells the two
+/// apart. (Two separate sends were not enough: on an idle host the first
+/// transfer finished before the second call's advertisement arrived.)
 #[tokio::test]
 async fn test_python_sends_two_concurrent_resources_rust_receives_both() {
     let (
@@ -616,14 +618,11 @@ async fn test_python_sends_two_concurrent_resources_rust_receives_both() {
 
     let first: Vec<u8> = (0..200u32).flat_map(|_| 0..=255u8).collect();
     let second: Vec<u8> = (0..3000u32).map(|i| (i % 241) as u8).collect();
-    let hash_first = py_initiator
-        .send_resource_concurrent(&py_link_hash, &first)
+    let hashes = py_initiator
+        .send_resources_concurrently(&py_link_hash, &[&first, &second])
         .await
-        .expect("Python sends the first resource");
-    let hash_second = py_initiator
-        .send_resource_concurrent(&py_link_hash, &second)
-        .await
-        .expect("Python sends the second resource");
+        .expect("Python advertises both resources");
+    let [hash_first, hash_second] = <[String; 2]>::try_from(hashes).expect("two hashes");
     assert_ne!(hash_first, hash_second);
 
     // Record the receiver's starts and completions in order until both

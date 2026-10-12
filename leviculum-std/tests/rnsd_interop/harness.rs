@@ -2371,28 +2371,33 @@ impl TestDaemon {
         Ok(resource_hash)
     }
 
-    /// Send a resource over an established link without waiting for the
-    /// link's previous outgoing resource to conclude: the daemon lifts
-    /// Python's `ready_for_new_resource` gate on that link, so a second call
-    /// advertises while the first transfer is still running (Codeberg #657).
+    /// Advertise several resources on one established link back to back:
+    /// the daemon lifts Python's `ready_for_new_resource` gate on the link
+    /// and runs the advertise jobs in order before it answers, so every
+    /// advertisement reaches the receiver before any part of the first
+    /// (Codeberg #657).
     ///
-    /// Returns the resource hash (hex string).
-    pub async fn send_resource_concurrent(
+    /// Returns the resource hashes (hex strings), in the order given.
+    pub async fn send_resources_concurrently(
         &self,
         link_hash: &str,
-        data: &[u8],
-    ) -> Result<String, HarnessError> {
+        data: &[&[u8]],
+    ) -> Result<Vec<String>, HarnessError> {
         let params = serde_json::json!({
             "link_hash": link_hash,
-            "data": hex::encode(data),
-            "concurrent": true,
+            "data": data.iter().map(hex::encode).collect::<Vec<_>>(),
         });
-        let result = self.query("send_resource", params).await?;
+        let result = self.query("send_resources_concurrently", params).await?;
         result
-            .get("resource_hash")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| HarnessError::ParseError("Missing resource_hash".to_string()))
+            .get("resource_hashes")
+            .and_then(|v| v.as_array())
+            .and_then(|hashes| {
+                hashes
+                    .iter()
+                    .map(|h| h.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .ok_or_else(|| HarnessError::ParseError("Missing resource_hashes".to_string()))
     }
 
     /// Get all received resources (completed and failed).
