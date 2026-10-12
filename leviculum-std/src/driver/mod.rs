@@ -3907,6 +3907,43 @@ impl ReticulumNode {
         self.inner.lock_recover().direct_link_interface(link_id)
     }
 
+    /// +ciris (leviculum#82): accept the peer's held upgrade request on
+    /// `link_id` (`direct_connect_policy = ask_host`, after a
+    /// `NodeEvent::DirectLinkRequested`). The establishment flow starts; its
+    /// outcome arrives as `DirectLinkEstablished` or `DirectLinkFailed`.
+    pub async fn accept_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
+        let output = self.inner.lock_recover().accept_direct_link(link_id)?;
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)
+    }
+
+    /// +ciris (leviculum#82): refuse the peer's held upgrade request on
+    /// `link_id`. The peer's proposal ends `Rejected`; this node probed and
+    /// sent nothing about its address.
+    pub async fn reject_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
+        let output = self.inner.lock_recover().reject_direct_link(link_id)?;
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)
+    }
+
+    /// +ciris (leviculum#83): move `link_id` off its direct interface and back
+    /// onto its relayed one now, as core does when the link goes stale on the
+    /// direct path, for a host whose liveness signal sees a dead path sooner.
+    /// The peer is nudged over the relay; `DirectLinkLost` fires once; the
+    /// re-proposal cooldown applies. A link that is not direct is an error and
+    /// nothing changes.
+    pub async fn retire_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
+        let output = self.inner.lock_recover().retire_direct_link(link_id)?;
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)
+    }
+
     /// Get the remote identity for a link, if the peer has identified.
     pub fn get_remote_identity(&self, link_id: &LinkId) -> Option<leviculum_core::Identity> {
         let inner = self.inner.lock_recover();

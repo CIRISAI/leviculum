@@ -181,6 +181,18 @@ pub enum NodeEvent {
         proposed: bool,
     },
 
+    /// +ciris (leviculum#82): a peer asked to move `link_id` onto a direct
+    /// path, under [`crate::node::DirectLinkPolicy::AskHost`]. The request is
+    /// held, with nothing probed and nothing sent, until the host calls
+    /// `accept_direct_link` or `reject_direct_link`; no answer within
+    /// [`crate::node::ASK_HOST_TIMEOUT_MS`] refuses it.
+    DirectLinkRequested {
+        /// The link ID
+        link_id: LinkId,
+        /// The peer's identity hash, when it identified itself on the link
+        peer_identity: Option<[u8; crate::constants::IDENTITY_HASHBYTES]>,
+    },
+
     /// +ciris (leviculum#70): a direct-link upgrade ended without a direct
     /// path. The link is untouched and keeps its relayed path.
     DirectLinkFailed {
@@ -672,6 +684,7 @@ impl NodeEvent {
             | NodeEvent::ChannelRetransmit { link_id, .. }
             | NodeEvent::LinkIdentified { link_id, .. }
             | NodeEvent::DirectLinkEstablished { link_id, .. }
+            | NodeEvent::DirectLinkRequested { link_id, .. }
             | NodeEvent::DirectLinkFailed { link_id, .. }
             | NodeEvent::DirectLinkLost { link_id, .. }
             | NodeEvent::LinkClosed { link_id, .. }
@@ -797,6 +810,7 @@ impl NodeEvent {
             // one of each per upgrade attempt, and the consumer's choice of
             // path depends on seeing them.
             NodeEvent::DirectLinkEstablished { .. }
+            | NodeEvent::DirectLinkRequested { .. }
             | NodeEvent::DirectLinkFailed { .. }
             | NodeEvent::DirectLinkLost { .. } => EventClass::Control,
 
@@ -896,6 +910,7 @@ impl NodeEvent {
             NodeEvent::ChannelRetransmit { .. } => "ChannelRetransmit",
             NodeEvent::LinkIdentified { .. } => "LinkIdentified",
             NodeEvent::DirectLinkEstablished { .. } => "DirectLinkEstablished",
+            NodeEvent::DirectLinkRequested { .. } => "DirectLinkRequested",
             NodeEvent::DirectLinkFailed { .. } => "DirectLinkFailed",
             NodeEvent::DirectLinkLost { .. } => "DirectLinkLost",
             NodeEvent::LinkClosed { .. } => "LinkClosed",

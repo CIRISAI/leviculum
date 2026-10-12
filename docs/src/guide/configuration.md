@@ -520,7 +520,7 @@ an rns-rs facilitator. The feature is off unless configured:
 | `probe_port` | u16 | unset | Run a facilitator on this UDP port (all IPv4 addresses). It answers RNSP and STUN Binding requests with the address each request came from, and holds no state. Put it on a node with a public address, usually the transport node. |
 | `probe_addr` | `host:port` | unset | The facilitator this node probes when it proposes an upgrade. Without it the node cannot propose, but it can still accept. |
 | `probe_protocol` | `rnsp`/`stun` | `rnsp` | `stun` lets any public STUN server stand in for the facilitator. |
-| `direct_connect_policy` | `reject`/`accept_all`/`identified_only` | `reject` | Which peers' proposals to accept. Accepting tells the peer this node's public address; `identified_only` accepts only from a peer that identified itself on the link. |
+| `direct_connect_policy` | `reject`/`accept_all`/`identified_only`/`ask_host` | `reject` | Which peers' proposals to accept. Accepting tells the peer this node's public address; `identified_only` accepts only from a peer that identified itself on the link; `ask_host` holds each proposal and raises `DirectLinkRequested` for the host to answer with `accept_direct_link` or `reject_direct_link` (no answer within 5 s refuses it, and nothing is probed before an accept). |
 
 An upgrade is never automatic: the application calls
 `ReticulumNode::propose_direct_link` and gets `DirectLinkEstablished` or

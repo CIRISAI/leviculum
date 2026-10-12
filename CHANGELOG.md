@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [Unreleased] — CIRIS fork
+
+### Added
+
+- Direct links: a host-decided accept (+ciris, leviculum#82).
+  `DirectLinkPolicy::AskHost` (config `direct_connect_policy = ask_host`)
+  holds each peer's upgrade REQUEST and raises
+  `NodeEvent::DirectLinkRequested { link_id, peer_identity }`. Nothing is
+  probed and no address leaves the node until the host answers with
+  `accept_direct_link` (the existing establishment flow) or
+  `reject_direct_link` (REJECT, reason POLICY; the proposer's upgrade ends
+  `Rejected`). No answer within `ASK_HOST_TIMEOUT_MS` (5 s, under the
+  proposer's own 10 s wait) refuses it the same way. A held request blocks a
+  second one and this node's own proposal on the link. The existing policies
+  are unchanged. For a host whose rule is narrower than "any identified peer":
+  CIRISEdge accepts only from peers it shares a room with.
+- Direct links: `retire_direct_link(&LinkId)` (+ciris, leviculum#83), on
+  `NodeCore` and `ReticulumNode`. It moves a direct link back onto the
+  interface it used before, now. This is the fallback core takes on a stale
+  link, for a host whose own liveness signal sees a dead path sooner. The peer
+  is nudged over the relay and follows, `DirectLinkLost` fires once, and the
+  re-proposal cooldown applies. On a link that is not direct it returns
+  `DirectLinkError::NotDirect` and changes nothing.
+- `DirectLinkError` gains `NoPendingRequest` and `NotDirect`.
+
 ## [0.30.0+ciris.1] — CIRIS fork
 
 ### Added
