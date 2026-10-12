@@ -89,7 +89,7 @@ impl FilePropagationStore {
             };
             // An interrupted append's temp file: not a message, not noise
             // worth a warning either.
-            if name.starts_with(TEMP_PREFIX) {
+            if name.starts_with(TEMP_PREFIX) || name == STAMP_VALUES_MARKER {
                 continue;
             }
             let Some((transient_id, received_at, stamp_value, sequence)) = parse_name(&name) else {
@@ -178,6 +178,48 @@ impl FilePropagationStore {
         &self.dir
     }
 
+    /// Whether every stored stamp value is the stamp's true value. False on
+    /// a store written before leviculum#442 D6 (8f470aa7), which stored 0
+    /// for whatever it took at cost 0 before its first demanding peer, and
+    /// on one `lxmd` left behind; [`Self::mark_stamp_values_true`] records
+    /// that a re-pricing pass has run over it.
+    pub fn stamp_values_true(&self) -> bool {
+        self.dir.join(STAMP_VALUES_MARKER).exists()
+    }
+
+    /// Record that every stored value is true from here on: what this
+    /// daemon appends already is.
+    pub fn mark_stamp_values_true(&mut self) -> Result<(), StorageError> {
+        durable_write(&self.dir, &self.dir.join(STAMP_VALUES_MARKER), b"")
+    }
+
+    /// Replace one message's stored stamp value, keeping its receive time
+    /// and its sequence: a re-priced message must not move past the peer
+    /// cursors that already stand below it. `Ok(false)` when the message
+    /// is not in the store.
+    pub fn set_stamp_value(
+        &mut self,
+        transient_id: &TransientId,
+        stamp_value: u8,
+    ) -> Result<bool, StorageError> {
+        let Some(entry) = self.index.get_mut(transient_id) else {
+            return Ok(false);
+        };
+        let renamed = self.dir.join(Self::entry_name(
+            transient_id,
+            entry.meta.received_at,
+            stamp_value,
+            entry.meta.sequence,
+        ));
+        std::fs::rename(&entry.path, &renamed).map_err(|_| StorageError::Io)?;
+        if let Ok(dir_handle) = std::fs::File::open(&self.dir) {
+            let _ = dir_handle.sync_all();
+        }
+        entry.path = renamed;
+        entry.meta.stamp_value = stamp_value;
+        Ok(true)
+    }
+
     /// Number of stored messages.
     pub fn len(&self) -> usize {
         self.index.len()
@@ -260,6 +302,11 @@ fn read_destination(path: &Path) -> Option<[u8; 16]> {
 
 /// Prefix of the temp file an append writes before the rename.
 const TEMP_PREFIX: &str = ".tmp-";
+
+/// The empty file [`FilePropagationStore::mark_stamp_values_true`] leaves.
+/// A dot name, so `lxmd`'s indexer (first `_`-component 64 hex characters,
+/// `reference/LXMF/LXMF/LXMRouter.py:566-575`) never reads it as a message.
+const STAMP_VALUES_MARKER: &str = ".stamp-values-true";
 
 /// The temp file an append writes before renaming it to `path`:
 /// `.tmp-<hex>_<secs>_<stamp>_<seq>`. The prefix, not a suffix, is the point.
@@ -717,5 +764,38 @@ mod tests {
         let store = FilePropagationStore::open(dir.path(), 4096).expect("reopen");
         assert_eq!(store.len(), 1);
         assert!(store.contains(&[1; 32]).unwrap());
+    }
+
+    /// A re-priced message keeps its receive time and its sequence across a
+    /// reopen, so a peer cursor below it still reaches it (leviculum#442
+    /// D6), and the marker is neither a message nor something `lxmd` would
+    /// index.
+    #[test]
+    fn a_repriced_value_survives_a_reopen_in_place() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FilePropagationStore::open(dir.path(), 4096).expect("open");
+        store.append(&[1; 32], 1234, 0, &body_for(7, 100)).unwrap();
+        store.append(&[2; 32], 2345, 0, &body_for(9, 100)).unwrap();
+        let before = store.meta(&[1; 32]).unwrap().expect("stored");
+        assert!(!store.stamp_values_true());
+
+        assert!(store.set_stamp_value(&[1; 32], 14).unwrap());
+        assert!(!store.set_stamp_value(&[3; 32], 14).unwrap());
+        store.mark_stamp_values_true().unwrap();
+        assert!(!lxmd_would_index(STAMP_VALUES_MARKER));
+        drop(store);
+
+        let store = FilePropagationStore::open(dir.path(), 4096).expect("reopen");
+        assert_eq!(store.len(), 2);
+        assert!(store.stamp_values_true());
+        let after = store.meta(&[1; 32]).unwrap().expect("still stored");
+        assert_eq!(after.stamp_value, 14);
+        assert_eq!(after.sequence, before.sequence);
+        assert_eq!(after.received_at, 1234);
+        assert_eq!(store.read_body(&[1; 32]).unwrap(), Some(body_for(7, 100)));
+        assert_eq!(
+            store.meta(&[2; 32]).unwrap().map(|meta| meta.stamp_value),
+            Some(0)
+        );
     }
 }
