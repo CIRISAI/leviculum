@@ -12,7 +12,7 @@
 //! probe_port = 4343                   # run a facilitator on this UDP port
 //! probe_addr = rns.example.org:4343   # the facilitator this node proposes with
 //! probe_protocol = rnsp               # or `stun`, to use a public STUN server
-//! direct_connect_policy = reject      # | accept_all | identified_only
+//! direct_connect_policy = reject      # | accept_all | identified_only | ask_host
 //! ```
 
 use std::collections::HashMap;
@@ -59,13 +59,20 @@ impl DirectLinkSettings {
                 "probe_port must be a UDP port number, not {bad:?}"
             )));
         }
-        let policy = match config.direct_link.direct_connect_policy.as_deref().map(str::trim) {
+        let policy = match config
+            .direct_link
+            .direct_connect_policy
+            .as_deref()
+            .map(str::trim)
+        {
             None | Some("") | Some("reject") => DirectLinkPolicy::Reject,
             Some("accept_all") => DirectLinkPolicy::AcceptAll,
             Some("identified_only") => DirectLinkPolicy::IdentifiedOnly,
+            Some("ask_host") => DirectLinkPolicy::AskHost,
             Some(other) => {
                 return Err(Error::Config(format!(
-                    "direct_connect_policy must be reject, accept_all or identified_only, not {other:?}"
+                    "direct_connect_policy must be reject, accept_all, identified_only or \
+                     ask_host, not {other:?}"
                 )))
             }
         };
