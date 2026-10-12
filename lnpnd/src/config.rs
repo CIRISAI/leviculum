@@ -287,8 +287,9 @@ pub fn default_config_dir() -> PathBuf {
 /// and so the one stock nodes in the field run, not the router's code
 /// default of 4 (`reference/LXMF/LXMF/LXMRouter.py:45`). At 4 a stock node
 /// five or six hops away peers with us and we decline it, so messages flow
-/// from it to us only (leviculum#442 D10, Lew 2026-10-09). A board keeps 4
-/// ([`leviculum_lxmf::peering::AUTOPEER_MAXDEPTH_DEFAULT`]).
+/// from it to us only (leviculum#442 D10, Lew 2026-10-09). A board runs 6
+/// as well since the audit of 2026-10-12 (D2, `BOARD_AUTOPEER_MAXDEPTH`,
+/// `leviculum-nrf/pn-store/src/lib.rs`).
 pub const DEFAULT_AUTOPEER_MAXDEPTH: u8 = 6;
 
 /// Our example config: `lxmd --exampleconfig`'s keys

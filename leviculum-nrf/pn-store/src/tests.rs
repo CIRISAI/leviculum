@@ -1044,3 +1044,284 @@ fn a_client_upload_the_gate_admits_is_one_the_store_holds() {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// The recalled propagation announce (audit 2026-10-12 D5) and the
+// board's autopeer depth (D2)
+// ---------------------------------------------------------------------
+
+/// A propagation announce's `app_data` as a neighbour sends it.
+fn pn_announce(timebase: u64, stamp_cost: u64, enabled: bool) -> Vec<u8> {
+    leviculum_lxmf::PropagationNodeAnnounce {
+        legacy_support: false,
+        timebase,
+        enabled,
+        transfer_limit_kb: 256,
+        sync_limit_kb: 10_240,
+        stamp_cost,
+        stamp_cost_flexibility: 3,
+        peering_cost: 10,
+        metadata: Vec::new(),
+    }
+    .encode()
+    .unwrap()
+}
+
+fn live_recall_records(log: &mut RecordLog<SimNor>) -> Vec<[u8; KEY_LEN]> {
+    let mut keys = Vec::new();
+    scan(log.flash_mut().bytes(), |r| {
+        if r.live && r.tag == TAG_RECALL {
+            keys.push(*r.key);
+        }
+    });
+    keys
+}
+
+/// The minimal reproduction of D5: a neighbour's propagation announce,
+/// heard before a reset, is still recallable after it. Before the fix the
+/// board's only recall was the RAM announce cache, which a reset empties.
+#[test]
+fn a_propagation_announce_is_recalled_after_a_reset() {
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let mut store = PnPeerStore::new(region.clone());
+        let app_data = pn_announce(1_700_000_000, 13, true);
+
+        assert_eq!(
+            store.remember_announce(&[5; 16], &app_data, 100),
+            Remembered::Written
+        );
+        // A queued write is already what a recall answers.
+        assert_eq!(store.recalled_announce(&[5; 16]), Some(app_data.clone()));
+        flush_peers(&mut store, &region, &mut log);
+
+        // The reset: a fresh adapter over the same flash, nothing in RAM.
+        let rebooted = PnPeerStore::new(region.clone());
+        assert_eq!(rebooted.recalled_announce(&[5; 16]), Some(app_data));
+        assert_eq!(rebooted.recalled_announce(&[6; 16]), None);
+        // The recall is not a peer: the table restores nothing from it.
+        assert!(rebooted.load_all().unwrap().is_empty());
+    });
+}
+
+/// Flash wear: one write per change of what the announce says, not one
+/// per announce. A propagation node's timebase moves on every announce,
+/// so it is not part of "a change"; a new stamp cost is.
+#[test]
+fn a_repeated_announce_writes_nothing_and_a_changed_one_writes_once() {
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let mut store = PnPeerStore::new(region.clone());
+
+        store.remember_announce(&[5; 16], &pn_announce(1_000, 13, true), 100);
+        flush_peers(&mut store, &region, &mut log);
+
+        for later in 1..5u64 {
+            assert_eq!(
+                store.remember_announce(
+                    &[5; 16],
+                    &pn_announce(1_000 + later * 21_600, 13, true),
+                    200
+                ),
+                Remembered::Unchanged
+            );
+            assert_eq!(store.pending_ops(), 0);
+        }
+
+        let raised = pn_announce(90_000, 16, true);
+        assert_eq!(
+            store.remember_announce(&[5; 16], &raised, 300),
+            Remembered::Written
+        );
+        flush_peers(&mut store, &region, &mut log);
+        assert_eq!(
+            live_recall_records(&mut log).len(),
+            1,
+            "the old copy is purged"
+        );
+        assert_eq!(
+            PnPeerStore::new(region.clone()).recalled_announce(&[5; 16]),
+            Some(raised)
+        );
+
+        // A disabled announce is a change too, and the recall then says so,
+        // as the reference's recall would: the peering declines it.
+        let disabled = pn_announce(95_000, 16, false);
+        assert_eq!(
+            store.remember_announce(&[5; 16], &disabled, 400),
+            Remembered::Written
+        );
+        assert_eq!(store.recalled_announce(&[5; 16]), Some(disabled));
+
+        // Not a propagation announce, or too long to keep: refused.
+        assert_eq!(
+            store.remember_announce(&[7; 16], b"not msgpack", 500),
+            Remembered::Refused
+        );
+    });
+}
+
+/// The region keeps at most [`RECALL_SLOTS`] announces; the oldest copy
+/// makes room for a new node.
+#[test]
+fn the_recall_keeps_at_most_its_slots_and_drops_the_oldest() {
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let mut store = PnPeerStore::new(region.clone());
+
+        for n in 0..=RECALL_SLOTS as u8 {
+            store.remember_announce(&[n; 16], &pn_announce(1_000, 13, true), n as u32);
+            flush_peers(&mut store, &region, &mut log);
+        }
+        assert_eq!(live_recall_records(&mut log).len(), RECALL_SLOTS);
+        let rebooted = PnPeerStore::new(region.clone());
+        assert_eq!(
+            rebooted.recalled_announce(&[0; 16]),
+            None,
+            "the oldest went"
+        );
+        assert!(rebooted.recalled_announce(&[1; 16]).is_some());
+        assert!(rebooted
+            .recalled_announce(&[RECALL_SLOTS as u8; 16])
+            .is_some());
+    });
+}
+
+/// Round-robin reclaim erases the oldest page whole, so an announce written
+/// once and never changed would be lost a lap later. A copy that has fallen
+/// into the older half of the region is rewritten when its node announces,
+/// even unchanged.
+#[test]
+fn an_unchanged_announce_whose_copy_ages_into_the_older_half_is_rewritten() {
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let mut peers = PnPeerStore::new(region.clone());
+        let mut messages = PnStore::new(region.clone(), SECTORS);
+
+        peers.remember_announce(&[5; 16], &pn_announce(1_000, 13, true), 100);
+        flush_peers(&mut peers, &region, &mut log);
+        assert_eq!(
+            peers.remember_announce(&[5; 16], &pn_announce(2_000, 13, true), 100),
+            Remembered::Unchanged
+        );
+
+        // Message traffic moves the log two pages on: the copy's page is
+        // now the next to be reclaimed but one.
+        let mut n = 0u32;
+        while live_page_lag(&mut log) < SECTORS / 2 {
+            messages
+                .append(&key(1_000 + n), 1, 0, &msg_body(1, FIELD_BODY))
+                .unwrap();
+            flush_messages(&mut messages, &region, &mut log);
+            n += 1;
+        }
+        assert_eq!(
+            peers.remember_announce(&[5; 16], &pn_announce(3_000, 13, true), 200),
+            Remembered::Written
+        );
+        flush_peers(&mut peers, &region, &mut log);
+        assert_eq!(live_recall_records(&mut log).len(), 1);
+        assert_eq!(
+            live_page_lag(&mut log),
+            0,
+            "the copy sits in the newest page"
+        );
+    });
+}
+
+/// Pages between the newest page and the page of the live recall copy.
+fn live_page_lag(log: &mut RecordLog<SimNor>) -> u32 {
+    let mut newest = 0u32;
+    let mut copy = None;
+    scan(log.flash_mut().bytes(), |r| {
+        newest = newest.max(r.page_seq);
+        if r.live && r.tag == TAG_RECALL {
+            copy = Some(r.page_seq);
+        }
+    });
+    newest - copy.unwrap()
+}
+
+/// The whole of D5 through the seams, in the engine's order: the board hears
+/// a neighbour's propagation announce and keeps it, resets, and the
+/// neighbour then syncs to it over a link with no path known. The board
+/// judges the depth by the link (683, D6) and recalls the announce from
+/// flash, so the peering admits it (`PN_PEER action=add reason=inbound_sync`
+/// on the board). The RAM-only recall the board had before declines it as
+/// not a node.
+#[test]
+fn after_a_reset_a_syncing_neighbour_is_peered_from_its_recalled_announce() {
+    use leviculum_lxmf::{DeclineReason, PeerChange, PeerTable};
+    use leviculum_sync_batch::sender_depth;
+
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let neighbour = [0x42; 16];
+        // Heard at three hops, inside the board's depth but not peered: the
+        // announce came back as a path response, which never peers
+        // (`Handlers.py:80`).
+        let mut store = PnPeerStore::new(region.clone());
+        store.remember_announce(&neighbour, &pn_announce(1_700_000_000, 13, true), 100);
+        flush_peers(&mut store, &region, &mut log);
+
+        // The reset.
+        let rebooted = PnPeerStore::new(region.clone());
+        let mut table = PeerTable::new(board_peering_config(1, 18));
+        table.restore(rebooted.load_all().unwrap());
+        assert!(table.get(&neighbour).is_none());
+
+        // The sync lands over a three-hop link; the path table is empty.
+        let hops = sender_depth(None, Some(3));
+        assert_eq!(hops, Some(3));
+
+        // Before: the announce cache alone, empty after a reset.
+        let mut before = PeerTable::new(board_peering_config(1, 18));
+        assert_eq!(
+            before.handle_inbound_sync_recalled(neighbour, None, hops, 1_700_000_500),
+            PeerChange::Declined(DeclineReason::NotANode)
+        );
+
+        // After: the RAM cache misses, the region answers.
+        let recalled = recall_for_inbound_sync(None, &rebooted, &neighbour);
+        assert!(recalled.is_some());
+        assert_eq!(
+            table.handle_inbound_sync_recalled(neighbour, recalled.as_deref(), hops, 1_700_000_500),
+            PeerChange::Added
+        );
+
+        // A fresher RAM copy wins over the region's.
+        let fresher = pn_announce(1_700_000_400, 13, false);
+        assert_eq!(
+            recall_for_inbound_sync(Some(fresher.clone()), &rebooted, &neighbour),
+            Some(fresher)
+        );
+    });
+}
+
+/// D2: the board peers a propagation node six hops out, as lxmd's
+/// generated config and lnpnd do, and declines one at seven.
+#[test]
+fn the_board_peers_a_node_six_hops_out_and_declines_seven() {
+    use leviculum_lxmf::{DeclineReason, PeerChange, PeerTable, PropagationNodeAnnounce};
+
+    let announce = PropagationNodeAnnounce::decode(&pn_announce(1_700_000_000, 13, true)).unwrap();
+    let mut table = PeerTable::new(board_peering_config(1, 18));
+    assert_eq!(
+        table.handle_announce([6; 16], &announce, Some(6), 1_700_000_100, false),
+        PeerChange::Added
+    );
+    assert_eq!(
+        table.handle_announce([7; 16], &announce, Some(7), 1_700_000_100, false),
+        PeerChange::Declined(DeclineReason::TooDeep)
+    );
+}

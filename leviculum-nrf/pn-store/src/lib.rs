@@ -59,8 +59,9 @@
 //! stamp value above 127 has probability 2^-127 and the clamp only ever
 //! understates value, never invents it. [`TAG_PEER`] marks peer records,
 //! [`TAG_PRICED`] the one marker record [`PnStore::stamp_values_true`]
-//! reads, and `TAG_BENCH` (0xB0, `leviculum-nrf/src/record_store.rs`) marks
-//! the bench instrument's synthetic records; all three are above the clamp,
+//! reads, [`TAG_RECALL`] a propagation node's recalled announce, and
+//! `TAG_BENCH` (0xB0, `leviculum-nrf/src/record_store.rs`) marks
+//! the bench instrument's synthetic records; all four are above the clamp,
 //! so none is ever visible to the message role and bench records survive
 //! in place, invisible, until their page is reclaimed.
 //!
@@ -106,6 +107,11 @@ pub const TAG_PEER: u8 = 0xA0;
 /// Tag of the marker record that says every message record in the region
 /// carries its true stamp value ([`PnStore::stamp_values_true`]).
 pub const TAG_PRICED: u8 = 0xA1;
+
+/// Tag of a recalled propagation announce ([`PnPeerStore::remember_announce`]):
+/// the `app_data` of a propagation node's last announce, kept so the
+/// inbound-sync peering can recall it after a reset (audit 2026-10-12 D5).
+pub const TAG_RECALL: u8 = 0xA2;
 
 /// Key of the [`TAG_PRICED`] marker: no transient id, because the tag
 /// already keeps it out of every message read.
@@ -1101,5 +1107,258 @@ impl<R: Region> PeerStore for PnPeerStore<R> {
             .collect();
         records.extend(self.pending.iter().cloned());
         Ok(records)
+    }
+}
+
+/// How many propagation announces the region keeps for recall
+/// ([`TAG_RECALL`]): one per slot of the peer table the recall feeds.
+pub const RECALL_SLOTS: usize = leviculum_heap_budget::BOARD_MAX_PEERS;
+
+/// The longest announce `app_data` kept for recall. A propagation
+/// announce is seven msgpack fields and a name; the ones observed on the
+/// rig are well under 100 B (audit 2026-10-12 D5). 255 B bounds the
+/// region's recall share at [`RECALL_SLOTS`] × 304 B of stride, and a
+/// longer one is simply not kept: its node is recalled from RAM while a
+/// path lives, as before.
+pub const RECALL_APP_DATA_MAX: usize = 255;
+
+/// What [`PnPeerStore::remember_announce`] did with an announce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remembered {
+    /// A new or changed announce, or one whose copy was about to be
+    /// reclaimed: an append (and the purge of the old copy) is queued.
+    Written,
+    /// The region already holds the same announce, timebase aside: no
+    /// write.
+    Unchanged,
+    /// Not a propagation announce, or longer than [`RECALL_APP_DATA_MAX`].
+    Refused,
+}
+
+/// Whether two propagation announces say the same thing to the peering,
+/// their timebases aside: a propagation node puts its clock in every
+/// announce, so comparing the bytes would write on every one.
+fn same_announce(a: &[u8], b: &[u8]) -> bool {
+    use leviculum_lxmf::PropagationNodeAnnounce;
+    match (
+        PropagationNodeAnnounce::decode(a),
+        PropagationNodeAnnounce::decode(b),
+    ) {
+        (Ok(a), Ok(mut b)) => {
+            b.timebase = a.timebase;
+            a == b
+        }
+        _ => false,
+    }
+}
+
+/// The recall half of the peer store (audit 2026-10-12 D5).
+///
+/// The board peers back a node whose sync lands by recalling that node's
+/// last propagation announce (`peer_from_recalled_announce`,
+/// `leviculum-nrf/src/pn.rs`, after `reference/LXMF/LXMF/LXMRouter.py:2355-2375`).
+/// The reference recalls from its persisted `known_destinations`; the
+/// board's announce cache is RAM, so after a reset a neighbour that
+/// announced before it was answered "not a node" until its next announce,
+/// up to six hours at lxmd's cadence. These records are the persisted half:
+/// the announce `app_data` of up to [`RECALL_SLOTS`] propagation nodes, as
+/// [`TAG_RECALL`] records keyed like peer records, in the same queue the
+/// engine already drains after every role call. No field is added to the
+/// adapter: a queued write is found in the queue, a kept one by a scan.
+///
+/// **Wear.** An announce is written when it is new, when it says something
+/// different from the kept copy (`same_announce`, timebase aside), or
+/// when the kept copy has aged into the older half of the region, where
+/// round-robin reclaim would erase it within half a lap; otherwise nothing.
+/// A neighbour announcing the same thing every six hours therefore costs
+/// one append and one purge per half-lap of the region, at most, and none
+/// at all while message traffic leaves the log where it is.
+impl<R: Region> PnPeerStore<R> {
+    /// The `app_data` of `destination_hash`'s last propagation announce as
+    /// the region holds it, a queued write first. `None` when none is kept.
+    pub fn recalled_announce(
+        &self,
+        destination_hash: &[u8; DESTINATION_LENGTH],
+    ) -> Option<Vec<u8>> {
+        let key = peer_key(destination_hash);
+        let queued = self.queue.iter().rev().find_map(|op| match op {
+            FlushOp::Append {
+                key: k, tag, body, ..
+            } if *tag == TAG_RECALL && *k == key => Some(body.clone()),
+            _ => None,
+        });
+        if queued.is_some() {
+            return queued;
+        }
+        let mut newest: Option<(u64, Vec<u8>)> = None;
+        self.region.with_bytes(|bytes| {
+            scan(bytes, |record| {
+                if record.live
+                    && record.tag == TAG_RECALL
+                    && record.key == &key
+                    && !self.is_purge_masked(record.offset)
+                    && newest
+                        .as_ref()
+                        .is_none_or(|(seq, _)| *seq < record.sequence())
+                {
+                    newest = Some((record.sequence(), record.body.to_vec()));
+                }
+            })
+        });
+        newest.map(|(_, body)| body)
+    }
+
+    /// Keep a propagation announce for recall across a reset: queue its
+    /// write when it is new, changed, or its copy is ageing out, and make
+    /// room by dropping the oldest kept announce when all
+    /// [`RECALL_SLOTS`] are taken. `time` is the record's receive time.
+    pub fn remember_announce(
+        &mut self,
+        destination_hash: &[u8; DESTINATION_LENGTH],
+        app_data: &[u8],
+        time: u32,
+    ) -> Remembered {
+        if app_data.len() > RECALL_APP_DATA_MAX
+            || leviculum_lxmf::PropagationNodeAnnounce::decode(app_data).is_err()
+        {
+            return Remembered::Refused;
+        }
+        let key = peer_key(destination_hash);
+
+        // One pass: the newest page, this node's live copies, and every
+        // other node's newest copy (oldest first is what makes room).
+        let mut newest_page = 0u32;
+        let mut pages = 0u32;
+        let mut own: Vec<(u32, u32, u64)> = Vec::new();
+        let mut others: Vec<([u8; KEY_LEN], u32, u32, u64)> = Vec::new();
+        let mut kept_same = false;
+        self.region.with_bytes(|bytes| {
+            pages = (bytes.len() / SECTOR_SIZE as usize) as u32;
+            scan(bytes, |record| {
+                newest_page = newest_page.max(record.page_seq);
+                if !record.live || record.tag != TAG_RECALL || self.is_purge_masked(record.offset) {
+                    return;
+                }
+                if record.key == &key {
+                    own.push((record.offset, record.page_seq, record.sequence()));
+                    if same_announce(record.body, app_data) {
+                        kept_same = true;
+                    }
+                } else {
+                    others.push((
+                        *record.key,
+                        record.offset,
+                        record.page_seq,
+                        record.sequence(),
+                    ));
+                }
+            })
+        });
+
+        let queued = self.queue.iter().rev().find_map(|op| match op {
+            FlushOp::Append {
+                key: k, tag, body, ..
+            } if *tag == TAG_RECALL && *k == key => Some(same_announce(body, app_data)),
+            _ => None,
+        });
+        let ageing = own
+            .iter()
+            .map(|(_, page, _)| *page)
+            .max()
+            .is_some_and(|page| newest_page - page >= pages / 2);
+        match queued {
+            Some(true) => return Remembered::Unchanged,
+            None if kept_same && !ageing && own.len() == 1 => return Remembered::Unchanged,
+            _ => {}
+        }
+
+        // Supersede a queued write of this node, then make room: a new
+        // node with every slot taken drops the node whose copy is oldest.
+        self.queue.retain(
+            |op| !matches!(op, FlushOp::Append { key: k, tag, .. } if *tag == TAG_RECALL && *k == key),
+        );
+        let queued_others: Vec<[u8; KEY_LEN]> = self
+            .queue
+            .iter()
+            .filter_map(|op| match op {
+                FlushOp::Append { key: k, tag, .. } if *tag == TAG_RECALL => Some(*k),
+                _ => None,
+            })
+            .collect();
+        if own.is_empty() {
+            let mut held: Vec<[u8; KEY_LEN]> = queued_others.clone();
+            for (k, ..) in &others {
+                if !held.contains(k) {
+                    held.push(*k);
+                }
+            }
+            if held.len() >= RECALL_SLOTS {
+                let oldest = others
+                    .iter()
+                    .filter(|(k, ..)| !queued_others.contains(k))
+                    .min_by_key(|(.., seq)| *seq)
+                    .map(|(k, ..)| *k);
+                if let Some(oldest) = oldest {
+                    for (k, offset, ..) in &others {
+                        if *k == oldest {
+                            self.queue.push_back(FlushOp::Purge {
+                                offset: *offset,
+                                key: *k,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        self.queue.push_back(FlushOp::Append {
+            key,
+            time,
+            tag: TAG_RECALL,
+            body: app_data.to_vec(),
+        });
+        for (offset, ..) in own {
+            self.queue.push_back(FlushOp::Purge { offset, key });
+        }
+        Remembered::Written
+    }
+}
+
+/// What the board recalls of a node whose sync just landed: the announce
+/// cache in RAM first, the region's copy second.
+pub fn recall_for_inbound_sync<R: Region>(
+    ram: Option<Vec<u8>>,
+    store: &PnPeerStore<R>,
+    destination_hash: &[u8; DESTINATION_LENGTH],
+) -> Option<Vec<u8>> {
+    ram.or_else(|| store.recalled_announce(destination_hash))
+}
+
+/// Hop depth inside which the board peers a propagation node: 6, the value
+/// lxmd's generated config carries (`reference/LXMF/LXMF/Utilities/lxmd.py:995`)
+/// and so the one stock nodes in the field run, not the router's code
+/// default of 4 (`reference/LXMF/LXMF/LXMRouter.py:45`,
+/// [`leviculum_lxmf::peering::AUTOPEER_MAXDEPTH_DEFAULT`]). At 4 a stock
+/// node five or six hops out peers with the board and syncs its store in,
+/// the board declines it as too deep, and nothing flows back: the
+/// one-directional flow lnpnd closed by the same move (668,
+/// `DEFAULT_AUTOPEER_MAXDEPTH`, `lnpnd/src/config.rs`). The price is no
+/// heap; more sync rounds toward distant peers, inside the duty share, and
+/// more candidates for the 16-slot table (audit 2026-10-12 D2).
+pub const BOARD_AUTOPEER_MAXDEPTH: u8 = 6;
+
+/// The board's peering configuration: the table cap from the heap budget,
+/// the announced peering cost, the costliest key the board will mine, and
+/// [`BOARD_AUTOPEER_MAXDEPTH`]. `leviculum_nrf::pn::Engine::new` builds its
+/// table from this, so the host tests run the depth the board runs.
+pub fn board_peering_config(
+    peering_cost: u8,
+    remote_peering_cost_max: u8,
+) -> leviculum_lxmf::PeeringConfig {
+    leviculum_lxmf::PeeringConfig {
+        max_peers: leviculum_heap_budget::BOARD_MAX_PEERS,
+        peering_cost,
+        remote_peering_cost_max,
+        autopeer_maxdepth: BOARD_AUTOPEER_MAXDEPTH,
+        ..leviculum_lxmf::PeeringConfig::default()
     }
 }

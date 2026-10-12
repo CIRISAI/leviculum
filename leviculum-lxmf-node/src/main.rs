@@ -146,7 +146,7 @@ const DEFAULT_LOGLEVEL: u8 = 4;
 ///
 /// tracing has no notice/verbose/extreme, so notice folds into info, verbose
 /// into debug and extreme into trace. The third copy of this ladder
-/// (`leviculum-cli/src/lnsd.rs:313`, `lnpnd/src/config.rs:472`); kept local
+/// (`leviculum-cli/src/lnsd.rs:313`, `lnpnd/src/config.rs:473`); kept local
 /// because this batch is scoped to this crate, and cited from here so a later
 /// consolidation into `leviculum-std` finds all three.
 fn loglevel_filter(level: u8) -> &'static str {

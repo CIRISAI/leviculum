@@ -93,7 +93,10 @@ pub const TAG_BENCH: u8 = 0xB0;
 /// records invisible: above the message clamp and distinct from the peer
 /// tag, or a storm would masquerade as messages or peers.
 const _: () = assert!(
-    TAG_BENCH > leviculum_pn_store::MESSAGE_TAG_MAX && TAG_BENCH != leviculum_pn_store::TAG_PEER,
+    TAG_BENCH > leviculum_pn_store::MESSAGE_TAG_MAX
+        && TAG_BENCH != leviculum_pn_store::TAG_PEER
+        && TAG_BENCH != leviculum_pn_store::TAG_PRICED
+        && TAG_BENCH != leviculum_pn_store::TAG_RECALL,
     "TAG_BENCH collides with the propagation store's tag map"
 );
 

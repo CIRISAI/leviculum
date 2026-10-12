@@ -16,3 +16,6 @@ leviculum-heap-budget = { path = "../heap-budget" }
 leviculum-record-log = { path = "../record-log", features = ["sim"] }
 # The streaming workblock, so the tests price a stamp the way the board does.
 leviculum-lxmf = { path = "../../leviculum-lxmf", default-features = false, features = ["pow"] }
+# The depth rule the inbound-sync peering takes from the link (683), so the
+# D5 scenario test judges a reset board's neighbour as the engine does.
+leviculum-sync-batch = { path = "../sync-batch" }

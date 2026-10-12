@@ -241,8 +241,8 @@ use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
     answer_offer, build_offer, offer_budget_for_mdu, offer_reply, peering_key_material,
     plan_sync_batch, DeclineReason, DropReason, InboundGate, OfferPlan, OfferReply, OfferResponse,
-    PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeeringConfig,
-    SyncPhase, SyncSource, WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_INTERVAL_SECS,
+    PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, SyncPhase,
+    SyncSource, WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_INTERVAL_SECS,
 };
 use leviculum_lxmf::propagation::{
     MessageListResponse, PeerError, PropagationNodeAnnounce, TransientId,
@@ -398,12 +398,12 @@ const IDLE_SWEEP_MS: u64 = 15_000;
 /// `/offer` request timeout, as on the host.
 const OFFER_REQUEST_TIMEOUT_MS: u64 = 60_000;
 
-// The board peer-table cap. Its derivation is a const assertion in the
-// heap budget crate now, beside the census model's figure for a full table
-// (`leviculum_heap_budget::BOARD_MAX_PEERS`). Re-measure on both bins when
+// The board peer-table cap is `leviculum_heap_budget::BOARD_MAX_PEERS`,
+// derived by a const assertion in the heap budget crate beside the census
+// model's figure for a full table, and handed to the table by
+// `leviculum_pn_store::board_peering_config`. Re-measure on both bins when
 // the role has run on hardware; the number to compare is the `[HEAP]`
 // watermark with a full table.
-use leviculum_heap_budget::BOARD_MAX_PEERS;
 
 /// Highest remote peering cost this board will mine a key for. The
 /// reference accepts up to 26 (`MAX_PEERING_COST`,
@@ -879,12 +879,12 @@ impl Engine {
         let role = PropagationNode::new(store, role_config);
 
         let peer_store = PnPeerStore::new(region);
-        let mut peers = PeerTable::new(PeeringConfig {
-            max_peers: BOARD_MAX_PEERS,
-            peering_cost: config.peering_cost,
-            remote_peering_cost_max: BOARD_REMOTE_PEERING_COST_MAX,
-            ..PeeringConfig::default()
-        });
+        // The cap, the costs and the autopeer depth, from the store crate
+        // where the host tests reach them (audit 2026-10-12 D2: depth 6).
+        let mut peers = PeerTable::new(leviculum_pn_store::board_peering_config(
+            config.peering_cost,
+            BOARD_REMOTE_PEERING_COST_MAX,
+        ));
         if let Ok(records) = peer_store.load_all() {
             peers.restore(records);
         }
@@ -1441,6 +1441,20 @@ impl Engine {
         self.seed_clock(node, announce.timebase, "pn-announce");
         let hops = node.hops_to(&DestinationHash::new(destination_hash));
         let now = node.emission_secs();
+        // Keep the announce for the inbound-sync recall across a reset
+        // (audit 2026-10-12 D5), path responses included: those never
+        // peer here, and a node heard only that way is exactly the one a
+        // sync later peers back. Only inside the depth, where a recall can
+        // still admit, so the slots go to candidates. The store writes
+        // only on a change or an ageing copy, not per announce
+        // (`PnPeerStore::remember_announce`).
+        if hops.unwrap_or(u8::MAX) <= leviculum_pn_store::BOARD_AUTOPEER_MAXDEPTH {
+            let _ = self.peer_store.remember_announce(
+                &destination_hash,
+                app_data,
+                now.min(u32::MAX as u64) as u32,
+            );
+        }
         let change =
             self.peers
                 .handle_announce(destination_hash, &announce, hops, now, is_path_response);
@@ -2083,18 +2097,19 @@ impl Engine {
     /// interval while its syncs keep arriving: its mail lands here and
     /// nothing of ours ever flows back (Codeberg #417).
     ///
-    /// **What a board can recall, and for how long.** The recall source is
-    /// [`NodeCore::recall_app_data`] over the announce cache, which on this
-    /// stack is [`EmbeddedStorage`](leviculum_core::EmbeddedStorage)'s
-    /// 16-entry map: RAM only, drop-oldest, and swept of every entry whose
-    /// destination has no path (`clean_announce_cache`). So the honest
-    /// bound is *while a path to that node lives, and not across a reset* —
-    /// the reference recalls from a persisted `known_destinations` and does
-    /// survive one. It covers the case this path is for, a neighbour heard
-    /// since the last reset; what it does not cover is a reboot between
-    /// hearing the announce and the sync. Closing that needs `app_data`
-    /// persisted with the destination — a store change of its own, not a
-    /// caller's problem.
+    /// **What a board can recall, and for how long.** The first recall
+    /// source is [`NodeCore::recall_app_data`] over the announce cache,
+    /// which on this stack is
+    /// [`EmbeddedStorage`](leviculum_core::EmbeddedStorage)'s 16-entry map:
+    /// RAM only, drop-oldest, and swept of every entry whose destination
+    /// has no path (`clean_announce_cache`). The reference recalls from a
+    /// persisted `known_destinations` and survives a reset; so does the
+    /// board since audit 2026-10-12 D5, from the second source: the
+    /// propagation announces [`Self::on_pn_announce`] kept in the region
+    /// ([`PnPeerStore::remember_announce`], up to
+    /// [`leviculum_pn_store::RECALL_SLOTS`] nodes inside the depth). A
+    /// neighbour heard before a reboot is therefore recalled after it,
+    /// without waiting for its next announce.
     ///
     /// **Depth.** A path dropped between the announce and the sync left the
     /// recall standing and the depth unknown, so the peer was declined
@@ -2121,7 +2136,13 @@ impl Engine {
             return;
         }
         let destination = DestinationHash::new(remote_hash);
-        let recalled = node.recall_app_data(&destination);
+        // The announce cache first, while it is fresher; the region's copy
+        // when a reset emptied the cache (D5).
+        let recalled = leviculum_pn_store::recall_for_inbound_sync(
+            node.recall_app_data(&destination),
+            &self.peer_store,
+            &remote_hash,
+        );
         // A known path, else the link the sync came over (D6, lnpnd's 556):
         // after a reset the board recalls nothing of a path, while the sync
         // has just proven the distance.
