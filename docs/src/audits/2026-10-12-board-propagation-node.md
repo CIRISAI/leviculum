@@ -365,6 +365,14 @@ share of page erases, once.
 Test: a board-config twin of
 `a_message_stored_at_value_zero_is_offered_once_repriced`
 (`lnpnd/src/validation.rs:322`).
+**Fixed in 5c82832d**, both halves: `board_role_config` prices every
+accept, and `RepriceWalk` prices an older store once at boot in one
+lap over the existing sliced grind, re-appending each valuable value-0
+record under its true tag, then a `TAG_PRICED` marker. Pinned by
+`a_message_accepted_at_cost_0_before_any_demanding_peer_is_offered_to_one`
+and `a_store_at_value_0_is_offered_once_the_boot_walk_priced_it`
+(`leviculum-nrf/pn-store/src/tests.rs`), both red against the old
+behaviour.
 
 **D11 — a single-message upload of 4 043-5 000 B is admitted on the
 wire and cannot be stored.** The advertisement gate admits a
@@ -511,6 +519,13 @@ retries, a peer waits its throttle — latency, not loss.
 Test: an mvr advertising three resources on three links, asserting
 today's admit and the chosen cap after; the heap model halves exist
 (`inbound_resource_peak`, `leviculum-nrf/heap-budget/src/peak.rs`).
+**Fixed in 5c82832d**, by admission: `admits_incoming_resource`
+(`leviculum-nrf/heap-budget`) takes an advertisement only while fewer
+than `INCOMING_RESOURCES_FUNDED` (one) incoming resources are in
+flight over every link, client uploads included; the rest get the RCL.
+The reserve term is written over the same constant and did not move.
+Pinned by `four_links_advertising_at_once_get_what_the_reserve_funds`
+(`leviculum-nrf/heap-budget/tests/budget.rs`), red against the old gate.
 
 **D15 — an idle inbound link lives ~12 minutes on the board, 3 on
 lnpnd and the reference.** lnpnd tears down a propagation link
@@ -536,6 +551,12 @@ hundred bytes of flash.
 Test: lnpnd's
 `an_idle_inbound_link_is_torn_down_after_the_reference_bound`
 (`lnpnd/src/engine.rs:3042`) through the board engine.
+**Fixed in 5c82832d**: one rule for both stacks, `link_idle_past_bound`
+(`leviculum-lxmf`), used by lnpnd's `close_idle_links` and by the
+board's sweep in `settle` (`tick_idle_links`, at most 15 s late on a
+quiet board). Pinned by
+`an_idle_inbound_link_is_let_go_strictly_above_the_reference_bound`;
+the board engine itself has no host target.
 
 **D16 — the board yields its own sync traffic to a duty-share
 budget; lnpnd never does.** Every site where the board originates
@@ -736,6 +757,8 @@ of that at once does not answer the question.
    (`docs/src/concepts/propagation-node-on-a-board.md:935`). The
    cap 16 itself is right; the stated arithmetic beside it is the
    stale draft.
+
+Both comments fixed in 5c82832d.
 
 ## Divergence count by class
 
