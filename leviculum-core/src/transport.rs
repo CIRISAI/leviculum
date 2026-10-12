@@ -1653,7 +1653,7 @@ pub struct LinkTableExport {
     /// Hash of the destination this link addresses (16 bytes).
     pub destination_hash: [u8; TRUNCATED_HASHBYTES],
     /// Wall-clock age of the link in seconds — time since the handshake
-    /// completed (`Link::established_at_secs`). `None` for links that have
+    /// completed (`Link::established_at_ms`). `None` for links that have
     /// not yet established (Pending / Handshake states); rendered as `null`
     /// in the response.
     pub age_secs: Option<u64>,

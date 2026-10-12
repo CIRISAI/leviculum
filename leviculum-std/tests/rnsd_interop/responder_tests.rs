@@ -173,7 +173,7 @@ async fn test_responder_basic_handshake() {
 
     // Process RTT
     let rtt_seconds = link
-        .process_rtt(&rtt_encrypted)
+        .process_rtt(&rtt_encrypted, 0)
         .expect("Failed to process RTT");
 
     println!("Processed RTT: {:.3}s", rtt_seconds);
@@ -277,7 +277,7 @@ async fn test_responder_bidirectional_data() {
     .await
     .expect("Should receive RTT");
 
-    link.process_rtt(&rtt_encrypted).unwrap();
+    link.process_rtt(&rtt_encrypted, 0).unwrap();
     assert_eq!(link.state(), LinkState::Active);
 
     // Wait for Python link task
@@ -416,7 +416,7 @@ async fn test_responder_key_derivation_match() {
     )
     .await
     .unwrap();
-    link.process_rtt(&rtt).unwrap();
+    link.process_rtt(&rtt, 0).unwrap();
 
     let resp = link_task.await.unwrap();
     let link_hash = resp
@@ -523,7 +523,7 @@ async fn test_responder_multiple_packets() {
     )
     .await
     .unwrap();
-    link.process_rtt(&rtt).unwrap();
+    link.process_rtt(&rtt, 0).unwrap();
 
     let _ = link_task.await.unwrap();
 

@@ -487,8 +487,11 @@ pub const CHANNEL_WINDOW_MAX_FAST: usize = 48;
 /// Python's rx_ring is unbounded; we cap at 512 for embedded safety.
 pub const CHANNEL_RX_RING_MAX: usize = 512;
 
-/// Maximum transmission attempts before failure
-pub const CHANNEL_MAX_TRIES: u8 = 8;
+/// Maximum transmission attempts before the link is torn down: Python's
+/// `_max_tries` (`Channel.py:295`), checked at `Channel.py:569`. Was 8 until
+/// the 2026-10-12 link audit (D18): three retries more than a Python sender
+/// spends before giving a struggling link up.
+pub const CHANNEL_MAX_TRIES: u8 = 5;
 
 /// RTT threshold for fast links (180ms)
 pub const CHANNEL_RTT_FAST_MS: u64 = 180;

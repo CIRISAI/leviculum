@@ -609,7 +609,7 @@ async fn phase2_link_establishment(network: &mut MultiNodeTestNetwork) {
 
             if let Some(rtt_data) = rtt_data {
                 incoming_link
-                    .process_rtt(&rtt_data)
+                    .process_rtt(&rtt_data, 0)
                     .expect("RTT should validate");
                 assert_eq!(incoming_link.state(), LinkState::Active);
                 println!("  L3: ESTABLISHED (Rust-A <-> Rust-B)");
@@ -732,7 +732,7 @@ async fn phase2_link_establishment(network: &mut MultiNodeTestNetwork) {
 
             if let Some(rtt_data) = rtt_data {
                 incoming_link
-                    .process_rtt(&rtt_data)
+                    .process_rtt(&rtt_data, 0)
                     .expect("RTT should validate");
                 assert_eq!(incoming_link.state(), LinkState::Active);
                 println!("  L5: ESTABLISHED (Rust-C <-> Rust-D)");

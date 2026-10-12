@@ -8,9 +8,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::constants::{
-    CHANNEL_DEFAULT_RTT_MS, DATA_RECEIPT_TIMEOUT_MS, LINK_REQUEST_MAX_RETRIES, MODE_AES256_CBC,
-    MS_PER_SECOND, PROOF_DATA_SIZE, TRAFFIC_TIMEOUT_FACTOR, TRAFFIC_TIMEOUT_MIN_MS,
-    TRUNCATED_HASHBYTES,
+    CHANNEL_DEFAULT_RTT_MS, DATA_RECEIPT_TIMEOUT_MS, KEEPALIVE_INITIATOR_BYTE,
+    LINK_REQUEST_MAX_RETRIES, MODE_AES256_CBC, MS_PER_SECOND, PROOF_DATA_SIZE,
+    TRAFFIC_TIMEOUT_FACTOR, TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
 };
 use crate::destination::{DestinationHash, ProofStrategy};
 use crate::event_scalar::MsOrNone;
@@ -666,7 +666,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// disambiguates `pending` / `handshake` / `active` / `stale` / `closed`.
     /// Backs the `link_table` shared-instance RPC (`lnstest diag` v2).
     pub fn link_table_entries(&self) -> alloc::vec::Vec<crate::transport::LinkTableExport> {
-        let now_secs = self.transport.clock().now_ms() / MS_PER_SECOND;
+        let now_ms = self.transport.clock().now_ms();
         self.links
             .values()
             .map(|link| {
@@ -678,8 +678,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     LinkState::Closed => "closed",
                 };
                 let age_secs = link
-                    .established_at_secs()
-                    .map(|est| now_secs.saturating_sub(est));
+                    .established_at_ms()
+                    .map(|est| now_ms.saturating_sub(est) / MS_PER_SECOND);
                 crate::transport::LinkTableExport {
                     link_id: *link.id().as_bytes(),
                     state,
@@ -1215,7 +1215,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         // Proof verified! Calculate RTT and transition to established
-        let now_secs = now_ms / MS_PER_SECOND;
         let measured_rtt_ms = match link.phase() {
             LinkPhase::PendingOutgoing { created_at_ms } => now_ms.saturating_sub(created_at_ms),
             _ => 0,
@@ -1235,7 +1234,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Keepalive timing uses the actual measurement (even 0 for localhost).
         let rtt_seconds_actual = measured_rtt_ms as f64 / MS_PER_SECOND as f64;
         link.update_keepalive_from_rtt(rtt_seconds_actual);
-        link.mark_established(now_secs);
+        link.mark_established(now_ms);
 
         crate::tracing::debug!(
             "Link <{}> established with RTT {}ms",
@@ -1244,12 +1243,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         );
         crate::tracing::debug!(
             target: "leviculum_core::link",
-            "LINK_ESTAB link={} rtt_ms={} keepalive_s={} stale_s={} inactivity_timeout_ms={} hops={} initiator=true",
+            "LINK_ESTAB link={} rtt_ms={} keepalive_ms={} stale_ms={} inactivity_timeout_ms={} hops={} initiator=true",
             HexShort(link_id.as_bytes()),
             link.rtt_ms(),
-            link.keepalive_secs(),
-            link.stale_time_secs(),
-            link.stale_close_timeout_secs().saturating_mul(MS_PER_SECOND),
+            link.keepalive_ms(),
+            link.stale_time_ms(),
+            link.stale_close_timeout_ms(),
             link.hops(),
         );
 
@@ -1341,10 +1340,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             // packet) is not marked Stale and closed mid-transfer (#124).
             // Python parity: Packet.py:463 sets last_proof; Link.py:789's stale
             // check uses max(last_inbound, last_proof, activated_at).
-            let now_secs = self.transport.clock().now_ms() / MS_PER_SECOND;
-            self.try_recover_stale(link_id, now_secs);
+            let now_ms = self.transport.clock().now_ms();
+            self.try_recover_stale(link_id, now_ms);
             if let Some(link) = self.links.get_mut(link_id) {
-                link.record_inbound(now_secs);
+                link.record_inbound(now_ms);
             }
 
             // confirm_delivery removes the entry entirely (fixes orphan path #1).
@@ -1442,14 +1441,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         interface_index: usize,
     ) {
         let link_id = LinkId::new(packet.destination_hash);
-        let now_secs = now_ms / MS_PER_SECOND;
+
+        // An initiator's own keepalive coming back (a medium that reflects
+        // frames) is not inbound at all: the reference drops it before the
+        // interface check and before any clock or state moves (`Link.py:974`).
+        if packet.context == PacketContext::Keepalive
+            && packet.data.as_slice() == [KEEPALIVE_INITIATOR_BYTE]
+            && self.links.get(&link_id).is_some_and(|l| l.is_initiator())
+        {
+            return;
+        }
 
         if self.refuse_off_link_interface(&link_id, packet, raw_hash, interface_index) {
             return;
         }
 
-        // Recover stale links on any inbound traffic (Python Link.py:983-984)
-        self.try_recover_stale(&link_id, now_secs);
+        // Recover stale links on any inbound traffic (Python Link.py:983-984).
+        // A keepalive recovers only once its byte validates, in its handler.
+        if packet.context != PacketContext::Keepalive {
+            self.try_recover_stale(&link_id, now_ms);
+        }
 
         if !self.links.contains_key(&link_id) {
             crate::tracing::trace!(
@@ -1477,23 +1488,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         match packet.context {
-            PacketContext::Lrrtt => self.handle_rtt_packet(link_id, packet, now_secs),
-            PacketContext::Keepalive => self.handle_keepalive_packet(link_id, packet, now_secs),
+            PacketContext::Lrrtt => self.handle_rtt_packet(link_id, packet, now_ms),
+            PacketContext::Keepalive => self.handle_keepalive_packet(link_id, packet, now_ms),
             PacketContext::LinkClose => self.handle_close_packet(link_id, packet),
             PacketContext::Channel => {
-                self.handle_channel_packet(link_id, packet, raw_packet, now_ms, now_secs)
+                self.handle_channel_packet(link_id, packet, raw_packet, now_ms)
             }
             PacketContext::ResourceAdv => {
-                self.handle_resource_adv(link_id, packet, raw_packet, now_ms, now_secs);
+                self.handle_resource_adv(link_id, packet, raw_packet, now_ms);
             }
             PacketContext::ResourceReq => {
-                self.handle_resource_req(link_id, packet, now_ms, now_secs);
+                self.handle_resource_req(link_id, packet, now_ms);
             }
             PacketContext::Resource => {
-                self.handle_resource_data(link_id, packet, now_ms, now_secs);
+                self.handle_resource_data(link_id, packet, now_ms);
             }
             PacketContext::ResourceHmu => {
-                self.handle_resource_hmu(link_id, packet, raw_packet, now_ms, now_secs);
+                self.handle_resource_hmu(link_id, packet, raw_packet, now_ms);
             }
             PacketContext::ResourceIcl => {
                 self.handle_resource_cancel(link_id, packet, true);
@@ -1502,16 +1513,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.handle_resource_cancel(link_id, packet, false);
             }
             PacketContext::LinkIdentify => {
-                self.handle_link_identify(link_id, packet, now_secs);
+                self.handle_link_identify(link_id, packet, now_ms);
             }
             PacketContext::Request => {
-                self.handle_request_packet(link_id, packet, raw_packet, now_ms, now_secs);
+                self.handle_request_packet(link_id, packet, raw_packet, now_ms);
             }
             PacketContext::Response => {
-                self.handle_response_packet(link_id, packet, raw_packet, now_secs);
+                self.handle_response_packet(link_id, packet, raw_packet, now_ms);
             }
             PacketContext::CacheRequest => {
-                self.handle_cache_request(link_id, packet, now_secs);
+                self.handle_cache_request(link_id, packet, now_ms);
             }
             // A context byte we assign no meaning to must NOT fall into the
             // plain-data arm below: that arm means "this is link payload for
@@ -1535,13 +1546,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             | PacketContext::CommandStatus
             | PacketContext::LinkProof
             | PacketContext::Lrproof => {
-                self.handle_plain_data_packet(link_id, packet, raw_packet, now_secs)
+                self.handle_plain_data_packet(link_id, packet, raw_packet, now_ms)
             }
         }
     }
 
     /// RTT packet (context = Lrrtt), responder side
-    fn handle_rtt_packet(&mut self, link_id: LinkId, packet: &Packet, now_secs: u64) {
+    fn handle_rtt_packet(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
@@ -1549,9 +1560,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
         let encrypted_data = packet.data.as_slice();
-        if let Ok(rtt_secs) = link.process_rtt(encrypted_data) {
+        if let Ok(rtt_secs) = link.process_rtt(encrypted_data, now_ms) {
             link.update_keepalive_from_rtt(rtt_secs);
-            link.mark_established(now_secs);
+            link.mark_established(now_ms);
             link.set_phase(LinkPhase::Established);
             crate::tracing::debug!(
                 "Link <{}> established (responder), RTT {:.3}s",
@@ -1560,12 +1571,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
             crate::tracing::debug!(
                 target: "leviculum_core::link",
-                "LINK_ESTAB link={} rtt_ms={} keepalive_s={} stale_s={} inactivity_timeout_ms={} hops={} initiator=false",
+                "LINK_ESTAB link={} rtt_ms={} keepalive_ms={} stale_ms={} inactivity_timeout_ms={} hops={} initiator=false",
                 HexShort(link_id.as_bytes()),
                 link.rtt_ms(),
-                link.keepalive_secs(),
-                link.stale_time_secs(),
-                link.stale_close_timeout_secs().saturating_mul(MS_PER_SECOND),
+                link.keepalive_ms(),
+                link.stale_time_ms(),
+                link.stale_close_timeout_ms(),
                 link.hops(),
             );
             self.events.push(NodeEvent::LinkEstablished {
@@ -1577,30 +1588,37 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Keepalive packet, record activity and echo if requested
-    fn handle_keepalive_packet(&mut self, link_id: LinkId, packet: &Packet, now_secs: u64) {
+    fn handle_keepalive_packet(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
-        link.record_keepalive_inbound(now_secs);
         let data = packet.data.as_slice();
-        if let Ok(should_echo) = link.process_keepalive(data) {
-            // Initiator side: a valid responder echo (should_echo == false) reset
-            // the watchdog. process_keepalive() already bumped keepalives_acked.
-            if !should_echo {
-                crate::tracing::debug!(
-                    target: "leviculum_core::link",
-                    "LINK_ACTIVITY link={} kind=keepalive_resp t_ms={} keepalives_sent={} keepalives_acked={}",
-                    HexShort(link_id.as_bytes()),
-                    now_secs.saturating_mul(MS_PER_SECOND),
-                    link.keepalives_sent(),
-                    link.keepalives_acked(),
-                );
+        // Validate before the keepalive feeds the watchdog: a wrong-direction
+        // or malformed byte is not a live peer, so it neither refreshes the
+        // inbound clock nor recovers a Stale link (audit D8).
+        let Ok(should_echo) = link.process_keepalive(data) else {
+            return;
+        };
+        self.try_recover_stale(&link_id, now_ms);
+        let Some(link) = self.links.get_mut(&link_id) else {
+            return;
+        };
+        link.record_keepalive_inbound(now_ms);
+        if should_echo {
+            if let Ok(echo_packet) = link.build_keepalive_packet() {
+                self.route_link_packet(&link_id, &echo_packet);
             }
-            if should_echo {
-                if let Ok(echo_packet) = link.build_keepalive_packet() {
-                    self.route_link_packet(&link_id, &echo_packet);
-                }
-            }
+        } else {
+            // Initiator side: a valid responder echo reset the watchdog.
+            // process_keepalive() already bumped keepalives_acked.
+            crate::tracing::debug!(
+                target: "leviculum_core::link",
+                "LINK_ACTIVITY link={} kind=keepalive_resp t_ms={} keepalives_sent={} keepalives_acked={}",
+                HexShort(link_id.as_bytes()),
+                now_ms,
+                link.keepalives_sent(),
+                link.keepalives_acked(),
+            );
         }
     }
 
@@ -1631,7 +1649,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         packet: &Packet,
         raw_packet: &[u8],
         now_ms: u64,
-        now_secs: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
             crate::tracing::trace!(
@@ -1648,7 +1665,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
 
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
 
         // Codeberg #280: a reliable channel message is proofed to the sender
         // the moment it is delivered below, so it must not be delivered into a
@@ -1854,7 +1871,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: LinkId,
         packet: &Packet,
         raw_packet: &[u8],
-        now_secs: u64,
+        now_ms: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
             crate::tracing::trace!(
@@ -1871,7 +1888,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
 
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
 
         let encrypted_data = packet.data.as_slice();
         let max_plaintext_len = encrypted_data.len();
@@ -1922,7 +1939,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Protocol: plaintext = public_key(64) + signature(64) = 128 bytes.
     /// signed_data = link_id(16) + public_key(64) = 80 bytes.
     /// Only accepted on responder side (non-initiator). Matches Python Link.py:1010-1031.
-    fn handle_link_identify(&mut self, link_id: LinkId, packet: &Packet, now_secs: u64) {
+    fn handle_link_identify(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
@@ -1940,7 +1957,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
 
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
 
         // Decrypt
         let encrypted_data = packet.data.as_slice();
@@ -2070,8 +2087,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: LinkId,
         packet: &Packet,
         raw_packet: &[u8],
-        _now_ms: u64, // passed by dispatch_link_data_packet uniformly; unused here
-        now_secs: u64,
+        now_ms: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
@@ -2080,7 +2096,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if link.state() != LinkState::Active {
             return;
         }
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
 
         // Decrypt
         let encrypted_data = packet.data.as_slice();
@@ -2240,7 +2256,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: LinkId,
         packet: &Packet,
         raw_packet: &[u8],
-        now_secs: u64,
+        now_ms: u64,
     ) {
         let _ = raw_packet; // request_id is inside the payload, not derived from packet hash
 
@@ -2251,7 +2267,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if link.state() != LinkState::Active {
             return;
         }
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
 
         // Decrypt
         let encrypted_data = packet.data.as_slice();
@@ -2360,11 +2376,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Handle a CacheRequest packet: re-send a cached resource proof if we have it.
-    fn handle_cache_request(&mut self, link_id: LinkId, packet: &Packet, now_secs: u64) {
+    fn handle_cache_request(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
 
         let data = packet.data.as_slice();
         if data.len() != 32 {
@@ -2390,7 +2406,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         };
 
-        link.record_outbound(now_secs);
+        link.record_outbound(now_ms);
         crate::tracing::debug!(
             link = %HexShort(link_id.as_bytes()),
             "Re-sending cached resource proof"
@@ -2549,13 +2565,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// If the link is Stale and we receive any valid packet, recover to Active.
     /// Matches Python Link.py:983-984.
-    fn try_recover_stale(&mut self, link_id: &LinkId, now_secs: u64) -> bool {
+    fn try_recover_stale(&mut self, link_id: &LinkId, now_ms: u64) -> bool {
         let Some(link) = self.links.get_mut(link_id) else {
             return false;
         };
         if link.state() == LinkState::Stale {
             link.set_state(LinkState::Active);
-            link.record_inbound(now_secs);
+            link.record_inbound(now_ms);
             self.events
                 .push(NodeEvent::LinkRecovered { link_id: *link_id });
             crate::tracing::debug!(link = %HexFmt(link_id.as_bytes()), "link_mgr: recovered from stale");
@@ -2573,7 +2589,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         packet: &Packet,
         _raw_packet: &[u8],
         now_ms: u64,
-        now_secs: u64,
     ) {
         use crate::resource::{
             incoming::IncomingResource, ResourceAdvertisement, ResourceStrategy,
@@ -2585,7 +2600,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if link.state() != LinkState::Active {
             return;
         }
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
 
         // An ADV parked for the application is decided there, ignore
         if link.has_pending_resource() {
@@ -2643,7 +2658,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         rh = %HexFmt(&adv.resource_hash[..4]),
                         link = %HexShort(link_id.as_bytes()),
                     );
-                    link.record_outbound(now_secs);
+                    link.record_outbound(now_ms);
                     self.route_link_packet(&link_id, &pkt);
                 }
                 Err(e) => {
@@ -2706,7 +2721,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if strategy != ResourceStrategy::AcceptNone
             && link.incoming_resource_count() >= self.max_incoming_resources_per_link
         {
-            self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_secs);
+            self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_ms);
             return;
         }
         let resource_hash = adv.resource_hash;
@@ -2737,7 +2752,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         match req_packet {
                             Ok(pkt) => {
                                 link.push_incoming_resource(incoming);
-                                link.record_outbound(now_secs);
+                                link.record_outbound(now_ms);
                                 self.route_link_packet(&link_id, &pkt);
                                 self.events.push(NodeEvent::ResourceTransferStarted {
                                     link_id,
@@ -2801,7 +2816,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         &mut self,
         link_id: &LinkId,
         resource_hash: &[u8; 32],
-        now_secs: u64,
+        now_ms: u64,
     ) {
         let Some(link) = self.links.get_mut(link_id) else {
             return;
@@ -2819,7 +2834,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             &mut self.rng,
         ) {
             Ok(pkt) => {
-                link.record_outbound(now_secs);
+                link.record_outbound(now_ms);
                 self.route_link_packet(link_id, &pkt);
             }
             Err(e) => {
@@ -2829,13 +2844,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Handle a ResourceReq packet (sender receives receiver's request).
-    fn handle_resource_req(
-        &mut self,
-        link_id: LinkId,
-        packet: &Packet,
-        now_ms: u64,
-        now_secs: u64,
-    ) {
+    fn handle_resource_req(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
@@ -2850,7 +2859,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
             return;
         }
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
 
         // Decrypt REQ
         let encrypted_data = packet.data.as_slice();
@@ -2927,18 +2936,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Update outbound timestamp
         if let Some(link) = self.links.get_mut(&link_id) {
-            link.record_outbound(now_secs);
+            link.record_outbound(now_ms);
         }
     }
 
     /// Handle a Resource data part (receiver gets raw data).
-    fn handle_resource_data(
-        &mut self,
-        link_id: LinkId,
-        packet: &Packet,
-        now_ms: u64,
-        now_secs: u64,
-    ) {
+    fn handle_resource_data(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
         use crate::resource::incoming::ResourcePartResult;
 
         let Some(link) = self.links.get_mut(&link_id) else {
@@ -2955,7 +2958,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
             return;
         }
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
 
         // Resource data parts are NOT encrypted per-packet (context=RESOURCE skips encryption)
         // The data is raw (pre-encrypted in bulk by the sender)
@@ -3007,7 +3010,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                 match req_pkt {
                     Ok(pkt) => {
-                        link.record_outbound(now_secs);
+                        link.record_outbound(now_ms);
                         self.route_link_packet(&link_id, &pkt);
                     }
                     Err(e) => {
@@ -3035,7 +3038,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 if let Ok(pkt) = proof_pkt {
                                     let ph = crate::packet::packet_hash(&pkt);
                                     link.cache_resource_proof(ph, pkt.clone());
-                                    link.record_outbound(now_secs);
+                                    link.record_outbound(now_ms);
                                     self.route_link_packet(&link_id, &pkt);
                                 }
                             }
@@ -3180,7 +3183,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         packet: &Packet,
         _raw_packet: &[u8],
         now_ms: u64,
-        now_secs: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
@@ -3188,7 +3190,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if link.state() != LinkState::Active {
             return;
         }
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
 
         // Decrypt HMU
         let encrypted_data = packet.data.as_slice();
@@ -3225,7 +3227,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     &mut self.rng,
                 );
                 if let Ok(pkt) = req_pkt {
-                    link.record_outbound(now_secs);
+                    link.record_outbound(now_ms);
                     self.route_link_packet(&link_id, &pkt);
                 }
             }
@@ -3317,10 +3319,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // for every link packet, RESOURCE_PRF included, and flips
         // STALE back to ACTIVE.
         if outcome.is_ok() {
-            let now_secs = now_ms / MS_PER_SECOND;
-            self.try_recover_stale(&link_id, now_secs);
+            self.try_recover_stale(&link_id, now_ms);
             if let Some(link) = self.links.get_mut(&link_id) {
-                link.record_inbound(now_secs);
+                link.record_inbound(now_ms);
             }
         }
 
@@ -3684,11 +3685,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Check if any active links need to send keepalives (initiator only)
-    pub(super) fn check_keepalives(&mut self, now_secs: u64) {
+    pub(super) fn check_keepalives(&mut self, now_ms: u64) {
         let need_keepalive: Vec<LinkId> = self
             .links
             .iter()
-            .filter(|(_, link)| link.is_initiator() && link.should_send_keepalive(now_secs))
+            .filter(|(_, link)| link.is_initiator() && link.should_send_keepalive(now_ms))
             .map(|(id, _)| *id)
             .collect();
 
@@ -3699,12 +3700,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         "Sent keepalive on link <{}>",
                         HexShort(link_id.as_bytes())
                     );
-                    link.record_keepalive_sent(now_secs);
+                    link.record_keepalive_sent(now_ms);
                     crate::tracing::debug!(
                         target: "leviculum_core::link",
                         "LINK_KEEPALIVE_TX link={} t_ms={} keepalives_sent={}",
                         HexShort(link_id.as_bytes()),
-                        now_secs.saturating_mul(MS_PER_SECOND),
+                        now_ms,
                         link.keepalives_sent(),
                     );
                     self.route_link_packet(&link_id, &packet);
@@ -3714,12 +3715,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Check for stale links and close them if timeout expired
-    pub(super) fn check_stale_links(&mut self, now_secs: u64) {
+    pub(super) fn check_stale_links(&mut self, now_ms: u64) {
         // First pass: Find links that are active but should become stale
         let newly_stale: Vec<LinkId> = self
             .links
             .iter()
-            .filter(|(_, link)| link.state() == LinkState::Active && link.is_stale(now_secs))
+            .filter(|(_, link)| link.state() == LinkState::Active && link.is_stale(now_ms))
             .map(|(id, _)| *id)
             .collect();
 
@@ -3738,7 +3739,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let should_close: Vec<LinkId> = self
             .links
             .iter()
-            .filter(|(_, link)| link.state() == LinkState::Stale && link.should_close(now_secs))
+            .filter(|(_, link)| link.state() == LinkState::Stale && link.should_close(now_ms))
             .map(|(id, _)| *id)
             .collect();
 
@@ -3768,14 +3769,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // recorded inbound traffic. `none` is therefore not expected
                 // here — it is printed rather than faked if that gate is ever
                 // dropped.
-                let elapsed_ms = link.inbound_age_ms(now_secs.saturating_mul(MS_PER_SECOND));
+                let elapsed_ms = link.inbound_age_ms(now_ms);
                 crate::tracing::debug!(
                     target: "leviculum_core::link",
                     "LINK_DIED link={} reason={} elapsed_since_activity_ms={} threshold_ms={} rtt_ms={} keepalives_sent={} keepalives_acked={}",
                     HexShort(link_id.as_bytes()),
                     reason,
                     MsOrNone(elapsed_ms),
-                    link.stale_close_timeout_secs().saturating_mul(MS_PER_SECOND),
+                    link.stale_close_timeout_ms(),
                     link.rtt_ms(),
                     sent,
                     acked,
@@ -3927,8 +3928,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .map(|(id, _)| *id)
             .collect();
 
-        let now_secs = now_ms / MS_PER_SECOND;
-
         for link_id in resource_link_ids {
             let rtt_ms = self.links.get(&link_id).map(|l| l.rtt_ms()).unwrap_or(5000);
 
@@ -3967,7 +3966,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         };
                         if let Some(pkt) = pkt {
                             if let Some(link) = self.links.get_mut(&link_id) {
-                                link.record_outbound(now_secs);
+                                link.record_outbound(now_ms);
                             }
                             self.route_link_packet(&link_id, &pkt);
                         }
@@ -4000,7 +3999,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             };
                             if let Some(pkt) = icl {
                                 if let Some(link) = self.links.get_mut(&link_id) {
-                                    link.record_outbound(now_secs);
+                                    link.record_outbound(now_ms);
                                 }
                                 self.route_link_packet(&link_id, &pkt);
                             }
@@ -4034,7 +4033,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             };
                             if let Some(pkt) = cache_req {
                                 if let Some(link) = self.links.get_mut(&link_id) {
-                                    link.record_outbound(now_secs);
+                                    link.record_outbound(now_ms);
                                 }
                                 self.route_link_packet(&link_id, &pkt);
                             }
@@ -4093,7 +4092,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         };
                         if let Some(pkt) = pkt {
                             if let Some(link) = self.links.get_mut(&link_id) {
-                                link.record_outbound(now_secs);
+                                link.record_outbound(now_ms);
                             }
                             self.route_link_packet(&link_id, &pkt);
                         }
@@ -4123,7 +4122,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Compute the earliest deadline across all link-layer timers
     pub(super) fn link_next_deadline(&self, now_ms: u64) -> Option<u64> {
-        let now_secs = now_ms / MS_PER_SECOND;
         let mut earliest: Option<u64> = None;
 
         let mut update = |deadline_ms: u64| {
@@ -4150,19 +4148,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             match link.state() {
                 LinkState::Active => {
                     if link.is_initiator() {
-                        let base = if link.last_keepalive_secs() > 0 {
-                            link.last_keepalive_secs()
+                        let base = if link.last_keepalive_ms() > 0 {
+                            link.last_keepalive_ms()
                         } else {
-                            link.established_at_secs().unwrap_or(now_secs)
+                            link.established_at_ms().unwrap_or(now_ms)
                         };
-                        let next_keepalive_secs = base.saturating_add(link.keepalive_secs());
-                        update(next_keepalive_secs.saturating_mul(MS_PER_SECOND));
+                        update(base.saturating_add(link.keepalive_ms()));
                     }
-                    if link.last_inbound_secs() > 0 {
-                        let stale_at_secs = link
-                            .last_inbound_secs()
-                            .saturating_add(link.stale_time_secs());
-                        update(stale_at_secs.saturating_mul(MS_PER_SECOND));
+                    if link.last_inbound_ms() > 0 {
+                        // `is_stale` flips once the silence EXCEEDS the window.
+                        update(
+                            link.last_inbound_ms()
+                                .saturating_add(link.stale_time_ms())
+                                .saturating_add(1),
+                        );
                     }
                 }
                 LinkState::Stale => {

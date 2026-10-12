@@ -416,39 +416,41 @@ pub struct Link {
     /// Used for keepalive interval calculation and window tier promotion.
     /// For the smoothed RTT used in pacing, see `Channel::srtt_ms`.
     rtt_us: Option<u64>,
-    /// Keepalive interval in seconds (calculated from RTT)
-    keepalive_secs: u64,
+    /// Keepalive interval in milliseconds (calculated from RTT). Kept in
+    /// milliseconds so the reference's fractional seconds survive
+    /// (`Link.py:845`): 102.857 s at a 500 ms RTT, not 102 s.
+    keepalive_ms: u64,
     /// Optional keepalive override in seconds. When set, the link uses this
     /// interval instead of the RTT-derived value and it survives RTT
     /// recalculation. Threaded from `TransportConfig::link_keepalive_secs`;
     /// `None` reproduces the default RTT-driven behaviour.
     keepalive_override: Option<u64>,
-    /// Stale time in seconds (keepalive_secs * STALE_FACTOR)
-    stale_time_secs: u64,
-    /// Time of last inbound packet (timestamp in seconds)
-    last_inbound: u64,
+    /// Stale time in milliseconds (keepalive_ms * STALE_FACTOR)
+    stale_time_ms: u64,
+    /// Time of last inbound packet (clock milliseconds)
+    last_inbound_ms: u64,
     /// Whether any inbound packet has been recorded. Distinguishes "no inbound
     /// yet" from a genuine `last_inbound` of 0 (a link established in the node's
     /// first uptime second, where the monotonic clock still reads 0), so the
     /// latter is not wrongly treated as never-active by stale detection.
     had_inbound: bool,
     /// Time payload last crossed the link inbound, keepalives excluded
-    /// (timestamp in seconds); `None` before establishment. Python's
+    /// (clock milliseconds); `None` before establishment. Python's
     /// `Link.last_data` (`Link.py:978-980`), the clock an application's
     /// idle teardown reads (`Link.no_data_for`, `Link.py:671-675`).
-    last_data: Option<u64>,
-    /// Time of last outbound packet (timestamp in seconds)
-    last_outbound: u64,
-    /// Last time we sent a keepalive (timestamp in seconds)
-    last_keepalive: u64,
+    last_data_ms: Option<u64>,
+    /// Time of last outbound packet (clock milliseconds)
+    last_outbound_ms: u64,
+    /// Last time we sent a keepalive (clock milliseconds)
+    last_keepalive_ms: u64,
     /// Count of keepalives sent proactively (initiator), since establishment.
     /// Diagnostic counter only; not used for any timeout decision.
     keepalives_sent: u64,
     /// Count of keepalive responses received (initiator), since establishment.
     /// Diagnostic counter only; not used for any timeout decision.
     keepalives_acked: u64,
-    /// When the link was established (timestamp in seconds)
-    established_at: Option<u64>,
+    /// When the link was established (clock milliseconds)
+    established_at_ms: Option<u64>,
     /// Proof strategy for received data on this link (responder only)
     proof_strategy: ProofStrategy,
     /// Destination identity signing key for generating proofs (responder only)
@@ -593,17 +595,17 @@ impl Link {
             initiator: true,
             hops: 0,
             rtt_us: None,
-            keepalive_secs: LINK_KEEPALIVE_SECS,
+            keepalive_ms: LINK_KEEPALIVE_SECS * MS_PER_SECOND,
             keepalive_override: None,
-            stale_time_secs: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR,
-            last_inbound: 0,
+            stale_time_ms: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR * MS_PER_SECOND,
+            last_inbound_ms: 0,
             had_inbound: false,
-            last_data: None,
-            last_outbound: 0,
-            last_keepalive: 0,
+            last_data_ms: None,
+            last_outbound_ms: 0,
+            last_keepalive_ms: 0,
             keepalives_sent: 0,
             keepalives_acked: 0,
-            established_at: None,
+            established_at_ms: None,
             proof_strategy: ProofStrategy::None,
             dest_signing_key: None,
             attached_interface: None,
@@ -728,17 +730,17 @@ impl Link {
             initiator: false, // We are the responder
             hops: 0,
             rtt_us: None,
-            keepalive_secs: LINK_KEEPALIVE_SECS,
+            keepalive_ms: LINK_KEEPALIVE_SECS * MS_PER_SECOND,
             keepalive_override: None,
-            stale_time_secs: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR,
-            last_inbound: 0,
+            stale_time_ms: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR * MS_PER_SECOND,
+            last_inbound_ms: 0,
             had_inbound: false,
-            last_data: None,
-            last_outbound: 0,
-            last_keepalive: 0,
+            last_data_ms: None,
+            last_outbound_ms: 0,
+            last_keepalive_ms: 0,
             keepalives_sent: 0,
             keepalives_acked: 0,
-            established_at: None,
+            established_at_ms: None,
             proof_strategy: ProofStrategy::None,
             dest_signing_key: None,
             attached_interface: None,
@@ -857,12 +859,22 @@ impl Link {
     /// This is called on the responder side after sending the PROOF.
     /// The RTT packet contains an encrypted msgpack float64 value.
     ///
+    /// The link's RTT is the larger of the initiator's wire value and our own
+    /// measurement from the proof send to `now_ms`, as the reference takes
+    /// `max(measured_rtt, rtt)` (`rtt_packet`, `Link.py:540`, with
+    /// `request_time` stamped beside `prove()`, `Link.py:215`): an initiator
+    /// that understates its RTT cannot shrink our keepalive and stale
+    /// windows below what we saw ourselves. A link not in `PendingIncoming`
+    /// has no proof send to measure from and keeps the wire value.
+    ///
     /// # Arguments
     /// * `encrypted_data` - The encrypted payload from the RTT packet
+    /// * `now_ms` - Arrival time of the RTT packet, on the clock the proof
+    ///   send was stamped with
     ///
     /// # Returns
     /// Ok(rtt_seconds) if the link is now active, Err otherwise.
-    pub fn process_rtt(&mut self, encrypted_data: &[u8]) -> Result<f64, LinkError> {
+    pub fn process_rtt(&mut self, encrypted_data: &[u8], now_ms: u64) -> Result<f64, LinkError> {
         self.require_state(LinkState::Handshake)?;
         self.require_responder()?;
 
@@ -890,8 +902,16 @@ impl Link {
         if !rtt_seconds.is_finite() || rtt_seconds <= 0.0 {
             return Err(LinkError::InvalidRtt);
         }
+        let measured_seconds = match self.phase {
+            LinkPhase::PendingIncoming { proof_sent_at_ms } => {
+                now_ms.saturating_sub(proof_sent_at_ms) as f64 / MS_PER_SECOND as f64
+            }
+            _ => 0.0,
+        };
         const MAX_PLAUSIBLE_RTT_SECS: f64 = 3600.0;
-        let rtt_seconds = rtt_seconds.min(MAX_PLAUSIBLE_RTT_SECS);
+        let rtt_seconds = rtt_seconds
+            .max(measured_seconds)
+            .min(MAX_PLAUSIBLE_RTT_SECS);
 
         // Store RTT (convert to microseconds for internal storage)
         self.rtt_us = Some((rtt_seconds * 1_000_000.0) as u64);
@@ -1392,54 +1412,65 @@ impl Link {
 
     /// Check if the link should be considered stale (no inbound for stale_time)
     ///
-    /// A link becomes stale when no packets have been received for stale_time_secs,
-    /// which is calculated as keepalive_secs * LINK_STALE_FACTOR.
-    pub fn is_stale(&self, current_time_secs: u64) -> bool {
+    /// A link becomes stale when no packets have been received for
+    /// `stale_time_ms`, which is `keepalive * LINK_STALE_FACTOR`.
+    pub fn is_stale(&self, now_ms: u64) -> bool {
         if self.state != LinkState::Active {
             return false;
         }
         if !self.had_inbound {
             return false; // No inbound recorded yet
         }
-        let elapsed = current_time_secs.saturating_sub(self.last_inbound);
-        elapsed > self.stale_time_secs
+        let elapsed = now_ms.saturating_sub(self.last_inbound_ms);
+        elapsed > self.stale_time_ms
     }
 
     /// Check if a stale link should be closed (timeout expired)
     ///
     /// After a link becomes stale, it should be closed after:
     /// RTT * LINK_KEEPALIVE_TIMEOUT_FACTOR + LINK_STALE_GRACE_SECS
-    pub fn should_close(&self, current_time_secs: u64) -> bool {
+    pub fn should_close(&self, now_ms: u64) -> bool {
         if self.state != LinkState::Stale {
             return false;
         }
         if !self.had_inbound {
             return false;
         }
-        let elapsed = current_time_secs.saturating_sub(self.last_inbound);
-        elapsed > self.stale_close_timeout_secs()
+        let elapsed = now_ms.saturating_sub(self.last_inbound_ms);
+        elapsed > self.stale_close_timeout_ms()
     }
 
-    /// Total inactivity (since last inbound) after which a stale link is closed.
+    /// Total inactivity (since last inbound) after which a stale link is
+    /// closed, in milliseconds.
     ///
     /// `stale_time + RTT * LINK_KEEPALIVE_TIMEOUT_FACTOR + LINK_STALE_GRACE_SECS`,
-    /// using this link's measured RTT. Pure; shared by `should_close()` and the
-    /// `LINK_DIED`/`LINK_ESTAB` diagnostics.
-    pub fn stale_close_timeout_secs(&self) -> u64 {
-        let rtt_secs = self.rtt_secs().unwrap_or(0.0);
-        self.stale_time_secs
-            + (rtt_secs * LINK_KEEPALIVE_TIMEOUT_FACTOR as f64) as u64
-            + LINK_STALE_GRACE_SECS
+    /// using this link's measured RTT (`Link.py:797`): 212.714 s at a 500 ms
+    /// RTT. Pure; shared by `should_close()` and the `LINK_DIED`/`LINK_ESTAB`
+    /// diagnostics.
+    pub fn stale_close_timeout_ms(&self) -> u64 {
+        let rtt_us = self.rtt_us.unwrap_or(0);
+        self.stale_time_ms
+            .saturating_add(rtt_us.saturating_mul(LINK_KEEPALIVE_TIMEOUT_FACTOR) / US_PER_MS)
+            .saturating_add(LINK_STALE_GRACE_SECS * MS_PER_SECOND)
     }
 
-    /// Calculate keepalive interval from RTT (matching Python formula)
+    /// Keepalive and stale windows for an RTT, in milliseconds (matching the
+    /// Python formula).
     ///
-    /// Python formula: max(min(rtt * (KEEPALIVE_MAX / KEEPALIVE_MAX_RTT), KEEPALIVE_MAX), KEEPALIVE_MIN)
-    /// Where KEEPALIVE_MAX=360, KEEPALIVE_MAX_RTT=1.75, KEEPALIVE_MIN=5
-    pub fn calculate_keepalive_from_rtt(rtt_secs: f64) -> u64 {
+    /// Python (`__update_keepalive`, `Link.py:844-846`):
+    /// `keepalive = max(min(rtt * (KEEPALIVE_MAX / KEEPALIVE_MAX_RTT), KEEPALIVE_MAX), KEEPALIVE_MIN)`
+    /// and `stale_time = keepalive * STALE_FACTOR`, where KEEPALIVE_MAX=360,
+    /// KEEPALIVE_MAX_RTT=1.75, KEEPALIVE_MIN=5, STALE_FACTOR=2. Both are
+    /// float seconds there; each is floored to the millisecond here only
+    /// once, from the float, so stale is not twice a truncated keepalive.
+    pub fn keepalive_windows_from_rtt(rtt_secs: f64) -> (u64, u64) {
         let interval = rtt_secs * (LINK_KEEPALIVE_SECS as f64 / LINK_KEEPALIVE_MAX_RTT);
-        let clamped = interval.clamp(LINK_KEEPALIVE_MIN_SECS as f64, LINK_KEEPALIVE_SECS as f64);
-        clamped as u64
+        let keepalive = interval.clamp(LINK_KEEPALIVE_MIN_SECS as f64, LINK_KEEPALIVE_SECS as f64);
+        let ms = MS_PER_SECOND as f64;
+        (
+            (keepalive * ms) as u64,
+            (keepalive * LINK_STALE_FACTOR as f64 * ms) as u64,
+        )
     }
 
     /// Update keepalive timing after RTT is known.
@@ -1451,8 +1482,7 @@ impl Link {
             self.apply_keepalive_override();
             return;
         }
-        self.keepalive_secs = Self::calculate_keepalive_from_rtt(rtt_secs);
-        self.stale_time_secs = self.keepalive_secs * LINK_STALE_FACTOR;
+        (self.keepalive_ms, self.stale_time_ms) = Self::keepalive_windows_from_rtt(rtt_secs);
     }
 
     /// Set or clear the keepalive override (seconds).
@@ -1470,9 +1500,11 @@ impl Link {
     /// Apply the current keepalive override to the live timing fields.
     fn apply_keepalive_override(&mut self) {
         if let Some(secs) = self.keepalive_override {
-            let clamped = secs.max(LINK_KEEPALIVE_MIN_SECS);
-            self.keepalive_secs = clamped;
-            self.stale_time_secs = clamped * LINK_STALE_FACTOR;
+            let clamped_ms = secs
+                .max(LINK_KEEPALIVE_MIN_SECS)
+                .saturating_mul(MS_PER_SECOND);
+            self.keepalive_ms = clamped_ms;
+            self.stale_time_ms = clamped_ms.saturating_mul(LINK_STALE_FACTOR);
         }
     }
 
@@ -1480,49 +1512,49 @@ impl Link {
     ///
     /// Returns true if enough time has passed since our last keepalive
     /// and we are the initiator (only initiators send keepalives proactively).
-    pub fn should_send_keepalive(&self, now_secs: u64) -> bool {
+    pub fn should_send_keepalive(&self, now_ms: u64) -> bool {
         if !self.initiator || self.state != LinkState::Active {
             return false;
         }
-        if self.last_keepalive == 0 {
+        if self.last_keepalive_ms == 0 {
             // First keepalive after establishment
-            if let Some(established) = self.established_at {
-                return now_secs.saturating_sub(established) >= self.keepalive_secs;
+            if let Some(established) = self.established_at_ms {
+                return now_ms.saturating_sub(established) >= self.keepalive_ms;
             }
             return false;
         }
-        now_secs.saturating_sub(self.last_keepalive) >= self.keepalive_secs
+        now_ms.saturating_sub(self.last_keepalive_ms) >= self.keepalive_ms
     }
 
-    /// Record an inbound packet timestamp
-    pub fn record_inbound(&mut self, now_secs: u64) {
-        self.last_inbound = now_secs;
+    /// Record an inbound packet timestamp (clock milliseconds)
+    pub fn record_inbound(&mut self, now_ms: u64) {
+        self.last_inbound_ms = now_ms;
         self.had_inbound = true;
-        self.last_data = Some(now_secs);
+        self.last_data_ms = Some(now_ms);
     }
 
     /// Record an inbound keepalive: it keeps the link alive but is not
     /// payload, so the data clock stays where it was (`Link.py:979`).
-    pub fn record_keepalive_inbound(&mut self, now_secs: u64) {
-        self.last_inbound = now_secs;
+    pub fn record_keepalive_inbound(&mut self, now_ms: u64) {
+        self.last_inbound_ms = now_ms;
         self.had_inbound = true;
     }
 
-    /// Seconds since payload last crossed the link inbound, keepalives
+    /// Milliseconds since payload last crossed the link inbound, keepalives
     /// excluded, or `None` before establishment: Python's
     /// `Link.no_data_for()` (`Link.py:671-675`).
-    pub fn no_data_for_secs(&self, now_secs: u64) -> Option<u64> {
-        self.last_data.map(|at| now_secs.saturating_sub(at))
+    pub fn no_data_for_ms(&self, now_ms: u64) -> Option<u64> {
+        self.last_data_ms.map(|at| now_ms.saturating_sub(at))
     }
 
-    /// Record an outbound packet timestamp
-    pub fn record_outbound(&mut self, now_secs: u64) {
-        self.last_outbound = now_secs;
+    /// Record an outbound packet timestamp (clock milliseconds)
+    pub fn record_outbound(&mut self, now_ms: u64) {
+        self.last_outbound_ms = now_ms;
     }
 
-    /// Record that we sent a keepalive
-    pub fn record_keepalive_sent(&mut self, now_secs: u64) {
-        self.last_keepalive = now_secs;
+    /// Record that we sent a keepalive (clock milliseconds)
+    pub fn record_keepalive_sent(&mut self, now_ms: u64) {
+        self.last_keepalive_ms = now_ms;
         self.keepalives_sent = self.keepalives_sent.saturating_add(1);
     }
 
@@ -1536,37 +1568,37 @@ impl Link {
         self.keepalives_acked
     }
 
-    /// Mark the link as established
-    pub fn mark_established(&mut self, now_secs: u64) {
-        self.established_at = Some(now_secs);
-        self.last_inbound = now_secs;
+    /// Mark the link as established (clock milliseconds)
+    pub fn mark_established(&mut self, now_ms: u64) {
+        self.established_at_ms = Some(now_ms);
+        self.last_inbound_ms = now_ms;
         self.had_inbound = true;
-        self.last_data = Some(now_secs);
+        self.last_data_ms = Some(now_ms);
     }
 
-    /// Get the keepalive interval in seconds
-    pub fn keepalive_secs(&self) -> u64 {
-        self.keepalive_secs
+    /// Get the keepalive interval in milliseconds
+    pub fn keepalive_ms(&self) -> u64 {
+        self.keepalive_ms
     }
 
-    /// Get the stale time threshold in seconds
-    pub fn stale_time_secs(&self) -> u64 {
-        self.stale_time_secs
+    /// Get the stale time threshold in milliseconds
+    pub fn stale_time_ms(&self) -> u64 {
+        self.stale_time_ms
     }
 
-    /// Get the last keepalive sent timestamp in seconds
-    pub fn last_keepalive_secs(&self) -> u64 {
-        self.last_keepalive
+    /// Get the last keepalive sent timestamp in clock milliseconds
+    pub fn last_keepalive_ms(&self) -> u64 {
+        self.last_keepalive_ms
     }
 
-    /// Get the established-at timestamp in seconds (if established)
-    pub fn established_at_secs(&self) -> Option<u64> {
-        self.established_at
+    /// Get the established-at timestamp in clock milliseconds (if established)
+    pub fn established_at_ms(&self) -> Option<u64> {
+        self.established_at_ms
     }
 
-    /// Get the last inbound packet timestamp in seconds
-    pub fn last_inbound_secs(&self) -> u64 {
-        self.last_inbound
+    /// Get the last inbound packet timestamp in clock milliseconds
+    pub fn last_inbound_ms(&self) -> u64 {
+        self.last_inbound_ms
     }
 
     /// Age of the last inbound packet in milliseconds, or `None` for a link
@@ -1583,7 +1615,7 @@ impl Link {
         if !self.had_inbound {
             return None;
         }
-        Some(now_ms.saturating_sub(self.last_inbound.saturating_mul(MS_PER_SECOND)))
+        Some(now_ms.saturating_sub(self.last_inbound_ms))
     }
 
     /// Instant the pending handshake started, in clock milliseconds: the
@@ -1856,13 +1888,13 @@ impl Link {
     #[cfg(test)]
     pub(crate) fn set_timing_for_test(
         &mut self,
-        keepalive_secs: u64,
-        stale_time_secs: u64,
-        last_inbound: u64,
+        keepalive_ms: u64,
+        stale_time_ms: u64,
+        last_inbound_ms: u64,
     ) {
-        self.keepalive_secs = keepalive_secs;
-        self.stale_time_secs = stale_time_secs;
-        self.last_inbound = last_inbound;
+        self.keepalive_ms = keepalive_ms;
+        self.stale_time_ms = stale_time_ms;
+        self.last_inbound_ms = last_inbound_ms;
         self.had_inbound = true;
     }
 
@@ -3313,7 +3345,7 @@ mod tests {
         let encrypted_data = &rtt_packet[19..];
 
         // Responder processes RTT
-        let received_rtt = responder.process_rtt(encrypted_data).unwrap();
+        let received_rtt = responder.process_rtt(encrypted_data, 0).unwrap();
 
         // Responder should now be active
         assert_eq!(responder.state(), LinkState::Active);
@@ -3352,7 +3384,7 @@ mod tests {
         // timers never take effect. build_rtt_packet is &self, so reuse it.
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
             let rtt_packet = initiator.build_rtt_packet(bad, &mut OsRng).unwrap();
-            let result = responder.process_rtt(&rtt_packet[19..]);
+            let result = responder.process_rtt(&rtt_packet[19..], 0);
             assert!(
                 matches!(result, Err(LinkError::InvalidRtt)),
                 "RTT {bad} must be rejected, got {result:?}"
@@ -3366,7 +3398,7 @@ mod tests {
 
         // A plausible finite RTT still activates the link (control).
         let good = initiator.build_rtt_packet(0.05, &mut OsRng).unwrap();
-        responder.process_rtt(&good[19..]).unwrap();
+        responder.process_rtt(&good[19..], 0).unwrap();
         assert_eq!(responder.state(), LinkState::Active);
     }
 
@@ -3383,7 +3415,7 @@ mod tests {
 
         // Responder is still in Pending state (no proof built yet)
         let fake_data = [0u8; 64];
-        let result = responder.process_rtt(&fake_data);
+        let result = responder.process_rtt(&fake_data, 0);
         assert!(matches!(result, Err(LinkError::InvalidState)));
     }
 
@@ -3556,28 +3588,24 @@ mod tests {
     // ==================== KEEPALIVE TESTS ====================
 
     #[test]
-    fn test_keepalive_calculation_from_rtt() {
-        // Test minimum clamping
-        assert_eq!(Link::calculate_keepalive_from_rtt(0.0), 5);
-        assert_eq!(Link::calculate_keepalive_from_rtt(0.01), 5);
+    fn test_keepalive_windows_from_rtt() {
+        let ka = |rtt| Link::keepalive_windows_from_rtt(rtt).0;
 
-        // Test calculation at midpoint (RTT = 1.75 -> keepalive = 360)
-        // Formula: rtt * (360 / 1.75) = rtt * 205.71
-        // At RTT = 1.75: 1.75 * 205.71 = 360
-        assert_eq!(Link::calculate_keepalive_from_rtt(1.75), 360);
+        // Test minimum clamping
+        assert_eq!(ka(0.0), 5_000);
+        assert_eq!(ka(0.01), 5_000);
+
+        // At RTT = 1.75 the formula reaches KEEPALIVE_MAX: 1.75 * (360 / 1.75)
+        assert_eq!(ka(1.75), 360_000);
 
         // Test maximum clamping
-        assert_eq!(Link::calculate_keepalive_from_rtt(2.0), 360);
-        assert_eq!(Link::calculate_keepalive_from_rtt(10.0), 360);
+        assert_eq!(ka(2.0), 360_000);
+        assert_eq!(ka(10.0), 360_000);
 
-        // Test intermediate values
-        // RTT = 0.1: 0.1 * (360/1.75) = 20.57 -> 20
-        let keepalive_01 = Link::calculate_keepalive_from_rtt(0.1);
-        assert!((20..=21).contains(&keepalive_01));
-
-        // RTT = 0.5: 0.5 * (360/1.75) = 102.86 -> 102
-        let keepalive_05 = Link::calculate_keepalive_from_rtt(0.5);
-        assert!((102..=103).contains(&keepalive_05));
+        // Intermediate values keep the reference's fractional seconds
+        // (`Link.py:845`): RTT 0.1 s -> 20.571 s, RTT 0.5 s -> 102.857 s.
+        assert_eq!(ka(0.1), 20_571);
+        assert_eq!(Link::keepalive_windows_from_rtt(0.5), (102_857, 205_714));
     }
 
     #[test]
@@ -3586,18 +3614,18 @@ mod tests {
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
 
         // Default values
-        assert_eq!(link.keepalive_secs(), 360);
-        assert_eq!(link.stale_time_secs(), 720); // 360 * 2
+        assert_eq!(link.keepalive_ms(), 360_000);
+        assert_eq!(link.stale_time_ms(), 720_000); // 360 s * 2
 
-        // Update with low RTT
+        // Update with low RTT: 0.05 * 360 / 1.75 = 10.286 s
         link.update_keepalive_from_rtt(0.05);
-        assert_eq!(link.keepalive_secs(), 10); // ~10.28, clamped
-        assert_eq!(link.stale_time_secs(), 20); // 10 * 2
+        assert_eq!(link.keepalive_ms(), 10_285);
+        assert_eq!(link.stale_time_ms(), 20_571);
 
         // Update with high RTT
         link.update_keepalive_from_rtt(2.0);
-        assert_eq!(link.keepalive_secs(), 360);
-        assert_eq!(link.stale_time_secs(), 720);
+        assert_eq!(link.keepalive_ms(), 360_000);
+        assert_eq!(link.stale_time_ms(), 720_000);
     }
 
     #[test]
@@ -3607,23 +3635,23 @@ mod tests {
 
         // Override takes effect immediately.
         link.set_keepalive_override(Some(6));
-        assert_eq!(link.keepalive_secs(), 6);
-        assert_eq!(link.stale_time_secs(), 12); // 6 * 2
+        assert_eq!(link.keepalive_ms(), 6_000);
+        assert_eq!(link.stale_time_ms(), 12_000); // 6 s * 2
 
         // RTT recalculation must NOT replace the override.
         link.update_keepalive_from_rtt(2.0);
-        assert_eq!(link.keepalive_secs(), 6);
-        assert_eq!(link.stale_time_secs(), 12);
+        assert_eq!(link.keepalive_ms(), 6_000);
+        assert_eq!(link.stale_time_ms(), 12_000);
 
         // Below-minimum overrides clamp to LINK_KEEPALIVE_MIN_SECS.
         link.set_keepalive_override(Some(1));
-        assert_eq!(link.keepalive_secs(), LINK_KEEPALIVE_MIN_SECS);
+        assert_eq!(link.keepalive_ms(), LINK_KEEPALIVE_MIN_SECS * MS_PER_SECOND);
 
         // Clearing the override restores RTT-driven behaviour.
         link.set_keepalive_override(None);
         link.update_keepalive_from_rtt(2.0);
-        assert_eq!(link.keepalive_secs(), 360);
-        assert_eq!(link.stale_time_secs(), 720);
+        assert_eq!(link.keepalive_ms(), 360_000);
+        assert_eq!(link.stale_time_ms(), 720_000);
     }
 
     #[test]
@@ -3631,25 +3659,25 @@ mod tests {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
         link.set_state(LinkState::Active);
-        // Establish at clock second 0 (the node's first uptime second): the
+        // Establish at clock 0 (the node's first uptime instant): the
         // monotonic clock starts at 0, so last_inbound is stamped 0.
         link.mark_established(0);
 
         // After the stale window of silence the link must be detectable as
         // stale; a last_inbound of 0 must mean "established at t=0", not
         // "never had inbound".
-        let now = link.stale_time_secs() + 1;
+        let now = link.stale_time_ms() + 1;
         assert!(
             link.is_stale(now),
-            "a link established at clock second 0 must still go stale"
+            "a link established at clock 0 must still go stale"
         );
 
         // And from Stale it must still be closable, not wedged open forever.
         link.set_state(LinkState::Stale);
-        let later = link.stale_time_secs() * 4 + 100;
+        let later = link.stale_time_ms() * 4 + 100_000;
         assert!(
             link.should_close(later),
-            "a stale link established at clock second 0 must still close"
+            "a stale link established at clock 0 must still close"
         );
     }
 
@@ -3663,27 +3691,28 @@ mod tests {
         let link_id = LinkId::new([0xAB; TRUNCATED_HASHBYTES]);
 
         // Not active yet - should not send
-        assert!(!initiator.should_send_keepalive(1000));
+        assert!(!initiator.should_send_keepalive(1_000_000));
 
         initiator.set_state(LinkState::Active);
-        initiator.mark_established(1000);
-        initiator.set_timing_for_test(10, initiator.stale_time_secs(), 1000);
+        initiator.mark_established(1_000_000);
+        initiator.set_timing_for_test(10_000, initiator.stale_time_ms(), 1_000_000);
 
         // Just established - should not send yet
-        assert!(!initiator.should_send_keepalive(1005));
+        assert!(!initiator.should_send_keepalive(1_005_000));
 
-        // After keepalive interval - should send
-        assert!(initiator.should_send_keepalive(1011));
+        // At the keepalive interval - should send
+        assert!(!initiator.should_send_keepalive(1_009_999));
+        assert!(initiator.should_send_keepalive(1_010_000));
 
         // Responder should never proactively send keepalives
         let mut responder =
             Link::new_incoming(&request_data, link_id, dest_hash, &mut OsRng, None).unwrap();
         responder.set_state(LinkState::Active);
-        responder.mark_established(1000);
-        responder.set_timing_for_test(10, responder.stale_time_secs(), 1000);
+        responder.mark_established(1_000_000);
+        responder.set_timing_for_test(10_000, responder.stale_time_ms(), 1_000_000);
 
         // Even after interval, responder should not send
-        assert!(!responder.should_send_keepalive(2000));
+        assert!(!responder.should_send_keepalive(2_000_000));
     }
 
     /// #331 finding 1. RNS 1.5.x widened the keepalive gate in the link
@@ -3710,17 +3739,17 @@ mod tests {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let mut initiator = Link::new_outgoing(dest_hash, &mut OsRng);
         initiator.set_state(LinkState::Active);
-        initiator.mark_established(1000);
-        initiator.set_timing_for_test(10, initiator.stale_time_secs(), 1000);
+        initiator.mark_established(1_000_000);
+        initiator.set_timing_for_test(10_000, initiator.stale_time_ms(), 1_000_000);
 
         // The scenario the finding names: the destination transmits, we
         // receive, we send nothing of our own. Inbound is always fresh.
-        let mut now = 1000u64;
+        let mut now = 1_000_000u64;
         let mut sent = 0u32;
-        let mut last_sent_at = 1000u64;
+        let mut last_sent_at = 1_000_000u64;
         let mut widest_gap = 0u64;
         for _ in 0..30 {
-            now += 1;
+            now += 1_000;
             initiator.record_inbound(now);
             if initiator.should_send_keepalive(now) {
                 initiator.record_keepalive_sent(now);
@@ -3740,9 +3769,9 @@ mod tests {
         );
         assert_eq!(initiator.keepalives_sent(), 3);
         assert!(
-            widest_gap < initiator.stale_time_secs(),
-            "widest keepalive gap {widest_gap}s must stay inside the peer's stale window of {}s",
-            initiator.stale_time_secs()
+            widest_gap < initiator.stale_time_ms(),
+            "widest keepalive gap {widest_gap}ms must stay inside the peer's stale window of {}ms",
+            initiator.stale_time_ms()
         );
     }
 
@@ -3752,46 +3781,56 @@ mod tests {
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
 
         link.set_state(LinkState::Active);
-        link.set_timing_for_test(10, 20, 1000); // stale after 20s of no inbound
+        link.set_timing_for_test(10_000, 20_000, 1_000_000); // stale after 20 s of no inbound
 
         // Not stale yet
-        assert!(!link.is_stale(1015));
+        assert!(!link.is_stale(1_015_000));
+        assert!(!link.is_stale(1_020_000));
 
-        // Becomes stale after stale_time_secs
-        assert!(link.is_stale(1021));
+        // Becomes stale once the silence exceeds stale_time
+        assert!(link.is_stale(1_020_001));
 
         // is_stale only works for Active state
         link.set_state(LinkState::Stale);
-        assert!(!link.is_stale(1021));
+        assert!(!link.is_stale(1_021_000));
 
         // should_close only works for Stale state
-        // With RTT of 0, timeout = stale_time (20) + RTT*4 (0) + grace (5) = 25
-        assert!(!link.should_close(1020)); // Not past stale_time yet from last_inbound
-                                           // Total elapsed needs to be > stale_time + RTT*4 + grace = 20 + 0 + 5 = 25
-        assert!(link.should_close(1026));
+        // With RTT of 0, timeout = stale_time (20 s) + RTT*4 (0) + grace (5 s) = 25 s
+        assert!(!link.should_close(1_020_000));
+        assert!(!link.should_close(1_025_000));
+        assert!(link.should_close(1_025_001));
     }
 
     #[test]
-    fn test_stale_close_timeout_secs() {
+    fn test_stale_close_timeout_ms() {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
 
-        // stale_time=20s, RTT=0 -> 20 + 0*4 + grace(5) = 25
-        link.set_timing_for_test(10, 20, 1000);
-        assert_eq!(link.stale_close_timeout_secs(), 20 + LINK_STALE_GRACE_SECS);
+        // stale_time=20 s, RTT=0 -> 20 + 0*4 + grace(5) = 25 s
+        link.set_timing_for_test(10_000, 20_000, 1_000_000);
+        assert_eq!(
+            link.stale_close_timeout_ms(),
+            20_000 + LINK_STALE_GRACE_SECS * MS_PER_SECOND
+        );
 
-        // RTT=3s -> 20 + 3*KEEPALIVE_TIMEOUT_FACTOR + grace
+        // RTT=3 s -> 20 + 3*KEEPALIVE_TIMEOUT_FACTOR + grace
         link.set_rtt_ms(3000);
         assert_eq!(
-            link.stale_close_timeout_secs(),
-            20 + 3 * LINK_KEEPALIVE_TIMEOUT_FACTOR + LINK_STALE_GRACE_SECS
+            link.stale_close_timeout_ms(),
+            20_000 + 3_000 * LINK_KEEPALIVE_TIMEOUT_FACTOR + LINK_STALE_GRACE_SECS * MS_PER_SECOND
         );
+
+        // A fractional RTT is not truncated to whole seconds (audit D5): at
+        // 500 ms the reference closes 212.714 s after the last inbound.
+        link.set_rtt_ms(500);
+        link.update_keepalive_from_rtt(0.5);
+        assert_eq!(link.stale_close_timeout_ms(), 212_714);
 
         // The threshold must equal the boundary should_close() trips at.
         link.set_state(LinkState::Stale);
-        let timeout = link.stale_close_timeout_secs();
-        assert!(!link.should_close(1000 + timeout));
-        assert!(link.should_close(1000 + timeout + 1));
+        let timeout = link.stale_close_timeout_ms();
+        assert!(!link.should_close(1_000_000 + timeout));
+        assert!(link.should_close(1_000_000 + timeout + 1));
     }
 
     #[test]
@@ -3846,7 +3885,7 @@ mod tests {
         initiator.process_proof(&proof_packet[19..]).unwrap();
 
         let rtt_packet = initiator.build_rtt_packet(0.05, &mut OsRng).unwrap();
-        responder.process_rtt(&rtt_packet[19..]).unwrap();
+        responder.process_rtt(&rtt_packet[19..], 0).unwrap();
 
         (initiator, responder)
     }
@@ -4018,8 +4057,9 @@ mod tests {
         link.record_keepalive_sent(12347);
         link.mark_established(12340);
 
-        // Just verify no panic - internal fields not exposed
-        assert!(link.established_at.is_some());
+        assert_eq!(link.established_at_ms(), Some(12340));
+        assert_eq!(link.last_inbound_ms(), 12340);
+        assert_eq!(link.last_keepalive_ms(), 12347);
     }
 
     /// The data clock behind an application's idle teardown: establishment
@@ -4030,16 +4070,16 @@ mod tests {
     fn keepalives_do_not_reset_the_data_clock() {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
-        assert_eq!(link.no_data_for_secs(100), None);
+        assert_eq!(link.no_data_for_ms(100_000), None);
 
-        link.mark_established(100);
-        assert_eq!(link.no_data_for_secs(150), Some(50));
+        link.mark_established(100_000);
+        assert_eq!(link.no_data_for_ms(150_000), Some(50_000));
 
-        link.record_keepalive_inbound(200);
-        assert_eq!(link.no_data_for_secs(250), Some(150));
+        link.record_keepalive_inbound(200_000);
+        assert_eq!(link.no_data_for_ms(250_000), Some(150_000));
 
-        link.record_inbound(260);
-        assert_eq!(link.no_data_for_secs(270), Some(10));
+        link.record_inbound(260_000);
+        assert_eq!(link.no_data_for_ms(270_000), Some(10_000));
     }
 
     // MTU Negotiation Tests

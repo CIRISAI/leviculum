@@ -257,13 +257,13 @@ fn resource_completion_proof_refreshes_activity_clock() {
     // timestamp of the LAST inbound packet — which, in a completing
     // transfer, is the resource completion proof.
     let mut completed = false;
-    let mut last_delivery_secs = 0u64;
+    let mut last_delivery_ms = 0u64;
     for _ in 0..64 {
         if for_initiator.is_empty() {
             break;
         }
         initiator.transport().clock().advance(7_000);
-        last_delivery_secs = initiator.transport().clock().now_ms() / 1_000;
+        last_delivery_ms = initiator.transport().clock().now_ms();
         let mut for_responder = Vec::new();
         for pkt in for_initiator.drain(..) {
             let out = initiator.handle_packet(InterfaceId(i_iface), &pkt);
@@ -288,12 +288,12 @@ fn resource_completion_proof_refreshes_activity_clock() {
     let last_inbound = initiator
         .link(&link_id)
         .expect("link must survive a completed transfer")
-        .last_inbound_secs();
+        .last_inbound_ms();
     assert_eq!(
         last_inbound,
-        last_delivery_secs,
+        last_delivery_ms,
         "L-0019: the resource completion proof must refresh last_inbound \
-         (froze {}s before the proof arrived)",
-        last_delivery_secs.saturating_sub(last_inbound)
+         (froze {}ms before the proof arrived)",
+        last_delivery_ms.saturating_sub(last_inbound)
     );
 }

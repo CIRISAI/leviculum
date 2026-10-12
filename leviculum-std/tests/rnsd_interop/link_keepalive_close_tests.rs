@@ -603,7 +603,7 @@ async fn test_link_stale_detection_no_inbound() {
     // Get the actual stale time from the link (depends on RTT calculation)
     let stale_time_secs = initiator
         .link(&link_id)
-        .map(|l| l.stale_time_secs())
+        .map(|l| l.stale_time_ms().div_ceil(MS_PER_SECOND))
         .unwrap_or(LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR);
 
     println!(
@@ -611,7 +611,7 @@ async fn test_link_stale_detection_no_inbound() {
         stale_time_secs,
         initiator
             .link(&link_id)
-            .map(|l| l.keepalive_secs())
+            .map(|l| l.keepalive_ms() / MS_PER_SECOND)
             .unwrap_or(0)
     );
 
@@ -719,7 +719,7 @@ async fn test_stale_link_closes_after_timeout() {
     // Get the actual stale time from the link (depends on RTT calculation)
     let stale_time_secs = initiator
         .link(&link_id)
-        .map(|l| l.stale_time_secs())
+        .map(|l| l.stale_time_ms().div_ceil(MS_PER_SECOND))
         .unwrap_or(LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR);
 
     // Advance past stale time but NOT past close timeout
@@ -847,7 +847,7 @@ async fn test_keepalive_resets_stale_timer() {
     // Get the actual stale time from the link
     let stale_time_secs = initiator
         .link(&link_id)
-        .map(|l| l.stale_time_secs())
+        .map(|l| l.stale_time_ms().div_ceil(MS_PER_SECOND))
         .unwrap_or(LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR);
 
     // Advance to just before stale time (but at least 2 seconds to allow for edge cases)
@@ -856,7 +856,7 @@ async fn test_keepalive_resets_stale_timer() {
 
     // Simulate receiving inbound traffic by recording inbound
     if let Some(link) = initiator.link_mut(&link_id) {
-        link.record_inbound(clock_init_handle.now_ms() / MS_PER_SECOND);
+        link.record_inbound(clock_init_handle.now_ms());
     }
 
     // Advance past where the old stale time would have been

@@ -927,12 +927,11 @@ impl<S: PropagationStore> Engine<S> {
         now_ms: u64,
         out: &mut TickOutput,
     ) {
-        let now_secs = now_ms / 1000;
         let idle: Vec<(LinkId, u64)> = self
             .inbound_links
             .iter()
             .filter_map(|link_id| {
-                let idle_secs = core.link(link_id)?.no_data_for_secs(now_secs)?;
+                let idle_secs = core.link(link_id)?.no_data_for_ms(now_ms)? / 1000;
                 (idle_secs > PROPAGATION_LINK_MAX_INACTIVITY_SECS).then_some((*link_id, idle_secs))
             })
             .collect();

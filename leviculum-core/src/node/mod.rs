@@ -132,6 +132,8 @@ mod mvr_link_rekey_alias;
 #[cfg(test)]
 mod mvr_link_retry_held_route;
 #[cfg(test)]
+mod mvr_link_timing_reference;
+#[cfg(test)]
 mod mvr_link_up_reoffer;
 #[cfg(test)]
 mod mvr_lnode_pathresolve;
@@ -2568,9 +2570,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Run link-layer periodic tasks
         self.check_timeouts(now_ms);
-        let now_secs = now_ms / crate::constants::MS_PER_SECOND;
-        self.check_keepalives(now_secs);
-        self.check_stale_links(now_secs);
+        self.check_keepalives(now_ms);
+        self.check_stale_links(now_ms);
         self.check_channel_timeouts(now_ms);
         self.check_resource_timeouts(now_ms);
         self.check_request_timeouts(now_ms);
@@ -7646,7 +7647,7 @@ mod tests {
         pair.initiator
             .link_mut(&pair.initiator_link_id)
             .unwrap()
-            .set_timing_for_test(3600, 3600, TEST_TIME_MS / crate::constants::MS_PER_SECOND);
+            .set_timing_for_test(3_600_000, 3_600_000, TEST_TIME_MS);
 
         let _ = pair
             .initiator
@@ -7696,7 +7697,7 @@ mod tests {
         pair.initiator
             .link_mut(&pair.initiator_link_id)
             .unwrap()
-            .set_timing_for_test(3600, 3600, TEST_TIME_MS / crate::constants::MS_PER_SECOND);
+            .set_timing_for_test(3_600_000, 3_600_000, TEST_TIME_MS);
 
         let _ = pair
             .initiator
@@ -7741,7 +7742,7 @@ mod tests {
         pair.initiator
             .link_mut(&pair.initiator_link_id)
             .unwrap()
-            .set_timing_for_test(5, 3600, TEST_TIME_MS / crate::constants::MS_PER_SECOND);
+            .set_timing_for_test(5_000, 3_600_000, TEST_TIME_MS);
 
         let _ = pair
             .initiator
@@ -10328,7 +10329,7 @@ mod tests {
         initiator
             .link_mut(&init_link_id)
             .unwrap()
-            .set_timing_for_test(3600, 3600, TEST_TIME_MS / crate::constants::MS_PER_SECOND);
+            .set_timing_for_test(3_600_000, 3_600_000, TEST_TIME_MS);
 
         let mut resent = 0;
         for k in 1..=120u64 {

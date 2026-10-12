@@ -2181,19 +2181,19 @@ mod tests {
 
     // MAX_TRIES and Pacing MD Tests
     #[test]
-    fn test_max_tries_8_survives_longer() {
-        // With max_tries=8, 7 retransmits trigger Retransmit (not TearDownLink),
-        // and the 8th triggers TearDownLink.
+    fn test_max_tries_matches_reference() {
+        // Python's `_max_tries` is 5 (`Channel.py:295`): the first send sets
+        // tries to 1, each timeout below 5 resends with tries + 1
+        // (`Channel.py:569-572`), and the timeout at tries 5 tears the link
+        // down. That is 4 retransmits, then TearDownLink.
         let mut channel = Channel::new();
-        assert_eq!(channel.max_tries, 8);
         let rtt_ms = 100;
 
         let msg = TestMessage { data: vec![1] };
         channel.send(&msg, MDU, 0, rtt_ms).unwrap();
 
-        // 7 retransmits (tries 1→2, 2→3, ..., 7→8)
         let mut t = 0u64;
-        for i in 0..7 {
+        for i in 0..4 {
             t += 1_000_000; // far enough in the future to trigger timeout
             let actions = channel.poll(t, rtt_ms);
             assert_eq!(
@@ -2211,13 +2211,13 @@ mod tests {
             );
         }
 
-        // 8th timeout, tries=8 >= max_tries=8 → TearDownLink
+        // 5th timeout, tries=5 >= max_tries=5 -> TearDownLink
         t += 1_000_000;
         let actions = channel.poll(t, rtt_ms);
         assert_eq!(actions.len(), 1);
         assert!(
             matches!(&actions[0], ChannelAction::TearDownLink),
-            "8th timeout should tear down link, got {:?}",
+            "5th timeout should tear down link, got {:?}",
             actions[0]
         );
     }
