@@ -1117,7 +1117,7 @@ pub const RECALL_SLOTS: usize = leviculum_heap_budget::BOARD_MAX_PEERS;
 /// The longest announce `app_data` kept for recall. A propagation
 /// announce is seven msgpack fields and a name; the ones observed on the
 /// rig are well under 100 B (audit 2026-10-12 D5). 255 B bounds the
-/// region's recall share at [`RECALL_SLOTS`] × 304 B of stride, and a
+/// region's recall share at [`RECALL_SLOTS`] × 300 B of stride, and a
 /// longer one is simply not kept: its node is recalled from RAM while a
 /// path lives, as before.
 pub const RECALL_APP_DATA_MAX: usize = 255;

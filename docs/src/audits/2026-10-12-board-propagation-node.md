@@ -130,6 +130,12 @@ Test: an mvr driving `handle_announce` at hops 5-6 asserting
 `Added`, board config — one assertion beside lnpnd's
 `a_sync_from_a_client_or_from_beyond_the_depth_peers_nobody`
 (`lnpnd/src/engine.rs:2406`).
+**Fixed in d2a9dcfb**: the board builds its table from
+`board_peering_config` (`leviculum-nrf/pn-store`), whose
+`BOARD_AUTOPEER_MAXDEPTH` is 6 with lxmd's generated config as its
+reason, as lnpnd's 668. Pinned by
+`the_board_peers_a_node_six_hops_out_and_declines_seven`
+(`leviculum-nrf/pn-store/src/tests.rs`), red at 4 on the hop-6 row.
 
 **D3 — the board never rotates its peer table, and keeps no traffic
 counters to rotate on.** The rule is in the shared crate
@@ -203,6 +209,25 @@ heap; or accept the window, which the peer's own cadence bounds.
 Test: the board seam (`docs/src/firmware/host-test-seams.md`) — a
 restore-then-sync mvr asserting `PN_PEER action=add
 reason=inbound_sync` without a fresh announce.
+**Fixed in d2a9dcfb**: the board keeps the announce `app_data` of up to
+16 propagation nodes inside its depth as `TAG_RECALL` records (0xA2) in
+the PN log (`PnPeerStore::remember_announce`, `leviculum-nrf/pn-store`),
+path responses included, since a node heard only that way is exactly
+one a sync later peers back. Not in the peer record: a held peer is
+restored at boot and never reaches the recall. A record is the 42 B
+header plus the app data, refused above 255 B, so about 100-150 B a
+node and at most 16 × 300 B of the region; 0 B of heap, the writes ride
+the peer store's existing flush queue. Wear: a write only when the
+announce says something different (timebase aside, it moves every
+announce) or its copy has aged into the older half of the region, where
+round-robin reclaim would take it within half a lap. The sync's recall
+asks the RAM cache first and the region second
+(`recall_for_inbound_sync`). Pinned by
+`a_propagation_announce_is_recalled_after_a_reset` and, through the
+seams in the engine's order (reset, link hops by 683, app data from
+flash), `after_a_reset_a_syncing_neighbour_is_peered_from_its_recalled_announce`,
+both red against the RAM-only recall; wear, slots and ageing by three
+more tests beside them.
 
 **D6 — lnpnd judges an inbound sync by its link's hops when no path
 is known; the board does not.** lnpnd's deliberate deviation 556
