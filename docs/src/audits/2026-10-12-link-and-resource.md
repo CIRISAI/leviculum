@@ -156,7 +156,7 @@ keepalive 291.9 s, one LRRTT on the air; lost, the one LRRTT dropped,
 no callback, and no link left on the responder by its report at 170 s.
 
 **D4 — the responder takes the initiator's RTT verbatim; the
-reference takes the max with its own measurement.** Python:
+reference takes the max with its own measurement.** *Fixed in de601f92.* Python:
 `self.rtt = max(measured_rtt, rtt)` (`rtt_packet`,
 `reference/Reticulum/RNS/Link.py:540`). Ours decrypts, rejects
 non-finite and non-positive values, clamps at 3600 s, and stored the
@@ -167,7 +167,14 @@ floor it; the clamps bound the damage. Class: **timing**. Test: unit —
 RTT packet carrying 1 ms against a responder whose proof→RTT gap was
 2 s; assert the stale window, compare the reference's.
 
-**D5 — integer truncation in the derived timers.** For the
+(Fixed in de601f92, #664: `process_rtt` takes the arrival time and keeps
+`max(measured, wire)`, measured from the proof send. Pinned by
+`responder_rtt_is_max_of_measured_and_wire` in
+`leviculum-core/src/node/mvr_link_timing_reference.rs`: wire 500 ms,
+measured 1500 ms, the responder holds 1500 ms and its link is still
+Active after 300 s of silence, Stale past 617.143 s.)
+
+**D5 — integer truncation in the derived timers.** *Fixed in de601f92.* For the
 instruction's example RTT of 500 ms: the reference derives keepalive
 102.857 s, stale 205.714 s, and tears down a stale link after
 `stale + 4×rtt + STALE_GRACE` ≈ 212.7 s (`STALE_GRACE`,
@@ -182,6 +189,15 @@ stale was `2×102`, and the close threshold (`stale_close_timeout_secs`,
 now `stale_close_timeout_ms`, `leviculum-core/src/link/mod.rs:1450`)
 landed 1.7 s earlier than the reference's. Both ends keep their own clocks, nothing crosses the
 wire. Class: **timing, inert**.
+
+(Fixed in de601f92, #664: the link's windows and clocks are
+milliseconds, each window floored once from the reference's float. At
+500 ms the line now reads `keepalive_ms=102857 stale_ms=205714
+inactivity_timeout_ms=212714`; `keepalive_s` and `stale_s` were renamed
+to the millisecond fields, and nothing in the tree or in periculum
+parsed them. Pinned by `derived_windows_keep_the_reference_fractions`:
+Active at 205 714 ms of silence, Stale at 205 715 ms, still Stale at
+212 714 ms, closed at 212 715 ms.)
 
 ## 2. Link maintenance
 
@@ -270,7 +286,7 @@ link's path move between interfaces, and does re-pinning only a Stale
 link keep the replay hardening?), not a side effect of this fix.
 
 **D8 — keepalive accounting is looser than the reference's by two
-small steps.** (a) We refreshed the inbound clock before validating the
+small steps.** *Fixed in de601f92.* (a) We refreshed the inbound clock before validating the
 keepalive byte (`handle_keepalive_packet`,
 `leviculum-core/src/node/link_management.rs:1591`), so a malformed or
 wrong-direction keepalive still feeds the stale watchdog; Python
@@ -281,6 +297,15 @@ echoes frames back (BLE bridge, misconfigured repeater), our initiator
 can keep a dead link "fresh" on its own reflected keepalives. Class:
 **timing**. Test: unit — feed an initiator its own 0xFF; assert the
 inbound clock did not move.
+
+(Fixed in de601f92, #664: an initiator's own 0xFF is dropped at the top
+of `handle_link_data`, before the interface check, as the reference does
+it; any other keepalive moves the clock or recovers a Stale link only
+after its byte validates. Pinned by
+`initiator_ignores_its_own_keepalive` and
+`invalid_keepalive_byte_does_not_refresh_the_clock`. One step stricter
+than the reference: a responder refuses a stray 0xFE, which Python would
+count; no peer sends one.)
 
 ## 3. Requests and responses over a link
 
@@ -580,6 +605,8 @@ Behavioural divergences, all tx-local (the window, the retry clock and
 the proof policy are each end's own):
 
 **D18 — retry budget 8 versus the reference's 5, then teardown.**
+*Fixed in de601f92* (#664): `CHANNEL_MAX_TRIES` is 5, four retransmits
+then teardown, pinned by `test_max_tries_matches_reference`.
 `CHANNEL_MAX_TRIES` (`leviculum-core/src/constants.rs:494`) was 8;
 Python's `_max_tries` is 5 (`reference/Reticulum/RNS/Channel.py:295`).
 Both tear the link down on exhaustion (ours
