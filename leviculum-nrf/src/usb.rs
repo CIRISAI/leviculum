@@ -85,6 +85,7 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_MGMT_ALLOW,
     envelope::TYPE_MGMT_ALLOW_QUERY,
     envelope::TYPE_CHANNEL_STATS_QUERY,
+    envelope::TYPE_PN_LIST,
 ];
 
 /// nRF52840 FICR base address
@@ -1208,6 +1209,44 @@ async fn retic_serial_task(
                                         .await
                                     {
                                         log("SER: mgmt-allow answer write failed");
+                                    }
+                                }
+                                ControlAction::PnList(wire) => {
+                                    // The list is a record of the message
+                                    // log, so the log's one writer, the store
+                                    // task, writes it; this hands it over and
+                                    // waits for the outcome, because the ack
+                                    // must mean "on the page" (#358). The
+                                    // role reads its lists at boot: the next
+                                    // reset's `PN_LISTS` line proves what came
+                                    // up. BUSY when the store cannot take it
+                                    // now (not mounted, a storm running, a
+                                    // write already queued); PERSIST when it
+                                    // took it and did not confirm it.
+                                    let answer = if !crate::record_store::request_board_list(wire) {
+                                        envelope::encode_refusal(
+                                            envelope::TYPE_PN_LIST,
+                                            envelope::REFUSE_BUSY,
+                                        )
+                                    } else {
+                                        match crate::record_store::board_list_landed(
+                                            embassy_time::Duration::from_millis(3_000),
+                                        )
+                                        .await
+                                        {
+                                            Some(true) => {
+                                                envelope::encode_ack(envelope::TYPE_PN_LIST)
+                                            }
+                                            _ => envelope::encode_refusal(
+                                                envelope::TYPE_PN_LIST,
+                                                envelope::REFUSE_PERSIST,
+                                            ),
+                                        }
+                                    };
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
+                                        log("SER: pn-list answer write failed");
                                     }
                                 }
                                 ControlAction::MgmtAllowQuery => {

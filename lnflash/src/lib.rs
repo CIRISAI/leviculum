@@ -29,6 +29,7 @@ pub mod manifest;
 pub mod media;
 pub mod mgmt;
 pub mod name;
+pub mod pn_list;
 pub mod position;
 pub mod radio;
 pub mod softdevice;

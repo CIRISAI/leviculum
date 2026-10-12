@@ -7,6 +7,8 @@ license = "AGPL-3.0-or-later"
 description = "Propagation-node store adapters over the record log (host-testable)"
 
 [dependencies]
+# The identity a `/get` client proved, for the auth list (audit 2026-10-12 D18).
+leviculum-core = { path = "../../leviculum-core", default-features = false }
 leviculum-record-log = { path = "../record-log" }
 leviculum-lxmf = { path = "../../leviculum-lxmf", default-features = false }
 # The board's announced limits, which `board_role_config` hands the role.

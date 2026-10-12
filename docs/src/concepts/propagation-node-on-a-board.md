@@ -218,7 +218,7 @@ not.
 
 One file decides it. `leviculum-nrf/memory.x` carves `STORE` out of the
 top of the application window and exports `__srecord_store` /
-`__erecord_store`; `region` (`leviculum-nrf/src/record_store.rs:215`)
+`__erecord_store`; `region` (`leviculum-nrf/src/record_store.rs:253`)
 reads those two symbols, and nothing else in the tree knows the
 addresses.
 
@@ -407,7 +407,7 @@ says 210 KiB of gap is what remains at 16. Widening the region upward is
 impossible, because `0xEA000` is the bootloader's `USER_FLASH_END`, and
 widening it downward moves every record, so a later resize is a
 reformat. That is the deliberate price of the smaller default, and
-`mount` (`leviculum-nrf/src/record_store.rs:518`) already treats a
+`mount` (`leviculum-nrf/src/record_store.rs:675`) already treats a
 region that is not ours as unformatted rather than as corrupt, so the
 reformat is a boot line and not an incident.
 
@@ -460,7 +460,7 @@ given size, bounded at 1 000 records of 1 024 B
 (`STORE_STORM_MAX_BYTES`, `leviculum-core/src/envelope.rs:286`) and
 tagged so a later batch can purge exactly those (`TAG_BENCH`,
 `leviculum-nrf/src/record_store.rs:90`); `lnflash --store-storm
-COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:410`).
+COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:469`).
 The numbers owed are a connected phone's throughput and a LoRa link's
 delivery rate across a storm, measured against the same run without one.
 
@@ -468,7 +468,7 @@ delivery rate across a storm, measured against the same run without one.
 
 **Reads do not go through the SoftDevice's flash scheduler at all.** The
 internal flash is memory-mapped and the read is a `memcpy` that cannot
-fail or be refused (`read`, `leviculum-nrf/src/record_store.rs:334`) —
+fail or be refused (`read`, `leviculum-nrf/src/record_store.rs:396`) —
 unlike a write or an erase, it never waits for a gap between radio
 events. That single fact removes the RAM index the QSPI costing needed:
 a lookup is a scan, and a scan is free of the radio.

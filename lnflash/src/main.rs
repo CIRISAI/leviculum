@@ -176,6 +176,65 @@ struct Cli {
     )]
     peering_cost: Option<u8>,
 
+    /// Pin the board's propagation node to a peer (audit 2026-10-12 D4):
+    /// that node's `lxmf.propagation` destination hash, 32 hex digits.
+    /// Repeatable, at most 16; the list replaces the stored one. Always
+    /// peered, never culled, path requested at boot, as lxmd's
+    /// `static_peers`. Sent to every running LNode, then exit; takes effect
+    /// at the next reset (the boot PN_LISTS line on if00 proves it).
+    /// Combinable with the cost flags and the other lists in one call.
+    #[arg(
+        long,
+        value_name = "HEX",
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm", "clear_static_peers"]
+    )]
+    static_peer: Vec<String>,
+
+    /// Empty the board's static-peer list (D4), as --static-peer would.
+    #[arg(
+        long,
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm"]
+    )]
+    clear_static_peers: bool,
+
+    /// Restrict the board's propagation mailbox to these identities (audit
+    /// 2026-10-12 D18): identity hashes as `rnid -i` prints them,
+    /// repeatable, at most 16. Anyone else's `/get` is refused with
+    /// ERROR_NO_ACCESS; an empty list is open, as lxmd's `auth_required =
+    /// no`. Persisted and boot-read like --static-peer.
+    #[arg(
+        long,
+        value_name = "HEX",
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm", "clear_auth_allowed"]
+    )]
+    auth_allowed: Vec<String>,
+
+    /// Empty the board's mailbox allow list (D18): every client may drain
+    /// its mailbox again.
+    #[arg(
+        long,
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm"]
+    )]
+    clear_auth_allowed: bool,
+
+    /// lxmd's `control_allowed` for the board (audit 2026-10-12 D18):
+    /// identity hashes, repeatable, at most 16. Stored and counted; the board
+    /// has no control destination yet (D17), so nothing consults it before
+    /// that lands.
+    #[arg(
+        long,
+        value_name = "HEX",
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm", "clear_control_allowed"]
+    )]
+    control_allowed: Vec<String>,
+
+    /// Empty the board's control allow list (D18).
+    #[arg(
+        long,
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm"]
+    )]
+    clear_control_allowed: bool,
+
     /// Set the transmit power, in dBm, on every running LNode, then exit.
     /// No flashing. Reads the board's current radio settings first and sends
     /// them back with only the power changed, so nothing else moves; a board
@@ -765,6 +824,24 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         });
     }
 
+    let pn_lists = lnflash::pn_list::plans(
+        (&cli.static_peer, cli.clear_static_peers),
+        (&cli.auth_allowed, cli.clear_auth_allowed),
+        (&cli.control_allowed, cli.clear_control_allowed),
+    )?;
+    if !pn_lists.is_empty() && cli.stamp_cost.is_none() && cli.peering_cost.is_none() {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_pn_lists(&catalogue, &sysfs, ui, &pn_lists)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
     if cli.stamp_cost.is_some() || cli.peering_cost.is_some() {
         use leviculum_core::envelope::{PnConfigWire, PN_COST_KEEP};
         let wire = PnConfigWire {
@@ -775,7 +852,12 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             Some(path) => Sysfs::new(path),
             None => Sysfs::new(SYSFS_USB_DEVICES),
         };
-        let all_took_it = flow::set_pn_config(&catalogue, &sysfs, ui, wire)?;
+        let mut all_took_it = flow::set_pn_config(&catalogue, &sysfs, ui, wire)?;
+        // The lists ride the same call: a deployment sets the costs and
+        // pins the home node in one line.
+        if !pn_lists.is_empty() {
+            all_took_it &= flow::set_pn_lists(&catalogue, &sysfs, ui, &pn_lists)?;
+        }
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {

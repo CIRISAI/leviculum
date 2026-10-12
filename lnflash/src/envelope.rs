@@ -456,6 +456,24 @@ pub fn send_pn_config(
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// Replace one of the propagation node's operator lists (audit 2026-10-12
+/// D4, D18, `TYPE_PN_LIST`). Acked only once the board's store holds it;
+/// the role reads its lists at boot, so a positive answer means a reset
+/// comes up with this list. Up to 274 bytes, so only behind [`probed`].
+pub fn send_pn_list(
+    fd: &Fd,
+    wire: leviculum_core::envelope::PnListWire,
+) -> io::Result<ControlOutcome> {
+    let payload = leviculum_core::envelope::encode_pn_list(wire.list(), wire.hashes());
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_PN_LIST),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
 /// What a board said about its media profile: the carriers it is running
 /// right now and the ones a reboot would come up with.
 ///

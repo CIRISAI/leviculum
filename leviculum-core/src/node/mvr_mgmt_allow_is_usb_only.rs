@@ -10,7 +10,7 @@
 //! *where the parser sits*: `leviculum_nrf::usb::retic_serial_task` is the
 //! only caller of
 //! [`classify_control_frame`](crate::envelope::classify_control_frame) in
-//! the firmware (`leviculum-nrf/src/usb.rs:757`), and it reads from the
+//! the firmware (`leviculum-nrf/src/usb.rs:758`), and it reads from the
 //! transport CDC alone. Bytes from the LoRa and BLE tasks are handed to
 //! the node core as Reticulum packets instead.
 //!

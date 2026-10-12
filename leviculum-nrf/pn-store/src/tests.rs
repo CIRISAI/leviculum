@@ -1276,7 +1276,7 @@ fn after_a_reset_a_syncing_neighbour_is_peered_from_its_recalled_announce() {
 
         // The reset.
         let rebooted = PnPeerStore::new(region.clone());
-        let mut table = PeerTable::new(board_peering_config(1, 18));
+        let mut table = PeerTable::new(board_peering_config(1, 18, Vec::new()));
         table.restore(rebooted.load_all().unwrap());
         assert!(table.get(&neighbour).is_none());
 
@@ -1285,7 +1285,7 @@ fn after_a_reset_a_syncing_neighbour_is_peered_from_its_recalled_announce() {
         assert_eq!(hops, Some(3));
 
         // Before: the announce cache alone, empty after a reset.
-        let mut before = PeerTable::new(board_peering_config(1, 18));
+        let mut before = PeerTable::new(board_peering_config(1, 18, Vec::new()));
         assert_eq!(
             before.handle_inbound_sync_recalled(neighbour, None, hops, 1_700_000_500),
             PeerChange::Declined(DeclineReason::NotANode)
@@ -1315,7 +1315,7 @@ fn the_board_peers_a_node_six_hops_out_and_declines_seven() {
     use leviculum_lxmf::{DeclineReason, PeerChange, PeerTable, PropagationNodeAnnounce};
 
     let announce = PropagationNodeAnnounce::decode(&pn_announce(1_700_000_000, 13, true)).unwrap();
-    let mut table = PeerTable::new(board_peering_config(1, 18));
+    let mut table = PeerTable::new(board_peering_config(1, 18, Vec::new()));
     assert_eq!(
         table.handle_announce([6; 16], &announce, Some(6), 1_700_000_100, false),
         PeerChange::Added
@@ -1324,4 +1324,281 @@ fn the_board_peers_a_node_six_hops_out_and_declines_seven() {
         table.handle_announce([7; 16], &announce, Some(7), 1_700_000_100, false),
         PeerChange::Declined(DeclineReason::TooDeep)
     );
+}
+
+/// Run a list write the way the record-store task does: build the ops over
+/// the region, apply them in order, refresh the view.
+fn write_list(
+    region: &SharedRegion,
+    log: &mut RecordLog<SimNor>,
+    list: BoardList,
+    hashes: &[[u8; 16]],
+) -> bool {
+    let Some(ops) = board_list_write_ops(region, list, hashes) else {
+        return false;
+    };
+    run_ops(region, log, &ops);
+    true
+}
+
+fn run_ops(region: &SharedRegion, log: &mut RecordLog<SimNor>, ops: &[FlushOp]) {
+    block_on(async {
+        for op in ops {
+            apply(log, op).await;
+            sync(region, log);
+        }
+    });
+}
+
+fn list_identity(seed: u8) -> leviculum_core::identity::Identity {
+    let mut private = [0u8; 64];
+    for (index, byte) in private.iter_mut().enumerate() {
+        *byte = seed.wrapping_add(index as u8);
+    }
+    leviculum_core::identity::Identity::from_private_key_bytes(&private).unwrap()
+}
+
+/// D4 through the seam, in the engine's boot order: a static peer written
+/// at flash time is read back after a reset, is in the table before any
+/// announce, is owed a path request, survives the 14-day cull, and is never
+/// rotated out. Before this the board had no such record and its peering
+/// config carried the default empty list.
+#[test]
+fn a_static_peer_set_at_flash_time_is_in_the_table_at_boot_and_never_culled() {
+    use leviculum_lxmf::peering::MAX_UNREACHABLE_SECS;
+    use leviculum_lxmf::PeerTable;
+
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let home = [0x51; 16];
+        assert!(write_list(
+            &region,
+            &mut log,
+            BoardList::StaticPeers,
+            &[home]
+        ));
+
+        // The reset.
+        let rebooted = PnPeerStore::new(region.clone());
+        let lists = rebooted.load_board_lists();
+        assert_eq!(lists.static_peers, vec![home]);
+        assert!(rebooted.load_all().unwrap().is_empty(), "not a peer record");
+        assert!(directory(&PnStore::new(region.clone(), SECTORS)).is_empty());
+
+        let mut table = PeerTable::new(board_peering_config(1, 18, lists.static_peers));
+        table.restore(rebooted.load_all().unwrap());
+        assert_eq!(table.activate_static_peers(), vec![home]);
+        assert!(table.get(&home).is_some_and(|peer| peer.is_static));
+        assert_eq!(
+            table.static_peers_unheard(),
+            vec![home],
+            "path request owed"
+        );
+
+        let now = 1_700_000_000 + MAX_UNREACHABLE_SECS + 24 * 60 * 60;
+        assert!(table.cull(now).is_empty());
+        assert!(table.rotate(now, |_| Default::default(), |_| 0).is_empty());
+        assert!(table.get(&home).is_some());
+    });
+}
+
+/// A list record lives in the message log and round-robin reclaim erases
+/// pages whole, so a list written once at flash time would be lost a lap
+/// later. A copy that has fallen into the older half is rewritten, same
+/// content, and the read after a reset still finds it.
+#[test]
+fn a_board_list_ageing_into_the_older_half_is_rewritten_unchanged() {
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let mut messages = PnStore::new(region.clone(), SECTORS);
+        let allowed = [[0x0A; 16], [0x0B; 16]];
+        assert!(write_list(
+            &region,
+            &mut log,
+            BoardList::AuthAllowed,
+            &allowed
+        ));
+        assert!(
+            board_list_refresh_ops(&region).is_empty(),
+            "a fresh copy is not rewritten"
+        );
+
+        let mut n = 0u32;
+        loop {
+            let mut newest = 0u32;
+            let mut copy = 0u32;
+            scan(log.flash_mut().bytes(), |r| {
+                newest = newest.max(r.page_seq);
+                if r.live && r.tag == TAG_AUTH {
+                    copy = r.page_seq;
+                }
+            });
+            if newest - copy >= SECTORS / 2 {
+                break;
+            }
+            messages
+                .append(&key(2_000 + n), 1, 0, &msg_body(1, FIELD_BODY))
+                .unwrap();
+            flush_messages(&mut messages, &region, &mut log);
+            n += 1;
+        }
+        let refresh = board_list_refresh_ops(&region);
+        assert_eq!(refresh.len(), 2, "one append, one purge");
+        run_ops(&region, &mut log, &refresh);
+        assert!(board_list_refresh_ops(&region).is_empty());
+
+        let mut live = 0;
+        scan(log.flash_mut().bytes(), |r| {
+            live += (r.live && r.tag == TAG_AUTH) as usize
+        });
+        assert_eq!(live, 1, "the old copy is purged");
+        assert_eq!(
+            PnPeerStore::new(region.clone())
+                .load_board_lists()
+                .auth_allowed,
+            allowed.to_vec()
+        );
+    });
+}
+
+/// D18 through the seam: with a non-empty auth list an unlisted client's
+/// `/get` is refused with the reference's `ERROR_NO_ACCESS`, the answer
+/// lnpnd gives (`lnpnd/src/engine.rs`, the `auth_allowed` check before
+/// `handle_get`), and a listed one is served its own mailbox. An empty list
+/// is open, as the board was before.
+#[test]
+fn an_unlisted_client_is_refused_its_mailbox_and_a_listed_one_served() {
+    use leviculum_lxmf::propagation::PeerError;
+    use leviculum_lxmf::propagation_node::get_mailbox;
+
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let listed = list_identity(1);
+        let stranger = list_identity(2);
+
+        // Empty: open, as today.
+        let open = PnPeerStore::new(region.clone()).load_board_lists();
+        assert!(open.auth_allowed.is_empty());
+        assert_eq!(
+            board_get_mailbox(Some(&stranger), &open.auth_allowed),
+            get_mailbox(Some(&stranger))
+        );
+
+        assert!(write_list(
+            &region,
+            &mut log,
+            BoardList::AuthAllowed,
+            &[*listed.hash()]
+        ));
+        let lists = PnPeerStore::new(region.clone()).load_board_lists();
+
+        assert_eq!(
+            board_get_mailbox(Some(&listed), &lists.auth_allowed),
+            get_mailbox(Some(&listed))
+        );
+        assert!(board_get_mailbox(Some(&listed), &lists.auth_allowed).is_ok());
+        assert_eq!(
+            board_get_mailbox(Some(&stranger), &lists.auth_allowed),
+            Err(PeerError::NoAccess)
+        );
+        assert_eq!(
+            board_get_mailbox(None, &lists.auth_allowed),
+            Err(PeerError::NoIdentity)
+        );
+
+        // The clear: an empty list written over it opens the mailbox again.
+        assert!(write_list(&region, &mut log, BoardList::AuthAllowed, &[]));
+        let cleared = PnPeerStore::new(region.clone()).load_board_lists();
+        assert!(cleared.auth_allowed.is_empty());
+        assert!(board_get_mailbox(Some(&stranger), &cleared.auth_allowed).is_ok());
+    });
+}
+
+/// The control list is its own record, and a list past its cap is refused
+/// whole with nothing queued: a list that arrives shorter than it was sent
+/// is a permission set nobody authorised.
+#[test]
+fn each_list_is_its_own_record_and_an_over_long_one_is_refused() {
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        assert!(write_list(
+            &region,
+            &mut log,
+            BoardList::ControlAllowed,
+            &[[0xC1; 16]]
+        ));
+        assert!(write_list(
+            &region,
+            &mut log,
+            BoardList::StaticPeers,
+            &[[0x51; 16], [0x52; 16]]
+        ));
+
+        let too_many: Vec<[u8; 16]> = (0..=BOARD_LIST_MAX as u8).map(|n| [n; 16]).collect();
+        assert!(board_list_write_ops(&region, BoardList::AuthAllowed, &too_many).is_none());
+
+        // A rewrite replaces, it does not accumulate.
+        assert!(write_list(
+            &region,
+            &mut log,
+            BoardList::StaticPeers,
+            &[[0x53; 16]]
+        ));
+
+        let lists = PnPeerStore::new(region.clone()).load_board_lists();
+        assert_eq!(lists.control_allowed, vec![[0xC1; 16]]);
+        assert_eq!(lists.static_peers, vec![[0x53; 16]]);
+        assert!(lists.auth_allowed.is_empty());
+        let mut live_static = 0;
+        scan(log.flash_mut().bytes(), |r| {
+            live_static += (r.live && r.tag == TAG_STATIC) as usize
+        });
+        assert_eq!(live_static, 1);
+    });
+}
+
+/// A list write cut between its append and its purge leaves two live
+/// copies: the read takes the newer, and the next refresh purges the older
+/// without changing what is read.
+#[test]
+fn a_list_write_interrupted_before_its_purge_reads_new_and_heals() {
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        assert!(write_list(
+            &region,
+            &mut log,
+            BoardList::AuthAllowed,
+            &[[1; 16]]
+        ));
+        let ops = board_list_write_ops(&region, BoardList::AuthAllowed, &[[2; 16]]).unwrap();
+        run_ops(&region, &mut log, &ops[..1]);
+        assert_eq!(
+            read_board_list(&region, BoardList::AuthAllowed),
+            vec![[2; 16]]
+        );
+
+        let refresh = board_list_refresh_ops(&region);
+        assert!(!refresh.is_empty());
+        run_ops(&region, &mut log, &refresh);
+        assert_eq!(
+            read_board_list(&region, BoardList::AuthAllowed),
+            vec![[2; 16]]
+        );
+        let mut live = 0;
+        scan(log.flash_mut().bytes(), |r| {
+            live += (r.live && r.tag == TAG_AUTH) as usize
+        });
+        assert_eq!(live, 1);
+        assert!(board_list_refresh_ops(&region).is_empty());
+    });
 }

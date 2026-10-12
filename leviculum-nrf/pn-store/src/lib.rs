@@ -59,11 +59,12 @@
 //! stamp value above 127 has probability 2^-127 and the clamp only ever
 //! understates value, never invents it. [`TAG_PEER`] marks peer records,
 //! [`TAG_PRICED`] the one marker record [`PnStore::stamp_values_true`]
-//! reads, [`TAG_RECALL`] a propagation node's recalled announce, and
-//! `TAG_BENCH` (0xB0, `leviculum-nrf/src/record_store.rs`) marks
-//! the bench instrument's synthetic records; all four are above the clamp,
-//! so none is ever visible to the message role and bench records survive
-//! in place, invisible, until their page is reclaimed.
+//! reads, [`TAG_RECALL`] a propagation node's recalled announce,
+//! [`TAG_STATIC`], [`TAG_AUTH`] and [`TAG_CONTROL`] the operator's lists
+//! ([`BoardList`]), and `TAG_BENCH` (0xB0, `leviculum-nrf/src/record_store.rs`)
+//! marks the bench instrument's synthetic records; all of them are above the
+//! clamp, so none is ever visible to the message role and bench records
+//! survive in place, invisible, until their page is reclaimed.
 //!
 //! # Re-pricing a store at value 0 (audit 2026-10-12 D10)
 //!
@@ -112,6 +113,20 @@ pub const TAG_PRICED: u8 = 0xA1;
 /// the `app_data` of a propagation node's last announce, kept so the
 /// inbound-sync peering can recall it after a reset (audit 2026-10-12 D5).
 pub const TAG_RECALL: u8 = 0xA2;
+
+/// Tag of the board's static-peer list ([`BoardList::StaticPeers`], audit
+/// 2026-10-12 D4): one record, its body the configured destination hashes,
+/// 16 B each.
+pub const TAG_STATIC: u8 = 0xA3;
+
+/// Tag of the client allow list ([`BoardList::AuthAllowed`], audit D18):
+/// identity hashes, 16 B each, that may drain a mailbox over `/get`.
+pub const TAG_AUTH: u8 = 0xA4;
+
+/// Tag of the control allow list ([`BoardList::ControlAllowed`], audit
+/// D18): identity hashes, 16 B each, for the control destination the board
+/// does not register yet (D17).
+pub const TAG_CONTROL: u8 = 0xA5;
 
 /// Key of the [`TAG_PRICED`] marker: no transient id, because the tag
 /// already keeps it out of every message read.
@@ -1350,15 +1365,247 @@ pub const BOARD_AUTOPEER_MAXDEPTH: u8 = 6;
 /// the announced peering cost, the costliest key the board will mine, and
 /// [`BOARD_AUTOPEER_MAXDEPTH`]. `leviculum_nrf::pn::Engine::new` builds its
 /// table from this, so the host tests run the depth the board runs.
+///
+/// `static_peers` is the [`BoardList::StaticPeers`] record read at boot
+/// ([`PnPeerStore::load_board_lists`], audit 2026-10-12 D4): never culled,
+/// never declined by the cap, gates bypassed, as on lnpnd. The board has no
+/// rotation pass, so the cull is the one removal they are exempt from on it
+/// (`PeerTable::cull`, run by the engine's maintenance tick).
 pub fn board_peering_config(
     peering_cost: u8,
     remote_peering_cost_max: u8,
+    static_peers: Vec<[u8; DESTINATION_LENGTH]>,
 ) -> leviculum_lxmf::PeeringConfig {
     leviculum_lxmf::PeeringConfig {
         max_peers: leviculum_heap_budget::BOARD_MAX_PEERS,
         peering_cost,
         remote_peering_cost_max,
         autopeer_maxdepth: BOARD_AUTOPEER_MAXDEPTH,
+        static_peers,
         ..leviculum_lxmf::PeeringConfig::default()
+    }
+}
+
+/// The most hashes one operator list holds: the peer table's cap, which
+/// bounds the static list by what the table can hold, and the same for the
+/// two allow lists so one frame shape and one bound serve all three
+/// (256 B of body, well inside a page).
+pub const BOARD_LIST_MAX: usize = leviculum_heap_budget::BOARD_MAX_PEERS;
+
+/// One of the operator's lists, set at flash time (`lnflash --static-peer`,
+/// `--auth-allowed`, `--control-allowed`) and read at boot. Each is one
+/// record in the store region under its own tag, its body the hashes, 16 B
+/// each; an empty body is the explicit clear, and no record at all reads
+/// as empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardList {
+    /// `static_peers` (audit 2026-10-12 D4), [`TAG_STATIC`].
+    StaticPeers,
+    /// `auth_required` with its `allowed` identities (D18), [`TAG_AUTH`].
+    /// Empty means open, as `auth_required = no` on lnpnd.
+    AuthAllowed,
+    /// `control_allowed` (D18), [`TAG_CONTROL`].
+    ControlAllowed,
+}
+
+impl BoardList {
+    pub const ALL: [BoardList; 3] = [
+        BoardList::StaticPeers,
+        BoardList::AuthAllowed,
+        BoardList::ControlAllowed,
+    ];
+
+    pub const fn tag(self) -> u8 {
+        match self {
+            BoardList::StaticPeers => TAG_STATIC,
+            BoardList::AuthAllowed => TAG_AUTH,
+            BoardList::ControlAllowed => TAG_CONTROL,
+        }
+    }
+
+    /// The record's key: fixed per list, because the tag already keeps it
+    /// out of every other read.
+    const fn key(self) -> [u8; KEY_LEN] {
+        match self {
+            BoardList::StaticPeers => *b"leviculum board static peers....",
+            BoardList::AuthAllowed => *b"leviculum board auth allowed....",
+            BoardList::ControlAllowed => *b"leviculum board control allowed.",
+        }
+    }
+}
+
+/// The three lists as one boot read ([`PnPeerStore::load_board_lists`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BoardLists {
+    pub static_peers: Vec<[u8; DESTINATION_LENGTH]>,
+    pub auth_allowed: Vec<[u8; DESTINATION_LENGTH]>,
+    pub control_allowed: Vec<[u8; DESTINATION_LENGTH]>,
+}
+
+/// The mailbox a `/get` client may drain, or the reference's error: no
+/// identity is `ERROR_NO_IDENTITY`, and an identity not on a non-empty
+/// `auth_allowed` is `ERROR_NO_ACCESS` (`identity_allowed`,
+/// `reference/LXMF/LXMF/LXMRouter.py:1472-1484`), the check lnpnd makes
+/// before `handle_get` (`lnpnd/src/engine.rs`, `auth_allowed`). An empty
+/// list is open (audit 2026-10-12 D18).
+pub fn board_get_mailbox(
+    remote: Option<&leviculum_core::identity::Identity>,
+    auth_allowed: &[[u8; DESTINATION_LENGTH]],
+) -> Result<[u8; DESTINATION_LENGTH], leviculum_lxmf::propagation::PeerError> {
+    if let Some(identity) = remote {
+        if !auth_allowed.is_empty() && !auth_allowed.contains(identity.hash()) {
+            return Err(leviculum_lxmf::propagation::PeerError::NoAccess);
+        }
+    }
+    leviculum_lxmf::propagation_node::get_mailbox(remote)
+}
+
+/// The newest live copy of `list`'s record in `region` (page sequence and
+/// body) and the offsets of every live copy, newest included.
+fn board_list_copies<R: Region>(region: &R, list: BoardList) -> (Option<(u32, Vec<u8>)>, Vec<u32>) {
+    let key = list.key();
+    let tag = list.tag();
+    let mut offsets = Vec::new();
+    let mut newest: Option<(u64, u32, Vec<u8>)> = None;
+    region.with_bytes(|bytes| {
+        scan(bytes, |record| {
+            if !record.live || record.tag != tag || record.key != &key {
+                return;
+            }
+            offsets.push(record.offset);
+            if newest
+                .as_ref()
+                .is_none_or(|(seq, ..)| *seq < record.sequence())
+            {
+                newest = Some((record.sequence(), record.page_seq, record.body.to_vec()));
+            }
+        })
+    });
+    (newest.map(|(_, page, body)| (page, body)), offsets)
+}
+
+/// `list` as `region` holds it; empty when no record exists. A body that is
+/// not a whole number of hashes is read up to its last whole one, and never
+/// past [`BOARD_LIST_MAX`].
+pub fn read_board_list<R: Region>(region: &R, list: BoardList) -> Vec<[u8; DESTINATION_LENGTH]> {
+    let (newest, _) = board_list_copies(region, list);
+    let Some((_, body)) = newest else {
+        return Vec::new();
+    };
+    body.chunks_exact(DESTINATION_LENGTH)
+        .take(BOARD_LIST_MAX)
+        .map(|chunk| {
+            let mut hash = [0u8; DESTINATION_LENGTH];
+            hash.copy_from_slice(chunk);
+            hash
+        })
+        .collect()
+}
+
+/// All three lists, the boot read.
+pub fn read_board_lists<R: Region>(region: &R) -> BoardLists {
+    BoardLists {
+        static_peers: read_board_list(region, BoardList::StaticPeers),
+        auth_allowed: read_board_list(region, BoardList::AuthAllowed),
+        control_allowed: read_board_list(region, BoardList::ControlAllowed),
+    }
+}
+
+fn board_list_ops<R: Region>(region: &R, list: BoardList, body: Vec<u8>) -> Vec<FlushOp> {
+    let key = list.key();
+    let (_, old) = board_list_copies(region, list);
+    let mut ops = Vec::with_capacity(1 + old.len());
+    ops.push(FlushOp::Append {
+        key,
+        time: 0,
+        tag: list.tag(),
+        body,
+    });
+    ops.extend(old.into_iter().map(|offset| FlushOp::Purge { offset, key }));
+    ops
+}
+
+/// The writes that replace `list` with `hashes` (empty is the clear): the
+/// new record, then the purge of every older copy, append first, so a write
+/// interrupted between the two leaves the newer copy readable (the read
+/// takes the newest) and the next refresh purges the leftover. `None` for
+/// more than [`BOARD_LIST_MAX`] hashes: a list that arrives shorter than it
+/// was sent is a permission set nobody authorised.
+///
+/// The ops are executed in order by the one writer of the log, the
+/// record-store task (`leviculum-nrf/src/record_store.rs`), never queued at
+/// the engine: the task is also what runs [`board_list_refresh_ops`], and
+/// one writer is what keeps a refresh of the old list from landing after
+/// the new one.
+pub fn board_list_write_ops<R: Region>(
+    region: &R,
+    list: BoardList,
+    hashes: &[[u8; DESTINATION_LENGTH]],
+) -> Option<Vec<FlushOp>> {
+    if hashes.len() > BOARD_LIST_MAX {
+        return None;
+    }
+    let mut body = Vec::with_capacity(hashes.len() * DESTINATION_LENGTH);
+    for hash in hashes {
+        body.extend_from_slice(hash);
+    }
+    Some(board_list_ops(region, list, body))
+}
+
+/// The writes that keep the operator lists from being reclaimed.
+///
+/// The lists live in the message log, which reclaims its oldest page
+/// round-robin, so a list written once at flash time would be erased a lap
+/// later, and a lost auth list is a mailbox that opens at the next boot. A
+/// list whose newest copy has aged into the older half of the region is
+/// rewritten unchanged, the rule the recalled announces follow
+/// ([`PnPeerStore::remember_announce`]); a list with a stray older copy (an
+/// interrupted write) is rewritten so the stray goes. Empty while every list
+/// is fresh. The record-store task asks whenever its active page changed,
+/// which is the only moment a copy can age.
+pub fn board_list_refresh_ops<R: Region>(region: &R) -> Vec<FlushOp> {
+    // One pass for all three lists: on the board this runs on the store
+    // task, which holds the executor for the length of the scan.
+    let mut newest_page = 0u32;
+    let mut pages = 0u32;
+    // Per list: copies seen, and the newest copy's sequence and page.
+    let mut seen = [(0usize, 0u64, 0u32); 3];
+    region.with_bytes(|bytes| {
+        pages = (bytes.len() / SECTOR_SIZE as usize) as u32;
+        scan(bytes, |record| {
+            newest_page = newest_page.max(record.page_seq);
+            if !record.live {
+                return;
+            }
+            for (at, list) in BoardList::ALL.iter().enumerate() {
+                if record.tag == list.tag() && record.key == &list.key() {
+                    let held = &mut seen[at];
+                    if held.0 == 0 || held.1 < record.sequence() {
+                        held.1 = record.sequence();
+                        held.2 = record.page_seq;
+                    }
+                    held.0 += 1;
+                }
+            }
+        })
+    });
+    let mut ops = Vec::new();
+    for (at, list) in BoardList::ALL.iter().enumerate() {
+        let (copies, _, page) = seen[at];
+        if copies == 0 || (newest_page - page < pages / 2 && copies == 1) {
+            continue;
+        }
+        let (newest, _) = board_list_copies(region, *list);
+        if let Some((_, body)) = newest {
+            ops.extend(board_list_ops(region, *list, body));
+        }
+    }
+    ops
+}
+
+impl<R: Region> PnPeerStore<R> {
+    /// The operator lists, read once at boot by the engine.
+    pub fn load_board_lists(&self) -> BoardLists {
+        read_board_lists(&self.region)
     }
 }

@@ -21,7 +21,7 @@ answers on a fixed USB ID, and publishes what it is in a text file.
 `leviculum-nrf/src/boards/rak4631.rs:187`. Two CDC ports: interface 00
 is the debug log, interface 02 the Reticulum transport. Both IDs are
 squatted pid.codes test IDs, flagged as a TODO at
-`leviculum-nrf/src/usb.rs:125`. Heltec stock firmware uses `239a:8071`.
+`leviculum-nrf/src/usb.rs:126`. Heltec stock firmware uses `239a:8071`.
 Meshtastic on the SenseCAP Solar Node uses `2886:0059`, and calls itself
 "XIAO-BOOT" while doing so. Nothing stops an application from naming
 itself after a bootloader, which is the sharpest available argument for
@@ -50,7 +50,7 @@ Two mechanisms, and only one of them is ours to control.
 
 **1200-baud touch.** The host opens a CDC port at exactly 1200 baud.
 Our firmware answers the resulting `SET_LINE_CODING` in
-`leviculum-nrf/src/usb.rs:195`, writes `DFU_MAGIC_UF2_RESET` (`0x57`) to
+`leviculum-nrf/src/usb.rs:196`, writes `DFU_MAGIC_UF2_RESET` (`0x57`) to
 `GPREGRET` at `0x4000_051C` and resets. The bootloader reads that
 retained register on the next boot and stays in mass-storage mode.
 Measured latency from `stty ... 1200` to the bootloader appearing on
@@ -1041,6 +1041,38 @@ dropped and looks exactly like a dead port.
 An unavailable preset refuses the same way: `--radio-preset eu433`
 stops the run with the 10 dBm reason before any board is enumerated,
 rather than shipping a board 4 dB over the limit.
+
+### The propagation node's settings
+
+A board runs a propagation node, and a deployment sets it at the flash
+too, in the same no-flash session shape as the radio power: one
+`lnflash` call talks to every running LNode and exits. The role reads
+all of it at boot, so every key below takes effect at the next reset, and
+the boot lines on the debug port (if00) prove what came up.
+
+| key | what it sets | lxmd's key | boot line |
+| --- | --- | --- | --- |
+| `--stamp-cost N` | the stamp cost the node announces (default 13) | `propagation_stamp_cost_target` | `PN_CONFIG` |
+| `--peering-cost N` | the peering cost it demands (default 1) | `peering_cost` | `PN_CONFIG` |
+| `--static-peer HEX` | a propagation node always peered, never culled, path requested at boot; repeatable, at most 16 | `static_peers` | `PN_LISTS static_peers=` |
+| `--auth-allowed HEX` | an identity that may drain its mailbox over `/get`; anyone else gets `ERROR_NO_ACCESS`; repeatable, at most 16; empty is open | `auth_required` + `allowed` | `PN_LISTS auth_allowed=` |
+| `--control-allowed HEX` | an identity allowed on the control destination; stored, but the board has none yet (audit 2026-10-12 D17) | `control_allowed` | `PN_LISTS control_allowed=` |
+
+Each list flag replaces its list whole, and `--clear-static-peers`,
+`--clear-auth-allowed`, `--clear-control-allowed` empty one. A static
+peer is the `lxmf.propagation` destination hash `lxmd --status` lists a
+peer by; the two allow lists take identity hashes, the form `rnid -i`
+prints. One call can carry the costs and the lists together, which is
+how a deployment pins a board to its home node:
+
+```text
+lnflash --stamp-cost 13 --peering-cost 1 --static-peer <home node> --auth-allowed <owner>
+```
+
+The costs live on the config page; the lists live as records of the
+board's message store (`TYPE_PN_LIST`,
+`docs/src/firmware/usb-control-envelope.md`), 16 B a hash, rewritten
+by the store task before round-robin reclaim can reach them.
 
 ### The real bottleneck is not the tool
 

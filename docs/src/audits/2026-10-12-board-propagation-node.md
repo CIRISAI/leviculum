@@ -49,7 +49,7 @@ updates (`admit`, `leviculum-lxmf/src/peering.rs:1068`, against
 `leviculum-lxmf/src/peering.rs:1138`, `MAX_UNREACHABLE_SECS`,
 `leviculum-lxmf/src/peering.rs:92`, run from the board's maintenance
 pass every 480 s, `tick_maintenance`,
-`leviculum-nrf/src/pn.rs:2561`, against
+`leviculum-nrf/src/pn.rs:2616`, against
 `reference/LXMF/LXMF/LXMRouter.py:2136-2140`), epoch-guarded on the
 board against the clock seed (`refresh_after_calendar_jump`,
 `leviculum-lxmf/src/peering.rs:808`, a board-only addition with no
@@ -60,7 +60,7 @@ validation, concurrent syncs, per-peer throttle, static-only
 `reference/LXMF/LXMF/LXMRouter.py:2274-2295`); the 180 s
 invalid-stamp throttle (`PN_STAMP_THROTTLE_SECS`,
 `leviculum-lxmf/src/peering.rs:87`, applied at
-`leviculum-nrf/src/pn.rs:3438`, against
+`leviculum-nrf/src/pn.rs:3502`, against
 `reference/LXMF/LXMF/LXMRouter.py:2430-2450`); the peering-key
 material order (`peering_key_material`,
 `leviculum-lxmf/src/peering.rs:1336`, against
@@ -81,16 +81,16 @@ Keys and stamps on the board, as built: the peer's X25519‖Ed25519
 keys are captured with the peer at announce time and persisted
 (#388 pass 3, `Peer::capture_identity`,
 `leviculum-lxmf/src/peering.rs:505`; `PnPeerStore`,
-`leviculum-nrf/pn-store/src/lib.rs:951`), because the board's
+`leviculum-nrf/pn-store/src/lib.rs:966`), because the board's
 `known_identities` cache is 8 slots against up to 16 peers. The
 peering key is mined on its own task, cooperatively
-(`miner_task`, `leviculum-nrf/src/pn.rs:641`), 10-32 s at the capped
+(`miner_task`, `leviculum-nrf/src/pn.rs:639`), 10-32 s at the capped
 cost 18, logged `PN_KEY`, persisted, never re-mined across a reset.
 
 **D1 — the peer table caps at 16 where the reference and lnpnd cap
 at 20.** Board: `BOARD_MAX_PEERS`,
 `leviculum-nrf/heap-budget/src/lib.rs:322`, wired at
-`leviculum-nrf/pn-store/src/lib.rs:1358`; reference `MAX_PEERS`,
+`leviculum-nrf/pn-store/src/lib.rs:1380`; reference `MAX_PEERS`,
 `reference/LXMF/LXMF/LXMRouter.py:43`; the shared default is 20
 (`MAX_PEERS_DEFAULT`, `leviculum-lxmf/src/peering.rs:62`). The §5
 derivation (`docs/src/concepts/propagation-node-on-a-board.md`,
@@ -146,10 +146,10 @@ reference's `rotate_peers`,
 lnpnd runs it on its tick (`rotate_peers`,
 `lnpnd/src/peering.rs:384`, landed 0a1d7e38). The board never calls
 it (the arm that names the reason says so,
-`leviculum-nrf/src/pn.rs:1506-1509`), and the inputs do not exist
+`leviculum-nrf/src/pn.rs:1558-1561`), and the inputs do not exist
 there: `PeerTraffic` is a host-side map persisted with the host's
 records, while the board's record codec restores zeros
-(`leviculum-nrf/pn-store/src/lib.rs:934-935`).
+(`leviculum-nrf/pn-store/src/lib.rs:949-950`).
 What a peer sees: with D1, a full board table is first-come-forever.
 The reference keeps ~10 % headroom by unpeering the peers that
 accept the least; a board keeps whoever came first, however dead
@@ -172,10 +172,11 @@ counters survive `PeerRecord` round-trips through the record log.
 a configured list — never culled, never declined by the cap, gates
 bypassed, path requested at start (`activate_static_peers`,
 `leviculum-lxmf/src/peering.rs:842`, against
-`reference/LXMF/LXMF/LXMRouter.py:633-642`). The board builds its
-`PeeringConfig` with the default empty list
-(`leviculum-nrf/pn-store/src/lib.rs:1357-1363`) and never calls
-`activate_static_peers`; there is no frame to configure one.
+`reference/LXMF/LXMF/LXMRouter.py:633-642`). The board built its
+`PeeringConfig` with the default empty list (`board_peering_config`,
+`leviculum-nrf/pn-store/src/lib.rs:1379-1387`, which takes a list since
+the fix below) and never called `activate_static_peers`; there was no
+frame to configure one.
 What an operator sees: a board cannot be pinned to a home
 propagation node; its peerings are whatever announces reach it
 first. A phone sees nothing — this is node-to-node only.
@@ -189,13 +190,13 @@ Test: board engine test — a configured static hash survives
 **D5 — the peer-back recall is RAM-only and does not survive a
 reset.** Both stacks peer back a node whose sync lands by recalling
 its last announce (`peer_from_recalled_announce`,
-`leviculum-nrf/src/pn.rs:2120` and `lnpnd/src/peering.rs:1140`,
+`leviculum-nrf/src/pn.rs:2172` and `lnpnd/src/peering.rs:1140`,
 against `reference/LXMF/LXMF/LXMRouter.py:2355-2375`). The
 reference recalls from `Identity.known_destinations`, which is
 persisted; the board recalls from `EmbeddedStorage`'s 16-entry RAM
 announce cache, swept of pathless destinations — the honest bound is
 *while a path lives, and not across a reset*
-(`leviculum-nrf/src/pn.rs:2100-2105`).
+(`leviculum-nrf/src/pn.rs:2152-2157`).
 What a peer sees: after a board reset — an ordinary event — a
 neighbour that announced before the reset syncs in and is answered
 `NotANode`; nothing flows back until its next announce, up to six
@@ -237,7 +238,7 @@ for an unknown path, so after a restart a recallable neighbour is
 "too deep" until its next announce; the link the sync arrived over
 has just proven the distance, so lnpnd takes `Link::hops` as the
 fallback. The board passed only `node.hops_to` (now the first
-argument of `sender_depth`, `leviculum-nrf/src/pn.rs:2149`).
+argument of `sender_depth`, `leviculum-nrf/src/pn.rs:2201`).
 What a peer sees: on the board the case is mostly masked by D5 —
 the RAM recall itself requires a live path — but a path dropped
 between the announce and the sync reproduces it: declined
@@ -262,7 +263,7 @@ closed before the decision, red against the path-only rule.
 
 **D7 — the board mines peering keys up to cost 18 where the
 reference and lnpnd accept 26.** `BOARD_REMOTE_PEERING_COST_MAX`,
-`leviculum-nrf/src/pn.rs:416`, against `MAX_PEERING_COST`,
+`leviculum-nrf/src/pn.rs:414`, against `MAX_PEERING_COST`,
 `reference/LXMF/LXMF/LXMRouter.py:51` and the shared default
 (`REMOTE_PEERING_COST_MAX_DEFAULT`,
 `leviculum-lxmf/src/peering.rs:75`).
@@ -281,7 +282,7 @@ Test: none needed; the bound is a named constant with its reasoning.
 **D8 — one key mine stalls all sync scheduling.** While a key
 grinds, `tick_sync` returns before picking any peer
 (`self.mining_peer.is_some()` in its early return until the fix
-below, `leviculum-nrf/src/pn.rs:2731`), so
+below, `leviculum-nrf/src/pn.rs:2786`), so
 peers whose keys are ready wait out the mine — 10-32 s at cost 18.
 The reference mines on a thread per peer and its scheduler keeps
 picking others (`generate_peering_key` off the sync thread,
@@ -291,7 +292,7 @@ What a peer sees: its due sync starts up to half a minute late, once
 per newly met peer. Class: timing.
 Price to close: 0 B (scheduling change: skip the mining peer instead
 of returning); the single-mine constraint itself is the one-deep
-channel (`MINE_REQ`, `leviculum-nrf/src/pn.rs:623`) and is right for
+channel (`MINE_REQ`, `leviculum-nrf/src/pn.rs:621`) and is right for
 this core.
 Test: board engine test — two peers, one mining, the other's round
 still dials.
@@ -339,10 +340,10 @@ link MDU, 431 B on LoRa), or a resource the advertisement gate
 admits at up to the announced sync limit
 (`accepts_resource_of`,
 `leviculum-lxmf/src/propagation_node.rs:977`, wired through
-`board_accepts_resource_of` at `leviculum-nrf/src/pn.rs:1217`). Storage is slice-at-a-time: the
+`board_accepts_resource_of` at `leviculum-nrf/src/pn.rs:1269`). Storage is slice-at-a-time: the
 record goes to the flash log through the work queue, one item per
 settle pass, the stamp workblock expanded 20 rounds per pass
-(`GRIND_SLICE_ROUNDS`, `leviculum-nrf/src/pn.rs:487`) so the LoRa
+(`GRIND_SLICE_ROUNDS`, `leviculum-nrf/src/pn.rs:485`) so the LoRa
 hand-off never goes dark behind a 3.7 s validation; the RAM is the
 role's sync slice (8 000 B) plus two queued uploads (8 000 B),
 priced in `ROLE_BUDGET_BYTES`.
@@ -374,7 +375,7 @@ peer is priced 0 and never offered to a stock peer.** The board
 skips the workblock at cost 0 while no peer demands a value
 (`always_compute_stamp_value: false` in `Engine::new` as audited, now
 `true` in `board_role_config`,
-`leviculum-nrf/pn-store/src/lib.rs:375`; the gate at
+`leviculum-nrf/pn-store/src/lib.rs:390`; the gate at
 `leviculum-lxmf/src/propagation_node.rs:1058-1069`), storing stamp
 value 0 as the record's tag. A stock peer announces cost 16 with
 flexibility 3 (`PROPAGATION_COST`,
@@ -405,7 +406,7 @@ message, 3655-3727 ms of CPU spread over ~50 settle passes
 the proof already left at receipt (#397), so the phone's round trip
 is untouched. Re-pricing an old store at boot costs the same CPU per
 stored record *plus one re-append-and-purge per record*, because the
-value is the record's tag (`leviculum-nrf/pn-store/src/lib.rs:678`)
+value is the record's tag (`leviculum-nrf/pn-store/src/lib.rs:693`)
 and the log is append-only: a full store re-priced is roughly one
 extra lap of the region's write pointer, ~150 appends and their
 share of page erases, once.
@@ -425,7 +426,7 @@ behaviour.
 wire and cannot be stored.** The advertisement gate admits a
 resource up to the announced sync limit, 5 000 B (D12); the record
 log refuses a body over `MAX_BODY` = 4 042 B
-(`leviculum-nrf/pn-store/src/lib.rs:670-673`, surfacing as
+(`leviculum-nrf/pn-store/src/lib.rs:685-688`, surfacing as
 `StorageError::Full` that no eviction can cure). By then the
 resource protocol has already acknowledged the transfer, and the
 store failure sends nothing — the reference has no signal for it
@@ -443,7 +444,7 @@ Price of leaving: one nonconforming sender's message lost with a log
 line. Price to narrow: 0 B — the sync-limit gate cannot see the
 message count at advertisement time, but the judgement path can
 refuse-and-teardown like the invalid-stamp arm
-(`leviculum-nrf/src/pn.rs:3141-3160`) so at least the link's death
+(`leviculum-nrf/src/pn.rs:3196-3215`) so at least the link's death
 tells the sender something; shrinking the announced sync limit to
 4 would close it entirely and cost legitimate two-message batches.
 Test: an mvr uploading a 4 500 B single-message resource, asserting
@@ -498,9 +499,9 @@ announce 20 s after boot (`PN_ANNOUNCE_INITIAL_DELAY_MS`,
 `NODE_ANNOUNCE_DELAY`, `reference/LXMF/LXMF/LXMRouter.py:41`);
 stock: `announce_interval = 360` minutes
 (`reference/LXMF/LXMF/Utilities/lxmd.py:981`). Both withheld while
-the store is unmounted (`leviculum-nrf/src/pn.rs:2429-2445`); the
+the store is unmounted (`leviculum-nrf/src/pn.rs:2484-2500`); the
 propagation slot is deliberately not clock-gated
-(`leviculum-nrf/src/pn.rs:2447-2462`).
+(`leviculum-nrf/src/pn.rs:2502-2517`).
 What a peer sees: a mobile board's peers refresh `last_heard` often
 and re-schedule syncs on every announce heard; the airtime is the
 cost, bounded by the duty budget the cadence crate carries.
@@ -543,7 +544,7 @@ processes one work item or one batch message, each stamp 50 slices
 of 20 rounds, ~3.7 s per message of CPU interleaved with the loop's
 channels. New `/offer`s during the drain are answered
 `ERROR_THROTTLED` — the batch gate sits at
-`leviculum-nrf/src/pn.rs:3286` — the reference's
+`leviculum-nrf/src/pn.rs:3350` — the reference's
 own postponement (`reference/LXMF/LXMF/LXMRouter.py:2274-2278`), on
 which a stock peer waits 180 s. The phones' proofs left at receipt
 (#397), so their round trips do not sit behind the grind. What is
@@ -559,7 +560,7 @@ the 8 KiB cap (`budget_reserve`,
 the reference's `reference/LXMF/LXMF/LXMRouter.py:58`) and client
 upload resources are not counted against it at all (only validated
 peer links enter `inbound_transfers`,
-`leviculum-nrf/src/pn.rs:1230-1231`). Worst case, one resource per
+`leviculum-nrf/src/pn.rs:1282-1283`). Worst case, one resource per
 endpoint link: 4 × 8 192 B in flight, 24 576 B of it unfunded — the
 3 × 8 192 B hole #661 named, and the one row of the heap-budget
 page's "does not sum" table that can kill (the live serve cap and
@@ -620,7 +621,7 @@ the board engine itself has no host target.
 **D16 — the board yields its own sync traffic to a duty-share
 budget; lnpnd never does.** Every site where the board originates
 propagation traffic asks the rolling-hour airtime share first
-(`own_traffic_go`, `leviculum-nrf/src/pn.rs:2687`, leviculum#494):
+(`own_traffic_go`, `leviculum-nrf/src/pn.rs:2742`, leviculum#494):
 a round is not dialled, a transfer not started, an offer answered
 `ERROR_THROTTLED` past the share, each logged `PN_YIELD` and the
 booked backoff handed back (`release_yielded_round`,
@@ -638,9 +639,9 @@ Test: covered by `leviculum-queue-budget`'s own tests.
 
 What the board serves on its propagation destination: `/get` (list,
 fetch, purge-on-haves) and `/offer`, registered at
-`leviculum-nrf/src/pn.rs:850-859` — a phone and a stock lxmd client
+`leviculum-nrf/src/pn.rs:858-867` — a phone and a stock lxmd client
 get full mailbox service, with the serve bounded by the live heap
-(`SERVE_CAP`, `read_serve_cap`, `leviculum-nrf/src/pn.rs:3046`) and
+(`SERVE_CAP`, `read_serve_cap`, `leviculum-nrf/src/pn.rs:3101`) and
 shortfalls re-listed on the client's next round.
 
 **D17 — no `lxmf.propagation.control` destination on the board.**
@@ -655,11 +656,11 @@ What an operator sees: `lxmd --status`/`--peers`/`--sync`/`--break
 --remote <board>` dies on "path not found" — the destination is
 never announced because it does not exist. The board's substitutes
 are local: the serial `PN_CONFIG` frame for costs
-(`apply_config`, `leviculum-nrf/src/pn.rs:339`, next-boot
+(`apply_config`, `leviculum-nrf/src/pn.rs:337`, next-boot
 semantics), the host-commanded announce
-(`announce_now`, `leviculum-nrf/src/pn.rs:2505`), the `PN_STATS`
+(`announce_now`, `leviculum-nrf/src/pn.rs:2560`), the `PN_STATS`
 log line every 300 s (`tick_stats`,
-`leviculum-nrf/src/pn.rs:2658`) and the display's store-fill field.
+`leviculum-nrf/src/pn.rs:2713`) and the display's store-fill field.
 There is no remote peer list, no remote sync trigger, no remote
 unpeer, and no way to read any of it over the mesh.
 Class: semantic (a whole reference surface absent).
@@ -688,10 +689,10 @@ Test: board twin of lnpnd's auth tests once the surface exists.
 What a board recalls across a reset, verified at the code: the peer
 table with identity hashes, public keys, mined peering keys, limits,
 costs, timebase, `last_heard` and the cursor (`PeerRecord` via
-`TAG_PEER` records, `leviculum-nrf/pn-store/src/lib.rs:947`,
-restored at `leviculum-nrf/src/pn.rs:888-890`); the message store
+`TAG_PEER` records, `leviculum-nrf/pn-store/src/lib.rs:962`,
+restored at `leviculum-nrf/src/pn.rs:908-910`); the message store
 (a flash scan); the announced costs
-(`load_config_at_boot`, `leviculum-nrf/src/pn.rs:317`). Backoff and
+(`load_config_at_boot`, `leviculum-nrf/src/pn.rs:315`). Backoff and
 transport phase start fresh (`into_peer`,
 `leviculum-lxmf/src/peering.rs:616`), as the reference's restore
 also drops link state.
@@ -704,7 +705,7 @@ re-uploading an already-drained message after a reset is re-stored,
 which its own `has_message` filter tolerates. The announce recall
 cache (D5). The traffic counters (D3's input; lnpnd persists them
 with the record, the board's codec zeroes them,
-`leviculum-nrf/pn-store/src/lib.rs:934-935`).
+`leviculum-nrf/pn-store/src/lib.rs:949-950`).
 
 How long until it is a mailbox again: the store mounts in the boot
 path; the propagation announce fires 20 s after boot

@@ -248,9 +248,7 @@ use leviculum_lxmf::propagation::{
     MessageListResponse, PeerError, PropagationNodeAnnounce, TransientId,
 };
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
-use leviculum_lxmf::propagation_node::{
-    get_mailbox, link_idle_past_bound, offer_remote, propagation_hash_of,
-};
+use leviculum_lxmf::propagation_node::{link_idle_past_bound, offer_remote, propagation_hash_of};
 use leviculum_lxmf::propagation_store::StoredMessage;
 use leviculum_lxmf::sync_round::{round_deadline_ms, round_step, RoundEvent, RoundStep, RoundView};
 use leviculum_lxmf::{
@@ -517,7 +515,7 @@ pub struct FlashRegion {
 }
 
 impl FlashRegion {
-    fn store_region() -> Self {
+    pub(crate) fn store_region() -> Self {
         let (base, len) = crate::record_store::region();
         Self { base, len }
     }
@@ -808,6 +806,16 @@ pub struct Engine {
     reprice: Option<RepriceWalk>,
     /// The largest modelled transient per operation since boot.
     peaks: EnginePeaks,
+    /// The identities that may drain a mailbox over `/get`, the
+    /// [`leviculum_pn_store::BoardList::AuthAllowed`] record read at boot;
+    /// empty is open (audit 2026-10-12 D18). 16 B of heap per entry, none
+    /// while unset.
+    auth_allowed: Vec<[u8; 16]>,
+    /// Static peers never heard, owed one path request on the first settle
+    /// pass, as lnpnd sends them on its first tick
+    /// (`reference/LXMF/LXMF/LXMRouter.py:638-642`). Construction has no
+    /// output to send through; emptied by that pass.
+    static_paths_pending: Vec<[u8; 16]>,
     /// What the BOOT plan funds one fetch to serve
     /// ([`crate::heap_census::budget_serve_cap`] of this node's own box)
     /// — the floor the serve-time reading is taken against, kept here so
@@ -879,15 +887,33 @@ impl Engine {
         let role = PropagationNode::new(store, role_config);
 
         let peer_store = PnPeerStore::new(region);
-        // The cap, the costs and the autopeer depth, from the store crate
-        // where the host tests reach them (audit 2026-10-12 D2: depth 6).
+        // The operator's lists, written at flash time (`lnflash
+        // --static-peer`, `--auth-allowed`, `--control-allowed`; audit
+        // 2026-10-12 D4, D18). Read once: a list written while the role runs
+        // takes effect at the next reset, as the costs do.
+        let lists = peer_store.load_board_lists();
+        let list_counts = (
+            lists.static_peers.len(),
+            lists.auth_allowed.len(),
+            lists.control_allowed.len(),
+        );
+        // The cap, the costs, the autopeer depth and the static peers, from
+        // the store crate where the host tests reach them (audit 2026-10-12
+        // D2: depth 6; D4: static peers).
         let mut peers = PeerTable::new(leviculum_pn_store::board_peering_config(
             config.peering_cost,
             BOARD_REMOTE_PEERING_COST_MAX,
+            lists.static_peers,
         ));
         if let Ok(records) = peer_store.load_all() {
             peers.restore(records);
         }
+        // The reference's order (`enable_propagation`,
+        // `reference/LXMF/LXMF/LXMRouter.py:615-642`), lnpnd's too: the
+        // persisted table, then an entry for every static peer still
+        // missing, then a path request for each static peer never heard.
+        let activated = peers.activate_static_peers();
+        let static_paths_pending = peers.static_peers_unheard();
         // A store an older board wrote may hold value 0 for what it took
         // before its first demanding peer: priced once, in the background,
         // before the marker says the region is true (D10).
@@ -903,6 +929,26 @@ impl Engine {
                 pages
             ),
         );
+        // The control list has no consumer yet: the board registers no
+        // control destination (audit D17). It is stored and counted, not
+        // held.
+        crate::log::log_fmt_critical(
+            "PN_LISTS ",
+            format_args!(
+                "static_peers={} auth_allowed={} control_allowed={}",
+                list_counts.0, list_counts.1, list_counts.2
+            ),
+        );
+        for destination_hash in &activated {
+            crate::log::log_fmt(
+                "PN_PEER ",
+                format_args!(
+                    "peer={} action=add reason=static peers={}",
+                    Hex(destination_hash),
+                    peers.len()
+                ),
+            );
+        }
         if reprice.is_some() {
             crate::log::log_fmt_critical("PN_REPRICE ", format_args!("walk=start"));
         }
@@ -937,6 +983,8 @@ impl Engine {
             grind: None,
             reprice,
             peaks: EnginePeaks::default(),
+            auth_allowed: lists.auth_allowed,
+            static_paths_pending,
             serve_boot_cap,
         })
     }
@@ -984,7 +1032,11 @@ impl Engine {
             + hc::vec_bytes(&self.too_large);
         EngineHeapCensus {
             peer_count: self.peers.len(),
-            peers: self.peers.heap_bytes(),
+            // The operator lists the engine holds ride with the table they
+            // configure.
+            peers: self.peers.heap_bytes()
+                + hc::vec_bytes(&self.auth_allowed)
+                + hc::vec_bytes(&self.static_paths_pending),
             work,
             batch,
             outbound,
@@ -2319,6 +2371,9 @@ impl Engine {
         let now_ms = node.now_ms();
 
         self.harvest_mining();
+        for destination in core::mem::take(&mut self.static_paths_pending) {
+            out.merge(node.request_path(&DestinationHash::new(destination)));
+        }
         self.tick_announce(node, now_ms, &mut out);
         self.tick_maintenance(node, now_ms);
         self.tick_stats(now_ms);
@@ -3180,9 +3235,18 @@ impl Engine {
                 request_id,
                 data,
             } => {
-                let mailbox = match get_mailbox(node.get_remote_identity(&link_id)) {
+                // No identity is the reference's ERROR_NO_IDENTITY; an
+                // identity off a non-empty auth list ERROR_NO_ACCESS, the
+                // answer lnpnd gives (audit 2026-10-12 D18).
+                let mailbox = match leviculum_pn_store::board_get_mailbox(
+                    node.get_remote_identity(&link_id),
+                    &self.auth_allowed,
+                ) {
                     Ok(mailbox) => mailbox,
                     Err(error) => {
+                        if error == PeerError::NoAccess {
+                            Self::log_reject("no_access", "get");
+                        }
                         let response = MessageListResponse::Error(error)
                             .encode()
                             .unwrap_or_default();

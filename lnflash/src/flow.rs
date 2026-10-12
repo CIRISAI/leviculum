@@ -1248,6 +1248,80 @@ pub fn set_pn_config(
     Ok(all_took_it)
 }
 
+/// The operator-list session (audit 2026-10-12 D4, D18): send each list
+/// the command line named to every running LNode, then exit. No flashing.
+/// Each frame replaces its list whole; the board acks once the list is in
+/// its store, and the role takes it at the next reset.
+pub fn set_pn_lists(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    wires: &[leviculum_core::envelope::PnListWire],
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --static-peer/--auth-allowed/--control-allowed \
+             talk to flashed boards; a board in its bootloader has no store to hold them.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        for wire in wires {
+            let name = crate::pn_list::list_name(wire.list());
+            let count = wire.hashes().len();
+            let reply = match open_transport(sysfs, &board.device, &board.tty)
+                .and_then(|fd| send_pn_list_to(&fd, *wire))
+            {
+                Ok(reply) => reply,
+                Err(err) => {
+                    ui.say(&format!(
+                        "{port}: the transport port could not be used ({err})"
+                    ));
+                    all_took_it = false;
+                    continue;
+                }
+            };
+            all_took_it &= reply.took_it();
+            match reply {
+                SessionReply::Acked => ui.say(&format!(
+                    "{port}: {name} stored ({count} entries). Takes effect at the next reset; \
+                     the boot PN_LISTS line on the debug port (if00) proves what came up."
+                )),
+                SessionReply::Refused(reason) => ui.say(&format!(
+                    "{port}: the board refused {name} — {}.",
+                    crate::envelope::reason_str(reason)
+                )),
+                SessionReply::NoAnswer => ui.say(&format!(
+                    "{port}: the board did not answer for {name}, so assume nothing was stored."
+                )),
+                SessionReply::ProbeSilent => ui.say(&format!(
+                    "{port}: the board did not answer the capability probe, so nothing was \
+                     sent. {}",
+                    crate::envelope::PROBE_SILENCE_HINT
+                )),
+                SessionReply::NotAccepted => ui.say(&format!(
+                    "{port}: this firmware speaks the envelope but cannot store operator \
+                     lists. Flash the current bundle first."
+                )),
+            }
+        }
+    }
+    Ok(all_took_it)
+}
+
+fn send_pn_list_to(
+    fd: &crate::sys::Fd,
+    wire: leviculum_core::envelope::PnListWire,
+) -> io::Result<SessionReply> {
+    use crate::envelope;
+    envelope::probed(fd, leviculum_core::envelope::TYPE_PN_LIST, |fd| {
+        envelope::send_pn_list(fd, wire)
+    })
+}
+
 fn send_pn_config_to(
     fd: &crate::sys::Fd,
     wire: leviculum_core::envelope::PnConfigWire,

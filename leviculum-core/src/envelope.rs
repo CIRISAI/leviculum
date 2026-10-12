@@ -342,6 +342,37 @@ pub const TYPE_MGMT_ALLOW_QUERY: u8 = 0x14;
 /// [`TYPE_CHANNEL_STATS_REPORT`].
 pub const TYPE_CHANNEL_STATS_QUERY: u8 = 0x15;
 
+/// Replace one of the board's propagation-node operator lists (audit
+/// 2026-10-12 D4, D18): `lnflash --static-peer <hex>` (repeatable),
+/// `--auth-allowed <hex>`, `--control-allowed <hex>`, and the matching
+/// `--clear-*` flags.
+///
+/// Payload is `[list: u8][count: u8][count × TRUNCATED_HASHBYTES]`, `list`
+/// one of [`PN_LIST_STATIC_PEERS`], [`PN_LIST_AUTH_ALLOWED`],
+/// [`PN_LIST_CONTROL_ALLOWED`]. The whole list is replaced; `count == 0` is
+/// the explicit clear. An unknown list or a count above
+/// [`PN_LIST_MAX_HASHES`] is refused with [`REFUSE_VALUE`], a payload whose
+/// length does not match its own count is [`REFUSE_MALFORMED`]. Acked only
+/// once the board's store holds the new list; the running role read its
+/// lists at boot, so the ack means "the next reset comes up with this", as
+/// for [`TYPE_PN_CONFIG`]. USB-only by where the parser sits, as
+/// [`TYPE_MGMT_ALLOW`] argues.
+pub const TYPE_PN_LIST: u8 = 0x16;
+
+/// [`TYPE_PN_LIST`]'s `list` byte: the static peers, destination hashes of
+/// propagation nodes the board always peers with and never culls.
+pub const PN_LIST_STATIC_PEERS: u8 = 0;
+/// [`TYPE_PN_LIST`]'s `list` byte: identity hashes that may drain a mailbox
+/// over `/get`; empty means anyone may (lxmd's `auth_required = no`).
+pub const PN_LIST_AUTH_ALLOWED: u8 = 1;
+/// [`TYPE_PN_LIST`]'s `list` byte: identity hashes allowed on the
+/// propagation control destination (lxmd's `control_allowed`).
+pub const PN_LIST_CONTROL_ALLOWED: u8 = 2;
+
+/// The most hashes one [`TYPE_PN_LIST`] carries: the board's peer-table cap,
+/// which `leviculum_pn_store::BOARD_LIST_MAX` is asserted equal to.
+pub const PN_LIST_MAX_HASHES: usize = 16;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -816,6 +847,66 @@ pub fn decode_mgmt_allow_payload(payload: &[u8]) -> Option<MgmtAllowWire<'_>> {
         payload: rest,
         count: count as usize,
     })
+}
+
+/// What one [`TYPE_PN_LIST`] asks for: the list and its new contents.
+/// Owned, for the reason [`ControlAction::MgmtAllow`] is: the executor is
+/// another task than the classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PnListWire {
+    list: u8,
+    count: u8,
+    hashes: [[u8; TRUNCATED_HASHBYTES]; PN_LIST_MAX_HASHES],
+}
+
+impl PnListWire {
+    /// `None` for an unknown list or more than [`PN_LIST_MAX_HASHES`].
+    pub fn new(list: u8, hashes: &[[u8; TRUNCATED_HASHBYTES]]) -> Option<Self> {
+        if list > PN_LIST_CONTROL_ALLOWED || hashes.len() > PN_LIST_MAX_HASHES {
+            return None;
+        }
+        let mut stored = [[0u8; TRUNCATED_HASHBYTES]; PN_LIST_MAX_HASHES];
+        stored[..hashes.len()].copy_from_slice(hashes);
+        Some(Self {
+            list,
+            count: hashes.len() as u8,
+            hashes: stored,
+        })
+    }
+
+    /// The `list` byte.
+    pub fn list(&self) -> u8 {
+        self.list
+    }
+
+    /// The hashes, in the order the frame listed them.
+    pub fn hashes(&self) -> &[[u8; TRUNCATED_HASHBYTES]] {
+        &self.hashes[..self.count as usize]
+    }
+}
+
+/// Encode a complete operator-list frame. The caller owns the bounds, so a
+/// test can build the frames [`classify_control_frame`] has to refuse.
+pub fn encode_pn_list(list: u8, hashes: &[[u8; TRUNCATED_HASHBYTES]]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(2 + hashes.len() * TRUNCATED_HASHBYTES);
+    payload.push(list);
+    payload.push(hashes.len() as u8);
+    for hash in hashes {
+        payload.extend_from_slice(hash);
+    }
+    encode_frame(TYPE_PN_LIST, &payload)
+}
+
+/// Decode an operator-list payload's shape: the list byte and the hash
+/// bytes, whose length matches the count. Value bounds are
+/// [`classify_control_frame`]'s.
+pub fn decode_pn_list_payload(payload: &[u8]) -> Option<(u8, &[u8])> {
+    let (&list, rest) = payload.split_first()?;
+    let (&count, hashes) = rest.split_first()?;
+    if hashes.len() != count as usize * TRUNCATED_HASHBYTES {
+        return None;
+    }
+    Some((list, hashes))
 }
 
 /// Encode an allow-list report (#235): `[flags, count, hashes…]`.
@@ -2000,6 +2091,11 @@ pub enum ControlAction {
     /// Envelope allow-list query: answer via [`mgmt_allow_answer`].
     /// Read-only, like [`MediaQuery`](Self::MediaQuery).
     MgmtAllowQuery,
+    /// Envelope operator list (audit 2026-10-12 D4, D18): hand it to the
+    /// board's store, which replaces the list's record, and answer
+    /// `encode_ack(TYPE_PN_LIST)` only once it landed. Already inside its
+    /// bounds: the classifier refused anything else.
+    PnList(PnListWire),
     /// Envelope channel-stats query: answer via
     /// [`encode_channel_stats_report`]. Read-only, like
     /// [`MediaQuery`](Self::MediaQuery).
@@ -2220,6 +2316,30 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
                 malformed
             }
         }
+        TYPE_PN_LIST => match decode_pn_list_payload(frame.payload) {
+            // A list the board does not have, or longer than its cap, is a
+            // VALUE refusal for the reason the management list's is: the
+            // frame says plainly what it wants, and truncating it would
+            // store a permission set nobody sent.
+            Some((list, bytes)) => {
+                let hashes: Vec<[u8; TRUNCATED_HASHBYTES]> = bytes
+                    .chunks_exact(TRUNCATED_HASHBYTES)
+                    .map(|chunk| {
+                        let mut hash = [0u8; TRUNCATED_HASHBYTES];
+                        hash.copy_from_slice(chunk);
+                        hash
+                    })
+                    .collect();
+                match PnListWire::new(list, &hashes) {
+                    Some(wire) => ControlAction::PnList(wire),
+                    None => ControlAction::Refuse {
+                        refused_type: TYPE_PN_LIST,
+                        reason: REFUSE_VALUE,
+                    },
+                }
+            }
+            None => malformed,
+        },
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -2257,6 +2377,7 @@ mod tests {
         TYPE_MGMT_ALLOW,
         TYPE_MGMT_ALLOW_QUERY,
         TYPE_CHANNEL_STATS_QUERY,
+        TYPE_PN_LIST,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -4286,6 +4407,67 @@ mod tests {
                 refused_type: TYPE_PN_CONFIG,
                 reason: REFUSE_UNKNOWN_TYPE,
             }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Propagation-node operator lists (audit 2026-10-12 D4, D18)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn an_operator_list_classifies_into_its_list_and_hashes() {
+        let hashes = [[7u8; TRUNCATED_HASHBYTES], [8u8; TRUNCATED_HASHBYTES]];
+        for list in [
+            PN_LIST_STATIC_PEERS,
+            PN_LIST_AUTH_ALLOWED,
+            PN_LIST_CONTROL_ALLOWED,
+        ] {
+            let action = classify_control_frame(&encode_pn_list(list, &hashes), ACCEPTED);
+            let ControlAction::PnList(wire) = action else {
+                panic!("not a list action: {action:?}");
+            };
+            assert_eq!(wire.list(), list);
+            assert_eq!(wire.hashes(), &hashes);
+        }
+        // Empty is the clear, not a refusal.
+        let ControlAction::PnList(clear) =
+            classify_control_frame(&encode_pn_list(PN_LIST_AUTH_ALLOWED, &[]), ACCEPTED)
+        else {
+            panic!("the clear was refused");
+        };
+        assert!(clear.hashes().is_empty());
+    }
+
+    #[test]
+    fn an_operator_list_out_of_bounds_is_refused_and_never_truncated() {
+        let refused = |reason| ControlAction::Refuse {
+            refused_type: TYPE_PN_LIST,
+            reason,
+        };
+        let too_many: Vec<_> = (0..=PN_LIST_MAX_HASHES)
+            .map(|i| [i as u8; TRUNCATED_HASHBYTES])
+            .collect();
+        assert_eq!(
+            classify_control_frame(&encode_pn_list(PN_LIST_STATIC_PEERS, &too_many), ACCEPTED),
+            refused(REFUSE_VALUE)
+        );
+        assert_eq!(
+            classify_control_frame(&encode_pn_list(3, &[[1; TRUNCATED_HASHBYTES]]), ACCEPTED),
+            refused(REFUSE_VALUE)
+        );
+        // A count that does not match the bytes behind it.
+        let mut short = vec![PN_LIST_AUTH_ALLOWED, 2];
+        short.extend_from_slice(&[1; TRUNCATED_HASHBYTES]);
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_PN_LIST, &short), ACCEPTED),
+            refused(REFUSE_MALFORMED)
+        );
+        assert_eq!(
+            classify_control_frame(
+                &encode_pn_list(PN_LIST_AUTH_ALLOWED, &[[1; TRUNCATED_HASHBYTES]]),
+                ACCEPTED_PRE_236
+            ),
+            refused(REFUSE_UNKNOWN_TYPE)
         );
     }
 

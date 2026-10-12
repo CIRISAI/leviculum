@@ -96,7 +96,10 @@ const _: () = assert!(
     TAG_BENCH > leviculum_pn_store::MESSAGE_TAG_MAX
         && TAG_BENCH != leviculum_pn_store::TAG_PEER
         && TAG_BENCH != leviculum_pn_store::TAG_PRICED
-        && TAG_BENCH != leviculum_pn_store::TAG_RECALL,
+        && TAG_BENCH != leviculum_pn_store::TAG_RECALL
+        && TAG_BENCH != leviculum_pn_store::TAG_STATIC
+        && TAG_BENCH != leviculum_pn_store::TAG_AUTH
+        && TAG_BENCH != leviculum_pn_store::TAG_CONTROL,
     "TAG_BENCH collides with the propagation store's tag map"
 );
 
@@ -123,6 +126,41 @@ pub enum Request {
     /// refused while one is running — see [`request_storm`].
     Storm { records: u16, size: u16 },
 }
+
+/// A pending operator-list write (audit 2026-10-12 D4, D18, `lnflash
+/// --static-peer` and kin) — see [`request_board_list`]. Its own channel
+/// rather than a [`Request`] variant: the list is 258 B, and every storm
+/// request would carry that width.
+static BOARD_LIST_REQUESTS: Channel<
+    CriticalSectionRawMutex,
+    leviculum_core::envelope::PnListWire,
+    1,
+> = Channel::new();
+
+/// The envelope's bound and the store's are one number.
+const _: () = assert!(
+    leviculum_core::envelope::PN_LIST_MAX_HASHES == leviculum_pn_store::BOARD_LIST_MAX,
+    "the operator-list frame and the store disagree on a list's cap"
+);
+
+/// The store's list for an envelope `list` byte.
+fn board_list_of(list: u8) -> Option<leviculum_pn_store::BoardList> {
+    use leviculum_core::envelope::{
+        PN_LIST_AUTH_ALLOWED, PN_LIST_CONTROL_ALLOWED, PN_LIST_STATIC_PEERS,
+    };
+    use leviculum_pn_store::BoardList;
+    match list {
+        PN_LIST_STATIC_PEERS => Some(BoardList::StaticPeers),
+        PN_LIST_AUTH_ALLOWED => Some(BoardList::AuthAllowed),
+        PN_LIST_CONTROL_ALLOWED => Some(BoardList::ControlAllowed),
+        _ => None,
+    }
+}
+
+/// Whether the last [`Request::BoardList`] landed: every op of the write
+/// performed. Signalled by the store task, awaited by the serial task's
+/// [`board_list_landed`].
+static BOARD_LIST_DONE: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 
 /// Pending requests. Depth 1: a second storm while one runs is refused by
 /// [`request_storm`] rather than queued, because a measurement that silently
@@ -245,6 +283,30 @@ pub fn request_storm(records: u16, size: u16) -> bool {
         return false;
     }
     REQUESTS.try_send(Request::Storm { records, size }).is_ok()
+}
+
+/// Ask the store task to replace one operator list.
+///
+/// The list is a record of the message log, so the log's one writer writes
+/// it, and the same task keeps it from being reclaimed (the refresh after
+/// every page change in [`store_task`]); the engine only reads the lists at
+/// boot. `false` means nothing will happen: the log is not mounted, a storm
+/// is running, or the slot is taken. The caller then refuses with BUSY.
+pub fn request_board_list(wire: leviculum_core::envelope::PnListWire) -> bool {
+    if !MOUNTED.load(Ordering::Relaxed) || STORM_RUNNING.load(Ordering::Relaxed) {
+        return false;
+    }
+    BOARD_LIST_DONE.reset();
+    BOARD_LIST_REQUESTS.try_send(wire).is_ok()
+}
+
+/// Wait for the outcome of the request [`request_board_list`] accepted.
+/// `None` when the store did not answer within `within` — the write may
+/// still land, so the caller must not claim it did.
+pub async fn board_list_landed(within: embassy_time::Duration) -> Option<bool> {
+    embassy_time::with_timeout(within, BOARD_LIST_DONE.wait())
+        .await
+        .ok()
 }
 
 /// Whether a storm is running right now.
@@ -401,23 +463,41 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash) {
 
     let mut ticker = embassy_time::Ticker::every(embassy_time::Duration::from_secs(STATS_PERIOD_S));
     let mut reported = (0u32, 0u32, 0u32);
+    // The active page the operator lists were last checked against; a copy
+    // only ages when this moves. `u32::MAX` checks once at mount.
+    let mut lists_checked_at = u32::MAX;
     loop {
-        use embassy_futures::select::{select3, Either3};
+        use embassy_futures::select::{select4, Either4};
         // The only place this task selects, and therefore the only place a
         // future of it is ever dropped: all arms are cheap and cancel-safe,
         // and an append is never inside one. See the module docs on the
         // `DropBomb`.
-        match select3(REQUESTS.receive(), PN_OPS.receive(), ticker.next()).await {
-            Either3::First(Request::Storm { records, size }) => {
+        match select4(
+            REQUESTS.receive(),
+            PN_OPS.receive(),
+            ticker.next(),
+            BOARD_LIST_REQUESTS.receive(),
+        )
+        .await
+        {
+            Either4::First(Request::Storm { records, size }) => {
                 STORM_RUNNING.store(true, Ordering::Relaxed);
                 storm(&mut log, records, size).await;
                 STORM_RUNNING.store(false, Ordering::Relaxed);
             }
-            Either3::Second(op) => {
+            Either4::Second(op) => {
                 let outcome = pn_perform(&mut log, base, op).await;
                 PN_DONE.signal(outcome);
             }
-            Either3::Third(()) => {}
+            Either4::Third(()) => {}
+            Either4::Fourth(wire) => {
+                let landed = write_board_list(&mut log, base, wire).await;
+                BOARD_LIST_DONE.signal(landed);
+            }
+        }
+        if log.sequence() != lists_checked_at {
+            lists_checked_at = log.sequence();
+            refresh_board_lists(&mut log, base).await;
         }
         let now = (
             APPENDS.load(Ordering::Relaxed),
@@ -505,6 +585,83 @@ async fn pn_perform(log: &mut RecordLog<Device>, base: u32, op: PnOp) -> Result<
             }
         }
     }
+}
+
+/// Perform a run of [`leviculum_pn_store::FlushOp`]s in order; whether
+/// every one landed.
+#[cfg(feature = "softdevice")]
+async fn perform_all(
+    log: &mut RecordLog<Device>,
+    base: u32,
+    ops: alloc::vec::Vec<leviculum_pn_store::FlushOp>,
+) -> bool {
+    use leviculum_pn_store::FlushOp;
+    let mut landed = true;
+    for op in ops {
+        let op = match op {
+            FlushOp::Append {
+                key,
+                time,
+                tag,
+                body,
+            } => PnOp::Append {
+                key,
+                time,
+                tag,
+                body,
+            },
+            FlushOp::Purge { offset, key } => PnOp::Purge { offset, key },
+        };
+        landed &= pn_perform(log, base, op).await.is_ok();
+    }
+    landed
+}
+
+/// Replace one operator list (audit 2026-10-12 D4, D18): the new record,
+/// then the purge of the old. One line says what landed; the boot line
+/// `PN_LISTS` of the next reset says what the role took.
+#[cfg(feature = "softdevice")]
+async fn write_board_list(
+    log: &mut RecordLog<Device>,
+    base: u32,
+    wire: leviculum_core::envelope::PnListWire,
+) -> bool {
+    let Some(list) = board_list_of(wire.list()) else {
+        return false;
+    };
+    let region = crate::pn::FlashRegion::store_region();
+    let Some(ops) = leviculum_pn_store::board_list_write_ops(&region, list, wire.hashes()) else {
+        return false;
+    };
+    let landed = perform_all(log, base, ops).await;
+    crate::log::log_fmt_critical(
+        "STORE ",
+        format_args!(
+            "pn_list list={} count={} landed={} effective=next-boot",
+            wire.list(),
+            wire.hashes().len(),
+            landed as u8
+        ),
+    );
+    landed
+}
+
+/// Rewrite any operator list whose copy aged into the older half of the
+/// region ([`leviculum_pn_store::board_list_refresh_ops`]). One scan per
+/// list, run only when the active page moved; nothing is written while the
+/// lists are fresh.
+#[cfg(feature = "softdevice")]
+async fn refresh_board_lists(log: &mut RecordLog<Device>, base: u32) {
+    let region = crate::pn::FlashRegion::store_region();
+    let ops = leviculum_pn_store::board_list_refresh_ops(&region);
+    if ops.is_empty() {
+        return;
+    }
+    let landed = perform_all(log, base, ops).await;
+    crate::log::log_fmt(
+        "STORE ",
+        format_args!("pn_list_refresh landed={}", landed as u8),
+    );
 }
 
 /// Mount the region, formatting it once if it is not ours, and say which of
