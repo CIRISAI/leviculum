@@ -120,6 +120,8 @@ mod mvr_link_data_no_link;
 #[cfg(test)]
 mod mvr_link_delivery_telemetry;
 #[cfg(test)]
+mod mvr_link_iface_pinning;
+#[cfg(test)]
 mod mvr_link_mtu_asymmetry;
 #[cfg(test)]
 mod mvr_link_mtu_floor;

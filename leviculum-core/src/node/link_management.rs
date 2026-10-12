@@ -899,7 +899,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.handle_link_proof(packet, raw_hash, now_ms, interface_index);
             }
             PacketType::Data => {
-                self.handle_link_data(packet, raw_packet, now_ms);
+                self.handle_link_data(packet, raw_packet, raw_hash, now_ms, interface_index);
             }
             PacketType::Announce => {
                 // Announces are not link packets, ignore
@@ -1088,6 +1088,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         if packet.context == PacketContext::ResourcePrf {
+            // A resource proof goes through `Link.receive` in the reference
+            // (Transport.py:2237-2242), so it is pinned like link DATA.
+            if self.refuse_off_link_interface(&link_id, packet, raw_hash, interface_index) {
+                return;
+            }
             self.handle_resource_proof(link_id, proof_data, now_ms);
             return;
         }
@@ -1374,12 +1379,77 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
+    /// Refuse a packet for one of our links that arrived on another interface
+    /// than the one the link was formed on (#658, audit D7). Returns true when
+    /// the packet was dropped.
+    ///
+    /// The reference hands link DATA to its link only on the attached
+    /// interface (Transport.py:2129) and `Link.receive` refuses everything
+    /// else (Link.py:975-976), stale recovery included, so the check runs
+    /// before anything touches the link. A link with no attached interface
+    /// yet (an initiator before its proof) refuses too, as `None !=
+    /// receiving_interface` does there. A link a local client holds is not
+    /// ours to check: the daemon relays it through its link table and the
+    /// client's own stack sees every packet on its one shared-instance
+    /// interface, the one the link was formed on.
+    ///
+    /// The reference also takes the packet hash back out of its filter so a
+    /// copy arriving later on the right interface is not a duplicate
+    /// (Transport.py:2149-2150). Ours needs no such step for the contexts
+    /// that matter here: keepalives, resource parts, resource proofs and
+    /// channel packets are exempt from dedup in the first place.
+    ///
+    /// Re-pinning a stale link to the interface its packets moved to would
+    /// keep it alive where the reference lets it die; that is a deviation to
+    /// decide on its own, measured, and is not done here.
+    fn refuse_off_link_interface(
+        &mut self,
+        link_id: &LinkId,
+        packet: &Packet,
+        raw_hash: Option<&[u8; 32]>,
+        interface_index: usize,
+    ) -> bool {
+        let Some(link) = self.links.get(link_id) else {
+            return false;
+        };
+        let attached = link.attached_interface();
+        if attached == Some(interface_index) {
+            return false;
+        }
+        crate::tracing::debug!(
+            event = "LINK_IFACE_MISMATCH",
+            link = %HexShort(link_id.as_bytes()),
+            iface = %self.transport.iface_name(interface_index),
+            attached = %self.transport.iface_name_opt(attached),
+            ctx = packet.context.to_byte(),
+        );
+        self.transport.record_node_layer_drop(
+            raw_hash,
+            packet,
+            interface_index,
+            crate::transport::DropReason::LinkIfaceMismatch,
+        );
+        true
+    }
+
     /// Handle an incoming DATA packet on a link.
     ///
-    /// Dispatches to per-context handlers after stale-link recovery.
-    fn handle_link_data(&mut self, packet: &Packet, raw_packet: &[u8], now_ms: u64) {
+    /// Dispatches to per-context handlers after the interface check and
+    /// stale-link recovery.
+    fn handle_link_data(
+        &mut self,
+        packet: &Packet,
+        raw_packet: &[u8],
+        raw_hash: Option<&[u8; 32]>,
+        now_ms: u64,
+        interface_index: usize,
+    ) {
         let link_id = LinkId::new(packet.destination_hash);
         let now_secs = now_ms / MS_PER_SECOND;
+
+        if self.refuse_off_link_interface(&link_id, packet, raw_hash, interface_index) {
+            return;
+        }
 
         // Recover stale links on any inbound traffic (Python Link.py:983-984)
         self.try_recover_stale(&link_id, now_secs);

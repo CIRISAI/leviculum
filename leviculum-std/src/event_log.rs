@@ -459,6 +459,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // inbound link for one of our own destinations (never for a relayed link).
     // The establishment proof reuses PROOF_GEN/PROOF_SEND, and local delivery
     // reuses PKT_LOCAL (all already catalogued above).
+    // A packet for one of our own links refused because it arrived on
+    // another interface than the link's attached one (#658, audit D7). The
+    // PKT_DROP line with reason=link-iface-mismatch carries the journey
+    // hash; this one names the interface the link expected.
+    EventSchema {
+        name: "LINK_IFACE_MISMATCH",
+        required_keys: &["link", "iface", "attached", "ctx"],
+    },
     EventSchema {
         name: "LINK_LOCAL",
         required_keys: &["dst", "iface", "link"],
@@ -502,6 +510,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "unknown_context",
             "no_such_interface",
             "next_hop_is_requestor",
+            "link_iface_mismatch",
             "total",
             // Not a drop reason and outside `total` (#374): link requests
             // for a local client's destination redirected to the clients.

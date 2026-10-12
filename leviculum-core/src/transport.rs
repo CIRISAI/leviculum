@@ -1773,12 +1773,20 @@ pub struct TransportStats {
     pub(crate) drops_unknown_context: u64,
     pub(crate) drops_no_such_interface: u64,
     pub(crate) drops_next_hop_is_requestor: u64,
+    pub(crate) drops_link_iface_mismatch: u64,
     // NOT a drop counter and deliberately outside `packets_dropped`: link
     // requests for a local client's destination that arrived while the path
     // table held nothing for it, and were handed to the connected clients
     // instead of the mesh (#374). Non-zero says a client came back without
     // announcing and the daemon covered for it.
-    pub(crate) lr_local_client_redirect: u64,
+    //
+    // This one and `path_request_retry_withheld` are u32, saturating: the
+    // boards' heap budget has no slack in the node box (the T114 box is
+    // exactly the size at which four links fit), so the u64 that
+    // `drops_link_iface_mismatch` added (#658) is paid for by halving two
+    // rare non-drop counters. At the worst rate measured for either (0.4 a
+    // second, 2026-09-28) a u32 saturates after about 340 years.
+    pub(crate) lr_local_client_redirect: u32,
     // NOT a drop counter and deliberately outside `packets_dropped`: path
     // requests that arrived while a discovery for the same destination was
     // already pending here, and were batched onto it instead of being
@@ -1800,7 +1808,7 @@ pub struct TransportStats {
     // says a requester is holding a window open for a destination the mesh
     // cannot answer — the 2026-09-28 live capture's two dead helpers, 0.4
     // fresh-tag frames a second onto LoRa and serial, for hours.
-    pub(crate) path_request_retry_withheld: u64,
+    pub(crate) path_request_retry_withheld: u32,
 }
 
 /// Classified reason for a dropped packet (OBS-2b).
@@ -1949,6 +1957,18 @@ pub enum DropReason {
     /// refusals, all silent). A rising count names a routing loop between
     /// two neighbours: each believes the destination is behind the other.
     NextHopIsRequestor,
+    /// A packet for one of our own links that arrived on another interface
+    /// than the one the link was formed on (Codeberg #658, audit D7).
+    /// Keepalives, resource parts and resource proofs carry no per-packet
+    /// authentication, so a node bridging two of our interfaces could replay
+    /// them across; the reference refuses every such packet
+    /// (`Transport.py:2129` for link DATA, `Link.py:975-976` for everything
+    /// `Link.receive` sees, resource proofs included) and only logs it. We
+    /// refuse the same set and count it. A rising count names either a
+    /// bridge between two of our interfaces or a link whose path moved to
+    /// another interface while it lived: the link goes stale here as it
+    /// does on a Python node.
+    LinkIfaceMismatch,
 }
 
 /// Dedicated tracing target for the per-packet journey contract
@@ -2015,11 +2035,12 @@ impl DropReason {
             DropReason::UnknownContext => "unknown-context",
             DropReason::NoSuchInterface => "no-such-interface",
             DropReason::NextHopIsRequestor => "next-hop-is-requestor",
+            DropReason::LinkIfaceMismatch => "link-iface-mismatch",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 21] = [
+    pub const ALL: [DropReason; 22] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -2041,6 +2062,7 @@ impl DropReason {
         DropReason::UnknownContext,
         DropReason::NoSuchInterface,
         DropReason::NextHopIsRequestor,
+        DropReason::LinkIfaceMismatch,
     ];
 }
 
@@ -2207,12 +2229,18 @@ impl TransportStats {
         self.drops_next_hop_is_requestor
     }
 
+    /// Packets for one of our own links refused because they arrived on
+    /// another interface than the link's attached one (#658).
+    pub fn drops_link_iface_mismatch(&self) -> u64 {
+        self.drops_link_iface_mismatch
+    }
+
     /// Link requests for a local client's destination that arrived with an
     /// empty path table and were handed to the connected clients instead of
     /// dying as overheard/no-path (#374). Not a drop; not part of
     /// [`Self::packets_dropped`].
     pub fn lr_local_client_redirects(&self) -> u64 {
-        self.lr_local_client_redirect
+        u64::from(self.lr_local_client_redirect)
     }
 
     /// Incoming path requests batched onto a discovery this node already had
@@ -2231,7 +2259,7 @@ impl TransportStats {
     /// names a requester holding Full-mode windows open for destinations the
     /// mesh cannot answer.
     pub fn path_request_retry_withholds(&self) -> u64 {
-        self.path_request_retry_withheld
+        u64::from(self.path_request_retry_withheld)
     }
 
     /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
@@ -2258,6 +2286,7 @@ impl TransportStats {
             + self.drops_unknown_context
             + self.drops_no_such_interface
             + self.drops_next_hop_is_requestor
+            + self.drops_link_iface_mismatch
     }
 
     /// Single choke point for every packet drop (OBS-2b).
@@ -2290,6 +2319,7 @@ impl TransportStats {
             DropReason::UnknownContext => self.drops_unknown_context += 1,
             DropReason::NoSuchInterface => self.drops_no_such_interface += 1,
             DropReason::NextHopIsRequestor => self.drops_next_hop_is_requestor += 1,
+            DropReason::LinkIfaceMismatch => self.drops_link_iface_mismatch += 1,
         }
         debug_assert_eq!(
             self.packets_dropped,
@@ -4740,6 +4770,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 unknown_context = self.stats.drops_unknown_context,
                 no_such_interface = self.stats.drops_no_such_interface,
                 next_hop_is_requestor = self.stats.drops_next_hop_is_requestor,
+                link_iface_mismatch = self.stats.drops_link_iface_mismatch,
                 total = self.stats.packets_dropped,
                 // Outside `total` on purpose: a redirect is a delivery, not
                 // a drop (#374); it rides this line because the operators
@@ -5629,7 +5660,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4025. A destination with no cached
+    /// link-request path uses at transport.rs:4055. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -7268,7 +7299,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Read path data into locals (releases immutable borrow)
             let (target_iface, path_hops, needs_relay, next_hop, via_peer) =
                 if returned_client_delivery {
-                    self.stats.lr_local_client_redirect += 1;
+                    self.stats.lr_local_client_redirect =
+                        self.stats.lr_local_client_redirect.saturating_add(1);
                     // The entry anchor: core interface indices grow
                     // monotonically (`register_interface`), so the highest
                     // local-client index is the most recent connection — in
@@ -11460,7 +11492,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2541`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2571`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -13136,7 +13168,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // batching later requesters (#433), and the requester's next
             // retry after expiry opens a fresh window with a fresh one-shot.
             if !self.interface_mode(requesting_iface).discovers_paths() {
-                self.stats.path_request_retry_withheld += 1;
+                self.stats.path_request_retry_withheld =
+                    self.stats.path_request_retry_withheld.saturating_add(1);
                 crate::tracing::debug!(
                     event = "PR_RETRY_WITHHELD",
                     dst = %HexShort(&dest_hash),
@@ -17684,7 +17717,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7156), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7187), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
