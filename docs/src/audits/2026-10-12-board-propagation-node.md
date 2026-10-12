@@ -223,6 +223,17 @@ Price to adopt: 0 B — the link is still up when
 its hop count is a read, not a new field.
 Test: the lnpnd rule's test shape
 (`lnpnd/src/engine.rs:2558-2565`) replayed through the board engine.
+**Fixed in 00ac770b**: the board reads the link's hop count at the
+resource advertisement, while the link certainly exists, into one slot
+(`AdvertisedHops`, `leviculum-nrf/sync-batch`; one because D14 admits
+one incoming resource at a time, asserted beside the import), and
+`sender_depth` takes it when no path is known; a known path still
+wins. The validated hash stays in `validated_links` until the
+`LinkClosed`, the keys in the identity cache, so the identity needs no
+slot. A link id and a byte in the engine, no heap. Pinned by
+`a_pathless_node_syncing_over_a_link_is_judged_by_the_links_hops`
+(`leviculum-nrf/sync-batch/src/lib.rs`), the lnpnd rows plus a link
+closed before the decision, red against the path-only rule.
 
 **D7 — the board mines peering keys up to cost 18 where the
 reference and lnpnd accept 26.** `BOARD_REMOTE_PEERING_COST_MAX`,
@@ -259,6 +270,16 @@ channel (`MINE_REQ`, `leviculum-nrf/src/pn.rs:623`) and is right for
 this core.
 Test: board engine test — two peers, one mining, the other's round
 still dials.
+**Fixed in 00ac770b**, by skipping: the pick is
+`PeerTable::next_dialable` (`leviculum-lxmf`), which serves every due
+peer except those that would need the busy miner, and `start_round`
+refuses a second job while one runs. No state: the mining peer is
+already `KeyMining`, and `mining_peer` already says the miner is busy.
+Pinned by `a_busy_miner_holds_only_the_peers_that_need_it`
+(`leviculum-lxmf/src/peering_tests.rs`), red against the early return.
+lnpnd's tick carries the same early return
+(`lnpnd/src/peering.rs:1238`, `self.mining.is_some()`), so the
+sentence above about lnpnd does not hold; not changed here.
 
 ## 2. The store, pricing, and what the board announces
 
@@ -402,6 +423,18 @@ tells the sender something; shrinking the announced sync limit to
 4 would close it entirely and cost legitimate two-message batches.
 Test: an mvr uploading a 4 500 B single-message resource, asserting
 `PN_REJECT reason=store` today and the chosen behaviour after.
+**Fixed in 00ac770b**, at the gate: `board_accepts_resource_of`
+(`leviculum-nrf/pn-store`) holds a resource from a link without a
+validated peering key, a client upload and one message by
+construction, to `MAX_UPLOAD_RESOURCE_BYTES` (`MAX_BODY` plus the
+thinnest envelope, 4 048 B), and refuses past it with the RCL before
+anything is acknowledged. The sync limit stays 5: at 4 it would break
+the assertion that a message at the transfer limit is syncable, and a
+stock peer would skip such a message toward the board forever. A peer
+packing one message above the transfer limit it was told is the case
+left. Pinned by `a_client_upload_the_gate_admits_is_one_the_store_holds`
+(`leviculum-nrf/pn-store/src/tests.rs`), red at 4 500 B against the
+old gate.
 
 **D12 — the board announces transfer 4 KB and sync 5 KB where a
 stock node announces 256 and 10 240 KB.** Board: fields 3 and 4 from
