@@ -53,6 +53,15 @@ use leviculum_lxmf::propagation_node::{
 /// this pool.
 pub const HEAP_SIZE: usize = 96 * 1024;
 
+/// How many incoming resources one board link carries at once
+/// (`NodeCoreBuilder::max_incoming_resources_per_link` in the binaries).
+/// One, as before Codeberg #657: [`budget_reserve`] funds one incoming
+/// resource's data at the binaries' cap, not two. A second advertisement on
+/// a board link is refused with an RCL at once, where it used to be ignored
+/// until its sender's advertisement budget ran out. The link's state for
+/// that one resource is inline in `Link` and counted in [`LINK_BYTES`].
+pub const BOARD_INCOMING_RESOURCES_PER_LINK: usize = 1;
+
 /// The largest incoming resource transfer the binaries accept
 /// (`NodeCoreBuilder::max_incoming_resource_size`), stated once so the
 /// builder call, the propagation role's announced sync limit

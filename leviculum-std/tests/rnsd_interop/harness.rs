@@ -2371,6 +2371,30 @@ impl TestDaemon {
         Ok(resource_hash)
     }
 
+    /// Send a resource over an established link without waiting for the
+    /// link's previous outgoing resource to conclude: the daemon lifts
+    /// Python's `ready_for_new_resource` gate on that link, so a second call
+    /// advertises while the first transfer is still running (Codeberg #657).
+    ///
+    /// Returns the resource hash (hex string).
+    pub async fn send_resource_concurrent(
+        &self,
+        link_hash: &str,
+        data: &[u8],
+    ) -> Result<String, HarnessError> {
+        let params = serde_json::json!({
+            "link_hash": link_hash,
+            "data": hex::encode(data),
+            "concurrent": true,
+        });
+        let result = self.query("send_resource", params).await?;
+        result
+            .get("resource_hash")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| HarnessError::ParseError("Missing resource_hash".to_string()))
+    }
+
     /// Get all received resources (completed and failed).
     pub async fn get_received_resources(&self) -> Result<Vec<ReceivedResource>, HarnessError> {
         let result = self

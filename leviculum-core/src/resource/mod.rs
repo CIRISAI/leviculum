@@ -98,6 +98,21 @@ pub const RESOURCE_MAX_INCOMING_SIZE: usize = RESOURCE_MAX_EFFICIENT_SIZE
     + crate::constants::TOKEN_OVERHEAD
     + crate::constants::AES_BLOCK_SIZE;
 
+/// How many incoming resources one link carries at once, unless the node
+/// is built with another bound
+/// (`NodeCoreBuilder::max_incoming_resources_per_link`).
+///
+/// The reference keeps an unbounded list (`register_incoming_resource`,
+/// `reference/Reticulum/RNS/Link.py:1308-1309`); ours is bounded because
+/// each entry may grow to [`RESOURCE_MAX_INCOMING_SIZE`]. Four covers what
+/// meets on one link in practice, a propagation sync beside a client's
+/// message delivery being two (Codeberg #657), with room for the request
+/// and response resources the link protocol runs itself. An advertisement
+/// beyond the bound is refused at once with a receiver cancel (RCL), so
+/// its sender fails fast instead of spending its advertisement budget on
+/// silence.
+pub const RESOURCE_MAX_INCOMING_PER_LINK: usize = 4;
+
 /// Maximum metadata size (16 MiB - 1).
 pub const RESOURCE_METADATA_MAX_SIZE: usize = 16 * 1024 * 1024 - 1;
 
@@ -147,7 +162,8 @@ pub const SENDER_GRACE_TIME_MS: u64 = 10_000;
 /// Additional delay per retry used, for progressive backoff (Python Resource.py:135 PER_RETRY_DELAY = 0.5).
 pub const PER_RETRY_DELAY_MS: u64 = 500;
 
-/// Small grace period added to each timeout check (Python Resource.py:133 RETRY_GRACE_TIME = 0.25).
+/// Small grace period added to each timeout check (`RETRY_GRACE_TIME = 0.25`,
+/// `reference/Reticulum/RNS/Resource.py:134`).
 pub const RETRY_GRACE_TIME_MS: u64 = 250;
 
 /// Initial part timeout multiplier before first data/response (Python Resource.py:126 PART_TIMEOUT_FACTOR = 4).
@@ -159,7 +175,8 @@ pub const PART_TIMEOUT_FACTOR_AFTER_RTT: u64 = 2;
 /// Timeout multiplier for awaiting proof (Python Resource.py:128 PROOF_TIMEOUT_FACTOR = 3).
 pub const PROOF_TIMEOUT_FACTOR: u64 = 3;
 
-/// Processing grace for advertisement retransmit (Python Resource.py:132 PROCESSING_GRACE = 1.0).
+/// Processing grace for advertisement retransmit (`PROCESSING_GRACE = 1.0`,
+/// `reference/Reticulum/RNS/Resource.py:133`).
 pub const PROCESSING_GRACE_MS: u64 = 1_000;
 
 /// The receiver's policy wait for a window of parts, in ms (Python

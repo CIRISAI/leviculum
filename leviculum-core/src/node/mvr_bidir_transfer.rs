@@ -360,7 +360,7 @@ impl BidirMedium {
         if outgoing {
             link.outgoing_resource().map(|r| r.status())
         } else {
-            link.incoming_resource().map(|r| r.status())
+            link.incoming_resources().first().map(|r| r.status())
         }
     }
 }

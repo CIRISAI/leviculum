@@ -221,6 +221,7 @@ async fn main(spawner: Spawner) {
         .enable_transport(true)
         .max_links(Some(MAX_ENDPOINT_LINKS))
         .max_incoming_resource_size(leviculum_nrf::MAX_INCOMING_RESOURCE_BYTES)
+        .max_incoming_resources_per_link(leviculum_nrf::BOARD_INCOMING_RESOURCES_PER_LINK)
         // #402: announces held back by the LoRa announce cap wait here, and
         // on a board the queue is a heap term, not a formality. One entry is
         // its raw announce (~183 B) plus its Vec header, destination, hops

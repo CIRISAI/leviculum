@@ -106,6 +106,8 @@ mod mvr_hop_asymmetry;
 #[cfg(test)]
 mod mvr_identify_relay;
 #[cfg(test)]
+mod mvr_incoming_resource_list;
+#[cfg(test)]
 mod mvr_inert_announce_retire;
 #[cfg(test)]
 mod mvr_ingress_link_exclusion;
@@ -516,6 +518,9 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// Maximum incoming resource size in bytes. Resources larger than this
     /// are rejected at advertisement time, before any allocation.
     max_incoming_resource_size: usize,
+    /// How many incoming resources one link may carry at once; an
+    /// advertisement beyond it is refused with an RCL (Codeberg #657).
+    max_incoming_resources_per_link: usize,
     /// Receive-window adaptation policy for incoming resources (Codeberg
     /// #85). Passed into every `IncomingResource` this node creates.
     resource_window_policy: crate::resource::WindowPolicy,
@@ -613,6 +618,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
             max_incoming_resource_size,
+            max_incoming_resources_per_link: crate::resource::RESOURCE_MAX_INCOMING_PER_LINK,
             resource_window_policy,
             announce_control: None,
             pending_single_dest_plaintext: None,
@@ -2187,6 +2193,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .take_pending_resource_adv()
             .ok_or(ResourceError::NoPendingResource)?;
         let resource_hash = adv.resource_hash;
+
+        // The link filled up while the application decided (a request or
+        // response resource bypasses the application): refuse the way
+        // `handle_resource_adv` refuses one it has no room for, so the
+        // sender is not left advertising into silence (Codeberg #657).
+        if link.incoming_resource_count() >= self.max_incoming_resources_per_link {
+            self.refuse_incoming_resource(
+                link_id,
+                &resource_hash,
+                now_ms / crate::constants::MS_PER_SECOND,
+            );
+            return Err(ResourceError::TransferInProgress);
+        }
         let link_mdu = link.mdu();
         let sdu = crate::resource::resource_sdu(link.negotiated_mtu());
 
@@ -2203,7 +2222,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .build_data_packet_with_context(&req_payload, PacketContext::ResourceReq, &mut self.rng)
             .map_err(|_| ResourceError::InvalidRequest)?;
 
-        link.set_incoming_resource(incoming);
+        link.push_incoming_resource(incoming);
         self.route_link_packet(link_id, &req_packet);
 
         self.events.push(NodeEvent::ResourceTransferStarted {

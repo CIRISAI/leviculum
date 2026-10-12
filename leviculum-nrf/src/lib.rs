@@ -253,7 +253,9 @@ static HEAP: Heap = Heap::empty();
 
 // The heap pool and the incoming-resource cap are terms of the boot heap
 // budget (#388) and live with its arithmetic, where a host test reaches them.
-pub use leviculum_heap_budget::{HEAP_SIZE, MAX_INCOMING_RESOURCE_BYTES};
+pub use leviculum_heap_budget::{
+    BOARD_INCOMING_RESOURCES_PER_LINK, HEAP_SIZE, MAX_INCOMING_RESOURCE_BYTES,
+};
 
 /// Return (used, free) heap bytes at this instant.
 pub fn heap_stats() -> (usize, usize) {

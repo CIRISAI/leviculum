@@ -23,13 +23,13 @@ use leviculum_std::EventReceiver;
 
 use leviculum_core::identity::Identity;
 use leviculum_core::link::LinkId;
-use leviculum_core::resource::ResourceStrategy;
-use leviculum_core::{Destination, DestinationType, Direction};
+use leviculum_core::resource::{ResourceError, ResourceStrategy};
+use leviculum_core::{Destination, DestinationType, Direction, NodeEvent};
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 
 use crate::common::{
-    create_link_raw, wait_for_resource_completed, wait_for_resource_sender_completed,
-    wait_for_responder_established_link,
+    create_link_raw, wait_for_event, wait_for_resource_completed,
+    wait_for_resource_sender_completed, wait_for_responder_established_link,
 };
 use crate::harness::TestDaemon;
 
@@ -584,4 +584,153 @@ async fn test_python_sends_large_resource_to_rust() {
     assert_eq!(received_data.len(), data.len(), "Data length should match");
     assert_eq!(received_data, data, "Data content should match");
     assert!(received_metadata.is_none(), "Metadata should be None");
+}
+
+/// TEST 7 (Codeberg #657, audit D12): a Python sender advertises a second
+/// resource on the link while its first is still transferring; lnsd takes
+/// both at once and both arrive whole.
+///
+/// A stock Python sender queues the second behind the first
+/// (`ready_for_new_resource`), so the daemon lifts that gate on this link
+/// (`send_resource_concurrent`). The first is 51 KB, many request windows
+/// long, so the second advertisement lands while it runs. Before #657 lnsd
+/// ignored that advertisement and started the second transfer only on a
+/// re-advertisement after the first had freed the link; the order of the
+/// receiver's events tells the two apart.
+#[tokio::test]
+async fn test_python_sends_two_concurrent_resources_rust_receives_both() {
+    let (
+        rust_node,
+        mut event_rx,
+        py_initiator,
+        _py_relay,
+        link_id,
+        py_link_hash,
+        _dest_hash,
+        _storage,
+    ) = setup_link(false).await;
+
+    rust_node
+        .set_resource_strategy(&link_id, ResourceStrategy::AcceptAll)
+        .expect("set_resource_strategy should succeed");
+
+    let first: Vec<u8> = (0..200u32).flat_map(|_| 0..=255u8).collect();
+    let second: Vec<u8> = (0..3000u32).map(|i| (i % 241) as u8).collect();
+    let hash_first = py_initiator
+        .send_resource_concurrent(&py_link_hash, &first)
+        .await
+        .expect("Python sends the first resource");
+    let hash_second = py_initiator
+        .send_resource_concurrent(&py_link_hash, &second)
+        .await
+        .expect("Python sends the second resource");
+    assert_ne!(hash_first, hash_second);
+
+    // Record the receiver's starts and completions in order until both
+    // transfers have ended.
+    let mut started_before_first_completion = 0usize;
+    let mut completed: Vec<([u8; 32], Vec<u8>)> = Vec::new();
+    let mut failed: Vec<([u8; 32], ResourceError)> = Vec::new();
+    let done = wait_for_event(&mut event_rx, Duration::from_secs(90), |event| {
+        match event {
+            NodeEvent::ResourceTransferStarted {
+                link_id: id,
+                is_sender: false,
+                ..
+            } if id == link_id && completed.is_empty() => {
+                started_before_first_completion += 1;
+            }
+            NodeEvent::ResourceCompleted {
+                link_id: id,
+                resource_hash,
+                data,
+                is_sender: false,
+                ..
+            } if id == link_id => completed.push((resource_hash, data)),
+            NodeEvent::ResourceFailed {
+                link_id: id,
+                resource_hash,
+                error,
+                is_sender: false,
+            } if id == link_id => failed.push((resource_hash, error)),
+            _ => {}
+        }
+        (completed.len() + failed.len() >= 2).then_some(())
+    })
+    .await;
+    eprintln!(
+        "CONCURRENT_RX started_before_first_completion={started_before_first_completion} \
+         completed={} failed={failed:?}",
+        completed.len()
+    );
+    assert!(done.is_some(), "both transfers end within 90 s");
+    assert!(failed.is_empty(), "no transfer failed: {failed:?}");
+    assert_eq!(
+        started_before_first_completion, 2,
+        "lnsd took the second advertisement while the first transfer ran"
+    );
+    let by_hash = |hash: &str| {
+        completed
+            .iter()
+            .find(|(h, _)| hex::encode(h) == hash)
+            .map(|(_, d)| d.clone())
+    };
+    assert_eq!(by_hash(&hash_first), Some(first), "first resource whole");
+    assert_eq!(by_hash(&hash_second), Some(second), "second resource whole");
+}
+
+/// TEST 8, the mirror of TEST 7: lnsd sends two resources on one link to
+/// Python. Unchanged by #657 and pinned here: our sender carries one
+/// outgoing resource per link, refuses a second while the first runs
+/// (`TransferInProgress`), and sends it once the first is proven; Python
+/// receives both.
+#[tokio::test]
+async fn test_rust_sends_two_resources_on_one_link_python_receives_both() {
+    let (
+        rust_node,
+        mut event_rx,
+        py_initiator,
+        _py_relay,
+        link_id,
+        _py_link_hash,
+        _dest_hash,
+        _storage,
+    ) = setup_link(true).await;
+
+    let first: Vec<u8> = (0..200u32).flat_map(|_| 0..=255u8).collect();
+    let second: Vec<u8> = (0..3000u32).map(|i| (i % 241) as u8).collect();
+    rust_node
+        .send_resource(&link_id, &first, None, false)
+        .await
+        .expect("the first resource is sent");
+    let refused = rust_node
+        .send_resource(&link_id, &second, None, false)
+        .await;
+    assert!(
+        refused.is_err(),
+        "a second outgoing resource on the link is refused while the first runs"
+    );
+    assert!(
+        wait_for_resource_sender_completed(&mut event_rx, &link_id, Duration::from_secs(60)).await,
+        "the first resource is proven"
+    );
+    rust_node
+        .send_resource(&link_id, &second, None, false)
+        .await
+        .expect("the second resource is sent once the first is proven");
+    assert!(
+        wait_for_resource_sender_completed(&mut event_rx, &link_id, Duration::from_secs(60)).await,
+        "the second resource is proven"
+    );
+
+    let received = wait_for_python_resources(&py_initiator, 2, Duration::from_secs(30)).await;
+    assert_eq!(received.len(), 2, "Python receives both resources");
+    assert!(
+        received.iter().any(|r| r.data == first),
+        "first resource whole"
+    );
+    assert!(
+        received.iter().any(|r| r.data == second),
+        "second resource whole"
+    );
 }

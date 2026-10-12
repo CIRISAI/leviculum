@@ -45,6 +45,112 @@ fn hashmap_base(segment: u64, seg_len: usize) -> Option<usize> {
     usize::try_from(segment).ok()?.checked_mul(seg_len)
 }
 
+/// The incoming resources one link carries, oldest first (Codeberg #657).
+///
+/// A list, as the reference keeps one (`incoming_resources`,
+/// `reference/Reticulum/RNS/Link.py:246`), shaped so that a link carrying
+/// at most one costs what the single slot it replaced did: `One` holds the
+/// resource inline, and the compiler packs the tag and `Many`'s list header
+/// into the resource's own spare bit patterns, so the whole type is the
+/// size of one [`IncomingResource`] (asserted below). The boards price a
+/// link by `size_of::<Link>()` with no slack to spare
+/// (`leviculum-nrf/heap-budget`), and run with a bound of one, so they never
+/// leave `One`; a host spills to `Many` for the second resource.
+// `One` is large on purpose: boxing it to even out the variants would put
+// the common case on the heap and cost every link a pointer.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum IncomingResources {
+    /// No transfer in progress.
+    Empty,
+    /// One transfer, inline.
+    One(IncomingResource),
+    /// Two or more transfers, on the heap.
+    Many(Vec<IncomingResource>),
+}
+
+// The zero-cost claim above, held on every target the crate builds for.
+const _: () =
+    assert!(core::mem::size_of::<IncomingResources>() == core::mem::size_of::<IncomingResource>());
+
+impl IncomingResources {
+    /// How many transfers are in progress.
+    pub(crate) fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    /// Whether no transfer is in progress.
+    pub(crate) fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    /// The transfers, oldest first.
+    pub(crate) fn as_slice(&self) -> &[IncomingResource] {
+        match self {
+            Self::Empty => &[],
+            Self::One(res) => core::slice::from_ref(res),
+            Self::Many(list) => list,
+        }
+    }
+
+    /// The transfers, oldest first, mutably.
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [IncomingResource] {
+        match self {
+            Self::Empty => &mut [],
+            Self::One(res) => core::slice::from_mut(res),
+            Self::Many(list) => list,
+        }
+    }
+
+    /// Insert a transfer at `index` (clamped to the end).
+    pub(crate) fn insert(&mut self, index: usize, res: IncomingResource) {
+        *self = match core::mem::replace(self, Self::Empty) {
+            Self::Empty => Self::One(res),
+            Self::One(first) => {
+                let mut list = Vec::with_capacity(2);
+                list.push(first);
+                list.insert(index.min(1), res);
+                Self::Many(list)
+            }
+            Self::Many(mut list) => {
+                list.reserve_exact(1);
+                list.insert(index.min(list.len()), res);
+                Self::Many(list)
+            }
+        };
+    }
+
+    /// Remove and return the transfer at `index`, or `None` past the end.
+    /// A list left with one transfer goes back inline.
+    pub(crate) fn remove(&mut self, index: usize) -> Option<IncomingResource> {
+        if index >= self.len() {
+            return None;
+        }
+        let (removed, rest) = match core::mem::replace(self, Self::Empty) {
+            Self::Empty => (None, Self::Empty),
+            Self::One(res) => (Some(res), Self::Empty),
+            Self::Many(mut list) => {
+                let removed = list.remove(index);
+                let rest = if list.len() == 1 {
+                    list.pop().map_or(Self::Empty, Self::One)
+                } else {
+                    Self::Many(list)
+                };
+                (Some(removed), rest)
+            }
+        };
+        *self = rest;
+        removed
+    }
+
+    /// Heap the list spine pins (#388 census); the inline one pins none.
+    pub(crate) fn spine_heap_bytes(&self) -> usize {
+        match self {
+            Self::Many(list) => list.capacity() * core::mem::size_of::<IncomingResource>(),
+            Self::Empty | Self::One(_) => 0,
+        }
+    }
+}
+
 /// Result of receiving a data part.
 #[derive(Debug)]
 pub(crate) enum ResourcePartResult {
@@ -154,9 +260,10 @@ impl IncomingResource {
         // so it is NOT bounded by the per-advertisement `max_size`. The
         // reference does bound it against the segment count it advertises:
         // `total_segments = ((total_size-1)//MAX_EFFICIENT_SIZE)+1`
-        // (Resource.py:296), i.e. `total_size <= l * MAX_EFFICIENT_SIZE`.
-        // Reject anything outside that. `l == 0` is treated as one segment,
-        // the way Python's `if adv.l > 1` treats it (Resource.py:203).
+        // (`reference/Reticulum/RNS/Resource.py:299`), i.e.
+        // `total_size <= l * MAX_EFFICIENT_SIZE`. Reject anything outside
+        // that. `l == 0` is treated as one segment, the way Python's
+        // `if adv.l > 1` treats it (`reference/Reticulum/RNS/Resource.py:204`).
         //
         // This is a self-consistency check, not a security boundary: `l` is
         // itself an unvalidated `u32` off the wire, so a hostile sender picks
@@ -356,6 +463,35 @@ impl IncomingResource {
     }
 
     /// Receive a data part (RESOURCE context packet).
+    /// The hashmap positions a part may match: the window past the last
+    /// consecutive completed part, plus the flexibility margin.
+    fn part_search_scope(&self) -> (usize, usize) {
+        let start = self.consecutive_completed_height;
+        let end = core::cmp::min(
+            start + self.window_state.window() + RESOURCE_WINDOW_FLEXIBILITY,
+            self.num_parts as usize,
+        );
+        (start, end)
+    }
+
+    /// The missing part, within the search scope, whose hashmap entry is
+    /// `mh`.
+    fn match_part(&self, mh: &[u8; RESOURCE_HASHMAP_LEN]) -> Option<usize> {
+        let (start, end) = self.part_search_scope();
+        (start..end).find(|&i| self.parts[i].is_none() && self.hashmap[i] == Some(*mh))
+    }
+
+    /// Whether `part_data` is a part this resource is waiting for: what
+    /// [`Self::receive_part`] would store, decided without storing it or
+    /// logging a refusal. The link asks this of each of its incoming
+    /// resources to find the one a part belongs to.
+    pub(crate) fn claims_part(&self, part_data: &[u8]) -> bool {
+        self.status == ResourceStatus::Transferring
+            && self
+                .match_part(&map_hash(part_data, &self.random_hash))
+                .is_some()
+    }
+
     pub(crate) fn receive_part(
         &mut self,
         part_data: &[u8],
@@ -374,27 +510,9 @@ impl IncomingResource {
 
         // Compute map hash and find matching part
         let mh = map_hash(part_data, &self.random_hash);
+        let (search_start, search_end) = self.part_search_scope();
 
-        // Search within window scope for matching hashmap entry
-        let search_start = self.consecutive_completed_height;
-        let search_end = core::cmp::min(
-            search_start + self.window_state.window() + RESOURCE_WINDOW_FLEXIBILITY,
-            self.num_parts as usize,
-        );
-
-        let mut matched_index = None;
-        for i in search_start..search_end {
-            if self.parts[i].is_none() {
-                if let Some(entry) = self.hashmap[i] {
-                    if entry == mh {
-                        matched_index = Some(i);
-                        break;
-                    }
-                }
-            }
-        }
-
-        let Some(index) = matched_index else {
+        let Some(index) = self.match_part(&mh) else {
             // An arriving-but-rejected part (#85): the part crossed the air
             // but matched no hashmap entry in the current window scope.
             crate::tracing::debug!(

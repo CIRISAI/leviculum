@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use crate::destination::ProofStrategy;
 use crate::identity::Identity;
-use crate::resource::{WindowPolicy, RESOURCE_MAX_INCOMING_SIZE};
+use crate::resource::{WindowPolicy, RESOURCE_MAX_INCOMING_PER_LINK, RESOURCE_MAX_INCOMING_SIZE};
 use crate::transport::{PathChoice, TransportConfig};
 use rand_core::CryptoRngCore;
 
@@ -45,6 +45,7 @@ pub struct NodeCoreBuilder {
     remote_management: bool,
     remote_management_allowed: Vec<[u8; crate::constants::TRUNCATED_HASHBYTES]>,
     max_incoming_resource_size: usize,
+    max_incoming_resources_per_link: usize,
     resource_window_policy: WindowPolicy,
     peer_up_pull_names: Option<Vec<alloc::string::String>>,
 }
@@ -66,6 +67,7 @@ impl NodeCoreBuilder {
             remote_management: false,
             remote_management_allowed: Vec::new(),
             max_incoming_resource_size: RESOURCE_MAX_INCOMING_SIZE,
+            max_incoming_resources_per_link: RESOURCE_MAX_INCOMING_PER_LINK,
             resource_window_policy: WindowPolicy::default(),
             peer_up_pull_names: None,
         }
@@ -261,6 +263,17 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Set how many incoming resources one link may carry at once.
+    ///
+    /// Default: [`RESOURCE_MAX_INCOMING_PER_LINK`]. An advertisement beyond
+    /// the bound is refused with a receiver cancel (RCL) at once. Zero is
+    /// read as one: a link that could carry none could never receive. The
+    /// firmware sets one, the transfer its heap budget prices.
+    pub fn max_incoming_resources_per_link(mut self, count: usize) -> Self {
+        self.max_incoming_resources_per_link = count.max(1);
+        self
+    }
+
     /// Set the receive-window adaptation policy for incoming resources
     /// (Codeberg #85). Default: [`WindowPolicy::Current`], the historical
     /// algorithm. Applied to every `IncomingResource` this node creates.
@@ -320,6 +333,7 @@ impl NodeCoreBuilder {
             clock,
             storage,
         );
+        node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
 
         if self.respond_to_probes {
             node.enable_probe_responder();
@@ -377,6 +391,7 @@ impl NodeCoreBuilder {
             clock,
             storage,
         ));
+        node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
 
         if self.respond_to_probes {
             node.enable_probe_responder();

@@ -287,7 +287,7 @@ impl PacedDelivery {
         self.receiver
             .links
             .get(&self.link_id)
-            .and_then(|l| l.incoming_resource())
+            .and_then(|l| l.incoming_resources().first())
             .map(|r| {
                 (
                     r.window_state().rounds_completed(),

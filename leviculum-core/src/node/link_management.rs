@@ -532,14 +532,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // emits no spurious ResourceFailed. Pre-activation teardowns (reject,
         // invalid proof, handshake timeout) hold no resource, so this is a
         // no-op there.
-        let (outgoing_hash, incoming_hash) = match self.links.get(link_id) {
+        let (outgoing_hash, incoming_hashes) = match self.links.get(link_id) {
             Some(link) => (
                 link.outgoing_resource().map(|r| *r.resource_hash()),
-                link.incoming_resource().map(|r| *r.resource_hash()),
+                link.incoming_resources()
+                    .iter()
+                    .map(|r| *r.resource_hash())
+                    .collect::<Vec<_>>(),
             ),
-            None => (None, None),
+            None => (None, Vec::new()),
         };
-        if outgoing_hash.is_some() || incoming_hash.is_some() {
+        if outgoing_hash.is_some() || !incoming_hashes.is_empty() {
             // Report the caller-visible id, consistent with emit_link_closed
             // (which translates re-keyed wire ids back to the original).
             let event_id = self
@@ -555,7 +558,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     is_sender: true,
                 });
             }
-            if let Some(resource_hash) = incoming_hash {
+            for resource_hash in incoming_hashes {
                 self.events.push(NodeEvent::ResourceFailed {
                     link_id: event_id,
                     resource_hash,
@@ -1428,10 +1431,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.handle_resource_hmu(link_id, packet, raw_packet, now_ms, now_secs);
             }
             PacketContext::ResourceIcl => {
-                self.handle_resource_cancel(link_id, true);
+                self.handle_resource_cancel(link_id, packet, true);
             }
             PacketContext::ResourceRcl => {
-                self.handle_resource_cancel(link_id, false);
+                self.handle_resource_cancel(link_id, packet, false);
             }
             PacketContext::LinkIdentify => {
                 self.handle_link_identify(link_id, packet, now_secs);
@@ -2546,21 +2549,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         };
 
-        // A link carries one incoming Resource. A repeated advertisement of
-        // that one, before any part of it arrived, means the sender never
+        // A repeated advertisement of a resource this link already
+        // carries, before any part of it arrived, means the sender never
         // heard our request: it leaves `Advertised` on the first REQ and
         // re-advertises only until then. Send the request again instead of
         // letting both sides wait out their timers (Codeberg #404: the lost
         // REQ stranded a 10 KB transfer for the sender's whole 48 s
         // advertisement budget). Python ignores the repeat
         // (`Resource.py:223-236`); a REQ is what its sender waits for, so the
-        // answer is plain wire. Everything else on a busy link is ignored.
-        if link.has_incoming_resource() {
-            let again = link
-                .incoming_resource_mut()
-                .and_then(|res| res.request_again_for_readvertisement(&adv.resource_hash, now_ms));
-            let Some(req_payload) = again else {
-                crate::tracing::debug!("Resource ADV on link with active resource, ignoring");
+        // answer is plain wire. A repeat after parts arrived is ignored. An
+        // advertisement for a DIFFERENT resource is a new transfer and goes
+        // on below (Codeberg #657).
+        if let Some(res) = link.incoming_resource_mut(&adv.resource_hash) {
+            let Some(req_payload) =
+                res.request_again_for_readvertisement(&adv.resource_hash, now_ms)
+            else {
+                crate::tracing::debug!("Resource ADV repeats a transfer under way, ignoring");
                 return;
             };
             match link.build_data_packet_with_context(
@@ -2631,6 +2635,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         } else {
             link.resource_strategy()
         };
+
+        // A link carries a bounded number of incoming resources; one it
+        // would take but has no room for is refused now.
+        if strategy != ResourceStrategy::AcceptNone
+            && link.incoming_resource_count() >= self.max_incoming_resources_per_link
+        {
+            self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_secs);
+            return;
+        }
         let resource_hash = adv.resource_hash;
         let transfer_size = adv.transfer_size;
         let data_size = adv.data_size;
@@ -2658,7 +2671,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         );
                         match req_packet {
                             Ok(pkt) => {
-                                link.set_incoming_resource(incoming);
+                                link.push_incoming_resource(incoming);
                                 link.record_outbound(now_secs);
                                 self.route_link_packet(&link_id, &pkt);
                                 self.events.push(NodeEvent::ResourceTransferStarted {
@@ -2710,6 +2723,44 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // queued behind the resource data on slow links; resetting
         // here prevents the timer from firing mid-transfer.
         self.reset_pending_requests_on_link(&link_id, now_ms);
+    }
+
+    /// Refuse an advertised resource because its link already carries
+    /// `max_incoming_resources_per_link` incoming ones: a receiver cancel
+    /// (RCL) naming it, the reply `Resource.reject` sends
+    /// (`reference/Reticulum/RNS/Resource.py:157-161`), so the sender fails
+    /// it at once. Ignoring it left the sender re-advertising into silence
+    /// until its whole advertisement budget ran out (Codeberg #657, audit
+    /// D12).
+    pub(super) fn refuse_incoming_resource(
+        &mut self,
+        link_id: &LinkId,
+        resource_hash: &[u8; 32],
+        now_secs: u64,
+    ) {
+        let Some(link) = self.links.get_mut(link_id) else {
+            return;
+        };
+        crate::tracing::debug!(
+            event = "RESOURCE_ADV_REFUSED",
+            rh = %HexFmt(&resource_hash[..4]),
+            link = %HexShort(link_id.as_bytes()),
+            reason = "incoming_full",
+            held = link.incoming_resource_count(),
+        );
+        match link.build_data_packet_with_context(
+            resource_hash,
+            PacketContext::ResourceRcl,
+            &mut self.rng,
+        ) {
+            Ok(pkt) => {
+                link.record_outbound(now_secs);
+                self.route_link_packet(link_id, &pkt);
+            }
+            Err(e) => {
+                crate::tracing::debug!("Failed to build RCL packet: {e}");
+            }
+        }
     }
 
     /// Handle a ResourceReq packet (sender receives receiver's request).
@@ -2846,9 +2897,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let part_data = packet.data.as_slice();
         let rtt_ms = link.rtt_ms();
 
-        // Take incoming resource out for processing
-        let mut incoming = match link.take_incoming_resource() {
-            Some(r) => r,
+        // Take the incoming resource this part belongs to out for processing
+        let (slot, mut incoming) = match link.take_incoming_resource_for_part(part_data) {
+            Some(taken) => taken,
             None => {
                 crate::tracing::debug!("Resource data but no incoming resource");
                 return;
@@ -2863,7 +2914,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         match result {
             ResourcePartResult::Continue => {
-                link.set_incoming_resource(incoming);
+                link.restore_incoming_resource(slot, incoming);
             }
             ResourcePartResult::SendRequest(req_payload) => {
                 // Capture progress before storing resource back
@@ -2877,7 +2928,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     PacketContext::ResourceReq,
                     &mut self.rng,
                 );
-                link.set_incoming_resource(incoming);
+                link.restore_incoming_resource(slot, incoming);
 
                 // Emit progress event
                 self.events.push(NodeEvent::ResourceProgress {
@@ -3024,7 +3075,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
             ResourcePartResult::InvalidPart => {
-                link.set_incoming_resource(incoming);
+                link.restore_incoming_resource(slot, incoming);
                 // Raised from trace to debug (#85): pairs with the detailed
                 // RESOURCE_PART_REJECT event emitted inside receive_part.
                 crate::tracing::debug!(
@@ -3086,13 +3137,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
         plaintext.truncate(len);
 
-        // Forward to incoming resource
-        let mut incoming = match link.take_incoming_resource() {
-            Some(r) => r,
-            None => {
-                crate::tracing::debug!("Resource HMU but no incoming resource");
-                return;
-            }
+        // Forward to the incoming resource the update names
+        // (`reference/Reticulum/RNS/Link.py:1125-1132`)
+        let Some(hmu_hash) = plaintext
+            .get(..32)
+            .and_then(|h| <[u8; 32]>::try_from(h).ok())
+        else {
+            crate::tracing::debug!("Resource HMU too short");
+            return;
+        };
+        let Some(incoming) = link.incoming_resource_mut(&hmu_hash) else {
+            crate::tracing::debug!("Resource HMU but no incoming resource with its hash");
+            return;
         };
 
         match incoming.handle_hashmap_update(now_ms, &plaintext) {
@@ -3103,33 +3159,47 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     PacketContext::ResourceReq,
                     &mut self.rng,
                 );
-                link.set_incoming_resource(incoming);
                 if let Ok(pkt) = req_pkt {
                     link.record_outbound(now_secs);
                     self.route_link_packet(&link_id, &pkt);
                 }
             }
-            Ok(None) => {
-                link.set_incoming_resource(incoming);
-            }
+            Ok(None) => {}
             Err(e) => {
                 crate::tracing::debug!("Resource HMU processing failed: {e}");
-                link.set_incoming_resource(incoming);
             }
         }
     }
 
     /// Handle resource cancellation (ICL or RCL).
-    fn handle_resource_cancel(&mut self, link_id: LinkId, is_incoming_cancel: bool) {
+    fn handle_resource_cancel(
+        &mut self,
+        link_id: LinkId,
+        packet: &Packet,
+        is_incoming_cancel: bool,
+    ) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
 
         if is_incoming_cancel {
-            // ICL received = initiator (sender) cancelled = we are the receiver
-            if let Some(res) = link.incoming_resource() {
-                let resource_hash = *res.resource_hash();
-                link.clear_incoming_resource();
+            // ICL received = initiator (sender) cancelled = we are the
+            // receiver. It names the resource it cancels, and only that one
+            // of the link's incoming resources ends
+            // (`reference/Reticulum/RNS/Link.py:1134-1141`).
+            let mut plaintext = alloc::vec![0u8; packet.data.len()];
+            let Ok(len) = link.decrypt(packet.data.as_slice(), &mut plaintext) else {
+                crate::tracing::debug!("Resource ICL decryption failed");
+                return;
+            };
+            let Some(resource_hash) = plaintext
+                .get(..len.min(32))
+                .and_then(|h| <[u8; 32]>::try_from(h).ok())
+            else {
+                crate::tracing::debug!("Resource ICL too short");
+                return;
+            };
+            if link.take_incoming_resource(&resource_hash).is_some() {
                 self.events.push(NodeEvent::ResourceFailed {
                     link_id,
                     resource_hash,
@@ -3977,21 +4047,30 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
 
-            // Poll incoming resource, same pattern. The receiver's timeout
-            // also needs what one frame costs the next on this link's
-            // carrier: it must never expect the window it requested sooner
-            // than the sender can put it on the air (Codeberg #36/#374).
-            let in_result = match self.links.get_mut(&link_id) {
+            // Poll every incoming resource, same pattern. The receiver's
+            // timeout also needs what one frame costs the next on this
+            // link's carrier: it must never expect the window it requested
+            // sooner than the sender can put it on the air (Codeberg
+            // #36/#374).
+            let in_results: Vec<([u8; 32], ResourcePollResult)> = match self.links.get_mut(&link_id)
+            {
                 Some(link) => {
                     let turnaround_ms = link.frame_turnaround_ms();
                     let acquisition_ms = link.acquisition_ms();
-                    link.incoming_resource_mut()
-                        .map(|res| res.poll(now_ms, rtt_ms, turnaround_ms, acquisition_ms))
+                    link.incoming_resources_mut()
+                        .iter_mut()
+                        .map(|res| {
+                            (
+                                *res.resource_hash(),
+                                res.poll(now_ms, rtt_ms, turnaround_ms, acquisition_ms),
+                            )
+                        })
+                        .collect()
                 }
                 None => continue,
             };
 
-            if let Some(result) = in_result {
+            for (resource_hash, result) in in_results {
                 match result {
                     ResourcePollResult::RetransmitAdv(req_bytes) => {
                         // Re-send last REQ. Stale is allowed (leviculum#272):
@@ -4023,15 +4102,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         }
                     }
                     ResourcePollResult::TimedOut(error) => {
-                        let resource_hash = self
+                        let removed = self
                             .links
-                            .get(&link_id)
-                            .and_then(|l| l.incoming_resource())
-                            .map(|r| *r.resource_hash());
-                        if let Some(link) = self.links.get_mut(&link_id) {
-                            link.clear_incoming_resource();
-                        }
-                        if let Some(resource_hash) = resource_hash {
+                            .get_mut(&link_id)
+                            .and_then(|link| link.take_incoming_resource(&resource_hash));
+                        if removed.is_some() {
                             self.events.push(NodeEvent::ResourceFailed {
                                 link_id,
                                 resource_hash,
@@ -4129,7 +4204,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     update(deadline);
                 }
             }
-            if let Some(res) = link.incoming_resource() {
+            for res in link.incoming_resources() {
                 if let Some(deadline) =
                     res.next_deadline(rtt_ms, link.frame_turnaround_ms(), link.acquisition_ms())
                 {

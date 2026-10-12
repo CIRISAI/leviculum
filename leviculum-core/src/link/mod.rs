@@ -518,9 +518,16 @@ pub struct Link {
     /// whose combined metadata+data exceeds RESOURCE_MAX_EFFICIENT_SIZE).
     /// `None` for single-segment transfers. Cleared with the outgoing resource.
     outgoing_segments: Option<crate::resource::outgoing::OutgoingSegmentPlan>,
-    /// Incoming resource transfer (receiver side).
-    /// Removed when transfer completes or fails.
-    incoming_resource: Option<crate::resource::incoming::IncomingResource>,
+    /// Incoming resource transfers (receiver side), oldest first. Each is
+    /// removed when it completes or fails.
+    ///
+    /// A link may carry a second transfer while the first runs, and a peer
+    /// that advertises one must get a request or a refusal, never silence
+    /// (Codeberg #657). How many it may hold is the node's
+    /// `max_incoming_resources_per_link`; the reference sets no bound
+    /// (`register_incoming_resource`,
+    /// `reference/Reticulum/RNS/Link.py:1308-1309`).
+    incoming_resources: crate::resource::incoming::IncomingResources,
     /// Pending advertisement awaiting application accept/reject (AcceptApp strategy).
     /// Removed when accept_resource() or reject_resource() is called.
     pending_resource_adv: Option<crate::resource::ResourceAdvertisement>,
@@ -623,7 +630,7 @@ impl Link {
             acquisition_ms: 0,
             outgoing_resource: None,
             outgoing_segments: None,
-            incoming_resource: None,
+            incoming_resources: crate::resource::incoming::IncomingResources::Empty,
             pending_resource_adv: None,
             resource_strategy: crate::resource::ResourceStrategy::AcceptNone,
             remote_identity: None,
@@ -761,7 +768,7 @@ impl Link {
             acquisition_ms: 0,
             outgoing_resource: None,
             outgoing_segments: None,
-            incoming_resource: None,
+            incoming_resources: crate::resource::incoming::IncomingResources::Empty,
             pending_resource_adv: None,
             resource_strategy: crate::resource::ResourceStrategy::AcceptNone,
             remote_identity: None,
@@ -958,9 +965,13 @@ impl Link {
     /// link (#388 census): incoming reassembly, outgoing staging, and a
     /// multi-segment plan's retained data.
     pub(crate) fn resource_heap_bytes(&self) -> usize {
-        self.incoming_resource
-            .as_ref()
-            .map_or(0, |r| r.heap_bytes())
+        self.incoming_resources.spine_heap_bytes()
+            + self
+                .incoming_resources
+                .as_slice()
+                .iter()
+                .map(|r| r.heap_bytes())
+                .sum::<usize>()
             + self
                 .outgoing_resource
                 .as_ref()
@@ -1738,7 +1749,12 @@ impl Link {
 
     /// Whether an incoming resource transfer is in progress.
     pub fn has_incoming_resource(&self) -> bool {
-        self.incoming_resource.is_some()
+        !self.incoming_resources.is_empty()
+    }
+
+    /// How many incoming resource transfers are in progress.
+    pub fn incoming_resource_count(&self) -> usize {
+        self.incoming_resources.len()
     }
 
     /// Get outgoing resource status.
@@ -1746,9 +1762,12 @@ impl Link {
         self.outgoing_resource.as_ref().map(|r| r.status())
     }
 
-    /// Get incoming resource status.
+    /// Get the status of the oldest incoming resource.
     pub fn incoming_resource_status(&self) -> Option<crate::resource::ResourceStatus> {
-        self.incoming_resource.as_ref().map(|r| r.status())
+        self.incoming_resources
+            .as_slice()
+            .first()
+            .map(|r| r.status())
     }
 
     /// Get outgoing resource progress (0.0 to 1.0).
@@ -1756,9 +1775,12 @@ impl Link {
         self.outgoing_resource.as_ref().map(|r| r.progress())
     }
 
-    /// Get incoming resource progress (0.0 to 1.0).
+    /// Get the progress of the oldest incoming resource (0.0 to 1.0).
     pub fn incoming_resource_progress(&self) -> Option<f32> {
-        self.incoming_resource.as_ref().map(|r| r.progress())
+        self.incoming_resources
+            .as_slice()
+            .first()
+            .map(|r| r.progress())
     }
 
     /// Get a reference to the outgoing resource.
@@ -1813,36 +1835,84 @@ impl Link {
         self.outgoing_segments.take()
     }
 
-    /// Get a reference to the incoming resource.
-    pub(crate) fn incoming_resource(&self) -> Option<&crate::resource::incoming::IncomingResource> {
-        self.incoming_resource.as_ref()
+    /// The incoming resources, oldest first.
+    pub(crate) fn incoming_resources(&self) -> &[crate::resource::incoming::IncomingResource] {
+        self.incoming_resources.as_slice()
     }
 
-    /// Get a mutable reference to the incoming resource.
+    /// The incoming resources, oldest first, for the watchdog to poll.
+    pub(crate) fn incoming_resources_mut(
+        &mut self,
+    ) -> &mut [crate::resource::incoming::IncomingResource] {
+        self.incoming_resources.as_mut_slice()
+    }
+
+    /// The incoming resource with this hash, mutably.
     pub(crate) fn incoming_resource_mut(
         &mut self,
+        resource_hash: &[u8; 32],
     ) -> Option<&mut crate::resource::incoming::IncomingResource> {
-        self.incoming_resource.as_mut()
+        self.incoming_resources
+            .as_mut_slice()
+            .iter_mut()
+            .find(|r| r.resource_hash() == resource_hash)
     }
 
-    /// Set the incoming resource.
-    pub(crate) fn set_incoming_resource(
+    /// Add an incoming resource, as the newest.
+    pub(crate) fn push_incoming_resource(
         &mut self,
         res: crate::resource::incoming::IncomingResource,
     ) {
-        self.incoming_resource = Some(res);
+        self.incoming_resources.insert(usize::MAX, res);
     }
 
-    /// Take the incoming resource out of the link (leaving None).
+    /// Take the incoming resource with this hash out of the link.
     pub(crate) fn take_incoming_resource(
         &mut self,
+        resource_hash: &[u8; 32],
     ) -> Option<crate::resource::incoming::IncomingResource> {
-        self.incoming_resource.take()
+        let index = self
+            .incoming_resources
+            .as_slice()
+            .iter()
+            .position(|r| r.resource_hash() == resource_hash)?;
+        self.incoming_resources.remove(index)
     }
 
-    /// Clear the incoming resource.
-    pub(crate) fn clear_incoming_resource(&mut self) {
-        self.incoming_resource = None;
+    /// Put back an incoming resource taken out by
+    /// [`Self::take_incoming_resource_for_part`], at the position it was
+    /// taken from, so the list stays oldest first.
+    pub(crate) fn restore_incoming_resource(
+        &mut self,
+        index: usize,
+        res: crate::resource::incoming::IncomingResource,
+    ) {
+        self.incoming_resources.insert(index, res);
+    }
+
+    /// Take out the incoming resource a RESOURCE part belongs to, with the
+    /// position to [restore](Self::restore_incoming_resource) it at.
+    ///
+    /// A part names no resource on the wire; the reference offers it to
+    /// every incoming resource and lets each match it against its own
+    /// hashmap (`reference/Reticulum/RNS/Link.py:1163-1166`). With one
+    /// resource that one is returned without a lookup, and when none
+    /// claims the part the oldest is returned, so its `receive_part` logs
+    /// why it refused the part (#85).
+    pub(crate) fn take_incoming_resource_for_part(
+        &mut self,
+        part_data: &[u8],
+    ) -> Option<(usize, crate::resource::incoming::IncomingResource)> {
+        let held = self.incoming_resources.as_slice();
+        let index = if held.len() > 1 {
+            held.iter()
+                .position(|r| r.claims_part(part_data))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let res = self.incoming_resources.remove(index)?;
+        Some((index, res))
     }
 
     #[cfg(test)]

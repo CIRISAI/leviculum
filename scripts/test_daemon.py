@@ -817,6 +817,16 @@ class TestDaemon:
             data = bytes.fromhex(data_hex)
             metadata = bytes.fromhex(metadata_hex) if metadata_hex else None
 
+            if params.get("concurrent"):
+                # A stock sender queues a resource behind the one it is
+                # already sending on this link (Resource.py:522-524 polls
+                # Link.ready_for_new_resource, Link.py:1331). Lift that gate
+                # on this link so a second resource is advertised while the
+                # first is in flight, the case a receiver must take or refuse
+                # (Codeberg #657). The sender side keeps a list and matches
+                # requests and proofs by hash, so it serves both.
+                link.ready_for_new_resource = lambda: True
+
             resource = RNS.Resource(data, link, metadata=metadata, advertise=True)
             return {"result": {"resource_hash": resource.hash.hex()}}
 

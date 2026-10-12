@@ -950,6 +950,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "RESOURCE_REQ_AGAIN",
         required_keys: &["rh", "link"],
     },
+    // An advertisement refused with an RCL because its link already
+    // carries `max_incoming_resources_per_link` incoming resources
+    // (Codeberg #657).
+    EventSchema {
+        name: "RESOURCE_ADV_REFUSED",
+        required_keys: &["rh", "link", "reason", "held"],
+    },
     EventSchema {
         name: "RESOURCE_PART_RX",
         required_keys: &["rh", "idx", "outstanding", "consecutive"],

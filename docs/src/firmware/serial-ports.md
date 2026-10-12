@@ -85,7 +85,7 @@ picocom /dev/leviculum-debug -b 115200
 On the debug port you will see the boot banner, the firmware git SHA and
 the periodic diagnostics the firmware emits: the `[FW_BUILD]` banner
 every 5 s, the `[STACK]` watermark lines, and the LoRa TX/RX events.
-(`fw_build_banner`, `leviculum-nrf/src/bin/t114.rs:1337-1348`, for the
+(`fw_build_banner`, `leviculum-nrf/src/bin/t114.rs:1338-1349`, for the
 banner task.) Do
 **not** point `lnsd` at the debug port; it carries log text, not HDLC
 frames.
@@ -247,7 +247,7 @@ lnstest diag --config /etc/reticulum
 
 A standalone LNode answers probes on one destination,
 `rnstransport.probe`, and announces it 15 s after boot and then every
-2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:752-753`;
+2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:758-759`;
 `MGMT_ANNOUNCE_INTERVAL_MS`, `leviculum-core/src/constants.rs:219`).
 The hash is carried in the announce itself, but it is also printed on
 the debug port — the `probe=` field of the `[IDENTITY]` banner, repeated
