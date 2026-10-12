@@ -278,11 +278,11 @@ pub const ESTABLISHMENT_TIMEOUT_PER_HOP_MS: u64 = DEFAULT_PER_HOP_TIMEOUT * 1000
 /// (LoRa, etc.).
 pub const UNKNOWN_BITRATE_ASSUMPTION_BPS: u32 = 300;
 
-/// Responder establishment bonus (milliseconds).
-/// With RTT retry (5 attempts at 10s intervals = ~50s budget), the
-/// responder no longer needs Python's 360s bonus. 54s gives 4s margin
-/// above the initiator's retry budget; reaping of dead links is handled
-/// by the keepalive/stale watchdog, not the retry budget.
+/// Responder establishment bonus (milliseconds), where Python adds its
+/// 360 s keepalive ceiling (`Link.py:207`). Sized when our initiator still
+/// resent the RTT packet over a ~50 s budget (removed in 662, the reference
+/// sends it once); the window is kept as it was. Reaping of dead links is
+/// handled by the keepalive/stale watchdog.
 pub const ESTABLISHMENT_RESPONDER_BONUS_MS: u64 = 54_000;
 
 /// Upper bound (permille of the base timeout) for the per-link random
@@ -297,24 +297,12 @@ pub const ESTABLISHMENT_RESPONDER_BONUS_MS: u64 = 54_000;
 /// is fully Python-RNS compatible. Tunable.
 pub const MAX_ESTABLISHMENT_JITTER_PERMILLE: u16 = 250;
 
-/// RTT packet retry: max additional attempts after the initial send.
-/// This only bounds redelivery of the RTT packet; it never closes the link.
-/// Reaping is handled by the keepalive/stale watchdog (Python-parity).
-pub const RTT_RETRY_MAX_ATTEMPTS: u8 = 5;
-
 /// Link request retry: minimum number of retries after the initial attempt.
 /// The actual retry count is `max(this, hops)`, multi-hop paths get more
 /// retries because each hop is an independent loss opportunity.
 /// Total attempts = 1 + effective_retries.
 /// Python Reticulum has no link request retry (single attempt only).
 pub const LINK_REQUEST_MAX_RETRIES: u8 = 2;
-
-/// RTT packet retry: minimum interval between attempts (milliseconds).
-/// Actual interval is max(rtt_ms * RTT_RETRY_INTERVAL_MULTIPLIER, this).
-pub const RTT_RETRY_MIN_INTERVAL_MS: u64 = 10_000;
-
-/// RTT packet retry: interval = rtt_ms * this multiplier (floored by min).
-pub const RTT_RETRY_INTERVAL_MULTIPLIER: u64 = 3;
 
 /// Cleanup timeout for Channel packet receipts awaiting proofs (milliseconds).
 ///

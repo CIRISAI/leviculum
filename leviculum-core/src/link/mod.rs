@@ -46,8 +46,7 @@ use crate::constants::{
     KEEPALIVE_INITIATOR_BYTE, KEEPALIVE_PAYLOAD_SIZE, KEEPALIVE_RESPONDER_BYTE,
     LINK_KEEPALIVE_MAX_RTT, LINK_KEEPALIVE_MIN_SECS, LINK_KEEPALIVE_SECS,
     LINK_KEEPALIVE_TIMEOUT_FACTOR, LINK_STALE_FACTOR, LINK_STALE_GRACE_SECS, MS_PER_SECOND, MTU,
-    PROOF_DATA_SIZE, RTT_RETRY_INTERVAL_MULTIPLIER, RTT_RETRY_MAX_ATTEMPTS,
-    RTT_RETRY_MIN_INTERVAL_MS, SIGNALING_MODE_MASK, SIGNALING_MODE_SHIFT, SIGNALING_MTU_MASK,
+    PROOF_DATA_SIZE, SIGNALING_MODE_MASK, SIGNALING_MODE_SHIFT, SIGNALING_MTU_MASK,
     TRUNCATED_HASHBYTES, US_PER_MS, X25519_KEY_SIZE,
 };
 use crate::crypto::{derive_key, truncated_hash};
@@ -477,14 +476,6 @@ pub struct Link {
     phase: LinkPhase,
     /// Channel for multiplexed message delivery (created lazily on first send/receive)
     channel: Option<Channel>,
-    /// Timestamp (ms) of last RTT packet send (initiator only).
-    /// Cleared when rtt_confirmed becomes true (no further retries needed).
-    rtt_sent_at_ms: Option<u64>,
-    /// Number of RTT packets sent (initial + retries, initiator only).
-    rtt_send_count: u8,
-    /// True once any inbound link packet confirms the responder is alive.
-    /// Stops RTT retry on the initiator side.
-    rtt_confirmed: bool,
     /// Extra establishment timeout from first-hop interface latency (ms).
     /// Matches Python's `get_first_hop_timeout()`: MTU × 8 × 1000 / bitrate.
     /// Set at link creation from the next-hop interface bitrate, or on a
@@ -622,9 +613,6 @@ impl Link {
             negotiated_mtu: MTU as u32,
             phase: LinkPhase::Established,
             channel: None,
-            rtt_sent_at_ms: None,
-            rtt_send_count: 0,
-            rtt_confirmed: false,
             first_hop_timeout_extra_ms: 0,
             frame_turnaround_ms: 0,
             acquisition_ms: 0,
@@ -760,9 +748,6 @@ impl Link {
             negotiated_mtu,
             phase: LinkPhase::Established,
             channel: None,
-            rtt_sent_at_ms: None,
-            rtt_send_count: 0,
-            rtt_confirmed: false,
             first_hop_timeout_extra_ms: 0,
             frame_turnaround_ms: 0,
             acquisition_ms: 0,
@@ -1219,7 +1204,7 @@ impl Link {
     ///
     /// Called on the **initiator** side after computing RTT in
     /// `handle_link_proof()`, so that `rtt_secs()` returns a meaningful
-    /// value for RTT-retry packets instead of `None`.
+    /// value instead of `None`.
     pub(crate) fn set_rtt_ms(&mut self, rtt_ms: u64) {
         self.rtt_us = Some(rtt_ms.saturating_mul(US_PER_MS));
     }
@@ -1489,53 +1474,6 @@ impl Link {
             self.keepalive_secs = clamped;
             self.stale_time_secs = clamped * LINK_STALE_FACTOR;
         }
-    }
-
-    // RTT retry state (initiator only)
-    /// Timestamp of the last RTT packet send (milliseconds)
-    pub(crate) fn rtt_sent_at_ms(&self) -> Option<u64> {
-        self.rtt_sent_at_ms
-    }
-
-    /// Number of RTT packets sent (initial + retries)
-    pub(crate) fn rtt_send_count(&self) -> u8 {
-        self.rtt_send_count
-    }
-
-    /// Whether an inbound packet has confirmed RTT delivery
-    pub(crate) fn rtt_confirmed(&self) -> bool {
-        self.rtt_confirmed
-    }
-
-    /// Retry interval for RTT packets: `max(rtt_ms * 3, 10s)`
-    pub(crate) fn rtt_retry_interval_ms(&self) -> u64 {
-        core::cmp::max(
-            self.rtt_ms() * RTT_RETRY_INTERVAL_MULTIPLIER,
-            RTT_RETRY_MIN_INTERVAL_MS,
-        )
-    }
-
-    /// Whether this link is eligible for an RTT retry (initiator, active,
-    /// unconfirmed, has sent at least once, hasn't exhausted retries).
-    pub(crate) fn needs_rtt_retry(&self) -> bool {
-        self.initiator
-            && self.state() == LinkState::Active
-            && !self.rtt_confirmed
-            && self.rtt_send_count > 0
-            && self.rtt_send_count <= RTT_RETRY_MAX_ATTEMPTS
-    }
-
-    /// Record that an RTT packet was sent (initial or retry)
-    pub(crate) fn record_rtt_sent(&mut self, now_ms: u64) {
-        self.rtt_sent_at_ms = Some(now_ms);
-        self.rtt_send_count += 1;
-    }
-
-    /// Mark RTT delivery as confirmed (any inbound link packet or proof).
-    /// Clears `rtt_sent_at_ms` since no further retries are needed.
-    pub(crate) fn confirm_rtt(&mut self) {
-        self.rtt_confirmed = true;
-        self.rtt_sent_at_ms = None;
     }
 
     /// Check if we should send a keepalive now (initiator only)

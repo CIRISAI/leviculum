@@ -58,7 +58,7 @@ The field T114 on ed0754e4 (2026-10-07) printed `node_box=31152` and
 | `discovery_path_requests` | 56 B a slot | 4 | 224 | measured |
 | `dest_ratchet_keys` | `Vec` header, 42 B a slot | 4 | 168 | measured |
 | rest of `NodeCore` (transport, node state) | | | 1 728 | node box less storage |
-| Endpoint links: boxed `Link` + link-map share | 2 648 + 64 = 2 712 | 4 | 10 848 | `LINK_BYTES` (asserted), `LINK_MAP_BYTES_PER_LINK` |
+| Endpoint links: boxed `Link` + link-map share | 2 632 + 64 = 2 696 | 4 | 10 784 | `LINK_BYTES` (asserted), `LINK_MAP_BYTES_PER_LINK` |
 | BLE sessions: `LINK_OUT` 4 × 564, pump 2 × 564, defragmenter 564 | 3 948 | 4 | 15 792 | `SESSION_BUDGET_BYTES` |
 | Propagation role | | 1 | 21 120 | `ROLE_BUDGET_BYTES` |
 | of which the sync slice | | 1 | 8 000 | `SYNC_SLICE_BYTES` |
@@ -69,17 +69,20 @@ The field T114 on ed0754e4 (2026-10-07) printed `node_box=31152` and
 | of which fragmentation | | | 6 144 | `FRAG_RESERVE_BYTES` |
 | of which the shared BLE channels | 2 × 4 × 564 | | 4 512 | `CHANNEL_BUDGET_BYTES` |
 | of which one incoming resource | 8 192 | 1 | 8 192 | `MAX_INCOMING_RESOURCE_BYTES` |
-| **Total** | | | **98 304** | `budget_total` |
+| **Total** | | | **98 240** | `budget_total` |
 | **Heap** | | | **98 304** | `HEAP_SIZE` |
-| **Slack** | | | **0** | `budget_slack` |
+| **Slack** | | | **64** | `budget_slack` |
 | **Boot serve cap** | | | **0** | `budget_serve_cap` |
 
-The heap is full to the byte: 31 696 B is exactly the node box at which
-four links fit with nothing left (`max_endpoint_links_at_its_boundaries`).
-One more byte in `NodeCore`, or in `Link`, costs an endpoint link and
-fails the binaries' `MAX_ENDPOINT_LINKS >= ble::MAX_LINKS` assert at
-compile time. The boot serve cap is 0 B, so the propagation role serves
-only what the live heap funds at each `/get` (`live_serve_cap`).
+The heap is full but for 64 B: 31 696 B was exactly the node box at
+which four links fit with nothing left, and #662 took 16 B a link out
+of `Link` (the RTT retry state), so the boundary now sits at 31 760 B
+(`max_endpoint_links_at_its_boundaries`). 65 more bytes in `NodeCore`,
+or 17 in `Link`, cost an endpoint link and fail the binaries'
+`MAX_ENDPOINT_LINKS >= ble::MAX_LINKS` assert at compile time. 64 B
+funds no serve, so the boot serve cap is still 0 B and the propagation
+role serves only what the live heap funds at each `/get`
+(`live_serve_cap`).
 
 ## What the boot plan does not sum
 
@@ -151,5 +154,5 @@ None of these is made; each is a decision.
 Two that look like candidates and are not: the hold cap 6 → 5 saves
 1 000 B of the held-announce slice, which is live heap outside
 `budget_total`, so the boot slack does not move. One fewer link (with
-its BLE session) buys 6 660 B but drops a claimable BLE connection,
+its BLE session) buys 6 644 B but drops a claimable BLE connection,
 which is a phone or a peer the board can no longer hold.

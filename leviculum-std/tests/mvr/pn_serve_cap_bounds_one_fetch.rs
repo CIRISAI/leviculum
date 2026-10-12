@@ -39,7 +39,7 @@
 //! through the real path
 //! (`a_streamed_serve_holds_only_the_transfer`,
 //! `pn_serve_peak_outgrows_the_board_heap.rs`). The cap the live heap
-//! funds goes from 2 540 B (nine messages) to 7 240 B (all 24, with room
+//! funds goes from 2 540 B (nine messages) to 7 252 B (all 24, with room
 //! for two more), and the free heap a single-sync drain needs falls from
 //! 54 848 B to 28 992 B — below the 30 380 B the board had.
 //!
@@ -77,7 +77,7 @@ const FREE_AT_PANIC: usize = 30_380;
 /// a serve is one allocation and only this figure prices it.
 const LARGEST_AT_PANIC: usize = 30_320;
 
-/// What the BOOT plan funds on that same board (`HEAP_BUDGET … slack=0`
+/// What the BOOT plan funds on that same board (`HEAP_BUDGET … slack=64`
 /// → `serve_cap=0`, `heap_census::budget_serve_cap`, `leviculum-nrf`), at
 /// the measured node box: 0 B since #661, which found the 170 B this file
 /// used to state computed from a node box 656 B too small. Either way a
@@ -91,9 +91,10 @@ const BOOT_CAP: usize =
 /// `leviculum-nrf/heap-budget`): one inbound sync batch in the role's
 /// `SYNC_SLICE_BYTES` (8 000 B), one queued upload at
 /// `BOARD_TRANSFER_LIMIT_KB` (4 000 B), and one more endpoint link at
-/// `budget_per_link()` — 2 712 B in this tree, since `Link` keeps the data
-/// clock an idle inbound link is torn down by (`last_data`, #442); 2 696 B
-/// before that. It was 2 680 B between
+/// `budget_per_link()` — 2 696 B in this tree, since `Link` dropped the
+/// RTT retry state (#662); 2 712 B before that, since `Link` keeps the data
+/// clock an idle inbound link is torn down by (`last_data`, #442), and
+/// 2 696 B before that. It was 2 680 B between
 /// #384 B2, which shrank `Link` by the joined-ciphertext copy
 /// `OutgoingResource` kept beside its parts, and the two `u64`s a link
 /// now records off its first hop (#36/#374): `frame_turnaround_ms`, then
@@ -123,7 +124,7 @@ const FIELD_BODY_BYTES: usize = 224;
 /// A mailbox deeper than any cap this heap funds, for the two tests
 /// about what happens when the mail does NOT fit. 80 messages against a
 /// margin-free cap of 14 296 B (52 messages) and a margined one of
-/// 7 240 B (26): both bite, and the difference between them is
+/// 7 252 B (26): both bite, and the difference between them is
 /// measurable. The field's own 24 no longer are — which is the point of
 /// this order and the reason these two tests stopped using them.
 const DEEP_MAILBOX_MESSAGES: u8 = 80;
@@ -251,8 +252,8 @@ fn the_field_mailbox_drains_in_one_fetch_where_the_buffered_serve_managed_nine()
         BOARD_RESOURCE_SDU,
     );
     assert_eq!(
-        live_cap, 7_240,
-        "the heap the board had funds 7 240 B of fetch response"
+        live_cap, 7_252,
+        "the heap the board had funds 7 252 B of fetch response"
     );
 
     let (mut role, stored) = field_node(live_cap);
@@ -453,13 +454,13 @@ fn a_fetch_past_the_funded_cap_is_served_in_part_and_finished_next_round() {
 /// plan feared — and the margin is what keeps that from being the panic
 /// again.
 ///
-/// The boot plan is every term at its maximum at once: 0 B of slack,
+/// The boot plan is every term at its maximum at once: 64 B of slack,
 /// 0 B of funded response (#661). A stored field message is 256 B stamped, so
 /// a board held to the floor lists 24 messages and serves **none** of
 /// them, which is what this test's first half measures. The heap that
-/// board actually stood on funds 7 240 B — the whole mailbox.
+/// board actually stood on funds 7 252 B — the whole mailbox.
 ///
-/// **7 240, not 14 296.** The margin-free cap is what the same heap
+/// **7 252, not 14 296.** The margin-free cap is what the same heap
 /// funds with nothing left over, and
 /// `pn_serve_cap_survives_a_shrinking_heap` measures what spending it
 /// costs: the serve fits the instant it is computed and overruns the
@@ -503,11 +504,11 @@ served={} of {FIELD_MESSAGES} response={}",
         plan.encoded_len(),
     );
 
-    assert_eq!(live_cap, 7_240);
+    assert_eq!(live_cap, 7_252);
     assert_eq!(
         plan.count(),
         usize::from(FIELD_MESSAGES),
-        "7 240 B of accounted cap is 24 B of preamble and 24 messages at \
+        "7 252 B of accounted cap is 24 B of preamble and 24 messages at \
          272 B each (24 + 24Â·272 = 6 552, and a 27th would be 7 368)"
     );
     assert!(

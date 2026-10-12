@@ -26,50 +26,50 @@ and a Python phone must agree.
 Where we match, verified: the link request payload is the two
 ephemeral public keys, 64 bytes, or 67 with the 3-byte MTU/mode
 signalling (`create_link_request_with_mtu`,
-`leviculum-core/src/link/mod.rs:1295`, against `request_data`
+`leviculum-core/src/link/mod.rs:1280`, against `request_data`
 composition at `reference/Reticulum/RNS/Link.py:316` and the two
 accepted sizes in `validate_request`,
 `reference/Reticulum/RNS/Link.py:186`); the signalling encoding is the
 21-bit MTU plus 3-bit mode (`encode_signaling_bytes`,
-`leviculum-core/src/link/mod.rs:80`, against `signalling_bytes`,
+`leviculum-core/src/link/mod.rs:79`, against `signalling_bytes`,
 `reference/Reticulum/RNS/Link.py:150`); the link id is the truncated
 hash over the masked flags byte plus the packet body with the
 signalling stripped (`calculate_link_id`,
-`leviculum-core/src/link/mod.rs:1977`, against
+`leviculum-core/src/link/mod.rs:1915`, against
 `link_id_from_lr_packet`, `reference/Reticulum/RNS/Link.py:341`), and
 one id regardless of header type; the proof is
 `signature + x25519_pub + signalling` signed over
 `link_id + pub + sig_pub + signalling` with the destination identity
-key (`build_proof_packet`, `leviculum-core/src/link/mod.rs:794`,
+key (`build_proof_packet`, `leviculum-core/src/link/mod.rs:779`,
 against `prove`, `reference/Reticulum/RNS/Link.py:371`); the 96-byte
 legacy proof without signalling is accepted and verified over the
 80-byte prefix (`LINK_PROOF_LEGACY_SIZE`,
-`leviculum-core/src/link/mod.rs:72`, against the two shapes gated at
+`leviculum-core/src/link/mod.rs:71`, against the two shapes gated at
 `reference/Reticulum/RNS/Link.py:404` and `:410`); only
 `MODE_AES256_CBC` is accepted (`validate_mode`,
-`leviculum-core/src/link/mod.rs:102`, against `ENABLED_MODES`,
+`leviculum-core/src/link/mod.rs:101`, against `ENABLED_MODES`,
 `reference/Reticulum/RNS/Link.py:133`); the link MDU formula is
 Python's to the byte (`compute_link_mdu`,
-`leviculum-core/src/link/mod.rs:126`, against `update_mdu`,
+`leviculum-core/src/link/mod.rs:125`, against `update_mdu`,
 `reference/Reticulum/RNS/Link.py:530`, 431 at the default MTU); an
 inbound request's signalled MTU is clamped to the receiving
 interface's HW MTU exactly as Transport does it (`new_incoming`,
-`leviculum-core/src/link/mod.rs:657`); the initiator adopts the
+`leviculum-core/src/link/mod.rs:645`); the initiator adopts the
 responder's confirmed MTU verbatim with the base-MTU fallback for a
-missing value (`process_proof`, `leviculum-core/src/link/mod.rs:2031`,
+missing value (`process_proof`, `leviculum-core/src/link/mod.rs:1969`,
 against the `confirmed_mtu or RNS.Reticulum.MTU` adoption,
 `reference/Reticulum/RNS/Link.py:427`); the RTT packet is the
 link-encrypted msgpack float64 (`build_rtt_packet`,
-`leviculum-core/src/link/mod.rs:2606`, against the `rtt_data` packb at
+`leviculum-core/src/link/mod.rs:2544`, against the `rtt_data` packb at
 `reference/Reticulum/RNS/Link.py:440`); the keepalive derivation is
 Python's formula (`calculate_keepalive_from_rtt`,
-`leviculum-core/src/link/mod.rs:1454`, against
+`leviculum-core/src/link/mod.rs:1439`, against
 `reference/Reticulum/RNS/Link.py:845`, constants `KEEPALIVE_MAX_RTT`
 at `reference/Reticulum/RNS/Link.py:83`); and the identify step is
 byte-identical both ways — initiator-only, 128-byte
 `pubkey + signature` over `link_id + pubkey` (`identify_link`,
 `leviculum-core/src/node/mod.rs:1363`, and `handle_link_identify`,
-`leviculum-core/src/node/link_management.rs:1930`, against `identify`,
+`leviculum-core/src/node/link_management.rs:1925`, against `identify`,
 `reference/Reticulum/RNS/Link.py:459`, and the LINKIDENTIFY arm,
 `reference/Reticulum/RNS/Link.py:1010-1031`), blackhole teardown
 included (`reference/Reticulum/RNS/Link.py:1021-1023`).
@@ -92,8 +92,9 @@ reference's is 360 s.** Python arms an incoming link with
 `KEEPALIVE_MAX` = 360 at `reference/Reticulum/RNS/Link.py:92`). Ours
 substitutes a 54 s bonus (`ESTABLISHMENT_RESPONDER_BONUS_MS`,
 `leviculum-core/src/constants.rs:286`, applied in
-`establishment_timeout_ms`, `leviculum-core/src/link/mod.rs:1131`),
-sized to cover our own initiator's RTT-retry budget (D3) with margin.
+`establishment_timeout_ms`, `leviculum-core/src/link/mod.rs:1116`),
+sized to cover our own initiator's RTT-retry budget (D3, the retry
+since removed) with margin.
 What a peer sees: a Python initiator whose LRRTT packet takes longer
 than `6s×hops + 54s` to arrive (an extreme multi-hop LoRa path, or an
 initiator that sleeps between proof and RTT) finds the link gone —
@@ -109,7 +110,7 @@ timeout.** Python never retries a link request internally; the
 application does. Ours retries up to `max(LINK_REQUEST_MAX_RETRIES,
 hops)` times, regenerating the ephemeral keys so the retry survives
 duplicate-hash dedup, re-keying the link table and aliasing old ids
-(`check_timeouts`, `leviculum-core/src/node/link_management.rs:3483`,
+(`check_timeouts`, `leviculum-core/src/node/link_management.rs:3478`,
 re-key at `:3396`), and every attempt draws a fresh +0..25 % timeout
 jitter (`MAX_ESTABLISHMENT_JITTER_PERMILLE`,
 `leviculum-core/src/constants.rs:298`). On the wire each retry is
@@ -118,37 +119,45 @@ reaches the air. Class: **deviation ours (deliberate), inert on the
 wire**. Pinned by the existing #66/#129 tests.
 
 **D3 — RTT packet retransmits, and what they do to a Python
-responder.** Python sends LRRTT once
-(`reference/Reticulum/RNS/Link.py:440-442`). Ours retransmits it up to
-`RTT_RETRY_MAX_ATTEMPTS` = 5 times at `max(3×rtt, 10 s)` until any
-inbound packet confirms the responder is alive (`check_rtt_retry`,
-`leviculum-core/src/node/link_management.rs:3716`; `needs_rtt_retry`,
-`leviculum-core/src/link/mod.rs:1520`) — the fix for the
-LRRTT-lost-on-LoRa establishment hole. The side effect on a Python
-responder: its LRRTT arm has **no state gate** (`rtt_packet` is called
-whenever `not self.initiator`, `reference/Reticulum/RNS/Link.py:1059`),
-and `rtt_packet` re-measures `time() - request_time`, takes
-`max(measured, wire)` (`reference/Reticulum/RNS/Link.py:540`),
-recomputes keepalive from it, and **re-fires the destination's
-`link_established` callback** (`reference/Reticulum/RNS/Link.py:550`)
-on every duplicate. A retry 10 s after establishment therefore sets
-the Python responder's RTT to ~10 s, which pushes its keepalive to the
-360 s ceiling and its stale window to 720 s, and runs the peer
-application's established-callback a second time. Our retries stop at
-the first inbound packet, so against a responder that transmits at all
-this stays theoretical; on a one-way-usable path it is real. Class:
-**semantic, deviation ours (deliberate) with an undocumented side
-effect on the peer**. Test: drop-in A/B — `rnsd` responder behind a
-return path that drops the first LRRTT; count `link_established`
-invocations and read the responder's RTT; ours should confirm-and-stop
-after one retry.
+responder.** *Resolved (#662): the retry is gone.* Python sends LRRTT once
+(`reference/Reticulum/RNS/Link.py:440-442`). Ours retransmitted it up to
+five times at `max(3×rtt, 10 s)` until any inbound packet confirmed the
+responder was alive (`check_rtt_retry` and `needs_rtt_retry`, both
+removed in 662) — the fix for the LRRTT-lost-on-LoRa establishment hole.
+The side effect on a Python responder: its LRRTT arm has **no state
+gate** (`rtt_packet` is called whenever `not self.initiator`,
+`reference/Reticulum/RNS/Link.py:1059`), and `rtt_packet` re-measures
+`time() - request_time`, takes `max(measured, wire)`
+(`reference/Reticulum/RNS/Link.py:540`), recomputes keepalive from it,
+and **re-fires the destination's `link_established` callback**
+(`reference/Reticulum/RNS/Link.py:550`) on every duplicate. Class
+when read: **semantic, deviation ours (deliberate) with an undocumented
+side effect on the peer**.
+
+This audit expected the effect to need a lost LRRTT on a one-way-usable
+path. Periculum 659 measured it (periculum
+`docs/measurements/2026-10-12-lrrtt-retry-python-responder.md`, cells
+`emulated/lrrtt_retry_python_responder_{control,lost}`) against a quiet
+rnsd 1.5.2 responder: with **nothing lost** the responder ran its
+`link_established` callback six times for one link, its rtt climbing
+1.42, 11.31, 21.09, 31.43, 41.30, 51.39 s, keepalive pinned at the 360 s
+ceiling and stale time at 720 s from our first retry; with the first
+LRRTT lost it ran five callbacks and never saw the true RTT. A responder
+that waits for the initiator to speak, the normal server-side case,
+never confirms, so every retry fired. That fails the deviation rule's
+semantic clause, so the deviation went: the initiator sends the RTT
+packet once, as the reference does, and a lost LRRTT leaves the
+responder unactivated and the link ends on its own timers, which is
+what two Python nodes do. Pinned by
+`test_rtt_packet_sent_once_to_silent_responder` in
+`leviculum-core/src/node/mod.rs`.
 
 **D4 — the responder takes the initiator's RTT verbatim; the
 reference takes the max with its own measurement.** Python:
 `self.rtt = max(measured_rtt, rtt)` (`rtt_packet`,
 `reference/Reticulum/RNS/Link.py:540`). Ours decrypts, rejects
 non-finite and non-positive values, clamps at 3600 s, and stores the
-wire value (`process_rtt`, `leviculum-core/src/link/mod.rs:880`). An
+wire value (`process_rtt`, `leviculum-core/src/link/mod.rs:865`). An
 initiator that understates its RTT (buggy clock) gives our responder a
 too-short keepalive/stale window where Python's own measurement would
 floor it; the clamps bound the damage. Class: **timing**. Test: unit —
@@ -164,9 +173,9 @@ instruction's example RTT of 500 ms: the reference derives keepalive
 `LINK_ESTAB` line in the instruction shows —
 `keepalive_s=102 stale_s=204 inactivity_timeout_ms=211000`: the
 keepalive clamps to whole seconds (`calculate_keepalive_from_rtt`,
-`leviculum-core/src/link/mod.rs:1454`, the trailing `as u64`), stale is
+`leviculum-core/src/link/mod.rs:1439`, the trailing `as u64`), stale is
 `2×102`, and the close threshold `stale_close_timeout_secs`
-(`leviculum-core/src/link/mod.rs:1443`) lands 1.7 s earlier than the
+(`leviculum-core/src/link/mod.rs:1428`) lands 1.7 s earlier than the
 reference's. Both ends keep their own clocks, nothing crosses the
 wire. Class: **timing, inert**.
 
@@ -174,35 +183,35 @@ wire. Class: **timing, inert**.
 
 Where we match, verified: only the initiator sends keepalives, 0xFF,
 unencrypted (`build_keepalive_packet`,
-`leviculum-core/src/link/mod.rs:2654`, against the KEEPALIVE plaintext
+`leviculum-core/src/link/mod.rs:2592`, against the KEEPALIVE plaintext
 arm of Packet.pack, `reference/Reticulum/RNS/Packet.py:206-208`);
 the responder echoes 0xFE and only 0xFE
-(`process_keepalive`, `leviculum-core/src/link/mod.rs:2780`, against
+(`process_keepalive`, `leviculum-core/src/link/mod.rs:2718`, against
 the echo arm, `reference/Reticulum/RNS/Link.py:1152-1156`); keepalives
 refresh the inbound clock but not the data clock
-(`record_keepalive_inbound`, `leviculum-core/src/link/mod.rs:1568`,
+(`record_keepalive_inbound`, `leviculum-core/src/link/mod.rs:1506`,
 against `last_data` gating, `reference/Reticulum/RNS/Link.py:979`);
 stale is `2 × keepalive` of inbound silence and recovery is any valid
 inbound packet (`try_recover_stale`,
-`leviculum-core/src/node/link_management.rs:2557`, against
+`leviculum-core/src/node/link_management.rs:2552`, against
 `reference/Reticulum/RNS/Link.py:983-984`), validated data proofs and
 resource proofs included (#124, matching the
 `max(last_inbound, last_proof, ...)` at
 `reference/Reticulum/RNS/Link.py:789`); the close packet is the
 link-encrypted link id, accepted from Active and Stale
-(`process_close`, `leviculum-core/src/link/mod.rs:2746`, against
+(`process_close`, `leviculum-core/src/link/mod.rs:2684`, against
 `teardown_packet`, `reference/Reticulum/RNS/Link.py:710`); and a
 teardown fails both in-flight resources toward the application
 (`remove_link`, `leviculum-core/src/node/link_management.rs:525`,
 against `link_closed` cancelling both lists,
 `reference/Reticulum/RNS/Link.py:725-726`). Our close *reasons* are a
 richer local enum (`LinkCloseReason`,
-`leviculum-core/src/link/mod.rs:277`) than Python's three
+`leviculum-core/src/link/mod.rs:276`) than Python's three
 (`reference/Reticulum/RNS/Link.py:116-118`) — local only, nothing on
 the wire carries a reason. Pending requests on a closed link are
 dropped without individual timeout events
 (`remove_pending_requests_for_link`,
-`leviculum-core/src/node/link_management.rs:4335`); Python lets each
+`leviculum-core/src/node/link_management.rs:4253`); Python lets each
 `RequestReceipt` time out on its own clock
 (`reference/Reticulum/RNS/Link.py:1415-1422`). Inert, local API.
 
@@ -211,10 +220,10 @@ Python sends a keepalive only when the link has been inbound-idle a
 whole keepalive interval AND one interval has passed since the last
 keepalive (`reference/Reticulum/RNS/Link.py:792-794`). Ours gates on
 `last_keepalive` alone (`should_send_keepalive`,
-`leviculum-core/src/link/mod.rs:1545`), so an initiator emits one
+`leviculum-core/src/link/mod.rs:1483`), so an initiator emits one
 keepalive per interval no matter what traffic flows. This is a
 deliberate superset — the test at
-`leviculum-core/src/link/mod.rs:3771`
+`leviculum-core/src/link/mod.rs:3709`
 (`silent_initiator_keeps_sending_keepalives_while_inbound_is_fresh`)
 pins why: a one-way-receiving initiator under the reference's gate
 would let the *peer's* inbound clock starve. What a peer sees: one
@@ -229,11 +238,11 @@ arrives on a different interface than the link is attached to, loudly
 (`reference/Reticulum/RNS/Link.py:975-977`: "Someone might be trying
 to manipulate your communication!"). Our dispatch has no interface
 check at all — `handle_link_data`
-(`leviculum-core/src/node/link_management.rs:1439`) never receives the
+(`leviculum-core/src/node/link_management.rs:1436`) never receives the
 arrival interface. HMAC covers every encrypted context, but keepalives,
 resource parts (bulk-encrypted slices with no per-packet tag,
 `handle_resource_data`,
-`leviculum-core/src/node/link_management.rs:2940`) and resource proofs
+`leviculum-core/src/node/link_management.rs:2935`) and resource proofs
 are not per-packet authenticated: a node bridging two of our
 interfaces can replay them cross-interface and we accept, where Python
 drops. It also means a link whose path genuinely moved keeps working
@@ -246,7 +255,7 @@ the reference refuses.
 interface and the resource-proof arm of `handle_link_proof` checks it
 too; a mismatch is dropped before stale recovery and counted as
 `link-iface-mismatch`, `refuse_off_link_interface`,
-`leviculum-core/src/node/link_management.rs:1405`. The mvr is
+`leviculum-core/src/node/link_management.rs:1402`. The mvr is
 `leviculum-core/src/node/mvr_link_iface_pinning.rs`.) What the gap gave
 us by accident is left undone on purpose: re-pinning a *stale* link to
 the interface its packets moved to would keep a link alive whose path
@@ -259,7 +268,7 @@ link keep the replay hardening?), not a side effect of this fix.
 **D8 — keepalive accounting is looser than the reference's by two
 small steps.** (a) We refresh the inbound clock before validating the
 keepalive byte (`handle_keepalive_packet`,
-`leviculum-core/src/node/link_management.rs:1589`), so a malformed or
+`leviculum-core/src/node/link_management.rs:1584`), so a malformed or
 wrong-direction keepalive still feeds the stale watchdog; Python
 validates direction first and, for an initiator, excludes an inbound
 0xFF *entirely* — it never even counts as inbound
@@ -287,19 +296,19 @@ against `reference/Reticulum/RNS/Link.py:515`); the default timeout is
 `reference/Reticulum/RNS/Link.py:494`); the handler auth ladder is
 none/all/allow-list with the allow-list keyed on the identified remote
 (`handle_request_payload`,
-`leviculum-core/src/node/link_management.rs:2118`, against
+`leviculum-core/src/node/link_management.rs:2113`, against
 `reference/Reticulum/RNS/Link.py:867-873`); the response is
 `[request_id, response]` as a packet up to the link MDU and a response
 resource beyond it, correlated only on the link that owns the pending
 request (`handle_response_payload`,
-`leviculum-core/src/node/link_management.rs:2284`; response-resource
+`leviculum-core/src/node/link_management.rs:2279`; response-resource
 acceptance gated on the pending request,
-`leviculum-core/src/node/link_management.rs:2681-2704`, against the
+`leviculum-core/src/node/link_management.rs:2676-2699`, against the
 pending-request scan at `reference/Reticulum/RNS/Link.py:1075-1088`);
 and a completed response resource is delivered as the response — the
 metadata/file shape included — not as a generic transfer
 (`response_delivery`,
-`leviculum-core/src/node/link_management.rs:3072-3106`, against
+`leviculum-core/src/node/link_management.rs:3067-3101`, against
 `response_resource_concluded`,
 `reference/Reticulum/RNS/Link.py:939-954`).
 
@@ -325,9 +334,9 @@ deadline whenever the link shows inbound progress — resource ADVs and
 parts included — and hands liveness to the resource watchdog while a
 response resource is in flight
 (`reset_pending_requests_on_link`,
-`leviculum-core/src/node/link_management.rs:2415`;
+`leviculum-core/src/node/link_management.rs:2410`;
 `reconcile_request_resource_outcomes`,
-`leviculum-core/src/node/link_management.rs:2453`). Rationale is bug
+`leviculum-core/src/node/link_management.rs:2448`). Rationale is bug
 #26: on LoRa the Response packet queues behind resource data and the
 absolute timer fired mid-transfer. What a peer sees: nothing — purely
 our clock. What an operator sees: our `fetch` survives where `rncp`'s
@@ -338,7 +347,7 @@ segment *any* resource, request and response bodies included (the
 split machinery at
 `reference/Reticulum/RNS/Resource.py:299-313` is shape-agnostic).
 Ours rejects a request/response ADV that is split or not segment 1/1
-(`leviculum-core/src/node/link_management.rs:2665-2674`) and refuses to
+(`leviculum-core/src/node/link_management.rs:2660-2669`) and refuses to
 build one past `RESOURCE_MAX_EFFICIENT_SIZE` on the sender side
 (`ensure_single_segment_internal_resource_size`, called at
 `leviculum-core/src/node/mod.rs:1612`). What a peer sees: a Python
@@ -360,7 +369,7 @@ with Python's keys, order, flag bits and nil-able `q`
 pinned in `test_advertisement_python_interop_vector`,
 `leviculum-core/src/resource/mod.rs:990`); parts are the bulk-encrypted
 stream cut at the resource SDU, sent raw in RESOURCE context
-(`build_raw_data_packet`, `leviculum-core/src/link/mod.rs:2482`,
+(`build_raw_data_packet`, `leviculum-core/src/link/mod.rs:2420`,
 against the RESOURCE arm of Packet.pack,
 `reference/Reticulum/RNS/Packet.py:202-204`); the REQ wire format is
 `[flag][last_map_hash?][resource_hash][N×4 map hashes]`
@@ -385,7 +394,7 @@ from the peer's `n` (`from_advertisement`,
 (`build_proof`, `leviculum-core/src/resource/incoming.rs:865`, against
 `prove`, `reference/Reticulum/RNS/Resource.py:752`), cached and
 re-served on an unencrypted CACHE_REQUEST (`handle_cache_request`,
-`leviculum-core/src/node/link_management.rs:2368`, against the
+`leviculum-core/src/node/link_management.rs:2363`, against the
 cache-request plaintext arm,
 `reference/Reticulum/RNS/Packet.py:210-211`); cancellation is ICL from
 the sender — ours also sends it when the sender's own watchdog gives
@@ -425,7 +434,7 @@ unpacked advertisement and only then calls `Resource.accept`
 (`reference/Reticulum/RNS/Link.py:1091-1099`); ours parks the ADV on
 the link and emits `ResourceAdvertised`, the application answers
 asynchronously with `accept_resource`/`reject_resource`, the parked
-ADV at `leviculum-core/src/node/link_management.rs:2764-2772`. Same point in
+ADV at `leviculum-core/src/node/link_management.rs:2759-2767`. Same point in
 the protocol — nothing stored, reject is an RCL on both — different
 concurrency shape: our decision window can span sender
 re-advertisements, which the parked-ADV gate absorbs. 643's cell
@@ -442,10 +451,10 @@ dedups only same-hash re-advertisements (`has_incoming_resource`,
 `Option<IncomingResource>` per link and ignored any ADV for a
 *different* hash while one was in flight — the #404 re-REQ answered
 only a repeat of the *same* resource. (Fixed in 1d727b68, #657: a link now keeps
-a list, `leviculum-core/src/link/mod.rs:530`, a repeat still draws the
-re-REQ, `leviculum-core/src/node/link_management.rs:2633`, and a new
+a list, `leviculum-core/src/link/mod.rs:521`, a repeat still draws the
+re-REQ, `leviculum-core/src/node/link_management.rs:2628`, and a new
 hash beyond the per-link bound is refused with an RCL,
-`leviculum-core/src/node/link_management.rs:2714`.) What a peer saw: a Python sender that advertises a second resource on the same
+`leviculum-core/src/node/link_management.rs:2709`.) What a peer saw: a Python sender that advertises a second resource on the same
 link mid-transfer (two queued LXMF messages delivered back to back;
 Python's own sender serialises via `ready_for_new_resource`,
 `reference/Reticulum/RNS/Link.py:1331`, but *two Python senders'
@@ -567,11 +576,11 @@ Behavioural divergences, all tx-local (the window, the retry clock and
 the proof policy are each end's own):
 
 **D18 — retry budget 8 versus the reference's 5, then teardown.**
-`CHANNEL_MAX_TRIES` (`leviculum-core/src/constants.rs:503`) is 8;
+`CHANNEL_MAX_TRIES` (`leviculum-core/src/constants.rs:491`) is 8;
 Python's `_max_tries` is 5 (`reference/Reticulum/RNS/Channel.py:295`).
 Both tear the link down on exhaustion (ours
 `ChannelAction::TearDownLink` handled at
-`leviculum-core/src/node/link_management.rs:3959`; Python
+`leviculum-core/src/node/link_management.rs:3886`; Python
 `_packet_timeout` escalating to the outlet's `timed_out`,
 `reference/Reticulum/RNS/Channel.py:569-584`). We hold a struggling
 link ~3 retries longer. Class: **timing**.
@@ -605,14 +614,14 @@ channel even parses it (`packet.prove()` at
 retransmit slot for a packet the receiver only *buffered*
 out-of-order. Ours proves on delivery (and on drain, and for
 duplicates of delivered packets), never for buffered gaps
-(`leviculum-core/src/node/link_management.rs:1687-1772`), precisely so
+(`leviculum-core/src/node/link_management.rs:1682-1767`), precisely so
 head-of-line blocking keeps the sender retransmitting the gap. Against
 a Python *sender* this costs nothing but the retransmits it would have
 skipped; against our sender a Python receiver proves early and our
 ring trusts it — symmetric, wire-legal, but the recovery dynamics
 under reorder differ by direction. Our rx ring is also bounded at 512
 with a loud refusal (`CHANNEL_RX_RING_MAX`,
-`leviculum-core/src/constants.rs:500`) where Python's deque is
+`leviculum-core/src/constants.rs:488`) where Python's deque is
 unbounded, and our backward-sequence acceptance window is half the
 sequence space with a re-prove
 (`Channel::receive`, `leviculum-core/src/link/channel/mod.rs:623`)
@@ -637,7 +646,7 @@ the receive path records whether a ratchet decrypted the packet and
 applies the live enforce policy (`ratchet_used`,
 `leviculum-core/src/node/mod.rs:314`). A link needs none of this: its
 keys are ephemeral X25519 freshly drawn per link
-(`new_outgoing`, `leviculum-core/src/link/mod.rs:576`, against
+(`new_outgoing`, `leviculum-core/src/link/mod.rs:567`, against
 `reference/Reticulum/RNS/Link.py:278-286`), so every link packet,
 resource part and channel envelope is forward-secret without ratchets,
 and the reference's only ratchet touch in `Link.receive` is labelling
@@ -676,7 +685,9 @@ machinery above (as the #374 lock did), never from ratchets.
    both are small; silence is the one wrong option. This is squarely
    in the propagation-node lane: a sync and a message delivery sharing
    one link is exactly the two-ADV case.
-3. **D3, stop RTT retries from reshaping a Python responder.** The
+3. **D3, stop RTT retries from reshaping a Python responder.**
+   *Resolved (#662): the retry is gone; 659 measured six callbacks on a
+   responder that lost nothing, so no cap would have contained it.* The
    retry is right (it closes a real LoRa establishment hole), but each
    duplicate LRRTT makes a Python responder re-run its established
    callback and inflate its RTT to the retry interval, with keepalive
@@ -693,14 +704,14 @@ does: every place the link or resource layer behaves differently over
 LoRa, it does so through two numbers the *interface* declares —
 `frame_turnaround_ms` and `acquisition_max_ms` — stored on the link as
 plain figures (`note_frame_turnaround_ms`,
-`leviculum-core/src/link/mod.rs:1197`) and consumed as timeout floors
+`leviculum-core/src/link/mod.rs:1182`) and consumed as timeout floors
 (`part_timeout_ms`, `leviculum-core/src/resource/incoming.rs:937`).
 What the medium changes is which divergences carry weight. On TCP, D5,
 D6 and D19 are noise. On a half-duplex carrier, timing *is* the
 protocol: the receiver's part timeout must exceed what the sender's
 radio can physically do (D15 exists because it once didn't), every
 gratuitous frame is airtime taken from data (D6's periodic keepalive
-and D3's RTT retries are paid in duty cycle), and both ends' watchdogs
+and, until 662, D3's RTT retries are paid in duty cycle), and both ends' watchdogs
 must agree within a window-flight of each other or they shred each
 other's windows (D14's policy choice is the record of that fight). The
 reference reads its own RTT and nothing else, which is why its

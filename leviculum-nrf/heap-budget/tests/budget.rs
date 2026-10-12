@@ -77,10 +77,10 @@ fn the_derived_constants_have_these_values() {
         ("SERVE_RESERVE_BYTES", SERVE_RESERVE_BYTES, 0),
         ("SERVE_PEAK_BYTES", SERVE_PEAK_BYTES, 17_264),
         ("ROLE_BUDGET_BYTES", ROLE_BUDGET_BYTES, 21_120),
-        ("LINK_BYTES", LINK_BYTES, 2_648),
-        ("budget_per_link", budget_per_link(), 2_712),
+        ("LINK_BYTES", LINK_BYTES, 2_632),
+        ("budget_per_link", budget_per_link(), 2_696),
         ("budget_reserve", budget_reserve(), 18_848),
-        ("SERVE_MARGIN_BYTES", SERVE_MARGIN_BYTES, 14_712),
+        ("SERVE_MARGIN_BYTES", SERVE_MARGIN_BYTES, 14_696),
     ];
     for (name, value, _) in rows {
         println!("HEAP_BUDGET_CONST {name}={value}");
@@ -102,10 +102,11 @@ fn the_t114_boot_line_has_these_values() {
         budget_serve_cap(nb)
     );
     assert_eq!(max_endpoint_links(nb), 4);
-    // The heap to the byte: four links fit with nothing left (#661).
+    // Four links fit with 64 B left: the heap to the byte at #661, and
+    // 4 × 16 B since the RTT retry state left `Link` (#662).
     assert_eq!(nb, 31_696);
-    assert_eq!(budget_total(nb), HEAP_SIZE);
-    assert_eq!(budget_slack(nb), 0);
+    assert_eq!(budget_total(nb), HEAP_SIZE - 64);
+    assert_eq!(budget_slack(nb), 64);
     assert_eq!(budget_serve_cap(nb), 0);
     // The binaries' two boot assertions hold on it.
     assert!(budget_total(nb) <= HEAP_SIZE);
@@ -125,9 +126,10 @@ fn max_endpoint_links_at_its_boundaries() {
     // The node box at which exactly MAX_LINKS links fit with nothing left:
     // the cap is reached, slack is zero, the total is the heap to the byte.
     let exact = full - MAX_LINKS * per_link;
-    assert_eq!(exact, 31_696);
-    // And that is where the boards are (#661): not one byte to spare.
-    assert_eq!(exact, NODE_BOX_BYTES);
+    assert_eq!(exact, 31_760);
+    // The boards are 64 B below it: not one byte to spare at #661, then
+    // 16 B a link freed when the RTT retry state left `Link` (#662).
+    assert_eq!(exact - NODE_BOX_BYTES, 64);
     assert_eq!(max_endpoint_links(exact), MAX_LINKS);
     assert_eq!(budget_slack(exact), 0);
     assert_eq!(budget_total(exact), HEAP_SIZE);
@@ -161,16 +163,16 @@ fn budget_serve_cap_at_its_boundaries() {
     // One byte of slack funds nothing either.
     assert_eq!(budget_serve_cap(exact - 1), 0);
     // The serve cap is the largest cap whose peak fits the slack: the
-    // T114's 0 B fund nothing, not even a one-byte serve (#661).
+    // T114's 64 B fund nothing, not even a one-byte serve (#661, #662).
     let slack = budget_slack(T114_NODE_BOX);
-    assert_eq!(slack, 0);
+    assert_eq!(slack, 64);
     assert_eq!(budget_serve_cap(T114_NODE_BOX), 0);
     assert!(serve_peak_bytes(1, SERVE_RESOURCE_SDU) > slack);
     // A link fewer frees almost a whole link's cost for the serve.
-    assert_eq!(budget_serve_cap(exact + 1), 1_023);
-    // Zero node box: 1 864 B of slack.
-    assert_eq!(budget_slack(0), 1_864);
-    assert_eq!(budget_serve_cap(0), 616);
+    assert_eq!(budget_serve_cap(exact + 1), 1_016);
+    // Zero node box: 2 104 B of slack.
+    assert_eq!(budget_slack(0), 2_104);
+    assert_eq!(budget_serve_cap(0), 744);
 }
 
 #[test]
@@ -227,7 +229,7 @@ fn live_serve_cap_never_falls_below_the_boot_cap() {
     // A zero floor (#661): the first heap above it is the first heap that
     // funds one byte at all (15 369 B when the stale pin said 170 B).
     assert_eq!(boot, 0);
-    assert_eq!(above, 14_853);
+    assert_eq!(above, 14_837);
     assert_eq!(live_serve_cap(boot, above - 1, usize::MAX), boot);
     assert_eq!(live_serve_cap(boot, above, usize::MAX), boot + 1);
     // Bytes in pieces: plenty free, but the largest block at the margin
@@ -254,7 +256,7 @@ fn issue_388_field_figures() {
         // After the upload, 24 s before `allocation of 340 bytes failed`.
         ("field 2026-09-12 pre-panic used=93544", 4_760, 4_760, 0),
         // The rig T114 that died serving 24 messages, under today's model.
-        ("rig 2026-09-23 used=67924", 30_380, 30_320, 7_240),
+        ("rig 2026-09-23 used=67924", 30_380, 30_320, 7_252),
     ];
     for (what, free, largest, expected) in rows {
         let cap = live_serve_cap(boot, free, largest);

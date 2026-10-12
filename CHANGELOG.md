@@ -400,6 +400,20 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- A link initiator sends the RTT packet once, as Python-RNS does
+  (`Link.py:440-442`). It used to resend it up to five times at ten-second
+  intervals until anything came back on the link. A Python responder runs its
+  RTT handler on every copy it receives (`Link.py:1059` has no state gate):
+  each one re-fires the destination's `link_established` callback and raises
+  its RTT to `max(measured, wire)` (`Link.py:540, 550`). Periculum 659 counted
+  six callbacks on a quiet rnsd 1.5.2 responder for one link, its RTT climbing
+  from 1.42 s to 51.39 s and its keepalive pinned at 360 s, on every link
+  whose responder stays silent for a minute. A lost RTT packet now leaves the
+  responder unactivated and the link ends on its own timers, as it does
+  between two Python nodes. `Link` is 16 B smaller on the boards
+  (2 632 B), which leaves the boot heap plan 64 B of slack where it had
+  none. Leviculum#662, audit D3.
+
 - The path re-balance of #330 no longer deletes the route it was correcting. A
   link-request proof that comes back over a different route than the one it was
   sent on made the terminus write that route's length into the path entry while

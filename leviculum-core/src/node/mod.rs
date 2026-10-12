@@ -2568,7 +2568,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Run link-layer periodic tasks
         self.check_timeouts(now_ms);
-        self.check_rtt_retry(now_ms);
         let now_secs = now_ms / crate::constants::MS_PER_SECOND;
         self.check_keepalives(now_secs);
         self.check_stale_links(now_secs);
@@ -5872,12 +5871,6 @@ mod tests {
             "responder should get LinkEstablished for its destination"
         );
 
-        // Mark RTT confirmed on the initiator, the RTT was delivered (step 7
-        // verified it), so in a real scenario the first inbound packet from the
-        // responder would confirm it. Prevents RTT retry from firing in tests
-        // that advance time after establishment.
-        initiator.link_mut(&init_link_id).unwrap().confirm_rtt();
-
         NodeCoreLinkPair {
             initiator,
             responder,
@@ -5944,9 +5937,6 @@ mod tests {
             )),
             "responder should get LinkEstablished for its destination"
         );
-
-        // Mark RTT confirmed, same as the _with_strategy variant above.
-        initiator.link_mut(&init_link_id).unwrap().confirm_rtt();
 
         NodeCoreLinkPair {
             initiator,
@@ -10258,7 +10248,7 @@ mod tests {
         assert!(result.is_ok(), "Expected Ok after clearing pacing delay");
     }
 
-    // RTT Retry Tests
+    // RTT packet tests
     type TestNode = NodeCore<OsRng, MockClock, NoStorage>;
     type LinkPairWithoutRtt = (TestNode, TestNode, LinkId, LinkId, Vec<u8>);
 
@@ -10316,131 +10306,43 @@ mod tests {
         (initiator, responder, init_link_id, resp_link_id, rtt_data)
     }
 
+    /// 662: the initiator sends the RTT packet once, as the reference does
+    /// (`reference/Reticulum/RNS/Link.py:440-442`). A Python responder runs
+    /// `rtt_packet` on every LRRTT it receives (`Link.py:1059` has no state
+    /// gate), so each duplicate re-fires its `link_established` callback and
+    /// inflates its RTT (`Link.py:540, 550`; periculum 659 counted six
+    /// callbacks and an rtt of 51.39 s on a quiet rnsd 1.5.2 responder).
     #[test]
-    fn test_rtt_retry_fires_after_interval() {
-        use crate::constants::RTT_RETRY_MIN_INTERVAL_MS;
+    fn test_rtt_packet_sent_once_to_silent_responder() {
+        use crate::packet::{Packet, PacketContext};
 
-        let (mut initiator, _responder, init_link_id, _resp_link_id, _rtt_data) =
+        let (mut initiator, _responder, init_link_id, _resp_link_id, rtt_data) =
             establish_link_pair_without_rtt();
-
-        // Initiator link should be Active with rtt_send_count=1, rtt_confirmed=false
-        let link = initiator.link(&init_link_id).unwrap();
-        assert_eq!(link.state(), LinkState::Active);
-        assert_eq!(link.rtt_send_count(), 1);
-        assert!(!link.rtt_confirmed());
-
-        // Advance past the retry interval
-        initiator
-            .transport()
-            .clock()
-            .set(TEST_TIME_MS + RTT_RETRY_MIN_INTERVAL_MS + 1);
-        let output = initiator.handle_timeout();
-
-        // Should have emitted an RTT retry packet
-        assert!(
-            !output.actions.is_empty(),
-            "expected RTT retry packet in actions"
+        assert_eq!(
+            Packet::unpack(&rtt_data).expect("rtt packet").context,
+            PacketContext::Lrrtt
         );
 
-        // rtt_send_count should be incremented
-        let link = initiator.link(&init_link_id).unwrap();
-        assert_eq!(link.rtt_send_count(), 2);
-    }
-
-    #[test]
-    fn test_rtt_confirmed_stops_retry() {
-        use crate::constants::RTT_RETRY_MIN_INTERVAL_MS;
-        use crate::transport::InterfaceId;
-
-        let (mut initiator, mut responder, init_link_id, _resp_link_id, rtt_data) =
-            establish_link_pair_without_rtt();
-
-        // Deliver the RTT to responder (responder becomes Active)
-        let _ = responder.handle_packet(InterfaceId(0), &rtt_data);
-
-        // Simulate an inbound packet on the initiator to confirm RTT.
-        // Use a keepalive from the responder, we need the responder link
-        // to build a keepalive, but it might not have one because keepalives
-        // are only built by initiators. Instead, just call confirm_rtt directly.
-        initiator.link_mut(&init_link_id).unwrap().confirm_rtt();
-
-        assert!(initiator.link(&init_link_id).unwrap().rtt_confirmed());
-
-        // Advance past retry interval
-        initiator
-            .transport()
-            .clock()
-            .set(TEST_TIME_MS + RTT_RETRY_MIN_INTERVAL_MS + 1);
-        let _output = initiator.handle_timeout();
-
-        // No retry should be emitted (actions may contain keepalive or other
-        // items, but rtt_send_count must stay at 1)
-        let link = initiator.link(&init_link_id).unwrap();
-        assert_eq!(link.rtt_send_count(), 1, "no retry should have fired");
-    }
-
-    #[test]
-    fn test_rtt_retry_limit_does_not_tear_down_link() {
-        use crate::constants::{RTT_RETRY_MAX_ATTEMPTS, RTT_RETRY_MIN_INTERVAL_MS};
-
-        let (mut initiator, _responder, init_link_id, _resp_link_id, _rtt_data) =
-            establish_link_pair_without_rtt();
-
-        // Extend stale timeout so the link survives through the retry period.
-        // With zero-RTT test links, the default stale timeout is only 15s,
-        // which is shorter than the retry budget (~60s).
+        // Keep the link alive across two minutes of silence so only the RTT
+        // logic can put frames on the air.
         initiator
             .link_mut(&init_link_id)
             .unwrap()
             .set_timing_for_test(3600, 3600, TEST_TIME_MS / crate::constants::MS_PER_SECOND);
 
-        // Exhaust all retries
-        for i in 0..RTT_RETRY_MAX_ATTEMPTS {
-            initiator
-                .transport()
-                .clock()
-                .set(TEST_TIME_MS + (i as u64 + 1) * (RTT_RETRY_MIN_INTERVAL_MS + 1));
-            let _ = initiator.handle_timeout();
-            // After each retry, send_count increases
-            if let Some(link) = initiator.link(&init_link_id) {
-                assert_eq!(link.rtt_send_count(), i + 2);
-            }
+        let mut resent = 0;
+        for k in 1..=120u64 {
+            initiator.transport().clock().set(TEST_TIME_MS + k * 1_000);
+            let output = initiator.handle_timeout();
+            resent += extract_all_action_data(&output)
+                .iter()
+                .filter_map(|raw| Packet::unpack(raw).ok())
+                .filter(|p| p.context == PacketContext::Lrrtt)
+                .count();
         }
 
-        // Link should still exist (retries not exceeded yet, just at limit)
-        assert!(
-            initiator.link(&init_link_id).is_some(),
-            "link should still exist at retry limit"
-        );
-
-        // One more tick, past the retry budget. The link must NOT be torn down:
-        // exhausted-but-unconfirmed links are left to the keepalive/stale
-        // watchdog (Python-parity reaping), not closed by an RTT-retry teardown.
-        initiator.transport().clock().set(
-            TEST_TIME_MS + (RTT_RETRY_MAX_ATTEMPTS as u64 + 1) * (RTT_RETRY_MIN_INTERVAL_MS + 1),
-        );
-        let output = initiator.handle_timeout();
-
-        // Link should still exist
-        assert!(
-            initiator.link(&init_link_id).is_some(),
-            "link must survive exhausted RTT retries (no teardown)"
-        );
-
-        // No LinkClosed event with Timeout reason should be emitted
-        let has_closed = output.events.iter().any(|e| {
-            matches!(
-                e,
-                NodeEvent::LinkClosed {
-                    reason: LinkCloseReason::Timeout,
-                    ..
-                }
-            )
-        });
-        assert!(
-            !has_closed,
-            "must not emit LinkClosed with Timeout reason after exhausting retries"
-        );
+        assert_eq!(resent, 0, "the RTT packet must not be resent");
+        assert!(initiator.link(&init_link_id).is_some());
     }
 
     #[test]
@@ -10528,30 +10430,6 @@ mod tests {
         let link = responder.link(&resp_link_id).unwrap();
         assert_eq!(link.state(), LinkState::Active);
         assert_eq!(link.rtt_us(), rtt_us);
-    }
-
-    #[test]
-    fn test_rtt_retry_deadline_in_next_deadline() {
-        use crate::constants::RTT_RETRY_MIN_INTERVAL_MS;
-
-        let (initiator, _responder, init_link_id, _resp_link_id, _rtt_data) =
-            establish_link_pair_without_rtt();
-
-        let link = initiator.link(&init_link_id).unwrap();
-        let sent_at = link.rtt_sent_at_ms().unwrap();
-
-        let deadline = initiator.next_deadline();
-        assert!(deadline.is_some(), "should have a deadline");
-        let d = deadline.unwrap();
-
-        // The RTT retry deadline should be at sent_at + interval
-        let expected = sent_at + RTT_RETRY_MIN_INTERVAL_MS;
-        assert!(
-            d <= expected,
-            "deadline {} should be <= rtt retry deadline {}",
-            d,
-            expected
-        );
     }
 
     // LinkIdentify tests

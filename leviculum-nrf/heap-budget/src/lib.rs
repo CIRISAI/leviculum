@@ -22,7 +22,7 @@
 /// tests run on the host, where pointer-sized fields make `Link` larger; the
 /// firmware asserts `size_of::<Link>() == LINK_BYTES`
 /// (`leviculum-nrf/src/heap_census.rs`), so the two cannot drift silently.
-pub const LINK_BYTES: usize = 2_648;
+pub const LINK_BYTES: usize = 2_632;
 
 use leviculum_core::resource::RESOURCE_SDU_OVERHEAD;
 use leviculum_lxmf::propagation_node::{
@@ -166,15 +166,15 @@ pub const SERVE_RESOURCE_SDU: usize = 500 - RESOURCE_SDU_OVERHEAD;
 /// it funds 14 296 B, and the whole announced 8 KB cap costs 17 264 B
 /// instead of 48 922.)
 ///
-/// And what it costs: the slack is 0 B and one endpoint link is
-/// [`budget_per_link`] ≈ 2 712 B, so raising this
+/// And what it costs: the slack is 64 B and one endpoint link is
+/// [`budget_per_link`] ≈ 2 696 B, so raising this
 /// still has to come out of the four links the budget affords — and
 /// [`MAX_LINKS`] is also four, asserted at boot and at
 /// compile time. **At four claimable BLE sessions there is no link to
 /// sell, so the BOOT-funded cap is 0 B.** What makes the board serve
 /// is not this number but the live one
 /// ([`live_serve_cap`]): the heap the T114 actually
-/// stood on funds 7 240 B after the margin, which is all 24 of the
+/// stood on funds 7 252 B after the margin, which is all 24 of the
 /// field's messages in one fetch. Raising this reserve would buy a
 /// bigger floor, not a bigger serve, and it would cost a link.
 pub const SERVE_RESERVE_BYTES: usize = 0;
@@ -266,7 +266,7 @@ pub const SERVE_PEAK_BYTES: usize = serve_peak_bytes(SYNC_SLICE_BYTES, SERVE_RES
 ///   says. It is a floor, not the serve: every `/get` re-reads the cap
 ///   from the heap the board HAS
 ///   ([`live_serve_cap`]), and the 30 380 B that
-///   T114 stood on funds 7 240 B after the margin — all 24 of the
+///   T114 stood on funds 7 252 B after the margin — all 24 of the
 ///   field's messages in one fetch, where the buffered path funded nine.
 ///
 /// Funding a bigger FLOOR still means taking bytes from a term above,
@@ -363,8 +363,8 @@ pub const fn budget_reserve() -> usize {
 /// fill its queues). What remains of [`HEAP_SIZE`] is divided by
 /// [`budget_per_link`], the carrier-independent cost of one more link.
 /// With today's numbers (node box [`NODE_BOX_BYTES`], role 21 120 B,
-/// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 712 B) the
-/// division yields 4 with 0 B over — the heap affords exactly the
+/// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 696 B) the
+/// division yields 4 with 64 B over — the heap affords exactly the
 /// BLE-session count, and no extra LoRa-backed links until a fixed term shrinks. The
 /// binaries assert `>=` [`MAX_LINKS`]: a node box grown past
 /// that line is a budget violation at compile time, not a dead session
@@ -461,8 +461,8 @@ pub const fn budget_serve_cap(node_box: usize) -> usize {
 /// ```text
 ///   SYNC_SLICE_BYTES                 8 000 B   one inbound sync batch
 /// + BOARD_TRANSFER_LIMIT_KB · 1000   4 000 B   one queued upload
-/// + budget_per_link()                2 712 B   one more endpoint link
-/// =                                 14 712 B
+/// + budget_per_link()                2 696 B   one more endpoint link
+/// =                                 14 696 B
 /// ```
 ///
 /// All three can coexist: the batch arrives from a peer over one link,
@@ -485,18 +485,18 @@ pub const SERVE_MARGIN_BYTES: usize =
 // and `…/pn_serve_cap_survives_a_shrinking_heap.rs`), but their expected
 // served counts are calibrated at it. Moving it legitimately: move the
 // pin, re-check those counts, and say what the board serves now.
-const _: () = assert!(SERVE_MARGIN_BYTES == 14_712);
+const _: () = assert!(SERVE_MARGIN_BYTES == 14_696);
 
 /// The cap one fetch may serve to, from the heap the board HAS rather
 /// than the heap its boot plan feared (#388, order 138).
 ///
 /// [`budget_serve_cap`] is a worst case: every term of the plan at its
-/// maximum at once, which on a T114 leaves 0 B of slack and funds a
+/// maximum at once, which on a T114 leaves 64 B of slack and funds a
 /// 0 B response — not one message, let alone a field one.
 /// The heap that board actually had when it died was 30 380 B free
 /// (`[HEAP_CENSUS] … free=30380 largest=30320`,
 /// `lora_pn_board_offer_past_the_link`, 2026-09-23 08:08 UTC), and under
-/// the streamed serve (#384 B2) that funds **7 240 B — all 24** of the
+/// the streamed serve (#384 B2) that funds **7 252 B — all 24** of the
 /// messages it was refusing to serve, in one fetch. Before B2 the same
 /// heap funded 2 540 B and nine of them.
 ///
@@ -714,9 +714,9 @@ pub const fn held_announce_bytes(per_iface: usize, ifaces: usize) -> usize {
 ///
 /// ```text
 ///   free at the 2026-09-23 T114 panic (two phones + role)  30 380 B
-/// − SERVE_MARGIN_BYTES        claimed while a /get is in   14 712 B
+/// − SERVE_MARGIN_BYTES        claimed while a /get is in   14 696 B
 /// − FRAG_RESERVE_BYTES        the allocator's elbow room    6 144 B
-/// =                           what a hold may take          9 524 B
+/// =                           what a hold may take          9 540 B
 /// ```
 ///
 /// 8 KiB is under that with 1.3 KiB to spare. What it buys is
@@ -796,9 +796,10 @@ const _: () =
 /// pinned 656 B of slack and a 170 B serve cap while every board built from
 /// the tree had none of either.
 ///
-/// 31 696 B is exactly the node box at which [`MAX_LINKS`] links fit with
-/// nothing left (`max_endpoint_links_at_its_boundaries`), so the slack is
-/// 0 B, the boot serve cap is 0 B, and one more byte in `NodeCore` costs a
-/// link and fails the binaries' `MAX_ENDPOINT_LINKS >= ble::MAX_LINKS`
-/// assert.
+/// 31 696 B was exactly the node box at which [`MAX_LINKS`] links fit with
+/// nothing left (`max_endpoint_links_at_its_boundaries`). Since #662 took
+/// the RTT retry state out of `Link` (16 B a link) it is 64 B under that
+/// line: the slack is 64 B, the boot serve cap is still 0 B, and 65 more
+/// bytes in `NodeCore` cost a link and fail the binaries'
+/// `MAX_ENDPOINT_LINKS >= ble::MAX_LINKS` assert.
 pub const NODE_BOX_BYTES: usize = 31_696;

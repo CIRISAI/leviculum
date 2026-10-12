@@ -178,8 +178,8 @@
 //! ([`crate::heap_census::max_endpoint_links`]): the fixed terms are
 //! subtracted from the heap and the remainder divided by `per_link`.
 //! With today's numbers — node box 31 696, role 21 120, reserve 18 848,
-//! sessions 4 · 3 948 = 15 792, per_link 2 712 — the remainder is
-//! 10 848 B and the division yields **4** (leaving 0 B of slack, #661): the heap affords exactly the
+//! sessions 4 · 3 948 = 15 792, per_link 2 696 — the remainder is
+//! 10 848 B and the division yields **4** (leaving 64 B of slack, #661, #662): the heap affords exactly the
 //! BLE-session count, no extra LoRa-backed links until a fixed term
 //! shrinks. The same number is handed to `NodeCoreBuilder::max_links`,
 //! so the budget's `links=` is an enforced cap, not a claim: the fifth
@@ -2805,7 +2805,7 @@ impl Engine {
     /// (30 380 B free when the 2026-09-23 fetch killed it), and
     /// [`crate::heap_census::live_serve_cap`] says what that funds,
     /// after [`crate::heap_census::SERVE_MARGIN_BYTES`] is taken off for
-    /// what can still arrive while the serve is in flight: **7 240 B**,
+    /// what can still arrive while the serve is in flight: **7 252 B**,
     /// which is the field's whole 24-message mailbox in one fetch since
     /// #384 B2 streamed the response out of the store.
     ///

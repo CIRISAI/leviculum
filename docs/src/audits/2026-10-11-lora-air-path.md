@@ -263,7 +263,7 @@ measurement in `docs/src/concepts/regulatory-airtime.md`).
 
 Where we match Python, verified: 2 % default cap over the interface
 bitrate (`DEFAULT_ANNOUNCE_CAP_PERCENT`,
-`leviculum-core/src/constants.rs:398`, against
+`leviculum-core/src/constants.rs:386`, against
 `reference/Reticulum/RNS/Reticulum.py:114`); local announces
 (`hops == 0`) bypass the cap (`leviculum-core/src/transport.rs:12356`,
 against `reference/Reticulum/RNS/Transport.py:1246-1250`); the queue

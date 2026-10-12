@@ -352,28 +352,26 @@ fn teardown_without_resource_emits_no_resource_failed() {
     );
 }
 
-/// #123 Test A: a HEALTHY but silent responder must survive past the RTT-retry
-/// budget. The initiator sends the RTT packet, gets nothing back (an Active idle
-/// responder stays silent until the initiator's first keepalive, which for a
-/// LoRa-scale RTT is scheduled well after the ~60s retry budget), so the RTT
-/// stays unconfirmed. The removed teardown used to close the link at ~66s; now
-/// it is left to the keepalive/stale watchdog, matching Python-RNS.
-///
-/// RED before removing the Phase-3 teardown (fails at the ~66s tick); GREEN after.
+/// #123 Test A: a HEALTHY but silent responder must survive its first
+/// minute of silence. The initiator sends the RTT packet once and gets nothing
+/// back (an Active idle responder stays silent until the initiator's first
+/// keepalive, which for a LoRa-scale RTT is scheduled minutes later). A removed
+/// teardown used to close the link at ~66s; the link is left to the
+/// keepalive/stale watchdog, matching Python-RNS.
 #[test]
-fn healthy_silent_responder_survives_past_rtt_retry_budget() {
+fn healthy_silent_responder_survives_first_minute() {
     let (mut initiator, _r, _i, _ri, link_id) = establish();
 
     // Force a LoRa-scale RTT so keepalive_secs > 60s (keepalive 360s, stale 720s),
-    // i.e. the confirming first keepalive is scheduled after the retry budget.
+    // i.e. the first keepalive is scheduled well after the window below.
     {
         let l = initiator.link_mut(&link_id).unwrap();
         l.set_rtt_ms(2000);
         l.update_keepalive_from_rtt(2.0);
     }
 
-    // Advance across the retry budget and beyond; the responder stays silent, so
-    // nothing is delivered back to confirm the RTT.
+    // Advance across 88 s; the responder stays silent, so nothing is delivered
+    // back.
     let mut saw_timeout_close = false;
     for k in 1..=8u64 {
         initiator.transport().clock().set(TEST_TIME_MS + k * 11_000);
@@ -385,7 +383,7 @@ fn healthy_silent_responder_survives_past_rtt_retry_budget() {
 
     assert!(
         initiator.link(&link_id).is_some(),
-        "healthy silent-responder link must survive past the RTT retry budget"
+        "healthy silent-responder link must survive its first minute"
     );
     assert!(
         !saw_timeout_close,
@@ -396,7 +394,7 @@ fn healthy_silent_responder_survives_past_rtt_retry_budget() {
 /// #123 Test B: a genuinely-dead responder must still be reaped by the
 /// keepalive/stale watchdog. Leaving rtt=0 keeps stale_close fast (~15s); jumping
 /// the clock past the stale horizon must close the link with `Stale`. Guards the
-/// reaping obligation that survives removing the RTT-retry teardown.
+/// reaping obligation that survived removing the RTT-retry teardown.
 ///
 /// GREEN before AND after the change.
 #[test]

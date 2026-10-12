@@ -239,6 +239,6 @@ Use `HexShort` for hashes. Always explain drop reasons ("rate limited",
 | transport process_incoming | Packet dispatch, drop reasons | `trace!` |
 | transport handle_announce | Path updates, rebroadcast decisions | `debug!` |
 | transport forward_packet | Forwarding decisions | `debug!` |
-| node/link_management | Link lifecycle, RTT retry | `debug!` |
+| node/link_management | Link lifecycle, RTT | `debug!` |
 | driver | Startup, interface registration | `info!` |
 | interfaces | Connection events, I/O errors | `info!`/`warn!` |

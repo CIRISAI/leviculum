@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 
 use crate::constants::{
     CHANNEL_DEFAULT_RTT_MS, DATA_RECEIPT_TIMEOUT_MS, LINK_REQUEST_MAX_RETRIES, MODE_AES256_CBC,
-    MS_PER_SECOND, PROOF_DATA_SIZE, RTT_RETRY_MAX_ATTEMPTS, TRAFFIC_TIMEOUT_FACTOR,
-    TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
+    MS_PER_SECOND, PROOF_DATA_SIZE, TRAFFIC_TIMEOUT_FACTOR, TRAFFIC_TIMEOUT_MIN_MS,
+    TRUNCATED_HASHBYTES,
 };
 use crate::destination::{DestinationHash, ProofStrategy};
 use crate::event_scalar::MsOrNone;
@@ -1221,8 +1221,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             _ => 0,
         };
 
-        // Store measured RTT on initiator so RTT retry packets carry the
-        // correct value instead of defaulting to 0.0.
+        // Store the measured RTT on the initiator so `rtt_secs()` reports it
+        // instead of `None`.
         if measured_rtt_ms > 0 {
             link.set_rtt_ms(measured_rtt_ms);
         }
@@ -1262,7 +1262,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Build RTT packet and route via attached interface
         match link.build_rtt_packet(rtt_seconds_wire, &mut self.rng) {
             Ok(rtt_packet) => {
-                link.record_rtt_sent(now_ms);
                 self.events.push(NodeEvent::LinkEstablished {
                     link_id,
                     is_initiator: true,
@@ -1347,8 +1346,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             if let Some(link) = self.links.get_mut(link_id) {
                 link.record_inbound(now_secs);
             }
-
-            self.try_confirm_rtt(link_id);
 
             // confirm_delivery removes the entry entirely (fixes orphan path #1).
             // Event only fires when the receipt still exists, a valid proof for
@@ -1461,8 +1458,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
             return;
         }
-
-        self.try_confirm_rtt(&link_id);
 
         // Any non-keepalive inbound link packet resets the inactivity watchdog
         // (the per-context handlers below call record_inbound). Keepalive echoes
@@ -3688,74 +3683,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
-    /// Confirm RTT delivery on an initiator link if not yet confirmed.
-    ///
-    /// Any inbound link traffic (data packet, proof, keepalive) proves the
-    /// responder is alive, stopping unnecessary RTT retries.
-    fn try_confirm_rtt(&mut self, link_id: &LinkId) {
-        if let Some(link) = self.links.get_mut(link_id) {
-            if link.is_initiator() && !link.rtt_confirmed() {
-                link.confirm_rtt();
-                crate::tracing::debug!(
-                    "Link <{}> RTT confirmed by inbound traffic",
-                    HexShort(link_id.as_bytes())
-                );
-            }
-        }
-    }
-
-    /// Resend RTT packet on initiator links where delivery is unconfirmed.
-    ///
-    /// The initiator sends the RTT packet once in `handle_link_proof()`. If the
-    /// packet is lost (common on LoRa), this method retransmits at intervals of
-    /// `max(rtt_ms * 3, 10s)` up to [`RTT_RETRY_MAX_ATTEMPTS`] retries. Any
-    /// inbound link packet sets `rtt_confirmed`, stopping retries. Retries are
-    /// bounded by [`RTT_RETRY_MAX_ATTEMPTS`]; links that exhaust them without
-    /// confirmation are left to the keepalive/stale watchdog (Python-parity
-    /// reaping), not torn down here.
-    pub(super) fn check_rtt_retry(&mut self, now_ms: u64) {
-        // Phase 1: Collect link_ids needing an RTT retry
-        let need_retry: Vec<LinkId> = self
-            .links
-            .iter()
-            .filter(|(_, link)| {
-                link.needs_rtt_retry()
-                    && link.rtt_sent_at_ms().is_some_and(|sent| {
-                        now_ms.saturating_sub(sent) >= link.rtt_retry_interval_ms()
-                    })
-            })
-            .map(|(id, _)| *id)
-            .collect();
-
-        // Phase 2: Resend RTT for each qualifying link
-        for link_id in need_retry {
-            if let Some(link) = self.links.get_mut(&link_id) {
-                // Use stored RTT if available, otherwise conservative default.
-                // The initiator stores rtt_us in handle_link_proof(); if it's
-                // None (e.g., sub-ms link), fall back to CHANNEL_DEFAULT_RTT_MS
-                // to avoid sending 0.0 which corrupts responder timeouts.
-                let rtt_secs = link
-                    .rtt_secs()
-                    .unwrap_or(CHANNEL_DEFAULT_RTT_MS as f64 / MS_PER_SECOND as f64);
-                match link.build_rtt_packet(rtt_secs, &mut self.rng) {
-                    Ok(packet) => {
-                        link.record_rtt_sent(now_ms);
-                        crate::tracing::debug!(
-                            "Resending RTT on link <{}> (attempt {}/{})",
-                            HexShort(link_id.as_bytes()),
-                            link.rtt_send_count(),
-                            RTT_RETRY_MAX_ATTEMPTS + 1,
-                        );
-                        self.route_link_packet(&link_id, &packet);
-                    }
-                    Err(e) => {
-                        crate::tracing::warn!("RTT retry build failed: {:?}", e);
-                    }
-                }
-            }
-        }
-    }
-
     /// Check if any active links need to send keepalives (initiator only)
     pub(super) fn check_keepalives(&mut self, now_secs: u64) {
         let need_keepalive: Vec<LinkId> = self
@@ -4210,15 +4137,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         for link in self.links.values() {
             if let Some(started_at) = link.pending_since_ms() {
                 update(started_at.saturating_add(link.establishment_timeout_ms()));
-            }
-        }
-
-        // RTT retry deadlines (initiator, unconfirmed)
-        for link in self.links.values() {
-            if link.needs_rtt_retry() {
-                if let Some(sent_at) = link.rtt_sent_at_ms() {
-                    update(sent_at.saturating_add(link.rtt_retry_interval_ms()));
-                }
             }
         }
 
