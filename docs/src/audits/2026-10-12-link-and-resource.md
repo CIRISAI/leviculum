@@ -371,7 +371,7 @@ absolute timer fired mid-transfer. What a peer sees: nothing — purely
 our clock. What an operator sees: our `fetch` survives where `rncp`'s
 times out. Class: **deviation ours (deliberate), timing**.
 
-**D11 — split request/response resources are refused.** Python can
+**D11 — split request/response resources are refused.** *Fixed in 743a5a27.* Python can
 segment *any* resource, request and response bodies included (the
 split machinery at
 `reference/Reticulum/RNS/Resource.py:299-313` is shape-agnostic).
@@ -381,7 +381,7 @@ sender side. What a peer saw: a Python node answering our request with
 a >1 MiB (pre-compression) response resource got its ADV silently
 ignored, re-advertised through its budget, and the request died as a
 timeout on our side with nothing naming the cause. Class: **semantic
-(bounded)**. Fixed (#666): a split request or response is sent with
+(bounded)**. (Fixed in 743a5a27, #666: a split request or response is sent with
 the request id and flag on every segment (`send_internal_split`,
 `leviculum-core/src/node/mod.rs:2222-2293`, against
 `reference/Reticulum/RNS/Resource.py:770-778`), and received one
@@ -393,7 +393,7 @@ joined body to the request or response path after the last segment
 body in memory up to `RESOURCE_MAX_REASSEMBLED_SIZE` (16 segments)
 where Python spills it to disk unbounded. Test: mvr
 `mvr_split_request_response`, and drop-in both ways against Python in
-`request_resource_interop_tests`.
+`request_resource_interop_tests`.)
 
 ## 4. Resources
 
@@ -647,20 +647,20 @@ have at all. All of it is our side's transmit discipline over
 identical wire bytes. Class: **deviation ours (deliberate)**.
 
 **D20 — proofs are deferred to in-order delivery; the reference
-proves on arrival.** Python proves every CHANNEL packet before the
+proves on arrival.** *Fixed in 8b0dd569.* Python proves every CHANNEL packet before the
 channel even parses it (`packet.prove()` at
 `reference/Reticulum/RNS/Link.py:1172`), so a Python sender clears its
 retransmit slot for a packet the receiver only *buffered*
 out-of-order. Ours proved on delivery (and on drain, and for
 duplicates of delivered packets), never for buffered gaps, so
 head-of-line blocking kept the sender retransmitting packets that had
-already arrived. Fixed (#666): every packet the channel keeps,
+already arrived. (Fixed in 8b0dd569, #666: every packet the channel keeps,
 delivered or buffered (and a duplicate of either), is proven on
 arrival (`leviculum-core/src/node/link_management.rs:1772-1848`); what
 the channel refuses (ring full, host sink full, malformed) is still
 not proven, because the sender's retransmit is then its only copy. A
 buffered message the host had no room for is handed over by the next
-packet or by `handle_timeout`, since no retransmit comes to wake it.
+packet or by `handle_timeout`, since no retransmit comes to wake it.)
 Our rx ring is also bounded at 512
 with a loud refusal (`CHANNEL_RX_RING_MAX`,
 `leviculum-core/src/constants.rs:488`) where Python's deque is
