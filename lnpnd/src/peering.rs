@@ -191,10 +191,16 @@ pub(crate) struct PeeringRuntime {
     mining: Option<MiningJob>,
     last_synced: Option<[u8; 16]>,
     next_sync_at_ms: u64,
+    /// Spacing of outbound sync rounds, [`SYNC_INTERVAL_SECS`] unless a
+    /// test shortens it ([`Self::set_cadence`]).
+    sync_interval_ms: u64,
     /// When the next rotation pass runs; booked one
     /// [`ROTATION_INTERVAL_SECS`] after the first tick, the reference's
     /// first pass after start (`reference/LXMF/LXMF/LXMRouter.py:905`).
     next_rotation_at_ms: Option<u64>,
+    /// Spacing of rotation passes, [`ROTATION_INTERVAL_SECS`] unless a
+    /// test shortens it.
+    rotation_interval_ms: u64,
     /// Traffic counters per peer, for the control stats and for rotation.
     /// Persisted with the peer's record, as the reference persists them
     /// (`LXMPeer.to_bytes`, `reference/LXMF/LXMF/LXMPeer.py:154-159`):
@@ -256,7 +262,9 @@ impl PeeringRuntime {
             mining: None,
             last_synced: None,
             next_sync_at_ms: 0,
+            sync_interval_ms: SYNC_INTERVAL_SECS * 1000,
             next_rotation_at_ms: None,
+            rotation_interval_ms: ROTATION_INTERVAL_SECS * 1000,
             traffic,
             names: HashMap::new(),
             unpeered_incoming: 0,
@@ -269,6 +277,15 @@ impl PeeringRuntime {
             runtime.log_peer("add", destination_hash, "static");
         }
         runtime
+    }
+
+    /// Shorten (or lengthen) the sync and rotation cadences. Production runs
+    /// the reference's (`SYNC_INTERVAL_SECS`, `ROTATION_INTERVAL_SECS`); the
+    /// drop-in tests against a stock lxmd cannot wait 22 minutes for a
+    /// rotation pass, and the rule they test does not depend on when it runs.
+    pub(crate) fn set_cadence(&mut self, sync_interval_ms: u64, rotation_interval_ms: u64) {
+        self.sync_interval_ms = sync_interval_ms;
+        self.rotation_interval_ms = rotation_interval_ms;
     }
 
     pub(crate) fn peer_count(&self) -> usize {
@@ -1212,16 +1229,16 @@ impl PeeringRuntime {
         // is exempt inside the pass.
         let next_rotation = *self
             .next_rotation_at_ms
-            .get_or_insert(now_ms + ROTATION_INTERVAL_SECS * 1000);
+            .get_or_insert(now_ms + self.rotation_interval_ms);
         if now_ms >= next_rotation {
-            self.next_rotation_at_ms = Some(now_ms + ROTATION_INTERVAL_SECS * 1000);
+            self.next_rotation_at_ms = Some(now_ms + self.rotation_interval_ms);
             self.rotate_peers(node, unix_secs());
         }
 
         if self.outbound.is_some() || self.mining.is_some() || now_ms < self.next_sync_at_ms {
             return;
         }
-        self.next_sync_at_ms = now_ms + SYNC_INTERVAL_SECS * 1000;
+        self.next_sync_at_ms = now_ms + self.sync_interval_ms;
 
         let now = unix_secs();
         for dropped in self.table.cull(now) {

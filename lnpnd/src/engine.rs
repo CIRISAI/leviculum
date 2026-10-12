@@ -39,7 +39,9 @@ use leviculum_lxmf::control::{
     SYNC_REQUEST_PATH, UNPEER_REQUEST_PATH,
 };
 use leviculum_lxmf::node::APP_NAME;
-use leviculum_lxmf::peering::{PeerStore, PeeringConfig, OFFER_REQUEST_PATH};
+use leviculum_lxmf::peering::{
+    PeerStore, PeeringConfig, OFFER_REQUEST_PATH, ROTATION_INTERVAL_SECS, SYNC_INTERVAL_SECS,
+};
 use leviculum_lxmf::propagation::{MessageListResponse, PeerError};
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::{
@@ -244,6 +246,11 @@ pub struct Engine<S> {
     next_announce_at: Option<u64>,
     announce_interval_secs: u64,
     announce_delay_secs: u64,
+    /// Peering cadences in milliseconds, the reference's unless a test sets
+    /// them ([`Self::with_sync_interval`], [`Self::with_rotation_interval`]);
+    /// handed to the peering runtime when the role registers.
+    sync_interval_ms: u64,
+    rotation_interval_ms: u64,
     next_maintenance_at: u64,
     /// Stamp validation off the core lock (deliverable 5): the hook
     /// queues, the worker grinds, the drain applies.
@@ -405,12 +412,29 @@ impl<S: PropagationStore> Engine<S> {
                 next_announce_at: None,
                 announce_interval_secs,
                 announce_delay_secs,
+                sync_interval_ms: SYNC_INTERVAL_SECS * 1000,
+                rotation_interval_ms: ROTATION_INTERVAL_SECS * 1000,
                 next_maintenance_at: 0,
                 validation: ValidationWorker::spawn(),
                 pending: VecDeque::new(),
             },
             receiver,
         )
+    }
+
+    /// Space outbound sync rounds by `interval` instead of the reference's
+    /// 24 s (`SYNC_INTERVAL_SECS`). For tests that run a stock `lxmd` peer
+    /// in real time; the daemon never calls it.
+    pub fn with_sync_interval(mut self, interval: std::time::Duration) -> Self {
+        self.sync_interval_ms = interval.as_millis() as u64;
+        self
+    }
+
+    /// Run rotation passes every `interval` instead of the reference's
+    /// 22 min 24 s (`ROTATION_INTERVAL_SECS`). For tests, as above.
+    pub fn with_rotation_interval(mut self, interval: std::time::Duration) -> Self {
+        self.rotation_interval_ms = interval.as_millis() as u64;
+        self
     }
 
     fn emit(&self, event: EngineEvent) {
@@ -555,7 +579,9 @@ impl<S: PropagationStore> Engine<S> {
         };
         let mut node = PropagationNode::new(store, node_config);
         let min_cost = node.min_accepted_cost();
-        let peering = PeeringRuntime::new(peering, peer_store, identity_copy, self.events.clone());
+        let mut peering =
+            PeeringRuntime::new(peering, peer_store, identity_copy, self.events.clone());
+        peering.set_cadence(self.sync_interval_ms, self.rotation_interval_ms);
         // Restored peers may already require true stamp values (§5).
         node.set_compute_stamp_value(peering.requires_stamp_values());
         self.emit(EngineEvent::Ready {
