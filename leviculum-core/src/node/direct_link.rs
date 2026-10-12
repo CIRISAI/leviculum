@@ -45,6 +45,12 @@ pub const PROPOSAL_COOLDOWN_MS: u64 = 60_000;
 /// does such an arrival mean the peer has gone back to the relay.
 pub const FALLBACK_GRACE_MS: u64 = 10_000;
 
+/// How long an [`DirectLinkPolicy::AskHost`] request waits for the host's
+/// answer before it is refused (+ciris, leviculum#82). Shorter than the
+/// proposer's own wait for an answer (`PROPOSE_TIMEOUT_MS`), so a host that
+/// never answers is heard as a REJECT, not as a timeout.
+pub const ASK_HOST_TIMEOUT_MS: u64 = 5_000;
+
 /// Signals waiting on a link's channel window, at most. An upgrade needs two
 /// or three; anything beyond that is a peer misbehaving.
 const OUTBOX_MAX: usize = 8;
@@ -64,6 +70,14 @@ pub enum DirectLinkPolicy {
     /// the link (LINKIDENTIFY), or this node initiated the link and so knows
     /// whose destination answered.
     IdentifiedOnly,
+    /// Ask the host, per request (+ciris, leviculum#82). A peer's REQUEST
+    /// raises [`NodeEvent::DirectLinkRequested`] and is held: nothing is
+    /// probed and no address leaves this node until the host calls
+    /// [`NodeCore::accept_direct_link`]. [`NodeCore::reject_direct_link`], or
+    /// no answer within [`ASK_HOST_TIMEOUT_MS`], refuses it (REJECT, reason
+    /// POLICY). For a host whose rule is narrower than "any identified peer"
+    /// (only peers it shares a room with, say).
+    AskHost,
 }
 
 /// Direct-link settings. The default refuses requests and cannot propose.
@@ -91,6 +105,11 @@ pub enum DirectLinkError {
     CoolingDown,
     /// The signal could not be queued on the link's channel (window full).
     ChannelBusy,
+    /// No peer request is waiting for the host's answer on this link
+    /// (+ciris, leviculum#82): never asked, already answered, or timed out.
+    NoPendingRequest,
+    /// The link is not on a direct interface (+ciris, leviculum#83).
+    NotDirect,
 }
 
 impl core::fmt::Display for DirectLinkError {
@@ -101,6 +120,8 @@ impl core::fmt::Display for DirectLinkError {
             DirectLinkError::AlreadyUpgrading => "the link is already upgrading or direct",
             DirectLinkError::CoolingDown => "the last proposal on this link was too recent",
             DirectLinkError::ChannelBusy => "the link's channel is busy",
+            DirectLinkError::NoPendingRequest => "no direct-link request awaits an answer",
+            DirectLinkError::NotDirect => "the link is not on a direct interface",
         })
     }
 }
@@ -135,6 +156,16 @@ enum SignalSend {
     Never,
 }
 
+/// A peer's REQUEST held for the host's answer ([`DirectLinkPolicy::AskHost`]).
+#[derive(Debug, Clone, Copy)]
+struct PendingRequest {
+    session: SessionId,
+    facilitator: SocketAddr,
+    initiator_public: SocketAddr,
+    protocol: ProbeProtocol,
+    asked_at_ms: u64,
+}
+
 /// A link moved onto a direct interface, and where it was before.
 #[derive(Debug, Clone, Copy)]
 struct Attachment {
@@ -165,6 +196,8 @@ pub(crate) struct DirectLinks {
     /// Punched links waiting on the relay for a resource transfer to finish
     /// before they move: (session, direct interface, proposed).
     deferred: BTreeMap<LinkId, (SessionId, usize, bool)>,
+    /// Peer requests waiting for the host's answer (`AskHost`), by link.
+    pending: BTreeMap<LinkId, PendingRequest>,
     jobs: VecDeque<DirectLinkJob>,
 }
 
@@ -227,6 +260,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             _ => return Err(DirectLinkError::NoActiveLink),
         };
         if self.direct_links.sessions.contains_key(&link_id)
+            || self.direct_links.pending.contains_key(&link_id)
             || self.direct_links.interface_of_link(&link_id).is_some()
         {
             return Err(DirectLinkError::AlreadyUpgrading);
@@ -485,9 +519,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
         let identified = link.is_initiator() || link.remote_identity().is_some();
         let link_key = link.link_key().copied();
+        let peer_identity = link.remote_identity().map(|id| *id.hash());
+        let ask_host = self.direct_links.config.policy == DirectLinkPolicy::AskHost;
         let allowed = match self.direct_links.config.policy {
             DirectLinkPolicy::Reject => false,
-            DirectLinkPolicy::AcceptAll => true,
+            DirectLinkPolicy::AcceptAll | DirectLinkPolicy::AskHost => true,
             DirectLinkPolicy::IdentifiedOnly => identified,
         };
         // A session id is the driver's key for its socket and tasks, so one
@@ -495,12 +531,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // link: a peer must not be able to reuse another link's id and take
         // over its probe (Codex review on #74).
         let busy = self.direct_links.sessions.contains_key(&link_id)
+            || self.direct_links.pending.contains_key(&link_id)
             || self.direct_links.interface_of_link(&link_id).is_some()
             || self
                 .direct_links
                 .sessions
                 .values()
                 .any(|s| s.id() == &session)
+            || self
+                .direct_links
+                .pending
+                .values()
+                .any(|p| p.session == session)
             // The cooldown binds the peer's proposals too, or one that keeps
             // asking keeps this node binding sockets and probing (Codex
             // review on #78).
@@ -533,25 +575,165 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         };
 
-        crate::tracing::info!(
-            link = %HexShort(link_id.as_bytes()),
-            session = %HexShort(&session),
-            %facilitator,
-            peer = %initiator_public,
-            "direct link: accepting a peer's proposal"
-        );
-        self.direct_links.last_proposal_ms.insert(link_id, now_ms);
-        let token = wire::punch_token(&link_key, &session);
-        let (session, steps) = Session::respond(
+        let request = PendingRequest {
             session,
-            token,
             facilitator,
             initiator_public,
             protocol,
+            asked_at_ms: now_ms,
+        };
+        if ask_host {
+            // Held: nothing probed, nothing sent, until the host answers.
+            crate::tracing::info!(
+                link = %HexShort(link_id.as_bytes()),
+                session = %HexShort(&session),
+                "direct link: a peer's proposal awaits the host's answer"
+            );
+            self.direct_links.pending.insert(link_id, request);
+            self.events.push(NodeEvent::DirectLinkRequested {
+                link_id,
+                peer_identity,
+            });
+            return;
+        }
+        self.accept_direct_request(link_id, link_key, request, now_ms);
+    }
+
+    /// Answer a peer's REQUEST with the establishment flow: probe the
+    /// facilitator it named, then punch.
+    fn accept_direct_request(
+        &mut self,
+        link_id: LinkId,
+        link_key: [u8; 64],
+        request: PendingRequest,
+        now_ms: u64,
+    ) {
+        crate::tracing::info!(
+            link = %HexShort(link_id.as_bytes()),
+            session = %HexShort(&request.session),
+            facilitator = %request.facilitator,
+            peer = %request.initiator_public,
+            "direct link: accepting a peer's proposal"
+        );
+        self.direct_links.last_proposal_ms.insert(link_id, now_ms);
+        let token = wire::punch_token(&link_key, &request.session);
+        let (session, steps) = Session::respond(
+            request.session,
+            token,
+            request.facilitator,
+            request.initiator_public,
+            request.protocol,
             now_ms,
         );
         self.direct_links.sessions.insert(link_id, session);
         self.apply_direct_link_steps(link_id, steps, now_ms);
+    }
+
+    /// Accept the peer's held upgrade request on `link_id`
+    /// ([`DirectLinkPolicy::AskHost`], +ciris leviculum#82): the existing
+    /// establishment flow starts, and the outcome arrives as
+    /// [`NodeEvent::DirectLinkEstablished`] or [`NodeEvent::DirectLinkFailed`].
+    ///
+    /// # Errors
+    /// [`DirectLinkError::NoPendingRequest`] when no request awaits an answer
+    /// on the link (never asked, already answered, timed out);
+    /// [`DirectLinkError::NoActiveLink`] when the link is no longer active
+    /// (the request is dropped).
+    pub fn accept_direct_link(
+        &mut self,
+        link_id: &LinkId,
+    ) -> Result<crate::transport::TickOutput, DirectLinkError> {
+        let link_id = self.resolve_link_id(link_id);
+        let request = self
+            .direct_links
+            .pending
+            .remove(&link_id)
+            .ok_or(DirectLinkError::NoPendingRequest)?;
+        let link_key = match self.links.get(&link_id) {
+            Some(link) if link.state() == LinkState::Active => {
+                *link.link_key().ok_or(DirectLinkError::NoActiveLink)?
+            }
+            _ => return Err(DirectLinkError::NoActiveLink),
+        };
+        let now_ms = self.transport.clock().now_ms();
+        self.accept_direct_request(link_id, link_key, request, now_ms);
+        Ok(self.process_events_and_actions())
+    }
+
+    /// Refuse the peer's held upgrade request on `link_id`
+    /// ([`DirectLinkPolicy::AskHost`], +ciris leviculum#82): the peer gets a
+    /// REJECT (reason POLICY) and its proposal ends `Rejected`. Nothing about
+    /// this node's address was probed or sent.
+    ///
+    /// # Errors
+    /// [`DirectLinkError::NoPendingRequest`] when no request awaits an answer
+    /// on the link.
+    pub fn reject_direct_link(
+        &mut self,
+        link_id: &LinkId,
+    ) -> Result<crate::transport::TickOutput, DirectLinkError> {
+        let link_id = self.resolve_link_id(link_id);
+        let request = self
+            .direct_links
+            .pending
+            .remove(&link_id)
+            .ok_or(DirectLinkError::NoPendingRequest)?;
+        let now_ms = self.transport.clock().now_ms();
+        self.refuse_held_request(link_id, request, "the host refused", now_ms);
+        Ok(self.process_events_and_actions())
+    }
+
+    fn refuse_held_request(
+        &mut self,
+        link_id: LinkId,
+        request: PendingRequest,
+        why: &str,
+        now_ms: u64,
+    ) {
+        crate::tracing::info!(
+            link = %HexShort(link_id.as_bytes()),
+            session = %HexShort(&request.session),
+            "direct link: refusing a peer's proposal ({why})"
+        );
+        self.send_direct_link_signal(
+            &link_id,
+            &Signal::Reject {
+                session: request.session,
+                reason: REJECT_POLICY,
+            },
+            now_ms,
+        );
+    }
+
+    /// Move a link off its direct interface and back onto the interface it
+    /// used before, now (+ciris, leviculum#83): exactly the fallback core
+    /// takes when the link goes stale on the direct path, for a host whose own
+    /// liveness signal sees a dead path sooner. The peer is nudged over the
+    /// relay and converges; [`NodeEvent::DirectLinkLost`] fires once; the
+    /// usual re-proposal cooldown applies. With no fallback interface left the
+    /// link closes, as it would on its own.
+    ///
+    /// # Errors
+    /// [`DirectLinkError::NotDirect`] when the link is not on a direct
+    /// interface (nothing changes).
+    pub fn retire_direct_link(
+        &mut self,
+        link_id: &LinkId,
+    ) -> Result<crate::transport::TickOutput, DirectLinkError> {
+        let link_id = self.resolve_link_id(link_id);
+        let index = self
+            .direct_links
+            .interface_of_link(&link_id)
+            .ok_or(DirectLinkError::NotDirect)?;
+        let attachment = self
+            .direct_links
+            .attached
+            .remove(&index)
+            .ok_or(DirectLinkError::NotDirect)?;
+        let now_ms = self.transport.clock().now_ms();
+        self.release_direct_attachment(index, attachment, "retired by the host", true);
+        self.direct_links.last_proposal_ms.insert(link_id, now_ms);
+        Ok(self.process_events_and_actions())
     }
 
     /// Carry out what a session asked for.
@@ -760,6 +942,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Time out sessions whose peer or facilitator went quiet.
     pub(super) fn check_direct_link_timeouts(&mut self, now_ms: u64) {
         self.flush_direct_link_outbox(now_ms);
+        // A host that never answered refuses (leviculum#82).
+        let expired: Vec<LinkId> = self
+            .direct_links
+            .pending
+            .iter()
+            .filter(|(_, p)| now_ms.saturating_sub(p.asked_at_ms) >= ASK_HOST_TIMEOUT_MS)
+            .map(|(link_id, _)| *link_id)
+            .collect();
+        for link_id in expired {
+            if let Some(request) = self.direct_links.pending.remove(&link_id) {
+                self.refuse_held_request(link_id, request, "the host did not answer", now_ms);
+            }
+        }
         let ready: Vec<LinkId> = self
             .direct_links
             .deferred
@@ -786,10 +981,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// The earliest session deadline.
     pub(super) fn direct_link_next_deadline(&self) -> Option<u64> {
+        let held = self
+            .direct_links
+            .pending
+            .values()
+            .map(|p| p.asked_at_ms.saturating_add(ASK_HOST_TIMEOUT_MS));
         self.direct_links
             .sessions
             .values()
             .filter_map(Session::deadline_ms)
+            .chain(held)
             .min()
     }
 
@@ -825,6 +1026,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             + hc::btree_map_bytes(&d.last_proposal_ms)
             + hc::btree_map_bytes(&d.attached)
             + hc::btree_map_bytes(&d.deferred)
+            + hc::btree_map_bytes(&d.pending)
             + hc::btree_map_bytes(&d.outbox)
             + outbox
             + hc::vec_deque_bytes(&d.jobs)
@@ -846,6 +1048,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         self.direct_links.last_proposal_ms.remove(link_id);
         self.direct_links.outbox.remove(link_id);
+        self.direct_links.pending.remove(link_id);
         if let Some(index) = self.direct_links.interface_of_link(link_id) {
             self.direct_links.attached.remove(&index);
             self.direct_links
@@ -1112,6 +1315,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     pub fn abandon_direct_links(&mut self) -> crate::transport::TickOutput {
         self.direct_links.jobs.clear();
         self.direct_links.outbox.clear();
+        self.direct_links.pending.clear();
         let sessions = core::mem::take(&mut self.direct_links.sessions);
         for (link_id, session) in sessions {
             self.events.push(NodeEvent::DirectLinkFailed {

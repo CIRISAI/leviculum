@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
-## [0.31.0+ciris.1] — CIRIS fork
+## [0.32.0+ciris.1] — CIRIS fork
 
-Catch-up to upstream master (+246 since the v0.30.0 base).
+Catch-up to upstream master (+246 since the v0.30.0 base), with v0.31.0+ciris.1
+(#82, #83) carried onto it.
 
 ### Changed
 
@@ -47,6 +48,40 @@ Catch-up to upstream master (+246 since the v0.30.0 base).
   sections below; notably, link timing accessors are now in milliseconds
   (`established_at_ms`, `last_inbound_ms`) and `DropReason` gained
   `LinkIfaceMismatch`.
+
+## [0.31.0+ciris.1] — CIRIS fork
+
+### Added
+
+- Direct links: a host-decided accept (+ciris, leviculum#82).
+  `DirectLinkPolicy::AskHost` (config `direct_connect_policy = ask_host`)
+  holds each peer's upgrade REQUEST and raises
+  `NodeEvent::DirectLinkRequested { link_id, peer_identity }`. Nothing is
+  probed and no address leaves the node until the host answers with
+  `accept_direct_link` (the existing establishment flow) or
+  `reject_direct_link` (REJECT, reason POLICY; the proposer's upgrade ends
+  `Rejected`). No answer within `ASK_HOST_TIMEOUT_MS` (5 s, under the
+  proposer's own 10 s wait) refuses it the same way. A held request blocks a
+  second one and this node's own proposal on the link. The existing policies
+  are unchanged. For a host whose rule is narrower than "any identified peer":
+  CIRISEdge accepts only from peers it shares a room with.
+- Direct links: `retire_direct_link(&LinkId)` (+ciris, leviculum#83), on
+  `NodeCore` and `ReticulumNode`. It moves a direct link back onto the
+  interface it used before, now. This is the fallback core takes on a stale
+  link, for a host whose own liveness signal sees a dead path sooner. The peer
+  is nudged over the relay and follows, `DirectLinkLost` fires once, and the
+  re-proposal cooldown applies. On a link that is not direct it returns
+  `DirectLinkError::NotDirect` and changes nothing.
+- `DirectLinkError` gains `NoPendingRequest` and `NotDirect`.
+
+### Fixed
+
+- leviculum-ffi's lib tests compile again. The interface-stats filler
+  snapshot in `diagnostics.rs` never gained the `circuit_open` and
+  `shed_packets` fields leviculum#66 added to `InterfaceStatusSnapshot`; it
+  now sets them to what the driver reports for an interface with no
+  counters (`false`, `0`). Test-only; no library change.
+
 
 ## [0.30.0+ciris.1] — CIRIS fork
 

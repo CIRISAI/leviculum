@@ -298,6 +298,108 @@ async fn upgrade_and_drop_relay(
     );
 }
 
+fn asker() -> DirectLinkSettings {
+    DirectLinkSettings {
+        policy: DirectLinkPolicy::AskHost,
+        ..Default::default()
+    }
+}
+
+async fn outcome(rx: &mut EventReceiver) -> Option<NodeEvent> {
+    next_event(rx, Duration::from_secs(20), |ev| {
+        matches!(
+            ev,
+            NodeEvent::DirectLinkEstablished { .. } | NodeEvent::DirectLinkFailed { .. }
+        )
+    })
+    .await
+}
+
+/// +ciris leviculum#82/#83 over real sockets: A asks its host, the host
+/// accepts, the link goes direct; then B's host retires it and both ends are
+/// back on the relay, the link still carrying data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_asking_host_accepts_and_a_retired_link_returns_to_the_relay() {
+    let (_t, mut a, mut b, link_id, handle, _hash) = linked_through_relay(asker(), None).await;
+
+    b.node.propose_direct_link(&link_id).await.expect("propose");
+    let asked = next_event(&mut a.rx, Duration::from_secs(20), |ev| {
+        matches!(ev, NodeEvent::DirectLinkRequested { .. })
+    })
+    .await;
+    assert!(
+        matches!(asked, Some(NodeEvent::DirectLinkRequested { link_id: l, .. }) if l == link_id),
+        "A's host is asked: {asked:?}"
+    );
+    a.node.accept_direct_link(&link_id).await.expect("accept");
+    assert!(matches!(
+        outcome(&mut b.rx).await,
+        Some(NodeEvent::DirectLinkEstablished { proposed: true, .. })
+    ));
+    assert!(matches!(
+        outcome(&mut a.rx).await,
+        Some(NodeEvent::DirectLinkEstablished {
+            proposed: false,
+            ..
+        })
+    ));
+    assert!(b.node.direct_link_interface(&link_id).is_some());
+
+    // B's host retires it.
+    b.node.retire_direct_link(&link_id).await.expect("retire");
+    let lost = |ev: &NodeEvent| matches!(ev, NodeEvent::DirectLinkLost { .. });
+    assert!(next_event(&mut b.rx, Duration::from_secs(5), lost)
+        .await
+        .is_some());
+    assert!(
+        next_event(&mut a.rx, Duration::from_secs(10), lost)
+            .await
+            .is_some(),
+        "A follows the nudge back onto the relay"
+    );
+    assert_eq!(b.node.direct_link_interface(&link_id), None);
+    assert_eq!(a.node.direct_link_interface(&link_id), None);
+    handle.try_send(b"after retire").await.expect("send");
+    assert!(
+        next_event(&mut a.rx, Duration::from_secs(8), received(b"after retire"))
+            .await
+            .is_some(),
+        "the same link carries on over the relay"
+    );
+    assert!(
+        b.node.retire_direct_link(&link_id).await.is_err(),
+        "not direct any more"
+    );
+}
+
+/// +ciris leviculum#82: the host refuses; the proposer hears `Rejected`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_asking_host_refuses_and_the_proposer_hears_rejected() {
+    let (_t, mut a, mut b, link_id, _handle, _hash) = linked_through_relay(asker(), None).await;
+    b.node.propose_direct_link(&link_id).await.expect("propose");
+    assert!(
+        next_event(&mut a.rx, Duration::from_secs(20), |ev| matches!(
+            ev,
+            NodeEvent::DirectLinkRequested { .. }
+        ))
+        .await
+        .is_some()
+    );
+    a.node.reject_direct_link(&link_id).await.expect("reject");
+    assert!(
+        matches!(
+            outcome(&mut b.rx).await,
+            Some(NodeEvent::DirectLinkFailed {
+                failure: Failure::Rejected(REJECT_POLICY),
+                proposed: true,
+                ..
+            })
+        ),
+        "refused by the host"
+    );
+    assert_eq!(a.node.direct_link_interface(&link_id), None);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_refused_upgrade_leaves_the_relayed_link_working() {
     // A runs the default policy: refuse.
