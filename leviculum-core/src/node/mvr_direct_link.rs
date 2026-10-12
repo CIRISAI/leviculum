@@ -1219,3 +1219,196 @@ fn a_restart_takes_the_old_direct_interface_down_in_full() {
         "transport forgets the interface, not only the link's attachment"
     );
 }
+
+// ─── +ciris leviculum#82: the host decides (AskHost) ───────────────────
+
+/// Run A's proposal up to B receiving its REQUEST, B holding `AskHost`.
+fn asked(pair: &mut Pair) -> [u8; 16] {
+    pair.configure(DirectLinkPolicy::AskHost);
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    pair.pump_from_a(packets(&out));
+    session
+}
+
+fn requested(events: &[NodeEvent], link: LinkId) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, NodeEvent::DirectLinkRequested { link_id, .. } if *link_id == link))
+        .count()
+}
+
+fn a_failed(pair: &Pair) -> Vec<Failure> {
+    pair.a_events
+        .iter()
+        .filter_map(|e| match e {
+            NodeEvent::DirectLinkFailed {
+                failure,
+                proposed: true,
+                ..
+            } => Some(*failure),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn ask_host_holds_the_request_and_does_nothing_else_until_answered() {
+    let mut pair = Pair::new();
+    let session = asked(&mut pair);
+    assert_eq!(
+        requested(&pair.b_events, pair.link),
+        1,
+        "B asks its host once"
+    );
+    assert!(
+        pair.b.take_direct_link_jobs().is_empty(),
+        "nothing probed before the host answers"
+    );
+    assert!(a_failed(&pair).is_empty(), "A is still waiting");
+
+    // The host accepts: the existing flow, through to both sides punching.
+    let out = pair.b.accept_direct_link(&pair.link).expect("accept");
+    pair.pump_from_b(packets(&out));
+    assert_eq!(only_probe(&pair.b.take_direct_link_jobs()), session);
+    let out = pair.b.direct_link_probed(&session, Some(b_public()));
+    let (_, b_peer, _) = only_punch(&pair.b.take_direct_link_jobs());
+    pair.pump_from_b(packets(&out));
+    let (_, a_peer, _) = only_punch(&pair.a.take_direct_link_jobs());
+    assert_eq!(a_peer, b_public());
+    assert_eq!(b_peer, a_public());
+    assert_eq!(
+        pair.b.accept_direct_link(&pair.link).unwrap_err(),
+        DirectLinkError::NoPendingRequest,
+        "answered once"
+    );
+}
+
+#[test]
+fn a_refusing_host_rejects_and_no_address_is_exchanged() {
+    let mut pair = Pair::new();
+    asked(&mut pair);
+    let out = pair.b.reject_direct_link(&pair.link).expect("reject");
+    pair.pump_from_b(packets(&out));
+    assert_eq!(a_failed(&pair), [Failure::Rejected(REJECT_POLICY)]);
+    assert!(
+        pair.b.take_direct_link_jobs().is_empty(),
+        "B never probed: it learned and sent no address"
+    );
+    assert_eq!(
+        pair.b.accept_direct_link(&pair.link).unwrap_err(),
+        DirectLinkError::NoPendingRequest
+    );
+}
+
+#[test]
+fn a_silent_host_rejects_before_the_proposer_times_out() {
+    let mut pair = Pair::new();
+    asked(&mut pair);
+    pair.advance(crate::node::ASK_HOST_TIMEOUT_MS);
+    assert_eq!(
+        a_failed(&pair),
+        [Failure::Rejected(REJECT_POLICY)],
+        "heard as a REJECT, not a timeout"
+    );
+    assert!(pair.b.take_direct_link_jobs().is_empty());
+    assert_eq!(
+        pair.b.accept_direct_link(&pair.link).unwrap_err(),
+        DirectLinkError::NoPendingRequest,
+        "too late"
+    );
+}
+
+#[test]
+fn a_held_request_blocks_our_own_proposal() {
+    let mut pair = Pair::new();
+    asked(&mut pair);
+    // B could propose itself (it has a facilitator), but not over a request
+    // it is still holding.
+    pair.b.set_direct_link_config(DirectLinkConfig {
+        policy: DirectLinkPolicy::AskHost,
+        facilitator: Some(facilitator()),
+        protocol: ProbeProtocol::Rnsp,
+    });
+    assert_eq!(
+        pair.b.propose_direct_link(&pair.link).unwrap_err(),
+        DirectLinkError::AlreadyUpgrading
+    );
+}
+
+// ─── +ciris leviculum#83: the host retires a direct link ───────────────
+
+#[test]
+fn retire_moves_a_direct_link_back_and_the_peer_follows() {
+    let mut pair = Pair::new();
+    assert_eq!(
+        pair.a.retire_direct_link(&pair.link).unwrap_err(),
+        DirectLinkError::NotDirect,
+        "not direct: an error, nothing changes"
+    );
+    let (session, _) = to_punch(&mut pair);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let b_direct = add_iface(&mut pair.b, "B_direct");
+    let out = pair.a.direct_link_punched(&session, Some(a_direct));
+    pair.a_events.extend(out.events);
+    let out = pair.b.direct_link_punched(&session, Some(b_direct));
+    pair.b_events.extend(out.events);
+    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
+    pair.a_events.clear();
+    pair.b_events.clear();
+    // The proposal's own cooldown runs out while the link is direct, so the
+    // cooldown asserted below is the retire's.
+    pair.a
+        .transport
+        .clock()
+        .advance(crate::node::PROPOSAL_COOLDOWN_MS);
+    pair.b
+        .transport
+        .clock()
+        .advance(crate::node::PROPOSAL_COOLDOWN_MS);
+
+    let out = pair.a.retire_direct_link(&pair.link).expect("retire");
+    pair.a_events.extend(out.events.clone());
+    let lost = |events: &[NodeEvent]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, NodeEvent::DirectLinkLost { .. }))
+            .count()
+    };
+    assert_eq!(lost(&pair.a_events), 1, "DirectLinkLost fires once");
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    // The nudge goes out over the relay; B, hearing it there, follows.
+    let wire = sent(&out);
+    assert!(
+        wire.iter().all(|(iface, _)| *iface == Some(pair.a_mesh)),
+        "the nudge rides the relay: {wire:?}"
+    );
+    pair.pump_from_a(wire.into_iter().map(|(_, d)| d).collect());
+    assert_eq!(lost(&pair.b_events), 1, "B converged");
+    assert_eq!(pair.b.direct_link_interface(&pair.link), None);
+
+    // The same link carries on over the relay.
+    pair.a.transport.clock().advance(1_000);
+    let out = pair.a.send_on_link(&pair.link, b"after retire").unwrap();
+    let wire = sent(&out);
+    assert!(wire.iter().all(|(iface, _)| *iface == Some(pair.a_mesh)));
+    let (_, ev) = deliver(
+        &mut pair.b,
+        pair.b_mesh,
+        wire.into_iter().map(|(_, d)| d).collect(),
+    );
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        NodeEvent::MessageReceived { data, .. } if data == b"after retire"
+    )));
+    assert_eq!(
+        pair.a.propose_direct_link(&pair.link).unwrap_err(),
+        DirectLinkError::CoolingDown,
+        "the usual cooldown applies"
+    );
+    assert_eq!(
+        pair.a.retire_direct_link(&pair.link).unwrap_err(),
+        DirectLinkError::NotDirect
+    );
+}
