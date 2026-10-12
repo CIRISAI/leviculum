@@ -8,11 +8,12 @@
 //! a change to the heap size or any term shows up as a diff, and the #388
 //! field figures are asked the question the board asks at every `/get`.
 //!
-//! The firmware's numbers did not change with the move: the T114's boot
-//! line (`HEAP_BUDGET links=4 … slack=720 serve_cap=194` then, the values
-//! `heap_census.rs` documented before it) is pinned below at the T114's
-//! node box. Since `Link` gained its data clock (`last_data`, #442, 16 B on
-//! the target) the line reads `slack=656 serve_cap=170`.
+//! The boot line is pinned below at the measured node box,
+//! [`NODE_BOX_BYTES`], which the firmware asserts against `size_of` of its
+//! `NodeCore`. Until #661 this file stated a node box of its own, 31 040 B,
+//! and pinned `slack=656 serve_cap=170` from it while every board built from
+//! the tree printed `total=98304 slack=0 serve_cap=0`: the node box had grown
+//! 656 B past the figure and nothing compared the two.
 //!
 //! Run: `cargo test -p leviculum-heap-budget --test budget -- --nocapture`
 
@@ -21,7 +22,7 @@ use leviculum_heap_budget::{
     held_announce_bytes, live_serve_cap, max_endpoint_links, BOARD_HOLDING_INTERFACES,
     BOARD_INGRESS_CONTROL, BOARD_INTERFACES, BOARD_MAX_HELD_ANNOUNCES, BOARD_SYNC_LIMIT_KB,
     BOARD_TRANSFER_LIMIT_KB, CHANNEL_BUDGET_BYTES, HEAP_SIZE, HELD_ANNOUNCE_SLICE_BYTES,
-    INTERFACE_MTU, LINK_BYTES, MAX_INCOMING_RESOURCE_BYTES, MAX_LINKS,
+    INTERFACE_MTU, LINK_BYTES, MAX_INCOMING_RESOURCE_BYTES, MAX_LINKS, NODE_BOX_BYTES,
     OFFER_RESPONSE_RESERVE_BYTES, QUEUE_DEPTH, ROLE_BUDGET_BYTES, SERVE_MARGIN_BYTES,
     SERVE_PEAK_BYTES, SERVE_RESERVE_BYTES, SERVE_RESOURCE_SDU, SESSION_BUDGET_BYTES,
     SYNC_SLICE_BYTES,
@@ -29,9 +30,10 @@ use leviculum_heap_budget::{
 use leviculum_lxmf::propagation_node::{serve_largest_block_bytes, serve_peak_bytes};
 
 /// The T114's boxed `NodeCore`, as its boot line reports it
-/// (`size_of_val(&*node)`, `src/bin/t114.rs`), and as `heap_census.rs`
-/// stated it beside the arithmetic before the move.
-const T114_NODE_BOX: usize = 31_040;
+/// (`size_of_val(&*node)`, `src/bin/t114.rs`). The crate's pinned
+/// [`NODE_BOX_BYTES`], which `heap_census.rs` asserts on the target; the
+/// RAK4631 and the solar node box the same type and measure the same.
+const T114_NODE_BOX: usize = NODE_BOX_BYTES;
 
 /// Every fixed term of [`max_endpoint_links`] except the node box.
 fn fixed_without_node_box() -> usize {
@@ -100,9 +102,11 @@ fn the_t114_boot_line_has_these_values() {
         budget_serve_cap(nb)
     );
     assert_eq!(max_endpoint_links(nb), 4);
-    assert_eq!(budget_total(nb), 97_648);
-    assert_eq!(budget_slack(nb), 656);
-    assert_eq!(budget_serve_cap(nb), 170);
+    // The heap to the byte: four links fit with nothing left (#661).
+    assert_eq!(nb, 31_696);
+    assert_eq!(budget_total(nb), HEAP_SIZE);
+    assert_eq!(budget_slack(nb), 0);
+    assert_eq!(budget_serve_cap(nb), 0);
     // The binaries' two boot assertions hold on it.
     assert!(budget_total(nb) <= HEAP_SIZE);
     assert!(max_endpoint_links(nb) >= MAX_LINKS);
@@ -122,6 +126,8 @@ fn max_endpoint_links_at_its_boundaries() {
     // the cap is reached, slack is zero, the total is the heap to the byte.
     let exact = full - MAX_LINKS * per_link;
     assert_eq!(exact, 31_696);
+    // And that is where the boards are (#661): not one byte to spare.
+    assert_eq!(exact, NODE_BOX_BYTES);
     assert_eq!(max_endpoint_links(exact), MAX_LINKS);
     assert_eq!(budget_slack(exact), 0);
     assert_eq!(budget_total(exact), HEAP_SIZE);
@@ -155,10 +161,11 @@ fn budget_serve_cap_at_its_boundaries() {
     // One byte of slack funds nothing either.
     assert_eq!(budget_serve_cap(exact - 1), 0);
     // The serve cap is the largest cap whose peak fits the slack: the
-    // T114's 656 B fund 170 B, and 171 B would need more than 656.
+    // T114's 0 B fund nothing, not even a one-byte serve (#661).
     let slack = budget_slack(T114_NODE_BOX);
-    assert!(serve_peak_bytes(170, SERVE_RESOURCE_SDU) <= slack);
-    assert!(serve_peak_bytes(171, SERVE_RESOURCE_SDU) > slack);
+    assert_eq!(slack, 0);
+    assert_eq!(budget_serve_cap(T114_NODE_BOX), 0);
+    assert!(serve_peak_bytes(1, SERVE_RESOURCE_SDU) > slack);
     // A link fewer frees almost a whole link's cost for the serve.
     assert_eq!(budget_serve_cap(exact + 1), 1_023);
     // Zero node box: 1 864 B of slack.
@@ -217,7 +224,10 @@ fn live_serve_cap_never_falls_below_the_boot_cap() {
     // The first free figure at which the live heap beats the boot floor.
     let above = m + serve_peak_bytes(boot + 1, SERVE_RESOURCE_SDU);
     println!("LIVE_SERVE boot_cap={boot} first_free_above_boot={above}");
-    assert_eq!(above, 15_369);
+    // A zero floor (#661): the first heap above it is the first heap that
+    // funds one byte at all (15 369 B when the stale pin said 170 B).
+    assert_eq!(boot, 0);
+    assert_eq!(above, 14_853);
     assert_eq!(live_serve_cap(boot, above - 1, usize::MAX), boot);
     assert_eq!(live_serve_cap(boot, above, usize::MAX), boot + 1);
     // Bytes in pieces: plenty free, but the largest block at the margin
@@ -240,9 +250,9 @@ fn issue_388_field_figures() {
     // (what, free, largest, expected cap)
     let rows: [(&str, usize, usize, usize); 3] = [
         // Six minutes before the panic, links=2, no traffic.
-        ("field 2026-09-12 steady used=90804", 7_500, 7_500, 170),
+        ("field 2026-09-12 steady used=90804", 7_500, 7_500, 0),
         // After the upload, 24 s before `allocation of 340 bytes failed`.
-        ("field 2026-09-12 pre-panic used=93544", 4_760, 4_760, 170),
+        ("field 2026-09-12 pre-panic used=93544", 4_760, 4_760, 0),
         // The rig T114 that died serving 24 messages, under today's model.
         ("rig 2026-09-23 used=67924", 30_380, 30_320, 7_240),
     ];
@@ -255,7 +265,7 @@ fn issue_388_field_figures() {
         assert_eq!(cap, expected, "{what}");
         // Both field rows are below the margin: the heap they report funds
         // no serve of its own, and the board falls back to the boot floor,
-        // about one minimal message.
+        // which since #661 is honestly 0 B: it serves nothing.
         if free < SERVE_MARGIN_BYTES {
             assert_eq!(cap, boot, "{what}");
         }

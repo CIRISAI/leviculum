@@ -153,7 +153,7 @@ pub const SERVE_RESOURCE_SDU: usize = 500 - RESOURCE_SDU_OVERHEAD;
 ///
 /// ```text
 /// reserve + slack   funded fetch response   messages of 224 B
-///        656 B                     170 B                    0
+///          0 B                       0 B                    0
 ///      5 000 B                   2 128 B                    7
 ///     17 264 B                   8 000 B     the full announced cap
 ///     20 000 B                   9 304 B                   34
@@ -166,12 +166,12 @@ pub const SERVE_RESOURCE_SDU: usize = 500 - RESOURCE_SDU_OVERHEAD;
 /// it funds 14 296 B, and the whole announced 8 KB cap costs 17 264 B
 /// instead of 48 922.)
 ///
-/// And what it costs: the slack is 656 B and one endpoint link is
+/// And what it costs: the slack is 0 B and one endpoint link is
 /// [`budget_per_link`] ≈ 2 712 B, so raising this
 /// still has to come out of the four links the budget affords — and
 /// [`MAX_LINKS`] is also four, asserted at boot and at
 /// compile time. **At four claimable BLE sessions there is no link to
-/// sell, so the BOOT-funded cap is 170 B.** What makes the board serve
+/// sell, so the BOOT-funded cap is 0 B.** What makes the board serve
 /// is not this number but the live one
 /// ([`live_serve_cap`]): the heap the T114 actually
 /// stood on funds 7 240 B after the margin, which is all 24 of the
@@ -255,14 +255,14 @@ pub const SERVE_PEAK_BYTES: usize = serve_peak_bytes(SYNC_SLICE_BYTES, SERVE_RES
 ///   the response out of the store and the four whole copies between
 ///   the store and the advertisement stopped existing);
 /// * what the plan leaves for it = [`SERVE_RESERVE_BYTES`] plus
-///   [`budget_slack`], **656 B** on the T114 — the
+///   [`budget_slack`], **0 B** on the T114 — the
 ///   remainder after `max_endpoint_links` floors its division, and it
 ///   cannot grow without taking a link away from
 ///   [`MAX_LINKS`];
-/// * deficit against the full announced cap = **16 608 B**;
+/// * deficit against the full announced cap = **17 264 B**;
 /// * so the BOOT-funded fetch response,
-///   [`budget_serve_cap`], is **170 B** — about one
-///   minimal message, and that is what `serve_cap=` on the boot line
+///   [`budget_serve_cap`], is **0 B** — not one
+///   message, and that is what `serve_cap=` on the boot line
 ///   says. It is a floor, not the serve: every `/get` re-reads the cap
 ///   from the heap the board HAS
 ///   ([`live_serve_cap`]), and the 30 380 B that
@@ -362,10 +362,10 @@ pub const fn budget_reserve() -> usize {
 /// link currently rides them, because a claimable GATT connection can
 /// fill its queues). What remains of [`HEAP_SIZE`] is divided by
 /// [`budget_per_link`], the carrier-independent cost of one more link.
-/// With today's numbers (T114: node box 31 040 B, role 21 120 B,
+/// With today's numbers (node box [`NODE_BOX_BYTES`], role 21 120 B,
 /// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 712 B) the
-/// division yields 4 — the heap affords exactly the BLE-session count,
-/// and no extra LoRa-backed links until a fixed term shrinks. The
+/// division yields 4 with 0 B over — the heap affords exactly the
+/// BLE-session count, and no extra LoRa-backed links until a fixed term shrinks. The
 /// binaries assert `>=` [`MAX_LINKS`]: a node box grown past
 /// that line is a budget violation at compile time, not a dead session
 /// in the field.
@@ -400,7 +400,7 @@ pub const fn budget_total(node_box: usize) -> usize {
 ///
 /// Named because the propagation role's unfunded outbound serve
 /// transient ([`SERVE_PEAK_BYTES`]) is measured against it:
-/// on a T114 this is 656 B against a 17 264 B need (it was 880 B against
+/// on a T114 this is 0 B against a 17 264 B need (it was 880 B against
 /// 48 922 B before the serve was streamed, #384 B2).
 pub const fn budget_slack(node_box: usize) -> usize {
     HEAP_SIZE.saturating_sub(budget_total(node_box))
@@ -430,9 +430,10 @@ pub const fn budget_slack(node_box: usize) -> usize {
 /// `plaintext` block the T114 died in on 2026-09-23 (5 450 B = 4 + 5 427
 /// + 19) is one of the four whole copies that stopped existing.
 ///
-/// At the slack this board prints today, 656 B, this is **170 B**: about
-/// the smallest LXMF message the store takes, and still nothing like a
-/// field one (224 B of body accounts to 296 B). It was 88 B before B2.
+/// At the slack this board prints today, 0 B, this is **0 B**: not even
+/// the smallest LXMF message the store takes, let alone a field one
+/// (224 B of body accounts to 296 B). The field build ed0754e4 printed
+/// 154 B at 608 B of slack (`rig-run/ble-drop/feld-t114.log`, 2026-10-11).
 /// That is the honest number, not a failure of the arithmetic — and it
 /// is a FLOOR: what makes the board serve is [`live_serve_cap`], which
 /// reads the heap the board has.
@@ -490,8 +491,8 @@ const _: () = assert!(SERVE_MARGIN_BYTES == 14_712);
 /// than the heap its boot plan feared (#388, order 138).
 ///
 /// [`budget_serve_cap`] is a worst case: every term of the plan at its
-/// maximum at once, which on a T114 leaves 656 B of slack and funds a
-/// 170 B response — about one minimal message, nothing like a field one.
+/// maximum at once, which on a T114 leaves 0 B of slack and funds a
+/// 0 B response — not one message, let alone a field one.
 /// The heap that board actually had when it died was 30 380 B free
 /// (`[HEAP_CENSUS] … free=30380 largest=30320`,
 /// `lora_pn_board_offer_past_the_link`, 2026-09-23 08:08 UTC), and under
@@ -703,7 +704,7 @@ pub const fn held_announce_bytes(per_iface: usize, ifaces: usize) -> usize {
 /// Lead can move: [`BOARD_MAX_HELD_ANNOUNCES`] is derived from it.
 ///
 /// **Not in [`budget_total`], and the boot plan funds none of it.** The
-/// plan's slack is [`budget_slack`], 656 B on a T114, and one interface's
+/// plan's slack is [`budget_slack`], 0 B on a T114, and one interface's
 /// first held announce costs 1 220 B (a 536 B map node, the 184 B outer
 /// node, a 500 B raw announce). Putting this slice into the sum would cost
 /// three of the four endpoint links the heap affords, below [`MAX_LINKS`].
@@ -768,3 +769,36 @@ const _: () =
 // worst heap (the arithmetic at `HELD_ANNOUNCE_SLICE_BYTES`).
 const _: () =
     assert!(HELD_ANNOUNCE_SLICE_BYTES + SERVE_MARGIN_BYTES + FRAG_RESERVE_BYTES <= 30_380);
+
+// The node box. Declared last, like the hold above, so the book's line
+// citations into this file stay where they are.
+
+/// Size of the boxed `NodeCore<RawHwRng, EmbassyClock, EmbeddedStorage>`
+/// on `thumbv7em-none-eabihf`: the `node_box` every term of the budget is
+/// computed against, and the same type, so the same size, on the T114, the
+/// RAK4631 and the solar node.
+///
+/// Measured, not estimated: `size_of` of that type in the firmware build of
+/// each binary (`cargo build --release --features bsp-t114 --bin t114`, and
+/// the RAK4631 and solar node equivalents), read off a compile error that
+/// prints it, at 68429da6. The board prints the same figure at runtime as
+/// `size_of_val(&*node)`: the `node_box=` of every `[HEAP_CENSUS]` line,
+/// and the argument the binaries hand `log_budget_and_assert`, whose
+/// `HEAP_BUDGET … total= slack=` follow from it. Of the 31 696 B,
+/// `EmbeddedStorage`'s inline tables are 29 968 B
+/// (`docs/src/firmware/heap-budget.md` has the table).
+///
+/// Pinned for the reason [`LINK_BYTES`] is, and asserted the same way:
+/// the firmware checks `size_of` against it at compile time
+/// (`leviculum-nrf/src/heap_census.rs`), so a change to the node box fails
+/// `just lint-nrf` until this number moves with it. Until Codeberg #661 the
+/// host tests used a stated 31 040 B, which had gone stale by 656 B: they
+/// pinned 656 B of slack and a 170 B serve cap while every board built from
+/// the tree had none of either.
+///
+/// 31 696 B is exactly the node box at which [`MAX_LINKS`] links fit with
+/// nothing left (`max_endpoint_links_at_its_boundaries`), so the slack is
+/// 0 B, the boot serve cap is 0 B, and one more byte in `NodeCore` costs a
+/// link and fails the binaries' `MAX_ENDPOINT_LINKS >= ble::MAX_LINKS`
+/// assert.
+pub const NODE_BOX_BYTES: usize = 31_696;

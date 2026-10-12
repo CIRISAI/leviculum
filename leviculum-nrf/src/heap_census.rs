@@ -207,7 +207,7 @@ const _: () = assert!(!leviculum_heap_budget::BOARD_INGRESS_CONTROL[crate::iface
 ///   plan DOES fund, and the bound the role serves to. The deficit line
 ///   says the announced cap is unaffordable; this one says what is
 ///   affordable instead, and a `serve_cap` below one stored message
-///   (170 B at the T114's 656 B of slack) means the BOOT plan alone
+///   (0 B at the T114's 0 B of slack, #661) means the BOOT plan alone
 ///   would have the board list mail it will not serve. It is a floor:
 ///   [`live_serve_cap`] raises it to what the heap actually has at
 ///   each `/get`, and only a board whose live heap is also that tight
@@ -379,3 +379,17 @@ where
         );
     }
 }
+
+// The node box every budget term is computed against, pinned in the budget
+// crate for its host tests (#661) and asserted here, on the target, like
+// `LINK_BYTES` above. Placed last so the book's line citations into this
+// file stay where they are.
+const _: () = assert!(
+    core::mem::size_of::<
+        NodeCore<
+            crate::rng::RawHwRng,
+            crate::clock::EmbassyClock,
+            leviculum_core::embedded_storage::EmbeddedStorage,
+        >,
+    >() == leviculum_heap_budget::NODE_BOX_BYTES
+);

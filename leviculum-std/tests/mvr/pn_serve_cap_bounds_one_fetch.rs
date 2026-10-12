@@ -77,14 +77,14 @@ const FREE_AT_PANIC: usize = 30_380;
 /// a serve is one allocation and only this figure prices it.
 const LARGEST_AT_PANIC: usize = 30_320;
 
-/// What the BOOT plan funds on that same board (`HEAP_BUDGET … slack=656`
-/// → `serve_cap=170`, `heap_census::budget_serve_cap`,
-/// `leviculum-nrf`): 170 B, about the smallest LXMF message the store
-/// takes and well under a field one, so a board held to it lists 24
-/// messages and serves none of them. It was 88 B before the serve was
-/// streamed; the floor moved a little, and it is still not what makes
-/// the board serve.
-const BOOT_CAP: usize = 170;
+/// What the BOOT plan funds on that same board (`HEAP_BUDGET … slack=0`
+/// → `serve_cap=0`, `heap_census::budget_serve_cap`, `leviculum-nrf`), at
+/// the measured node box: 0 B since #661, which found the 170 B this file
+/// used to state computed from a node box 656 B too small. Either way a
+/// board held to it lists 24 messages and serves none of them, and it is
+/// not what makes the board serve.
+const BOOT_CAP: usize =
+    leviculum_heap_budget::budget_serve_cap(leviculum_heap_budget::NODE_BOX_BYTES);
 
 /// Heap the board keeps clear of the serve because it can be claimed
 /// WHILE the serve is in flight (`SERVE_MARGIN_BYTES`,
@@ -453,8 +453,8 @@ fn a_fetch_past_the_funded_cap_is_served_in_part_and_finished_next_round() {
 /// plan feared — and the margin is what keeps that from being the panic
 /// again.
 ///
-/// The boot plan is every term at its maximum at once: 656 B of slack,
-/// 170 B of funded response. A stored field message is 256 B stamped, so
+/// The boot plan is every term at its maximum at once: 0 B of slack,
+/// 0 B of funded response (#661). A stored field message is 256 B stamped, so
 /// a board held to the floor lists 24 messages and serves **none** of
 /// them, which is what this test's first half measures. The heap that
 /// board actually stood on funds 7 240 B — the whole mailbox.
@@ -471,7 +471,7 @@ fn a_boot_cap_below_one_message_is_raised_by_the_heap_the_board_has() {
     let boot_plan = fetch_all(&mut booted, &stored);
     assert!(
         boot_plan.is_empty() && boot_plan.encoded_len() < 8,
-        "a 170 B cap cannot fit a 256 B message: served {} in {} B",
+        "a {BOOT_CAP} B cap cannot fit a 256 B message: served {} in {} B",
         boot_plan.count(),
         boot_plan.encoded_len()
     );

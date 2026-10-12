@@ -70,9 +70,11 @@ const FREE_AT_PANIC: usize = 30_380;
 /// same instant (`… largest=30320`).
 const LARGEST_AT_PANIC: usize = 30_320;
 
-/// What the boot plan funds on that board (`HEAP_BUDGET … slack=656` →
-/// `serve_cap=170`), the floor the live reading is taken against.
-const BOOT_CAP: usize = 170;
+/// What the boot plan funds on that board (`HEAP_BUDGET … slack=0` →
+/// `serve_cap=0` at the measured node box, #661), the floor the live
+/// reading is taken against.
+const BOOT_CAP: usize =
+    leviculum_heap_budget::budget_serve_cap(leviculum_heap_budget::NODE_BOX_BYTES);
 
 /// One inbound sync batch, at the role's whole sync slice
 /// (`SYNC_SLICE_BYTES`, `leviculum-nrf/heap-budget`): the margin claims the
