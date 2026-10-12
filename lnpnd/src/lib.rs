@@ -33,6 +33,8 @@ pub mod mailbox;
 pub(crate) mod peering;
 pub(crate) mod validation;
 
+pub use validation::reprice_stored_values;
+
 /// Where the message store lives under a data directory, and what the start
 /// did to put it there.
 #[derive(Debug, Clone, PartialEq, Eq)]

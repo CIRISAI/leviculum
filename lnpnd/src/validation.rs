@@ -80,6 +80,63 @@ pub(crate) fn validate_stamp_value(
     }
 }
 
+/// Re-price, once per store, every message stored with stamp value 0
+/// (leviculum#442 D6). Returns how many changed.
+///
+/// A store written before 8f470aa7 holds 0 for whatever the node took at
+/// cost 0 before its first demanding peer; a store `lxmd` left behind holds
+/// 0 for every name without a value component. Stored as 0, such a message
+/// is skipped by every peer whose minimum is above 0
+/// (`reference/LXMF/LXMF/LXMPeer.py:340`), although its stamp, which the
+/// body still carries in its last 32 bytes, may be worth more. The true
+/// value is computed as the reference computes it at cost 0
+/// (`reference/LXMF/LXMF/LXStamper.py:95`) and written in place; the
+/// message keeps its sequence, so a peer whose cursor stands below it now
+/// receives it.
+///
+/// At load, not at offer: building an offer runs under the core lock,
+/// where a workblock expansion per stored message would break the lock
+/// budget (`docs/src/concepts/core-lock-budget.md`), and before the node
+/// is built nothing else is waiting. Once: half of all cost-0 stamps are
+/// truly worth 0, and without the store's marker every start would grind
+/// them again. What this daemon appends afterwards is priced at accept.
+/// The cost is one workblock expansion and one rename per message: 200
+/// messages took 229 ms in a release build on the coder host
+/// (2026-10-12), so a full 30-day store of ten thousand is seconds, once.
+pub fn reprice_stored_values(
+    store: &mut leviculum_std::FilePropagationStore,
+) -> Result<usize, leviculum_lxmf::storage::StorageError> {
+    use leviculum_lxmf::PropagationStore as _;
+
+    if store.stamp_values_true() {
+        return Ok(0);
+    }
+    let mut unpriced = Vec::new();
+    store.for_each(&mut |meta| {
+        if meta.stamp_value == 0 {
+            unpriced.push(meta.transient_id);
+        }
+    })?;
+    let mut repriced = 0;
+    for transient_id in unpriced {
+        let Some(body) = store.read_body(&transient_id)? else {
+            continue;
+        };
+        if body.len() <= LXMF_OVERHEAD + STAMP_SIZE {
+            continue;
+        }
+        let mut stamp = [0u8; STAMP_SIZE];
+        stamp.copy_from_slice(&body[body.len() - STAMP_SIZE..]);
+        let value = validate_stamp_value(&transient_id, &stamp, 0, true).unwrap_or(0);
+        let value = value.min(u8::MAX as u16) as u8;
+        if value > 0 && store.set_stamp_value(&transient_id, value)? {
+            repriced += 1;
+        }
+    }
+    store.mark_stamp_values_true()?;
+    Ok(repriced)
+}
+
 /// How the payload arrived, so the drained result re-enters the engine on
 /// the path the event would have taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,5 +312,82 @@ mod tests {
     #[test]
     fn garbage_yields_no_stamps() {
         assert!(stamps_in(b"not msgpack at all").is_empty());
+    }
+
+    /// leviculum#442 D6: a message an older lnpnd stored at value 0 is not
+    /// offered to a peer demanding 4; after the load-time re-pricing it is,
+    /// at its true value and its old sequence, and a second load does no
+    /// work.
+    #[test]
+    fn a_message_stored_at_value_zero_is_offered_once_repriced() {
+        use leviculum_lxmf::peering::{build_offer, PeerTable, PeeringConfig, OFFER_BYTES_LIMIT};
+        use leviculum_lxmf::propagation::PropagationNodeAnnounce;
+        use leviculum_lxmf::{PropagationStore as _, StampCancel, StoredMessage};
+        use leviculum_std::FilePropagationStore;
+
+        let mut unstamped = vec![0x42u8; LXMF_OVERHEAD + 40];
+        unstamped[16..].fill(0x17);
+        let transient_id = full_hash(&unstamped);
+        let stamp = futures::executor::block_on(
+            CooperativeStamper::cooperative(rand_core::OsRng).generate(
+                &transient_id,
+                4,
+                WORKBLOCK_EXPAND_ROUNDS_PN,
+                &StampCancel::new(),
+            ),
+        )
+        .expect("a cost-4 stamp");
+        let true_value = validate_stamp_value(&transient_id, &stamp, 0, true).expect("measured");
+        assert!(true_value >= 4);
+        let mut body = unstamped.clone();
+        body.extend_from_slice(&stamp);
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FilePropagationStore::open(dir.path(), 1 << 20).expect("open");
+        store.append(&transient_id, 100, 0, &body).unwrap();
+        let sequence = store.meta(&transient_id).unwrap().expect("stored").sequence;
+
+        let mut table = PeerTable::new(PeeringConfig::default());
+        let announce = PropagationNodeAnnounce {
+            legacy_support: false,
+            timebase: 1,
+            enabled: true,
+            transfer_limit_kb: 256,
+            sync_limit_kb: 10_240,
+            stamp_cost: 4,
+            stamp_cost_flexibility: 0,
+            peering_cost: 18,
+            metadata: vec![],
+        };
+        let _ = table.handle_announce([1; 16], &announce, Some(2), 200, false);
+        let peer = table.get(&[1; 16]).expect("peered");
+        assert_eq!(peer.min_accepted_cost(), 4);
+        let entries = |store: &FilePropagationStore| {
+            let mut entries: Vec<StoredMessage> = Vec::new();
+            store.for_each(&mut |entry| entries.push(*entry)).unwrap();
+            entries
+        };
+
+        let before = build_offer(peer, &entries(&store), OFFER_BYTES_LIMIT).expect("a plan");
+        assert!(
+            before.ids.is_empty(),
+            "stored at 0, it is below the peer's minimum"
+        );
+        assert_eq!(before.skipped_low_value, 1);
+
+        assert_eq!(reprice_stored_values(&mut store).unwrap(), 1);
+        let meta = store.meta(&transient_id).unwrap().expect("still stored");
+        assert_eq!(meta.stamp_value as u16, true_value);
+        assert_eq!(meta.sequence, sequence);
+        let plan = build_offer(peer, &entries(&store), OFFER_BYTES_LIMIT).expect("offerable now");
+        assert_eq!(plan.ids, vec![transient_id]);
+
+        drop(store);
+        let mut store = FilePropagationStore::open(dir.path(), 1 << 20).expect("reopen");
+        assert_eq!(
+            store.meta(&transient_id).unwrap().unwrap().stamp_value as u16,
+            true_value
+        );
+        assert_eq!(reprice_stored_values(&mut store).unwrap(), 0);
     }
 }

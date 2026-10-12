@@ -614,10 +614,24 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
             store_dir.path.display()
         );
     }
-    let store = match FilePropagationStore::open(&store_dir.path, effective.store_limit_kb * 1000) {
-        Ok(store) => store,
-        Err(error) => return failure(format!("message store: {error}")),
-    };
+    let mut store =
+        match FilePropagationStore::open(&store_dir.path, effective.store_limit_kb * 1000) {
+            Ok(store) => store,
+            Err(error) => return failure(format!("message store: {error}")),
+        };
+    // Once per store, before the node exists (`lnpnd::reprice_stored_values`).
+    if !store.stamp_values_true() {
+        let started = std::time::Instant::now();
+        match lnpnd::reprice_stored_values(&mut store) {
+            Ok(repriced) => eprintln!(
+                "lnpnd: re-priced {repriced} message(s) stored at stamp value 0 in {} ms",
+                started.elapsed().as_millis()
+            ),
+            // Not fatal: the store serves as before, its values as stored,
+            // and without the marker the next start tries again.
+            Err(error) => tracing::warn!("lnpnd: re-pricing the message store failed: {error}"),
+        }
+    }
     eprintln!(
         "lnpnd: message store holds {} message(s), {} of {} kB free",
         store.len(),

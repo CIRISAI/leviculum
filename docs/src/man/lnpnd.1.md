@@ -103,6 +103,8 @@ The three announced costs default to `propagation_stamp_cost_target = 13`, `prop
 
 The config directory keeps lxmd's layout. lnpnd started on an lxmd config directory takes over its identity and its message store, so the messages lxmd held for its clients are served from the first start on.
 
+On the first start over a store it did not price itself (lxmd's, or one an lnpnd older than 8f470aa7 wrote), lnpnd reads the stamp of every message stored at value 0, records its true value and leaves a `.stamp-values-true` marker in the store directory. A peer that demands a stamp value is offered those messages from then on. This happens once, before the node starts, and the start-up line says how many messages it re-priced.
+
 *config*
 :   The configuration file. Created from the example on first daemon start if missing.
 
