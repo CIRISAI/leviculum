@@ -568,9 +568,7 @@ impl CentralTask {
                 }
                 unit = session.frames_rx.recv() => {
                     let Some(frames) = unit else { break };
-                    let keepalive = frames.len() == 1
-                        && frames[0].len()
-                            < leviculum_core::framing::ble::FRAGMENT_HEADER_SIZE;
+                    let keepalive = super::census::is_keepalive_unit(&frames);
                     if !keepalive {
                         let now_ms = tokio::time::Instant::now()
                             .duration_since(start)

@@ -13,7 +13,7 @@
 //! | `abandon_reports` | reports the driver has not taken | the `Vec`'s slots |
 //! | `defrag_partial` | links with a reassembly in progress | [`BleDefragmenter::held_bytes`] summed |
 //! | `parked_tails` | links holding an out-of-order tail | the tails' capacity |
-//! | `pacer_queues` | packets queued on central links | [`unit_bytes`] summed |
+//! | `pacer_queues` | packets queued on central links, keepalives excluded | [`unit_bytes`] summed |
 //! | `central_pipes` | central links' queue handles | `HashMap` capacity |
 //! | `notifiers` | subscribed centrals' notify handles | the `Vec`'s slots |
 //! | `dial_queue` | dials waiting to start | the `Vec`'s slots |
@@ -24,6 +24,13 @@
 //! | `churn_ledger` | identities remembered | the fixed table |
 //! | `link_addr_types` | handshaked addresses' types | `HashMap` capacity |
 //! | `owed_removals` | device removals an adapter loss could swallow (600) | `BTreeSet` entries + `VecDeque` slots |
+//!
+//! A keepalive ([`is_keepalive_unit`]) rides the same central queue but is
+//! not a packet: the writer sends it outside the pacer, and the tick arm
+//! pushes it in the very tick that publishes this census, so counting it
+//! would read a queue of one whenever a link's keepalive fell due in that
+//! tick (656: the eight-hour soak's only red, 25 bytes, no packet sent).
+//! Neither `pacer_queues` nor the `pacer_depth=` detail counts one.
 //!
 //! The peripheral notify pipe has no queue: a notification is awaited at the
 //! send, so its pacer holds no packet. Its links show `pacer=notify` in the
@@ -44,6 +51,14 @@ use super::links::{Addr, ChurnGate, DialQueue, Link, LinkTable, OwedRemovals, Ro
 use super::CentralPipe;
 use crate::interfaces::census::{hash_map_row, CensusRow, InterfaceCensus};
 
+/// Whether a queued unit is a keepalive rather than a packet: one fragment
+/// shorter than a fragment header, which no packet's fragment can be. The
+/// one definition, used by the gauge here and by the central writer's
+/// pacer bypass in `bluez.rs`.
+pub(crate) fn is_keepalive_unit(unit: &[Vec<u8>]) -> bool {
+    unit.len() == 1 && unit[0].len() < leviculum_core::framing::ble::FRAGMENT_HEADER_SIZE
+}
+
 /// Bytes one queued packet pins: its fragment list's slots plus every
 /// fragment's buffer.
 pub(crate) fn unit_bytes(unit: &[Vec<u8>]) -> usize {
@@ -52,7 +67,8 @@ pub(crate) fn unit_bytes(unit: &[Vec<u8>]) -> usize {
 
 /// What a central link's packet queue holds right now. The orchestrator
 /// adds before it sends and the link task takes off after it receives, so
-/// the two never meet in the middle of one packet.
+/// the two never meet in the middle of one packet. Keepalives are neither
+/// added nor taken.
 #[derive(Debug, Default)]
 pub(crate) struct QueueGauge {
     units: AtomicUsize,
@@ -88,9 +104,12 @@ pub(crate) struct PacketTx {
 }
 
 impl PacketTx {
-    /// Queue one packet; `false` when the queue is full or the link task
-    /// is gone, and nothing was queued.
+    /// Queue one packet or keepalive; `false` when the queue is full or
+    /// the link task is gone, and nothing was queued.
     pub(crate) fn try_send(&self, unit: Vec<Vec<u8>>) -> bool {
+        if is_keepalive_unit(&unit) {
+            return self.tx.try_send(unit).is_ok();
+        }
         let bytes = unit_bytes(&unit);
         self.gauge.add(bytes);
         if self.tx.try_send(unit).is_ok() {
@@ -117,7 +136,9 @@ impl PacketRx {
     /// The next queued packet, `None` once the orchestrator dropped its end.
     pub(crate) async fn recv(&mut self) -> Option<Vec<Vec<u8>>> {
         let unit = self.rx.recv().await?;
-        self.gauge.take(unit_bytes(&unit));
+        if !is_keepalive_unit(&unit) {
+            self.gauge.take(unit_bytes(&unit));
+        }
         Some(unit)
     }
 }
@@ -299,7 +320,7 @@ impl<const N: usize> BleState<'_, N> {
 mod tests {
     use super::*;
     use leviculum_ble_tx::DialFailure;
-    use leviculum_core::framing::ble::fragment_packet;
+    use leviculum_core::framing::ble::{fragment_packet, KEEPALIVE_BYTE};
 
     const OWN: [u8; 16] = [0x0E; 16];
     const PEER_C: [u8; 16] = [0xA1; 16];
@@ -424,5 +445,64 @@ mod tests {
         assert_eq!(tx.gauge().read(), (1, bytes));
         assert!(rx.recv().await.is_some());
         assert_eq!(tx.gauge().read(), (0, 0));
+    }
+
+    /// 656: a keepalive is not a packet. It travels the same queue, but the
+    /// gauge neither adds it nor takes it off, and a real packet beside it
+    /// is counted exactly as before.
+    #[tokio::test]
+    async fn a_keepalive_is_not_a_queued_packet() {
+        let (tx, mut rx) = packet_queue(4);
+        assert!(tx.try_send(vec![vec![KEEPALIVE_BYTE]]));
+        assert_eq!(tx.gauge().read(), (0, 0), "a keepalive is not counted");
+        let unit = fragment_packet(&[0x66; 300], 185);
+        let bytes = unit_bytes(&unit);
+        assert!(tx.try_send(unit));
+        assert_eq!(tx.gauge().read(), (1, bytes));
+        assert_eq!(rx.recv().await, Some(vec![vec![KEEPALIVE_BYTE]]));
+        assert_eq!(
+            tx.gauge().read(),
+            (1, bytes),
+            "taking a keepalive takes nothing"
+        );
+        assert!(rx.recv().await.is_some());
+        assert_eq!(tx.gauge().read(), (0, 0));
+    }
+
+    /// 656, the soak's reading: the tick arm pushes a due keepalive into a
+    /// central pipe and publishes the census in the same tick, before the
+    /// link task takes it. The census must read an empty queue.
+    #[test]
+    fn a_keepalive_pushed_in_the_publishing_tick_reads_as_an_empty_queue() {
+        let mut table = LinkTable::new(OWN, 4);
+        table.admit(PEER_C, ADDR_C, Role::Central, 185, 0);
+        let (tx, _rx) = packet_queue(4);
+        let mut central_pipes = HashMap::new();
+        central_pipes.insert(ADDR_C, CentralPipe { frames: tx });
+        // The tick arm's keepalive push, verbatim in shape (mod.rs).
+        for pipe in central_pipes.values() {
+            assert!(pipe.frames.try_send(vec![vec![KEEPALIVE_BYTE]]));
+        }
+        let dial_backoff: DialBackoff<8> = DialBackoff::new();
+        let census = BleState {
+            table: &table,
+            central_pipes: &central_pipes,
+            notifiers: &Vec::new(),
+            dial_queue: &DialQueue::new(1),
+            backoff_until: &HashMap::new(),
+            dial_backoff: &dial_backoff,
+            scan_lines: &ScanLineGate::default(),
+            churn: &ChurnGate::new(crate::interfaces::ble::links::CHURN_POLICY),
+            link_addr_types: &HashMap::new(),
+            owed_removals: &OwedRemovals::default(),
+        }
+        .census();
+        let q = find(&census, "pacer_queues");
+        assert_eq!((q.entries, q.raw, q.estimated), (0, 0, 0), "{q:?}");
+        let section = census.render("ble", "BLE0");
+        assert!(
+            section.contains("role=central peer=a1a1a1a1 pacer_depth=0 pacer_bytes=0 "),
+            "{section}"
+        );
     }
 }
