@@ -3008,8 +3008,17 @@ mod tests {
             server.link(&link_id).is_some_and(|link| link.is_active()),
             "the link must come up, or the test proves nothing"
         );
-        // The data clock starts at establishment, in whole core seconds.
-        let established_ms = server.now_ms() / 1000 * 1000;
+        // The data clock starts at establishment, to the millisecond since
+        // de601f92 (#664). Rounding it down to a whole second, as this read
+        // before, put the tick past the bound short of a full second past it
+        // whenever establishment fell inside a second, so the strict `>`
+        // never fired. Read the link's own clock instead.
+        let now_ms = server.now_ms();
+        let established_ms = now_ms
+            - server
+                .link(&link_id)
+                .and_then(|link| link.no_data_for_ms(now_ms))
+                .expect("an established link has a data clock");
 
         let out = engine.on_tick(&mut server, established_ms + BOUND * 1000);
         assert!(
