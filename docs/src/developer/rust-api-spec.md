@@ -186,7 +186,7 @@ caller must dispatch.
 | `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:603` | Close a link |
 | `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2309` | Feed received bytes from an interface |
 | `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2564` | Run periodic maintenance (call at the next deadline) |
-| `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2593` | Earliest timer deadline (ms); when to call `handle_timeout` |
+| `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2594` | Earliest timer deadline (ms); when to call `handle_timeout` |
 
 A node is more often built with `NodeCoreBuilder` (`node/builder.rs:40`), whose
 `fn build<R, Clk, S>(self, rng: R, clock: Clk, storage: S) -> NodeCore<R, Clk, S>`

@@ -4851,6 +4851,10 @@ async fn run_event_loop(
             _ = tokio::time::sleep_until(next_poll) => {
                 let (output, tick_output, now_ms) = {
                     let mut core = inner.lock_recover();
+                    // The timer also hands over channel messages a full sink
+                    // left buffered (Codeberg #666), so it needs the room the
+                    // sink has now, not what it had at the last packet.
+                    core.set_channel_delivery_budget(event_sink.as_ref().map(EventSink::data_capacity));
                     let output = core.handle_timeout();
                     // Blackhole `until` timestamps are unix wall-clock values
                     // from the Python RPC, so the expiry sweep needs wall time

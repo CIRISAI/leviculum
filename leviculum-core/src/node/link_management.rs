@@ -1668,7 +1668,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link.record_inbound(now_ms);
 
         // Codeberg #280: a reliable channel message is proofed to the sender
-        // the moment it is delivered below, so it must not be delivered into a
+        // the moment it is delivered or buffered below, so it must not reach a
         // host sink that will discard it. With no room left, refuse the packet
         // untouched — no decrypt, no `Channel::receive` (which would consume
         // the sequence number), no proof. The sender sees an unproofed message
@@ -1696,13 +1696,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
         plaintext.truncate(decrypted_len);
 
-        // 2. Channel receive + drain + proof, link borrow scoped in this block
-        // so that route_link_packet (which needs &mut self) can run afterward.
+        // 2. Channel receive + proof, link borrow scoped in this block so that
+        // route_link_packet (which needs &mut self) can run afterward.
         //
-        // Deferred proof strategy: only prove messages that are delivered in-order
-        // to the application. Out-of-order buffered messages store their proof hash
-        // and get proved when drained. This prevents the sender from clearing its
-        // retransmit queue for undelivered messages during head-of-line blocking.
+        // Every packet the channel keeps is proven on arrival, delivered or
+        // buffered out of order, the way the reference proves each CHANNEL
+        // packet before its channel parses it (`packet.prove()`,
+        // `reference/Reticulum/RNS/Link.py:1172`; audit 654 D20, Codeberg
+        // #666). A buffered packet sits in the bounded rx ring until the gap
+        // before it fills, so the proof promises nothing the core cannot
+        // keep, and the sender stops retransmitting what already arrived.
+        // What the channel refuses (ring full, host sink full, malformed) is
+        // not kept and so not proven: the sender's retransmit is its only
+        // copy.
         let mut rx_ring_full = false;
         let proof_packets: Vec<Vec<u8>> = {
             let rtt_ms = link.rtt_ms();
@@ -1744,10 +1750,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
                 Ok(ReceiveOutcome::Buffered) => {
                     crate::tracing::debug!("link_mgr: channel message buffered (out-of-order)");
-                    // No proof, sender will retransmit the gap-filling packet
+                    if let Some(p) =
+                        Self::build_channel_proof_from_hash(link, &link_id, &full_packet_hash)
+                    {
+                        proofs.push(p);
+                    }
                 }
                 Ok(ReceiveOutcome::DuplicateBuffered) => {
-                    // Duplicate of buffered msg, no proof
+                    // The first proof may have been lost: prove again.
+                    if let Some(p) =
+                        Self::build_channel_proof_from_hash(link, &link_id, &full_packet_hash)
+                    {
+                        proofs.push(p);
+                    }
                 }
                 Err(ChannelError::RxRingFull) => {
                     rx_ring_full = true;
@@ -1757,39 +1772,67 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             };
 
-            // Drain consecutive buffered messages now ready for delivery.
-            // Capped by what the host can still take (#280): draining proofs
-            // them, so anything beyond the budget stays buffered with its
-            // stored hash and is drained on a later packet.
-            let drain_limit = self.channel_delivery_budget.unwrap_or(usize::MAX);
-            let drained: Vec<_> = link
-                .channel_mut()
-                .map(|ch| ch.drain_received_limit(drain_limit))
-                .unwrap_or_default();
-            if let Some(budget) = &mut self.channel_delivery_budget {
-                *budget = budget.saturating_sub(drained.len());
-            }
-            for (envelope, stored_hash) in drained {
-                self.events.push(NodeEvent::MessageReceived {
-                    link_id,
-                    msgtype: envelope.msgtype,
-                    sequence: envelope.sequence,
-                    data: envelope.data,
-                });
-                if let Some(p) = Self::build_channel_proof_from_hash(link, &link_id, &stored_hash) {
-                    proofs.push(p);
-                }
-            }
-
             proofs
         };
 
         // 3. Post-processing (link borrow released)
+        self.drain_ready_channel_messages(link_id);
         if rx_ring_full {
             self.update_rx_ring_full(now_ms);
         }
         for proof in proof_packets {
             self.route_link_packet(&link_id, &proof);
+        }
+    }
+
+    /// Hand the host the buffered channel messages that are now in order,
+    /// as many as it can still take (#280).
+    ///
+    /// They were proven when they arrived, so no proof goes out here. What
+    /// stays buffered for want of room is drained by the next channel
+    /// packet on the link or by the next `handle_timeout`: the sender has no
+    /// retransmit left to wake it, because it was told the packet arrived.
+    pub(super) fn drain_ready_channel_messages(&mut self, link_id: LinkId) {
+        let limit = self.channel_delivery_budget.unwrap_or(usize::MAX);
+        if limit == 0 {
+            return;
+        }
+        let Some(link) = self.links.get_mut(&link_id) else {
+            return;
+        };
+        let drained = link
+            .channel_mut()
+            .map(|ch| ch.drain_received_limit(limit))
+            .unwrap_or_default();
+        if let Some(budget) = &mut self.channel_delivery_budget {
+            *budget = budget.saturating_sub(drained.len());
+        }
+        for (envelope, _proven_on_arrival) in drained {
+            self.events.push(NodeEvent::MessageReceived {
+                link_id,
+                msgtype: envelope.msgtype,
+                sequence: envelope.sequence,
+                data: envelope.data,
+            });
+        }
+    }
+
+    /// [`drain_ready_channel_messages`](Self::drain_ready_channel_messages)
+    /// for every link whose channel holds a message, from the timer: a
+    /// message left buffered by a full host is delivered once the host has
+    /// room even if its link stays quiet.
+    pub(super) fn drain_all_ready_channel_messages(&mut self) {
+        if self.channel_delivery_budget == Some(0) {
+            return;
+        }
+        let holding: Vec<LinkId> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.channel().is_some_and(|ch| !ch.rx_ring_is_empty()))
+            .map(|(id, _)| *id)
+            .collect();
+        for link_id in holding {
+            self.drain_ready_channel_messages(link_id);
         }
     }
 

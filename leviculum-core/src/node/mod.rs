@@ -2573,6 +2573,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.check_keepalives(now_ms);
         self.check_stale_links(now_ms);
         self.check_channel_timeouts(now_ms);
+        self.drain_all_ready_channel_messages();
         self.check_resource_timeouts(now_ms);
         self.check_request_timeouts(now_ms);
 
@@ -2738,7 +2739,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// (Codeberg #280).
     ///
     /// A reliable channel message is proofed to the sender at the moment the
-    /// core delivers it as a `NodeEvent::MessageReceived`; from then on the
+    /// core delivers it as a `NodeEvent::MessageReceived`, or, out of order,
+    /// at the moment the core buffers it in the channel's rx ring, from which
+    /// it is delivered as soon as the host has room (by the next packet on
+    /// the link or by `handle_timeout`). From then on the
     /// sender's channel considers it delivered and stops retransmitting. A
     /// host that then fails to hand the event to the application has destroyed
     /// a message the protocol already confirmed, and no local counter can undo
@@ -7225,27 +7229,21 @@ mod tests {
         );
     }
 
-    /// #280: the budget also caps the deferred drain of out-of-order messages,
-    /// which proofs every message it hands over.
-    #[test]
-    fn test_channel_drain_capped_by_delivery_budget() {
-        use crate::transport::InterfaceId;
-
-        let mut pair = establish_nodecore_link_pair();
-
+    /// Send `bodies` on the initiator's channel with a window wide enough to
+    /// keep them all in flight unproven; returns each packet's wire bytes.
+    fn channel_burst(
+        pair: &mut NodeCoreLinkPair,
+        bodies: &[&[u8]],
+    ) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
         let mut wire = alloc::vec::Vec::new();
-        for (i, body) in [b"m0".as_slice(), b"m1".as_slice(), b"m2".as_slice()]
-            .into_iter()
-            .enumerate()
-        {
+        for (i, body) in bodies.iter().enumerate() {
             let output = pair
                 .initiator
                 .send_on_link(&pair.initiator_link_id, body)
                 .unwrap();
             wire.push(extract_broadcast_data(&output));
             if i == 0 {
-                // The channel exists only after the first send; widen its window
-                // so all three messages can be in flight unproofed.
+                // The channel exists only after the first send.
                 pair.initiator
                     .link_mut(&pair.initiator_link_id)
                     .unwrap()
@@ -7254,11 +7252,80 @@ mod tests {
                     .set_window_for_test(8);
             }
         }
+        wire
+    }
 
-        // Deliver seq 1 and 2 first: both buffer out of order, neither proofs.
+    /// Audit 654 D20 (Codeberg #666): the reference proves every CHANNEL
+    /// packet on arrival, before the channel parses it
+    /// (`packet.prove()`, `reference/Reticulum/RNS/Link.py:1172`), so a
+    /// packet buffered out of order is proven when it lands, not when the
+    /// gap before it fills. Three packets reordered 1, 2, 0: one proof per
+    /// arrival, three in all, none again when the buffer drains.
+    #[test]
+    fn test_channel_buffered_message_proved_on_arrival() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let wire = channel_burst(&mut pair, &[b"m0", b"m1", b"m2"]);
+
+        let mut proofs = alloc::vec::Vec::new();
         for data in &wire[1..] {
             let output = pair.responder.handle_packet(InterfaceId(0), data);
-            assert!(output.actions.is_empty(), "buffered message must not proof");
+            assert_eq!(
+                output.actions.len(),
+                1,
+                "a packet buffered out of order is proven on arrival"
+            );
+            assert!(!output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::MessageReceived { .. })));
+            proofs.push(extract_broadcast_data(&output));
+        }
+
+        let output = pair.responder.handle_packet(InterfaceId(0), &wire[0]);
+        let delivered: alloc::vec::Vec<alloc::vec::Vec<u8>> = output
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                NodeEvent::MessageReceived { data, .. } => Some(data.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            delivered,
+            alloc::vec![b"m0".to_vec(), b"m1".to_vec(), b"m2".to_vec()]
+        );
+        assert_eq!(
+            output.actions.len(),
+            1,
+            "the gap filler is proven, the drained ones were proven on arrival"
+        );
+        proofs.push(extract_broadcast_data(&output));
+
+        // The three proofs clear the sender's three receipts.
+        assert_eq!(pair.initiator.receipt_count(), 3);
+        for proof in &proofs {
+            let _ = pair.initiator.handle_packet(InterfaceId(0), proof);
+        }
+        assert_eq!(pair.initiator.receipt_count(), 0);
+    }
+
+    /// #280: the budget also caps the drain of out-of-order messages. They
+    /// were proven on arrival (D20), so the sender retransmits none of them;
+    /// what stays buffered for want of room is handed over by the timer once
+    /// the host has room, with no proof (it has had one).
+    #[test]
+    fn test_channel_drain_capped_by_delivery_budget() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let wire = channel_burst(&mut pair, &[b"m0", b"m1", b"m2"]);
+
+        // Deliver seq 1 and 2 first: both buffer out of order, each proven.
+        for data in &wire[1..] {
+            let output = pair.responder.handle_packet(InterfaceId(0), data);
+            assert_eq!(output.actions.len(), 1, "buffered message is proven");
         }
 
         // seq 0 arrives with room for exactly two deliveries.
@@ -7277,16 +7344,19 @@ mod tests {
             alloc::vec![b"m0".to_vec(), b"m1".to_vec()],
             "drain must stop at the host's remaining room"
         );
-        assert_eq!(
-            output.actions.len(),
-            2,
-            "one proof per delivered message, none for what stayed buffered"
-        );
+        assert_eq!(output.actions.len(), 1, "only the gap filler's own proof");
 
-        // The third stays buffered and is drained (and proofed) once there is
-        // room again — the sender's retransmit of seq 2 wakes the drain.
+        // No room: the timer leaves the third where it is.
+        pair.responder.set_channel_delivery_budget(Some(0));
+        let output = pair.responder.handle_timeout();
+        assert!(!output
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::MessageReceived { .. })));
+
+        // Room again: the timer hands it over, with no packet on the link.
         pair.responder.set_channel_delivery_budget(Some(4));
-        let output = pair.responder.handle_packet(InterfaceId(0), &wire[2]);
+        let output = pair.responder.handle_timeout();
         let delivered: alloc::vec::Vec<alloc::vec::Vec<u8>> = output
             .events
             .iter()
