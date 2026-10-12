@@ -186,6 +186,74 @@ impl<M> SyncBatch<M> {
     }
 }
 
+/// The hop count of the link the board's one funded incoming resource was
+/// advertised on, kept until that resource is judged (audit 2026-10-12 D6).
+///
+/// The core forgets a link the moment it closes, and a sync's sender may
+/// close it the moment its transfer is proven. On the board the judgement
+/// follows the completion in the same dispatch, but a close carried in that
+/// same dispatch has already emptied the core's table by the time the engine
+/// reads it, and then the link's hops are gone with it. So they are read at
+/// the advertisement, when the link certainly exists, as lnpnd does since 643
+/// (`SyncSender`, `lnpnd/src/peering.rs`).
+///
+/// One slot, not one per link: the board admits one incoming resource at a
+/// time over all its links (`INCOMING_RESOURCES_FUNDED`, D14), so the next
+/// admitted advertisement can only follow the conclusion or failure of the
+/// one this slot describes. The identity needs no slot: the validated
+/// peering hash stays in the engine's `validated_links` until the
+/// `LinkClosed` that follows, and the keys come from the identity cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdvertisedHops<K> {
+    held: Option<(K, u8)>,
+}
+
+impl<K> Default for AdvertisedHops<K> {
+    fn default() -> Self {
+        Self { held: None }
+    }
+}
+
+impl<K: PartialEq> AdvertisedHops<K> {
+    /// An advertisement on `link` was accepted while the link reported
+    /// `hops`; `None` when the core did not know the link.
+    pub fn note(&mut self, link: K, hops: Option<u8>) {
+        self.held = hops.map(|hops| (link, hops));
+    }
+
+    /// The hop count of `link` for the judgement of its resource: as noted
+    /// at its advertisement, or `live` (the link as the core answers now)
+    /// when nothing was noted for it.
+    pub fn of(&self, link: &K, live: Option<u8>) -> Option<u8> {
+        match &self.held {
+            Some((held, hops)) if held == link => Some(*hops),
+            _ => live,
+        }
+    }
+
+    /// The resource on `link` is done with, judged or failed.
+    pub fn forget(&mut self, link: &K) {
+        if self.held.as_ref().is_some_and(|(held, _)| held == link) {
+            self.held = None;
+        }
+    }
+}
+
+/// The depth an inbound sync's sender is judged by when the board decides
+/// whether to peer it back: the path table's answer, and the hop count of
+/// the link the sync arrived over when there is no path.
+///
+/// The reference reads the path table alone, which answers `PATHFINDER_M`
+/// for an unknown path, so after a reset a recalled neighbour is too deep
+/// until its next announce (`reference/LXMF/LXMF/LXMRouter.py:2365`,
+/// leviculum#420). lnpnd deviates since 8756a5df (556): the sender just
+/// proved its distance over the link. A known path still wins, and the
+/// depth rule itself is unchanged, a link deeper than `autopeer_maxdepth`
+/// is declined as before.
+pub fn sender_depth(path_hops: Option<u8>, link_hops: Option<u8>) -> Option<u8> {
+    path_hops.or(link_hops)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +352,87 @@ mod tests {
         assert_eq!(batch.bytes(), 4);
         assert_eq!(batch.invalid(), 1);
         assert_eq!(batch.result(), "invalid_stamps");
+    }
+}
+
+#[cfg(test)]
+mod sender_tests {
+    use super::*;
+    use leviculum_lxmf::peering::{DeclineReason, PeerChange, PeerTable, PeeringConfig};
+    use leviculum_lxmf::PropagationNodeAnnounce;
+
+    /// lnpnd's `a_pathless_node_syncing_over_a_link_is_judged_by_the_links_hops`
+    /// (643) through the board's two pieces: a node whose propagation
+    /// announce is recallable but which has no path, the state a reset
+    /// leaves, syncs to us over a link of `link_hops`, at an
+    /// `autopeer_maxdepth` of one. Closed or not before the decision, the
+    /// link's hops judge it. With nothing noted and the link gone, nothing is
+    /// known and the reference's answer stands.
+    #[test]
+    fn a_pathless_node_syncing_over_a_link_is_judged_by_the_links_hops() {
+        let recalled = PropagationNodeAnnounce {
+            legacy_support: false,
+            timebase: 100,
+            enabled: true,
+            transfer_limit_kb: 4,
+            sync_limit_kb: 32,
+            stamp_cost: 16,
+            stamp_cost_flexibility: 3,
+            peering_cost: 18,
+            metadata: alloc::vec![],
+        }
+        .encode()
+        .expect("encode the recalled announce");
+        let link = [0x11u8; 16];
+        for (link_hops, noted, closed, expected) in [
+            (1u8, true, false, PeerChange::Added),
+            (2, true, false, PeerChange::Declined(DeclineReason::TooDeep)),
+            (1, true, true, PeerChange::Added),
+            (2, true, true, PeerChange::Declined(DeclineReason::TooDeep)),
+            (1, false, true, PeerChange::Declined(DeclineReason::TooDeep)),
+        ] {
+            let mut table = PeerTable::new(PeeringConfig {
+                autopeer_maxdepth: 1,
+                ..PeeringConfig::default()
+            });
+            let mut advertised = AdvertisedHops::default();
+            if noted {
+                advertised.note(link, Some(link_hops));
+            }
+            let live = (!closed).then_some(link_hops);
+            let path_hops = None;
+            let hops = sender_depth(path_hops, advertised.of(&link, live));
+            assert_eq!(
+                table.handle_inbound_sync_recalled([7; 16], Some(&recalled), hops, 50),
+                expected,
+                "a link of {link_hops} hops, noted {noted}, closed {closed}"
+            );
+            advertised.forget(&link);
+            assert_eq!(advertised.of(&link, None), None, "forgotten");
+        }
+    }
+
+    /// A known path wins over the link, as on lnpnd.
+    #[test]
+    fn a_known_path_wins_over_the_link() {
+        assert_eq!(sender_depth(Some(3), Some(1)), Some(3));
+        assert_eq!(sender_depth(None, None), None);
+    }
+
+    /// The slot answers only for the link it was noted for.
+    #[test]
+    fn the_slot_answers_for_its_own_link_only() {
+        let mut advertised = AdvertisedHops::default();
+        advertised.note(1u8, Some(2));
+        assert_eq!(advertised.of(&1, None), Some(2));
+        assert_eq!(advertised.of(&9, Some(4)), Some(4));
+        advertised.forget(&9);
+        assert_eq!(advertised.of(&1, None), Some(2), "another link's end");
+        advertised.note(1, None);
+        assert_eq!(
+            advertised.of(&1, None),
+            None,
+            "an unknown link notes nothing"
+        );
     }
 }

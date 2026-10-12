@@ -612,6 +612,49 @@ fn next_due_walks_hash_order_and_honours_backoff_and_cursor() {
     assert_eq!(table.next_due(150, 5, None), None);
 }
 
+/// One key mine does not hold every other peer's sync (audit 2026-10-12
+/// D8). The board mines one key at a time, and while it ground its
+/// scheduler picked nobody, so a peer whose key was ready waited out the
+/// whole mine, 10 to 32 s at cost 18. The reference mines off its sync
+/// thread and keeps picking (`reference/LXMF/LXMF/LXMPeer.py:285-286`).
+/// While the miner is busy the pick skips the mining peer (its phase says
+/// so) and any peer that would need the miner too, and serves the rest.
+#[test]
+fn a_busy_miner_holds_only_the_peers_that_need_it() {
+    let mut table = table();
+    table.handle_announce([1; 16], &announce(1), Some(1), 0, false);
+    table.handle_announce([2; 16], &announce(1), Some(1), 0, false);
+    table.handle_announce([3; 16], &announce(1), Some(1), 0, false);
+    table.get_mut(&[1; 16]).unwrap().state = SyncPhase::KeyMining;
+    table.get_mut(&[3; 16]).unwrap().peering_key = Some(([0xAA; 32], 18));
+
+    assert_eq!(
+        table.next_dialable(50, 5, None, true),
+        Some([3; 16]),
+        "the peer whose key is ready is dialled while [1]'s key mines; \
+         [2] would need the busy miner"
+    );
+    assert_eq!(
+        table.next_dialable(50, 5, Some([3; 16]), true),
+        Some([3; 16]),
+        "rotation past it comes back to it, not to a peer that needs the miner"
+    );
+    assert_eq!(
+        table.next_dialable(50, 5, Some([1; 16]), false),
+        Some([2; 16]),
+        "an idle miner takes [2] in its turn"
+    );
+    table.get_mut(&[3; 16]).unwrap().cursor = 5;
+    assert_eq!(
+        table.next_dialable(50, 5, None, true),
+        None,
+        "nobody dialable without the miner"
+    );
+    // A key below the peer's announced cost is no key: it needs the miner.
+    table.get_mut(&[2; 16]).unwrap().peering_key = Some(([0xAA; 32], 17));
+    assert_eq!(table.next_dialable(50, 5, None, true), None);
+}
+
 /// A round that reached an established link and then lost the medium is
 /// due again on the next sync pass, not a `SYNC_BACKOFF_STEP_SECS` later.
 ///

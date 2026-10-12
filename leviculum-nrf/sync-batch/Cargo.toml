@@ -7,3 +7,7 @@ license = "AGPL-3.0-or-later"
 description = "The inbound peer-sync batch on the board: what a drain step counts, and what the link closing under it means. Host-testable"
 
 [dependencies]
+
+[dev-dependencies]
+# The peering rule the slot feeds, so the D6 test judges as the board does.
+leviculum-lxmf = { path = "../../leviculum-lxmf", default-features = false }

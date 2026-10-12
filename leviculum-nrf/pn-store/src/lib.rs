@@ -406,6 +406,57 @@ pub fn board_role_config(
     }
 }
 
+/// The fewest bytes an upload envelope (`[timestamp, [lxmf_data ‖ stamp]]`)
+/// can wrap a body of more than 255 B in: a fixarray, the timestamp as a
+/// one-byte fixint, a fixarray, and a `bin 16` header. A reference client
+/// sends a float timestamp (9 B, so 14 B in all); the minimum is what makes
+/// [`MAX_UPLOAD_RESOURCE_BYTES`] hold for any encoding a client chooses.
+pub const UPLOAD_ENVELOPE_MIN_OVERHEAD: usize = 1 + 1 + 1 + 3;
+
+/// The largest single-message resource whose message the record log can
+/// hold: [`leviculum_record_log::MAX_BODY`] (a record never straddles a
+/// page) plus the thinnest envelope around it.
+pub const MAX_UPLOAD_RESOURCE_BYTES: u64 =
+    (leviculum_record_log::MAX_BODY + UPLOAD_ENVELOPE_MIN_OVERHEAD) as u64;
+
+// A conforming client is bounded by the announced per-transfer limit, so the
+// store bound must not refuse what that limit lets through.
+const _: () =
+    assert!(MAX_UPLOAD_RESOURCE_BYTES >= leviculum_heap_budget::BOARD_TRANSFER_LIMIT_KB * 1000);
+
+/// The board's resource-advertisement size gate: whether a resource of
+/// `data_size` bytes (the advertisement's uncompressed size) is taken,
+/// judged before the transfer starts and so before the resource protocol
+/// acknowledges anything.
+///
+/// Every resource is held to the announced per-sync limit, the reference's
+/// own gate (`reference/LXMF/LXMF/LXMRouter.py:2220-2224`). A resource from
+/// a link whose `/offer` peering key did not validate is a client's upload,
+/// one message by construction (the multi-message form is torn down unread,
+/// `:2381-2389`), and is also held to what the store can keep,
+/// [`MAX_UPLOAD_RESOURCE_BYTES`] (audit 2026-10-12 D11). Without it a
+/// 4 043-5 000 B message passed the 5 000 B sync limit, was proven by the
+/// resource protocol, and was then refused by the record log with nothing
+/// sent back: acknowledged and lost. Refused here it gets the same immediate
+/// RCL as any over-limit resource, the answer the reference gives by
+/// returning `False` from its advertisement callback.
+///
+/// The sync limit itself cannot move down to the store's bound: it must stay
+/// above one message at the per-transfer limit plus the packing overhead, or
+/// a stock peer skips that message toward us forever (the assertion beside
+/// `leviculum_heap_budget::BOARD_SYNC_LIMIT_KB`). A validated peer's batch
+/// therefore keeps the 5 000 B limit; a peer that packs one message above
+/// the per-transfer limit it was told is the one case left, and it is
+/// nonconforming (`reference/LXMF/LXMF/LXMPeer.py:370-373`).
+pub fn board_accepts_resource_of<S: PropagationStore>(
+    role: &PropagationNode<S>,
+    data_size: u64,
+    from_validated_peer: bool,
+) -> bool {
+    role.accepts_resource_of(data_size)
+        && (from_validated_peer || data_size <= MAX_UPLOAD_RESOURCE_BYTES)
+}
+
 /// The message-store half: [`PropagationStore`] over the region.
 pub struct PnStore<R> {
     region: R,

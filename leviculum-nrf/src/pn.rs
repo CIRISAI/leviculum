@@ -260,7 +260,12 @@ use leviculum_lxmf::{
 use leviculum_pn_store::{settle_message_op, FlushOp, PnPeerStore, PnStore, Region, RepriceWalk};
 use leviculum_queue_budget::{OwnShare, OwnVerdict, OWN_TRAFFIC_SHARE_PERMILLE};
 use leviculum_record_log::SECTOR_SIZE;
-use leviculum_sync_batch::{AfterClose, Arrival};
+use leviculum_sync_batch::{AdvertisedHops, AfterClose, Arrival};
+
+// One slot holds the advertised link's hops (`Engine::advertised_hops`)
+// because one incoming resource is admitted at a time; funding a second
+// needs a slot per funded resource.
+const _: () = assert!(leviculum_heap_budget::INCOMING_RESOURCES_FUNDED == 1);
 use leviculum_upload_proof::UploadProofs;
 use rand_core::CryptoRngCore;
 
@@ -773,6 +778,10 @@ pub struct Engine {
     /// (`validated_peer_links`, `reference/LXMF/LXMF/LXMRouter.py:2316`).
     validated_links: BTreeMap<LinkId, [u8; 16]>,
     inbound_transfers: Vec<LinkId>,
+    /// The hop count of the link the one funded incoming resource was
+    /// advertised on, for the peering decision its completion takes (D6).
+    /// A link id and a byte in the engine itself, no heap.
+    advertised_hops: AdvertisedHops<LinkId>,
     mining_peer: Option<[u8; 16]>,
     last_synced: Option<[u8; 16]>,
     next_sync_at_ms: u64,
@@ -914,6 +923,7 @@ impl Engine {
             outbound: None,
             validated_links: BTreeMap::new(),
             inbound_transfers: Vec::with_capacity(crate::ble::MAX_LINKS),
+            advertised_hops: AdvertisedHops::default(),
             mining_peer: None,
             last_synced: None,
             next_sync_at_ms: 0,
@@ -1199,8 +1209,14 @@ impl Engine {
                 // are what the heap reserve funds. Client uploads and peer
                 // syncs count alike; the refusal is the same immediate RCL,
                 // so the sender retries instead of the board dying of a
-                // transfer its plan never funded (#388).
-                let within_limit = self.role.accepts_resource_of(*data_size);
+                // transfer its plan never funded (#388). A client's upload is
+                // also held to what the record log can store (D11), since
+                // past this point the resource is proven before the role
+                // ever sees it.
+                let from_peer = self.validated_links.contains_key(link_id);
+                let within_limit = leviculum_pn_store::board_accepts_resource_of(
+                    &self.role, *data_size, from_peer,
+                );
                 let in_flight: usize = node
                     .links()
                     .map(|(_, link)| link.incoming_resource_count())
@@ -1211,9 +1227,13 @@ impl Engine {
                     Self::log_reject("resources_busy", "resource");
                 }
                 let verdict = if accept {
-                    if self.validated_links.contains_key(link_id) {
+                    if from_peer {
                         self.inbound_transfers.push(*link_id);
                     }
+                    // Read while the link certainly exists (D6): the judgement
+                    // at completion may find it closed.
+                    self.advertised_hops
+                        .note(*link_id, node.link(link_id).map(|link| link.hops()));
                     node.accept_resource(link_id)
                 } else {
                     node.reject_resource(link_id)
@@ -1327,6 +1347,7 @@ impl Engine {
         self.proofs.forget(link_id);
         self.validated_links.remove(link_id);
         self.inbound_transfers.retain(|held| held != link_id);
+        self.advertised_hops.forget(link_id);
         // Two cases for a close that lands on the batch's own link,
         // told apart by whether anything is still resident
         // (`leviculum_sync_batch::SyncBatch::after_close`):
@@ -1378,6 +1399,7 @@ impl Engine {
         self.proofs.forget(link_id);
         self.validated_links.remove(link_id);
         self.inbound_transfers.retain(|held| held != link_id);
+        self.advertised_hops.forget(link_id);
     }
 
     fn owns_link<R, C, S>(&self, node: &NodeCore<R, C, S>, link_id: &LinkId) -> bool
@@ -2007,8 +2029,12 @@ impl Engine {
         let link_identity = node.get_remote_identity(link_id).cloned();
         let remote_of_link = peer.or_else(|| link_identity.as_ref().map(propagation_hash_of));
         if let Some(remote) = remote_of_link {
-            self.peer_from_recalled_announce(node, remote, link_identity.as_ref());
+            let link_hops = self
+                .advertised_hops
+                .of(link_id, node.link(link_id).map(|link| link.hops()));
+            self.peer_from_recalled_announce(node, remote, link_identity.as_ref(), link_hops);
         }
+        self.advertised_hops.forget(link_id);
 
         let (Some(remote), Some(envelope)) = (peer, envelope) else {
             if multi {
@@ -2064,16 +2090,24 @@ impl Engine {
     /// destination has no path (`clean_announce_cache`). So the honest
     /// bound is *while a path to that node lives, and not across a reset* —
     /// the reference recalls from a persisted `known_destinations` and does
-    /// survive one. It covers the case this path is for, because a node
-    /// syncing to us over a link has a path by construction; what it does
-    /// not cover is a reboot between hearing the announce and the sync.
-    /// Closing that needs `app_data` persisted with the destination — a
-    /// store change of its own, not a caller's problem.
+    /// survive one. It covers the case this path is for, a neighbour heard
+    /// since the last reset; what it does not cover is a reboot between
+    /// hearing the announce and the sync. Closing that needs `app_data`
+    /// persisted with the destination — a store change of its own, not a
+    /// caller's problem.
+    ///
+    /// **Depth.** A path dropped between the announce and the sync left the
+    /// recall standing and the depth unknown, so the peer was declined
+    /// `too_deep` (audit 2026-10-12 D6). `link_hops`, the hops of the link
+    /// the sync arrived over as noted at its advertisement
+    /// ([`AdvertisedHops`]), stands in when no path is known, as on lnpnd
+    /// since 556; a known path still wins.
     fn peer_from_recalled_announce<R, C, S>(
         &mut self,
         node: &NodeCore<R, C, S>,
         remote_hash: [u8; 16],
         link_identity: Option<&Identity>,
+        link_hops: Option<u8>,
     ) where
         R: CryptoRngCore,
         C: Clock,
@@ -2088,7 +2122,10 @@ impl Engine {
         }
         let destination = DestinationHash::new(remote_hash);
         let recalled = node.recall_app_data(&destination);
-        let hops = node.hops_to(&destination);
+        // A known path, else the link the sync came over (D6, lnpnd's 556):
+        // after a reset the board recalls nothing of a path, while the sync
+        // has just proven the distance.
+        let hops = leviculum_sync_batch::sender_depth(node.hops_to(&destination), link_hops);
         let now = node.emission_secs();
         if self
             .peers
@@ -2666,14 +2703,22 @@ impl Engine {
             self.finish_round(end.as_str(), 0, 0);
             out.merge(node.close_link(&round.link_id));
         }
-        if self.outbound.is_some() || self.mining_peer.is_some() || now_ms < self.next_sync_at_ms {
+        // A key mining does not hold the pass (audit 2026-10-12 D8): the pick
+        // skips the mining peer and any other that would need the one miner,
+        // and serves the rest. `harvest_mining` reschedules at once when the
+        // key lands.
+        if self.outbound.is_some() || now_ms < self.next_sync_at_ms {
             return;
         }
         self.next_sync_at_ms = now_ms + SYNC_INTERVAL_SECS * 1000;
 
         let now = node.emission_secs();
         let newest = self.role.store().newest_sequence().unwrap_or(0);
-        let Some(destination) = self.peers.next_due(now, newest, self.last_synced) else {
+        let miner_busy = self.mining_peer.is_some();
+        let Some(destination) = self
+            .peers
+            .next_dialable(now, newest, self.last_synced, miner_busy)
+        else {
             return;
         };
         self.last_synced = Some(destination);
@@ -2726,6 +2771,12 @@ impl Engine {
                 out.merge(node.request_path(&DestinationHash::new(destination)));
                 return;
             };
+            // One miner, one job: the pick never brings a keyless peer here
+            // while it is busy (`next_dialable`), and a second job queued
+            // behind the first would take over `mining_peer` from it.
+            if self.mining_peer.is_some() {
+                return;
+            }
             peer.state = SyncPhase::KeyMining;
             let material = peering_key_material(&peer_identity_hash, &our_identity_hash);
             let cost = peer.peering_cost;

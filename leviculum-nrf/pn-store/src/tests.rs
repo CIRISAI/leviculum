@@ -983,3 +983,64 @@ fn a_rewrite_interrupted_before_its_purge_heals_on_the_next_walk() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].stamp_value, 14);
 }
+
+// ---- the upload the gate admits is one the store holds (audit 2026-10-12 D11) ----
+
+/// One client upload whose stored body (`lxmf_data ‖ stamp`) is `body_len`
+/// bytes, for destination 7.
+fn upload_with_body(body_len: usize) -> Vec<u8> {
+    let mut lxmf = vec![7u8; DESTINATION_LENGTH];
+    lxmf.resize(body_len - STAMP_LEN, 0x5A);
+    leviculum_lxmf::PropagationUpload::single(1_700_000_000.0, lxmf, [0xEE; 32]).encode()
+}
+
+/// A client's single-message resource that the advertisement gate admits
+/// must be one the store can hold. The resource protocol proves the
+/// transfer before the role ever sees the bytes, and a store refusal after
+/// that sends nothing (`UploadOutcome::StoreFailed`), so a message the gate
+/// admits and the record log cannot take (`MAX_BODY`, one page) was
+/// acknowledged to its sender and lost. The audit's case is 4 500 B: under
+/// the 5 000 B sync limit, over the 4 042 B body bound. A conforming upload,
+/// up to the announced per-transfer limit, is still taken.
+#[test]
+fn a_client_upload_the_gate_admits_is_one_the_store_holds() {
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let mut role = PropagationNode::new(
+        PnStore::new(region.clone(), SECTORS),
+        board_role_config(0, 0, b"board".to_vec(), 4_000),
+    );
+    // The body whose reference envelope (14 B around it) is exactly the
+    // announced per-transfer limit.
+    let at_transfer_limit = leviculum_heap_budget::BOARD_TRANSFER_LIMIT_KB as usize * 1000 - 14;
+    for (body_len, conforming) in [
+        (4_500, false),
+        (leviculum_record_log::MAX_BODY + 1, false),
+        (leviculum_record_log::MAX_BODY, false),
+        (at_transfer_limit, true),
+        (FIELD_BODY, true),
+    ] {
+        let bytes = upload_with_body(body_len);
+        let admitted = board_accepts_resource_of(&role, bytes.len() as u64, false);
+        let stored = match role.handle_upload(&bytes, 1000, |_, _| Some(0)) {
+            leviculum_lxmf::UploadOutcome::Accepted { transient_id, .. } => {
+                flush_messages(role.store_mut(), &region, &mut log);
+                role.store().contains(&transient_id).unwrap_or(false)
+            }
+            _ => false,
+        };
+        assert!(
+            !admitted || stored,
+            "a {body_len} B body in a {} B resource was admitted and not stored",
+            bytes.len()
+        );
+        if conforming {
+            assert_eq!(bytes.len(), body_len + 14, "a reference envelope");
+            assert!(
+                admitted && stored,
+                "a conforming {body_len} B body was refused"
+            );
+        }
+    }
+}

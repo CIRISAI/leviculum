@@ -466,6 +466,13 @@ impl Peer {
         self.stamp_cost.saturating_sub(self.stamp_cost_flexibility)
     }
 
+    /// [`Self::peering_key_ready`] without forgetting a key that fell below
+    /// the announced cost: whether a round could start without the miner.
+    pub fn peering_key_held(&self) -> bool {
+        self.peering_key
+            .is_some_and(|(_, value)| value as u32 >= self.peering_cost as u32)
+    }
+
     /// Whether the held key still satisfies the peer's announced cost; a
     /// devalued key is discarded so the caller re-mines
     /// (`peering_key_ready`, `reference/LXMF/LXMF/LXMPeer.py:227-236`).
@@ -1268,11 +1275,22 @@ impl PeerTable {
         newest_sequence: u64,
         last: Option<[u8; DESTINATION_LENGTH]>,
     ) -> Option<[u8; DESTINATION_LENGTH]> {
+        self.next_due_where(now, newest_sequence, last, |_| true)
+    }
+
+    fn next_due_where(
+        &self,
+        now: u64,
+        newest_sequence: u64,
+        last: Option<[u8; DESTINATION_LENGTH]>,
+        dialable: impl Fn(&Peer) -> bool,
+    ) -> Option<[u8; DESTINATION_LENGTH]> {
         let due = |peer: &Peer| {
             peer.announce_known
                 && peer.state == SyncPhase::Idle
                 && now >= peer.next_sync_attempt
                 && peer.cursor < newest_sequence
+                && dialable(peer)
         };
         let mut wrapped: Vec<&Peer> = self.peers.values().collect();
         if let Some(pivot) = last {
@@ -1282,6 +1300,30 @@ impl PeerTable {
             .iter()
             .find(|peer| due(peer))
             .map(|peer| peer.destination_hash)
+    }
+
+    /// [`Self::next_due`] for a node with one peering-key miner, which may be
+    /// busy (`miner_busy`): the board's pick (audit 2026-10-12 D8).
+    ///
+    /// While the miner grinds, the peer it grinds for is `KeyMining` and so
+    /// not due anyway, and a peer whose key is not ready would need the same
+    /// miner, so it waits for it; every other due peer is dialled. Until D8
+    /// the board picked nobody while a key mined, and a peer whose key was
+    /// ready waited out the whole grind, 10 to 32 s at cost 18. The
+    /// reference mines on a thread per peer and keeps picking
+    /// (`reference/LXMF/LXMF/LXMPeer.py:285-286`); the board keeps one miner,
+    /// the one-deep channel its single core affords, and so holds only the
+    /// peers that need it.
+    pub fn next_dialable(
+        &self,
+        now: u64,
+        newest_sequence: u64,
+        last: Option<[u8; DESTINATION_LENGTH]>,
+        miner_busy: bool,
+    ) -> Option<[u8; DESTINATION_LENGTH]> {
+        self.next_due_where(now, newest_sequence, last, |peer| {
+            !miner_busy || peer.peering_key_held()
+        })
     }
 }
 

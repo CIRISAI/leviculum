@@ -1157,6 +1157,9 @@ dependencies = [
 [[package]]
 name = "leviculum-sync-batch"
 version = "0.1.0"
+dependencies = [
+ "leviculum-lxmf",
+]
 
 [[package]]
 name = "leviculum-telemetry-policy"
