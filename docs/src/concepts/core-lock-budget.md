@@ -25,9 +25,9 @@ anything with the same profile:
 
 | phase | lock | code |
 | --- | --- | --- |
-| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1433` |
+| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1446` |
 | `resource::prepare_resource_send` | **none** | `leviculum-core/src/resource/outgoing.rs:89` |
-| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1468` |
+| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1481` |
 
 Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
@@ -36,7 +36,7 @@ the caller rebuilds once. The std driver calls the three phases itself
 (`leviculum-std/src/driver/mod.rs:3679`).
 
 `NodeCore::send_resource` still exists as the composed single call
-(`leviculum-core/src/node/mod.rs:1559`) because no_std and FFI callers
+(`leviculum-core/src/node/mod.rs:1572`) because no_std and FFI callers
 have no lock to hold and no second thread to starve. It is the
 composed form that is dangerous behind the driver, not the code it
 composes.
@@ -103,7 +103,7 @@ pass and was not re-measured here.
 ### The segment boundary sits under the 1 MiB row
 
 `RESOURCE_MAX_EFFICIENT_SIZE` is 1 048 575 bytes
-(`leviculum-core/src/resource/mod.rs:69`) and the split is decided on
+(`leviculum-core/src/resource/mod.rs:70`) and the split is decided on
 the *packed, uncompressed* length
 (`leviculum-core/src/resource/outgoing.rs:106`), so a 1 MiB body is
 above it in every payload class — the compression ratio does not move
@@ -284,7 +284,7 @@ offering one.
 ### The one call the seam hands out that this page forbids
 
 `NodeCore::send_resource` is `pub`
-(`leviculum-core/src/node/mod.rs:1763`) and therefore reachable on the
+(`leviculum-core/src/node/mod.rs:1784`) and therefore reachable on the
 `&mut StdNodeCore` a processor hook holds. It is the 141 ms composed
 call this page opens with — one line, in consumer code, behind the
 driver and under the lock. `PROCESSOR_TICK_BUDGET` reports it 141 ms
@@ -369,7 +369,7 @@ The rule that follows is the CPU rule's sibling:
 > worse bug than the missing diagnostic.**
 
 The event log now inverts the trade (`FileSink`,
-`leviculum-std/src/event_log.rs:1477`): the emitting thread does a
+`leviculum-std/src/event_log.rs:1490`): the emitting thread does a
 bounded enqueue and returns, one writer thread owns the file, and an
 overrun drops lines and says so with `EVENT_LOG_DROPPED` rather than
 blocking the mesh. `LEVICULUM_EVENT_LOG_SYNC=1` restores the old
@@ -386,7 +386,7 @@ informatively:
 | --- | --- | --- |
 | `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6254`) | announce handling itself took ≥ 100 ms |
 | `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4368`) | an outside thread waited ≥ 250 ms for the core lock |
-| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1594`) | one batch write to the log file took ≥ 50 ms |
+| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1607`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by
 something other than announce handling; `EVENT_LOG_WRITE_SLOW`

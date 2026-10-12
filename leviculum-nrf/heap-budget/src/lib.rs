@@ -364,7 +364,7 @@ pub const fn budget_reserve() -> usize {
 /// [`budget_per_link`], the carrier-independent cost of one more link.
 /// With today's numbers (node box [`NODE_BOX_BYTES`], role 21 120 B,
 /// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 696 B) the
-/// division yields 4 with 64 B over — the heap affords exactly the
+/// division yields 4 with 56 B over — the heap affords exactly the
 /// BLE-session count, and no extra LoRa-backed links until a fixed term shrinks. The
 /// binaries assert `>=` [`MAX_LINKS`]: a node box grown past
 /// that line is a budget violation at compile time, not a dead session
@@ -784,7 +784,7 @@ const _: () =
 /// prints it, at 68429da6. The board prints the same figure at runtime as
 /// `size_of_val(&*node)`: the `node_box=` of every `[HEAP_CENSUS]` line,
 /// and the argument the binaries hand `log_budget_and_assert`, whose
-/// `HEAP_BUDGET … total= slack=` follow from it. Of the 31 696 B,
+/// `HEAP_BUDGET … total= slack=` follow from it. Of the 31 704 B,
 /// `EmbeddedStorage`'s inline tables are 29 968 B
 /// (`docs/src/firmware/heap-budget.md` has the table).
 ///
@@ -798,8 +798,10 @@ const _: () =
 ///
 /// 31 696 B was exactly the node box at which [`MAX_LINKS`] links fit with
 /// nothing left (`max_endpoint_links_at_its_boundaries`). Since #662 took
-/// the RTT retry state out of `Link` (16 B a link) it is 64 B under that
-/// line: the slack is 64 B, the boot serve cap is still 0 B, and 65 more
-/// bytes in `NodeCore` cost a link and fail the binaries'
+/// the RTT retry state out of `Link` (16 B a link) the boundary sits 64 B
+/// higher, and #666 spent 8 B of that on the boxed split request/response
+/// state (`NodeCore::split_internal`, the box pointer and its alignment):
+/// the slack is 56 B, the boot serve cap is still 0 B, and 57 more bytes
+/// in `NodeCore` cost a link and fail the binaries'
 /// `MAX_ENDPOINT_LINKS >= ble::MAX_LINKS` assert.
-pub const NODE_BOX_BYTES: usize = 31_696;
+pub const NODE_BOX_BYTES: usize = 31_704;

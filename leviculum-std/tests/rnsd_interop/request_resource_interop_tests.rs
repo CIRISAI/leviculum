@@ -1,5 +1,5 @@
 //! Request-Resource interop tests: >MDU requests as Resources, both
-//! directions, plus the documented split-Resource divergence.
+//! directions, single-segment and split.
 //!
 //! Python `Link.request()` sends the packed `[timestamp, path_hash, data]`
 //! as a single REQUEST packet only while it fits the link MDU
@@ -7,15 +7,12 @@
 //! request id (Link.py:514-527). `NodeCore::send_request_resource` is our
 //! counterpart for that large-payload path.
 //!
-//! Divergence under test (negative case): Python auto-splits Resources
-//! above `MAX_EFFICIENT_SIZE = 1_048_575` bytes (Resource.py:116, 285-313).
-//! Our request-correlation path represents one transfer, so split
-//! request/response advertisements are rejected explicitly
-//! (link_management.rs `Split request/response Resources are unsupported`)
-//! instead of accepting bytes that cannot be reassembled with Python
-//! semantics. The peer's request must time out cleanly and the link must
-//! stay usable.
-
+//! Above `MAX_EFFICIENT_SIZE = 1_048_575` bytes Python splits that Resource
+//! (Resource.py:116, 285-313), every segment carrying the request id and
+//! the request or response flag (Resource.py:770-778), and hands the joined
+//! body to the handler after the last segment (Resource.py:708-738). Ours
+//! does the same in both roles since Codeberg #666; until then it refused
+//! the shape and a large request against it died as a timeout.
 use std::time::Duration;
 
 use rand_core::OsRng;
@@ -411,49 +408,56 @@ async fn test_python_request_resource_to_rust_echo_round_trip() {
     rust_node.stop().await.expect("stop node");
 }
 
-/// Negative divergence: a >1_048_575-byte request from Python arrives as a
-/// split Resource advertisement, our node ignores it, Python times out
-/// cleanly, and the link stays healthy.
+/// Python → Rust, split both ways: a request past one segment arrives as a
+/// split request Resource, our handler gets the joined body once, and our
+/// echo past one segment goes back as a split response Python reassembles.
 ///
 /// Python spills the packed request to a tempfile and splits it
-/// (Resource.py:273-279, 285-313: `total_segments > 1`, `split = True`);
-/// our core rejects split request/response advertisements explicitly rather
-/// than accepting bytes it cannot reassemble with Python semantics. The
-/// Python RequestReceipt must FAIL (Link.py:1402-1434), no `RequestReceived`
-/// may fire on our side, and a subsequent small request over the same link
-/// must still succeed.
+/// (Resource.py:273-279, 285-313: `total_segments > 1`, `split = True`),
+/// each segment advertised after the previous one's proof
+/// (Resource.py:782-821). The RequestReceipt must turn READY with the bytes
+/// Python sent, and the link must stay healthy for a small request after.
 #[tokio::test]
-async fn test_python_split_request_resource_ignored_link_survives() {
+async fn test_python_split_request_resource_served_by_rust() {
     let (rust_node, mut event_rx, daemon, link_id, py_link_hash, _storage) =
         setup_rust_echo_responder("test_python_split_request_resource").await;
 
     // 1_100_000 raw bytes: with msgpack framing and the [ts, path_hash, data]
-    // wrapper the packed request exceeds MAX_EFFICIENT_SIZE = 1_048_575.
-    let payload = vec![0x5Au8; 1_100_000];
+    // wrapper the packed request exceeds MAX_EFFICIENT_SIZE = 1_048_575, so
+    // Python sends two segments.
+    let payload: Vec<u8> = (0..1_100_000u32)
+        .map(|i| (i.wrapping_mul(7) % 253) as u8)
+        .collect();
 
-    // Python forwards the timeout to the Resource (Link.py:517), where the
-    // ADV watchdog waits timeout+1s per retry across MAX_ADV_RETRIES=4
-    // (Resource.py:131, 574): 2s keeps the FAILED verdict within ~15s.
     let py_request_id = daemon
-        .send_link_request(&py_link_hash, "/interop-echo", Some(&payload), Some(2.0))
+        .send_link_request(&py_link_hash, "/interop-echo", Some(&payload), Some(60.0))
         .await
         .expect("send_link_request");
 
-    // The split advertisement must be ignored: no RequestReceived within the
-    // window in which Python is still retrying the ADV.
-    let received =
-        wait_for_request_received(&mut event_rx, &link_id, Duration::from_secs(10)).await;
-    assert!(
-        received.is_none(),
-        "split request Resource must not dispatch a request handler"
+    let (request_id, path, data) =
+        wait_for_request_received(&mut event_rx, &link_id, Duration::from_secs(60))
+            .await
+            .expect("a split request Resource must reach our handler, joined");
+    assert_eq!(path, "/interop-echo");
+    assert_eq!(
+        data,
+        msgpack_bin(&payload),
+        "the joined segments are the one msgpack value Python packed"
     );
 
-    // Python's RequestReceipt must conclude FAILED, not hang or go READY.
-    let (status, _response) =
-        poll_request_status(&daemon, &py_request_id, Duration::from_secs(90)).await;
+    // The echo is past one segment too, so it goes back split.
+    rust_node
+        .send_response_resource(&link_id, &request_id, &data)
+        .await
+        .expect("a response past one segment is sent split");
+
+    let (status, response) =
+        poll_request_status(&daemon, &py_request_id, Duration::from_secs(60)).await;
+    assert_eq!(status, "READY", "Python RequestReceipt must turn READY");
     assert_eq!(
-        status, "FAILED",
-        "Python Link.request must time out cleanly on the ignored split ADV"
+        response.as_deref(),
+        Some(payload.as_slice()),
+        "Python must reassemble our split response into the bytes it sent"
     );
 
     // The link is still healthy: the daemon drops closed links from its
@@ -462,10 +466,7 @@ async fn test_python_split_request_resource_ignored_link_survives() {
         .get_link_status(&py_link_hash)
         .await
         .expect("get_link_status");
-    assert_eq!(
-        link_status.status, "found",
-        "link must survive the ignored split request"
-    );
+    assert_eq!(link_status.status, "found", "link must survive");
 
     // ...and a small request over the same link still round-trips.
     let small_payload = b"small follow-up".to_vec();
@@ -493,4 +494,70 @@ async fn test_python_split_request_resource_ignored_link_survives() {
         poll_request_status(&daemon, &py_small_id, Duration::from_secs(20)).await;
     assert_eq!(status, "READY", "follow-up request must succeed");
     assert_eq!(response.as_deref(), Some(small_payload.as_slice()));
+}
+
+/// Rust → Python, split both ways: our request past one segment goes out as
+/// a split request Resource, Python's echo handler gets it whole, and its
+/// equally large echo comes back as a split response Resource that must
+/// surface once as `ResponseReceived` with our request id.
+#[tokio::test]
+async fn test_rust_split_request_resource_to_python_echo_round_trip() {
+    let daemon = TestDaemon::start().await.expect("Failed to start daemon");
+    let mut stream = connect_to_daemon(&daemon).await;
+    let mut deframer = Deframer::new();
+    let mut node = NodeCoreBuilder::new().build(OsRng, TestClock, MemoryStorage::with_defaults());
+
+    let link_id = establish_link_to_echo_handler(&mut node, &daemon, &mut stream, &mut deframer)
+        .await
+        .expect("link establishment");
+
+    let payload: Vec<u8> = (0..1_100_000u32).map(|i| (i % 251) as u8).collect();
+    let request_data = msgpack_bin(&payload);
+
+    let (request_id, _resource_hash, output) = node
+        .send_request_resource(&link_id, "/echo", Some(&request_data), Some(60_000))
+        .expect("a request past one segment is sent split");
+    dispatch_actions(&mut stream, &output).await;
+
+    let mut response = None;
+    let (got_response, events) = pump_until(
+        &mut node,
+        &mut stream,
+        &mut deframer,
+        Duration::from_secs(90),
+        |e| {
+            if let NodeEvent::ResponseReceived {
+                link_id: id,
+                request_id: rid,
+                response_data,
+                ..
+            } = e
+            {
+                if *id == link_id && *rid == request_id {
+                    response = Some(response_data.clone());
+                    return true;
+                }
+            }
+            false
+        },
+    )
+    .await;
+    let failures: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                NodeEvent::ResourceFailed { .. } | NodeEvent::RequestTimedOut { .. }
+            )
+        })
+        .collect();
+    assert!(
+        got_response,
+        "ResponseReceived must fire for our split request; failures: {failures:?}"
+    );
+    assert_eq!(
+        response.expect("response captured"),
+        request_data,
+        "Python's split echo must reassemble to the request payload byte-exact"
+    );
 }

@@ -19,11 +19,10 @@ discover a propagation node, upload a recipient-encrypted message as a raw Link
 Packet or Resource, and perform the `/get` list, download, and acknowledgement
 exchange. Propagation-node hosting, transit storage, `/offer`, and peer
 synchronisation are documented only as Python-reference context and are not
-implemented by `leviculum-lxmf`. The current `/get` path supports canonical
-single-segment Link request and response Resources. Packed request or response
-values above Reticulum's 1,048,575-byte efficient Resource limit, and incoming
-split request/response advertisements, are rejected until semantic segment
-reassembly is implemented.
+implemented by `leviculum-lxmf`. The `/get` path supports Link request and response Resources of any size:
+packed request or response values above Reticulum's 1,048,575-byte efficient
+Resource limit travel as split Resources and are reassembled before the
+handler sees them, as in Python (Codeberg #666).
 
 ## How to read this specification
 

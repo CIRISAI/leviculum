@@ -966,6 +966,19 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "RESOURCE_ADV_REFUSED",
         required_keys: &["rh", "link", "reason", "held"],
     },
+    // A segment of a split request or response that cannot be joined:
+    // segment 1 past `RESOURCE_MAX_REASSEMBLED_SIZE`, or a later segment
+    // with no reassembly open at its index (Codeberg #666).
+    EventSchema {
+        name: "RESOURCE_SPLIT_INTERNAL_REFUSED",
+        required_keys: &["link", "segment", "total", "size"],
+    },
+    // A segment of a split request or response assembled and held until
+    // the last one (Codeberg #666).
+    EventSchema {
+        name: "RESOURCE_SPLIT_INTERNAL_SEGMENT",
+        required_keys: &["link", "segment", "total", "held"],
+    },
     EventSchema {
         name: "RESOURCE_PART_RX",
         required_keys: &["rh", "idx", "outstanding", "consecutive"],

@@ -264,7 +264,7 @@ empty and nothing transmits at the next drain.
 
 *Fixed in 2352c749.* The arm calls `drop_announce_queues`
 (`leviculum-core/src/transport.rs:9240`, reached through
-`NodeCore::drop_announce_queues`, `leviculum-core/src/node/mod.rs:2818`),
+`NodeCore::drop_announce_queues`, `leviculum-core/src/node/mod.rs:2945`),
 which empties every interface's cap queue, leaves the holdoff clocks as
 they are, and logs `ANN_QUEUE_DROPPED iface= count=` per interface that
 held any, as the reference logs "Dropped N announces on <interface>". The

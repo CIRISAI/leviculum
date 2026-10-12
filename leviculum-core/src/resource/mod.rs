@@ -36,6 +36,7 @@ pub mod window;
 pub use outgoing::{
     prepare_resource_send, PreparedResourceSend, ResourceCryptParams, ResourceSendParams,
 };
+pub(crate) use source::read_source_to_vec;
 pub use source::{PrefixSource, ResourceSource, SliceSource, SourceError};
 pub use window::{RateSample, WindowPolicy};
 
@@ -112,6 +113,20 @@ pub const RESOURCE_MAX_INCOMING_SIZE: usize = RESOURCE_MAX_EFFICIENT_SIZE
 /// its sender fails fast instead of spending its advertisement budget on
 /// silence.
 pub const RESOURCE_MAX_INCOMING_PER_LINK: usize = 4;
+
+/// The largest request or response body this node reassembles from a split
+/// resource (Codeberg #666), checked against the advertised total `d` when
+/// segment 1 arrives.
+///
+/// The reference appends each segment to a file named by the transfer's
+/// original hash and has no bound but the disk
+/// (`reference/Reticulum/RNS/Resource.py:708`); ours holds the segments in
+/// memory until the last one, so the bound is ours. Sixteen segments covers
+/// any request or response the propagation node or remote management sends
+/// with room to spare. A board never reaches it: its per-segment bound
+/// (`NodeCoreBuilder::max_incoming_resource_size`) already refuses a
+/// segment 1, which carries a whole segment's worth.
+pub const RESOURCE_MAX_REASSEMBLED_SIZE: usize = 16 * RESOURCE_MAX_EFFICIENT_SIZE;
 
 /// Maximum metadata size (16 MiB - 1).
 pub const RESOURCE_METADATA_MAX_SIZE: usize = 16 * 1024 * 1024 - 1;

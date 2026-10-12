@@ -5,6 +5,7 @@
 //! and internal link packet processing (handshake, data, timeouts).
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::constants::{
@@ -39,6 +40,71 @@ pub(super) struct LinkRetryState {
     /// (Codeberg #327: a field log that showed one request and a death, with
     /// no way to tell that two more requests had gone out unlogged).
     pub attempt: u8,
+}
+
+/// The state of split request and response bodies (Codeberg #666), boxed
+/// on `NodeCore::split_internal` and allocated only while one is in flight:
+/// a board never splits (its per-segment bound refuses a segment 1), and
+/// the node box is pinned to the byte by its heap budget.
+#[derive(Default)]
+pub(super) struct SplitInternal {
+    /// Bodies being received, by link and the transfer's original hash.
+    pub reassembly: BTreeMap<(LinkId, [u8; 32]), SplitReassembly>,
+    /// Bodies being sent, by link: the tag each next segment is built
+    /// with, valid only for the plan whose original hash it names.
+    pub sends: BTreeMap<LinkId, SplitSend>,
+}
+
+impl SplitInternal {
+    pub(super) fn is_empty(&self) -> bool {
+        self.reassembly.is_empty() && self.sends.is_empty()
+    }
+
+    /// Estimated heap bytes (#388 census): both maps and the bodies held.
+    pub(super) fn heap_bytes(&self) -> usize {
+        use crate::heap_census as hc;
+        core::mem::size_of::<Self>()
+            + hc::btree_map_bytes(&self.reassembly)
+            + hc::btree_map_bytes(&self.sends)
+            + self
+                .reassembly
+                .values()
+                .map(|r| r.data.capacity() + r.metadata.as_ref().map_or(0, |m| m.capacity()))
+                .sum::<usize>()
+    }
+}
+
+/// A split request or response being sent on a link.
+pub(super) struct SplitSend {
+    /// Segment 1's resource hash, which the link's segment plan carries; a
+    /// tag naming another hash is stale and ignored.
+    pub original_hash: [u8; 32],
+    pub tag: crate::resource::outgoing::InternalRequestTag,
+}
+
+/// A request or response body arriving as a split resource, held until its
+/// last segment (Codeberg #666).
+///
+/// Keyed in `SplitInternal::reassembly` by link and the
+/// transfer's original hash, which every segment advertises as `o`. The
+/// reference appends each assembled segment to a file named by that hash and
+/// calls the request or response handler only after the last one
+/// (`reference/Reticulum/RNS/Resource.py:708-738`); this is that file, in
+/// memory.
+pub(super) struct SplitReassembly {
+    /// The segment index the next advertisement must carry; segments are
+    /// advertised in order, each after the previous one's proof.
+    pub next_index: u32,
+    /// The transfer's segment count, the same on every advertisement.
+    pub total_segments: u32,
+    /// Hash of the segment currently transferring, so its failure ends the
+    /// reassembly instead of leaving it to the link's close.
+    pub current_hash: [u8; 32],
+    /// The bodies of the segments assembled so far, in order.
+    pub data: Vec<u8>,
+    /// Segment 1's metadata, the only segment that carries any
+    /// (Resource.py:696).
+    pub metadata: Option<Vec<u8>>,
 }
 
 /// Outcome of trying to advance a split outgoing resource transfer after a
@@ -569,6 +635,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         self.links.remove(link_id);
         self.link_retry_state.remove(link_id);
+        if let Some(split) = self.split_internal.as_mut() {
+            split.reassembly.retain(|(link, _), _| link != link_id);
+            split.sends.remove(link_id);
+            if split.is_empty() {
+                self.split_internal = None;
+            }
+        }
         self.transport.unregister_destination(link_id.as_bytes());
         // Drop caller-visible aliases that pointed at this link
         // (Codeberg #66 retry rekeying). The origin-id entry is NOT
@@ -2529,6 +2602,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let Some((link_id, resource_hash, is_sender, completed)) = outcome else {
                 continue;
             };
+            if !is_sender && !completed {
+                if let Some(split) = self.split_internal.as_mut() {
+                    split.reassembly.retain(|(link, _), entry| {
+                        *link != link_id || entry.current_hash != resource_hash
+                    });
+                    if split.is_empty() {
+                        self.split_internal = None;
+                    }
+                }
+            }
             let request_id = if is_sender {
                 self.request_resource_uploads.get(&resource_hash).copied()
             } else {
@@ -2711,20 +2794,51 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
 
-        // Python can split large request and response Resources, but the
-        // request-correlation path here currently represents one transfer.
-        // Reject non-canonical multi-segment forms explicitly instead of
-        // accepting bytes that cannot be reassembled with Python semantics.
-        if (adv.flags.is_request || adv.flags.is_response)
-            && (adv.flags.split || adv.segment_index != 1 || adv.total_segments != 1)
+        // The reference sends a request or response past one segment as a
+        // split resource, every segment flagged and carrying the request id
+        // (`reference/Reticulum/RNS/Resource.py:770-778`), and accepts each
+        // segment's advertisement through the same request or response arm
+        // (`reference/Reticulum/RNS/Link.py:1073-1088`). Segment 1 opens a
+        // reassembly, a later segment must be the next one of an open
+        // reassembly on this link; anything else cannot be put together and
+        // is ignored (Codeberg #666).
+        let split_internal = (adv.flags.is_request || adv.flags.is_response)
+            && adv.request_id.is_some()
+            && adv.total_segments > 1;
+        if split_internal {
+            let key = (link_id, adv.original_hash);
+            let fits = if adv.segment_index == 1 {
+                adv.data_size <= crate::resource::RESOURCE_MAX_REASSEMBLED_SIZE as u64
+            } else {
+                self.split_internal
+                    .as_ref()
+                    .and_then(|split| split.reassembly.get(&key))
+                    .is_some_and(|r| {
+                        r.next_index == adv.segment_index && r.total_segments == adv.total_segments
+                    })
+            };
+            if !fits {
+                crate::tracing::debug!(
+                    event = "RESOURCE_SPLIT_INTERNAL_REFUSED",
+                    link = %HexShort(link_id.as_bytes()),
+                    segment = adv.segment_index,
+                    total = adv.total_segments,
+                    size = adv.data_size,
+                );
+                return;
+            }
+        } else if (adv.flags.is_request || adv.flags.is_response)
+            && (adv.flags.split || adv.segment_index != 1)
         {
             crate::tracing::debug!(
                 segment = adv.segment_index,
                 total = adv.total_segments,
-                "Split request/response Resources are unsupported"
+                "Request/response Resource with an inconsistent segment shape, ignoring"
             );
             return;
         }
+        let split_key = (link_id, adv.original_hash);
+        let split_segment = (adv.segment_index, adv.total_segments);
 
         // Request and response Resources are Link protocol internals, not
         // application Resources. Python accepts request Resources regardless
@@ -2826,6 +2940,39 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
             ResourceStrategy::AcceptNone => {
                 crate::tracing::trace!("Resource ADV rejected (strategy=AcceptNone)");
+            }
+        }
+
+        // An accepted segment of a split request or response opens (segment
+        // 1) or advances the reassembly the next segment is checked against.
+        if split_internal
+            && self.links.get(&link_id).is_some_and(|l| {
+                l.incoming_resources()
+                    .iter()
+                    .any(|r| r.resource_hash() == &resource_hash)
+            })
+        {
+            let (segment_index, total_segments) = split_segment;
+            if segment_index == 1 {
+                self.split_internal
+                    .get_or_insert_with(Default::default)
+                    .reassembly
+                    .insert(
+                        split_key,
+                        SplitReassembly {
+                            next_index: 1,
+                            total_segments,
+                            current_hash: resource_hash,
+                            data: Vec::new(),
+                            metadata: None,
+                        },
+                    );
+            } else if let Some(entry) = self
+                .split_internal
+                .as_mut()
+                .and_then(|split| split.reassembly.get_mut(&split_key))
+            {
+                entry.current_hash = resource_hash;
             }
         }
 
@@ -3095,6 +3242,84 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         let seg_idx = incoming.segment_index();
                         let total_segs = incoming.total_segments();
 
+                        // A split request or response body is delivered once,
+                        // whole, after its last segment; the segments before
+                        // it are appended and proven, and their sender then
+                        // advertises the next (Resource.py:708-749).
+                        let split_internal = total_segs > 1
+                            && has_request_id
+                            && (resource_flags.is_request || resource_flags.is_response);
+                        let (data, metadata) = if split_internal {
+                            let key = (link_id, *incoming.original_hash());
+                            let Some(entry) = self
+                                .split_internal
+                                .as_mut()
+                                .and_then(|split| split.reassembly.get_mut(&key))
+                            else {
+                                crate::tracing::debug!(
+                                    "Split request/response segment without a reassembly"
+                                );
+                                return;
+                            };
+                            if entry.next_index != seg_idx {
+                                if let Some(split) = self.split_internal.as_mut() {
+                                    split.reassembly.remove(&key);
+                                }
+                                crate::tracing::debug!(
+                                    "Split request/response segment out of order, dropped"
+                                );
+                                return;
+                            }
+                            if entry.data.is_empty() {
+                                entry.data = data;
+                            } else {
+                                entry.data.extend_from_slice(&data);
+                            }
+                            if seg_idx == 1 {
+                                entry.metadata = metadata;
+                            }
+                            entry.next_index = seg_idx.saturating_add(1);
+                            if seg_idx < total_segs {
+                                crate::tracing::debug!(
+                                    event = "RESOURCE_SPLIT_INTERNAL_SEGMENT",
+                                    link = %HexShort(link_id.as_bytes()),
+                                    segment = seg_idx,
+                                    total = total_segs,
+                                    held = entry.data.len(),
+                                );
+                                // Between two segments of a response nothing
+                                // is transferring, so the request's own
+                                // timer watches for the next advertisement.
+                                if let Some(request_id) =
+                                    self.response_resource_downloads.remove(&resource_hash)
+                                {
+                                    if let Some(pending) =
+                                        self.pending_requests.get_mut(&request_id)
+                                    {
+                                        pending.response_started_at_ms = Some(now_ms);
+                                    }
+                                }
+                                return;
+                            }
+                            let joined = self
+                                .split_internal
+                                .as_mut()
+                                .and_then(|split| split.reassembly.remove(&key));
+                            if self
+                                .split_internal
+                                .as_ref()
+                                .is_some_and(|split| split.is_empty())
+                            {
+                                self.split_internal = None;
+                            }
+                            match joined {
+                                Some(entry) => (entry.data, entry.metadata),
+                                None => return,
+                            }
+                        } else {
+                            (data, metadata)
+                        };
+
                         // Python `response_resource_concluded` (Link.py): a
                         // completed resource whose ADV flagged `is_response` and
                         // that matches an outstanding request is delivered to the
@@ -3106,11 +3331,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         // correlated by the request_id carried in the ADV. One
                         // WITHOUT metadata carries the wrapped
                         // `[request_id, response]` and is unpacked here.
-                        // Responses up to RESOURCE_MAX_EFFICIENT_SIZE (~1 MiB) are
-                        // single-segment, which covers every request response; a
-                        // (never-in-practice) multi-segment response falls through
-                        // to the generic resource path.
-                        let response_delivery = if incoming.is_response() && total_segs == 1 {
+                        // A split response arrives here once, after its last
+                        // segment, with the segments' bodies joined above.
+                        let response_delivery = if incoming.is_response() {
                             if metadata.is_some() {
                                 incoming
                                     .request_id()
@@ -3384,9 +3607,30 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // completion (mirrors Python's next_segment.advertise()). Only
                 // the final segment emits the sender's ResourceCompleted.
                 let total_segments = match self.advance_outgoing_segments(&link_id, now_ms) {
-                    SegmentAdvance::Sent => return,
-                    SegmentAdvance::Done { total_segments } => total_segments,
+                    SegmentAdvance::Sent => {
+                        // A split request upload is correlated by the hash of
+                        // the segment in flight, so its completion or failure
+                        // is the next segment's to report (Codeberg #666).
+                        if let Some(request_id) =
+                            self.request_resource_uploads.remove(&resource_hash)
+                        {
+                            if let Some(next) = self
+                                .links
+                                .get(&link_id)
+                                .and_then(|l| l.outgoing_resource())
+                                .map(|r| *r.resource_hash())
+                            {
+                                self.request_resource_uploads.insert(next, request_id);
+                            }
+                        }
+                        return;
+                    }
+                    SegmentAdvance::Done { total_segments } => {
+                        self.end_split_send(&link_id);
+                        total_segments
+                    }
                     SegmentAdvance::Failed { error } => {
+                        self.end_split_send(&link_id);
                         // A mid-transfer segment build or link-away: the
                         // transfer stopped short, so report failure instead of
                         // completion. The resource is not put back (Codeberg
@@ -3440,6 +3684,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
+    /// Forget the request tag of a split send on `link_id` once its plan is
+    /// done or gone.
+    fn end_split_send(&mut self, link_id: &LinkId) {
+        if let Some(split) = self.split_internal.as_mut() {
+            split.sends.remove(link_id);
+            if split.is_empty() {
+                self.split_internal = None;
+            }
+        }
+    }
+
     /// After a segment's proof, build and advertise the next segment of a split
     /// transfer, if any.
     ///
@@ -3481,7 +3736,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     error: crate::resource::ResourceError::LinkClosed,
                 };
             };
-            plan.build_segment(index, &link.resource_crypt_params(), &mut self.rng, now_ms)
+            let request = self
+                .split_internal
+                .as_ref()
+                .and_then(|split| split.sends.get(link_id))
+                .filter(|send| &send.original_hash == plan.original_hash())
+                .map(|send| &send.tag);
+            plan.build_segment(
+                index,
+                &link.resource_crypt_params(),
+                &mut self.rng,
+                now_ms,
+                request,
+            )
         };
 
         let outgoing = match build {

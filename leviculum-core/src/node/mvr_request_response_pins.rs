@@ -1,12 +1,9 @@
 //! mvr pins for the #138 request/response hardening (red on pre-#138 master).
 //!
-//! F1: `send_response_resource` / `send_file_response` with a payload above
-//! `RESOURCE_MAX_EFFICIENT_SIZE` (1_048_575 B) must refuse with
-//! `ResourceError::ResourceTooLarge`. Python splits such payloads into
-//! multiple Resource segments; the pre-#138 code advertised the unsplit
-//! single-segment form instead, which no Python peer can reassemble. Until
-//! request/response segmentation exists, the only wire-compatible behavior
-//! is an explicit sender-side refusal.
+//! F1 (retired by #666): the oversized response senders used to refuse with
+//! `ResourceTooLarge`, because the single-segment form they advertised could
+//! not be reassembled by a Python peer. They now split the way the reference
+//! does; the pins for that live in `mvr_split_request_response`.
 //!
 //! F2: a RESPONSE packet carrying a valid pending `request_id` but arriving
 //! on a DIFFERENT link must not consume the pending request. Pre-#138 the
@@ -24,14 +21,12 @@ use std::vec::Vec;
 
 use rand_core::OsRng;
 
-use crate::constants::TRUNCATED_HASHBYTES;
 use crate::destination::{Destination, DestinationType, Direction, ProofStrategy};
 use crate::identity::Identity;
 use crate::link::LinkId;
-use crate::msgpack::{write_bin, write_fixstr};
+use crate::msgpack::write_fixstr;
 use crate::node::request::RequestPolicy;
 use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
-use crate::resource::{ResourceError, RESOURCE_MAX_EFFICIENT_SIZE};
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::traits::NoStorage;
 use crate::transport::{Action, InterfaceId, TickOutput};
@@ -137,81 +132,6 @@ fn establish(
         caller_link_id,
         responder_link_id.expect("responder side must reach Active"),
     )
-}
-
-/// A response value exceeding `RESOURCE_MAX_EFFICIENT_SIZE`: one msgpack bin
-/// whose raw content alone is already past the single-segment boundary.
-fn oversized_msgpack_value() -> Vec<u8> {
-    let raw: Vec<u8> = (0..RESOURCE_MAX_EFFICIENT_SIZE + 1)
-        .map(|i| (i % 251) as u8)
-        .collect();
-    let mut v = Vec::new();
-    write_bin(&mut v, &raw);
-    v
-}
-
-// ----------------------------------------------------------------------------
-// F1: oversized internal response senders must refuse, not send unsplit.
-// ----------------------------------------------------------------------------
-
-/// `send_response_resource` above the single-segment boundary must return
-/// `ResourceTooLarge` instead of advertising an unsplit Resource no Python
-/// peer can reassemble.
-#[test]
-fn oversized_send_response_resource_is_refused() {
-    let (mut responder, dest_hash, signing_key) = make_responder("f1-wrapped");
-    let mut initiator = make_initiator();
-    let r_iface = add_iface(&mut responder, "R_mesh");
-    let i_iface = add_iface(&mut initiator, "I_mesh");
-    let (_caller_link, responder_link) = establish(
-        &mut initiator,
-        i_iface,
-        &mut responder,
-        r_iface,
-        dest_hash,
-        signing_key,
-    );
-
-    let request_id = [0x42u8; TRUNCATED_HASHBYTES];
-    match responder.send_response_resource(&responder_link, &request_id, &oversized_msgpack_value())
-    {
-        Err(ResourceError::ResourceTooLarge) => {}
-        Err(other) => panic!("expected ResourceTooLarge, got {other}"),
-        Ok(_) => panic!("oversized send_response_resource must be refused, but it advertised"),
-    }
-}
-
-/// `send_file_response` above the single-segment boundary must return
-/// `ResourceTooLarge` for the same reason.
-#[test]
-fn oversized_send_file_response_is_refused() {
-    let (mut responder, dest_hash, signing_key) = make_responder("f1-file");
-    let mut initiator = make_initiator();
-    let r_iface = add_iface(&mut responder, "R_mesh");
-    let i_iface = add_iface(&mut initiator, "I_mesh");
-    let (_caller_link, responder_link) = establish(
-        &mut initiator,
-        i_iface,
-        &mut responder,
-        r_iface,
-        dest_hash,
-        signing_key,
-    );
-
-    let data: Vec<u8> = (0..RESOURCE_MAX_EFFICIENT_SIZE + 1)
-        .map(|i| (i % 251) as u8)
-        .collect();
-    // `{"name": "big.bin"}` as msgpack (fixmap(1) + fixstr + fixstr).
-    let mut metadata = std::vec![0x81];
-    write_fixstr(&mut metadata, "name");
-    write_fixstr(&mut metadata, "big.bin");
-
-    let request_id = [0x42u8; TRUNCATED_HASHBYTES];
-    match responder.send_file_response(&responder_link, &request_id, &data, &metadata) {
-        Err(ResourceError::ResourceTooLarge) => {}
-        Err(other) => panic!("expected ResourceTooLarge, got {other}"),
-        Ok(_) => panic!("oversized send_file_response must be refused, but it advertised"),
-    }
 }
 
 // ----------------------------------------------------------------------------

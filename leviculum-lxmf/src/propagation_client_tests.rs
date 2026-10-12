@@ -676,33 +676,6 @@ fn large_get_and_response_use_resource_fallback_end_to_end() {
         .active_link(&server_hash)
         .expect("outgoing propagation link established");
 
-    // Python would split a /get request above Resource.MAX_EFFICIENT_SIZE.
-    // Core deliberately leaves that semantic reassembly for the deferred
-    // split-request work, so LXMF must surface the explicit size error without
-    // retaining a request correlation that can never complete.
-    let mut split_sized_request = Vec::new();
-    crate::msgpack::bin(
-        &mut split_sized_request,
-        &alloc::vec![0x5c; RESOURCE_MAX_EFFICIENT_SIZE],
-    );
-    assert!(matches!(
-        transport.submit_mailbox_request(
-            &mut client,
-            link_id,
-            &split_sized_request,
-            PropagationRequestKind::Get,
-            Some(60_000),
-        ),
-        Err(PropagationTransportError::Resource(
-            ResourceError::ResourceTooLarge
-        ))
-    ));
-    assert!(transport.pending_requests.is_empty());
-    assert!(!client
-        .link(&link_id)
-        .expect("active propagation link")
-        .has_outgoing_resource());
-
     let request_body: Vec<u8> = (0..1_400)
         .map(|index| ((index * 79 + 11) & 0xff) as u8)
         .collect();
@@ -796,6 +769,33 @@ fn large_get_and_response_use_resource_fallback_end_to_end() {
             ..
         } if data == &encoded_response
     )));
+
+    // A /get past Resource.MAX_EFFICIENT_SIZE goes out split, as Python
+    // sends it, and keeps its request correlation for the response
+    // (Codeberg #666; the split transfer itself is pinned in core's
+    // `mvr_split_request_response` and against Python in rnsd_interop).
+    let mut split_sized_request = Vec::new();
+    crate::msgpack::bin(
+        &mut split_sized_request,
+        &alloc::vec![0x5c; RESOURCE_MAX_EFFICIENT_SIZE],
+    );
+    let _split_output = transport
+        .submit_mailbox_request(
+            &mut client,
+            link_id,
+            &split_sized_request,
+            PropagationRequestKind::Get,
+            Some(60_000),
+        )
+        .expect("a split-sized /get is sent, split");
+    assert!(transport
+        .pending_requests
+        .values()
+        .any(|pending| pending.request_resource_hash.is_some()));
+    assert!(client
+        .link(&link_id)
+        .expect("active propagation link")
+        .has_outgoing_resource());
 }
 
 #[test]

@@ -127,18 +127,17 @@ then starts a fresh response deadline after the upload proof. The Rust client
 matches those two timeout phases and the canonical request (`q/u`) and response
 (`q/p`) advertisement flags.
 
-The current Core correlation path represents a request or response Resource as
-one semantic transfer. The fully packed Link request or response must currently
-fit one Reticulum Resource segment: at most `RESOURCE_MAX_EFFICIENT_SIZE` =
-1,048,575 bytes. An oversized outgoing request returns `ResourceTooLarge`
-before LXMF stores its correlation, and an incoming split request/response
-advertisement is ignored. Generic LXMF message Resources still use Core's
-ordinary multi-segment transfer path; this limit applies specifically to Link
-request/response Resources.
+A Link request or response larger than one Reticulum Resource segment
+(`RESOURCE_MAX_EFFICIENT_SIZE` = 1,048,575 bytes) travels as a split
+Resource, every segment carrying the request id and the request or response
+flag, and Core joins the segments before the request or response surfaces,
+as Python does (Codeberg #666). The receiver holds the joined body in memory
+up to `RESOURCE_MAX_REASSEMBLED_SIZE` (16 segments); Python spills it to
+disk and has no bound.
 
 The router's default `/get` delivery transfer limit is 1000 KB (1,024,000
-bytes), below the single-segment ceiling. Full Python-compatible semantic
-reassembly for larger request/response Resources remains deferred.
+bytes), below the single-segment ceiling, so a default `/get` never needs the
+split.
 
 ## Error codes (`LXMPeer.py:24-31`)
 

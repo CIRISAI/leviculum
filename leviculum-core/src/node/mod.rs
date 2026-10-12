@@ -218,6 +218,8 @@ mod mvr_shared_client_1hop;
 #[cfg(test)]
 mod mvr_single_decrypt_drop;
 #[cfg(test)]
+mod mvr_split_request_response;
+#[cfg(test)]
 mod mvr_stale_link_retransmit;
 #[cfg(test)]
 mod mvr_teardown_resource_fail;
@@ -271,9 +273,11 @@ const MGMT_ANNOUNCE_INITIAL_DELAY_MS: u64 = 15 * 1000;
 /// deviation: wire format and announce semantics are untouched.
 const MGMT_ANNOUNCE_INITIAL_JITTER_MS: u64 = 5 * 1000;
 
-/// Request and response Resources are currently correlated as one transfer.
-/// Python splits payloads above this limit, but accepting or emitting those
-/// advertisements without semantic reassembly would not be wire-compatible.
+/// A streamed generic resource is built as one segment: the streaming build
+/// reads its source per segment, and a split would need the source held as
+/// a buffer for the later segments, which is the copy streaming exists to
+/// avoid. Requests and responses past the limit split instead (Codeberg
+/// #666, `NodeCore::send_internal_split`).
 fn ensure_single_segment_internal_resource_size(
     size: usize,
 ) -> Result<(), crate::resource::ResourceError> {
@@ -497,6 +501,14 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// terminates the request immediately; successful response decoding and
     /// every other pending-request terminal path remove the correlation.
     response_resource_downloads: BTreeMap<[u8; 32], [u8; TRUNCATED_HASHBYTES]>,
+    /// Split request and response bodies in flight, sent and received
+    /// (Codeberg #666). Boxed and `None` while there are none, which on a
+    /// board is always.
+    /// Cleanup: a reassembly ends on (a) the last segment, (b) a segment out
+    /// of order, (c) the failure of the segment in flight, or (d)
+    /// remove_link(); a send tag on its plan's end or remove_link(). Emptied,
+    /// the box is dropped.
+    split_internal: Option<Box<link_management::SplitInternal>>,
     /// Link establishment retry state, keyed by link_id.
     /// When a link request times out, the retry state determines whether
     /// to re-attempt with fresh keys or emit LinkClosed::Timeout.
@@ -618,6 +630,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             pending_requests: BTreeMap::new(),
             request_resource_uploads: BTreeMap::new(),
             response_resource_downloads: BTreeMap::new(),
+            split_internal: None,
             link_retry_state: BTreeMap::new(),
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
@@ -1611,8 +1624,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             write_nil(&mut packed);
         }
 
-        ensure_single_segment_internal_resource_size(packed.len())?;
-
         let request_id = crate::crypto::truncated_hash(&packed);
         let rtt_ms = link.rtt_ms();
         let timeout = timeout_ms.unwrap_or_else(|| {
@@ -1622,34 +1633,45 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .saturating_add(1250)
         });
 
-        let outgoing = OutgoingResource::new_request(
-            &packed,
-            &request_id,
-            link,
-            true,
-            timeout,
-            &mut self.rng,
-            now_ms,
-        )?;
-        let resource_hash = *outgoing.resource_hash();
-        let advertisement = outgoing.adv_packet().to_vec();
+        // A request past one segment travels as a split request resource,
+        // every segment flagged and carrying the request id, the way the
+        // reference sends any request larger than the MDU
+        // (`reference/Reticulum/RNS/Link.py:516-517`, split at
+        // `reference/Reticulum/RNS/Resource.py:299-313`).
+        let resource_hash = if packed.len() > crate::resource::RESOURCE_MAX_EFFICIENT_SIZE {
+            self.send_internal_split(link_id, packed, None, &request_id, false, Some(timeout))?
+        } else {
+            let outgoing = OutgoingResource::new_request(
+                &packed,
+                &request_id,
+                link,
+                true,
+                timeout,
+                &mut self.rng,
+                now_ms,
+            )?;
+            let resource_hash = *outgoing.resource_hash();
+            let advertisement = outgoing.adv_packet().to_vec();
 
-        let link = self
-            .links
-            .get_mut(link_id)
-            .ok_or(ResourceError::InvalidRequest)?;
-        link.set_outgoing_resource(outgoing);
-        let packet = match link.build_data_packet_with_context(
-            &advertisement,
-            PacketContext::ResourceAdv,
-            &mut self.rng,
-        ) {
-            Ok(packet) => packet,
-            Err(error) => {
-                link.clear_outgoing_resource();
-                crate::tracing::debug!("Failed to build request Resource ADV packet: {error}");
-                return Err(ResourceError::InvalidRequest);
-            }
+            let link = self
+                .links
+                .get_mut(link_id)
+                .ok_or(ResourceError::InvalidRequest)?;
+            link.set_outgoing_resource(outgoing);
+            let packet = match link.build_data_packet_with_context(
+                &advertisement,
+                PacketContext::ResourceAdv,
+                &mut self.rng,
+            ) {
+                Ok(packet) => packet,
+                Err(error) => {
+                    link.clear_outgoing_resource();
+                    crate::tracing::debug!("Failed to build request Resource ADV packet: {error}");
+                    return Err(ResourceError::InvalidRequest);
+                }
+            };
+            self.route_link_packet(link_id, &packet);
+            resource_hash
         };
 
         self.pending_requests.insert(
@@ -1663,7 +1685,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         );
         self.request_resource_uploads
             .insert(resource_hash, request_id);
-        self.route_link_packet(link_id, &packet);
 
         Ok((request_id, resource_hash, self.process_events_and_actions()))
     }
@@ -1925,7 +1946,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         write_bin(&mut wrapped, request_id);
         wrapped.extend_from_slice(response_data);
         debug_assert_eq!(wrapped.len(), framed_len);
-        ensure_single_segment_internal_resource_size(wrapped.len())?;
+        if wrapped.len() > crate::resource::RESOURCE_MAX_EFFICIENT_SIZE {
+            let resource_hash =
+                self.send_internal_split(link_id, wrapped, None, request_id, true, None)?;
+            return Ok((resource_hash, self.process_events_and_actions()));
+        }
 
         let link = self
             .links
@@ -2031,7 +2056,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         write_fixarray_header(&mut prefix, 2);
         write_bin(&mut prefix, request_id);
         let framed_len = prefix.len() + response.total_len();
-        ensure_single_segment_internal_resource_size(framed_len)?;
+        if framed_len > crate::resource::RESOURCE_MAX_EFFICIENT_SIZE {
+            // Past one segment the later segments are cut from a held
+            // buffer, so the stream is read into one here; the streaming
+            // saving is for the sub-segment answers a board serves.
+            let mut framed = PrefixSource::new(prefix, response);
+            let wrapped = crate::resource::read_source_to_vec(&mut framed)?;
+            let resource_hash =
+                self.send_internal_split(link_id, wrapped, None, request_id, true, None)?;
+            return Ok((resource_hash, self.process_events_and_actions()));
+        }
 
         let link = self
             .links
@@ -2112,11 +2146,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .checked_add(metadata.len())
             .and_then(|size| size.checked_add(3))
             .ok_or(ResourceError::ResourceTooLarge)?;
-        ensure_single_segment_internal_resource_size(combined_size)?;
 
         // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
         // link) so every links.get/get_mut and the route use the wire id.
         let link_id = &self.resolve_link_id(link_id);
+
+        if combined_size > crate::resource::RESOURCE_MAX_EFFICIENT_SIZE {
+            let resource_hash = self.send_internal_split(
+                link_id,
+                data.to_vec(),
+                Some(metadata.to_vec()),
+                request_id,
+                true,
+                None,
+            )?;
+            return Ok((resource_hash, self.process_events_and_actions()));
+        }
 
         let link = self
             .links
@@ -2163,6 +2208,88 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         Ok((resource_hash, self.process_events_and_actions()))
+    }
+
+    /// Start a request or response body larger than one segment as a split
+    /// resource and return segment 1's resource hash.
+    ///
+    /// Every segment carries the request id and the request or response
+    /// flag, segment 1 the metadata, later ones segment 1's hash as `o`;
+    /// the next segment is advertised on the previous one's proof
+    /// (`advance_outgoing_segments`). The reference builds its next segment
+    /// with the same request id and flag
+    /// (`reference/Reticulum/RNS/Resource.py:770-778`).
+    fn send_internal_split(
+        &mut self,
+        link_id: &LinkId,
+        data: Vec<u8>,
+        metadata: Option<Vec<u8>>,
+        request_id: &[u8],
+        is_response: bool,
+        advertisement_timeout_ms: Option<u64>,
+    ) -> Result<[u8; 32], crate::resource::ResourceError> {
+        use crate::packet::PacketContext;
+        use crate::resource::outgoing::{segment_count, InternalRequestTag, OutgoingSegmentPlan};
+        use crate::resource::ResourceError;
+
+        let now_ms = self.transport.clock().now_ms();
+        let link = self
+            .links
+            .get(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        if link.has_outgoing_resource() {
+            return Err(ResourceError::TransferInProgress);
+        }
+        let crypt = link.resource_crypt_params();
+
+        let request_id = <[u8; TRUNCATED_HASHBYTES]>::try_from(request_id)
+            .map_err(|_| ResourceError::InvalidRequest)?;
+        let tag = InternalRequestTag {
+            request_id,
+            is_response,
+            advertisement_timeout_ms,
+        };
+        let metadata_size = metadata.as_ref().map_or(0, |m| 3 + m.len());
+        let total_segments = segment_count(metadata_size + data.len());
+        let mut plan =
+            OutgoingSegmentPlan::new(data, metadata, metadata_size, total_segments, true);
+        let segment1 = plan.build_segment(1, &crypt, &mut self.rng, now_ms, Some(&tag))?;
+        let resource_hash = *segment1.resource_hash();
+        let adv_bytes = segment1.adv_packet().to_vec();
+        plan.set_original_hash(resource_hash);
+
+        let link = self
+            .links
+            .get_mut(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        link.set_outgoing_resource(segment1);
+        link.set_outgoing_segments(plan);
+        match link.build_data_packet_with_context(
+            &adv_bytes,
+            PacketContext::ResourceAdv,
+            &mut self.rng,
+        ) {
+            Ok(pkt) => {
+                self.split_internal
+                    .get_or_insert_with(Default::default)
+                    .sends
+                    .insert(
+                        *link_id,
+                        link_management::SplitSend {
+                            original_hash: resource_hash,
+                            tag,
+                        },
+                    );
+                self.route_link_packet(link_id, &pkt);
+                Ok(resource_hash)
+            }
+            Err(e) => {
+                link.clear_outgoing_resource();
+                let _ = link.take_outgoing_segments();
+                crate::tracing::debug!("Failed to build split request/response ADV: {e}");
+                Err(ResourceError::InvalidRequest)
+            }
+        }
     }
 
     /// Accept a pending resource advertisement on a link.
@@ -3604,6 +3731,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         out
     }
 
+    /// Split request or response bodies being reassembled (Codeberg #666).
+    #[cfg(test)]
+    pub(crate) fn split_reassembly_count(&self) -> usize {
+        self.split_internal
+            .as_ref()
+            .map_or(0, |split| split.reassembly.len())
+    }
+
     /// One heap census of this node (Codeberg #388): estimated bytes
     /// held per subsystem, computed by walking the collections at their
     /// owners — see [`crate::heap_census`] for the estimation model.
@@ -3625,6 +3760,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             + hc::btree_map_bytes(&self.pending_requests)
             + hc::btree_map_bytes(&self.request_resource_uploads)
             + hc::btree_map_bytes(&self.response_resource_downloads)
+            + self
+                .split_internal
+                .as_ref()
+                .map_or(0, |split| split.heap_bytes())
             + hc::btree_map_bytes(&self.link_retry_state)
             + hc::btree_map_bytes(&self.link_id_aliases)
             + hc::btree_map_bytes(&self.link_origin_ids)
@@ -10714,41 +10853,11 @@ mod tests {
         responder.register_request_handler(dest_hash, "/echo", policy);
     }
 
+    /// Segment 1 of a split request is accepted and opens a reassembly
+    /// (Codeberg #666): the reference accepts every segment of a request
+    /// through its request arm (`reference/Reticulum/RNS/Link.py:1073-1074`).
     #[test]
-    fn test_internal_resource_senders_reject_split_sized_payloads() {
-        use crate::resource::{ResourceError, RESOURCE_MAX_EFFICIENT_SIZE};
-
-        let mut pair = establish_nodecore_link_pair();
-        let raw = alloc::vec![0x5a; RESOURCE_MAX_EFFICIENT_SIZE];
-        let mut encoded = Vec::new();
-        crate::msgpack::write_bin(&mut encoded, &raw);
-
-        assert!(matches!(
-            pair.initiator.send_request_resource(
-                &pair.initiator_link_id,
-                "/echo",
-                Some(&encoded),
-                Some(60_000),
-            ),
-            Err(ResourceError::ResourceTooLarge)
-        ));
-
-        let request_id = [0x61; TRUNCATED_HASHBYTES];
-        assert!(matches!(
-            pair.responder
-                .send_response_resource(&pair.responder_link_id, &request_id, &encoded,),
-            Err(ResourceError::ResourceTooLarge)
-        ));
-
-        assert!(matches!(
-            pair.responder
-                .send_file_response(&pair.responder_link_id, &request_id, &raw, &[],),
-            Err(ResourceError::ResourceTooLarge)
-        ));
-    }
-
-    #[test]
-    fn test_split_request_resource_advertisement_is_rejected() {
+    fn test_split_request_segment1_advertisement_is_accepted() {
         use crate::packet::PacketContext;
         use crate::resource::ResourceAdvertisement;
         use crate::transport::InterfaceId;
@@ -10789,22 +10898,25 @@ mod tests {
             .unwrap();
 
         let output = pair.responder.handle_packet(InterfaceId(0), &packet);
-        assert!(!output.events.iter().any(|event| matches!(
+        assert!(output.events.iter().any(|event| matches!(
             event,
             NodeEvent::ResourceTransferStarted {
                 is_sender: false,
                 ..
             }
         )));
-        assert!(!pair
+        assert!(pair
             .responder
             .link(&pair.responder_link_id)
             .unwrap()
             .has_incoming_resource());
+        assert_eq!(pair.responder.split_reassembly_count(), 1);
     }
 
+    /// A later segment of a split response with no segment 1 before it has
+    /// nothing to join and is ignored; the request stays pending (#666).
     #[test]
-    fn test_split_response_resource_advertisement_is_rejected() {
+    fn test_split_response_later_segment_without_segment1_is_rejected() {
         use crate::packet::PacketContext;
         use crate::resource::ResourceAdvertisement;
         use crate::transport::InterfaceId;
@@ -10831,6 +10943,7 @@ mod tests {
         )
         .unwrap();
         advertisement.flags.split = true;
+        advertisement.segment_index = 2;
         advertisement.total_segments = 2;
         let packet = pair
             .responder

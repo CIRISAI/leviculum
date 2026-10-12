@@ -177,9 +177,9 @@
 //! `links` is DERIVED, not chosen
 //! ([`crate::heap_census::max_endpoint_links`]): the fixed terms are
 //! subtracted from the heap and the remainder divided by `per_link`.
-//! With today's numbers — node box 31 696, role 21 120, reserve 18 848,
+//! With today's numbers — node box 31 704, role 21 120, reserve 18 848,
 //! sessions 4 · 3 948 = 15 792, per_link 2 696 — the remainder is
-//! 10 848 B and the division yields **4** (leaving 64 B of slack, #661, #662): the heap affords exactly the
+//! 10 840 B and the division yields **4** (leaving 56 B of slack, #661, #662, #666): the heap affords exactly the
 //! BLE-session count, no extra LoRa-backed links until a fixed term
 //! shrinks. The same number is handed to `NodeCoreBuilder::max_links`,
 //! so the budget's `links=` is an enforced cap, not a claim: the fifth

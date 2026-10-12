@@ -111,6 +111,25 @@ impl ResourceSource for SliceSource<'_> {
     }
 }
 
+/// Read a whole source, from byte zero, into one buffer of its exact size.
+///
+/// For the one case that needs the bytes held: a request or response past
+/// one segment, whose later segments are cut from a buffer (Codeberg #666).
+pub(crate) fn read_source_to_vec(source: &mut dyn ResourceSource) -> Result<Vec<u8>, SourceError> {
+    source.rewind()?;
+    let mut out = alloc::vec![0u8; source.total_len()];
+    let mut filled = 0;
+    while filled < out.len() {
+        let n = source.read(&mut out[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    out.truncate(filled);
+    Ok(out)
+}
+
 /// A source with a short owned prologue in front of it.
 ///
 /// The request/response wrapper is exactly this shape: a response Resource

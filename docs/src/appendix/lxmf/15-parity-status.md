@@ -43,10 +43,10 @@ Leviculum adds propagation-node hosting. At that point they belong in a
 separate server/peer state machine with bounded queues and tests, not in
 `leviculum-core`.
 
-The existing client also deliberately limits a semantic Link request or
-response Resource to one efficient Resource segment. Python-compatible
-reassembly of split request/response Resources above 1,048,575 bytes remains a
-layer-level gap. It is independent of the LXMF 1.1.0 wire changes above.
+A semantic Link request or response Resource above one efficient Resource
+segment (1,048,575 bytes) is split and reassembled the way Python does it,
+in both roles, since Codeberg #666. It is independent of the LXMF 1.1.0 wire
+changes above.
 
 ## Required `leviculum-core` work for the RNS 1.4.0 baseline
 

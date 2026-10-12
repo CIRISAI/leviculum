@@ -129,7 +129,7 @@ pub fn prepare_resource_send(
             total_segments,
             auto_compress,
         );
-        let segment1 = plan.build_segment(1, &params.crypt, rng, params.now_ms)?;
+        let segment1 = plan.build_segment(1, &params.crypt, rng, params.now_ms, None)?;
         let resource_hash = *segment1.resource_hash();
         let adv_bytes = segment1.adv_packet().to_vec();
         // All later segments carry segment 1's resource hash as `o`.
@@ -503,35 +503,6 @@ impl OutgoingResource {
             false,
             Some(timeout_ms),
             SegmentParams::single(),
-        )
-    }
-
-    /// Create one segment of a multi-segment resource transfer.
-    ///
-    /// `data` is this segment's slice of the file (metadata is prepended only
-    /// on segment 1, driven by `metadata` being `Some`). `seg` carries the
-    /// shared advertisement fields (`o`, `d`, `l`) and this segment's index so
-    /// a Python `rncp` receiver reassembles the file across segments.
-    pub(crate) fn new_segment(
-        data: &[u8],
-        metadata: Option<&[u8]>,
-        crypt: &ResourceCryptParams,
-        auto_compress: bool,
-        rng: &mut impl CryptoRngCore,
-        now_ms: u64,
-        seg: SegmentParams,
-    ) -> Result<Self, ResourceError> {
-        Self::new_with_flags(
-            data,
-            metadata,
-            None,
-            crypt,
-            auto_compress,
-            rng,
-            now_ms,
-            false,
-            None,
-            seg,
         )
     }
 
@@ -1508,6 +1479,21 @@ pub(crate) fn segment_count(total_size: usize) -> u32 {
     ((total_size - 1) / RESOURCE_MAX_EFFICIENT_SIZE) as u32 + 1
 }
 
+/// What makes the segments of a split transfer a request or a response
+/// body: the request id every segment advertises and the flag it carries.
+/// The reference hands both to each next segment unchanged
+/// (`request_id = self.request_id`, `is_response = self.is_response`,
+/// `reference/Reticulum/RNS/Resource.py:774-775`; Codeberg #666).
+pub(crate) struct InternalRequestTag {
+    /// The request id, in every segment's advertisement.
+    pub request_id: [u8; crate::constants::TRUNCATED_HASHBYTES],
+    /// Response flag rather than request flag.
+    pub is_response: bool,
+    /// Advertisement watchdog override for a request upload, applied to
+    /// every segment like the single-segment request (`new_request`).
+    pub advertisement_timeout_ms: Option<u64>,
+}
+
 /// Plan for sending the remaining segments of a split resource transfer.
 ///
 /// Held on the [`Link`] alongside the in-flight [`OutgoingResource`]. Segment 1
@@ -1571,6 +1557,11 @@ impl OutgoingSegmentPlan {
         self.original_hash = hash;
     }
 
+    /// Segment 1's resource hash, the `o` every later segment carries.
+    pub(crate) fn original_hash(&self) -> &[u8; 32] {
+        &self.original_hash
+    }
+
     /// Whether there is still a segment left to advertise.
     pub(crate) fn has_next(&self) -> bool {
         self.next_index <= self.total_segments
@@ -1604,12 +1595,17 @@ impl OutgoingSegmentPlan {
     /// segment's own resource hash; later segments carry the recorded
     /// `original_hash` and no metadata bytes (but keep the `has_metadata` flag
     /// when the transfer has metadata, matching Python).
+    ///
+    /// `request` marks the segment as part of a request or response body;
+    /// it is held beside the plan rather than in it, because the plan sits
+    /// inline in every [`Link`] the board's heap budget counts.
     pub(crate) fn build_segment(
         &self,
         index: u32,
         crypt: &ResourceCryptParams,
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
+        request: Option<&InternalRequestTag>,
     ) -> Result<OutgoingResource, ResourceError> {
         let range = self.data_range(index);
         let slice = &self.data[range];
@@ -1628,7 +1624,18 @@ impl OutgoingSegmentPlan {
             force_has_metadata: self.metadata_size > 0,
         };
 
-        OutgoingResource::new_segment(slice, metadata, crypt, self.auto_compress, rng, now_ms, seg)
+        OutgoingResource::new_with_flags(
+            slice,
+            metadata,
+            request.map(|r| &r.request_id[..]),
+            crypt,
+            self.auto_compress,
+            rng,
+            now_ms,
+            request.is_some_and(|r| r.is_response),
+            request.and_then(|r| r.advertisement_timeout_ms),
+            seg,
+        )
     }
 
     /// Advance the plan to the next segment after one has been advertised.
@@ -2903,7 +2910,7 @@ mod tests {
         let mut plan = OutgoingSegmentPlan::new(data, None, 0, total_segments, false);
 
         let seg1 = plan
-            .build_segment(1, &link.resource_crypt_params(), &mut rng, 1_000)
+            .build_segment(1, &link.resource_crypt_params(), &mut rng, 1_000, None)
             .unwrap();
         let adv1 = ResourceAdvertisement::unpack(seg1.adv_packet()).unwrap();
         assert_eq!(
@@ -2914,7 +2921,7 @@ mod tests {
 
         plan.set_original_hash(*seg1.resource_hash());
         let seg2 = plan
-            .build_segment(2, &link.resource_crypt_params(), &mut rng, 2_000)
+            .build_segment(2, &link.resource_crypt_params(), &mut rng, 2_000, None)
             .unwrap();
         let adv2 = ResourceAdvertisement::unpack(seg2.adv_packet()).unwrap();
         assert_ne!(
