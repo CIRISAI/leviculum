@@ -86,7 +86,8 @@ pub fn passwd_name() -> Option<String> {
     None
 }
 
-#[cfg(test)]
+// The one test is Unix-only, so the module is too.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

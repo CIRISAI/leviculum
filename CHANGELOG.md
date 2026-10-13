@@ -47,7 +47,8 @@ Catch-up to upstream master (+246 since the v0.30.0 base), with v0.31.0+ciris.1
 - Upstream code that broke the fork's macOS and Windows lanes: the
   storage-flush CPU timer used `clock_gettime`, absent on Windows (now zero
   off Unix); one test assumed Linux's abstract socket name, another the
-  /proc-derived RSS line.
+  /proc-derived RSS line. Four discovery-cache tests age the registry by
+  setting a directory's mtime, which Windows refuses; they run on Unix.
 
 ### Consumer notes
 

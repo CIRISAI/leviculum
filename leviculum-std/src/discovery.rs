@@ -631,6 +631,7 @@ mod tests {
         assert_eq!(list[0].name, "High", "higher stamp value sorts first");
     }
 
+    #[cfg(unix)]
     /// Persist `n` distinct records and [`settle`] the registry.
     fn settled_registry(root: &Path, n: usize) {
         for i in 0..n {
@@ -644,6 +645,11 @@ mod tests {
     /// Move the directory's and every file's mtime an hour into the past, so
     /// the registry looks the way it does on a node between announces rather
     /// than a moment after a write.
+    ///
+    /// Unix only: Windows refuses to open a directory as a file to set its
+    /// mtime (ERROR_ACCESS_DENIED), so the cache tests that age the registry
+    /// run on Unix.
+    #[cfg(unix)]
     fn settle(root: &Path) {
         let past = SystemTime::now() - std::time::Duration::from_secs(3600);
         let dir = discovery_dir(root);
@@ -665,6 +671,7 @@ mod tests {
     /// On the miauhaus soak (773 records) that read was 72 percent of the
     /// node's allocations, decoding every record to learn that nothing had
     /// changed. A read of an unchanged registry must not decode anything.
+    #[cfg(unix)]
     #[test]
     fn unchanged_registry_is_not_decoded_again() {
         use crate::rpc::connection::alloc_probe::measure_allocations;
@@ -690,6 +697,7 @@ mod tests {
     /// binary, any parallel test) sent every cached directory back to the
     /// files, and the test above went red when a neighbour wrote between its
     /// two reads.
+    #[cfg(unix)]
     #[test]
     fn a_write_to_another_registry_leaves_this_one_cached() {
         use crate::rpc::connection::alloc_probe::measure_allocations;
@@ -713,6 +721,7 @@ mod tests {
     /// `persist_discovered` in this process to bump the generation) is listed
     /// on the next read, and only that record is decoded. The others are
     /// stat'ed, not read.
+    #[cfg(unix)]
     #[test]
     fn a_record_added_behind_the_cache_is_listed_and_decoded_alone() {
         use crate::rpc::connection::alloc_probe::measure_allocations;
@@ -744,6 +753,7 @@ mod tests {
     /// Expiry is decided at query time, so a cached record that ages past
     /// `THRESHOLD_REMOVE` is dropped and unlinked on the read that sees it
     /// expire, although nothing on disk changed.
+    #[cfg(unix)]
     #[test]
     fn a_cached_record_expires_on_the_read_that_sees_it() {
         use leviculum_core::discovery::THRESHOLD_REMOVE;
