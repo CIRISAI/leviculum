@@ -287,13 +287,16 @@ pub(crate) fn spawn_tcp_interface_from_stream(
     let task_counters = Arc::clone(&counters);
 
     tokio::spawn(async move {
-        let _rx = tcp_interface_task(
+        // A server-accepted connection is the peer's to re-dial, so it
+        // ignores the host's reconnect kick (leviculum#84).
+        let _ = tcp_interface_task(
             task_name,
             stream,
             incoming_tx,
             outgoing_rx,
             corrupt_every,
             task_counters,
+            false,
         )
         .await;
     });
@@ -892,6 +895,8 @@ async fn tcp_client_reconnect_loop(
     // Set on the first failed cycle of an outage, cleared on the next success,
     // so the success line can report how long the peer was gone.
     let mut outage_start: Option<Instant> = None;
+    // This task honours the host's "reconnect now" (leviculum#84).
+    counters.enable_reconnect();
     loop {
         // Between here and a successful connect the carrier is down; say so
         // (L-0020, Python `self.online = False` across teardown/reconnect).
@@ -974,16 +979,36 @@ async fn tcp_client_reconnect_loop(
                 // Packets queued in outgoing_rx during disconnect will be sent on
                 // the new stream. If the channel overflowed (capacity limited),
                 // excess packets were dropped by the event loop (BufferFull).
-                outgoing_rx = tcp_interface_task(
+                let (rx, end) = tcp_interface_task(
                     name.clone(),
                     stream,
                     incoming_tx.clone(),
                     outgoing_rx,
                     corrupt_every,
                     Arc::clone(&counters),
+                    true,
                 )
                 .await;
-                tracing::warn!("{}: connection lost, will reconnect", name);
+                outgoing_rx = rx;
+                match end {
+                    ServeEnd::Lost => {
+                        tracing::warn!("{}: connection lost, will reconnect", name);
+                    }
+                    // The host said the network changed (leviculum#84): the
+                    // socket is already dropped. Dial again now, with no
+                    // backoff; the next success fires the interface-up path
+                    // (`reconnect_notify`, re-announce) and the tunnel
+                    // synthesize like any reconnect.
+                    ServeEnd::Kicked => {
+                        tracing::info!("{}: reconnecting now (host request)", name);
+                        if incoming_tx.is_closed() {
+                            return;
+                        }
+                        outage_start.get_or_insert_with(Instant::now);
+                        attempt = 0;
+                        continue;
+                    }
+                }
             }
             Err((stage, e)) => {
                 // One structured line per failed attempt, unthrottled: the
@@ -1039,8 +1064,25 @@ async fn tcp_client_reconnect_loop(
             delay,
             attempt
         );
-        tokio::time::sleep(delay).await;
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            // A host kick (leviculum#84) ends the backoff: dial again now,
+            // and restart the schedule at the base interval.
+            _ = counters.reconnect_kicked() => {
+                tracing::info!("{}: reconnecting now (host request), backoff skipped", name);
+                attempt = 0;
+            }
+        }
     }
+}
+
+/// Why a served connection ended.
+enum ServeEnd {
+    /// EOF, an I/O error, or a closed channel: the ordinary loss.
+    Lost,
+    /// The host asked for a reconnect (leviculum#84); the socket was dropped
+    /// on purpose.
+    Kicked,
 }
 
 /// Perform a SOCKS5 CONNECT handshake to `host:port` over an established stream.
@@ -1122,7 +1164,8 @@ async fn tcp_interface_task(
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     corrupt_every: Option<u64>,
     counters: Arc<InterfaceCounters>,
-) -> mpsc::Receiver<OutgoingPacket> {
+    honour_kick: bool,
+) -> (mpsc::Receiver<OutgoingPacket>, ServeEnd) {
     let (reader, mut writer) = stream.into_split();
 
     let mut deframer = Deframer::with_max_frame(TCP_HW_MTU as usize);
@@ -1132,6 +1175,13 @@ async fn tcp_interface_task(
 
     loop {
         tokio::select! {
+            // The host's "reconnect now" (leviculum#84). Returning drops both
+            // halves of the stream, which closes the socket.
+            _ = counters.reconnect_kicked(), if honour_kick => {
+                tracing::debug!("TCP interface {} dropped on host request", name);
+                return (outgoing_rx, ServeEnd::Kicked);
+            }
+
             // Read path: wait for socket readability, then try_read + deframe
             result = reader.readable() => {
                 match result {
@@ -1141,7 +1191,7 @@ async fn tcp_interface_task(
                             match reader.try_read(&mut read_buf) {
                                 Ok(0) => {
                                     tracing::debug!("TCP interface {} disconnected (EOF)", name);
-                                    return outgoing_rx;
+                                    return (outgoing_rx, ServeEnd::Lost);
                                 }
                                 Ok(n) => {
                                     counters.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
@@ -1156,7 +1206,7 @@ async fn tcp_interface_task(
                                         if let DeframeResult::Frame(data) = r {
                                             if incoming_tx.send(IncomingPacket { data, peer: None, radio: None }).await.is_err() {
                                                 // Event loop dropped its receiver
-                                                return outgoing_rx;
+                                                return (outgoing_rx, ServeEnd::Lost);
                                             }
                                         }
                                     }
@@ -1167,14 +1217,14 @@ async fn tcp_interface_task(
                                 }
                                 Err(e) => {
                                     tracing::debug!("TCP interface {} read error: {}", name, e);
-                                    return outgoing_rx;
+                                    return (outgoing_rx, ServeEnd::Lost);
                                 }
                             }
                         }
                     }
                     Err(e) => {
                         tracing::debug!("TCP interface {} readability error: {}", name, e);
-                        return outgoing_rx;
+                        return (outgoing_rx, ServeEnd::Lost);
                     }
                 }
             }
@@ -1206,13 +1256,13 @@ async fn tcp_interface_task(
                         counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
                         if let Err(e) = writer.write_all(&frame_buf).await {
                             tracing::debug!("TCP interface {} write error: {}", name, e);
-                            return outgoing_rx;
+                            return (outgoing_rx, ServeEnd::Lost);
                         }
                     }
                     None => {
                         // Event loop dropped its sender, shut down
                         tracing::debug!("TCP interface {} outgoing channel closed", name);
-                        return outgoing_rx;
+                        return (outgoing_rx, ServeEnd::Lost);
                     }
                 }
             }
@@ -1838,6 +1888,120 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// A reconnecting TCP client for the leviculum#84 tests: a long base
+    /// interval, so any reconnect inside the test budget can only be the
+    /// kick's doing.
+    fn kickable_client(
+        name: &str,
+        addr: SocketAddr,
+        reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    ) -> InterfaceHandle {
+        spawn_tcp_client_with_reconnect(TcpClientConfig {
+            id: InterfaceId(84),
+            name: name.to_string(),
+            target: TcpTarget::new(addr.ip().to_string(), addr.port()),
+            resolver: None,
+            buffer_size: 16,
+            corrupt_every: None,
+            reconnect_interval: Duration::from_secs(30),
+            max_reconnect_tries: None,
+            reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
+            connect_timeout: Duration::from_secs(2),
+            reconnect_notify,
+            tunnel_notify: None,
+            socks_target: None,
+            shutdown: None,
+            outbound_socket_hook: None,
+        })
+    }
+
+    /// leviculum#84: a kick drops the live socket (the peer reads EOF), dials
+    /// again at once, and the reconnect fires the interface-up notification
+    /// that makes the driver re-announce.
+    #[tokio::test]
+    async fn a_kick_drops_the_socket_and_redials_at_once_84() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (notify_tx, mut notify_rx) = mpsc::channel(4);
+        let handle = kickable_client("kick_live", addr, Some(notify_tx));
+
+        let (mut first, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("first connect")
+            .unwrap();
+        assert!(
+            handle.counters.kick_reconnect(),
+            "a reconnecting TCP client accepts the kick"
+        );
+
+        let mut buf = [0u8; 8];
+        let n = tokio::time::timeout(Duration::from_secs(2), first.read(&mut buf))
+            .await
+            .expect("the kicked socket is closed promptly")
+            .unwrap_or(0);
+        assert_eq!(n, 0, "the old socket was dropped (EOF at the peer)");
+        tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("the redial is immediate, not after the 30 s interval")
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), notify_rx.recv())
+                .await
+                .expect("the reconnect fires the interface-up notification"),
+            Some(InterfaceId(84))
+        );
+    }
+
+    /// leviculum#84: a kick during the reconnect backoff ends it. The peer
+    /// closes the first connection, so the client sleeps its 30 s base
+    /// interval; the kick must bring the redial inside 2 s.
+    #[tokio::test]
+    async fn a_kick_skips_the_reconnect_backoff_84() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = kickable_client("kick_backoff", addr, None);
+
+        let (first, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("first connect")
+            .unwrap();
+        drop(first);
+        // Let the client see the EOF and enter its backoff sleep.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(handle.counters.kick_reconnect());
+        tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("the kick skipped the 30 s backoff")
+            .unwrap();
+    }
+
+    /// leviculum#84: only a reconnecting TCP client honours the kick. A
+    /// server-accepted connection is the peer's to re-dial, and an interface
+    /// with no reconnect loop refuses rather than ignoring it.
+    #[tokio::test]
+    async fn a_kick_is_refused_where_nothing_reconnects_84() {
+        assert!(
+            !InterfaceCounters::new().kick_reconnect(),
+            "no task declared it reconnects"
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+        let child = spawn_tcp_interface_from_stream(
+            InterfaceId(85),
+            "accepted".to_string(),
+            accepted,
+            16,
+            None,
+        );
+        assert!(
+            !child.counters.kick_reconnect(),
+            "a server-accepted connection does not take the kick"
+        );
+    }
+
     #[tokio::test]
     async fn test_tcp_client_detaches_on_shutdown() {
         // No give-up bound: only the detach signal can stop this loop, so a
@@ -1910,6 +2074,7 @@ mod tests {
                 outgoing_rx,
                 None,
                 task_counters,
+                false,
             )
             .await
         });

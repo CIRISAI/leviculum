@@ -396,6 +396,21 @@ impl Node {
         self.inner.interface_stats()
     }
 
+    /// Reconnect one TCP client interface now, re-resolving its host and
+    /// skipping any backoff, after a network change (leviculum#84). `false`
+    /// when `id` is not a reconnecting TCP client. See
+    /// [`crate::driver::ReticulumNode::reconnect_interface`].
+    pub fn reconnect_interface(&self, id: InterfaceId) -> bool {
+        self.inner.reconnect_interface(id)
+    }
+
+    /// Reconnect every TCP client interface now (leviculum#84); returns how
+    /// many were asked. See
+    /// [`crate::driver::ReticulumNode::reconnect_all_clients`].
+    pub fn reconnect_all_clients(&self) -> usize {
+        self.inner.reconnect_all_clients()
+    }
+
     /// The bound addresses of this node's TCP server listeners, in start
     /// order. A server added with port 0 reports the kernel-assigned port
     /// here after `start()`. See
@@ -703,6 +718,57 @@ mod tests {
         // must succeed.
         node.announce(&dh, Some(b"hi")).await.expect("announce");
 
+        node.stop().await.expect("stop node");
+    }
+
+    /// leviculum#84, through the public surface: a runtime TCP client takes
+    /// `reconnect_interface`, which redials at once (the client's base
+    /// interval is 5 s); `reconnect_all_clients` counts it; an unknown id is
+    /// refused.
+    #[tokio::test]
+    async fn reconnect_interface_redials_a_tcp_client_now_84() {
+        use std::time::Duration;
+        let storage = tempfile::tempdir().expect("temp dir");
+        let mut node = NodeBuilder::new()
+            .storage_path(storage.path().to_path_buf())
+            .enable_transport(false)
+            .build()
+            .expect("build node");
+        node.start().await.expect("start node");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = node
+            .spawn_tcp_client("reconnect_84", "127.0.0.1", port, None)
+            .expect("spawn client");
+        let id = client.id();
+        let _first = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("first connect")
+            .unwrap();
+
+        // The event loop registers the interface asynchronously; until it
+        // has, the id is unknown and the kick is refused.
+        let mut accepted = false;
+        for _ in 0..50 {
+            if node.reconnect_interface(id) {
+                accepted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(accepted, "a registered TCP client takes the kick");
+        tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("redialed at once, inside the 5 s base interval")
+            .unwrap();
+
+        assert_eq!(node.reconnect_all_clients(), 1, "one TCP client to kick");
+        assert!(
+            !node.reconnect_interface(InterfaceId(usize::MAX)),
+            "an unknown id is refused"
+        );
+        drop(client);
         node.stop().await.expect("stop node");
     }
 

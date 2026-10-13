@@ -229,6 +229,18 @@ pub(crate) struct InterfaceCounters {
     /// and path-response relay on the interface until the hold lifts.
     /// Interfaces without a duty gate never touch it and stay at `false`.
     duty_hold: AtomicBool,
+    /// Whether the owning interface task honours [`kick_reconnect`]: set by a
+    /// reconnecting TCP client when its loop starts (leviculum#84). Every
+    /// other interface leaves it `false`, so a kick aimed at one is refused
+    /// rather than silently ignored.
+    ///
+    /// [`kick_reconnect`]: Self::kick_reconnect
+    reconnectable: AtomicBool,
+    /// The host's "reconnect now" signal (leviculum#84): the network changed,
+    /// so drop the socket and dial again at once. A `Notify` keeps one permit
+    /// when nobody waits, so a kick that lands mid-connect is honoured right
+    /// after that connect, never lost.
+    reconnect_kick: Notify,
 }
 
 impl InterfaceCounters {
@@ -255,7 +267,32 @@ impl InterfaceCounters {
             census: std::sync::Mutex::new(None),
             online: AtomicBool::new(true),
             duty_hold: AtomicBool::new(false),
+            reconnectable: AtomicBool::new(false),
+            reconnect_kick: Notify::new(),
         }
+    }
+
+    /// Declare that the owning task honours [`kick_reconnect`](Self::kick_reconnect).
+    /// Called once by a reconnecting TCP client as its loop starts.
+    pub(crate) fn enable_reconnect(&self) {
+        self.reconnectable.store(true, Ordering::Release);
+    }
+
+    /// Ask the owning task to drop its connection and dial again now,
+    /// bypassing any backoff (leviculum#84). Returns `false`, and does
+    /// nothing, for an interface whose task does not reconnect.
+    pub(crate) fn kick_reconnect(&self) -> bool {
+        if !self.reconnectable.load(Ordering::Acquire) {
+            return false;
+        }
+        self.reconnect_kick.notify_one();
+        true
+    }
+
+    /// Resolves when [`kick_reconnect`](Self::kick_reconnect) is called (or
+    /// at once, if a kick is already pending). The owning task's side.
+    pub(crate) async fn reconnect_kicked(&self) {
+        self.reconnect_kick.notified().await;
     }
 
     /// Record the carrier coming up or going down. Called by the owning

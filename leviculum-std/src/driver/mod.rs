@@ -3998,6 +3998,39 @@ impl ReticulumNode {
             .collect()
     }
 
+    /// **Reconnect one TCP client interface now** (leviculum#84): the host
+    /// knows the network changed (Android ConnectivityManager, iOS
+    /// NWPathMonitor, netlink) before TCP can notice a dead socket.
+    ///
+    /// The interface drops its current socket, re-resolves its configured
+    /// host and dials again at once, bypassing any reconnect backoff. The
+    /// connect that follows runs the ordinary reconnect path: the driver's
+    /// interface-up handling re-announces local destinations on it, and a
+    /// tunnel-capable client re-runs the tunnel synthesize. A kick that lands
+    /// while a connect is already in flight takes effect right after it.
+    ///
+    /// Returns `false`, and changes nothing, when `id` is not a reconnecting
+    /// TCP client (a server-accepted connection, UDP, an RNode, an unknown
+    /// id). Takes no core lock.
+    pub fn reconnect_interface(&self, id: InterfaceId) -> bool {
+        self.iface_stats_map
+            .lock_recover()
+            .get(&id.0)
+            .is_some_and(|c| c.kick_reconnect())
+    }
+
+    /// **Reconnect every TCP client interface now** (leviculum#84): what
+    /// [`reconnect_interface`](Self::reconnect_interface) does, for each
+    /// reconnecting TCP client. Returns how many were asked. Takes no core
+    /// lock.
+    pub fn reconnect_all_clients(&self) -> usize {
+        self.iface_stats_map
+            .lock_recover()
+            .values()
+            .filter(|c| c.kick_reconnect())
+            .count()
+    }
+
     /// The bound socket addresses of this node's TCP server listeners, in
     /// daemon start order. Each listener binds synchronously during
     /// `start()`, so after a successful start the list is complete. A server
