@@ -47,6 +47,7 @@ use leviculum_lxmf::propagation_client::{PropagationTransport, PROPAGATION_ASPEC
 use leviculum_lxmf::router::{
     LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
     PropagationStampRequest, RouterConfig, RouterError, RouterEvent, RouterOutput,
+    PATH_REQUEST_WAIT_MS,
 };
 use leviculum_lxmf::{
     announce, CooperativeStamper, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig,
@@ -133,8 +134,13 @@ enum StampAnswer {
 /// A destination the frontend asked to have resolved.
 struct Resolve {
     destination: [u8; 16],
-    /// A path is asked for once per resolve, as Python's clients do.
-    path_requested: bool,
+    /// When the path is next asked for, on the tick clock; `None` until the
+    /// first request. Repeated every `PATH_REQUEST_WAIT_MS` while no path has
+    /// come, the reference's wait between a path request and the next attempt
+    /// (`reference/LXMF/LXMF/LXMRouter.py:33`, `:1779`): one request is one
+    /// packet, and a packet lost to a daemon whose interface is still
+    /// reconnecting must not cost the whole send (leviculum#699).
+    next_path_request_ms: Option<u64>,
     /// Set once the answer has gone out, so a repeated ask is not answered
     /// twice.
     answered: bool,
@@ -374,7 +380,7 @@ impl Engine {
             match self.commands.try_recv() {
                 Ok(Command::Resolve { destination }) => self.resolves.push(Resolve {
                     destination,
-                    path_requested: false,
+                    next_path_request_ms: None,
                     answered: false,
                 }),
                 Ok(Command::Send(request)) => self.send(ready, core, *request, out),
@@ -628,7 +634,13 @@ impl Engine {
     /// without waiting for the identity to turn up first — a path request is
     /// how an address nobody has announced near us becomes known at all, and a
     /// messenger's whole job is sending to an address a user was given.
-    fn poll_resolves(&mut self, ready: &mut Ready, core: &mut StdNodeCore, out: &mut TickOutput) {
+    fn poll_resolves(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut StdNodeCore,
+        now_ms: u64,
+        out: &mut TickOutput,
+    ) {
         if self.resolves.is_empty() {
             return;
         }
@@ -643,14 +655,20 @@ impl Engine {
                 self.emit(OutboxEvent::Resolved { destination });
                 continue;
             }
-            if !self.resolves[index].path_requested {
-                self.resolves[index].path_requested = true;
+            if self.resolves[index]
+                .next_path_request_ms
+                .is_none_or(|due| now_ms >= due)
+            {
+                self.resolves[index].next_path_request_ms =
+                    Some(now_ms.saturating_add(PATH_REQUEST_WAIT_MS));
                 // Through `absorb` rather than merged straight into `out`:
                 // `request_path` ends in `process_events_and_actions`, so its
                 // output can carry events, and every other core call made from
                 // a hook here has them re-fed to the router for the reason
-                // `MAX_ABSORB_ROUNDS` gives.
-                let output = core.request_path(&hash);
+                // `MAX_ABSORB_ROUNDS` gives. Unthrottled, because the core's
+                // per-destination interval (20 s) would drop the repeat this
+                // resolve paces itself.
+                let output = core.request_path_unthrottled(&hash);
                 self.absorb(
                     ready,
                     core,
@@ -781,7 +799,9 @@ impl CoreProcessor for Engine {
         // An announce arriving is exactly what a pending resolve is waiting
         // for. Answering here rather than on the next timer tick puts the
         // latency at the announce instead of `POLL_INTERVAL_MS` after it.
-        self.poll_resolves(&mut ready, core, &mut out);
+        // The driver's tick clock is the core's, so the event reads it there.
+        let now_ms = core.now_ms();
+        self.poll_resolves(&mut ready, core, now_ms, &mut out);
         self.report_departures(&ready);
         self.state = State::Ready(ready);
         out
@@ -796,7 +816,7 @@ impl CoreProcessor for Engine {
         self.announce(&mut ready, core, &mut out);
         self.pump_commands(&mut ready, core, &mut out);
         self.pump_stamps(&mut ready, core, &mut out);
-        self.poll_resolves(&mut ready, core, &mut out);
+        self.poll_resolves(&mut ready, core, now_ms, &mut out);
         match ready.router.tick(core) {
             Ok(output) => self.absorb(&mut ready, core, output, &mut out),
             Err(e) => self.emit(OutboxEvent::Broken {
@@ -1362,6 +1382,44 @@ mod tests {
             !resolved,
             "an address with no identity and no path is not resolved"
         );
+    }
+
+    /// A resolve repeats its path request while the path is missing
+    /// (leviculum#699). One request is one packet, and a packet sent while the
+    /// daemon's interface is still reconnecting is gone; a resolve that never
+    /// asks again waits out its whole budget for an answer nobody was asked
+    /// for. The ticks carry their own clock, so the wait is stepped, not slept.
+    #[test]
+    fn an_unanswered_resolve_asks_for_the_path_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events, commands) = engine();
+        let destination = [0x22; 16];
+        // A path request carries the destination it asks for in its payload.
+        let requests = |out: &TickOutput| {
+            out.actions
+                .iter()
+                .filter(|action| match action {
+                    leviculum_core::Action::SendPacket { data, .. }
+                    | leviculum_core::Action::Broadcast { data, .. } => {
+                        data.windows(16).any(|window| window == destination)
+                    }
+                })
+                .count()
+        };
+
+        commands
+            .send(Command::Resolve { destination })
+            .expect("queue the command");
+        let start = core.now_ms();
+        let first = engine.on_tick(&mut core, start);
+        assert_eq!(requests(&first), 1, "the resolve asks once at once");
+
+        let early = engine.on_tick(&mut core, start + 1_000);
+        assert_eq!(requests(&early), 0, "not again before the wait is over");
+
+        let repeat = engine.on_tick(&mut core, start + PATH_REQUEST_WAIT_MS);
+        assert_eq!(requests(&repeat), 1, "the unanswered resolve asks again");
     }
 
     /// A queued message must not be reported as having left the queue in the
