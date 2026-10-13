@@ -332,59 +332,60 @@ async fn test_rust_self_announce_is_oneshot() {
     rust_node.stop().await.expect("stop");
 }
 
-/// 6. Rust's mgmt-announce keepalive fires on its configured interval.
-///    Uses the reduced-interval override on the Python peer only; the Rust
-///    side is irrelevant here — the Python peer's keepalive emits a fresh
-///    announce after the interval, and Rust observes the updated timestamp.
+/// 6. Python's mgmt-announce keepalive fires on its configured interval,
+///    and Rust hears each fire.
+///
+///    The Python peer runs with a reduced `mgmt_announce_interval` and with
+///    a probe destination, which is a management destination
+///    (`Transport.py:398-402`) and so is announced by every keepalive fire
+///    (`Transport.py:963-967`). The first fire comes about 15 s after start
+///    (`Transport.py:283`), the next one interval later; Rust receiving two
+///    announces of that destination is the keepalive firing twice.
+///
+///    Until 689 this test slept 45 s and asserted that a path to an
+///    ordinary destination was still present. The daemon had no management
+///    destination then, so the keepalive announced nothing and the sleep
+///    observed nothing.
 ///
 ///    (The symmetric "Rust emits keepalive" side requires observing Rust's
 ///    mgmt tick externally. It is covered indirectly: B4 has its own unit
 ///    tests in `node/mod.rs` that assert the tick fires on schedule.)
 #[tokio::test]
 async fn test_mgmt_announce_keepalive_fires() {
-    let daemon = TestDaemon::start_with_mgmt_interval(30)
+    const KEEPALIVE_SECS: u32 = 5;
+    let daemon = TestDaemon::start_with_mgmt_interval(KEEPALIVE_SECS)
         .await
         .expect("start daemon with reduced mgmt interval");
+    let probe_hash = leviculum_core::DestinationHash::new(parse_hash(
+        daemon
+            .probe_dest_hash()
+            .expect("the daemon prints its probe destination"),
+    ));
     let (mut rust_node, _storage) =
         start_rust_node_with_tcp("mgmt_announce_keepalive_fires", &daemon).await;
+    let mut events = rust_node.take_event_receiver().expect("event receiver");
 
-    // Grab the probe destination at startup. With mgmt interval 30 s and
-    // the initial 15 s lead-in, we should see the first mgmt announce
-    // within 20 s and a second one within the following 35 s.
-    let dest_info = daemon
-        .register_destination("parity_test", &["keepalive"])
-        .await
-        .expect("register");
-    daemon
-        .announce_destination(&dest_info.hash, b"ka")
-        .await
-        .expect("announce");
-
-    let learned = crate::common::wait_for_path_reannounce(
-        || {
-            rust_node.has_path(&leviculum_core::DestinationHash::new(parse_hash(
-                &dest_info.hash,
-            )))
-        },
-        &daemon,
-        &dest_info.hash,
-        b"ka",
-        Duration::from_secs(10),
-    )
-    .await;
-    assert!(learned, "initial announce should be visible to rust");
-
-    // Look at Python's announce-table timestamp for the probe destination
-    // (if respond_to_probes is off, use a different observable). Here we
-    // simply assert the daemon stays reachable and path persists after the
-    // keepalive window — a regression in mgmt_announce_interval would
-    // typically present as path expiry or transport state drift.
-    tokio::time::sleep(Duration::from_secs(45)).await;
+    // Two fires: the first at ~15 s, the second KEEPALIVE_SECS later. The
+    // bound is a liveness bound, the wait ends at the second announce.
+    let mut heard = 0;
+    let fired_twice =
+        crate::common::wait_for_event(&mut events, Duration::from_secs(120), |event| match event {
+            leviculum_core::node::NodeEvent::AnnounceReceived { announce, .. }
+                if *announce.destination_hash() == probe_hash =>
+            {
+                heard += 1;
+                (heard >= 2).then_some(())
+            }
+            _ => None,
+        })
+        .await;
     assert!(
-        rust_node.has_path(&leviculum_core::DestinationHash::new(parse_hash(
-            &dest_info.hash
-        ))),
-        "path should still be present after a mgmt-announce window"
+        fired_twice.is_some(),
+        "Rust must hear the mgmt keepalive announce twice, heard {heard}"
+    );
+    assert!(
+        rust_node.has_path(&probe_hash),
+        "the keepalive announce must leave a path to the mgmt destination"
     );
 
     rust_node.stop().await.expect("stop");
@@ -584,9 +585,6 @@ async fn test_announce_rate_target_matches_python() {
             .expect("announce");
         tokio::time::sleep(ANNOUNCE_SPACING).await;
     }
-    // Let forwarding and retries settle.
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
     // The sink learned the destination from the first (accepted) announce:
     // rate limiting blocks rebroadcast, not path-table propagation.
     assert!(
@@ -595,8 +593,19 @@ async fn test_announce_rate_target_matches_python() {
     );
 
     // Rebroadcasts after grace were blocked. With grace=0, announces #2..N are
-    // all blocked, so at least ANNOUNCE_COUNT-2 drops are recorded.
-    let drops = relay.transport_stats().drops_announce_rate_limited();
+    // all blocked, so at least ANNOUNCE_COUNT-2 drops are recorded. Waited
+    // for as a count rather than read after a fixed 3 s settle: on a slow
+    // host the relay may not have handled the last announces by then (689).
+    // The bound is a liveness bound; the wait ends at the count.
+    let want = ANNOUNCE_COUNT as u64 - 2;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let drops = loop {
+        let drops = relay.transport_stats().drops_announce_rate_limited();
+        if drops >= want || tokio::time::Instant::now() >= deadline {
+            break drops;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
     assert!(
         drops >= (ANNOUNCE_COUNT as u64 - 2),
         "Rust relay should rate-limit rebroadcasts (drops={drops}, want >= {})",
@@ -641,7 +650,6 @@ async fn test_announce_rate_target_matches_python() {
             .expect("announce");
         tokio::time::sleep(ANNOUNCE_SPACING).await;
     }
-    tokio::time::sleep(Duration::from_secs(3)).await;
 
     assert!(
         crate::common::wait_for_path_on_daemon(&snk, &ref_hash, Duration::from_secs(10)).await,

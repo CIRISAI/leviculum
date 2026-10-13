@@ -874,8 +874,14 @@ async fn test_lxmf_propagation_node_sync() {
         .await
         .expect("propagated lxmf_send");
 
-    // Uploaded to the PN = state SENT on the sender.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    // Uploaded to the PN = state SENT on the sender. Before the upload the
+    // sender mines the PN's propagation stamp (PROPAGATION_COST 16,
+    // LXMRouter.py:54), CPU work whose attempt count is a geometric draw:
+    // 1.2 s here on a quiet host, 16.8 s under a quarter of a CPU (689),
+    // and its tail is several times its mean. So the bound is a liveness
+    // bound against a hung sender, not a speed bound; the loop still ends at
+    // the state change.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     let mut state = String::new();
     while tokio::time::Instant::now() < deadline {
         state = sender_daemon

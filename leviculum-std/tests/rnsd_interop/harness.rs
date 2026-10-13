@@ -271,6 +271,11 @@ impl TestDaemon {
     /// hours. The interval is applied to the Python class attribute before
     /// `RNS.Reticulum` is constructed, so the first ~15 s initial-delay
     /// fire is unaffected and subsequent fires use the reduced cadence.
+    ///
+    /// The daemon also responds to probes: the probe destination is a
+    /// management destination (`Transport.py:398-402`), and without one the
+    /// keepalive has nothing to announce, so nothing would show that it
+    /// fired. Its hash is in [`Self::probe_dest_hash`].
     pub async fn start_with_mgmt_interval(interval_secs: u32) -> Result<Self, HarnessError> {
         ensure_reticulum_submodule()?;
         let mut last_error = HarnessError::StartupTimeout;
@@ -281,6 +286,7 @@ impl TestDaemon {
             let extra = vec![
                 "--mgmt-announce-interval-seconds".to_string(),
                 interval_secs.to_string(),
+                "--respond-to-probes".to_string(),
             ];
             match Self::start_with_ports_and_options(rns_port, cmd_port, extra).await {
                 Ok(daemon) => return Ok(daemon),
@@ -521,11 +527,17 @@ impl TestDaemon {
         let stdout = process.stdout.take().expect("stdout should be captured");
         let reader = BufReader::new(stdout);
 
+        // The probe destination's hash comes before READY when one of the
+        // extra args is `--respond-to-probes`.
         let ready_result = tokio::task::spawn_blocking(move || {
+            let mut probe_hash = None;
             for line in reader.lines() {
                 match line {
+                    Ok(line) if line.starts_with("PROBE_DEST:") => {
+                        probe_hash = Some(line["PROBE_DEST:".len()..].trim().to_string());
+                    }
                     Ok(line) if line.starts_with("READY ") => {
-                        return Ok(line);
+                        return Ok((line, probe_hash));
                     }
                     Ok(_) => continue,
                     Err(e) => return Err(HarnessError::ParseError(e.to_string())),
@@ -534,7 +546,7 @@ impl TestDaemon {
             Err(HarnessError::StartupTimeout)
         });
 
-        let ready_line = timeout(Self::STARTUP_TIMEOUT, ready_result)
+        let (ready_line, probe_dest_hash) = timeout(Self::STARTUP_TIMEOUT, ready_result)
             .await
             .map_err(|_| HarnessError::StartupTimeout)?
             .map_err(|_| HarnessError::StartupTimeout)??;
@@ -551,7 +563,7 @@ impl TestDaemon {
             cmd_port,
             udp_listen_port: None,
             udp_forward_port: None,
-            probe_dest_hash: None,
+            probe_dest_hash,
             initial_peer_count: 0,
         };
 
