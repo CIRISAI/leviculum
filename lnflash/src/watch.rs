@@ -360,6 +360,9 @@ impl FirstLineSync {
     }
 }
 
+/// Why the port went away when the other end hung up (EOF or EIO).
+const PORT_CLOSED: &str = "the port closed";
+
 fn discard_line(n: usize) -> String {
     format!("[WATCH] discarded partial first line ({n} bytes)")
 }
@@ -388,10 +391,21 @@ pub(crate) fn drain_once<W: Write>(
             }
             Ok(None)
         }
+        // EIO is the same hang-up as EOF, reported earlier. A closed pty
+        // master marks the slave other-closed at once, and a read then fails
+        // with EIO until the kernel's deferred hangup work has run, after
+        // which it reads 0; a vanished ttyACM fails with EIO as well. Which
+        // of the two a read sees is the scheduler's choice, so they are one
+        // reason here.
         Ok(None) => {
             sync.finish(sink, carry)?;
             flush_carry(sink, carry)?;
-            Ok(Some("EOF, the port closed".into()))
+            Ok(Some(PORT_CLOSED.into()))
+        }
+        Err(err) if err.raw_os_error() == Some(libc::EIO) => {
+            sync.finish(sink, carry)?;
+            flush_carry(sink, carry)?;
+            Ok(Some(PORT_CLOSED.into()))
         }
         Err(err) => {
             sync.finish(sink, carry)?;
@@ -598,7 +612,7 @@ mod tests {
         let reason = drain_once(&fd, &mut sink, &mut carry, &mut sync)
             .unwrap()
             .expect("master closed, the port is gone");
-        assert!(reason.contains("EOF"), "{reason}");
+        assert_eq!(reason, PORT_CLOSED);
         assert_eq!(
             sunk(sink),
             "t1 [WATCH] discarded partial first line (29 bytes)\n\
@@ -694,7 +708,7 @@ mod tests {
         let reason = drain_once(&fd, &mut sink, &mut carry, &mut sync)
             .unwrap()
             .expect("master closed, the port is gone");
-        assert!(reason.contains("EOF"), "{reason}");
+        assert_eq!(reason, PORT_CLOSED);
         assert_eq!(
             sunk(sink),
             "t1 [WATCH] discarded partial first line (4 bytes)\n",
@@ -774,11 +788,11 @@ mod tests {
             "t1 [WATCH] watching board (session 1)",
             "t2 [WATCH] discarded partial first line (5 bytes)",
             "t3 alpha",
-            "t4 [WATCH] board (session 1) went away (EOF, the port closed); reconnecting",
+            "t4 [WATCH] board (session 1) went away (the port closed); reconnecting",
             "t5 [WATCH] reconnected to board (session 2) after ",
             "t6 [WATCH] discarded partial first line (5 bytes)",
             "t7 beta",
-            "t8 [WATCH] board (session 2) went away (EOF, the port closed); reconnecting",
+            "t8 [WATCH] board (session 2) went away (the port closed); reconnecting",
         ];
         let lines: Vec<&str> = said.lines().collect();
         assert_eq!(lines.len(), expected.len(), "{said}");
