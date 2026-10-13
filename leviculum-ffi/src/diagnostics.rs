@@ -442,6 +442,8 @@ mod tests {
                     tx_bytes: 0,
                     held_announces: 0,
                     burst_active: false,
+                    circuit_open: false,
+                    shed_packets: 0,
                     configured_bitrate: None,
                     kind: Default::default(),
                 })
