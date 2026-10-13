@@ -145,7 +145,7 @@ iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
 # Debian revision and sorts it ABOVE the release, so the packaging
 # translates it to `~` when it derives a Debian version — the comparison
 # is run, not reasoned, in scripts/deb-stamp.sh and its selftest.
-version = "0.31.0+ciris.1"
+version = "0.32.0+ciris.1"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"
