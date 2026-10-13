@@ -138,6 +138,22 @@ periculum run ../periculum/conformance
 If you must, use `just extensive`, which builds the binaries the nodes
 mount first and is lock-protected.
 
+## Tests that wait on the host
+
+The forge runner is shared, so a test that only passes when the host is
+fast goes red on a slow day. Before landing a test that waits on a
+worker, a daemon or a timer, run it under a quarter of a CPU:
+
+```sh
+just test-under-quota          # whole workspace, normal and under 25 %
+```
+
+It prints every test that takes 10 s or more under the quota beside its
+normal time, and every red. A wait in a test ends at an event or a
+count, and its bound is a liveness bound, minutes rather than a guess at
+how fast the host is. CPU work never runs against a wall-clock budget,
+and a test never sleeps for "long enough" and then checks.
+
 ## Before pushing
 
 Nothing to type. `git push` triggers `.githooks/pre-push`, which lints

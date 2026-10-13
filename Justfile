@@ -2152,3 +2152,21 @@ site-check:
 [doc('Drive the site docs unpacker against the tarballs it must refuse')]
 site-unpack-docs-selftest:
     @bash scripts/test-site-unpack-docs.sh
+
+# The forge runner is a shared machine, and a test whose pass depends on the
+# host being fast is a red waiting for a slow day (672: lnpnd's stamp worker
+# against a ten second wall budget lost the first landing in three days). This
+# runs every workspace test binary once unconstrained and once under
+# `systemd-run --user --scope -p CPUQuota=<quota>`, with libtest's per-test
+# times, and prints every test at or above 10 s under the quota beside its
+# normal time, and every red. About 15 min unconstrained and 90 min under 25 %
+# on the coder host (689); both resume from where they stopped, per commit,
+# under ~/.local/state/leviculum-ci/under-quota/. A coder pass, held to 600 s a
+# command, runs the script itself with --budget (see its header). The test
+# binaries build unconstrained first: the question is the tests, not rustc.
+[doc('Every workspace test under a CPU quota: which ones wait on the host')]
+test-under-quota quota="25%":
+    {{just_executable()}} build-integ-bins
+    -python3 scripts/test-under-quota.py run --quota none
+    -python3 scripts/test-under-quota.py run --quota {{quota}}
+    python3 scripts/test-under-quota.py report --quota {{quota}}
