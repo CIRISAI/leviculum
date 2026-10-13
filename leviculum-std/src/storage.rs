@@ -1587,7 +1587,8 @@ mod tests {
 
     #[test]
     fn identity_evictions_counts_cap_evictions_through_the_std_storage() {
-        let path = temp_dir().join(format!("reticulum_test_49_evict_{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("reticulum_test_49_evict_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         let mut storage = Storage::new_with_caps(&path, caps_with_identity_cap(1)).unwrap();
         assert_eq!(storage.identity_evictions(), 0);
@@ -1638,7 +1639,8 @@ mod tests {
 
     #[test]
     fn loading_a_file_over_the_cap_keeps_its_pins_and_newest_entries() {
-        let path = temp_dir().join(format!("reticulum_test_49_load_{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("reticulum_test_49_load_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         let mut m = BTreeMap::new();
@@ -1669,7 +1671,8 @@ mod tests {
 
     #[test]
     fn a_flush_holds_the_file_to_the_cap_and_evictions_stay_evicted() {
-        let path = temp_dir().join(format!("reticulum_test_49_flush_{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("reticulum_test_49_flush_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         let mut m = BTreeMap::new();
@@ -2158,6 +2161,7 @@ mod tests {
         const REMEMBERED: f64 = 1_790_000_000.0;
         const FLUSHED: f64 = 1_799_000_000.0;
         let runtime = |hash: u8, remembered_at: Option<f64>| RuntimeIdentity {
+            use_state: None,
             hash: [hash; TRUNCATED_HASHBYTES],
             public_key: Identity::generate(&mut rand_core::OsRng).public_key_bytes(),
             announce: None,

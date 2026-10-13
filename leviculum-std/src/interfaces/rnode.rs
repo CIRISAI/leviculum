@@ -10708,6 +10708,7 @@ mod tests {
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                transit: true,
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
             },
@@ -10744,6 +10745,8 @@ mod tests {
             &mut queues,
             &mut std::collections::BTreeSet::new(),
             &mut BTreeMap::new(),
+            &crate::driver::PlaneCounters::default(),
+            &registry,
         );
         out_rx.try_recv().expect("the filler leaves, a slot opens");
         drain_retry_queues(&mut queues, &mut registry, 0);
