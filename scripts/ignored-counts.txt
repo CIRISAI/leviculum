@@ -20,7 +20,11 @@
 #
 # Baseline measured 2026-08-05 (Codeberg #191): 35 workspace-wide.
 
-3    -p leviculum-core --lib
+# 3 -> 4 (2026-10-13): bench_stamp_attempt_rate in discovery/stamp.rs is a
+# timing harness for the discovery mint, not a behaviour test: it prints
+# attempts per second and asserts nothing, and only means something under
+# --release. Run by hand with `--release -- --ignored --nocapture`.
+4    -p leviculum-core --lib
 3    -p leviculum-core --doc
 
 # measure_send_lock_costs is a timing harness for the lock-budget doc page,

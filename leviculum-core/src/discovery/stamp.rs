@@ -16,7 +16,7 @@
 use alloc::vec::Vec;
 use rand_core::CryptoRngCore;
 
-use crate::crypto::{derive_key, full_hash};
+use crate::crypto::{derive_key, full_hash, full_hash_parts, StreamHasher};
 use crate::msgpack;
 
 /// Size of a stamp in bytes (`RNS.Identity.HASHLENGTH // 8`).
@@ -85,13 +85,13 @@ pub fn stamp_workblock(material: &[u8], rounds: usize) -> Vec<u8> {
 ///
 /// Mirrors `LXStamper.stamp_value`.
 pub fn stamp_value(workblock: &[u8], stamp: &[u8]) -> u32 {
-    let mut input = Vec::with_capacity(workblock.len() + stamp.len());
-    input.extend_from_slice(workblock);
-    input.extend_from_slice(stamp);
-    let material = full_hash(&input);
+    digest_value(&full_hash_parts(&[workblock, stamp]))
+}
 
+/// Number of leading zero bits of a stamp digest.
+fn digest_value(digest: &[u8; 32]) -> u32 {
     let mut value = 0u32;
-    for &byte in material.iter() {
+    for &byte in digest.iter() {
         if byte == 0 {
             value += 8;
         } else {
@@ -114,12 +114,15 @@ pub fn stamp_valid(stamp: &[u8], target_cost: u32, workblock: &[u8]) -> bool {
     if target_cost > 256 {
         return false;
     }
+    digest_meets_cost(&full_hash_parts(&[workblock, stamp]), target_cost)
+}
 
-    let mut input = Vec::with_capacity(workblock.len() + stamp.len());
-    input.extend_from_slice(workblock);
-    input.extend_from_slice(stamp);
-    let result = full_hash(&input);
-
+/// The acceptance rule, once for the mint and the verifiers alike: `digest`,
+/// read as a big-endian 256-bit integer, is `<= 2^(256 - target_cost)`.
+///
+/// `target_cost` must be in `1..=256`; its callers answer the cases outside
+/// that range before they get here.
+fn digest_meets_cost(digest: &[u8; 32], target_cost: u32) -> bool {
     // target = 1 << (256 - target_cost), as a 32-byte big-endian value.
     let p = 256 - target_cost as usize; // 0..=255
     let mut target = [0u8; STAMP_SIZE];
@@ -127,8 +130,8 @@ pub fn stamp_valid(stamp: &[u8], target_cost: u32, workblock: &[u8]) -> bool {
     let bit = p % 8;
     target[STAMP_SIZE - 1 - byte_from_lsb] = 1u8 << bit;
 
-    // result <= target, compared as unsigned big-endian integers.
-    result <= target
+    // digest <= target, compared as unsigned big-endian integers.
+    *digest <= target
 }
 
 /// Why a stamp could not be generated.
@@ -182,21 +185,28 @@ pub fn generate_stamp(
     if cost > 256 {
         return Err(StampError::CostExceedsHashWidth { cost });
     }
-    let workblock = stamp_workblock(material, rounds);
+    // The workblock is the same for every attempt, so its SHA-256 state is
+    // built once and each attempt only feeds its 32-byte stamp into a clone:
+    // a cost-16 mint draws about 65 536 stamps, and hashing the 5 KiB
+    // workblock for each of them was nearly all of its work.
+    let mut base = StreamHasher::new();
+    base.update(&stamp_workblock(material, rounds));
     let mut stamp = [0u8; STAMP_SIZE];
     loop {
         rng.fill_bytes(&mut stamp);
-        if stamp_valid(&stamp, cost, &workblock) {
-            let value = stamp_value(&workblock, &stamp);
-            return Ok((stamp, value));
+        let digest = base.finish_with(&stamp);
+        if cost == 0 || digest_meets_cost(&digest, cost) {
+            return Ok((stamp, digest_value(&digest)));
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
-    use rand_core::OsRng;
+    use rand_core::{OsRng, RngCore};
 
     // Golden vectors captured from Python `LXMF.LXStamper` over the vendored
     // tree (see `tests/discovery_golden_gen.py`). `material = 0xaa * 32`,
@@ -261,6 +271,94 @@ mod tests {
             !stamp_valid(&[0u8; 32], 257, &wb),
             "257 is never satisfiable"
         );
+    }
+
+    /// Attempt rate of the discovery mint at a fixed workblock, and of the
+    /// standalone verifier for comparison. Ignored because it is a
+    /// measurement, not a check; run it under `--release` with
+    /// `--ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement, run manually under --release with --nocapture"]
+    fn bench_stamp_attempt_rate() {
+        const ATTEMPTS: u32 = 200_000;
+        let wb = stamp_workblock(&[0x55u8; 32], WORKBLOCK_EXPAND_ROUNDS);
+        let rate = |label: &str, attempt: &mut dyn FnMut(&[u8; STAMP_SIZE]) -> bool| {
+            let mut stamp = [0u8; STAMP_SIZE];
+            let mut hits = 0u32;
+            let start = std::time::Instant::now();
+            for n in 0..ATTEMPTS {
+                stamp[..4].copy_from_slice(&n.to_le_bytes());
+                if attempt(&stamp) {
+                    hits += 1;
+                }
+            }
+            let secs = start.elapsed().as_secs_f64();
+            std::println!(
+                "STAMP_ATTEMPT_RATE path={label} attempts={ATTEMPTS} secs={secs:.3} per_sec={:.0} hits={hits}",
+                f64::from(ATTEMPTS) / secs
+            );
+        };
+        rate("verifier", &mut |stamp| {
+            stamp_valid(stamp, DEFAULT_STAMP_VALUE, &wb)
+        });
+        let mut base = StreamHasher::new();
+        base.update(&wb);
+        rate("mint", &mut |stamp| {
+            digest_meets_cost(&base.finish_with(stamp), DEFAULT_STAMP_VALUE)
+        });
+    }
+
+    /// The pre-696 spelling of the check, concatenating the workblock and the
+    /// stamp into one buffer: the reference the incremental mint is held to.
+    fn concatenated_digest(workblock: &[u8], stamp: &[u8]) -> [u8; 32] {
+        let mut input = Vec::with_capacity(workblock.len() + stamp.len());
+        input.extend_from_slice(workblock);
+        input.extend_from_slice(stamp);
+        full_hash(&input)
+    }
+
+    fn concatenated_stamp_valid(stamp: &[u8], target_cost: u32, workblock: &[u8]) -> bool {
+        if target_cost == 0 {
+            return true;
+        }
+        let p = 256 - target_cost as usize;
+        let mut target = [0u8; STAMP_SIZE];
+        target[STAMP_SIZE - 1 - p / 8] = 1u8 << (p % 8);
+        concatenated_digest(workblock, stamp) <= target
+    }
+
+    /// A stamp from the incremental mint passes the old concatenating check,
+    /// and its reported value is the old spelling's value.
+    #[test]
+    fn a_minted_stamp_passes_the_concatenating_check() {
+        let material = [0x66u8; 32];
+        let wb = stamp_workblock(&material, WORKBLOCK_EXPAND_ROUNDS);
+        for cost in [0u32, 1, 4, 10] {
+            let (stamp, value) =
+                generate_stamp(&material, cost, WORKBLOCK_EXPAND_ROUNDS, &mut OsRng)
+                    .expect("low cost");
+            assert!(concatenated_stamp_valid(&stamp, cost, &wb), "cost {cost}");
+            assert_eq!(value, digest_value(&concatenated_digest(&wb, &stamp)));
+            assert!(value >= cost);
+        }
+    }
+
+    /// The cloned base state finalised with a stamp is the digest of the
+    /// concatenation, for random workblocks and stamps.
+    #[test]
+    fn the_incremental_digest_is_the_concatenated_digest() {
+        for _ in 0..1000 {
+            let mut material = [0u8; 32];
+            OsRng.fill_bytes(&mut material);
+            let mut stamp = [0u8; STAMP_SIZE];
+            OsRng.fill_bytes(&mut stamp);
+            let wb = stamp_workblock(&material, 1 + (material[0] % 3) as usize);
+            let mut base = StreamHasher::new();
+            base.update(&wb);
+            let expected = concatenated_digest(&wb, &stamp);
+            assert_eq!(base.finish_with(&stamp), expected);
+            assert_eq!(full_hash_parts(&[&wb, &stamp]), expected);
+        }
     }
 
     #[test]
