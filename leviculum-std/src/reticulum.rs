@@ -231,6 +231,8 @@ mod tests {
     /// Codeberg #437: one SIGUSR1 has to name the owner class of the gap,
     /// so the composed dump carries the allocator, the mapping histogram
     /// and the gap arithmetic, in that order after the RSS line.
+    // The RSS line and the mapping histogram come from /proc (Linux only).
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn diagnostic_dump_carries_allocator_mappings_and_gap_arithmetic() {
         let td = tempfile::tempdir().expect("tempdir");

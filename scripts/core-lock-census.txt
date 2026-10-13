@@ -27,8 +27,9 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 68
+TOTAL 71
 
+driver::ReticulumNode::accept_direct_link
 driver::ReticulumNode::accept_resource
 driver::ReticulumNode::active_link_count
 driver::ReticulumNode::announce_destination
@@ -71,10 +72,12 @@ driver::ReticulumNode::publish_metrics
 driver::ReticulumNode::rate_table_entries
 driver::ReticulumNode::register_destination
 driver::ReticulumNode::register_request_handler
+driver::ReticulumNode::reject_direct_link
 driver::ReticulumNode::reject_resource
 driver::ReticulumNode::remember_identity
 driver::ReticulumNode::remove_path
 driver::ReticulumNode::request_path
+driver::ReticulumNode::retire_direct_link
 driver::ReticulumNode::send_file_response
 driver::ReticulumNode::send_proof
 driver::ReticulumNode::send_request
