@@ -59,6 +59,15 @@ Catch-up to upstream master (+246 since the v0.30.0 base), with v0.31.0+ciris.1
   (`established_at_ms`, `last_inbound_ms`) and `DropReason` gained
   `LinkIfaceMismatch`.
 
+### Changed
+
+- Apple TCP liveness matches Linux (+ciris, leviculum#85). On iOS and macOS a
+  TCP socket now gets keepalive idle 5 s / interval 2 s / 12 probes, and
+  `TCP_RXT_CONNDROPTIME` 24 s, the counterpart of Linux's `TCP_USER_TIMEOUT`.
+  A dead socket after a Wi-Fi/cellular switch is now detected in about 24 s
+  instead of the kernel default of many minutes. This goes past the
+  reference, whose macOS branch sets only the idle keepalive.
+
 ## [0.31.0+ciris.1] — CIRIS fork
 
 ### Added
