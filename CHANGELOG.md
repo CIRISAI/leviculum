@@ -42,8 +42,17 @@ Catch-up to upstream master (+246 since the v0.30.0 base), with v0.31.0+ciris.1
   must derive alike from the link id (a KDF salt, a nonce) takes the wire
   id.
 
+### Fixed
+
+- Upstream code that broke the fork's macOS and Windows lanes: the
+  storage-flush CPU timer used `clock_gettime`, absent on Windows (now zero
+  off Unix); one test assumed Linux's abstract socket name, another the
+  /proc-derived RSS line.
+
 ### Consumer notes
 
+- v0.31.0+ciris.1 (#82, #83) was tagged on the pre-sync base; its changes
+  are carried here unchanged and the tag is left where it is.
 - No fork API changed signature. Upstream changes are listed in its own
   sections below; notably, link timing accessors are now in milliseconds
   (`established_at_ms`, `last_inbound_ms`) and `DropReason` gained

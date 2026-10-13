@@ -822,7 +822,10 @@ mod tests {
 
         let message = err.to_string();
         assert!(
-            message.contains(&format!("rns/{instance_name}")),
+            // `rns/<name>` is the Linux abstract socket; macOS uses a
+            // filesystem path ending `rns-<name>`.
+            message.contains(&format!("rns/{instance_name}"))
+                || message.contains(&format!("rns-{instance_name}")),
             "must name the socket, so a wrong instance_name is visible: {message}"
         );
         assert!(

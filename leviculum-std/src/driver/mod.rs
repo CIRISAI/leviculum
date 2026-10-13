@@ -7561,7 +7561,9 @@ impl FlushHolds {
 }
 
 /// The CPU time the calling thread has run. Zero if the clock cannot be
-/// read, which makes every hold read as zero rather than fail a flush.
+/// read, which makes every hold read as zero rather than fail a flush, and
+/// on Windows, which has no `clock_gettime` (the measure is diagnostic).
+#[cfg(unix)]
 fn thread_cpu_time() -> Duration {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -7573,6 +7575,10 @@ fn thread_cpu_time() -> Duration {
         return Duration::ZERO;
     }
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+#[cfg(not(unix))]
+fn thread_cpu_time() -> Duration {
+    Duration::ZERO
 }
 
 /// Map a configured interface type (Python-style class name) to its transport

@@ -33,7 +33,7 @@ Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
 the last returns the retryable `ResourceError::LinkStateChanged` and
 the caller rebuilds once. The std driver calls the three phases itself
-(`leviculum-std/src/driver/mod.rs:4158`).
+(`leviculum-std/src/driver/mod.rs:4195`).
 
 `NodeCore::send_resource` still exists as the composed single call
 (`leviculum-core/src/node/mod.rs:1682`) because no_std and FFI callers
@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:6649`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:6686`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -247,11 +247,11 @@ reach the bounded channel at all, because `PacketSender::send`
 block and releases it *before* its `.await`. It deadlocks one line
 earlier, on the mutex.
 
-And no `block_on` is needed. The number is **68** in this fork (58 upstream), and it is a number
+And no `block_on` is needed. The number is **71** in this fork (58 upstream), and it is a number
 rather than a phrase on purpose: `scripts/check-core-lock-census.py`
 rebuilds the list of public methods that lock the core out of the
 sources on every `just fast` and pins it, name by name, in a
-checked-in file (its `TOTAL` line, `scripts/core-lock-census.txt:30`). Two
+checked-in file (the census's `TOTAL` line, `scripts/core-lock-census.txt:30`). Two
 earlier revisions of this page estimated the size of this set in words
 and were low by nearly half — which is what an estimate nothing can
 check is worth.
@@ -357,7 +357,7 @@ The emission can. Until #418 the event-log layer wrote each line with
 a blocking `write(2)`, flushed, under a process-global mutex, on the
 thread that emitted it — and the event loop emits while it holds the
 core mutex (`apply_inbound`,
-`leviculum-std/src/driver/mod.rs:5234`). A `write(2)` to a USB disk
+`leviculum-std/src/driver/mod.rs:5271`). A `write(2)` to a USB disk
 under writeback throttling blocks for seconds, so the loop stopped,
 and everything that wanted the core queued behind it. That is why the
 symptom was total silence rather than a missing log line.
@@ -385,7 +385,7 @@ informatively:
 | event | where | says |
 | --- | --- | --- |
 | `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6257`) | announce handling itself took ≥ 100 ms |
-| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4859`) | an outside thread waited ≥ 250 ms for the core lock |
+| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4896`) | an outside thread waited ≥ 250 ms for the core lock |
 | `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1651`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by
