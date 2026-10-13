@@ -69,13 +69,78 @@ pub(crate) const TCP_DEFAULT_BUFFER_SIZE: usize = 256;
 /// its path entries, and the reconnect loop takes over — without these
 /// options the kernel defaults let such a connection linger for many
 /// minutes. No config surface yet, by design (reference parity).
-#[cfg(any(target_os = "linux", target_os = "android"))]
+///
+/// Apple targets take the same numbers (leviculum#85), a deliberate step
+/// past the reference: Python's `set_timeouts_osx` (TCPInterface.py:196)
+/// sets only the idle keepalive, which leaves a write-side black hole after
+/// a Wi-Fi/cellular switch at the kernel default of many minutes. That is
+/// the iOS app's ordinary roaming case. The interval and probe count go
+/// through socket2 (`TCP_KEEPINTVL`, `TCP_KEEPCNT`), and Linux's
+/// `TCP_USER_TIMEOUT` becomes XNU's `TCP_RXT_CONNDROPTIME`: drop the
+/// connection once retransmission has gone unanswered this long. Wire- and
+/// semantics-invisible, like the backoff deviation.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 const TCP_USER_TIMEOUT: Duration = Duration::from_secs(24);
 const TCP_PROBE_AFTER: Duration = Duration::from_secs(5);
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 const TCP_PROBE_INTERVAL: Duration = Duration::from_secs(2);
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 const TCP_PROBES: u32 = 12;
+
+/// XNU's `TCP_RXT_CONNDROPTIME` (`bsd/netinet/tcp.h`: `0x80`), in seconds:
+/// the time after which retransmissions stop and the connection is dropped.
+/// Not exported by the `libc` crate. `TCP_CONNECTIONTIMEOUT` (`0x20`) is not
+/// used: it bounds only connection establishment, which every connect
+/// attempt here already bounds with `connect_timeout`.
+#[cfg(target_vendor = "apple")]
+const TCP_RXT_CONNDROPTIME: libc::c_int = 0x80;
+
+/// Set [`TCP_RXT_CONNDROPTIME`] on `sock` to `after`, whole seconds.
+#[cfg(target_vendor = "apple")]
+fn set_rxt_conndroptime(sock: &socket2::SockRef<'_>, after: Duration) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let secs = libc::c_int::try_from(after.as_secs()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: a valid fd for the call's duration (borrowed through `sock`),
+    // and a pointer to a live `c_int` with its exact length.
+    let rc = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            TCP_RXT_CONNDROPTIME,
+            std::ptr::addr_of!(secs).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Read [`TCP_RXT_CONNDROPTIME`] back, whole seconds (the Apple witness).
+#[cfg(all(test, target_vendor = "apple"))]
+fn rxt_conndroptime(sock: &socket2::SockRef<'_>) -> io::Result<Duration> {
+    use std::os::fd::AsRawFd;
+    let mut secs: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: a valid fd for the call's duration, and a pointer to a live
+    // `c_int` whose length is passed in and out through `len`.
+    let rc = unsafe {
+        libc::getsockopt(
+            sock.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            TCP_RXT_CONNDROPTIME,
+            std::ptr::addr_of_mut!(secs).cast(),
+            &mut len,
+        )
+    };
+    if rc == 0 {
+        Ok(Duration::from_secs(secs.max(0) as u64))
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
 
 /// Apply the liveness options above to a TCP socket (std or tokio).
 /// Best-effort by contract at the call sites: a socket that cannot take
@@ -91,22 +156,26 @@ fn apply_liveness_options<S: std::os::windows::io::AsSocket>(stream: &S) -> io::
     apply_liveness_sockref(socket2::SockRef::from(stream))
 }
 
-/// Shared body. The keepalive interval/retry tuning and `TCP_USER_TIMEOUT` are
-/// Linux/Android-only (socket2 gates the setters; `TCP_USER_TIMEOUT` is a Linux
-/// socket option). Other platforms get the universal idle-keepalive and fall
-/// back to kernel-default dead-peer detection (best-effort by contract).
+/// Shared body. The keepalive interval/retry tuning and the retransmission
+/// drop time apply on Linux/Android (`TCP_USER_TIMEOUT`) and on Apple targets
+/// (`TCP_RXT_CONNDROPTIME`, leviculum#85). Other platforms get the universal
+/// idle-keepalive and fall back to kernel-default dead-peer detection
+/// (best-effort by contract).
 fn apply_liveness_sockref(sock: socket2::SockRef<'_>) -> io::Result<()> {
     use socket2::TcpKeepalive;
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     {
         let keepalive = TcpKeepalive::new()
             .with_time(TCP_PROBE_AFTER)
             .with_interval(TCP_PROBE_INTERVAL)
             .with_retries(TCP_PROBES);
         sock.set_tcp_keepalive(&keepalive)?;
-        sock.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT))?;
     }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    sock.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT))?;
+    #[cfg(target_vendor = "apple")]
+    set_rxt_conndroptime(&sock, TCP_USER_TIMEOUT)?;
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
     {
         sock.set_tcp_keepalive(&TcpKeepalive::new().with_time(TCP_PROBE_AFTER))?;
     }
@@ -1886,6 +1955,48 @@ mod tests {
             .expect("channel closed");
         assert_eq!(pkt.data, b"through-socks");
         server.await.unwrap();
+    }
+
+    /// A connected loopback socket with the liveness options applied, plus
+    /// its peer (kept open for the duration of a witness).
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    fn liveness_socket() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        apply_liveness_options(&client).expect("the liveness options apply");
+        (client, peer)
+    }
+
+    /// leviculum#85: on Apple targets a TCP socket carries the same liveness
+    /// numbers as on Linux. Idle 5 s, interval 2 s and 12 probes go through
+    /// `TCP_KEEPALIVE`/`TCP_KEEPINTVL`/`TCP_KEEPCNT`; the 24 s drop goes through
+    /// `TCP_RXT_CONNDROPTIME`. Without them, a dead socket after a network
+    /// switch lingers for minutes.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn apple_sockets_carry_the_linux_liveness_numbers_85() {
+        let (client, _peer) = liveness_socket();
+        let sock = socket2::SockRef::from(&client);
+        assert!(sock.keepalive().unwrap(), "SO_KEEPALIVE");
+        assert_eq!(sock.tcp_keepalive_time().unwrap(), TCP_PROBE_AFTER);
+        assert_eq!(sock.tcp_keepalive_interval().unwrap(), TCP_PROBE_INTERVAL);
+        assert_eq!(sock.tcp_keepalive_retries().unwrap(), TCP_PROBES);
+        assert_eq!(rxt_conndroptime(&sock).unwrap(), TCP_USER_TIMEOUT);
+    }
+
+    /// The Linux/Android half of the same table (Codeberg #63), pinned beside
+    /// the Apple one so the two cannot drift apart unnoticed.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn linux_sockets_carry_the_liveness_numbers_63() {
+        let (client, _peer) = liveness_socket();
+        let sock = socket2::SockRef::from(&client);
+        assert!(sock.keepalive().unwrap(), "SO_KEEPALIVE");
+        assert_eq!(sock.tcp_keepalive_time().unwrap(), TCP_PROBE_AFTER);
+        assert_eq!(sock.tcp_keepalive_interval().unwrap(), TCP_PROBE_INTERVAL);
+        assert_eq!(sock.tcp_keepalive_retries().unwrap(), TCP_PROBES);
+        assert_eq!(sock.tcp_user_timeout().unwrap(), Some(TCP_USER_TIMEOUT));
     }
 
     /// A reconnecting TCP client for the leviculum#84 tests: a long base

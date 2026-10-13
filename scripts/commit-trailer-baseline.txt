@@ -54,6 +54,7 @@
 # check's own report names each one. In the fork the count moves in
 # every release commit, by the number of commits that release brings in.
 # 84 -> 85: the leviculum#84 reconnect commit (CIRIS fork, 2026-10-13).
+# 85 -> 86: the leviculum#85 Apple liveness commit (CIRIS fork, 2026-10-13).
 #
 # The 16, newest first, all on master:
 #   5c79cc9 2026-07-31 feat(link): per-link delivery telemetry
@@ -77,6 +78,7 @@ baseline 8d309ab69a2d451b54f61dc003fb0d509bb12524
 legacy 16
 foreign 7
 foreign 85
+foreign 86
 
 # Every `ours` line is an identity this guard stops exempting -- i.e. one
 # whose commit messages it checks. `lp@lew-palm.de` is what Lew, the
