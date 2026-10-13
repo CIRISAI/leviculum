@@ -81,6 +81,13 @@ const LOAD_SLICE: usize = 500;
 const FLUSH_INTERVAL_SECS: u64 = 2;
 const FLUSHES: usize = 3;
 
+/// How long the test waits for the load and for the flushes before it calls
+/// the node hung. A liveness bound, not a speed bound: the load and the
+/// flushes are CPU work, 4 s a flush under a quarter of a CPU against well
+/// under one on a quiet host (689), and how fast the host does them is not
+/// what this test asserts. The speed it does assert is in CPU time.
+const LIVENESS: Duration = Duration::from_secs(300);
+
 /// The longest single core-lock hold, in CPU time, a flush may take.
 ///
 /// Before the #563 fix the field shape held the loop for the whole capture,
@@ -215,8 +222,11 @@ fn field_announce() -> (Vec<u8>, Vec<u8>) {
     (buf, app_data)
 }
 
-fn modified(path: &std::path::Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+fn count_flush_holds(events: &[String]) -> usize {
+    events
+        .iter()
+        .filter(|line| line.starts_with("FLUSH_LOCK_HOLD "))
+        .count()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -267,35 +277,35 @@ async fn the_hourly_flush_leaves_the_core_lock_free() {
         .expect("build node");
     node.start().await.expect("start node");
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + LIVENESS;
     while !loaded.load(Ordering::Relaxed) {
         assert!(
             Instant::now() < deadline,
-            "the processor did not load the field shape within 60 s"
+            "the processor did not load the field shape within {} s",
+            LIVENESS.as_secs()
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // Three flushes after the load, each one seen as a new write of the
-    // known-destinations file.
-    let file = storage.path().join("known_destinations");
-    let mut last = modified(&file);
+    // Three flushes after the load, counted by the event each one ends with.
+    // Not by writes of the file: the blocking task writes it, and the event
+    // comes after the event loop has joined that task and settled the
+    // flush, which under a quarter of a CPU was more than the 200 ms this
+    // test used to allow between the two (689).
+    let flushes_before = count_flush_holds(&evlog.dump());
     measuring.store(true, Ordering::Relaxed);
-    let mut flushes = 0;
-    let deadline = Instant::now() + Duration::from_secs(FLUSH_INTERVAL_SECS * 10);
-    while flushes < FLUSHES {
+    let deadline = Instant::now() + LIVENESS;
+    loop {
+        let flushes = count_flush_holds(&evlog.dump()) - flushes_before;
+        if flushes >= FLUSHES {
+            break;
+        }
         assert!(
             Instant::now() < deadline,
-            "only {flushes} of {FLUSHES} flushes wrote {} in {} s",
-            file.display(),
-            FLUSH_INTERVAL_SECS * 10
+            "only {flushes} of {FLUSHES} flushes settled in {} s",
+            LIVENESS.as_secs()
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let now = modified(&file);
-        if now != last {
-            flushes += 1;
-            last = now;
-        }
     }
     // The watchdog reports a stall when the wait ends, at most one probe
     // interval after the lock comes free.
