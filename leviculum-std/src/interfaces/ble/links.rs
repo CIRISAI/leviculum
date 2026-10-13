@@ -443,7 +443,7 @@ impl LinkTable {
     }
 
     /// Whether an outgoing slot is free, the scan path's and the dial
-    /// pump's gate (`ble/mod.rs:1059`, `:856`).
+    /// pump's gate (`ble/mod.rs:1062`, `:856`).
     ///
     /// Half of what was one occupancy predicate before #432. It reads
     /// the CENTRAL links only, so a node with a lively GATT server
@@ -4478,7 +4478,7 @@ mod tests {
     }
 
     /// One dial in the room, gated exactly as the driver gates it: the
-    /// dialler needs an outgoing slot (`may_dial`, `ble/mod.rs:1059` and
+    /// dialler needs an outgoing slot (`may_dial`, `ble/mod.rs:1062` and
     /// the pump at `:856`) and the target must be on the air
     /// (`should_advertise` — a dark peer sends no connectable PDU, so a
     /// dial at it can only run out `bluez.rs`'s 20 s setup budget).

@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.31.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master (+246 since the v0.30.0 base).
+
+### Changed
+
+- Off-lock resource assembly (leviculum#71) is carried onto upstream's
+  multi-resource links (Codeberg #657, up to
+  `max_incoming_resources_per_link` incoming resources per link) and split
+  request/response segments. Everything is now keyed by (link, resource
+  hash): the assembly queue, the resources assembling outside the node,
+  `take_resource_assembly_jobs` and `complete_resource_assembly`. A resource
+  assembling outside the node counts against its link's bound, and a cancel
+  naming it fails that resource alone.
+- Known-destination pruning (leviculum#49) is carried onto upstream's sliced,
+  off-lock storage flush. The runtime use-state is collected with each
+  slice, and the file is held to the identity cap during the off-lock write.
+- Direct links (leviculum#70): buffered channel messages are now drained by
+  upstream's `drain_ready_channel_messages`, which hands direct-link signals
+  to the node and drains them past a spent host budget.
+- The scoped-transit announce gate (leviculum#51) now sits inside upstream's
+  split mode/duty-hold gate.
+
+### Consumer notes
+
+- No fork API changed signature. Upstream changes are listed in its own
+  sections below; notably, link timing accessors are now in milliseconds
+  (`established_at_ms`, `last_inbound_ms`) and `DropReason` gained
+  `LinkIfaceMismatch`.
+
 ## [0.30.0+ciris.1] — CIRIS fork
 
 ### Added

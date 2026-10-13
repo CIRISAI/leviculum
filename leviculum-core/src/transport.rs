@@ -5663,7 +5663,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4055. A destination with no cached
+    /// link-request path uses at transport.rs:4058. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -17869,7 +17869,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7187), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7198), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

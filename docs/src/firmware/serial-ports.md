@@ -209,7 +209,7 @@ For a RAK4631 / WisMesh Pocket V2 the only change is the port
 
 **Who applies the LoRa keys.** Under `lnsd` the five LoRa keys are sent
 to the board as a radio-config frame at interface startup
-(`leviculum-std/src/interfaces/serial.rs:720`), so the config decides
+(`leviculum-std/src/interfaces/serial.rs:721`), so the config decides
 the channel. Under Python-RNS `rnsd` they are inert: its
 `SerialInterface` reads port settings only and pushes nothing to the
 board, which then keeps whatever profile is in its flash — the compiled
@@ -247,7 +247,7 @@ lnstest diag --config /etc/reticulum
 
 A standalone LNode answers probes on one destination,
 `rnstransport.probe`, and announces it 15 s after boot and then every
-2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:775-776`;
+2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:885-886`;
 `MGMT_ANNOUNCE_INTERVAL_MS`, `leviculum-core/src/constants.rs:219`).
 The hash is carried in the announce itself, but it is also printed on
 the debug port — the `probe=` field of the `[IDENTITY]` banner, repeated

@@ -253,9 +253,8 @@ async fn an_established_link_survives_deregistration() {
 /// outside).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn plane_stats_report_limits_and_track_the_live_set() {
-    let port = next_port();
-    let srv = server(port).await;
-    let mut cli = client(port).await;
+    let (srv, addr) = server().await;
+    let mut cli = client(addr).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     let idle = srv.node.plane_stats();

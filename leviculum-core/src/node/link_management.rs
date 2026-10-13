@@ -1605,6 +1605,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if attached == Some(interface_index) {
             return false;
         }
+        // A link moving between its relayed interface and a punched direct
+        // one (leviculum#70) is bound to both: the punch proved the direct
+        // path with a token derived from the link key, and the relayed one
+        // is where the link was formed.
+        if self.direct_link_binds(link_id, interface_index) {
+            return false;
+        }
         crate::tracing::debug!(
             event = "LINK_IFACE_MISMATCH",
             link = %HexShort(link_id.as_bytes()),
