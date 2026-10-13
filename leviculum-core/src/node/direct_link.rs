@@ -24,7 +24,7 @@ use core::net::SocketAddr;
 
 use rand_core::CryptoRngCore;
 
-use crate::constants::{MS_PER_SECOND, TRUNCATED_HASHBYTES};
+use crate::constants::TRUNCATED_HASHBYTES;
 use crate::direct_link::wire::{self, REJECT_BUSY, REJECT_POLICY};
 use crate::direct_link::{Failure, ProbeProtocol, Role, Session, SessionId, Signal, Step};
 use crate::hex_fmt::HexShort;
@@ -390,7 +390,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link.lower_mtu(crate::direct_link::DIRECT_LINK_MTU);
         // The direct path just proved itself both ways; do not let a stale
         // timer that was running on the relayed path fire against it.
-        link.record_inbound(now_ms / MS_PER_SECOND);
+        link.record_inbound(now_ms);
         // A punch both ways is the peer answering: a link that went stale on
         // the relay while the punch ran is live again, as any authenticated
         // inbound traffic would make it (Codex review on #74).
@@ -800,7 +800,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     fn resources_in_flight(&self, link_id: &LinkId) -> bool {
         self.links.get(link_id).is_some_and(|link| {
             link.outgoing_resource().is_some()
-                || link.incoming_resource().is_some()
+                || link.has_incoming_resource()
                 // An advertisement awaiting the application: accepting it
                 // later sizes its parts from the link's MTU (Codex review
                 // on #78).
@@ -808,7 +808,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 || link.channel().is_some_and(|ch| {
                     ch.outstanding_exceeds_mtu(crate::direct_link::DIRECT_LINK_MTU)
                 })
-        }) || self.assembling_resources.contains_key(link_id)
+        }) || self
+            .assembling_resources
+            .range(super::link_resource_range(link_id))
+            .next()
+            .is_some()
     }
 
     /// Heap held by the direct-link bookkeeping (leviculum#77's census).
@@ -978,6 +982,36 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 );
             }
         }
+    }
+
+    /// Whether `iface` is bound to `link_id` by a direct-link upgrade, beside
+    /// the interface it is attached to: the direct interface of a link that
+    /// is on it, waiting to move onto it, or has just been punched toward
+    /// it, and the relayed interface a direct link came from. Upstream pins
+    /// a link to its attached interface (Codeberg #658); the upgrade moves a
+    /// link between exactly these two, and during the move, and for a
+    /// fallback, packets legitimately arrive on the other one.
+    pub(super) fn direct_link_binds(&self, link_id: &LinkId, iface: usize) -> bool {
+        let d = &self.direct_links;
+        if d.attached.is_empty() && d.deferred.is_empty() {
+            return false;
+        }
+        if let Some(attachment) = d.attached.get(&iface) {
+            if &attachment.link_id == link_id {
+                return true;
+            }
+        }
+        if let Some(index) = d.interface_of_link(link_id) {
+            if d.attached
+                .get(&index)
+                .is_some_and(|a| a.previous == Some(iface))
+            {
+                return true;
+            }
+        }
+        d.deferred
+            .get(link_id)
+            .is_some_and(|(_, index, _)| *index == iface)
     }
 
     /// A link packet from interface `iface` is about to be processed.

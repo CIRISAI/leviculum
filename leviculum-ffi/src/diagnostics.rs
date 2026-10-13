@@ -444,6 +444,8 @@ mod tests {
                     burst_active: false,
                     configured_bitrate: None,
                     kind: Default::default(),
+                    circuit_open: false,
+                    shed_packets: 0,
                 })
                 .collect(),
         }

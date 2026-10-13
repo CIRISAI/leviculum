@@ -8430,6 +8430,7 @@ mod tests {
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                transit: true,
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
                 path_choice: leviculum_core::transport::PathChoice::Hops,
