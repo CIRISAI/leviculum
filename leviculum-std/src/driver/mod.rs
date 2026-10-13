@@ -8248,6 +8248,7 @@ impl ReticulumNode {
     }
 }
 
+mod wire_id; // CIRISVerify#309, kept in its own file so no cited line moves
 #[cfg(test)]
 mod tests {
     use super::*;

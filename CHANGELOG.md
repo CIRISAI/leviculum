@@ -32,6 +32,15 @@ Catch-up to upstream master (+246 since the v0.30.0 base).
 - The scoped-transit announce gate (leviculum#51) now sits inside upstream's
   split mode/duty-hold gate.
 
+### Added
+
+- `ReticulumNode::wire_link_id(&LinkId)` and `LinkInfo::wire_link_id`
+  (CIRISVerify#309). After an establishment retry (Codeberg #66) an
+  initiator keeps reporting the id it was first given, so its handles stay
+  valid, while the responder only sees the new wire id. Anything both ends
+  must derive alike from the link id (a KDF salt, a nonce) takes the wire
+  id.
+
 ### Consumer notes
 
 - No fork API changed signature. Upstream changes are listed in its own
