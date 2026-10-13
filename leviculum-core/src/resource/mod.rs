@@ -763,6 +763,68 @@ impl ResourceAdvertisement {
     }
 }
 
+/// An incoming resource's assembly, taken out of the node so its CPU-heavy
+/// half can run without the node lock (leviculum#71).
+///
+/// Obtained from [`crate::node::NodeCore::take_resource_assembly_jobs`] when
+/// deferred assembly is enabled. Run it anywhere with [`AssemblyJob::run`],
+/// then hand the [`AssemblyResult`] back with
+/// [`crate::node::NodeCore::complete_resource_assembly`]. Opaque: the fields
+/// are crate-internal so the contract can evolve.
+pub struct AssemblyJob {
+    pub(crate) link_id: crate::link::LinkId,
+    pub(crate) resource_hash: [u8; 32],
+    pub(crate) input: incoming::AssemblyInput,
+}
+
+impl AssemblyJob {
+    /// Decrypt, decompress and verify. Pure: takes no lock and touches no
+    /// node state, so it may run on any thread.
+    pub fn run(self) -> AssemblyResult {
+        AssemblyResult {
+            link_id: self.link_id,
+            resource_hash: self.resource_hash,
+            outcome: incoming::run_assembly(self.input),
+        }
+    }
+
+    /// The link the resource arrived on.
+    pub fn link_id(&self) -> crate::link::LinkId {
+        self.link_id
+    }
+
+    /// The resource being assembled.
+    pub fn resource_hash(&self) -> [u8; 32] {
+        self.resource_hash
+    }
+}
+
+impl AssemblyResult {
+    /// A result for a job that could not be run to completion, for example
+    /// because its worker panicked. Applying it fails the resource with
+    /// `error` instead of leaving it waiting for a result that will never
+    /// come.
+    pub fn failed(
+        link_id: crate::link::LinkId,
+        resource_hash: [u8; 32],
+        error: ResourceError,
+    ) -> Self {
+        AssemblyResult {
+            link_id,
+            resource_hash,
+            outcome: Err(incoming::AssemblyFailure::from_error(error)),
+        }
+    }
+}
+
+/// The outcome of an [`AssemblyJob`], to be applied with
+/// [`crate::node::NodeCore::complete_resource_assembly`].
+pub struct AssemblyResult {
+    pub(crate) link_id: crate::link::LinkId,
+    pub(crate) resource_hash: [u8; 32],
+    pub(crate) outcome: Result<incoming::Assembled, incoming::AssemblyFailure>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

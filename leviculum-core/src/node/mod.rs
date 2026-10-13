@@ -81,6 +81,8 @@ mod mvr_client_forgets_a_used_peer;
 mod mvr_client_hosted_report_drop;
 #[cfg(test)]
 mod mvr_default_announce_app_data;
+#[cfg(test)]
+mod mvr_deferred_assembly;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
 #[cfg(test)]
@@ -412,6 +414,88 @@ impl LinkStats {
     }
 }
 
+/// What concluding an assembled incoming resource left to do
+/// (leviculum#71; see `conclude_incoming_resource`).
+pub(crate) enum ResourceConclusion {
+    /// Concluded; any Link-internal request/response payload to dispatch.
+    Deliver(Option<Vec<u8>>),
+    /// A split request/response segment was appended and held for the next
+    /// one: nothing further happens for it now.
+    Held,
+}
+
+/// An incoming resource, by the link it arrives on and its hash: a link can
+/// carry several at once.
+pub(crate) type ResourceKey = (LinkId, [u8; 32]);
+
+/// The lowest and highest keys a link's resources can have, for a range over
+/// one link in a map keyed by [`ResourceKey`].
+pub(crate) fn link_resource_range(link_id: &LinkId) -> core::ops::RangeInclusive<ResourceKey> {
+    (*link_id, [0u8; 32])..=(*link_id, [0xFFu8; 32])
+}
+
+/// Incoming resources that wait for an assembly job, in arrival order
+/// (leviculum#71).
+///
+/// Keyed both ways so enqueue, retire and take are all O(log n) under the
+/// node lock: a deque needed a full scan to dedupe or to retire one entry,
+/// which a peer finishing and cancelling transfers on many links could make
+/// quadratic.
+#[derive(Default)]
+pub(crate) struct AssemblyQueue {
+    by_order: BTreeMap<u64, ResourceKey>,
+    by_key: BTreeMap<ResourceKey, u64>,
+    next: u64,
+}
+
+impl AssemblyQueue {
+    /// Queue a resource once; one already queued keeps its place.
+    pub(crate) fn push(&mut self, key: ResourceKey) {
+        if self.by_key.contains_key(&key) {
+            return;
+        }
+        let order = self.next;
+        self.next = self.next.wrapping_add(1);
+        self.by_order.insert(order, key);
+        self.by_key.insert(key, order);
+    }
+
+    /// Retire a resource's entry, if it has one.
+    pub(crate) fn remove(&mut self, key: &ResourceKey) {
+        if let Some(order) = self.by_key.remove(key) {
+            self.by_order.remove(&order);
+        }
+    }
+
+    /// Retire every entry of a link.
+    pub(crate) fn remove_link(&mut self, link_id: &LinkId) {
+        let keys: Vec<ResourceKey> = self
+            .by_key
+            .range(link_resource_range(link_id))
+            .map(|(k, _)| *k)
+            .collect();
+        for key in keys {
+            self.remove(&key);
+        }
+    }
+
+    /// Take the oldest queued resource.
+    pub(crate) fn pop(&mut self) -> Option<ResourceKey> {
+        let (_, key) = self.by_order.pop_first()?;
+        self.by_key.remove(&key);
+        Some(key)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.by_key.len()
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        crate::heap_census::btree_map_bytes(&self.by_order)
+            + crate::heap_census::btree_map_bytes(&self.by_key)
+    }
+}
+
 /// The unified Reticulum node, owns all protocol state
 ///
 /// NodeCore is generic over RNG, Clock, and Storage traits, allowing it to run
@@ -531,6 +615,22 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// LinkClosed for a link that never established — with the one id
     /// they hold. Entries exist only for re-keyed links.
     link_origin_ids: BTreeMap<LinkId, LinkId>,
+    /// leviculum#71: when set, an incoming resource whose last part arrives is
+    /// not assembled in place. Its parts are taken and handed out as an
+    /// [`crate::resource::AssemblyJob`] for the caller to run without the node
+    /// borrow; the std driver runs it on a blocking thread. Off by default, so
+    /// no_std and FFI callers assemble inline exactly as before.
+    defer_resource_assembly: bool,
+    /// Incoming resources that have every part and wait to be assembled,
+    /// oldest first. A resource stays in its link's incoming list until a job
+    /// is taken for it, exactly where inline assembly kept it, so a cancel, a
+    /// duplicate ADV, a timeout poll or a link close treat it as they always
+    /// did. Taking a job is what moves the parts out.
+    pending_assembly: AssemblyQueue,
+    /// Resources whose assembly is running outside the node, by link and
+    /// resource hash. A link can have several. Holds no more than the caller
+    /// asked for at a time.
+    assembling_resources: BTreeMap<ResourceKey, crate::resource::incoming::IncomingResource>,
     /// Maximum incoming resource size in bytes. Resources larger than this
     /// are rejected at advertisement time, before any allocation.
     max_incoming_resource_size: usize,
@@ -634,6 +734,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_retry_state: BTreeMap::new(),
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
+            defer_resource_assembly: false,
+            pending_assembly: AssemblyQueue::default(),
+            assembling_resources: BTreeMap::new(),
             max_incoming_resource_size,
             max_incoming_resources_per_link: crate::resource::RESOURCE_MAX_INCOMING_PER_LINK,
             resource_window_policy,
@@ -1803,6 +1906,126 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.commit_resource_send(prepared)
     }
 
+    /// Assemble incoming resources outside the node (leviculum#71).
+    ///
+    /// When on, an incoming resource whose last part arrives yields an
+    /// [`crate::resource::AssemblyJob`] from
+    /// [`take_resource_assembly_jobs`](Self::take_resource_assembly_jobs)
+    /// instead of being decrypted and decompressed in place. Run the job, then
+    /// hand its result to
+    /// [`complete_resource_assembly`](Self::complete_resource_assembly).
+    pub fn set_defer_resource_assembly(&mut self, defer: bool) {
+        self.defer_resource_assembly = defer;
+    }
+
+    /// Take up to `max` assembly jobs (leviculum#71), oldest ready first.
+    ///
+    /// A resource whose parts are all in waits in its link until it is
+    /// taken here; only then do its parts move into a job. So the caller
+    /// bounds how much work and ciphertext is outside the node at once by
+    /// how many it takes. A resource cancelled, or whose link closed, while
+    /// it waited is skipped.
+    pub fn take_resource_assembly_jobs(&mut self, max: usize) -> Vec<crate::resource::AssemblyJob> {
+        let mut jobs = Vec::new();
+        let now_ms = self.transport.clock().now_ms();
+        while jobs.len() < max {
+            let Some((link_id, resource_hash)) = self.pending_assembly.pop() else {
+                break;
+            };
+            let Some(link) = self.links.get_mut(&link_id) else {
+                continue;
+            };
+            if !link
+                .incoming_resource_mut(&resource_hash)
+                .is_some_and(|r| r.is_assembling())
+            {
+                continue;
+            }
+            let token_key = link.resource_crypt_params().token_key;
+            let mut incoming = link
+                .take_incoming_resource(&resource_hash)
+                .expect("checked above");
+            match incoming.take_assembly_input(token_key) {
+                Ok(input) => {
+                    jobs.push(crate::resource::AssemblyJob {
+                        link_id,
+                        resource_hash,
+                        input,
+                    });
+                    self.assembling_resources
+                        .insert((link_id, resource_hash), incoming);
+                }
+                Err(e) => {
+                    let resource_flags = incoming.flags();
+                    if let ResourceConclusion::Deliver(payload) =
+                        self.conclude_incoming_resource(link_id, incoming, Err(e), now_ms)
+                    {
+                        self.dispatch_completed_internal_payload(link_id, resource_flags, payload);
+                    }
+                }
+            }
+        }
+        jobs
+    }
+
+    /// How many incoming resources wait for an assembly job (leviculum#71).
+    pub fn pending_resource_assemblies(&self) -> usize {
+        self.pending_assembly.len()
+    }
+
+    /// Fail every assembly still running outside the node (leviculum#71).
+    ///
+    /// For a caller that will never deliver those results, such as an event
+    /// loop that is stopping or one that starts fresh after a stop. Each
+    /// waiting resource fails as `Cancelled` instead of holding its link's
+    /// incoming slot forever. A result that turns up later finds nothing
+    /// waiting and concludes nothing. Resources still queued in their links
+    /// are untouched and are taken by the next caller.
+    pub fn abandon_resource_assemblies(&mut self) -> crate::transport::TickOutput {
+        let parked = core::mem::take(&mut self.assembling_resources);
+        for ((link_id, _), resource) in parked {
+            self.events.push(NodeEvent::ResourceFailed {
+                link_id,
+                resource_hash: *resource.resource_hash(),
+                error: crate::resource::ResourceError::Cancelled,
+                is_sender: false,
+            });
+        }
+        self.process_events_and_actions()
+    }
+
+    /// Apply a finished [`crate::resource::AssemblyJob`] (leviculum#71): send
+    /// the completion proof and emit the completion or failure, exactly as an
+    /// inline assembly would have.
+    ///
+    /// A result whose resource is no longer waiting is dropped: its link
+    /// closed meanwhile, and that teardown already reported the resource as
+    /// failed.
+    pub fn complete_resource_assembly(
+        &mut self,
+        result: crate::resource::AssemblyResult,
+    ) -> crate::transport::TickOutput {
+        let link_id = result.link_id;
+        if let Some(mut incoming) = self
+            .assembling_resources
+            .remove(&(link_id, result.resource_hash))
+        {
+            let outcome = incoming.apply_assembly(result.outcome);
+            let now_ms = self.transport.clock().now_ms();
+            let resource_flags = incoming.flags();
+            // No `reset_pending_requests_on_link` here: that deadline renews
+            // on packets received, and the last part already renewed it in
+            // `handle_resource_data`. A local assembly finishing is not peer
+            // activity.
+            if let ResourceConclusion::Deliver(payload) =
+                self.conclude_incoming_resource(link_id, incoming, outcome, now_ms)
+            {
+                self.dispatch_completed_internal_payload(link_id, resource_flags, payload);
+            }
+        }
+        self.process_events_and_actions()
+    }
+
     /// Phase 1 of the off-lock resource send (leviculum#29): snapshot the
     /// link-derived inputs [`crate::resource::prepare_resource_send`] needs.
     /// Fails fast with [`crate::resource::ResourceError::TransferInProgress`]
@@ -2314,6 +2537,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let link_id = &self.resolve_link_id(link_id);
 
         let now_ms = self.transport.clock().now_ms();
+        // Resources assembling outside the node count against the link's
+        // bound too (leviculum#71).
+        let assembling = self
+            .assembling_resources
+            .range(link_resource_range(link_id))
+            .count();
 
         let link = self
             .links
@@ -2329,7 +2558,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // response resource bypasses the application): refuse the way
         // `handle_resource_adv` refuses one it has no room for, so the
         // sender is not left advertising into silence (Codeberg #657).
-        if link.incoming_resource_count() >= self.max_incoming_resources_per_link {
+        if link.incoming_resource_count() + assembling >= self.max_incoming_resources_per_link {
             self.refuse_incoming_resource(
                 link_id,
                 &resource_hash,
@@ -3807,6 +4036,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         for link in self.links.values() {
             links += link.content_heap_bytes();
             resources += link.resource_heap_bytes();
+        }
+        // leviculum#71: resources out of their links for assembly, and the
+        // queue of links waiting for one, are still resource memory.
+        resources +=
+            hc::btree_map_bytes(&self.assembling_resources) + self.pending_assembly.heap_bytes();
+        for resource in self.assembling_resources.values() {
+            resources += resource.heap_bytes();
         }
         let requests = hc::btree_map_bytes(&self.request_handlers)
             + hc::btree_map_bytes(&self.pending_requests)

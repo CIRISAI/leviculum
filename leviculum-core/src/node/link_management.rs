@@ -24,7 +24,7 @@ use rand_core::CryptoRngCore;
 
 use super::event::NodeEvent;
 use super::send;
-use super::{LinkStats, NodeCore};
+use super::{LinkStats, NodeCore, ResourceConclusion};
 
 /// State for link establishment retry.
 ///
@@ -608,6 +608,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             ),
             None => (None, Vec::new()),
         };
+        // Resources whose assembly is running outside the node (leviculum#71)
+        // are still this link's incoming transfers: fail them the same way,
+        // and let their late results find nothing waiting.
+        let mut incoming_hashes = incoming_hashes;
+        let parked: Vec<super::ResourceKey> = self
+            .assembling_resources
+            .range(super::link_resource_range(link_id))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in parked {
+            self.assembling_resources.remove(&key);
+            incoming_hashes.push(key.1);
+        }
+        self.pending_assembly.remove_link(link_id);
         if outgoing_hash.is_some() || !incoming_hashes.is_empty() {
             // Report the caller-visible id, consistent with emit_link_closed
             // (which translates re-keyed wire ids back to the original).
@@ -2730,6 +2744,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             incoming::IncomingResource, ResourceAdvertisement, ResourceStrategy,
         };
 
+        // Resources whose assembly runs outside the node (leviculum#71) are
+        // still this link's incoming transfers, though its list no longer
+        // holds them: they count against its bound, and a repeat of their
+        // advertisement is a transfer under way.
+        let assembling: alloc::vec::Vec<[u8; 32]> = self
+            .assembling_resources
+            .range(super::link_resource_range(&link_id))
+            .map(|((_, hash), _)| *hash)
+            .collect();
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
@@ -2776,6 +2799,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // answer is plain wire. A repeat after parts arrived is ignored. An
         // advertisement for a DIFFERENT resource is a new transfer and goes
         // on below (Codeberg #657).
+        if assembling.contains(&adv.resource_hash) {
+            crate::tracing::debug!("Resource ADV repeats a transfer being assembled, ignoring");
+            return;
+        }
         if let Some(res) = link.incoming_resource_mut(&adv.resource_hash) {
             let Some(req_payload) =
                 res.request_again_for_readvertisement(&adv.resource_hash, now_ms)
@@ -2886,7 +2913,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // A link carries a bounded number of incoming resources; one it
         // would take but has no room for is refused now.
         if strategy != ResourceStrategy::AcceptNone
-            && link.incoming_resource_count() >= self.max_incoming_resources_per_link
+            && link.incoming_resource_count() + assembling.len()
+                >= self.max_incoming_resources_per_link
         {
             self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_ms);
             return;
@@ -3177,7 +3205,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let result = incoming.receive_part(part_data, now_ms, rtt_ms);
         let resource_hash = *incoming.resource_hash();
         let resource_flags = incoming.flags();
-        let has_request_id = incoming.request_id().is_some();
         let mut completed_internal_payload: Option<alloc::vec::Vec<u8>> = None;
 
         match result {
@@ -3223,198 +3250,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
             ResourcePartResult::Assembling => {
-                // All parts received, assemble
-                let link_ref = &*link;
-                match incoming.assemble(link_ref) {
-                    Ok((data, metadata)) => {
-                        // Build and send proof, caching for CacheRequest re-send
-                        let proof_data = incoming.build_proof();
-                        match proof_data {
-                            Ok(pd) => {
-                                let proof_pkt = link.build_proof_packet_with_context(
-                                    &pd,
-                                    PacketContext::ResourcePrf,
-                                );
-                                if let Ok(pkt) = proof_pkt {
-                                    let ph = crate::packet::packet_hash(&pkt);
-                                    link.cache_resource_proof(ph, pkt.clone());
-                                    link.record_outbound(now_ms);
-                                    self.route_link_packet(&link_id, &pkt);
-                                }
-                            }
-                            Err(e) => {
-                                crate::tracing::debug!("Failed to build resource proof: {e}");
-                            }
+                // All parts received. Deferred (leviculum#71): leave the
+                // resource in its link, ready, until the caller takes a job
+                // for it (`take_resource_assembly_jobs`); it then waits in
+                // `assembling_resources` and concludes in
+                // `complete_resource_assembly`. Inline otherwise.
+                if self.defer_resource_assembly {
+                    link.restore_incoming_resource(slot, incoming);
+                    self.pending_assembly.push((link_id, resource_hash));
+                } else {
+                    let outcome = incoming.assemble(&*link);
+                    match self.conclude_incoming_resource(link_id, incoming, outcome, now_ms) {
+                        ResourceConclusion::Deliver(payload) => {
+                            completed_internal_payload = payload;
                         }
-
-                        // Clear incoming resource (segment complete)
-                        // (incoming is consumed, not put back)
-                        let seg_idx = incoming.segment_index();
-                        let total_segs = incoming.total_segments();
-
-                        // A split request or response body is delivered once,
-                        // whole, after its last segment; the segments before
-                        // it are appended and proven, and their sender then
-                        // advertises the next (Resource.py:708-749).
-                        let split_internal = total_segs > 1
-                            && has_request_id
-                            && (resource_flags.is_request || resource_flags.is_response);
-                        let (data, metadata) = if split_internal {
-                            let key = (link_id, *incoming.original_hash());
-                            let Some(entry) = self
-                                .split_internal
-                                .as_mut()
-                                .and_then(|split| split.reassembly.get_mut(&key))
-                            else {
-                                crate::tracing::debug!(
-                                    "Split request/response segment without a reassembly"
-                                );
-                                return;
-                            };
-                            if entry.next_index != seg_idx {
-                                if let Some(split) = self.split_internal.as_mut() {
-                                    split.reassembly.remove(&key);
-                                }
-                                crate::tracing::debug!(
-                                    "Split request/response segment out of order, dropped"
-                                );
-                                return;
-                            }
-                            if entry.data.is_empty() {
-                                entry.data = data;
-                            } else {
-                                entry.data.extend_from_slice(&data);
-                            }
-                            if seg_idx == 1 {
-                                entry.metadata = metadata;
-                            }
-                            entry.next_index = seg_idx.saturating_add(1);
-                            if seg_idx < total_segs {
-                                crate::tracing::debug!(
-                                    event = "RESOURCE_SPLIT_INTERNAL_SEGMENT",
-                                    link = %HexShort(link_id.as_bytes()),
-                                    segment = seg_idx,
-                                    total = total_segs,
-                                    held = entry.data.len(),
-                                );
-                                // Between two segments of a response nothing
-                                // is transferring, so the request's own
-                                // timer watches for the next advertisement.
-                                if let Some(request_id) =
-                                    self.response_resource_downloads.remove(&resource_hash)
-                                {
-                                    if let Some(pending) =
-                                        self.pending_requests.get_mut(&request_id)
-                                    {
-                                        pending.response_started_at_ms = Some(now_ms);
-                                    }
-                                }
-                                return;
-                            }
-                            let joined = self
-                                .split_internal
-                                .as_mut()
-                                .and_then(|split| split.reassembly.remove(&key));
-                            if self
-                                .split_internal
-                                .as_ref()
-                                .is_some_and(|split| split.is_empty())
-                            {
-                                self.split_internal = None;
-                            }
-                            match joined {
-                                Some(entry) => (entry.data, entry.metadata),
-                                None => return,
-                            }
-                        } else {
-                            (data, metadata)
-                        };
-
-                        // Python `response_resource_concluded` (Link.py): a
-                        // completed resource whose ADV flagged `is_response` and
-                        // that matches an outstanding request is delivered to the
-                        // request path as `ResponseReceived` — the SAME shape as
-                        // the single-packet response — not the generic
-                        // `ResourceCompleted`. A response resource WITH metadata
-                        // is a file response (Python's `has_metadata` branch,
-                        // NomadNet `serve_file`): its data is the RAW response,
-                        // correlated by the request_id carried in the ADV. One
-                        // WITHOUT metadata carries the wrapped
-                        // `[request_id, response]` and is unpacked here.
-                        // A split response arrives here once, after its last
-                        // segment, with the segments' bodies joined above.
-                        let response_delivery = if incoming.is_response() {
-                            if metadata.is_some() {
-                                incoming
-                                    .request_id()
-                                    .and_then(|rid| {
-                                        <[u8; crate::constants::TRUNCATED_HASHBYTES]>::try_from(rid)
-                                            .ok()
-                                    })
-                                    .filter(|rid| self.pending_requests.contains_key(rid))
-                                    .map(|rid| (rid, None))
-                            } else {
-                                Self::parse_wrapped_response(&data)
-                                    .filter(|(rid, _)| self.pending_requests.contains_key(rid))
-                                    .map(|(rid, unwrapped)| (rid, Some(unwrapped)))
-                            }
-                        } else {
-                            None
-                        };
-
-                        if let Some((request_id, unwrapped)) = response_delivery {
-                            self.remove_pending_request(&request_id);
-                            // A file response's raw data IS the response value
-                            // and its resource metadata (the `{"name": ...}`
-                            // blob) rides along; a wrapped one delivers the
-                            // unpacked value and has no metadata.
-                            let (response_data, metadata) = match unwrapped {
-                                Some(unwrapped) => (unwrapped, None),
-                                None => (data, metadata),
-                            };
-                            self.events.push(NodeEvent::ResponseReceived {
-                                link_id,
-                                request_id,
-                                response_data,
-                                metadata,
-                            });
-                        } else if has_request_id && resource_flags.is_request {
-                            // A request Resource is Link-protocol internal:
-                            // Python accepts its advertisement with
-                            // `request_resource_concluded` as the resource's
-                            // callback (Link.py:1073-1074), so the
-                            // application's resource callbacks never see it.
-                            // It concludes below as RequestReceived only — a
-                            // completion event here reads as an application
-                            // transfer to any consumer that serves uploads on
-                            // the same link (the propagation-node engines fed
-                            // it to `handle_upload` and refused the client's
-                            // own oversized `/get`).
-                            completed_internal_payload = Some(data);
-                        } else {
-                            if has_request_id && resource_flags.is_response {
-                                completed_internal_payload = Some(data.clone());
-                            }
-
-                            self.events.push(NodeEvent::ResourceCompleted {
-                                link_id,
-                                resource_hash,
-                                data,
-                                metadata,
-                                is_sender: false,
-                                segment_index: seg_idx,
-                                total_segments: total_segs,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        crate::tracing::debug!("Resource assembly failed: {e}");
-                        self.events.push(NodeEvent::ResourceFailed {
-                            link_id,
-                            resource_hash,
-                            error: e,
-                            is_sender: false,
-                        });
+                        // A split request/response segment is held for the
+                        // next; nothing more happens for this part.
+                        ResourceConclusion::Held => return,
                     }
                 }
             }
@@ -3442,6 +3294,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // RequestReceived event; an uncorrelated response Resource keeps its
         // ResourceCompleted so `reconcile_request_resource_outcomes` can
         // re-arm the pending request's semantic timeout.
+        self.dispatch_completed_internal_payload(
+            link_id,
+            resource_flags,
+            completed_internal_payload,
+        );
+    }
+
+    /// Hand a concluded request or response Resource's payload to the
+    /// request/response machinery (shared by inline and deferred assembly).
+    pub(crate) fn dispatch_completed_internal_payload(
+        &mut self,
+        link_id: LinkId,
+        resource_flags: crate::resource::ResourceFlags,
+        completed_internal_payload: Option<alloc::vec::Vec<u8>>,
+    ) {
         if let Some(payload) = completed_internal_payload {
             if resource_flags.is_request {
                 let request_id = crate::crypto::truncated_hash(&payload);
@@ -3450,6 +3317,216 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.handle_response_payload(link_id, &payload);
             }
         }
+    }
+
+    /// Conclude an incoming resource whose assembly has run (leviculum#71
+    /// shares this between the inline and deferred paths): send the
+    /// completion proof, then emit the completion, response delivery or
+    /// failure, or hold a split request/response segment for the next.
+    pub(crate) fn conclude_incoming_resource(
+        &mut self,
+        link_id: LinkId,
+        incoming: crate::resource::incoming::IncomingResource,
+        outcome: Result<
+            (alloc::vec::Vec<u8>, Option<alloc::vec::Vec<u8>>),
+            crate::resource::ResourceError,
+        >,
+        now_ms: u64,
+    ) -> ResourceConclusion {
+        let resource_hash = *incoming.resource_hash();
+        let resource_flags = incoming.flags();
+        let has_request_id = incoming.request_id().is_some();
+        let mut completed_internal_payload: Option<alloc::vec::Vec<u8>> = None;
+        match outcome {
+            Ok((data, metadata)) => {
+                // Build and send proof, caching for CacheRequest re-send.
+                // Active or Stale: an off-lock assembly can finish after the
+                // link went Stale (leviculum#71).
+                let proof_pkt = match incoming.build_proof() {
+                    Ok(pd) => self.links.get_mut(&link_id).and_then(|link| {
+                        let pkt = link.build_resource_proof_packet(&pd).ok()?;
+                        let ph = crate::packet::packet_hash(&pkt);
+                        link.cache_resource_proof(ph, pkt.clone());
+                        link.record_outbound(now_ms);
+                        Some(pkt)
+                    }),
+                    Err(e) => {
+                        crate::tracing::debug!("Failed to build resource proof: {e}");
+                        None
+                    }
+                };
+                if let Some(pkt) = proof_pkt {
+                    self.route_link_packet(&link_id, &pkt);
+                }
+
+                // Clear incoming resource (segment complete)
+                // (incoming is consumed, not put back)
+                let seg_idx = incoming.segment_index();
+                let total_segs = incoming.total_segments();
+
+                // A split request or response body is delivered once,
+                // whole, after its last segment; the segments before
+                // it are appended and proven, and their sender then
+                // advertises the next (Resource.py:708-749).
+                let split_internal = total_segs > 1
+                    && has_request_id
+                    && (resource_flags.is_request || resource_flags.is_response);
+                let (data, metadata) = if split_internal {
+                    let key = (link_id, *incoming.original_hash());
+                    let Some(entry) = self
+                        .split_internal
+                        .as_mut()
+                        .and_then(|split| split.reassembly.get_mut(&key))
+                    else {
+                        crate::tracing::debug!(
+                            "Split request/response segment without a reassembly"
+                        );
+                        return ResourceConclusion::Held;
+                    };
+                    if entry.next_index != seg_idx {
+                        if let Some(split) = self.split_internal.as_mut() {
+                            split.reassembly.remove(&key);
+                        }
+                        crate::tracing::debug!(
+                            "Split request/response segment out of order, dropped"
+                        );
+                        return ResourceConclusion::Held;
+                    }
+                    if entry.data.is_empty() {
+                        entry.data = data;
+                    } else {
+                        entry.data.extend_from_slice(&data);
+                    }
+                    if seg_idx == 1 {
+                        entry.metadata = metadata;
+                    }
+                    entry.next_index = seg_idx.saturating_add(1);
+                    if seg_idx < total_segs {
+                        crate::tracing::debug!(
+                            event = "RESOURCE_SPLIT_INTERNAL_SEGMENT",
+                            link = %HexShort(link_id.as_bytes()),
+                            segment = seg_idx,
+                            total = total_segs,
+                            held = entry.data.len(),
+                        );
+                        // Between two segments of a response nothing
+                        // is transferring, so the request's own
+                        // timer watches for the next advertisement.
+                        if let Some(request_id) =
+                            self.response_resource_downloads.remove(&resource_hash)
+                        {
+                            if let Some(pending) = self.pending_requests.get_mut(&request_id) {
+                                pending.response_started_at_ms = Some(now_ms);
+                            }
+                        }
+                        return ResourceConclusion::Held;
+                    }
+                    let joined = self
+                        .split_internal
+                        .as_mut()
+                        .and_then(|split| split.reassembly.remove(&key));
+                    if self
+                        .split_internal
+                        .as_ref()
+                        .is_some_and(|split| split.is_empty())
+                    {
+                        self.split_internal = None;
+                    }
+                    match joined {
+                        Some(entry) => (entry.data, entry.metadata),
+                        None => return ResourceConclusion::Held,
+                    }
+                } else {
+                    (data, metadata)
+                };
+
+                // Python `response_resource_concluded` (Link.py): a
+                // completed resource whose ADV flagged `is_response` and
+                // that matches an outstanding request is delivered to the
+                // request path as `ResponseReceived` — the SAME shape as
+                // the single-packet response — not the generic
+                // `ResourceCompleted`. A response resource WITH metadata
+                // is a file response (Python's `has_metadata` branch,
+                // NomadNet `serve_file`): its data is the RAW response,
+                // correlated by the request_id carried in the ADV. One
+                // WITHOUT metadata carries the wrapped
+                // `[request_id, response]` and is unpacked here.
+                // A split response arrives here once, after its last
+                // segment, with the segments' bodies joined above.
+                let response_delivery = if incoming.is_response() {
+                    if metadata.is_some() {
+                        incoming
+                            .request_id()
+                            .and_then(|rid| {
+                                <[u8; crate::constants::TRUNCATED_HASHBYTES]>::try_from(rid).ok()
+                            })
+                            .filter(|rid| self.pending_requests.contains_key(rid))
+                            .map(|rid| (rid, None))
+                    } else {
+                        Self::parse_wrapped_response(&data)
+                            .filter(|(rid, _)| self.pending_requests.contains_key(rid))
+                            .map(|(rid, unwrapped)| (rid, Some(unwrapped)))
+                    }
+                } else {
+                    None
+                };
+
+                if let Some((request_id, unwrapped)) = response_delivery {
+                    self.remove_pending_request(&request_id);
+                    // A file response's raw data IS the response value
+                    // and its resource metadata (the `{"name": ...}`
+                    // blob) rides along; a wrapped one delivers the
+                    // unpacked value and has no metadata.
+                    let (response_data, metadata) = match unwrapped {
+                        Some(unwrapped) => (unwrapped, None),
+                        None => (data, metadata),
+                    };
+                    self.events.push(NodeEvent::ResponseReceived {
+                        link_id,
+                        request_id,
+                        response_data,
+                        metadata,
+                    });
+                } else if has_request_id && resource_flags.is_request {
+                    // A request Resource is Link-protocol internal:
+                    // Python accepts its advertisement with
+                    // `request_resource_concluded` as the resource's
+                    // callback (Link.py:1073-1074), so the
+                    // application's resource callbacks never see it.
+                    // It concludes below as RequestReceived only — a
+                    // completion event here reads as an application
+                    // transfer to any consumer that serves uploads on
+                    // the same link (the propagation-node engines fed
+                    // it to `handle_upload` and refused the client's
+                    // own oversized `/get`).
+                    completed_internal_payload = Some(data);
+                } else {
+                    if has_request_id && resource_flags.is_response {
+                        completed_internal_payload = Some(data.clone());
+                    }
+
+                    self.events.push(NodeEvent::ResourceCompleted {
+                        link_id,
+                        resource_hash,
+                        data,
+                        metadata,
+                        is_sender: false,
+                        segment_index: seg_idx,
+                        total_segments: total_segs,
+                    });
+                }
+            }
+            Err(e) => {
+                crate::tracing::debug!("Resource assembly failed: {e}");
+                self.events.push(NodeEvent::ResourceFailed {
+                    link_id,
+                    resource_hash,
+                    error: e,
+                    is_sender: false,
+                });
+            }
+        }
+        ResourceConclusion::Deliver(completed_internal_payload)
     }
 
     /// Handle a ResourceHmu packet (hashmap update).
@@ -3542,7 +3619,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 crate::tracing::debug!("Resource ICL too short");
                 return;
             };
-            if link.take_incoming_resource(&resource_hash).is_some() {
+            // A resource queued for assembly retires its queue entry, and
+            // one whose assembly is running outside the node fails now; its
+            // late result then finds nothing waiting (leviculum#71).
+            let key = (link_id, resource_hash);
+            self.pending_assembly.remove(&key);
+            if link.take_incoming_resource(&resource_hash).is_some()
+                || self.assembling_resources.remove(&key).is_some()
+            {
                 self.events.push(NodeEvent::ResourceFailed {
                     link_id,
                     resource_hash,

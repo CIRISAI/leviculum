@@ -1,0 +1,578 @@
+//! mvr: an incoming resource's assembly can run outside the node
+//! (leviculum#71) and conclude exactly as the inline path does.
+//!
+//! The std driver decrypts and decompresses a finished transfer on a blocking
+//! thread so concurrent transfers on different links stop serializing on the
+//! node lock. That is only sound if the deferred path is indistinguishable
+//! from the inline one to everyone outside the node: same bytes, same
+//! metadata, a proof the sender accepts, and a clean failure when the link
+//! closes while the assembly is running.
+//!
+//! Sans-I/O: direct initiator <-> responder over one mesh hop.
+
+extern crate std;
+
+use std::string::String;
+use std::vec;
+use std::vec::Vec;
+
+use rand_core::OsRng;
+
+use crate::destination::{Destination, DestinationType, Direction, ProofStrategy};
+use crate::identity::Identity;
+use crate::link::{LinkId, LinkState};
+use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
+use crate::packet::PacketContext;
+use crate::resource::{ResourceError, ResourceStrategy};
+use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
+use crate::transport::{Action, InterfaceId, TickOutput};
+
+type EndpointNode = NodeCore<OsRng, MockClock, crate::traits::NoStorage>;
+
+fn add_iface(node: &mut EndpointNode, name: &'static str) -> usize {
+    let idx = node
+        .transport
+        .register_interface(std::boxed::Box::new(MockInterface::new(name, 0)));
+    node.set_interface_name(idx, String::from(name));
+    idx
+}
+
+fn action_data(output: &TickOutput) -> Vec<Vec<u8>> {
+    output
+        .actions
+        .iter()
+        .map(|a| match a {
+            Action::Broadcast { data, .. } | Action::SendPacket { data, .. } => data.clone(),
+        })
+        .collect()
+}
+
+/// Deliver every packet, returning what the target sends back and the events
+/// it raised.
+fn deliver_all(
+    target: &mut EndpointNode,
+    iface: usize,
+    packets: Vec<Vec<u8>>,
+) -> (Vec<Vec<u8>>, Vec<NodeEvent>) {
+    let mut out = Vec::new();
+    let mut events = Vec::new();
+    for pkt in packets {
+        let tick = target.handle_packet(InterfaceId(iface), &pkt);
+        out.extend(action_data(&tick));
+        events.extend(tick.events);
+    }
+    (out, events)
+}
+
+fn establish() -> (EndpointNode, EndpointNode, usize, usize, LinkId) {
+    let identity = Identity::generate(&mut OsRng);
+    let signing_key = identity.ed25519_verifying().to_bytes();
+    let mut responder = NodeCoreBuilder::new().build(
+        OsRng,
+        MockClock::new(TEST_TIME_MS),
+        crate::traits::NoStorage,
+    );
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "mvrapp",
+        &["deferasm"],
+    )
+    .unwrap();
+    dest.set_accepts_links(true);
+    dest.set_proof_strategy(ProofStrategy::All);
+    let dest_hash = *dest.hash();
+    responder.register_destination(dest);
+    let mut initiator = NodeCoreBuilder::new().build(
+        OsRng,
+        MockClock::new(TEST_TIME_MS),
+        crate::traits::NoStorage,
+    );
+    let r_iface = add_iface(&mut responder, "R_mesh");
+    let i_iface = add_iface(&mut initiator, "I_mesh");
+
+    let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
+    let mut for_responder = action_data(&out);
+    for _ in 0..8 {
+        if for_responder.is_empty() {
+            break;
+        }
+        let (back, _) = deliver_all(&mut responder, r_iface, for_responder);
+        (for_responder, _) = deliver_all(&mut initiator, i_iface, back);
+    }
+    assert_eq!(initiator.active_link_count(), 1, "initiator link active");
+    assert_eq!(responder.active_link_count(), 1, "responder link active");
+    responder
+        .set_resource_strategy(&link_id, ResourceStrategy::AcceptAll)
+        .expect("AcceptAll on the responder link");
+    (initiator, responder, i_iface, r_iface, link_id)
+}
+
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+const METADATA: &[u8] = b"deferred-assembly-meta";
+
+fn received(events: &[NodeEvent]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    events.iter().find_map(|e| match e {
+        NodeEvent::ResourceCompleted {
+            is_sender: false,
+            data,
+            metadata,
+            ..
+        } => Some((data.clone(), metadata.clone())),
+        _ => None,
+    })
+}
+
+fn sender_completed(events: &[NodeEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            NodeEvent::ResourceCompleted {
+                is_sender: true,
+                ..
+            }
+        )
+    })
+}
+
+/// Pump a transfer until the responder goes quiet. Returns the responder's
+/// events and the initiator's events seen on the way.
+fn pump(
+    initiator: &mut EndpointNode,
+    responder: &mut EndpointNode,
+    i_iface: usize,
+    r_iface: usize,
+    mut to_responder: Vec<Vec<u8>>,
+) -> (Vec<NodeEvent>, Vec<NodeEvent>) {
+    let mut r_events = Vec::new();
+    let mut i_events = Vec::new();
+    for _ in 0..20_000 {
+        if to_responder.is_empty() {
+            break;
+        }
+        let (back, ev) = deliver_all(responder, r_iface, to_responder);
+        r_events.extend(ev);
+        let (next, ev) = deliver_all(initiator, i_iface, back);
+        i_events.extend(ev);
+        to_responder = next;
+    }
+    (r_events, i_events)
+}
+
+/// Run one transfer of `data` + `METADATA`, deferring assembly on the
+/// responder when asked. Returns what the responder delivered and whether the
+/// sender saw its own completion.
+fn transfer(data: &[u8], defer: bool) -> ((Vec<u8>, Option<Vec<u8>>), bool) {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(defer);
+
+    let (_hash, tick) = initiator
+        .send_resource(&link_id, data, Some(METADATA), true)
+        .expect("send_resource");
+    let (r_events, mut i_events) = pump(
+        &mut initiator,
+        &mut responder,
+        i_iface,
+        r_iface,
+        action_data(&tick),
+    );
+
+    let delivered = if defer {
+        assert!(
+            received(&r_events).is_none(),
+            "a deferred resource must not complete before its job has run"
+        );
+        let jobs = responder.take_resource_assembly_jobs(usize::MAX);
+        assert_eq!(jobs.len(), 1, "one transfer, one assembly job");
+        assert_eq!(jobs[0].link_id(), link_id);
+        // The job runs with no node borrow at all: that is the whole point.
+        let result = jobs.into_iter().next().unwrap().run();
+        let tick = responder.complete_resource_assembly(result);
+        let delivered = received(&tick.events).expect("completes once the job is applied");
+        // The proof the completion sent must satisfy the sender.
+        let (_, ev) = deliver_all(&mut initiator, i_iface, action_data(&tick));
+        i_events.extend(ev);
+        delivered
+    } else {
+        assert!(responder.take_resource_assembly_jobs(usize::MAX).is_empty());
+        received(&r_events).expect("inline assembly completes in place")
+    };
+    (delivered, sender_completed(&i_events))
+}
+
+#[test]
+fn deferred_assembly_concludes_exactly_as_inline_assembly_does() {
+    let data = pattern(40_000);
+    let (inline, inline_sender_done) = transfer(&data, false);
+    let (deferred, deferred_sender_done) = transfer(&data, true);
+
+    assert_eq!(inline.0, data, "inline delivers the bytes sent");
+    assert_eq!(inline.1.as_deref(), Some(METADATA));
+    assert_eq!(
+        deferred, inline,
+        "deferred delivers the same bytes and metadata"
+    );
+    assert!(inline_sender_done, "the inline proof completes the sender");
+    assert!(
+        deferred_sender_done,
+        "the deferred proof completes the sender"
+    );
+}
+
+#[test]
+fn a_link_closed_during_assembly_fails_the_resource_and_drops_the_late_result() {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (resource_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let _ = pump(
+        &mut initiator,
+        &mut responder,
+        i_iface,
+        r_iface,
+        action_data(&tick),
+    );
+
+    let job = responder
+        .take_resource_assembly_jobs(usize::MAX)
+        .pop()
+        .expect("an assembly job");
+
+    let closed = responder.close_link(&link_id);
+    let failed = closed.events.iter().any(|e| {
+        matches!(
+            e,
+            NodeEvent::ResourceFailed {
+                is_sender: false,
+                error: ResourceError::LinkClosed,
+                resource_hash: h,
+                ..
+            } if *h == resource_hash
+        )
+    });
+    assert!(
+        failed,
+        "the waiting resource fails with the link: {:?}",
+        closed.events
+    );
+
+    let late = responder.complete_resource_assembly(job.run());
+    assert!(
+        received(&late.events).is_none() && late.actions.is_empty(),
+        "a result whose link is gone concludes nothing and sends nothing"
+    );
+}
+
+/// Pump a deferred transfer up to the point its assembly job exists, and hand
+/// back the sender's first packet (its advertisement) for replay.
+fn parked_transfer() -> (
+    EndpointNode,
+    EndpointNode,
+    usize,
+    usize,
+    LinkId,
+    [u8; 32],
+    Vec<u8>,
+    crate::resource::AssemblyJob,
+) {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (resource_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let first = action_data(&tick);
+    let adv = first.first().cloned().expect("the advertisement");
+    let _ = pump(&mut initiator, &mut responder, i_iface, r_iface, first);
+    let job = responder
+        .take_resource_assembly_jobs(usize::MAX)
+        .pop()
+        .expect("an assembly job");
+    (
+        initiator,
+        responder,
+        i_iface,
+        r_iface,
+        link_id,
+        resource_hash,
+        adv,
+        job,
+    )
+}
+
+/// Codex review on #73: while the resource is parked the link's incoming
+/// slot reads empty, so a retransmitted ADV must still find the link busy.
+#[test]
+fn a_replayed_advertisement_during_assembly_starts_no_second_transfer() {
+    let (_initiator, mut responder, _i, r_iface, _link_id, resource_hash, adv, job) =
+        parked_transfer();
+
+    let (sent, events) = deliver_all(&mut responder, r_iface, vec![adv]);
+    assert!(
+        sent.is_empty(),
+        "no REQ for a replayed ADV: {} packets",
+        sent.len()
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::ResourceTransferStarted { .. })),
+        "no second transfer starts: {events:?}"
+    );
+
+    let done = responder.complete_resource_assembly(job.run());
+    let completions = done
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                NodeEvent::ResourceCompleted { is_sender: false, resource_hash: h, .. } if *h == resource_hash
+            )
+        })
+        .count();
+    assert_eq!(completions, 1, "the parked transfer completes exactly once");
+}
+
+/// Codex review on #73: a sender's ICL during assembly must fail the
+/// resource as Cancelled, and the late result must conclude nothing.
+#[test]
+fn a_cancel_during_assembly_fails_the_resource_and_drops_the_late_result() {
+    let (initiator, mut responder, _i, r_iface, link_id, resource_hash, _adv, job) =
+        parked_transfer();
+
+    let icl = initiator
+        .links
+        .get(&link_id)
+        .expect("sender link")
+        .build_data_packet_with_context(&resource_hash, PacketContext::ResourceIcl, &mut OsRng)
+        .expect("ICL packet");
+    let (_, events) = deliver_all(&mut responder, r_iface, vec![icl]);
+    let cancelled = events.iter().any(|e| {
+        matches!(
+            e,
+            NodeEvent::ResourceFailed {
+                is_sender: false,
+                error: ResourceError::Cancelled,
+                resource_hash: h,
+                ..
+            } if *h == resource_hash
+        )
+    });
+    assert!(
+        cancelled,
+        "the parked resource fails as Cancelled: {events:?}"
+    );
+
+    let late = responder.complete_resource_assembly(job.run());
+    assert!(
+        received(&late.events).is_none() && late.actions.is_empty(),
+        "a cancelled resource's late result concludes nothing"
+    );
+}
+
+/// Codex review on #73 (second pass): a ready resource stays in its link
+/// until the caller takes a job for it, so the caller's limit bounds what is
+/// outside the node. A cancel that lands while it waits goes through the
+/// ordinary path, and no job is ever created for it.
+#[test]
+fn a_ready_resource_waits_in_its_link_until_taken_and_a_queued_cancel_needs_no_job() {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (resource_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let _ = pump(
+        &mut initiator,
+        &mut responder,
+        i_iface,
+        r_iface,
+        action_data(&tick),
+    );
+
+    assert_eq!(
+        responder.pending_resource_assemblies(),
+        1,
+        "one transfer waits"
+    );
+    assert!(
+        responder.take_resource_assembly_jobs(0).is_empty(),
+        "a limit of zero takes nothing"
+    );
+    assert_eq!(
+        responder.pending_resource_assemblies(),
+        1,
+        "and it still waits"
+    );
+
+    let icl = initiator
+        .links
+        .get(&link_id)
+        .expect("sender link")
+        .build_data_packet_with_context(&resource_hash, PacketContext::ResourceIcl, &mut OsRng)
+        .expect("ICL packet");
+    let (_, events) = deliver_all(&mut responder, r_iface, vec![icl]);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            NodeEvent::ResourceFailed { is_sender: false, error: ResourceError::Cancelled, resource_hash: h, .. }
+                if *h == resource_hash
+        )),
+        "a cancel while queued fails it as Cancelled: {events:?}"
+    );
+    assert!(
+        responder.take_resource_assembly_jobs(usize::MAX).is_empty(),
+        "a cancelled resource never becomes a job"
+    );
+    assert_eq!(responder.pending_resource_assemblies(), 0);
+}
+
+/// The limit takes exactly as many as asked, oldest first.
+#[test]
+fn taking_one_job_takes_the_ready_resource() {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (resource_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let _ = pump(
+        &mut initiator,
+        &mut responder,
+        i_iface,
+        r_iface,
+        action_data(&tick),
+    );
+    let jobs = responder.take_resource_assembly_jobs(1);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].resource_hash(), resource_hash);
+    assert_eq!(responder.pending_resource_assemblies(), 0);
+}
+
+/// Codex review on #73 (third pass): a cancel or a link close retires the
+/// queue entry with the resource, so the queue never holds stale work.
+#[test]
+fn a_cancel_or_close_retires_the_queue_entry() {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (resource_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let _ = pump(
+        &mut initiator,
+        &mut responder,
+        i_iface,
+        r_iface,
+        action_data(&tick),
+    );
+    assert_eq!(responder.pending_resource_assemblies(), 1);
+
+    let icl = initiator
+        .links
+        .get(&link_id)
+        .expect("sender link")
+        .build_data_packet_with_context(&resource_hash, PacketContext::ResourceIcl, &mut OsRng)
+        .expect("ICL packet");
+    let _ = deliver_all(&mut responder, r_iface, vec![icl]);
+    assert_eq!(
+        responder.pending_resource_assemblies(),
+        0,
+        "the cancel retires the entry"
+    );
+
+    // A fresh transfer on a fresh link, queued, then the link closes.
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    responder.set_defer_resource_assembly(true);
+    let (_hash, tick) = initiator
+        .send_resource(&link_id, &pattern(20_000), None, true)
+        .expect("send_resource");
+    let _ = pump(
+        &mut initiator,
+        &mut responder,
+        i_iface,
+        r_iface,
+        action_data(&tick),
+    );
+    assert_eq!(responder.pending_resource_assemblies(), 1);
+    let _ = responder.close_link(&link_id);
+    assert_eq!(
+        responder.pending_resource_assemblies(),
+        0,
+        "the close retires the entry"
+    );
+}
+
+/// Codex review on #73 (third pass): a caller that will never deliver its
+/// results (a stopping loop) fails what is out, and the census counts it.
+#[test]
+fn abandoned_assemblies_fail_as_cancelled_and_parked_ones_are_counted() {
+    let (_initiator, mut responder, _i, _r, _link_id, resource_hash, _adv, job) = parked_transfer();
+    let census = responder.heap_census();
+    assert!(census.resources > 0, "a parked resource is resource memory");
+
+    let out = responder.abandon_resource_assemblies();
+    assert!(
+        out.events.iter().any(|e| matches!(
+            e,
+            NodeEvent::ResourceFailed { is_sender: false, error: ResourceError::Cancelled, resource_hash: h, .. }
+                if *h == resource_hash
+        )),
+        "the abandoned resource fails as Cancelled: {:?}",
+        out.events
+    );
+    let late = responder.complete_resource_assembly(job.run());
+    assert!(
+        received(&late.events).is_none(),
+        "its late result concludes nothing"
+    );
+}
+
+/// Codex review on #73 (fourth pass): an assembly that finishes after the
+/// link went Stale still proves, so the sender completes. Stale means the
+/// peer went quiet, not that the link is closed.
+#[test]
+fn an_assembly_finishing_on_a_stale_link_still_proves() {
+    let (mut initiator, mut responder, i_iface, _r, link_id, _hash, _adv, job) = parked_transfer();
+    responder
+        .links
+        .get_mut(&link_id)
+        .expect("responder link")
+        .set_state(LinkState::Stale);
+
+    let done = responder.complete_resource_assembly(job.run());
+    assert!(received(&done.events).is_some(), "the resource completes");
+    let proof = action_data(&done);
+    assert!(
+        !proof.is_empty(),
+        "and its proof goes out on the Stale link"
+    );
+    let (_, events) = deliver_all(&mut initiator, i_iface, proof);
+    assert!(
+        sender_completed(&events),
+        "the sender accepts it: {events:?}"
+    );
+}
+
+#[test]
+fn the_assembly_queue_is_fifo_deduped_and_retirable() {
+    use crate::node::AssemblyQueue;
+    let key = |l: u8, r: u8| (LinkId::new([l; 16]), [r; 32]);
+    let mut q = AssemblyQueue::default();
+    q.push(key(1, 1));
+    q.push(key(2, 1));
+    q.push(key(1, 1)); // already queued: keeps its place
+    q.push(key(1, 2)); // a second resource on link 1 is its own entry
+    q.push(key(3, 1));
+    assert_eq!(q.len(), 4);
+    q.remove(&key(2, 1));
+    q.remove(&key(9, 1)); // not queued: no-op
+    assert_eq!(q.pop(), Some(key(1, 1)));
+    // Retiring a link takes every one of its entries.
+    q.remove_link(&LinkId::new([1; 16]));
+    assert_eq!(q.pop(), Some(key(3, 1)));
+    assert_eq!(q.pop(), None);
+    assert_eq!(q.len(), 0);
+}

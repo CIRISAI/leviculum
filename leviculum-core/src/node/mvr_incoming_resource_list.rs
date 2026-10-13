@@ -324,6 +324,13 @@ fn drive(pair: &mut Pair, first: Vec<Vec<u8>>, hashes: [[u8; 32]; 2]) -> Outcome
                 events.extend(o.events.iter().cloned());
                 next_to_sender.extend(action_data(&o));
             }
+            // A receiver that assembles off-lock (leviculum#71) has its jobs
+            // run here, as the std driver would; one that does not has none.
+            for job in pair.receiver.take_resource_assembly_jobs(usize::MAX) {
+                let o = pair.receiver.complete_resource_assembly(job.run());
+                events.extend(o.events.iter().cloned());
+                next_to_sender.extend(action_data(&o));
+            }
             for pkt in core::mem::take(&mut to_sender) {
                 let o = pair.deliver_to_sender(&pkt);
                 events.extend(o.events.iter().cloned());
@@ -400,6 +407,95 @@ fn two_concurrent_resources_on_one_link_both_complete() {
         "B was taken when first advertised, not after A freed the link and B's \
          sender re-advertised"
     );
+}
+
+/// The same with the receiver assembling off-lock (leviculum#71): two
+/// resources on one link wait and assemble independently, keyed by hash.
+#[test]
+fn two_concurrent_resources_on_one_link_both_complete_when_assembly_is_deferred() {
+    let mut pair = establish(crate::resource::RESOURCE_MAX_INCOMING_PER_LINK);
+    pair.receiver.set_defer_resource_assembly(true);
+    let (hash_a, hash_b, answer_a, answer_b) = advertise_two(&mut pair);
+    let mut first = answer_a;
+    first.extend(action_data(&answer_b));
+    let Outcome {
+        received,
+        failed,
+        proven,
+        ..
+    } = drive(&mut pair, first, [hash_a, hash_b]);
+    assert!(failed.is_empty(), "no transfer failed: {failed:?}");
+    assert!(received
+        .iter()
+        .any(|(h, d)| *h == hash_a && *d == payload(7, 3000)));
+    assert!(received
+        .iter()
+        .any(|(h, d)| *h == hash_b && *d == payload(11, 2000)));
+    assert_eq!(proven, 2, "the sender saw both transfers proven");
+}
+
+/// A resource assembling off-lock counts against the link's bound, and a
+/// cancel naming it fails only it (leviculum#71).
+#[test]
+fn an_assembling_resource_counts_against_the_bound_and_cancels_alone() {
+    let mut pair = establish(1);
+    pair.receiver.set_defer_resource_assembly(true);
+    let (hash_a, adv_a) = pair.advertise(&payload(7, 3000));
+    let answer = action_data(
+        &pair
+            .receiver
+            .handle_packet(InterfaceId(pair.r_iface), &adv_a),
+    );
+    // Run A to "all parts in" and take its job, so it is outside the link.
+    let mut to_sender = answer;
+    let mut job = None;
+    for _ in 0..64 {
+        let mut to_receiver = Vec::new();
+        for pkt in core::mem::take(&mut to_sender) {
+            to_receiver.extend(action_data(&pair.deliver_to_sender(&pkt)));
+        }
+        for pkt in to_receiver {
+            to_sender.extend(action_data(
+                &pair.receiver.handle_packet(InterfaceId(pair.r_iface), &pkt),
+            ));
+        }
+        if let Some(j) = pair.receiver.take_resource_assembly_jobs(1).pop() {
+            job = Some(j);
+            break;
+        }
+    }
+    let job = job.expect("A's parts all arrived");
+    pair.park();
+    // B is refused: A, though out of the link, still fills the bound of one.
+    let (_hash_b, adv_b) = pair.advertise(&payload(11, 2000));
+    let out = pair
+        .receiver
+        .handle_packet(InterfaceId(pair.r_iface), &adv_b);
+    assert_eq!(
+        count_context(&action_data(&out), PacketContext::ResourceRcl),
+        1,
+        "the second advertisement is refused while A assembles"
+    );
+    // The sender cancels A while it assembles: A fails now, and its late
+    // result concludes nothing.
+    let icl = pair
+        .sender
+        .links
+        .get(&pair.sender_link)
+        .expect("link")
+        .build_data_packet_with_context(&hash_a, PacketContext::ResourceIcl, &mut OsRng)
+        .expect("ICL");
+    let out = pair.receiver.handle_packet(InterfaceId(pair.r_iface), &icl);
+    assert!(out.events.iter().any(|e| matches!(
+        e,
+        NodeEvent::ResourceFailed { resource_hash, error: ResourceError::Cancelled, .. }
+            if *resource_hash == hash_a
+    )));
+    let late = pair.receiver.complete_resource_assembly(job.run());
+    assert!(!late.events.iter().any(|e| matches!(
+        e,
+        NodeEvent::ResourceCompleted { .. } | NodeEvent::ResourceFailed { .. }
+    )));
 }
 
 /// The sender's cancel names one resource; only that one of the two ends,
