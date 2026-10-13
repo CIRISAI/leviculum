@@ -164,7 +164,7 @@ read the answers:
   `shared_instance_name`, `leviculum-std/src/interfaces/inventory.rs:96`;
   against `reference/Reticulum/RNS/Utilities/rnstatus.py:393-401` and
   `:429-438`). The live client count decrements on disconnect
-  (`retire_from_inventory`, `leviculum-std/src/driver/mod.rs:4177`),
+  (`retire_from_inventory`, `leviculum-std/src/driver/mod.rs:4167`),
   so the `Serving : N programs` line (clients − 1,
   `reference/Reticulum/RNS/Utilities/rnstatus.py:432`) reads the same
   against either daemon. Announce-rate defaults follow Python's

@@ -2406,7 +2406,7 @@ impl ReticulumNode {
         }
 
         // Persist state to disk
-        self.save_persistent_state();
+        shutdown_flush(&self.inner).await;
 
         // Tear down the node's runtime (non-blocking) now that the event loop
         // has exited. Clearing it means a subsequent start() builds a fresh
@@ -2418,16 +2418,6 @@ impl ReticulumNode {
 
         tracing::info!("ReticulumNode stopped");
         Ok(())
-    }
-
-    /// Persist all state to disk on shutdown.
-    ///
-    /// Delegates to `Storage::flush()` which saves known_destinations
-    /// and packet_hashlist in Python-compatible formats.
-    fn save_persistent_state(&self) {
-        use leviculum_core::traits::Storage as _;
-        let mut core = self.inner.lock_recover();
-        core.storage_mut().flush();
     }
 
     /// Enable shared instance with the given instance name.
@@ -4987,9 +4977,9 @@ async fn run_event_loop(
                     // closes it now, while the runtime still polls its task.
                     teardown_carriers_on_shutdown(&mut registry).await;
                     // Join any in-flight storage flush before breaking: stop()
-                    // runs the synchronous shutdown flush the moment the runner
-                    // joins, and an unjoined background write could rename an
-                    // older merge over it. Unbounded await on local disk IO —
+                    // begins the shutdown flush the moment the runner joins,
+                    // and an unjoined background write could rename an older
+                    // merge over it. Unbounded await on local disk IO —
                     // the same exposure the old under-lock flush had here.
                     if let Some(handle) = flush_in_flight.take() {
                         let joined = handle.await;
@@ -6311,8 +6301,8 @@ const FLUSH_SLICE_PAUSE: Duration = Duration::from_millis(1);
 /// that reads the runtime identities a slice per short hold and does the
 /// fold and the file IO with no lock. `None` when nothing is dirty. The
 /// returned handle is the overlap guard; the caller must settle it —
-/// including on the shutdown path — before the synchronous shutdown flush
-/// may run.
+/// including on the shutdown path — before the shutdown flush
+/// ([`shutdown_flush`]) may begin.
 ///
 /// This is the core lock budget's three-phase shape
 /// (`docs/src/concepts/core-lock-budget.md`, the `send_resource` split),
@@ -6383,6 +6373,21 @@ fn settle_flush(
             );
         }
         Err(e) => tracing::error!("Storage flush write task failed: {e}"),
+    }
+}
+
+/// The last storage flush, run by `stop()` once the event loop has joined:
+/// the same three phases as the hourly flush, awaited rather than
+/// interleaved with the loop (698). It used to be `Storage::flush` under
+/// one lock hold, which on 87 000 known destinations under a quarter of a
+/// CPU held the lock 2.1 s (`CORE_STALL ms=2065`): the disk merge 1.1 s,
+/// the encode 0.5 s and the fold 0.3 s, with the file write itself 7 ms.
+/// Nothing that runs on after the loop, the RPC listener for one, then
+/// waits on that.
+async fn shutdown_flush(inner: &Arc<Mutex<StdNodeCore>>) {
+    if let Some(handle) = begin_flush(inner) {
+        let joined = handle.await;
+        settle_flush(inner, joined);
     }
 }
 
@@ -10019,6 +10024,50 @@ mod tests {
         assert!(
             entries.contains_key(&[0x0A; TRUNCATED_HASHBYTES]),
             "the pre-gate identity must be on disk"
+        );
+    }
+
+    /// The shutdown flush leaves the node lock free while it writes (698).
+    /// It used to run all three phases under one hold: at 87 000 known
+    /// destinations under a quarter of a CPU that hold was 2.1 s, nearly
+    /// all of it the disk merge, the fold and the encode, the work the
+    /// hourly flush already does with no lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_shutdown_flush_writes_off_the_node_lock() {
+        use crate::known_destinations::{decode_known_destinations, KNOWN_DESTINATIONS_FILE};
+
+        let (core, td) = shared_test_core();
+        let (hook, mut gate) = gated_flush_hook(1);
+        core.lock_recover().storage_mut().set_flush_io_hook(hook);
+        dirty_identity(&core, 0x0A);
+
+        let flushing = tokio::spawn({
+            let core = Arc::clone(&core);
+            async move { shutdown_flush(&core).await }
+        });
+        gate.entered_rx.recv().await.expect("hook must be entered");
+        // Read before the release, assert after it: a lock held across the
+        // write would otherwise keep the gate shut and the flush unjoinable.
+        let free_while_writing = core.try_lock().is_ok();
+        gate.release_tx.send(()).expect("blocked hook receives");
+        flushing.await.expect("the shutdown flush ran");
+        assert!(
+            free_while_writing,
+            "the node lock must be free while the shutdown flush writes"
+        );
+
+        assert!(
+            core.lock_recover()
+                .storage_mut()
+                .take_flush_snapshot()
+                .is_none(),
+            "a settled shutdown flush leaves nothing dirty"
+        );
+        let bytes = std::fs::read(td.path().join(KNOWN_DESTINATIONS_FILE)).unwrap();
+        let entries = decode_known_destinations(&bytes).unwrap();
+        assert!(
+            entries.contains_key(&[0x0A; TRUNCATED_HASHBYTES]),
+            "the shutdown flush must put the identity on disk"
         );
     }
 

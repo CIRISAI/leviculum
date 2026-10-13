@@ -469,8 +469,8 @@ impl FlushOutcome {
 }
 
 impl FlushSnapshot {
-    /// Blocking work — blocking pool from the event loop, inline at
-    /// shutdown. Folds the runtime identities into a copy of the table, then
+    /// Blocking work — blocking pool from the event loop and at shutdown,
+    /// inline only through `Storage::flush`. Folds the runtime identities into a copy of the table, then
     /// merges on-disk entries written by other processes (Python-compatible)
     /// before rewriting. Never touches the node lock.
     pub(crate) fn write(self) -> FlushOutcome {
@@ -1041,10 +1041,11 @@ impl leviculum_core::traits::Storage for Storage {
 
     // Flush (persist to disk)
     //
-    // The synchronous shutdown entry: all three phases run back-to-back on
-    // the caller's thread. The event loop instead runs `FlushSnapshot::write`
-    // on the blocking pool between the two lock-holding phases
-    // (leviculum#44).
+    // The synchronous entry, for a caller with no runtime: all three phases
+    // run back-to-back on the caller's thread, under whatever lock it holds.
+    // The driver never calls it: the event loop and `stop()` both run
+    // `FlushSnapshot::write` on the blocking pool between the two
+    // lock-holding phases (leviculum#44, 698).
     fn flush(&mut self) {
         if let Some(mut snapshot) = self.take_flush_snapshot() {
             while !self.collect_flush_slice(&mut snapshot) {}
