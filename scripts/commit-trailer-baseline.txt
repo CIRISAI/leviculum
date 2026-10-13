@@ -24,7 +24,7 @@
 # look, which is what we wanted all along -- we still want to know when it
 # happens, we just do not want to rewrite the message.
 #
-# The 7 foreign commits above the baseline:
+# The first 7 foreign commits above the baseline:
 #   57f7c59 2026-08-07 Eric Moore <mooreericnyc@gmail.com>
 #           feat(lxmf): expose the propagation-node HOST direction
 #           (leviculum#38), merged as PR #201; carries
@@ -44,6 +44,15 @@
 #   61edbbd 2026-08-16 Eric Moore <mooreericnyc@gmail.com>
 #           fix(test): self-spawn the pipe-bridge child, merged as
 #           PR #259; carries a Claude Fable 5 trailer
+#
+# 7 -> 84 in the v0.31.0+ciris.1 release commit (CIRIS fork, 2026-10-13).
+# The other 77 are the CIRIS fork's own commits since the guard landed,
+# every one by Eric Moore <mooreericnyc@gmail.com> and carrying the
+# Claude trailer the CIRIS harness writes: the fork's release and
+# feature/fix commits up to v0.30.0+ciris.1, then the v0.31.0 line
+# (a1d75799, the leviculum-ffi test fix and this release commit). `git log --format='%h %ae' <baseline>..HEAD` lists them; the
+# check's own report names each one. In the fork the count moves in
+# every release commit, by the number of commits that release brings in.
 #
 # The 16, newest first, all on master:
 #   5c79cc9 2026-07-31 feat(link): per-link delivery telemetry
@@ -65,7 +74,7 @@
 
 baseline 8d309ab69a2d451b54f61dc003fb0d509bb12524
 legacy 16
-foreign 7
+foreign 84
 
 # Every `ours` line is an identity this guard stops exempting -- i.e. one
 # whose commit messages it checks. `lp@lew-palm.de` is what Lew, the

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
-## [Unreleased] — CIRIS fork
+## [0.31.0+ciris.1] — CIRIS fork
 
 ### Added
 
@@ -33,6 +33,14 @@ git tag, not the version string. -->
   re-proposal cooldown applies. On a link that is not direct it returns
   `DirectLinkError::NotDirect` and changes nothing.
 - `DirectLinkError` gains `NoPendingRequest` and `NotDirect`.
+
+### Fixed
+
+- leviculum-ffi's lib tests compile again. The interface-stats filler
+  snapshot in `diagnostics.rs` never gained the `circuit_open` and
+  `shed_packets` fields leviculum#66 added to `InterfaceStatusSnapshot`; it
+  now sets them to what the driver reports for an interface with no
+  counters (`false`, `0`). Test-only; no library change.
 
 ## [0.30.0+ciris.1] — CIRIS fork
 
