@@ -1542,7 +1542,14 @@ standard: fast test-ffi verify-packaging
     # is too slow for the Tier 0 push gate but trivial here.
     {{manifest}} lblogd-tests -- cargo test -p lblogd --tests
     {{manifest}} proxy -- cargo test -p leviculum-proxy
-    {{manifest}} rnsd-interop -- cargo test -p leviculum-std --test rnsd_interop
+    # 7200, not the wrapper's 1800 (698): 207 s and 396 s are the honest runs
+    # the manifests recorded, but under a quarter of a CPU the suite's 393
+    # tests summed to 2131 s of shard wall (689's survey on c4d29b71, against
+    # 355 s unconstrained), so a slow coder host exited 124 on a green suite.
+    # 7200 is 3.4x that, the wrapper default's own headroom over an honest run,
+    # and the ceiling workspace-all-targets already has. The forge does not run
+    # this suite (38ec9635).
+    {{manifest}} rnsd-interop --timeout 7200 -- cargo test -p leviculum-std --test rnsd_interop
     {{manifest}} event-log-subscriber -- cargo test -p leviculum-std --test event_log_subscriber -- --test-threads=1
     {{manifest}} event-log-multiprocess -- cargo test -p leviculum-std --test event_log_multiprocess
     # The LNode debug-log format contract (Codeberg #65): pins the [HEAP] and
