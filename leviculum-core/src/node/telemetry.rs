@@ -32,6 +32,11 @@ pub struct LinkInfo {
     /// The id the application was given (a re-keyed link reports its
     /// original id, the same one its events carry).
     pub link_id: LinkId,
+    /// The id on the wire, which both ends share. Equal to `link_id` unless
+    /// an establishment retry re-keyed this initiator's link (Codeberg #66):
+    /// the responder only ever sees this one, so anything both ends must
+    /// agree on (a KDF salt, a nonce) takes it, not `link_id`.
+    pub wire_link_id: LinkId,
     /// For an initiator link the destination dialled; for a responder link
     /// this node's own destination.
     pub destination_hash: DestinationHash,
@@ -159,6 +164,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         .get(wire_id)
                         .copied()
                         .unwrap_or(*wire_id),
+                    wire_link_id: *wire_id,
                     destination_hash: *link.destination_hash(),
                     role: if link.is_initiator() {
                         LinkRole::Initiator
@@ -174,6 +180,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             })
             .collect()
+    }
+
+    /// The id a link carries on the wire, for the id an application holds
+    /// (CIRISVerify#309). After an establishment retry (Codeberg #66) the
+    /// initiator keeps reporting the id it was first given, in every event,
+    /// so its handles stay valid; the responder only ever sees the new wire
+    /// id. Both ends agree on the wire id, so material both ends derive
+    /// from the link id takes this. `None` if no such link exists.
+    pub fn wire_link_id(&self, link_id: &LinkId) -> Option<LinkId> {
+        let wire = self.resolve_link_id(link_id);
+        self.links.contains_key(&wire).then_some(wire)
     }
 
     /// Cumulative link lifecycle counters (leviculum#77).

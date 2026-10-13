@@ -431,3 +431,24 @@ fn rekey_alias_resolved_for_reject_resource() {
         "the parked ADV must have been taken off the LIVE link"
     );
 }
+
+/// CIRISVerify#309: after a re-key the initiator still reports the id it was
+/// given, and `wire_link_id` maps it to the id the responder sees, so both
+/// ends can derive alike.
+#[test]
+fn wire_link_id_maps_the_callers_id_to_the_one_both_ends_share() {
+    let (initiator, responder, caller_link_id, wire_link_id) = active_pair_via_rekey();
+    assert_ne!(caller_link_id, wire_link_id, "the retry re-keyed the link");
+    assert_eq!(initiator.wire_link_id(&caller_link_id), Some(wire_link_id));
+    assert_eq!(initiator.wire_link_id(&wire_link_id), Some(wire_link_id));
+    assert_eq!(responder.wire_link_id(&wire_link_id), Some(wire_link_id));
+    let listed = initiator.link_list();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].link_id, caller_link_id,
+        "events and lists keep the caller's id"
+    );
+    assert_eq!(listed[0].wire_link_id, wire_link_id);
+    assert_eq!(responder.link_list()[0].wire_link_id, wire_link_id);
+    assert_eq!(initiator.wire_link_id(&LinkId::new([0xEE; 16])), None);
+}

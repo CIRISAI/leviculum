@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 67
+TOTAL 68
 
 driver::ReticulumNode::accept_resource
 driver::ReticulumNode::active_link_count
@@ -96,3 +96,4 @@ driver::sender::PacketSender::send_measured
 driver::stream::LinkHandle::close
 driver::stream::LinkHandle::send
 driver::stream::LinkHandle::try_send
+driver::wire_id::ReticulumNode::wire_link_id

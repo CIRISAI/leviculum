@@ -7620,6 +7620,7 @@ pub(crate) async fn shared_instance_first_hop_timeout_ms(
     }
 }
 
+mod wire_id; // CIRISVerify#309, kept in its own file so no cited line moves
 #[cfg(test)]
 mod tests {
     use super::*;
