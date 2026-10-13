@@ -719,6 +719,12 @@ async fn a_python_client_drains_a_full_field_mailbox_in_one_sync() {
         );
     }
 
+    // About 96 s of this test, and not shortened by queueing all 24 and
+    // waiting once (measured 2026-10-13: 99.1 s either way). The rate is
+    // the stock sender's: a propagated message defers its propagation
+    // stamp by default (`reference/LXMF/LXMF/LXMessage.py:164`), and the
+    // deferred-stamp job mints for one message per 4 s jobloop pass
+    // (`reference/LXMF/LXMF/LXMRouter.py:2582-2587`).
     for index in 0..MESSAGES {
         let content = format!("field mailbox message {index}");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
