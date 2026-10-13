@@ -67,6 +67,11 @@ Catch-up to upstream master (+246 since the v0.30.0 base), with v0.31.0+ciris.1
   A dead socket after a Wi-Fi/cellular switch is now detected in about 24 s
   instead of the kernel default of many minutes. This goes past the
   reference, whose macOS branch sets only the idle keepalive.
+- The TCP client reconnect backoff caps at 20 s instead of 60 s (+ciris). It
+  is still a jittered doubling: 5, 5, 5, 10, then 20 s. A returning peer is
+  redialed within about 20 s. Upstream Python's fixed 5 s wait is not
+  adopted, because a fleet redialing a downed canonical every 5 s would
+  reconnect in one synchronized burst when the canonical returns.
 
 ## [0.31.0+ciris.1] — CIRIS fork
 

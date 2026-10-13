@@ -250,7 +250,8 @@ pub(crate) struct TcpClientConfig {
     /// Upper bound on the backoff delay between reconnect attempts. The base
     /// `reconnect_interval` is doubled on each attempt past the third and
     /// clamped here, so a permanently-dead peer is retried at most once per
-    /// this interval instead of every `reconnect_interval`. Default 60 s.
+    /// this interval instead of every `reconnect_interval`. Default 20 s
+    /// ([`DEFAULT_RECONNECT_MAX_INTERVAL`]).
     pub reconnect_max_interval: Duration,
     /// Upper bound on a single connect attempt. A connect that does not
     /// complete within this window is abandoned and counted as a failed
@@ -288,7 +289,17 @@ pub(crate) struct TcpClientConfig {
 pub(crate) const DEFAULT_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Default cap on the exponential reconnect backoff. See [`backoff_delay`].
-pub(crate) const DEFAULT_RECONNECT_MAX_INTERVAL: Duration = Duration::from_secs(60);
+///
+/// 20 s (CIRIS fork; 60 s upstream of the fork). With a host that kicks its
+/// clients on a network change (leviculum#84) and ~24 s dead-socket detection
+/// on every platform (leviculum#85), the backoff now matters mostly for a
+/// peer that is DOWN: the cap is how long a returning peer can wait to be
+/// redialed, and 60 s was a minute of unreachability per canonical restart.
+/// It stays a jittered doubling, not Python's fixed 5 s: a mobile fleet
+/// redialing a downed canonical every 5 s is a synchronized storm the moment
+/// it returns (the CIRISEdge#855 class). At the cap a dead peer costs ~4,300
+/// attempts a day, against ~1,440 at 60 s and ~17,280 at Python's 5 s.
+pub(crate) const DEFAULT_RECONNECT_MAX_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Fast non-cryptographic PRNG (xorshift64). Seeded from OsRng once per task.
 struct Xorshift64(u64);
@@ -1419,6 +1430,19 @@ mod tests {
         // Clamped at max, never exceeding it.
         assert_eq!(backoff_delay(7, base, max), max); // 80s -> 60s
         assert_eq!(backoff_delay(8, base, max), max); // 160s -> 60s
+    }
+
+    /// The fork's default cap (see [`DEFAULT_RECONNECT_MAX_INTERVAL`]): the
+    /// schedule from the 5 s config default reaches 20 s at attempt 5 and
+    /// stays there.
+    #[test]
+    fn the_default_backoff_cap_is_20_s() {
+        let base = Duration::from_secs(5);
+        let max = DEFAULT_RECONNECT_MAX_INTERVAL;
+        assert_eq!(max, Duration::from_secs(20));
+        assert_eq!(backoff_delay(4, base, max), Duration::from_secs(10));
+        assert_eq!(backoff_delay(5, base, max), max);
+        assert_eq!(backoff_delay(50, base, max), max);
     }
 
     #[test]
