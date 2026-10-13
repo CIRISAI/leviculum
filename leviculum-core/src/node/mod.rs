@@ -3609,6 +3609,31 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.process_events_and_actions()
     }
 
+    /// [`request_path`](Self::request_path) for a caller that paces its own
+    /// repeats: the request goes out even inside the per-destination minimum
+    /// interval, as an application's `Transport.request_path` does in the
+    /// reference. See [`Transport::request_path_unthrottled`].
+    ///
+    /// [`Transport::request_path_unthrottled`]: crate::transport::Transport::request_path_unthrottled
+    pub fn request_path_unthrottled(
+        &mut self,
+        dest_hash: &DestinationHash,
+    ) -> crate::transport::TickOutput {
+        let mut tag = [0u8; TRUNCATED_HASHBYTES];
+        self.rng.fill_bytes(&mut tag);
+        if let Err(e) = self
+            .transport
+            .request_path_unthrottled(dest_hash.as_bytes(), None, &tag)
+        {
+            crate::tracing::debug!(
+                "Failed to build path request for <{}>: {}",
+                HexShort(dest_hash.as_bytes()),
+                e
+            );
+        }
+        self.process_events_and_actions()
+    }
+
     /// Get the hop count to a destination
     pub fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8> {
         self.transport.hops_to(dest_hash.as_bytes())

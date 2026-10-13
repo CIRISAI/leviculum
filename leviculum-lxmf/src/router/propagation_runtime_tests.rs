@@ -1,6 +1,7 @@
 use super::*;
 use alloc::{
     collections::{BTreeSet, VecDeque},
+    rc::Rc,
     vec,
 };
 use core::cell::Cell;
@@ -25,7 +26,9 @@ use crate::{
 
 const NOW_UNIX: f64 = 1_700_000_000.0;
 
-struct TestClock(Cell<u64>);
+/// Shared with the test through [`node_and_clock`]: `NodeCore` owns its clock
+/// and offers no way back to it, so a test that steps time keeps the handle.
+struct TestClock(Rc<Cell<u64>>);
 
 impl Clock for TestClock {
     fn now_ms(&self) -> u64 {
@@ -42,11 +45,17 @@ impl Clock for TestClock {
 type TestNode = NodeCore<OsRng, TestClock, MemoryStorage>;
 
 fn node() -> TestNode {
-    NodeCoreBuilder::new().build(
+    node_and_clock().0
+}
+
+fn node_and_clock() -> (TestNode, Rc<Cell<u64>>) {
+    let clock = Rc::new(Cell::new(1_000));
+    let node = NodeCoreBuilder::new().build(
         OsRng,
-        TestClock(Cell::new(1_000)),
+        TestClock(Rc::clone(&clock)),
         MemoryStorage::with_defaults(),
-    )
+    );
+    (node, clock)
 }
 
 fn identity(seed: u8) -> Identity {
@@ -1168,6 +1177,8 @@ struct MailboxPair {
     client_identity_hash: [u8; 16],
     content: Vec<u8>,
     message_id: [u8; 32],
+    client_clock: Rc<Cell<u64>>,
+    server_clock: Rc<Cell<u64>>,
 }
 
 fn mailbox_pair() -> MailboxPair {
@@ -1179,7 +1190,7 @@ fn mailbox_pair() -> MailboxPair {
     let client_propagation =
         PropagationTransport::destination(identity_copy(&client_identity)).expect("client PN");
 
-    let mut client_node = node();
+    let (mut client_node, client_clock) = node_and_clock();
     let lxmf = LxmfNode::register(&mut client_node, client_delivery, LxmfNodeConfig::default())
         .expect("register delivery");
     let propagation = PropagationTransport::register(&mut client_node, client_propagation)
@@ -1196,7 +1207,7 @@ fn mailbox_pair() -> MailboxPair {
     );
     client_node.remember_identity(source_hash, public_identity(&source));
 
-    let mut server_node = node();
+    let (mut server_node, server_clock) = node_and_clock();
     let server_identity = identity(51);
     let mut server_destination = Destination::new(
         Some(server_identity),
@@ -1275,6 +1286,8 @@ fn mailbox_pair() -> MailboxPair {
         client_identity_hash,
         content,
         message_id: message.message_id,
+        client_clock,
+        server_clock,
     }
 }
 
@@ -1286,6 +1299,7 @@ fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
         client_identity_hash,
         content,
         message_id,
+        ..
     } = mailbox_pair();
     let already_have = server.already_have;
     let fresh = server.fresh;
@@ -1383,6 +1397,89 @@ fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
     assert!(client.router.delivered_ids.contains_key(&already_have));
     assert!(client.router.has_message(&fresh));
     assert!(client.router.delivered_ids.contains_key(&message_id));
+}
+
+/// mvr for leviculum#699: a drain whose first path request is lost still
+/// reaches the node inside the path window.
+///
+/// `lnmsg fetch` right after its daemon starts sent its one path request in
+/// the same second the daemon's TCP interface reconnected to the node; the
+/// daemon had no interface to send it on, dropped it, and the client waited
+/// out the whole window for an answer to a request nobody received, then
+/// reported `NoPath`. Here the first request is simply never delivered, and
+/// the clock is stepped through the window the way the router's tick sees it.
+#[test]
+fn a_drain_survives_losing_its_first_path_request() {
+    let MailboxPair {
+        mut client,
+        mut server,
+        client_clock,
+        server_clock,
+        ..
+    } = mailbox_pair();
+    // The node has announced before, so it can answer a path request for
+    // itself, but the client has never heard that announce.
+    let _ = server
+        .node
+        .announce_destination(
+            &server.propagation_destination,
+            Some(&propagation_announce()),
+        )
+        .expect("announce propagation node");
+    assert!(!client.node.has_path(&server.propagation_destination));
+
+    let selected = client
+        .router
+        .set_outbound_propagation_node(&mut client.node, Some(server.propagation_destination))
+        .expect("select propagation node");
+    let _ = client.absorb_router(selected);
+    let requested = client
+        .router
+        .request_messages_from_propagation_node(&mut client.node, None)
+        .expect("request mailbox");
+    let lost = client.absorb_router(requested);
+    assert_eq!(lost.len(), 1, "the drain opens with one path request");
+    assert_eq!(
+        client.router.propagation_client_state(),
+        Some(PropagationClientState::PathRequested)
+    );
+
+    // Step both clocks through the path window a tick at a time, delivering
+    // everything either side sends from here on. The first request stays
+    // lost. The node answers a path request with a deferred announce, so it
+    // is ticked as well.
+    let start = client_clock.get();
+    let mut repeats = 0;
+    while client_clock.get() < start + PROPAGATION_PATH_TIMEOUT_MS {
+        client_clock.set(client_clock.get() + 250);
+        server_clock.set(server_clock.get() + 250);
+        let ticked = client.router.tick(&mut client.node).expect("router tick");
+        let to_server = client.absorb_router(ticked);
+        if !to_server.is_empty() {
+            repeats += 1;
+        }
+        let timeout = server.node.handle_timeout();
+        let to_client = server.absorb_core(timeout);
+        pump(&mut client, &mut server, to_server, to_client);
+        if client.node.has_path(&server.propagation_destination) {
+            break;
+        }
+    }
+    assert_eq!(repeats, 1, "the lost request is repeated exactly once");
+    assert!(
+        client.node.has_path(&server.propagation_destination),
+        "the repeated request found the node inside the path window"
+    );
+
+    // The rest of the round runs as it would have from the first request.
+    let ticked = client.router.tick(&mut client.node).expect("router tick");
+    let to_server = client.absorb_router(ticked);
+    pump(&mut client, &mut server, to_server, Vec::new());
+    assert_eq!(
+        client.router.propagation_client_state(),
+        Some(PropagationClientState::Complete)
+    );
+    assert_eq!(server.list_requests, 1);
 }
 
 /// mvr for Codeberg #393: the round that asked for a transfer owns it.

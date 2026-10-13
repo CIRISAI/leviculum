@@ -9044,20 +9044,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         tag: &[u8; TRUNCATED_HASHBYTES],
     ) -> Result<(), TransportError> {
         let now = self.clock.now_ms();
-
-        // A caller asking for a path while the table holds an entry over
-        // an OFFLINE interface is saying that entry does not serve
-        // (Codeberg #365). Mark it unresponsive so the answer — often the
-        // same cached announce emission at more hops, relayed by a
-        // neighbour — is accepted as the alternative route (the
-        // Transport.py:1677-1679 arm in handle_announce) instead of
-        // losing the hop-count comparison to the stale entry.
-        if let Some(entry) = self.storage.get_path(dest_hash) {
-            if !self.interface_online(entry.interface_index) {
-                self.storage
-                    .set_path_state(*dest_hash, PathState::Unresponsive);
-            }
-        }
+        self.distrust_offline_path(dest_hash);
 
         // Rate limiting
         if let Some(last_request) = self.storage.get_path_request_time(dest_hash) {
@@ -9065,6 +9052,54 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 return Ok(());
             }
         }
+        self.send_path_request(dest_hash, on_interface, tag)
+    }
+
+    /// [`request_path`](Self::request_path) without the per-destination
+    /// minimum interval, for a caller that paces its own repeats.
+    ///
+    /// The interval is ours for requests this stack raises on its own: the
+    /// reference throttles only its automated requests by `PATH_REQUEST_MI`
+    /// (Transport.py:83, :538, :703), while an application's
+    /// `Transport.request_path` (Transport.py:2771) always transmits. A client
+    /// whose first request was lost, and which repeats it on its own wait,
+    /// needs the second one on the wire inside its window, not 20 s later.
+    /// The request still counts as the latest for the interval, so the
+    /// automated ones stay paced against it.
+    pub fn request_path_unthrottled(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        on_interface: Option<usize>,
+        tag: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Result<(), TransportError> {
+        self.distrust_offline_path(dest_hash);
+        self.send_path_request(dest_hash, on_interface, tag)
+    }
+
+    /// A caller asking for a path while the table holds an entry over
+    /// an OFFLINE interface is saying that entry does not serve
+    /// (Codeberg #365). Mark it unresponsive so the answer — often the
+    /// same cached announce emission at more hops, relayed by a
+    /// neighbour — is accepted as the alternative route (the
+    /// Transport.py:1677-1679 arm in handle_announce) instead of
+    /// losing the hop-count comparison to the stale entry.
+    fn distrust_offline_path(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) {
+        if let Some(entry) = self.storage.get_path(dest_hash) {
+            if !self.interface_online(entry.interface_index) {
+                self.storage
+                    .set_path_state(*dest_hash, PathState::Unresponsive);
+            }
+        }
+    }
+
+    /// Record the request time and put one path request on the wire.
+    fn send_path_request(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        on_interface: Option<usize>,
+        tag: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Result<(), TransportError> {
+        let now = self.clock.now_ms();
         self.storage.set_path_request_time(*dest_hash, now);
 
         // Build path request data:

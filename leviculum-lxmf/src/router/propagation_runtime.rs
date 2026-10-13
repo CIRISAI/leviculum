@@ -28,8 +28,19 @@ use crate::{
     },
 };
 
-/// Python `LXMRouter.PR_PATH_TIMEOUT`, expressed for the sans-I/O clock.
-pub const PROPAGATION_PATH_TIMEOUT_MS: u64 = 10_000;
+/// How long a drain waits for a path to its node before it reports
+/// [`PropagationClientState::NoPath`].
+///
+/// Python waits `LXMRouter.PR_PATH_TIMEOUT` (10 s) on one path request
+/// (`reference/LXMF/LXMF/LXMRouter.py:534-540`, `:1461-1470`), so a single
+/// lost request fails the whole drain. Ours repeats the request every
+/// [`PATH_REQUEST_WAIT_MS`](super::PATH_REQUEST_WAIT_MS), the reference's own
+/// wait between a path request and the next attempt (`LXMRouter.py:33`,
+/// `:1779`), and the window holds two of those waits so the repeat is given
+/// as long to be answered as the first was (leviculum#699: `lnmsg fetch` at
+/// boot lost its only request to a daemon whose interface was still
+/// reconnecting). Wire-neutral: a repeated path request is an ordinary one.
+pub const PROPAGATION_PATH_TIMEOUT_MS: u64 = 2 * super::PATH_REQUEST_WAIT_MS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropagationClientConfig {
@@ -108,6 +119,9 @@ struct MailboxSync {
     received: usize,
     duplicates: usize,
     path_deadline_ms: Option<u64>,
+    /// When the path request is repeated if no path has turned up. Read only
+    /// in [`PropagationClientState::PathRequested`], which sets it.
+    next_path_request_ms: Option<u64>,
 }
 
 impl Default for MailboxSync {
@@ -120,6 +134,7 @@ impl Default for MailboxSync {
             received: 0,
             duplicates: 0,
             path_deadline_ms: None,
+            next_path_request_ms: None,
         }
     }
 }
@@ -751,8 +766,22 @@ impl PropagationRuntime {
             self.client.path_deadline_ms = None;
             output.core.merge(self.transport.cancel(node, destination));
             self.set_state(PropagationClientState::NoPath, &mut output);
-        } else if let Some(deadline) = self.client.path_deadline_ms {
-            output.core.next_deadline_ms = Some(deadline);
+        } else {
+            if self
+                .client
+                .next_path_request_ms
+                .is_some_and(|due| node.now_ms() >= due)
+            {
+                // Unthrottled: the core's per-destination interval (20 s) is
+                // longer than this whole window, so the plain call would drop
+                // the repeat that is the point of the wait.
+                output
+                    .core
+                    .merge(node.request_path_unthrottled(&destination));
+                self.client.next_path_request_ms =
+                    Some(node.now_ms().saturating_add(super::PATH_REQUEST_WAIT_MS));
+            }
+            output.core.next_deadline_ms = self.next_deadline();
         }
         Ok(output)
     }
@@ -1140,10 +1169,15 @@ impl PropagationRuntime {
     }
 
     pub(super) fn next_deadline(&self) -> Option<u64> {
-        if self.client.state == PropagationClientState::PathRequested {
-            self.client.path_deadline_ms
-        } else {
-            None
+        if self.client.state != PropagationClientState::PathRequested {
+            return None;
+        }
+        match (
+            self.client.path_deadline_ms,
+            self.client.next_path_request_ms,
+        ) {
+            (Some(deadline), Some(repeat)) => Some(deadline.min(repeat)),
+            (deadline, repeat) => deadline.or(repeat),
         }
     }
 }
@@ -1427,15 +1461,16 @@ impl LxmfRouter {
                 .core
                 .merge(propagation.transport.ensure_link(node, destination)?.core);
         } else {
-            propagation.client.path_deadline_ms = Some(
-                node.now_ms()
-                    .saturating_add(propagation.config.path_timeout_ms),
-            );
+            let now_ms = node.now_ms();
+            propagation.client.path_deadline_ms =
+                Some(now_ms.saturating_add(propagation.config.path_timeout_ms));
+            propagation.client.next_path_request_ms =
+                Some(now_ms.saturating_add(super::PATH_REQUEST_WAIT_MS));
             propagation.set_state(PropagationClientState::PathRequested, &mut output);
             output
                 .core
                 .merge(propagation.transport.ensure_link(node, destination)?.core);
-            output.core.next_deadline_ms = propagation.client.path_deadline_ms;
+            output.core.next_deadline_ms = propagation.next_deadline();
         }
         Ok(self.finish_output(output))
     }

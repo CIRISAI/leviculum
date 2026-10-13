@@ -11,9 +11,9 @@ This is where a naive design produces a client that silently loses mail,
 and the library has arranged things so that the naive design is the
 default: **nothing syncs unless the application asks**
 (`request_messages_from_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1365`, and
+`leviculum-lxmf/src/router/propagation_runtime.rs:1399`, and
 `next_deadline()` returns `None` outside `PathRequested`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1142-1148`).
+`leviculum-lxmf/src/router/propagation_runtime.rs:1171-1182`).
 
 ### When to sync
 
@@ -55,10 +55,10 @@ cadence is visible, never inferred.
 
 The library hands over a fourteen-state machine
 (`PropagationClientState`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:60-75`), progress as an
+`leviculum-lxmf/src/router/propagation_runtime.rs:71-86`), progress as an
 `f32`, transfer size, and a result of `{ received, duplicates }`
 (`PropagationSyncResult`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:78-83`). That is more
+`leviculum-lxmf/src/router/propagation_runtime.rs:89-94`). That is more
 than enough to be honest.
 
 A permanent one-line status, taking NomadNet's best idea (its
@@ -81,11 +81,11 @@ different failures happened, because they need different fixes:
 | Library state | What the user must be told |
 |---|---|
 | no node selected | "no mailbox chosen"; offer the picker |
-| `NoPath` (`leviculum-lxmf/src/router/propagation_runtime.rs:69`) | "cannot find a route to the mailbox"; it may come back |
-| `LinkFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:70`) | "the mailbox did not answer" |
-| `NoAccess` (`leviculum-lxmf/src/router/propagation_runtime.rs:73`) | "the mailbox refused you"; this one will not fix itself |
-| `NoIdentity` (`leviculum-lxmf/src/router/propagation_runtime.rs:72`) | "the mailbox does not know your key" |
-| `TransferFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:71`) | "the transfer broke"; will retry |
+| `NoPath` (`leviculum-lxmf/src/router/propagation_runtime.rs:80`) | "cannot find a route to the mailbox"; it may come back |
+| `LinkFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:81`) | "the mailbox did not answer" |
+| `NoAccess` (`leviculum-lxmf/src/router/propagation_runtime.rs:84`) | "the mailbox refused you"; this one will not fix itself |
+| `NoIdentity` (`leviculum-lxmf/src/router/propagation_runtime.rs:83`) | "the mailbox does not know your key" |
+| `TransferFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:82`) | "the transfer broke"; will retry |
 
 A single "sync failed" for all six is the lie this section exists to
 prevent.
@@ -140,7 +140,7 @@ eligible as your mailbox. Do not inherit that.
 ### The purge default
 
 `retain_synced_on_node` defaults to `false`
-(`leviculum-lxmf/src/router/propagation_runtime.rs:50`), so by default the
+(`leviculum-lxmf/src/router/propagation_runtime.rs:61`), so by default the
 client tells the node to delete what it has collected. That is the right
 default for privacy and for the node operator's disk, and it is the wrong
 default for a user who runs two clients on the same identity, because the
@@ -154,7 +154,7 @@ consequence spelled out, not a config-file default nobody reads.
   neither is in the router snapshot (`snapshot`,
   `leviculum-lxmf/src/router.rs:2069-2086`); replay via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1317`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1351`).
 - Re-selection after restart.
 - Proof-of-work for `PropagationStampPending`, off the core lock.
 - Calling `persist()` on `PersistenceRequested`.
