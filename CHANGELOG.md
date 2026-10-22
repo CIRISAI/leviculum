@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.31.1+ciris.1] — CIRIS fork
+
+### Added
+
+- `ReticulumNode::wire_link_id(&LinkId) -> Option<LinkId>` (leviculum-std): the
+  link's current wire id, resolving an id handed out before an establishment
+  retry through the #66 alias table (CIRISAI/leviculum#86). A caller that binds
+  the id into a key derivation, a nonce or its own per-link map must use the id
+  the peer sees; after a retry that is not the id `connect` returned. Core
+  already resolves it (`NodeCore::link(&id).id()`, witnessed by
+  `mvr_link_rekey_alias`); the std driver now exposes it.
+
 ## [0.31.0+ciris.1] — CIRIS fork
 
 ### Added

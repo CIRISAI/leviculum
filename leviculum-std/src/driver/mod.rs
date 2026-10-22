@@ -3333,6 +3333,24 @@ impl ReticulumNode {
             .is_some_and(leviculum_core::link::Link::is_active)
     }
 
+    /// The link's current WIRE id, resolving a caller-visible id handed out
+    /// before an establishment retry (Codeberg #66, CIRISAI/leviculum#86).
+    ///
+    /// The #66 retry regenerates the initiator's ephemeral keys and re-keys the
+    /// link under a fresh id; `connect` handed the caller the ORIGINAL id, and
+    /// the accessors resolve it through the alias table, but anything a caller
+    /// BINDS to the id — a key derivation, a nonce, a map it keys its own
+    /// per-link state by — must use the id the peer sees, which is this one.
+    /// `None` for an unknown or already-closed link. For a link that was never
+    /// re-keyed (every responder link; most initiator links) this is the id
+    /// given.
+    pub fn wire_link_id(&self, link_id: &LinkId) -> Option<LinkId> {
+        self.inner
+            .lock_recover()
+            .link(link_id)
+            .map(|l| *l.id())
+    }
+
     /// Get the node's identity hash (16 bytes)
     pub fn identity_hash(&self) -> [u8; 16] {
         *self.inner.lock_recover().identity().hash()
