@@ -3345,10 +3345,7 @@ impl ReticulumNode {
     /// re-keyed (every responder link; most initiator links) this is the id
     /// given.
     pub fn wire_link_id(&self, link_id: &LinkId) -> Option<LinkId> {
-        self.inner
-            .lock_recover()
-            .link(link_id)
-            .map(|l| *l.id())
+        self.inner.lock_recover().link(link_id).map(|l| *l.id())
     }
 
     /// Get the node's identity hash (16 bytes)
