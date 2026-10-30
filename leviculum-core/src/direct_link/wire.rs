@@ -46,6 +46,9 @@ pub const REJECT_BUSY: u8 = 0x02;
 /// The responder cannot take part (here: its probe of the facilitator failed).
 pub const REJECT_UNSUPPORTED: u8 = 0x03;
 
+/// +ciris: the most host candidates a signal carries or a decoder keeps.
+pub const MAX_LOCAL_CANDIDATES: usize = 4;
+
 /// HKDF `info` for the punch token. Shared with rns-rs; a different label
 /// would make every punch frame fail the other side's check.
 const PUNCH_TOKEN_INFO: &[u8] = b"rns-holepunch-v1";
@@ -98,6 +101,9 @@ pub enum Signal {
         facilitator: SocketAddr,
         initiator_public: SocketAddr,
         protocol: ProbeProtocol,
+        /// +ciris: the initiator's host candidates ([`MAX_LOCAL_CANDIDATES`]
+        /// at most), punched when both ends turn out to share a NAT.
+        initiator_local: Vec<SocketAddr>,
     },
     Accept {
         session: SessionId,
@@ -109,6 +115,8 @@ pub enum Signal {
     Ready {
         session: SessionId,
         responder_public: SocketAddr,
+        /// +ciris: the responder's host candidates.
+        responder_local: Vec<SocketAddr>,
     },
     Complete {
         session: SessionId,
@@ -151,9 +159,11 @@ impl Signal {
                 facilitator,
                 initiator_public,
                 protocol,
+                initiator_local,
             } => {
                 let stun = *protocol != ProbeProtocol::Rnsp;
-                msgpack::write_fixmap_header(&mut buf, if stun { 4 } else { 3 });
+                let local = !initiator_local.is_empty();
+                msgpack::write_fixmap_header(&mut buf, 3 + u8::from(stun) + u8::from(local));
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "f");
                 write_endpoint(&mut buf, facilitator);
@@ -162,6 +172,9 @@ impl Signal {
                 if stun {
                     msgpack::write_fixstr(&mut buf, "p");
                     msgpack::write_uint(&mut buf, protocol.wire_value());
+                }
+                if local {
+                    write_local(&mut buf, initiator_local);
                 }
             }
             Signal::Accept { session } | Signal::Complete { session } => {
@@ -177,11 +190,16 @@ impl Signal {
             Signal::Ready {
                 session,
                 responder_public,
+                responder_local,
             } => {
-                msgpack::write_fixmap_header(&mut buf, 2);
+                let local = !responder_local.is_empty();
+                msgpack::write_fixmap_header(&mut buf, 2 + u8::from(local));
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "a");
                 write_endpoint(&mut buf, responder_public);
+                if local {
+                    write_local(&mut buf, responder_local);
+                }
             }
         }
         buf
@@ -206,6 +224,7 @@ impl Signal {
                     .protocol
                     .map(ProbeProtocol::from_wire)
                     .unwrap_or(ProbeProtocol::Rnsp),
+                initiator_local: fields.local,
             },
             MSG_UPGRADE_ACCEPT => Signal::Accept { session },
             MSG_UPGRADE_REJECT => Signal::Reject {
@@ -218,6 +237,7 @@ impl Signal {
             MSG_UPGRADE_READY => Signal::Ready {
                 session,
                 responder_public: fields.address.ok_or(WireError::Malformed)?,
+                responder_local: fields.local,
             },
             _ => Signal::Complete { session },
         };
@@ -233,6 +253,7 @@ struct Fields {
     address: Option<SocketAddr>,
     protocol: Option<u64>,
     reason: Option<u64>,
+    local: Vec<SocketAddr>,
 }
 
 impl Fields {
@@ -251,6 +272,7 @@ impl Fields {
                 b"a" => fields.address = Some(read_endpoint(data, &mut pos)?),
                 b"p" => fields.protocol = Some(msgpack::read_msgpack_uint(data, &mut pos)?),
                 b"r" => fields.reason = Some(msgpack::read_msgpack_uint(data, &mut pos)?),
+                b"l" => fields.local = read_local(data, &mut pos)?,
                 _ => msgpack::skip_msgpack_value(data, &mut pos)?,
             }
         }
@@ -271,6 +293,32 @@ fn write_endpoint(buf: &mut Vec<u8>, addr: &SocketAddr) {
         IpAddr::V6(ip) => msgpack::write_bin(buf, &ip.octets()),
     }
     msgpack::write_uint(buf, u64::from(addr.port()));
+}
+
+/// +ciris: `"l"`, the sender's host candidates, as an array of endpoints.
+/// Written only when there are any, so a signal without them is byte for
+/// byte what rns-rs sends; an rns-rs decoder skips the unknown key.
+fn write_local(buf: &mut Vec<u8>, local: &[SocketAddr]) {
+    let local = &local[..local.len().min(MAX_LOCAL_CANDIDATES)];
+    msgpack::write_fixstr(buf, "l");
+    msgpack::write_fixarray_header(buf, local.len());
+    for addr in local {
+        write_endpoint(buf, addr);
+    }
+}
+
+/// The candidates past [`MAX_LOCAL_CANDIDATES`] are skipped, not kept.
+fn read_local(data: &[u8], pos: &mut usize) -> Option<Vec<SocketAddr>> {
+    let len = msgpack::read_array_len(data, pos)?;
+    let mut out = Vec::new();
+    for _ in 0..len {
+        if out.len() < MAX_LOCAL_CANDIDATES {
+            out.push(read_endpoint(data, pos)?);
+        } else {
+            msgpack::skip_msgpack_value(data, pos)?;
+        }
+    }
+    Some(out)
 }
 
 fn read_endpoint(data: &[u8], pos: &mut usize) -> Option<SocketAddr> {
@@ -611,6 +659,7 @@ mod tests {
             facilitator: facilitator(),
             initiator_public: public_v4(),
             protocol: ProbeProtocol::Rnsp,
+            initiator_local: Vec::new(),
         };
         let golden = hex(
             "83a173c41011111111111111111111111111111111a16692c404cb007107cd10f7a16192c404c6336417cd9c40",
@@ -626,6 +675,7 @@ mod tests {
             facilitator: facilitator(),
             initiator_public: public_v6(),
             protocol: ProbeProtocol::Stun,
+            initiator_local: Vec::new(),
         };
         let golden = hex(
             "84a173c41011111111111111111111111111111111a16692c404cb007107cd10f7a16192c41020010db800000000000000000000000105a17001",
@@ -652,6 +702,7 @@ mod tests {
                 Signal::Ready {
                     session: SESSION,
                     responder_public: public_v4(),
+                    responder_local: Vec::new(),
                 },
                 "82a173c41011111111111111111111111111111111a16192c404c6336417cd9c40",
             ),
@@ -691,6 +742,39 @@ mod tests {
             Ok(Signal::Ready {
                 session: SESSION,
                 responder_public: public_v6(),
+                responder_local: Vec::new(),
+            })
+        );
+    }
+
+    /// +ciris: host candidates ride `"l"` on REQUEST and READY, round-trip,
+    /// and are capped at [`MAX_LOCAL_CANDIDATES`] on both ends.
+    #[test]
+    fn host_candidates_round_trip_and_are_capped() {
+        let lan = |n: u8| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, n)), 40_000);
+        let request = Signal::Request {
+            session: SESSION,
+            facilitator: public_v4(),
+            initiator_public: public_v4(),
+            protocol: ProbeProtocol::Rnsp,
+            initiator_local: alloc::vec![lan(10)],
+        };
+        assert_eq!(
+            Signal::decode(MSG_UPGRADE_REQUEST, &request.encode()),
+            Ok(request)
+        );
+        let many: Vec<SocketAddr> = (1..=9).map(lan).collect();
+        let ready = Signal::Ready {
+            session: SESSION,
+            responder_public: public_v6(),
+            responder_local: many.clone(),
+        };
+        assert_eq!(
+            Signal::decode(MSG_UPGRADE_READY, &ready.encode()),
+            Ok(Signal::Ready {
+                session: SESSION,
+                responder_public: public_v6(),
+                responder_local: many[..MAX_LOCAL_CANDIDATES].to_vec(),
             })
         );
     }

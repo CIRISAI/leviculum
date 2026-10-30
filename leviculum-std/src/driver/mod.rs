@@ -5527,9 +5527,15 @@ async fn run_event_loop(
             Some(outcome) = direct_outcome_rx.recv() => {
                 use crate::direct_link::Outcome;
                 let output = match outcome {
-                    Outcome::Probed { session, public } => {
-                        Some(inner.lock_recover().direct_link_probed(&session, public))
-                    }
+                    Outcome::Probed {
+                        session,
+                        public,
+                        local,
+                    } => Some(
+                        inner
+                            .lock_recover()
+                            .direct_link_probed_with_local(&session, public, local),
+                    ),
                     Outcome::Punched { session, peer: Some(peer), early } => {
                         let id = InterfaceId(
                             autoconnect_wiring
