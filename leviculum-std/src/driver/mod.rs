@@ -3345,10 +3345,7 @@ impl ReticulumNode {
     /// re-keyed (every responder link; most initiator links) this is the id
     /// given.
     pub fn wire_link_id(&self, link_id: &LinkId) -> Option<LinkId> {
-        self.inner
-            .lock_recover()
-            .link(link_id)
-            .map(|l| *l.id())
+        self.inner.lock_recover().link(link_id).map(|l| *l.id())
     }
 
     /// Get the node's identity hash (16 bytes)
@@ -5253,9 +5250,15 @@ async fn run_event_loop(
             Some(outcome) = direct_outcome_rx.recv() => {
                 use crate::direct_link::Outcome;
                 let output = match outcome {
-                    Outcome::Probed { session, public } => {
-                        Some(inner.lock_recover().direct_link_probed(&session, public))
-                    }
+                    Outcome::Probed {
+                        session,
+                        public,
+                        local,
+                    } => Some(
+                        inner
+                            .lock_recover()
+                            .direct_link_probed_with_local(&session, public, local),
+                    ),
                     Outcome::Punched { session, peer: Some(peer), early } => {
                         let id = InterfaceId(
                             autoconnect_wiring
