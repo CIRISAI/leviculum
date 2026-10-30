@@ -213,6 +213,7 @@ fn only_punch(jobs: &[DirectLinkJob]) -> ([u8; 16], SocketAddr, [u8; 32]) {
             session,
             peer,
             token,
+            ..
         }] => (*session, *peer, *token),
         other => panic!("expected one punch, got {other:?}"),
     }
@@ -852,6 +853,7 @@ fn a_session_id_in_use_on_another_link_is_refused() {
         facilitator: facilitator(),
         initiator_public: a_public(),
         protocol: ProbeProtocol::Rnsp,
+        initiator_local: Vec::new(),
     };
     let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
     assert!(pair
@@ -1117,6 +1119,7 @@ fn a_peer_cannot_propose_again_inside_the_cooldown() {
         facilitator: facilitator(),
         initiator_public: a_public(),
         protocol: ProbeProtocol::Rnsp,
+        initiator_local: Vec::new(),
     };
     pair.a.transport.clock().advance(1_000);
     pair.b.transport.clock().advance(1_000);

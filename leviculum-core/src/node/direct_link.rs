@@ -135,10 +135,13 @@ pub enum DirectLinkJob {
         server: SocketAddr,
         protocol: ProbeProtocol,
     },
-    /// Punch from the session's socket toward `peer`.
+    /// Punch from the session's socket toward `peer`, and toward each of
+    /// `alternates` at once (+ciris: the peer's host candidates when both
+    /// ends share a NAT).
     Punch {
         session: SessionId,
         peer: SocketAddr,
+        alternates: Vec<SocketAddr>,
         token: [u8; 32],
     },
     /// The session is over: drop its socket and any task still running.
@@ -157,11 +160,12 @@ enum SignalSend {
 }
 
 /// A peer's REQUEST held for the host's answer ([`DirectLinkPolicy::AskHost`]).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PendingRequest {
     session: SessionId,
     facilitator: SocketAddr,
     initiator_public: SocketAddr,
+    initiator_local: Vec<SocketAddr>,
     protocol: ProbeProtocol,
     asked_at_ms: u64,
 }
@@ -310,11 +314,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         session: &SessionId,
         public: Option<SocketAddr>,
     ) -> crate::transport::TickOutput {
+        self.direct_link_probed_with_local(session, public, Vec::new())
+    }
+
+    /// +ciris — [`Self::direct_link_probed`], with this node's host
+    /// candidates (the probe socket's LAN address), sent to the peer so it can
+    /// punch them when both ends share a NAT.
+    pub fn direct_link_probed_with_local(
+        &mut self,
+        session: &SessionId,
+        public: Option<SocketAddr>,
+        local: Vec<SocketAddr>,
+    ) -> crate::transport::TickOutput {
         let now_ms = self.transport.clock().now_ms();
         if let Some(link_id) = self.direct_links.link_of_session(session) {
             let steps = match self.direct_links.sessions.get_mut(&link_id) {
                 Some(s) => match public {
-                    Some(addr) => s.probed(addr, now_ms),
+                    Some(addr) => s.probed_with_local(addr, local, now_ms),
                     None => s.probe_failed(),
                 },
                 None => Vec::new(),
@@ -501,6 +517,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             facilitator,
             initiator_public,
             protocol,
+            initiator_local,
         } = signal
         else {
             if let Signal::Complete { session } = &signal {
@@ -579,6 +596,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             session,
             facilitator,
             initiator_public,
+            initiator_local,
             protocol,
             asked_at_ms: now_ms,
         };
@@ -622,6 +640,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             token,
             request.facilitator,
             request.initiator_public,
+            request.initiator_local,
             request.protocol,
             now_ms,
         );
@@ -757,11 +776,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         protocol,
                     });
                 }
-                Step::Punch { peer } => {
+                Step::Punch { peer, alternates } => {
                     let token = *session.token();
                     self.direct_links.jobs.push_back(DirectLinkJob::Punch {
                         session: session_id,
                         peer,
+                        alternates,
                         token,
                     });
                 }

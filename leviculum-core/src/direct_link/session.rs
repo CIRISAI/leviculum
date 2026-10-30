@@ -71,6 +71,27 @@ pub enum Failure {
     PunchFailed,
 }
 
+/// +ciris — the peer's host candidates worth punching: all of them when both
+/// ends report the SAME public IP (one NAT; a punch to that IP needs the
+/// router to hairpin, which many home routers do not), none otherwise (a host
+/// address behind another NAT is unreachable, and punching it only leaks
+/// datagrams onto this node's own network).
+#[must_use]
+pub fn same_nat_alternates(
+    own_public: SocketAddr,
+    peer_public: SocketAddr,
+    peer_local: &[SocketAddr],
+) -> Vec<SocketAddr> {
+    if own_public.ip() != peer_public.ip() {
+        return Vec::new();
+    }
+    peer_local
+        .iter()
+        .copied()
+        .filter(|a| *a != peer_public && a.port() != 0)
+        .collect()
+}
+
 /// Something the caller must do for the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
@@ -81,8 +102,14 @@ pub enum Step {
         server: SocketAddr,
         protocol: ProbeProtocol,
     },
-    /// Punch from the probe's socket toward `peer`.
-    Punch { peer: SocketAddr },
+    /// Punch from the probe's socket toward `peer`, and toward each of
+    /// `alternates` at once: the peer's host candidates, when both ends sit
+    /// behind the same NAT (+ciris). The first that proves both directions
+    /// is the path.
+    Punch {
+        peer: SocketAddr,
+        alternates: Vec<SocketAddr>,
+    },
     /// The direct path is up.
     Established,
     /// The session is over without one.
@@ -102,6 +129,11 @@ pub struct Session {
     protocol: ProbeProtocol,
     /// The other side's reflexive address, once known.
     peer_public: Option<SocketAddr>,
+    /// +ciris: the other side's host candidates, as it sent them.
+    peer_local: Vec<SocketAddr>,
+    /// +ciris: this node's reflexive address, once probed (the initiator
+    /// needs it when READY arrives).
+    own_public: Option<SocketAddr>,
 }
 
 impl Session {
@@ -122,6 +154,8 @@ impl Session {
             facilitator,
             protocol,
             peer_public: None,
+            peer_local: Vec::new(),
+            own_public: None,
         };
         let steps = alloc::vec![Step::Probe {
             server: facilitator,
@@ -140,6 +174,7 @@ impl Session {
         token: [u8; 32],
         facilitator: SocketAddr,
         initiator_public: SocketAddr,
+        initiator_local: Vec<SocketAddr>,
         protocol: ProbeProtocol,
         now_ms: u64,
     ) -> (Self, Vec<Step>) {
@@ -152,6 +187,8 @@ impl Session {
             facilitator,
             protocol,
             peer_public: Some(initiator_public),
+            peer_local: initiator_local,
+            own_public: None,
         };
         let steps = alloc::vec![
             Step::Send(Signal::Accept { session: id }),
@@ -203,17 +240,30 @@ impl Session {
 
     /// The probe learned this node's reflexive address.
     pub fn probed(&mut self, public: SocketAddr, now_ms: u64) -> Vec<Step> {
+        self.probed_with_local(public, Vec::new(), now_ms)
+    }
+
+    /// +ciris — [`Self::probed`], with this node's host candidates: sent to
+    /// the peer, which punches them if it turns out to share this node's NAT.
+    pub fn probed_with_local(
+        &mut self,
+        public: SocketAddr,
+        local: Vec<SocketAddr>,
+        now_ms: u64,
+    ) -> Vec<Step> {
         if self.phase != Phase::Discovering {
             return Vec::new();
         }
         match self.role {
             Role::Initiator => {
                 self.enter(Phase::Proposing, now_ms);
+                self.own_public = Some(public);
                 alloc::vec![Step::Send(Signal::Request {
                     session: self.id,
                     facilitator: self.facilitator,
                     initiator_public: public,
                     protocol: self.protocol,
+                    initiator_local: local,
                 })]
             }
             Role::Responder => {
@@ -222,12 +272,14 @@ impl Session {
                     return alloc::vec![Step::Failed(Failure::Timeout)];
                 };
                 self.enter(Phase::Punching, now_ms);
+                let alternates = same_nat_alternates(public, peer, &self.peer_local);
                 alloc::vec![
                     Step::Send(Signal::Ready {
                         session: self.id,
                         responder_public: public,
+                        responder_local: local,
                     }),
-                    Step::Punch { peer },
+                    Step::Punch { peer, alternates },
                 ]
             }
         }
@@ -276,13 +328,21 @@ impl Session {
                 Role::Initiator,
                 Phase::AwaitingReady,
                 Signal::Ready {
-                    responder_public, ..
+                    responder_public,
+                    responder_local,
+                    ..
                 },
             ) => {
                 self.peer_public = Some(*responder_public);
+                self.peer_local.clone_from(responder_local);
                 self.enter(Phase::Punching, now_ms);
+                let alternates = match self.own_public {
+                    Some(own) => same_nat_alternates(own, *responder_public, responder_local),
+                    None => Vec::new(),
+                };
                 alloc::vec![Step::Punch {
                     peer: *responder_public,
+                    alternates,
                 }]
             }
             _ => Vec::new(),
@@ -378,14 +438,22 @@ mod tests {
             facilitator,
             initiator_public,
             protocol,
+            initiator_local,
         } = request_from(&steps).clone()
         else {
             unreachable!()
         };
         assert_eq!(initiator_public, a_pub());
 
-        let (mut b, b_steps) =
-            Session::respond(session, TOKEN, facilitator, initiator_public, protocol, 150);
+        let (mut b, b_steps) = Session::respond(
+            session,
+            TOKEN,
+            facilitator,
+            initiator_public,
+            initiator_local,
+            protocol,
+            150,
+        );
         assert_eq!(
             b_steps[1],
             Step::Probe {
@@ -398,10 +466,22 @@ mod tests {
 
         let b_steps = b.probed(b_pub(), 200);
         assert_eq!(b.phase(), Phase::Punching);
-        assert_eq!(b_steps[1], Step::Punch { peer: a_pub() });
+        assert_eq!(
+            b_steps[1],
+            Step::Punch {
+                peer: a_pub(),
+                alternates: Vec::new()
+            }
+        );
 
         let a_steps = deliver(&b_steps, &mut a, 210);
-        assert_eq!(a_steps, [Step::Punch { peer: b_pub() }]);
+        assert_eq!(
+            a_steps,
+            [Step::Punch {
+                peer: b_pub(),
+                alternates: Vec::new()
+            }]
+        );
         assert_eq!(a.peer_public(), Some(b_pub()));
 
         assert_eq!(a.punched(true, 300), [Step::Established]);
@@ -411,6 +491,72 @@ mod tests {
             a.poll(u64::MAX).is_empty(),
             "a connected session never times out"
         );
+    }
+
+    /// +ciris: two nodes behind one NAT (the same public IP) punch each
+    /// other's host candidates too; a router that does not hairpin never
+    /// delivers a punch sent to its own public address. Behind different NATs
+    /// a host candidate is never punched.
+    #[test]
+    fn behind_one_nat_each_side_punches_the_others_host_candidate() {
+        use core::net::{IpAddr, Ipv4Addr};
+        let shared = IpAddr::V4(Ipv4Addr::new(73, 45, 127, 73));
+        let (a_pub, b_pub) = (
+            SocketAddr::new(shared, 48098),
+            SocketAddr::new(shared, 55418),
+        );
+        let a_lan = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 40001);
+        let b_lan = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11)), 40002);
+
+        let (mut a, _) = Session::initiate(ID, TOKEN, t(), ProbeProtocol::Rnsp, 0);
+        let steps = a.probed_with_local(a_pub, alloc::vec![a_lan], 1);
+        let Signal::Request {
+            session,
+            facilitator,
+            initiator_public,
+            protocol,
+            initiator_local,
+        } = request_from(&steps).clone()
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            initiator_local,
+            [a_lan],
+            "the request carries A's host candidate"
+        );
+        let (mut b, b_steps) = Session::respond(
+            session,
+            TOKEN,
+            facilitator,
+            initiator_public,
+            initiator_local,
+            protocol,
+            2,
+        );
+        deliver(&b_steps, &mut a, 3);
+        let b_steps = b.probed_with_local(b_pub, alloc::vec![b_lan], 4);
+        assert_eq!(
+            b_steps[1],
+            Step::Punch {
+                peer: a_pub,
+                alternates: alloc::vec![a_lan]
+            },
+            "B punches A's public address and A's host candidate"
+        );
+        let a_steps = deliver(&b_steps, &mut a, 5);
+        assert_eq!(
+            a_steps,
+            [Step::Punch {
+                peer: b_pub,
+                alternates: alloc::vec![b_lan]
+            }],
+            "A punches B's public address and B's host candidate"
+        );
+
+        // Different public IPs: a host candidate is never punched.
+        let other: SocketAddr = "192.0.2.9:6000".parse().unwrap();
+        assert!(same_nat_alternates(a_pub, other, &[b_lan]).is_empty());
     }
 
     #[test]
@@ -434,7 +580,8 @@ mod tests {
 
     #[test]
     fn a_responder_whose_probe_fails_rejects() {
-        let (mut b, _) = Session::respond(ID, TOKEN, t(), a_pub(), ProbeProtocol::Rnsp, 0);
+        let (mut b, _) =
+            Session::respond(ID, TOKEN, t(), a_pub(), Vec::new(), ProbeProtocol::Rnsp, 0);
         assert_eq!(
             b.probe_failed(),
             [
@@ -458,11 +605,13 @@ mod tests {
         let ready = Signal::Ready {
             session: ID,
             responder_public: b_pub(),
+            responder_local: Vec::new(),
         };
         assert!(a.signal(&ready, 2).is_empty());
         assert_eq!(a.phase(), Phase::Proposing);
         // A responder takes no signal at all after the REQUEST.
-        let (mut b, _) = Session::respond(ID, TOKEN, t(), a_pub(), ProbeProtocol::Rnsp, 0);
+        let (mut b, _) =
+            Session::respond(ID, TOKEN, t(), a_pub(), Vec::new(), ProbeProtocol::Rnsp, 0);
         let busy = Signal::Reject {
             session: ID,
             reason: REJECT_BUSY,
@@ -487,7 +636,8 @@ mod tests {
             [Step::Failed(Failure::Timeout)]
         );
 
-        let (mut b, _) = Session::respond(ID, TOKEN, t(), a_pub(), ProbeProtocol::Rnsp, 0);
+        let (mut b, _) =
+            Session::respond(ID, TOKEN, t(), a_pub(), Vec::new(), ProbeProtocol::Rnsp, 0);
         b.probed(b_pub(), 7);
         assert_eq!(
             b.poll(7 + PUNCH_TIMEOUT_MS),
@@ -497,7 +647,8 @@ mod tests {
 
     #[test]
     fn a_failed_punch_fails_the_session() {
-        let (mut b, _) = Session::respond(ID, TOKEN, t(), a_pub(), ProbeProtocol::Rnsp, 0);
+        let (mut b, _) =
+            Session::respond(ID, TOKEN, t(), a_pub(), Vec::new(), ProbeProtocol::Rnsp, 0);
         b.probed(b_pub(), 1);
         assert_eq!(b.punched(false, 2), [Step::Failed(Failure::PunchFailed)]);
     }
