@@ -961,9 +961,14 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
     Ok(steps)
 }
 
-/// The screen of a test backend as text, one row a line, trailing blanks cut.
-fn frame_text(backend: &TestBackend) -> String {
-    let buffer = backend.buffer();
+/// A drawn frame as text, one row a line, trailing blanks cut.
+///
+/// The frame's own buffer, not the test backend's grid: ratatui sends the
+/// backend no write for the cell behind a wide character, so the grid
+/// keeps whatever stood there before (`日a本` where a line of Latin text
+/// was), where a terminal clears the whole glyph. The frame resets that
+/// cell to a blank.
+fn frame_text(buffer: &ratatui::buffer::Buffer) -> String {
     let mut out = String::new();
     for y in 0..buffer.area.height {
         let mut row = String::new();
@@ -1092,11 +1097,11 @@ async fn run_script(
                 .map_err(|e| format!("{}: {e}", frames.display()));
         };
         let view = ui::view(model);
-        terminal
+        let drawn = terminal
             .draw(|frame| draw(frame, &view, Some(painter)))
             .map_err(|e| e.to_string())?;
         count += 1;
-        let text = frame_text(terminal.backend());
+        let text = frame_text(drawn.buffer);
         write!(out, "--- frame {count}: {label} ---\n{text}")
             .and_then(|()| out.flush())
             .map_err(|e| format!("{}: {e}", frames.display()))
@@ -1563,7 +1568,7 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, &view, None))
             .expect("draw");
-        frame_text(terminal.backend())
+        frame_text(terminal.backend().buffer())
     }
 
     /// The style map of a model drawn 80 x 16 in a tier and theme.
@@ -1858,7 +1863,7 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, &view, None))
             .expect("draw");
-        let screen = frame_text(terminal.backend());
+        let screen = frame_text(terminal.backend().buffer());
         assert!(screen.contains("not sent: direct: no route to"), "{screen}");
         assert!(
             screen.contains("propagated: no propagation node"),
@@ -2159,7 +2164,7 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, &view, None))
             .expect("draw");
-        frame_text(terminal.backend())
+        frame_text(terminal.backend().buffer())
     }
 
     /// The two mockups of section 5 drawn from a model: the same elements in

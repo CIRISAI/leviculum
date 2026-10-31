@@ -251,6 +251,9 @@ png = "0.18"
 # The emoji table's test counts graphemes (1137); in the lock already,
 # through ratatui.
 unicode-segmentation = "1"
+# The wire's property tests (1173), the workspace's version; in the lock
+# already, through leviculum-core.
+proptest.workspace = true
 
 [lib]
 name = "loquax"
@@ -268,6 +271,12 @@ required-features = ["tui"]
 # The import and the export: the history feature's store.
 [[test]]
 name = "import"
+required-features = ["history"]
+
+# The wire's shapes round trip (1173): the imported entries are the
+# history feature's.
+[[test]]
+name = "wire_props"
 required-features = ["history"]
 
 # The home node end to end: `--daemon` and `home` are the terminal build's.

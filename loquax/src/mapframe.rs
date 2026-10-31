@@ -239,6 +239,12 @@ impl Frames {
         self.motion.zoom(by_milli);
     }
 
+    /// A frame was asked at `now_ms`, before it is drawn: the first since
+    /// the last pan freezes the heading the prefetch plans by (1189).
+    pub fn asked(&mut self, now_ms: u64) {
+        self.motion.asked(now_ms);
+    }
+
     /// The motion a frontend kept itself, where a pan cannot wait for
     /// the frame being drawn (the window's worker holds the frames).
     pub fn set_motion(&mut self, motion: Motion) {
@@ -445,15 +451,16 @@ impl Frames {
     }
 
     /// One batch of the prefetch around the last frame at rest (1135):
-    /// on the first call the plan, ordered by the pan's direction at
-    /// `now_ms`; then a tile a worker.
+    /// on the first call the plan, ordered by the pan's direction when
+    /// the frame was asked ([`asked`](Self::asked)), at `now_ms` when no
+    /// frame was; then a tile a worker.
     pub fn prefetch(&mut self, now_ms: u64) -> Prefetched {
         let Some((frame, zooms)) = self.rest else {
             return Prefetched::default();
         };
         let mut planned = None;
         if self.plan.is_none() {
-            let heading = self.motion.heading(now_ms);
+            let heading = self.motion.rest_heading(now_ms);
             self.plan = Some(tiles::plan(&frame, heading, self.motion.zoomed_out, zooms));
             planned = Some(frame);
         }

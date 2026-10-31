@@ -313,6 +313,7 @@ impl Renderer {
         }
         let by = i64::from(request.zoom_by) * i64::from(MILLI) + i64::from(request.zoom_by_milli);
         self.frames.zoom(by);
+        self.frames.asked(now);
         if by != 0 {
             let zoom = (i64::from(view.zoom_milli()) + by)
                 .clamp(i64::from(floor), i64::from(ceiling.max(floor)));

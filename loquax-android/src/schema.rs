@@ -12,7 +12,7 @@
 //! |---|---|
 //! | `start` | [`Start`] |
 //! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`] or [`Links`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`] or [`Run`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
@@ -55,6 +55,12 @@
 //! bit and wrote it back as an int64, so the values Java sees and keeps
 //! (a pinned message's key) stay what they were; only Rust's side now
 //! reads what Java writes. See [`wire_key`].
+//! A run of a peer's position reports folding into one row (1184) is no
+//! new version either: [`Query::Messages`] answers the run's newest report
+//! with [`MessageRow::updates`] and [`MessageRow::since`] and leaves the
+//! others out, [`ConversationRow::updates`] counts it in the list, and
+//! [`Query::Run`] expands it. An app without them shows the newest report
+//! alone, which is what it draws as it is; nothing is merged on disk.
 
 use serde::{Deserialize, Serialize};
 
@@ -302,6 +308,38 @@ pub enum Query {
     Me,
     /// The address's backup, sealed with `passphrase` (1152).
     Backup { passphrase: String },
+    /// Every report the row `key` ([`MessageRow::key`]) of `peer`'s
+    /// conversation folds (1184): the long press's "Show all positions".
+    Run { peer: String, key: i64 },
+}
+
+/// What [`Query::Run`] answers: the run's reports, newest first; one for a
+/// row that folds none, none for a key the conversation lacks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Run {
+    pub v: u32,
+    pub positions: Vec<RunRow>,
+}
+
+/// One report of a run, as its row would have shown it alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRow {
+    /// The report's key, as [`MessageRow::key`].
+    pub key: i64,
+    /// When it came, unix seconds.
+    pub at: i64,
+    /// Its fix, as [`MessageRow`] has it; absent when it carried none
+    /// readable.
+    #[serde(default)]
+    pub lat_e6: Option<i32>,
+    #[serde(default)]
+    pub lon_e6: Option<i32>,
+    #[serde(default)]
+    pub place: Option<String>,
+    #[serde(default)]
+    pub accuracy: Option<String>,
+    #[serde(default)]
+    pub fix_at: Option<i64>,
 }
 
 /// What [`Query::Backup`] answers: the line the file holds, and the same
@@ -516,6 +554,8 @@ pub struct ConversationRow {
     pub ours: bool,
     /// When it was written or came, seconds since 1970 UTC; 0 for none.
     pub at: i64,
+    /// Unread rows: a run of reports counts once (1184), so a report that
+    /// joins one raises no count and no notification.
     pub unread: u32,
     /// The avatar's letters (1129): from the name, or the address's first
     /// two hex digits for a peer without one.
@@ -553,6 +593,11 @@ pub struct ConversationRow {
     pub pinned: bool,
     #[serde(default)]
     pub muted: bool,
+    /// How many reports the last row folds when it is a run of them, else
+    /// 0 (1184): the list says `📍 Position · 14`, and `unread` counted the
+    /// run once.
+    #[serde(default)]
+    pub updates: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -628,6 +673,15 @@ pub struct MessageRow {
     pub quote_ours: Option<bool>,
     #[serde(default)]
     pub quote_to: Option<String>,
+    /// A run of the peer's position reports with nothing between them is
+    /// one row, the newest (1184): how many reports it stands for, 0 for a
+    /// row that folds none, and when the run's first came, unix seconds.
+    /// [`Query::Run`] lists them. A new report of the run replaces this row
+    /// under its own key.
+    #[serde(default)]
+    pub updates: u32,
+    #[serde(default)]
+    pub since: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

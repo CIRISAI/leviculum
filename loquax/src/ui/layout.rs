@@ -158,16 +158,15 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
     }
     let mut last = Last::Separator;
     let mut day = None;
-    // The first of the reactions folded since the last block: a note or the
-    // `new` rule that stood before one goes before the next block instead.
+    // The first of the reactions and reports folded since the last block: a
+    // note or the `new` rule that stood before one goes before the next
+    // block instead.
     let mut skipped: Option<usize> = None;
     let reactions = reactions::gather(conversation);
     for (index, message) in conversation.messages.iter().enumerate() {
         let start = laid.rows.len();
-        if message.is_reaction() {
-            skipped.get_or_insert(index);
-        }
         if folded(conversation, index) {
+            skipped.get_or_insert(index);
             // Drawn as the report after it: no rows, so no click lands on
             // it and the cursor steps over it.
             laid.spans.push(Span {
@@ -208,8 +207,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
         }
         let first = laid.rows.len();
         let drawn = block(
-            conversation.peer,
-            message,
+            conversation,
             index,
             width,
             draw,
@@ -245,29 +243,14 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
 /// Whether message `index` has no block of its own: a reaction, drawn
 /// under its target ([`reactions`]), or a telemetry report the next one
 /// replaces on screen: one peer's consecutive reports fold into the latest
-/// (`loquax-map.md`, "In the conversation"). Not across a day, a note or the
-/// `new` rule, which say something about where the run is.
+/// (`loquax-map.md`, "In the conversation"), by the rule every screen folds
+/// by ([`Conversation::report_folded`]).
 pub fn folded(conversation: &Conversation, index: usize) -> bool {
-    if conversation
+    conversation
         .messages
         .get(index)
         .is_some_and(Message::is_reaction)
-    {
-        return true;
-    }
-    let (Some(this), Some(next)) = (
-        conversation.messages.get(index),
-        conversation.messages.get(index + 1),
-    ) else {
-        return false;
-    };
-    this.is_report()
-        && next.is_report()
-        && this.at.map(|at| at.day()) == next.at.map(|at| at.day())
-        && !conversation.notes.iter().any(|n| n.before == index + 1)
-        && conversation
-            .new_rule
-            .is_none_or(|rule| rule.at != index + 1)
+        || conversation.report_folded(index)
 }
 
 /// `── was Alice, now announces Ally ──`, centred and muted: a peer's name
@@ -405,14 +388,15 @@ struct Block {
 /// link in the body is underlined and its cells name it in `links`. With a
 /// search open the body's first match is marked, the marks part of the text.
 fn block(
-    peer: [u8; 16],
-    message: &Message,
+    conversation: &Conversation,
     index: usize,
     width: usize,
     draw: &Draw<'_>,
     selected: bool,
     links: &mut Vec<String>,
 ) -> Block {
+    let peer = conversation.peer;
+    let message = &conversation.messages[index];
     let narrow = width < NARROW;
     let cap = block_cap(width);
     let mut rows = Vec::new();
@@ -422,7 +406,16 @@ fn block(
         (true, _) => {
             let received = message.at.map(|at| at.unix_secs);
             let read = telemetry::read(peer, &message.fields, received);
-            telemetry::report_line(&read)
+            // The newest of a run, which stands for all of it (1184).
+            let run = conversation.run(index);
+            let since = run
+                .first()
+                .and_then(|&first| conversation.messages[first].at);
+            format!(
+                "{}{}",
+                telemetry::report_line(&read),
+                telemetry::run_words(run.len(), since.as_ref())
+            )
         }
         (false, Some(query)) => super::search::mark_first(&message.body, query),
         (false, None) => message.body.clone(),
@@ -615,7 +608,7 @@ pub fn list_first<B>(model: &UiModel<B>, height: usize) -> usize {
 /// The badge's columns in a list entry's second row `width` cells wide: the
 /// first and how many, `[3]` flush right before the last cell.
 pub fn badge_cells(conversation: &Conversation, width: usize) -> Option<(usize, usize)> {
-    match conversation.unread {
+    match conversation.unread_rows() {
         0 => None,
         n => {
             let len = format!("[{n}]").chars().count();
@@ -652,13 +645,22 @@ fn entry(
         RStyle::default(),
     );
 
-    let badge = match conversation.unread {
+    let badge = match conversation.unread_rows() {
         0 => String::new(),
         n => format!("[{n}]"),
     };
     let preview = match last {
         Some(message) if message.is_reaction() => reactions::preview(message).unwrap_or_default(),
-        Some(message) if message.is_report() => format!("{} position", telemetry::REPORT_MARK),
+        Some(message) if message.is_report() => format!(
+            "{} position{}",
+            telemetry::REPORT_MARK,
+            telemetry::run_words(
+                conversation
+                    .run(conversation.messages.len().saturating_sub(1))
+                    .len(),
+                None
+            )
+        ),
         Some(message) => {
             let first = message.body.split('\n').next().unwrap_or("");
             match message.outbound {

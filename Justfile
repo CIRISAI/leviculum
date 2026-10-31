@@ -2474,7 +2474,9 @@ loquax-core-no-std:
 # tui build's). In `standard`, not `fast`: both spawn loquax against a daemon
 # over sockets. The screen model's own tests are core and run in every lib run.
 # The import and the export (`loquax/tests/import.rs`, 1103) need the
-# `history` feature the tui build carries; files only, 0.05 s.
+# `history` feature the tui build carries; files only, 0.05 s. So does the
+# wire's property test (`loquax/tests/wire_props.rs`, 1173): every home
+# wire shape and imported entry round trips, 256 cases each, 0.3 s.
 # The forge runs this recipe and has no reference submodule, so the home node
 # tests that start the Python peer go out there by the names
 # scripts/integ-prerequisites.txt declares (scripts/with-prerequisites.sh,
@@ -2482,7 +2484,7 @@ loquax-core-no-std:
 [doc('Lint and test loquax with its tui feature (#232)')]
 loquax-tui:
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
-    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import
+    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props
 
 # 1084, #474: loquax's `gui` feature (the iced window) is off by default and
 # in no other feature, so neither the workspace runs nor `loquax-tui` compile

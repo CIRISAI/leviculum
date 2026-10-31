@@ -32,7 +32,7 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:3070`), and the store keeps the fields whole in its
+`loquax/src/ui.rs:3141`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:2255`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:173`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
@@ -80,6 +80,24 @@ fold into the latest one when they follow each other. As built, the `14:05` is t
 block's own arrival time beside the line, as every block carries it; the
 fix's own time is in the header's age and the detail view. A run folds
 only within one day, and not across a name note or the `new` rule.
+
+**A run is one row on every screen** (1184). Columba sends a report a
+minute; on the phone each was a bubble, an unread count and a
+notification. One model rule, `Conversation::report_folded`
+(`loquax/src/ui.rs`), now decides the fold for the terminal's blocks,
+the bubbles of the phone and the window, the list and the toast. A
+reaction does not break a run; any other message does, a text of
+either side included. The row is the newest report, its line followed
+by the count, `· 14 updates since 14:45`, and the list's last line says
+`◎ position · 14 updates` (the phone: `📍 Position · 14`). A report that
+joins a run updates the row in place: no new row, no toast, and the
+unread count and the phone's notification count the run once
+(`Conversation::unread_rows`). The conversation's own unread counter
+still counts every message, because the home's read marks name each
+one. Nothing is merged on disk: the store and the archive keep every
+report. On the phone a long press on the run's row offers "Show all 14
+positions", which lists them, newest first, through the facade's `run`
+query; a tap on one opens the map there.
 
 **A text with a position** (1132). Sideband and a stock LXMF client can
 send a body and a telemetry field in one message. Such a message from a

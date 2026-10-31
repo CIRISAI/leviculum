@@ -224,6 +224,15 @@ final class Core {
                 "addresses");
     }
 
+    /**
+     * The reports the row `key` of `peer`'s conversation folds (1184),
+     * newest first: key, at, lat_e6, lon_e6, place, accuracy, fix_at.
+     */
+    static List<Map<String, Object>> run(String peer, long key) {
+        return list(answer(Native.query(MsgPack.pack(
+                map("t", "run", "peer", peer, "key", key)))), "positions");
+    }
+
     /** Every link: peer, lookup, contact_id, name. */
     static List<Map<String, Object>> links() {
         return list(answer(Native.query(MsgPack.pack(map("t", "links")))), "links");

@@ -25,6 +25,9 @@ use loquax::ui::map::MapPin;
 use loquax::when::WallTime;
 use loquax_android::schema::{self, MapRequest, MapShown};
 
+#[path = "../../loquax/tests/support/ugly_store.rs"]
+mod ugly_store;
+
 /// The Florence view of the window's golden of the names: z16, 480 x 320.
 const LAT: f64 = 43.7752;
 const LON: f64 = 11.2660;
@@ -389,6 +392,32 @@ fn a_position_in_the_store_makes_a_pin() {
     assert_eq!(shown.pins, 1, "{shown:?}");
     assert_eq!(shown.selected.as_deref(), Some("42".repeat(16).as_str()));
     assert!(shown.zoom > 11, "one pin fits deep: {}", shown.zoom);
+}
+
+/// The ugly store (1173) under the phone's client address, with no
+/// session running: the frame comes, and every peer whose received
+/// position the store keeps is a pin but the blocked one, whose pin the
+/// model's pins leave out. The imports keep their positions in their
+/// rows' fields only, so their peers have no pin.
+#[test]
+fn the_ugly_store_makes_a_pin_of_each_position() {
+    let home = home();
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    loquax::home::client::save_client(home.path(), &identity.public_key_bytes()).expect("client");
+    let filled = ugly_store::fill_store_of(home.path(), &identity);
+    assert_eq!(
+        filled.messages,
+        ugly_store::CONVERSATIONS * ugly_store::PER_CONVERSATION
+    );
+    let first = MapRequest {
+        x: None,
+        y: None,
+        zoom: None,
+        ..request(home.path(), false)
+    };
+    let (shown, _) = frame(&loquax_android::render_map(&schema::encode(&first)));
+    let live = ugly_store::CONVERSATIONS - 2;
+    assert_eq!(shown.pins as usize, live - 1, "{shown:?}");
 }
 
 /// How long a phone's whole screen takes on this host, for the report:
@@ -963,10 +992,21 @@ const FRAME_MS: u64 = 16;
 /// clock is held, a frame every [`FRAME_MS`] from `at_ms`, so the pan's
 /// velocity is the gesture's and not how fast the host draws (1167).
 fn pan_and_rest(ask: &MapRequest, dx: i32, dy: i32, at_ms: u64) -> (MapShown, MapRequest) {
+    pan_every(ask, dx, dy, at_ms, FRAME_MS)
+}
+
+/// [`pan_and_rest`] with a frame every `frame_ms`.
+fn pan_every(
+    ask: &MapRequest,
+    dx: i32,
+    dy: i32,
+    at_ms: u64,
+    frame_ms: u64,
+) -> (MapShown, MapRequest) {
     let dir = PathBuf::from(&ask.dir);
     let mut ask = ask.clone();
     for i in 0..5 {
-        loquax_android::map::tune_clock(&dir, Some(at_ms + i * FRAME_MS));
+        loquax_android::map::tune_clock(&dir, Some(at_ms + i * frame_ms));
         ask.pan_x = dx;
         ask.pan_y = dy;
         ask.moving = true;
@@ -979,7 +1019,7 @@ fn pan_and_rest(ask: &MapRequest, dx: i32, dy: i32, at_ms: u64) -> (MapShown, Ma
     ask.pan_x = 0;
     ask.pan_y = 0;
     ask.moving = false;
-    loquax_android::map::tune_clock(&dir, Some(at_ms + 5 * FRAME_MS));
+    loquax_android::map::tune_clock(&dir, Some(at_ms + 5 * frame_ms));
     let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
     (shown, ask)
 }
@@ -1030,6 +1070,49 @@ fn the_prefetch_draws_the_tile_ahead_of_the_pan_first() {
             "way {way}"
         );
     }
+}
+
+/// The prefetch plans by the heading when the frame at rest was asked,
+/// not what is left of it once a slow phone has drawn that frame (1189):
+/// a pan north at 600 pixels a second, 12 every 20 ms, a frame at rest
+/// that takes 1.2 s, and the first tile prefetched is still the one a
+/// further pan north uncovers. Measured from the rest frame's ask the
+/// smoothed velocity, about 190 pixels a second, falls to about 17 in
+/// those 1.2 s, under [`tiles::MOTION_FLOOR`]. A phone held upright,
+/// so the tiles left and right are the nearest and a plan without a
+/// heading starts with one of them.
+#[test]
+fn the_prefetch_keeps_the_heading_a_slow_rest_frame_was_asked_with() {
+    let home = home();
+    let ask = MapRequest {
+        w: H,
+        h: W,
+        ..request(home.path(), false)
+    };
+    let _ = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    loquax_android::map::tune_tiles(home.path(), Some(1), false);
+    let (rest, ask) = pan_every(&ask, 0, -12, 1000, 20);
+    assert!(rest.prefetching, "a frame at rest owing nothing prefetches");
+    loquax_android::map::tune_clock(home.path(), Some(1000 + 5 * 20 + 1200));
+    let one = prefetch(&ask);
+    assert_eq!(one.prefetched, 1);
+    let before = loquax_android::map::tile_stats(home.path()).expect("a renderer");
+    let north = MapRequest {
+        pan_y: -(tiles::TILE as i32),
+        moving: true,
+        ..ask.clone()
+    };
+    let _ = frame(&loquax_android::map::render(
+        &north,
+        Some(Vec::new()),
+        now(),
+    ));
+    let after = loquax_android::map::tile_stats(home.path()).expect("a renderer");
+    assert_eq!(
+        after.prefetch_hits - before.prefetch_hits,
+        1,
+        "the tile ahead of the pan north first"
+    );
 }
 
 /// A prefetch runs to its plan's end within its budget; any frame, a
