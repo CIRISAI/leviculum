@@ -112,9 +112,12 @@ public class ChatActivity extends Activity implements Events.Listener {
     private boolean insertWithAddress;
     /** The contact screen's request code. */
     private static final int CONTACT = 45;
-    /** The last search in this conversation and the key of its match shown, -1 for none. */
+    /**
+     * The last search in this conversation and the key of its match shown, null for none: a key
+     * has either sign (Rust's schema::wire_key), so no number stands for none.
+     */
     private String searchQuery = "";
-    private long searchHit = -1;
+    private Long searchHit = null;
     private final ServiceLink link = new ServiceLink(this);
     /** Redraws the relative times of the newest group while the screen is up. */
     private final Handler ticker = new Handler(Looper.getMainLooper());
@@ -677,11 +680,11 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     private void find(String query) {
         if (!query.equals(searchQuery)) {
-            searchHit = -1;
+            searchHit = null;
         }
         searchQuery = query;
         if (query.isEmpty()) {
-            searchHit = -1;
+            searchHit = null;
             adapter.notifyDataSetChanged();
             return;
         }
@@ -693,7 +696,7 @@ public class ChatActivity extends Activity implements Events.Listener {
             }
         }
         if (matches.isEmpty()) {
-            searchHit = -1;
+            searchHit = null;
             line(getString(R.string.chat_search_none));
             adapter.notifyDataSetChanged();
             return;
@@ -701,7 +704,7 @@ public class ChatActivity extends Activity implements Events.Listener {
         // The next older match than the one shown, the newest again after the oldest.
         int next = 0;
         for (int m = 0; m < matches.size(); m++) {
-            if (Core.num(rows.get(matches.get(m)), "key") == searchHit) {
+            if (Long.valueOf(Core.num(rows.get(matches.get(m)), "key")).equals(searchHit)) {
                 next = (m + 1) % matches.size();
                 break;
             }
@@ -1049,7 +1052,10 @@ public class ChatActivity extends Activity implements Events.Listener {
         return getSharedPreferences(PINS, MODE_PRIVATE);
     }
 
-    /** The key of this conversation's pinned message, 0 for none. */
+    /**
+     * The key of this conversation's pinned message, 0 for none: a key of either sign is a row's,
+     * but 0 is seq i64::MIN's (Rust's schema::wire_key), which no store reaches.
+     */
     private long pinnedKey() {
         return pins().getLong(peer, 0);
     }
@@ -1207,7 +1213,7 @@ public class ChatActivity extends Activity implements Events.Listener {
             LinearLayout root = (LinearLayout) view;
             root.setGravity(ours ? Gravity.END : Gravity.START);
             boolean picked = selection != null && selection.contains(Core.num(row, "key"));
-            boolean found = searchHit >= 0 && Core.num(row, "key") == searchHit;
+            boolean found = Long.valueOf(Core.num(row, "key")).equals(searchHit);
             root.setBackgroundColor(picked || found ? getColor(R.color.selected_row) : 0);
 
             TextView day = (TextView) view.findViewById(R.id.day);
