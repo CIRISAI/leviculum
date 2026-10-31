@@ -35,8 +35,14 @@ scratch=$(mktemp -d /tmp/tl.XXXXXX)
 log=$(mktemp /tmp/tl-log.XXXXXX)
 trap 'rm -rf "$scratch" "$log"' EXIT
 
+# /tmp is shared: an entry another process deletes between find's readdir
+# and its stat for -user makes find exit 1, which under pipefail and set -e
+# ended this script silently, its stderr discarded (1190: the guards run
+# failed `tmp-leftovers-selftest` with an empty message; 3 of 20 runs of the
+# selftest beside a /tmp churner). The listing is information only, so a
+# vanished entry is not an error.
 list_tmp() {
-    find /tmp -mindepth 1 -maxdepth 1 -user "$(id -u)" -printf '%f\n' 2>/dev/null | sort
+    { find /tmp -mindepth 1 -maxdepth 1 -user "$(id -u)" -printf '%f\n' 2>/dev/null || true; } | sort
 }
 
 # The compiler cache's server must not be born inside $scratch (987). sccache
