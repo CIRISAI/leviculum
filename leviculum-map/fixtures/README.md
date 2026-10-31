@@ -18,12 +18,30 @@ bytes, sha256 `7190f3d807a62f4f012b574007c96b809f6842f45a6b0c508639331fc68fd30a`
 Protomaps Basemap schema 3.7.1, planetiler 2024-08-01, OSM replication of
 2024-08-07). Re-cutting gives the same bytes.
 
+`berlin/`: two region files of central Berlin, for a pinch from z14 to
+z10 that needs names at every step (1225), in a directory of their own so
+the tests that read this one see Florence alone. `wide.lmr` (77,613
+bytes, sha256 `f0aec6f7981750ba48fb57eb566b4f66ee0c864f6b690e1b842dc9216ba6ef5b`)
+holds zooms 10 and 11, one tile each, `mitte.lmr` (181,205 bytes, sha256
+`9c048b801577045b284e66618a6b3131ff9a7d094c35b8a1413dbc8f5bb1f6af`)
+zooms 12 to 14, one tile each. Cut with
+
+```sh
+leviculum-map-tool cut -o wide.lmr https://build.protomaps.com/20261031.pmtiles \
+    --bbox 13.37,52.50,13.45,52.54 --min-zoom 10 --max-zoom 11 --locale de
+leviculum-map-tool cut -o mitte.lmr https://build.protomaps.com/20261031.pmtiles \
+    --bbox 13.390,52.515,13.400,52.520 --min-zoom 12 --max-zoom 14 --locale de
+```
+
+from the Protomaps daily build of 2026-10-31, which the bucket keeps for
+about a week; a later build cuts other bytes.
+
 **© OpenStreetMap contributors**, <https://www.openstreetmap.org/copyright>.
 The data is available under the Open Database License (ODbL) 1.0,
-<https://opendatacommons.org/licenses/odbl/1-0/>. This file is a derived
-database of it and is under the same licence, not under the AGPL of the
-code around it; it carries this notice inside itself as well. Pictures
-drawn from it are produced works and carry the same attribution.
+<https://opendatacommons.org/licenses/odbl/1-0/>. These files are derived
+databases of it and are under the same licence, not under the AGPL of the
+code around them; each carries this notice inside itself as well. Pictures
+drawn from them are produced works and carry the same attribution.
 
 ## The world outline
 
