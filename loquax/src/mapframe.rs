@@ -19,7 +19,8 @@
 //! zooms holds them to the ladder of its own zoom: a name whose
 //! `min_zoom` the zoom no longer reaches is not drawn, and of two whose
 //! boxes the zoom brought together the one placed first, the more
-//! important, is (1205). A name that drops out fades over [`FADE_MS`],
+//! important, is; more than a step from the rest frame's zoom none is
+//! (1205). A name that drops out fades over [`FADE_MS`],
 //! and at the end of the gesture the names the placement sets anew fade
 //! in, by the frontend's clock ([`Ask::now_ms`]); while one fades the
 //! frame says so ([`Shot::fading`]: ask again), and a frame at rest asked
@@ -649,6 +650,9 @@ impl Frames {
             // them all, as at rest.
             let zoomed = ask.moving && rest.zoom_milli() != view.zoom_milli();
             let band = rest_zoom;
+            // More than a step away the names were set for another map:
+            // none is kept, the ground alone shows until the view rests.
+            let lost = ask.moving && view.zoom_milli().abs_diff(rest.zoom_milli()) > MILLI;
             let started = Instant::now();
             for (i, name) in self.names.iter().enumerate() {
                 let (x, y) = moved(&rest, &drawn, name.centre);
@@ -656,7 +660,7 @@ impl Frames {
                 self.drawn_names.push(Carried {
                     i,
                     by: (by.0 as i64, by.1 as i64),
-                    keep: !zoomed || name.min_zoom <= band,
+                    keep: !lost && (!zoomed || name.min_zoom <= band),
                     alpha: 0,
                 });
             }
@@ -1207,6 +1211,20 @@ mod tests {
         assert!(over.is_empty(), "more names than at rest: {over:?}");
         assert!(frames[0].drawn > 1, "the first frame keeps names");
         assert_eq!(frames.last().map(|f| f.zoom_milli), Some(12_000));
+    }
+
+    /// 1205: more than a step from the zoom of the frame at rest a pinch
+    /// draws no name at all: from z13.95 the frames of a pinch out from
+    /// z15 show the ground alone, where before one name stayed to z13.5.
+    #[test]
+    fn a_pinch_past_a_step_draws_the_ground_alone() {
+        let frames = pinch_out();
+        let past: Vec<_> = frames
+            .iter()
+            .filter(|f| f.zoom_milli < 14_000 && f.drawn > 0)
+            .collect();
+        assert!(past.is_empty(), "names past a step: {past:?}");
+        assert!(frames.iter().any(|f| f.zoom_milli >= 14_000 && f.drawn > 0));
     }
 
     /// 1163: a pinch's frame at the step below covers more than the
