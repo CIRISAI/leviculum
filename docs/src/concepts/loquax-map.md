@@ -294,24 +294,67 @@ The frontends:
   pins, in tiles of 256 pixels of the nearest whole step, kept by last
   use up to 96 MB, missing ones drawn on up to eight threads, scaled to
   the exact zoom (one to one at a whole step). The names are placed at
-  rest over the frame at the exact scale and kept; a frame while the
-  finger moves draws those names where the view moved them and places
-  none, so no name leaves the picture during a pan or a pinch. Since
-  1205 a frame that zooms holds them to the ladder of its own zoom
-  (each name's `min_zoom` against the step nearest the zoom, the step a
-  frame at rest there looks its names up at), then runs a collision pass
-  in the rule's order over their placement boxes at the new anchors, so
-  of two names the zoom brought together the more important stays; more
-  than a step from the rest frame's zoom it keeps none and shows the
-  ground until rest. A name that drops out fades over 150 ms, the names
-  the placement at rest sets anew fade in, an alpha on the sprite's
-  levels at blend time by the frontend's clock, and a frame says it
-  fades so the frontend asks again. A pan at the rest zoom keeps every
-  name, as before, and a frame at rest with its fades done is the same
-  bytes. On the Florence fixture pinched from z15 to z12 the old frames
-  drew all eight names, up to twenty-eight overlapping pairs and all
-  eight below the ladder; the passes cost 3 and 5 us a frame for the 57
-  names Frankfurt carries at z15 in `map_fps`. The pins
+  rest over the frame at the exact scale and kept; a pan at that zoom
+  draws them where the view moved them and places none. Since 1225 a
+  frame that zooms places its names anew, as a frame at rest at its
+  zoom would: the data's `min_zoom` ladder at the step nearest the
+  zoom, the anchors and the street lines of the frame's own geometry,
+  the text at its screen size (names never scale with the map), the
+  rule's collisions. Into the step's frame the Canvas scales up by
+  1/k it draws each name sampled at k, below k 0.75 from the name's
+  coverage averaged two by two, so on screen it has the size and the
+  place a frame at rest gives it. The names it looks up are kept while
+  the pinch stays at the step and inside a view 1.6 times the frame's
+  each way, so a pinch reads the region file about twice a step rather
+  than every frame. 1205's ladder filter and collision pass over the
+  names carried from rest, and its step limit past which a pinch showed
+  the ground alone, are gone: Lew saw names vanish when zooming out and
+  carried names detached from the streets that stretched under them. A
+  name that enters fades in over 150 ms and one that leaves fades out
+  where the map moves it, an alpha on the sprite's levels at blend
+  time by the frontend's clock, and a frame says it fades so the
+  frontend asks again; a frame at rest with its fades done is the same
+  bytes. A pinch out over the Berlin fixture from z14 to z10 in half
+  steps shows 20, 18, 13, 12, 9, 5, 3 and 1 names, each frame the set
+  a frame at rest at its zoom places, every anchor within a pixel of
+  it.
+
+  The cost, measured 2026-10-31 on the coder host (10 vCPUs, eight
+  workers) with `loquax/examples/names_cost.rs` over Berlin Mitte (cut
+  from the Protomaps build of that day, `--bbox
+  13.33,52.49,13.45,52.55`, and a z12 cut of the country around it),
+  the median of ten frames of a pinch out by 0.05 a frame, in ms (the
+  full placement: the names looked up, placed and sampled as a frame at
+  rest at a zoom between steps runs it, on the code before 1225):
+
+  | frame | zoom | names | ground | full placement before 1225 | zooming frame since 1225 | its names: kept / placed / sampled |
+  |---|---|---|---|---|---|---|
+  | phone 1080x2400 at 2.75 | 10 | 31 | 2.0 to 2.2 | 7.0 to 7.3 | 4.5 to 4.6 | 0.01 / 0.42 to 0.45 / 1.0 to 1.1 |
+  | phone | 13 | 120 | 0.7 to 1.2 | 42.9 to 43.7 | 10.1 to 10.7 | 0.01 / 2.8 to 3.2 / 3.5 to 4.0 |
+  | phone | 16 | 94 | 1.1 to 1.3 | 13.2 to 13.9 | 9.1 to 10.2 | 0.01 / 1.9 to 2.1 / 2.6 to 3.3 |
+  | window 1920x1080 at 1 | 10 | 67 | 0.8 to 1.1 | 5.0 to 5.2 | 2.0 to 2.6 | 0.02 / 0.30 to 0.35 / 0.6 to 0.8 |
+  | window | 13 | 210 | 0.6 to 0.8 | 8.3 to 8.7 | 5.1 to 7.4 | 0.02 / 1.3 / 1.8 to 3.3 |
+  | window | 16 | 199 | 0.7 to 0.9 | 8.1 | 5.5 to 6.7 | 0.02 / 1.8 to 1.9 / 1.4 to 2.2 |
+
+  Three runs each side, the coder host's load under 3.5. "Kept" is the
+  median over the frames, most of which took the names looked up
+  before; two of the eleven frames of each pinch looked them up, in the
+  view 1.6 times the frame's each way.
+
+  A full placement as a frame at rest runs it (the names looked up, 2.5
+  to 5 ms; placed, and their sprites sampled) did not fit beside the
+  ground in 16 ms at the phone's z13: the typesetter's store of masks
+  and halos was 4 MB, which the phone's density passes at z13, so every
+  frame shaped and rasterised its names again (32 ms of the 43). With
+  the store at 16 MB the same full placement there is 12.1 to 12.4 ms,
+  which a frame at rest gains too; with the names looked up kept as
+  well, and the sprites sampled over each name's own band, a zooming
+  frame is 2 to 11 ms on this host. The phone itself was not measured
+  in 1225 (no device on the coder host); a frame there that misses
+  16 ms is shown late, the Canvas scaling the last frame, names and
+  ground together, until it lands.
+
+  The pins
   are drawn over the tiles every frame, so a pin costs no tile. A pinch
   keeps the step it is composed from while it stays within a step of it,
   and a frame shows other steps' cached tiles where the new step's are
