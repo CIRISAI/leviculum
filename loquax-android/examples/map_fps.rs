@@ -277,10 +277,10 @@ fn main() {
     }
 }
 
-/// The names a pinch out carries (1205): a frame at rest at z15, then a
-/// pinch out to z14.0 in tenths, the finger down; the frames' median,
-/// the names carried, and what the frame spent on them, the median of
-/// the frames of the pinch, also scaled to 200 names.
+/// The names a pinch out places (1205, 1225): a frame at rest at z15,
+/// then a pinch out to z14.0 in tenths, the finger down; the frames'
+/// median, and what a frame spent placing its names, the median of the
+/// frames of the pinch: looked up or kept, placed, sampled.
 fn carried(
     home: &std::path::Path,
     base: &MapRequest,
@@ -289,10 +289,9 @@ fn carried(
     median: &impl Fn(Vec<f64>) -> f64,
     threads: usize,
 ) {
-    let mut ladder = Vec::new();
-    let mut collision = Vec::new();
+    let (mut labels, mut place, mut sprites) = (Vec::new(), Vec::new(), Vec::new());
     let mut ms = Vec::new();
-    let mut names = 0;
+    let (mut names, mut looked_up) = (0, 0);
     for _ in 0..5 {
         let _ = draw(base);
         let mut pinch = MapRequest {
@@ -302,10 +301,12 @@ fn carried(
         for z in (14_000..15_000).rev().step_by(100) {
             pinch.zoom_milli = Some(z);
             ms.push(timed(&pinch).0);
-            if let Some(cost) = loquax_android::map::carry_cost(home) {
-                names = cost.carried;
-                ladder.push(cost.ladder_ns as f64 / 1e3);
-                collision.push(cost.collision_ns as f64 / 1e3);
+            if let Some(cost) = loquax_android::map::place_cost(home) {
+                names = cost.names;
+                looked_up += usize::from(cost.looked_up);
+                labels.push(cost.labels_ns as f64 / 1e6);
+                place.push(cost.place_ns as f64 / 1e6);
+                sprites.push(cost.sprites_ns as f64 / 1e6);
             }
         }
     }
@@ -314,14 +315,16 @@ fn carried(
     let _ = draw(base);
     let ms = median(ms);
     println!(
-        "| pinch out z15 to z14, names carried (median) | {threads} | {ms:.1} | {:.0} | | |",
+        "| pinch out z15 to z14, names placed (median) | {threads} | {ms:.1} | {:.0} | | |",
         1e3 / ms
     );
-    let per200 = |us: f64| us * 200.0 / names.max(1) as f64;
-    for (pass, us) in [("ladder", median(ladder)), ("collision", median(collision))] {
+    for (pass, ms) in [
+        ("looked up or kept", median(labels)),
+        ("placed", median(place)),
+        ("sampled", median(sprites)),
+    ] {
         println!(
-            "| names carried: {names}, {pass} us a frame (for 200) | {threads} | {us:.1} ({:.1}) | | | |",
-            per200(us)
+            "| names placed: {names}, {pass} ms a frame ({looked_up} of 50 looked up) | {threads} | {ms:.2} | | | |"
         );
     }
 }

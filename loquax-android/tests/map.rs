@@ -1386,6 +1386,11 @@ fn a_frame_into_the_bitmap_is_the_frame_of_the_host_path() {
         for (k, b) in bitmap.rgba.iter_mut().enumerate() {
             *b = (k * 7 + i) as u8;
         }
+        // Both on one clock: a pinch's frame places its names and those
+        // it sets anew fade in by it (1225).
+        for dir in [one.path(), two.path()] {
+            loquax_android::map::tune_clock(dir, Some(10_000 + 16 * i as u64));
+        }
         let (want, rgba) = frame(&loquax_android::map::render(&host, Some(Vec::new()), now()));
         let mut got = loquax_android::map::render_into(&into, Some(Vec::new()), now(), &mut bitmap);
         assert!(got.ok, "step {i}: {:?}", got.error);
