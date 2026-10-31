@@ -370,6 +370,77 @@ fn the_settings_page_sets_the_map_theme() {
     );
 }
 
+/// The Map tab's loading chip (1199) reads the frame's `loading`: a map
+/// opened on a place no region holds asks the autoload for it, and while
+/// the download runs (a fake source that takes the connection and never
+/// answers) every frame says `loading`, so Java asks again and the chip
+/// stays. A source that refuses ends the load with a notice, the chip's
+/// line for a load that could not start, and `loading` drops.
+#[test]
+fn a_missing_region_loads_by_itself_and_the_frame_says_so() {
+    let stalls = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let refuses = std::net::TcpListener::bind("127.0.0.1:0").expect("another port");
+    let refused_port = refuses.local_addr().expect("its address").port();
+    drop(refuses);
+    let berlin = |home: &Path| MapRequest {
+        at_lat_e6: Some(52_520_000),
+        at_lon_e6: Some(13_405_000),
+        ..request(home, false)
+    };
+    let source = |home: &Path, port: u16| {
+        std::fs::write(
+            home.join(loquax::config::CONFIG_FILE),
+            format!("map_source = \"http://127.0.0.1:{port}/planet.pmtiles\"\n"),
+        )
+        .expect("config");
+    };
+
+    let home = home();
+    source(
+        home.path(),
+        stalls.local_addr().expect("its address").port(),
+    );
+    let (shown, _) = frame(&loquax_android::map::render(
+        &berlin(home.path()),
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(shown.loading, "the autoload runs: {shown:?}");
+    let (shown, _) = frame(&loquax_android::map::render(
+        &request(home.path(), false),
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(
+        shown.loading && shown.notice.is_none(),
+        "still loading: {shown:?}"
+    );
+
+    let home = self::home();
+    source(home.path(), refused_port);
+    let (shown, _) = frame(&loquax_android::map::render(
+        &berlin(home.path()),
+        Some(Vec::new()),
+        now(),
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut last = shown;
+    while last.notice.is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no notice for a refused source: {last:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        last = frame(&loquax_android::map::render(
+            &request(home.path(), false),
+            Some(Vec::new()),
+            now(),
+        ))
+        .0;
+    }
+    assert!(!last.loading, "the load ended: {last:?}");
+}
+
 /// A tap on a pin's marker selects it and names it; the selected pin is
 /// drawn red. A pan moves the centre by the pixels at the zoom.
 #[test]
