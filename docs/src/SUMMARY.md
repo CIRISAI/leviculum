@@ -35,6 +35,7 @@
   - [Loquax: the propagation node, and who you talk to](concepts/loquax-mailbox.md)
   - [Loquax: the map](concepts/loquax-map.md)
   - [Loquax: the home node](concepts/loquax-home-node.md)
+  - [Loquax: reaching the mailbox from anywhere](concepts/loquax-reachability.md)
   - [Loquax: import and export](concepts/loquax-import.md)
 - [Public channels over LXMF](concepts/public-channels.md)
 - [Telemetry](concepts/telemetry.md)

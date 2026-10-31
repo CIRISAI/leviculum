@@ -73,6 +73,9 @@ in Unicode half blocks, the base32 in upper case in the QR alphanumeric
 mode (version 6 for the code alone, at error correction level M). The
 Android join screen takes the combined form pasted or shared to it from a
 QR reader and fills the address from it.
+How a phone outside the home reaches that server, through a shared
+rendezvous node or any mesh path, is
+[Reaching the mailbox from anywhere](loquax-reachability.md).
 
 On the new device, `loquax mailbox join <code>` creates the device identity,
 asks for the path to the home destination, opens a link to it, identifies
