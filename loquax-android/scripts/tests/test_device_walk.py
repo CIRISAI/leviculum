@@ -185,6 +185,59 @@ class Settings(unittest.TestCase):
         self.assertIsNone(walk.page_mark_missing("Backup", []))
 
 
+def maps_page(on=True, used="Storage used: 1.4 MB", rows=(("Around 43.77° N, 11.25° E",
+              "1.4 MB · Oct 31 · zoom 0 to 16"),)):
+    """The Maps page as SettingsActivity.showMaps builds it (1207)."""
+    switch = walk.Node(text="", desc="", rid="network.leviculum.loquax.debug:id/maps_auto",
+                       cls="android.widget.Switch", bounds=(900, 200, 1000, 260), checked=on)
+    nodes = [switch, at("maps_used", used, 300)]
+    for i, (name, line) in enumerate(rows):
+        nodes.append(at("maps_region_name", name, 400 + 100 * i))
+        nodes.append(at("maps_region_line", line, 440 + 100 * i))
+    return nodes
+
+
+class MapsPage(unittest.TestCase):
+    def test_the_page_as_built_has_no_problem(self):
+        detail, problems = walk.maps_page_problems(maps_page())
+        self.assertEqual(problems, [])
+        self.assertEqual(detail, "auto=on used=1.4 MB regions=1")
+        german = maps_page(used="Speicher belegt: 1,4 MB",
+                           rows=(("Rund um 43,77° N, 11,25° E", "1,4 MB · 31. Okt. · Zoom 0 bis 16"),))
+        self.assertEqual(walk.maps_page_problems(german)[1], [])
+
+    def test_lews_phone_on_2026_10_31(self):
+        """Switch off, 0 B, no maps, the toast's line in the dump."""
+        nodes = maps_page(on=False, used="Storage used: 0 B", rows=()) + [
+            node("", "No maps on this phone yet."),
+            node("", "the request did not decode: missing field `w`"),
+        ]
+        detail, problems = walk.maps_page_problems(nodes)
+        self.assertEqual(detail, "auto=off used=0 B regions=0")
+        self.assertEqual(problems, [
+            "the automatic download shows off",
+            "the storage line says 'Storage used: 0 B'",
+            "no row of the fixture region among []",
+            "on screen: 'the request did not decode: missing field `w`'",
+        ])
+
+    def test_a_region_without_its_size_and_no_switch(self):
+        rows = (("Around 43.77° N, 11.25° E", " · Oct 31 · zoom 0 to 16"),)
+        _, problems = walk.maps_page_problems(maps_page(rows=rows))
+        self.assertEqual(problems, [f"a region without its size: {[rows[0][1]]}"])
+        _, problems = walk.maps_page_problems(maps_page()[1:])
+        self.assertEqual(problems, ["no automatic download switch"])
+
+    def test_the_dump_reads_a_switchs_state(self):
+        xml = ('<hierarchy rotation="0"><node index="0" text="" resource-id="x:id/maps_auto" '
+               'class="android.widget.Switch" checked="true" bounds="[0,0][1,1]" /></hierarchy>')
+        self.assertTrue(walk.parse_dump(xml)[0].checked)
+        self.assertFalse(walk.parse_dump(xml.replace('checked="true"', 'checked="false"'))[0].checked)
+
+    def test_the_fixture_region_exists(self):
+        self.assertTrue(walk.FIXTURE_REGION.is_file(), walk.FIXTURE_REGION)
+
+
 ME = "3e35f10c9a7b4d2e8f1a0b6c5d4e3f21"
 
 

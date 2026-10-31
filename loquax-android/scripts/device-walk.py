@@ -108,6 +108,13 @@ SETTINGS_PAGE_MARKS = {
     "Privacy": ("text", "Positions you shared"),
     "Maps": ("rid", "maps_auto"),
 }
+# The region the walk puts on the phone for the Maps page (1207): the
+# repository's Florence fixture, and the middle the page names it by
+# (Ui.place, two decimals, either decimal mark).
+FIXTURE_REGION = REPO / "leviculum-map" / "fixtures" / "firenze.lmr"
+FIXTURE_REGION_PLACE = re.compile(r"43[.,]\d\d° N, 11[.,]\d\d° E")
+# A size as Formatter.formatShortFileSize writes it: "1.2 MB", "345 kB".
+FILE_SIZE = re.compile(r"\d+(?:[.,]\d+)?\s?(?:B|kB|KB|MB|GB)\b")
 # The buttons of the dialogs a first start may raise: Android's
 # notification question, its battery exemption, the app's own (Asks.java).
 # "Not now" before "Leave it out": the latter opens a second, system dialog.
@@ -131,6 +138,7 @@ class Node:
     clickable: bool = False
     long_clickable: bool = False
     scrollable: bool = False
+    checked: bool = False
 
     @property
     def center(self) -> tuple[int, int]:
@@ -203,6 +211,7 @@ def parse_dump(xml_text: str) -> list[Node]:
                 clickable=el.get("clickable") == "true",
                 long_clickable=el.get("long-clickable") == "true",
                 scrollable=el.get("scrollable") == "true",
+                checked=el.get("checked") == "true",
             )
         )
     return nodes
@@ -358,6 +367,38 @@ def profile_problems(nodes: list[Node], want: str | None) -> tuple[str, list[str
 def decode_problems(nodes: list[Node]) -> list[str]:
     """A line that says something did not decode, anywhere on screen."""
     return [f"on screen: {t!r}" for t in texts(nodes) if NOT_DECODED in t]
+
+
+def maps_page_problems(nodes: list[Node]) -> tuple[str, list[str]]:
+    """The Maps page (1201, 1207): what it shows, and what is wrong: no
+    automatic download switch or one that is off (on by default, 1089,
+    and the walk never stores off for good), no storage line or one
+    without a size or of 0 B, no region row of the walk's fixture, a
+    region without its size, a line that did not decode. Lew's phone
+    showed the switch off, "0 B" and no maps, the request having failed
+    to decode."""
+    switch = find(nodes, rid="maps_auto")
+    used = find(nodes, rid="maps_used")
+    names = [n.text for n in by_top(find(nodes, rid="maps_region_name"))]
+    lines = [n.text for n in by_top(find(nodes, rid="maps_region_line"))]
+    problems = []
+    if not switch:
+        problems.append("no automatic download switch")
+    elif not switch[0].checked:
+        problems.append("the automatic download shows off")
+    used_text = used[0].text if used else ""
+    size = FILE_SIZE.search(used_text)
+    if not used:
+        problems.append("no storage line")
+    elif size is None or re.fullmatch(r"0\s?B", size.group(0)):
+        problems.append(f"the storage line says {used_text!r}")
+    if not any(FIXTURE_REGION_PLACE.search(name) for name in names):
+        problems.append(f"no row of the fixture region among {names}")
+    if len(lines) != len(names) or any(not FILE_SIZE.search(line) for line in lines):
+        problems.append(f"a region without its size: {lines}")
+    problems += decode_problems(nodes)
+    state = "none" if not switch else "on" if switch[0].checked else "off"
+    return f"auto={state} used={size.group(0) if size else '?'} regions={len(names)}", problems
 
 
 def page_mark_missing(page: str, nodes: list[Node]) -> str | None:
@@ -1283,8 +1324,10 @@ class Walk:
         """The settings (1201): More, Settings; the eight entries in their
         order, each with a one line description and no raw hash; each page
         opened and left with back, none with a line that did not decode,
-        each with its own mark where it has one; back to the chats."""
+        each with its own mark where it has one; the Maps page as
+        `maps_page` walks it (1207); back to the chats."""
         dev = self.need_device()
+        self.put_fixture_region()
         for _ in range(3):
             if find(dev.dump(), rid="write"):
                 break
@@ -1310,8 +1353,7 @@ class Walk:
             if trouble:
                 raise StepFailed(f"{page}: " + "; ".join(trouble))
             if page == "Maps":
-                regions = len(find(nodes, rid="maps_region"))
-                walked.append(f"Maps(regions={regions})")
+                walked.append(f"Maps({self.maps_page()})")
             else:
                 walked.append(page)
             dev.key("KEYCODE_BACK")
@@ -1319,6 +1361,58 @@ class Walk:
         dev.key("KEYCODE_BACK")
         self.wait_id("write", 10)
         return f"entries={len(titles)} walked={','.join(walked)} back=chats"
+
+    def put_fixture_region(self) -> None:
+        """The walk's region into the app's maps directory, through
+        run-as (a debug APK), for the Maps page to list (1207)."""
+        dev = self.need_device()
+        if not FIXTURE_REGION.is_file():
+            raise StepFailed(f"{FIXTURE_REGION} missing")
+        dev.run("push", str(FIXTURE_REGION), "/data/local/tmp/walk-firenze.lmr", timeout=60)
+        dev.shell(
+            f"cat /data/local/tmp/walk-firenze.lmr | run-as {PACKAGE} sh -c "
+            "'mkdir -p files/maps && cat > files/maps/firenze.lmr'"
+        )
+        dev.shell("rm -f /data/local/tmp/walk-firenze.lmr", check=False)
+
+    def maps_switch(self, on: bool) -> list[Node]:
+        """The Maps page's switch once it shows `on`; a line that did not
+        decode on the way fails (1207)."""
+        dev = self.need_device()
+        seen: list[Node] = []
+
+        def shows():
+            nonlocal seen
+            seen = dev.dump()
+            if decode_problems(seen):
+                raise StepFailed("Maps: " + "; ".join(decode_problems(seen)))
+            switch = find(seen, rid="maps_auto")
+            return seen if switch and switch[0].checked == on else None
+
+        if not wait_for(shows, 10, every=0.3):
+            raise StepFailed(f"Maps: the switch did not show {'on' if on else 'off'}")
+        return seen
+
+    def maps_page(self) -> str:
+        """The Maps page (1207), open: the switch on, the storage used,
+        the fixture's region with its size; the switch off, the page left
+        and opened again still off (stored), then on again; never a line
+        that did not decode. The page's line for the detail."""
+        dev = self.need_device()
+        nodes = self.maps_switch(True)
+        detail, problems = maps_page_problems(nodes)
+        if problems:
+            raise StepFailed("Maps: " + "; ".join(problems))
+        dev.tap_node(find(nodes, rid="maps_auto")[0])
+        self.maps_switch(False)
+        dev.key("KEYCODE_BACK")
+        self.wait_id("settings_entry_title", 10)
+        self.tap_text("Maps")
+        self.wait_id("maps_auto", 10)
+        nodes = self.maps_switch(False)
+        dev.tap_node(find(nodes, rid="maps_auto")[0])
+        self.maps_switch(True)
+        return f"{detail} switch=off,stored,on"
 
     def step_profile(self) -> str:
         """The profile (1187): our avatar at the top left of the chats

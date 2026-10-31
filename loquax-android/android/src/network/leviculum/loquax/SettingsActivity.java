@@ -340,6 +340,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView used = text(getString(R.string.maps_used,
                 Formatter.formatShortFileSize(this, Core.num(answer, "region_bytes"))), 14, R.color.accent);
+        used.setId(R.id.maps_used);
         used.setPadding(dp(16), dp(16), dp(16), dp(4));
         body.addView(used);
         List<Map<String, Object>> regions = Core.list(answer, "regions");
@@ -360,15 +361,19 @@ public class SettingsActivity extends Activity implements Events.Listener {
         line.setPadding(dp(16), dp(8), dp(8), dp(8));
         LinearLayout words = new LinearLayout(this);
         words.setOrientation(LinearLayout.VERTICAL);
-        words.addView(text(getString(R.string.maps_region,
-                Ui.place(Core.num(region, "lat_e6"), Core.num(region, "lon_e6"))), 16, R.color.text));
+        TextView place = text(getString(R.string.maps_region,
+                Ui.place(Core.num(region, "lat_e6"), Core.num(region, "lon_e6"))), 16, R.color.text);
+        place.setId(R.id.maps_region_name);
+        words.addView(place);
         long modified = Core.num(region, "modified");
         String when = modified == 0 ? "" : DateUtils.formatDateTime(this, modified * 1000,
                 DateUtils.FORMAT_SHOW_DATE | DateUtils.FORMAT_ABBREV_MONTH);
-        words.addView(text(getString(R.string.maps_region_line,
+        TextView facts = text(getString(R.string.maps_region_line,
                 Formatter.formatShortFileSize(this, Core.num(region, "bytes")), when,
                 (int) Core.num(region, "min_zoom"), (int) Core.num(region, "max_zoom")), 14,
-                R.color.text_secondary));
+                R.color.text_secondary);
+        facts.setId(R.id.maps_region_line);
+        words.addView(facts);
         line.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button delete = new Button(this);
         delete.setText(R.string.maps_delete);
