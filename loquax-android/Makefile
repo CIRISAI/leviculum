@@ -12,8 +12,14 @@
 # --- Project ---
 APP_MODULE=loquax
 NAMESPACE=network.leviculum.loquax
-VERSION_CODE?=1
-VERSION_NAME?=0.1
+# The version lives in Cargo.toml beside this file, where
+# scripts/bump-touched.py moves it at every landing (1226): `version` is the
+# versionName, `[package.metadata.android] version-code` the versionCode,
+# which has to grow for a phone to accept the APK as an update. A command
+# line VERSION_CODE=... still wins, for a one-off build.
+CARGO_TOML:=$(dir $(realpath $(lastword $(MAKEFILE_LIST))))Cargo.toml
+VERSION_CODE?=$(shell sed -n 's/^version-code *= *\([0-9][0-9]*\).*/\1/p' $(CARGO_TOML))
+VERSION_NAME?=$(shell sed -n 's/^version *= *"\([^"]*\)".*/\1/p' $(CARGO_TOML) | head -n 1)
 
 # --- SDK / tools ---
 SDK?=/usr/lib/android-sdk
@@ -103,7 +109,7 @@ PACKAGE_NAME?=$(NAMESPACE)
 PACKAGE=$(BIN)/$(APP_MODULE)$(APK_SUFFIX).apk
 UNALIGNED_PACKAGE=$(BIN)/$(APP_MODULE)$(APK_SUFFIX).unaligned.apk
 
-.PHONY: all release debug waydroid build install install-debug uninstall uninstall-debug start start-debug logcat clean compile compile_android manifest native pack check-kspass FORCE
+.PHONY: all release debug waydroid build install install-debug uninstall uninstall-debug start start-debug logcat clean compile compile_android manifest native pack check-kspass print-version FORCE
 
 all: release
 
@@ -217,6 +223,10 @@ start-debug:
 
 logcat:
 	$(ADB) shell logcat | grep Runtime
+
+# What the manifest step will stamp, for scripts/bump-touched.py's selftest.
+print-version:
+	@echo VERSION_CODE=$(VERSION_CODE) VERSION_NAME=$(VERSION_NAME)
 
 clean:
 	rm -rf $(BIN) $(PROJ)/obj

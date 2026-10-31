@@ -11,6 +11,12 @@ homepage.workspace = true
 description = "loquax on Android: the JNI library the app's Java calls"
 publish = false
 
+# The APK's versionCode. Android refuses an update whose code did not grow,
+# so scripts/bump-touched.py raises it by one whenever this crate's version
+# moves; the Makefile stamps it and the version above into the manifest.
+[package.metadata.android]
+version-code = 1
+
 # A cdylib for the app (`make` in this directory builds it for Android and
 # puts it in the APK), an rlib so the host's `cargo test` runs its tests.
 # Not a default member: on the workspace's musl default cargo drops the
