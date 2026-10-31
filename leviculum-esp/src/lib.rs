@@ -61,11 +61,16 @@ use boards::BoardConfig;
 /// `dirty` is part of the stamp, not decoration: two images built from the
 /// same commit with different working trees are different images, and a
 /// rig that confirmed only the sha would call them the same one.
+///
+/// `version` is the crate's, moved at every landing that touched this
+/// firmware (scripts/bump-touched.py, 1226); last, as in `leviculum-nrf`.
 pub const FW_BUILD_STAMP: &str = concat!(
     "git_sha=",
     env!("LEVICULUM_GIT_SHA"),
     " dirty=",
-    env!("LEVICULUM_GIT_DIRTY")
+    env!("LEVICULUM_GIT_DIRTY"),
+    " version=",
+    env!("CARGO_PKG_VERSION")
 );
 
 // ---------------------------------------------------------------------

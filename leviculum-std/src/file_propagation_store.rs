@@ -67,11 +67,23 @@
 //! Purges and the removal of a replaced file go through the same queue, in
 //! order, so a purge of a queued message runs after its write.
 //!
+//! # The sequence index
+//!
+//! Beside the directory index keyed by transient ID the store keeps the same
+//! entries ordered by sequence, so [`PropagationStore::for_each_above`] reads
+//! only what an offer reads and [`PropagationStore::newest_sequence`] is the
+//! last key, and [`PropagationStore::meta`] is a lookup. Without it every
+//! outbound sync tick walked the whole store: 170 ms a tick on the field
+//! node's Odroid at 300 000 messages (leviculum#478).
+//! Both indexes change together, through `index_insert` and `index_remove`
+//! only.
+//!
 //! [`write_behind`]: FilePropagationStore::write_behind
 //! [`writes_issued`]: FilePropagationStore::writes_issued
 //! [`settle_writes`]: FilePropagationStore::settle_writes
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{Bound, ControlFlow};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Arc;
@@ -96,6 +108,9 @@ pub struct FilePropagationStore {
     capacity: u64,
     used: u64,
     index: BTreeMap<TransientId, IndexEntry>,
+    /// `index` ordered by `(sequence, transient_id)` (module docs, "The
+    /// sequence index").
+    by_sequence: BTreeSet<(u64, TransientId)>,
     /// Last assigned append sequence; recovered as the maximum on disk.
     last_sequence: u64,
     fsync: Arc<dyn Fsync>,
@@ -294,11 +309,16 @@ impl FilePropagationStore {
                 }
             }
         }
+        let by_sequence = index
+            .values()
+            .map(|entry| (entry.meta.sequence, entry.meta.transient_id))
+            .collect();
         Ok(Self {
             dir,
             capacity,
             used,
             index,
+            by_sequence,
             last_sequence,
             fsync,
             writer: None,
@@ -423,11 +443,29 @@ impl FilePropagationStore {
             return;
         };
         if ok {
-            self.index.insert(transient_id, queued.entry);
+            self.index_insert(transient_id, queued.entry);
         } else {
             self.used -= queued.entry.meta.size as u64;
             writer.failed.push(transient_id);
         }
+    }
+
+    /// Put one entry in both indexes, replacing whatever the ID held.
+    fn index_insert(&mut self, transient_id: TransientId, entry: IndexEntry) {
+        let sequence = entry.meta.sequence;
+        if let Some(previous) = self.index.insert(transient_id, entry) {
+            self.by_sequence
+                .remove(&(previous.meta.sequence, transient_id));
+        }
+        self.by_sequence.insert((sequence, transient_id));
+    }
+
+    /// Take one entry out of both indexes.
+    fn index_remove(&mut self, transient_id: &TransientId) -> Option<IndexEntry> {
+        let entry = self.index.remove(transient_id)?;
+        self.by_sequence
+            .remove(&(entry.meta.sequence, *transient_id));
+        Some(entry)
     }
 
     /// Queue a removal behind the writes before it, or remove now when no
@@ -675,7 +713,7 @@ impl PropagationStore for FilePropagationStore {
                     body,
                 },
             );
-            self.index.remove(transient_id);
+            self.index_remove(transient_id);
             self.last_sequence = sequence;
             self.used = next;
             return Ok(());
@@ -689,7 +727,7 @@ impl PropagationStore for FilePropagationStore {
                 let _ = std::fs::remove_file(&previous.path);
             }
         }
-        self.index.insert(*transient_id, entry);
+        self.index_insert(*transient_id, entry);
         self.used = next;
         Ok(())
     }
@@ -701,13 +739,48 @@ impl PropagationStore for FilePropagationStore {
         Ok(())
     }
 
+    /// The sequence index from just above `cursor`: what the visitor reads,
+    /// not the store (module docs, "The sequence index"). Ties come in
+    /// transient ID order, as the default's stable sort of `for_each` leaves
+    /// them.
+    fn for_each_above(
+        &self,
+        cursor: u64,
+        visit: &mut dyn FnMut(&StoredMessage) -> ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        let above = (Bound::Excluded((cursor, [0xff; 32])), Bound::Unbounded);
+        for (_, transient_id) in self.by_sequence.range(above) {
+            let Some(entry) = self.index.get(transient_id) else {
+                continue;
+            };
+            if visit(&entry.meta).is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// One index lookup; the default walks the store, once per wanted ID of
+    /// an outbound sync batch (`plan_sync_batch`, leviculum#478).
+    fn meta(&self, transient_id: &TransientId) -> Result<Option<StoredMessage>, StorageError> {
+        Ok(self.index.get(transient_id).map(|entry| entry.meta))
+    }
+
+    fn count(&self) -> Result<usize, StorageError> {
+        Ok(self.index.len())
+    }
+
+    fn newest_sequence(&self) -> Result<u64, StorageError> {
+        Ok(self.by_sequence.last().map_or(0, |(sequence, _)| *sequence))
+    }
+
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError> {
         let queued = self
             .writer
             .as_mut()
             .and_then(|writer| writer.queued.remove(transient_id))
             .map(|queued| queued.entry);
-        let Some(entry) = queued.or_else(|| self.index.remove(transient_id)) else {
+        let Some(entry) = queued.or_else(|| self.index_remove(transient_id)) else {
             return Ok(false);
         };
         self.used -= entry.meta.size as u64;
@@ -1323,5 +1396,129 @@ mod tests {
         assert!(!store.contains(&[1; 32]).unwrap());
         assert_eq!(store.free_space(), 4096);
         assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 0);
+    }
+
+    /// The answers the sequence index gives, recomputed by the trait's own
+    /// defaults from `for_each`: what the store said before leviculum#478.
+    fn by_walk(store: &FilePropagationStore, cursor: u64) -> (Vec<StoredMessage>, u64, usize) {
+        let mut above = Vec::new();
+        let mut newest = 0;
+        let mut count = 0;
+        store
+            .for_each(&mut |meta| {
+                count += 1;
+                newest = newest.max(meta.sequence);
+                if meta.sequence > cursor {
+                    above.push(*meta);
+                }
+            })
+            .unwrap();
+        above.sort_by_key(|meta| meta.sequence);
+        (above, newest, count)
+    }
+
+    fn by_index(store: &FilePropagationStore, cursor: u64) -> (Vec<StoredMessage>, u64, usize) {
+        let mut above = Vec::new();
+        store
+            .for_each_above(cursor, &mut |meta| {
+                above.push(*meta);
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        (
+            above,
+            store.newest_sequence().unwrap(),
+            store.count().unwrap(),
+        )
+    }
+
+    fn assert_index_matches_walk(store: &FilePropagationStore, ids: &[TransientId], step: usize) {
+        let (_, newest, _) = by_walk(store, 0);
+        for cursor in [
+            0,
+            newest / 3,
+            newest / 2,
+            newest.saturating_sub(1),
+            newest,
+            newest + 1,
+        ] {
+            assert_eq!(
+                by_index(store, cursor),
+                by_walk(store, cursor),
+                "step {step}, cursor {cursor}"
+            );
+        }
+        for id in ids {
+            let mut walked = None;
+            store
+                .for_each(&mut |meta| {
+                    if meta.transient_id == *id {
+                        walked = Some(*meta);
+                    }
+                })
+                .unwrap();
+            assert_eq!(store.meta(id).unwrap(), walked, "step {step}");
+        }
+    }
+
+    /// leviculum#478: the sequence index answers `for_each_above`,
+    /// `newest_sequence`, `count` and `meta` exactly as the whole-store walk
+    /// did, through appends, re-appends of a stored ID, purges, queued
+    /// writes the writer has not confirmed, and a reopen; and an ordered
+    /// walk that breaks visits no further.
+    #[test]
+    fn the_sequence_index_answers_as_the_store_walk_does() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FilePropagationStore::open(dir.path(), 1_000_000)
+            .expect("open")
+            .write_behind()
+            .expect("writer");
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let ids: Vec<TransientId> = (0..24u8).map(|n| [n; 32]).collect();
+        for step in 0..400 {
+            let id = ids[(next() % ids.len() as u64) as usize];
+            match next() % 4 {
+                0 => {
+                    store.purge(&id).unwrap();
+                }
+                3 => {
+                    store.flush_writes();
+                }
+                _ => {
+                    store
+                        .append(&id, 1_789_000_000 + step as u64, 13, &body_for(3, 80))
+                        .unwrap();
+                }
+            }
+            assert_index_matches_walk(&store, &ids, step);
+        }
+        store.flush_writes();
+        assert_index_matches_walk(&store, &ids, 400);
+
+        let (above, _, count) = by_walk(&store, 0);
+        assert!(count > 3, "the walk left {count} entries to break over");
+        let mut visited = Vec::new();
+        store
+            .for_each_above(0, &mut |meta| {
+                visited.push(meta.sequence);
+                if visited.len() == 3 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .unwrap();
+        let first: Vec<u64> = above.iter().take(3).map(|meta| meta.sequence).collect();
+        assert_eq!(visited, first, "a break ends the walk");
+
+        drop(store);
+        let store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+        assert_index_matches_walk(&store, &ids, 401);
     }
 }

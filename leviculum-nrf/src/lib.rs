@@ -562,11 +562,17 @@ pub fn set_panic_led(port: u8, pin: u8, active_low: bool) {
 /// `dirty` is part of the stamp, not decoration: two images built from the
 /// same commit with different working trees are different images, and a rig
 /// that confirmed only the sha would call them the same one (Codeberg #343).
+///
+/// `version` is the crate's, the number scripts/bump-touched.py moves at
+/// every landing that touched this firmware (1226). It comes last, so every
+/// reader that matches `git_sha=<sha> dirty=<bool>` reads it unchanged.
 pub const FW_BUILD_STAMP: &str = concat!(
     "git_sha=",
     env!("LEVICULUM_GIT_SHA"),
     " dirty=",
-    env!("LEVICULUM_GIT_DIRTY")
+    env!("LEVICULUM_GIT_DIRTY"),
+    " version=",
+    env!("CARGO_PKG_VERSION")
 );
 
 static HARDFAULT_LED_ARMED: AtomicBool = AtomicBool::new(false);

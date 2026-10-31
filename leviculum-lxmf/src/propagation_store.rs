@@ -108,6 +108,7 @@
 //! is append-ordered.
 
 use alloc::{collections::BTreeMap, vec::Vec};
+use core::ops::ControlFlow;
 
 use crate::{
     constants::{DESTINATION_LENGTH, STAMP_SIZE},
@@ -177,6 +178,36 @@ pub trait PropagationStore {
 
     /// Visit every stored message's directory entry, without reading bodies.
     fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError>;
+
+    /// Visit the entries whose [`StoredMessage::sequence`] is above
+    /// `cursor`, ascending by sequence, until `visit`
+    /// breaks: the walk an offer is built from
+    /// ([`OfferBuilder`](crate::peering::OfferBuilder)).
+    ///
+    /// The default collects one directory pass and sorts it, so it costs the
+    /// whole store whatever the visitor reads. A store that keeps its entries
+    /// in sequence order overrides it to cost what the visitor reads: an
+    /// offer stops after a handful of IDs, and the host node walked 300 000
+    /// files for it on every sync tick (leviculum#478).
+    fn for_each_above(
+        &self,
+        cursor: u64,
+        visit: &mut dyn FnMut(&StoredMessage) -> ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        let mut entries: Vec<StoredMessage> = Vec::new();
+        self.for_each(&mut |meta| {
+            if meta.sequence > cursor {
+                entries.push(*meta);
+            }
+        })?;
+        entries.sort_by_key(|meta| meta.sequence);
+        for meta in &entries {
+            if visit(meta).is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
 
     /// Remove one message. Returns whether it was present.
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError>;

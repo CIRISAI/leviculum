@@ -25,14 +25,14 @@ use leviculum_lxmf::constants::WORKBLOCK_EXPAND_ROUNDS_PEERING;
 use leviculum_lxmf::control::{ControlPeerStats, HOPS_UNKNOWN};
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
-    answer_offer, build_offer, offer_budget_for_mdu, peering_key_material, response_action,
-    DeclineReason, DropReason, InboundGate, OfferPlan, OfferResponse, PeerChange, PeerOffer,
+    answer_offer, offer_budget_for_mdu, peering_key_material, response_action, DeclineReason,
+    DropReason, InboundGate, OfferBuilder, OfferPlan, OfferResponse, Peer, PeerChange, PeerOffer,
     PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeerTraffic, PeeringConfig, ResponseAction,
     SyncPhase, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, ROTATION_INTERVAL_SECS, SYNC_INTERVAL_SECS,
 };
 use leviculum_lxmf::propagation::PeerError;
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
-use leviculum_lxmf::propagation_store::StoredMessage;
+use leviculum_lxmf::storage::StorageError;
 use leviculum_lxmf::sync_round::{
     round_deadline_ms, round_step, LinkView, RoundEvent, RoundStep, RoundView,
 };
@@ -108,6 +108,21 @@ fn unhandled_above_cursors(
             (above > 0).then_some((*hash, above))
         })
         .collect()
+}
+
+/// One offer toward `peer` from its cursor, `offer_budget` bytes of encoded
+/// body at most: [`leviculum_lxmf::peering::build_offer`]'s plan, built over the store's ordered walk
+/// so it reads what the plan takes and stops (leviculum#478). The whole-store
+/// walk it replaced cost 170 ms a sync tick on the field node at 300 000
+/// messages, and the same again when the round's link came up.
+fn plan_offer<S: PropagationStore + ?Sized>(
+    peer: &Peer,
+    store: &S,
+    offer_budget: usize,
+) -> Result<Option<OfferPlan>, StorageError> {
+    let mut builder = OfferBuilder::new(peer, offer_budget);
+    store.for_each_above(peer.cursor, &mut |meta| builder.push(meta))?;
+    Ok(builder.finish())
 }
 
 /// One outbound sync round in flight.
@@ -1467,17 +1482,14 @@ impl PeeringRuntime {
         // The offer, from the cursor (§5); low-value and oversize entries
         // are stepped past for good, exactly as the reference marks them
         // handled (`LXMPeer.py:340`, `:370-373`).
-        let mut entries: Vec<StoredMessage> = Vec::new();
-        let cursor = peer.cursor;
-        if node
-            .store()
-            .for_each(&mut |meta| {
-                if meta.sequence > cursor {
-                    entries.push(*meta);
-                }
-            })
-            .is_err()
-        {
+        //
+        // A probe, not the offer: no link yet, so no MDU to size against.
+        // It answers one question — is anything above the cursor
+        // offerable — and `on_link_established` builds the offer itself
+        // against the link that will carry it. An empty id list still
+        // carries the full skip scan, so dead entries step past here as
+        // before.
+        let Ok(probe) = plan_offer(peer, node.store(), OFFER_PROBE_BUDGET) else {
             // A store that cannot be walked now will most likely fail on
             // the next pass too: the peer is booked like an unreachable
             // one, so it climbs the backoff ladder instead of staying due.
@@ -1501,15 +1513,8 @@ impl PeeringRuntime {
                 });
             }
             return;
-        }
-        entries.sort_by_key(|meta| meta.sequence);
-        // A probe, not the offer: no link yet, so no MDU to size against.
-        // It answers one question — is anything above the cursor
-        // offerable — and `on_link_established` builds the offer itself
-        // against the link that will carry it. An empty id list still
-        // carries the full skip scan, so dead entries step past here as
-        // before.
-        let Some(plan) = build_offer(peer, &entries, OFFER_PROBE_BUDGET) else {
+        };
+        let Some(plan) = probe else {
             return;
         };
         if plan.ids.is_empty() {
@@ -1622,19 +1627,11 @@ impl PeeringRuntime {
             }
             RoundStep::Unchanged | RoundStep::Defer | RoundStep::Backoff(_) => return,
         };
-        let Some(cursor) = self.table.get(&peer_hash).map(|peer| peer.cursor) else {
+        let Some(peer) = self.table.get(&peer_hash) else {
             return;
         };
-        let mut entries: Vec<StoredMessage> = Vec::new();
-        if node
-            .store()
-            .for_each(&mut |meta| {
-                if meta.sequence > cursor {
-                    entries.push(*meta);
-                }
-            })
-            .is_err()
-        {
+        let cursor = peer.cursor;
+        let Ok(planned) = plan_offer(peer, node.store(), offer_budget_for_mdu(mdu)) else {
             if let RoundStep::End(end) =
                 round_step(self.round_view().as_ref(), RoundEvent::StoreFailed)
             {
@@ -1642,12 +1639,8 @@ impl PeeringRuntime {
                 out.merge(core.close_link(link_id));
             }
             return;
-        }
-        entries.sort_by_key(|meta| meta.sequence);
-        let Some(peer) = self.table.get(&peer_hash) else {
-            return;
         };
-        let plan = match build_offer(peer, &entries, offer_budget_for_mdu(mdu)) {
+        let plan = match planned {
             Some(plan) if !plan.ids.is_empty() => plan,
             // Everything above the cursor was drained or became
             // unofferable between scheduling and link-up: conclude so the
@@ -1998,10 +1991,14 @@ impl PeeringRuntime {
 mod tests {
     use super::*;
 
+    use std::cell::Cell;
+
     use leviculum_core::node::NodeCoreBuilder;
-    use leviculum_lxmf::peering::MAX_PEERS_DEFAULT;
+    use leviculum_lxmf::peering::{plan_sync_batch, WantedIds, MAX_PEERS_DEFAULT};
+    use leviculum_lxmf::propagation_store::StoredMessage;
     use leviculum_lxmf::{MemoryPeerStore, MemoryPropagationStore};
     use leviculum_std::driver::{StdClock, StdStorage};
+    use leviculum_std::FilePropagationStore;
 
     /// A persisted peer as the file store would hand it back: heard just
     /// now, synced before, alive, offered 10 and took `outgoing`.
@@ -2217,5 +2214,306 @@ mod tests {
         assert_eq!(sorted, walked);
         assert_eq!(walk_visits, n * p, "positive control: the walk visits n*p");
         assert!(visits <= bound, "{visits} visits exceed {bound}");
+    }
+
+    /// The production store before leviculum#478: only the verbs the trait
+    /// requires, so `for_each_above`, `newest_sequence`, `meta` and `count`
+    /// take the trait's defaults and walk the whole store, as
+    /// `FilePropagationStore` did. Counts its walks.
+    struct WalkOnly<'a> {
+        store: &'a FilePropagationStore,
+        walks: Cell<usize>,
+    }
+
+    /// The production store as it is, its walks counted.
+    struct Indexed<'a> {
+        store: &'a FilePropagationStore,
+        walks: Cell<usize>,
+    }
+
+    impl<'a> WalkOnly<'a> {
+        fn new(store: &'a FilePropagationStore) -> Self {
+            Self {
+                store,
+                walks: Cell::new(0),
+            }
+        }
+    }
+
+    impl<'a> Indexed<'a> {
+        fn new(store: &'a FilePropagationStore) -> Self {
+            Self {
+                store,
+                walks: Cell::new(0),
+            }
+        }
+    }
+
+    impl PropagationStore for WalkOnly<'_> {
+        fn append(&mut self, _: &TransientId, _: u64, _: u8, _: &[u8]) -> Result<(), StorageError> {
+            Err(StorageError::Io)
+        }
+        fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError> {
+            self.walks.set(self.walks.get() + 1);
+            self.store.for_each(visit)
+        }
+        fn purge(&mut self, _: &TransientId) -> Result<bool, StorageError> {
+            Err(StorageError::Io)
+        }
+        fn free_space(&self) -> u64 {
+            self.store.free_space()
+        }
+        fn capacity(&self) -> u64 {
+            self.store.capacity()
+        }
+        fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
+            self.store.contains(transient_id)
+        }
+    }
+
+    impl PropagationStore for Indexed<'_> {
+        fn append(&mut self, _: &TransientId, _: u64, _: u8, _: &[u8]) -> Result<(), StorageError> {
+            Err(StorageError::Io)
+        }
+        fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError> {
+            self.walks.set(self.walks.get() + 1);
+            self.store.for_each(visit)
+        }
+        fn for_each_above(
+            &self,
+            cursor: u64,
+            visit: &mut dyn FnMut(&StoredMessage) -> std::ops::ControlFlow<()>,
+        ) -> Result<(), StorageError> {
+            self.store.for_each_above(cursor, visit)
+        }
+        fn meta(&self, transient_id: &TransientId) -> Result<Option<StoredMessage>, StorageError> {
+            self.store.meta(transient_id)
+        }
+        fn count(&self) -> Result<usize, StorageError> {
+            self.store.count()
+        }
+        fn newest_sequence(&self) -> Result<u64, StorageError> {
+            self.store.newest_sequence()
+        }
+        fn purge(&mut self, _: &TransientId) -> Result<bool, StorageError> {
+            Err(StorageError::Io)
+        }
+        fn free_space(&self) -> u64 {
+            self.store.free_space()
+        }
+        fn capacity(&self) -> u64 {
+            self.store.capacity()
+        }
+        fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
+            self.store.contains(transient_id)
+        }
+    }
+
+    /// No device under the store: the benchmark fills hundreds of thousands
+    /// of files, and the walk it prices reads none of them.
+    struct NoFsync;
+
+    impl leviculum_std::durable::Fsync for NoFsync {
+        fn sync(&self, _handle: &std::fs::File) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A file store in `dir` holding at least `messages` entries with random
+    /// transient ids, stamp values 0 to 15 and sizes up to 2 KB, so offers
+    /// skip low-value and oversize entries; a reopen when it already does.
+    fn file_store_with(dir: &std::path::Path, messages: usize) -> FilePropagationStore {
+        let fsync: std::sync::Arc<dyn leviculum_std::durable::Fsync> = std::sync::Arc::new(NoFsync);
+        let mut store =
+            FilePropagationStore::open_with(dir, u64::MAX / 2, fsync).expect("a store directory");
+        let mut state = 0x2545_f491_4f6c_dd1d ^ store.len() as u64;
+        let min = leviculum_lxmf::propagation_store::MIN_BODY_LEN;
+        while store.len() < messages {
+            let mut transient_id = [0u8; 32];
+            for chunk in transient_id.chunks_mut(8) {
+                chunk.copy_from_slice(&next_random(&mut state).to_le_bytes());
+            }
+            let len = min + (next_random(&mut state) % 2048) as usize;
+            let value = (next_random(&mut state) % 16) as u8;
+            store
+                .append(&transient_id, 1_789_000_000, value, &vec![0x5a; len])
+                .expect("the store has room");
+        }
+        store
+    }
+
+    fn peer_with(cursor: u64, stamp_cost: u8, transfer_limit_kb: u64) -> PeeringRuntime {
+        let hash = [1; 16];
+        let mut persisted = record(hash, 9, unix_secs());
+        persisted.cursor = cursor;
+        persisted.stamp_cost = stamp_cost;
+        persisted.transfer_limit_kb = transfer_limit_kb;
+        let mut store = MemoryPeerStore::default();
+        store.save(&persisted).expect("memory store");
+        let (events_tx, _events) = std::sync::mpsc::channel();
+        PeeringRuntime::new(
+            PeeringConfig::default(),
+            Box::new(store),
+            leviculum_std::generate_identity(),
+            events_tx,
+        )
+    }
+
+    /// leviculum#478: an offer planned over the store's ordered walk is the
+    /// offer the whole-store walk planned, for cursors below, inside and
+    /// above the store, budgets from the probe to the largest MDU, and
+    /// peers that skip low-value and oversize entries; and so is the batch
+    /// a peer that wants all of it would get.
+    #[test]
+    fn an_offer_over_the_ordered_walk_is_the_whole_walk_offer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = file_store_with(dir.path(), 600);
+        let walked = WalkOnly::new(&store);
+        let newest = walked.newest_sequence().expect("walk");
+        assert_eq!(store.newest_sequence(), Ok(newest));
+        for cursor in [0, 1, newest / 3, newest / 2, newest - 1, newest, newest + 5] {
+            for (stamp_cost, transfer_limit_kb) in [(0, 256), (8, 256), (0, 1), (12, 1)] {
+                let runtime = peer_with(cursor, stamp_cost, transfer_limit_kb);
+                let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+                for budget in [
+                    OFFER_PROBE_BUDGET,
+                    offer_budget_for_mdu(431),
+                    offer_budget_for_mdu(8192),
+                ] {
+                    let case = format!("cursor {cursor} cost {stamp_cost} limit {transfer_limit_kb} budget {budget}");
+                    let planned = plan_offer(peer, &store, budget).expect("indexed");
+                    assert_eq!(
+                        planned,
+                        plan_offer(peer, &walked, budget).expect("walk"),
+                        "{case}"
+                    );
+                    if let Some(plan) = planned {
+                        let fits = |_: usize, _: usize, _: usize| true;
+                        assert_eq!(
+                            plan_sync_batch(&store, &plan, &WantedIds::All, fits),
+                            plan_sync_batch(&walked, &plan, &WantedIds::All, fits),
+                            "{case}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// leviculum#478: what a sync tick, a sync link coming up and a peer's
+    /// answer ask of the production store walks none of it. The positive
+    /// control asks the same of the store as it was and counts the walks.
+    #[test]
+    fn a_sync_round_asks_the_store_without_walking_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = file_store_with(dir.path(), 300);
+        let runtime = peer_with(0, 0, 256);
+        let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+        let round = |view: &dyn PropagationStore| {
+            view.newest_sequence().expect("newest");
+            plan_offer(peer, view, OFFER_PROBE_BUDGET).expect("probe");
+            let plan = plan_offer(peer, view, offer_budget_for_mdu(8192))
+                .expect("offer")
+                .expect("something to offer");
+            assert!(
+                plan.ids.len() > 1,
+                "a batch of {} proves nothing",
+                plan.ids.len()
+            );
+            plan_sync_batch(view, &plan, &WantedIds::All, |_, _, _| true).expect("batch");
+            plan.ids.len()
+        };
+
+        let indexed = Indexed::new(&store);
+        round(&indexed);
+        assert_eq!(indexed.walks.get(), 0, "the production store was walked");
+
+        let walked = WalkOnly::new(&store);
+        let offered = round(&walked);
+        assert_eq!(
+            walked.walks.get(),
+            3 + offered,
+            "positive control: newest, probe, offer and one walk per batched id"
+        );
+    }
+
+    fn median_and_max(mut micros: Vec<u128>) -> (u128, u128) {
+        micros.sort_unstable();
+        (micros[micros.len() / 2], micros[micros.len() - 1])
+    }
+
+    /// leviculum#478: what one outbound sync tick (newest sequence, then the
+    /// probe offer) and one sync link coming up (the offer at an MDU) cost
+    /// the core hook over a store of `LNPND_BENCH_STORED` messages (300 000,
+    /// miauhaus's count on 2026-10-31), the store as it was against the
+    /// store as it is, for a peer at cursor 0 and one halfway up. A
+    /// measurement: it asserts only that the two plan the same. The store
+    /// lives in `LNPND_BENCH_DIR` and is kept, so a second run only reopens
+    /// it:
+    ///
+    /// ```text
+    /// LNPND_BENCH_DIR=/home/lew/scratch/1171 \
+    ///   cargo test --release -p lnpnd sync_tick_cost -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement over a store of hundreds of thousands of files"]
+    fn sync_tick_cost_over_a_field_sized_store() {
+        use std::time::Instant;
+
+        let dir = std::env::var("LNPND_BENCH_DIR").expect("LNPND_BENCH_DIR names the store");
+        let messages: usize = std::env::var("LNPND_BENCH_STORED")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300_000);
+        let filled = Instant::now();
+        let store = file_store_with(std::path::Path::new(&dir), messages);
+        println!(
+            "BENCH_STORE dir={dir} messages={} open_ms={}",
+            store.len(),
+            filled.elapsed().as_millis()
+        );
+        let newest = store.newest_sequence().expect("newest");
+        let walked = WalkOnly::new(&store);
+        let round = |view: &dyn PropagationStore, peer: &Peer| {
+            let tick = Instant::now();
+            view.newest_sequence().expect("newest");
+            let probe = plan_offer(peer, view, OFFER_PROBE_BUDGET).expect("probe");
+            let tick_us = tick.elapsed().as_micros();
+            let link = Instant::now();
+            let offer = plan_offer(peer, view, offer_budget_for_mdu(431)).expect("offer");
+            let link_us = link.elapsed().as_micros();
+            let batch = Instant::now();
+            if let Some(plan) = &offer {
+                plan_sync_batch(view, plan, &WantedIds::All, |_, _, _| true).expect("batch");
+            }
+            (tick_us, link_us, batch.elapsed().as_micros(), probe, offer)
+        };
+        for cursor in [0, newest / 2] {
+            let runtime = peer_with(cursor, 0, 256);
+            let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+            for (name, view) in [
+                ("walk", &walked as &dyn PropagationStore),
+                ("indexed", &store),
+            ] {
+                let (mut ticks, mut links, mut batches) = (Vec::new(), Vec::new(), Vec::new());
+                for _ in 0..15 {
+                    let (tick, link, batch, probe, offer) = round(view, peer);
+                    let (_, _, _, walk_probe, walk_offer) = round(&walked, peer);
+                    assert_eq!((probe, offer), (walk_probe, walk_offer));
+                    ticks.push(tick);
+                    links.push(link);
+                    batches.push(batch);
+                }
+                let (tick_median, tick_max) = median_and_max(ticks);
+                let (link_median, link_max) = median_and_max(links);
+                let (batch_median, batch_max) = median_and_max(batches);
+                println!(
+                    "BENCH_SYNC store={name} messages={} cursor={cursor} tick_us_median={tick_median} \
+                     tick_us_max={tick_max} link_up_us_median={link_median} link_up_us_max={link_max} \
+                     batch_us_median={batch_median} batch_us_max={batch_max}",
+                    store.len(),
+                );
+            }
+        }
     }
 }
