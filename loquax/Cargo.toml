@@ -279,6 +279,12 @@ required-features = ["history"]
 name = "wire_props"
 required-features = ["history"]
 
+# 1217: the scene of the list and the chat over the ugly store, pinned as
+# JSON goldens; the store is the history feature's.
+[[test]]
+name = "scene_golden"
+required-features = ["history"]
+
 # The home node end to end: `--daemon` and `home` are the terminal build's.
 [[test]]
 name = "home_node"

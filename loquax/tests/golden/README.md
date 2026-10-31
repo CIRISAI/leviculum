@@ -28,3 +28,13 @@ bar. Compared pixel for pixel as the map's picture is; the text is set in
 the window's default font, Fira Sans as iced embeds it, and the picture
 holds no emoji, which only a host's font would draw.
 
+
+`scene-compact-list.json`, `scene-compact-chat.json`, `scene-wide.json`:
+the scene of the list and the chat (1217, `loquax::ui::scene`) built from
+the ugly store (1173) by `tests/scene_golden.rs`: Compact with no
+conversation open, Compact and Wide with conversation 2 open. JSON with
+sorted keys; texts are catalogue keys with their arguments, not resolved,
+so one file pins both languages. Compared line for line; a scene that
+moved is left in the temp dir as `loquax-golden/<name>`, and
+`LOQUAX_WRITE_GOLDEN=1` writes the goldens for a change that means to move
+them.

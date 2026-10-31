@@ -136,11 +136,13 @@ pub mod chat;
 pub mod contacts;
 pub mod history;
 pub mod hit;
+pub mod intent;
 pub mod layout;
 pub mod liveness;
 pub mod map;
 pub mod reactions;
 pub mod replies;
+pub mod scene;
 pub mod search;
 pub mod state;
 pub mod strings;
@@ -4306,7 +4308,7 @@ mod tests {
     /// places, which the next edit puts back at the end. The terminal's
     /// field is `tui_input::Input`.
     #[derive(Default, Clone, Debug)]
-    struct Field(String, Option<usize>);
+    pub(super) struct Field(String, Option<usize>);
 
     impl InputBuffer for Field {
         fn value(&self) -> &str {

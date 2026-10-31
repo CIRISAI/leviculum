@@ -27,9 +27,10 @@ use loquax::home::runner::{self, HomeClient};
 use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
+use loquax::ui::intent::{Intent, Messages, Switch, Target};
 use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
-use loquax::ui::{chat, update, UiEffect, UiEvent, UiModel};
+use loquax::ui::{chat, scene, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
 use crate::links::{self, Book};
@@ -593,26 +594,29 @@ impl Session {
 
     /// What the user did.
     pub fn request(&self, request: schema::Request) -> Result<(), String> {
-        let event = match request {
-            schema::Request::Open { peer } => {
-                let peer = parse_peer(&peer)?;
+        let intent = match decode(request)? {
+            Decoded::Intent(intent) => intent,
+            Decoded::Platform(platform) => return self.platform(platform),
+        };
+        let event = match intent {
+            Intent::OpenChat { peer } => {
                 let mut inner = self.lock();
                 inner.apply(UiEvent::Open { peer });
                 inner.apply(UiEvent::Run(PaletteCommand::Fetch));
                 return Ok(());
             }
-            schema::Request::Send { peer, body } => UiEvent::Write {
-                peer: parse_peer(&peer)?,
-                body,
-            },
-            schema::Request::React {
-                peer,
-                target,
-                content,
+            Intent::Send {
+                to: Target::Peer(peer),
+                body: Some(body),
+            } => UiEvent::Write { peer, body },
+            Intent::React {
+                to: Target::Peer(peer),
+                target: Some(target),
+                content: Some(content),
             } => {
                 let event = UiEvent::React {
-                    peer: parse_peer(&peer)?,
-                    target: parse_id(&target)?,
+                    peer,
+                    target,
                     content: content.clone(),
                 };
                 let mut inner = self.lock();
@@ -620,68 +624,61 @@ impl Session {
                 inner.apply(event);
                 return Ok(());
             }
-            schema::Request::Reply { peer, target, body } => UiEvent::Reply {
-                peer: parse_peer(&peer)?,
-                target: parse_id(&target)?,
-                body,
-            },
-            schema::Request::Forward { peer, key, to } => UiEvent::Forward {
-                from: parse_peer(&peer)?,
-                key: schema::model_key(key),
-                to: parse_peer(&to)?,
-            },
-            schema::Request::Delete { peer, keys } => UiEvent::Delete {
-                peer: parse_peer(&peer)?,
-                keys: keys.into_iter().map(schema::model_key).collect(),
-            },
-            schema::Request::Used { emoji } => {
+            Intent::Reply {
+                to: Target::Peer(peer),
+                target,
+                body: Some(body),
+            } => UiEvent::Reply { peer, target, body },
+            Intent::Forward { from, key, to } => UiEvent::Forward { from, key, to },
+            Intent::Delete {
+                messages: Messages::Keys { peer, keys },
+                confirmed: true,
+            } => UiEvent::Delete { peer, keys },
+            Intent::Insert(emoji) => {
                 self.lock().used(&emoji);
                 return Ok(());
             }
-            schema::Request::Close => UiEvent::Close,
-            schema::Request::Pull => {
+            Intent::CloseChat => UiEvent::Close,
+            Intent::Pull => {
                 let mut inner = self.lock();
                 inner.asked_to_pull();
                 inner.apply(UiEvent::Run(PaletteCommand::Fetch));
                 return Ok(());
             }
-            schema::Request::Front { front } => {
+            Intent::Front(front) => {
                 self.lock().front = front;
                 return Ok(());
             }
-            schema::Request::Name { name } => return self.rename(&name),
-            schema::Request::AddContact { lxma, name } => {
-                return self.add_contact(&lxma, name.as_deref())
+            Intent::Name(name) => return self.rename(&name),
+            Intent::AddContact { lxma, name } => return self.add_contact(&lxma, name.as_deref()),
+            Intent::Rename {
+                peer: Target::Peer(peer),
+                name: Some(name),
+            } => UiEvent::Rename { peer, name },
+            Intent::Pin {
+                peer: Target::Peer(peer),
+                on,
+            } => {
+                return self.change_state(&peer, |state, _| state.pinned = on.apply(state.pinned));
             }
-            schema::Request::Link { peer, contact } => {
-                let peer = parse_peer(&peer)?;
-                return self.lock().link(peer, &contact);
+            Intent::Archive {
+                peer: Target::Peer(peer),
+                on,
+            } => {
+                return self
+                    .change_state(&peer, |state, _| state.archived = on.apply(state.archived));
             }
-            schema::Request::Unlink { peer } => {
-                let peer = parse_peer(&peer)?;
-                return self.lock().unlink(peer);
+            Intent::Block {
+                peer: Target::Peer(peer),
+                on,
+            } => {
+                return self
+                    .change_state(&peer, |state, _| state.blocked = on.apply(state.blocked));
             }
-            schema::Request::NotNow { peer } => {
-                let peer = parse_peer(&peer)?;
-                let mut inner = self.lock();
-                inner.book.not_now.insert(peer);
-                inner.dirty = true;
-                return links::save(&inner.home, &inner.book);
-            }
-            schema::Request::Rename { peer, name } => UiEvent::Rename {
-                peer: parse_peer(&peer)?,
-                name,
-            },
-            schema::Request::Pin { peer, on } => {
-                return self.change_state(&peer, |state, _| state.pinned = on);
-            }
-            schema::Request::Archive { peer, on } => {
-                return self.change_state(&peer, |state, _| state.archived = on);
-            }
-            schema::Request::Block { peer, on } => {
-                return self.change_state(&peer, |state, _| state.blocked = on);
-            }
-            schema::Request::Mute { peer, secs } => {
+            Intent::Mute {
+                peer: Target::Peer(peer),
+                secs,
+            } => {
                 return self.change_state(&peer, |state, now| {
                     state.muted_until = match secs {
                         0 => None,
@@ -690,30 +687,45 @@ impl Session {
                     };
                 });
             }
-            schema::Request::Verify { peer, on } => UiEvent::Verify {
-                peer: parse_peer(&peer)?,
-                verified: on,
-            },
-            schema::Request::Unread { peer, on } => UiEvent::MarkUnread {
-                peer: parse_peer(&peer)?,
-                unread: on,
-            },
-            schema::Request::Forget { peer, everywhere } => UiEvent::DeleteConversation {
-                peer: parse_peer(&peer)?,
-                everywhere,
-            },
-            schema::Request::Share {
+            Intent::Verify {
+                peer: Target::Peer(peer),
+                on,
+            } => UiEvent::Verify {
                 peer,
-                lat_e6,
-                lon_e6,
-                alt_e2,
-                accuracy_e2,
-                at,
-            } => UiEvent::SharePosition {
-                peer: parse_peer(&peer)?,
-                location: share_location(lat_e6, lon_e6, alt_e2, accuracy_e2, at)?,
+                verified: on.apply(self.lock().model.verified(&peer)),
             },
-            schema::Request::Relink { rows } => {
+            Intent::MarkUnread {
+                peer: Target::Peer(peer),
+                on,
+            } => UiEvent::MarkUnread {
+                peer,
+                unread: on.apply(false),
+            },
+            Intent::Forget {
+                peer: Target::Peer(peer),
+                everywhere,
+                confirmed: true,
+            } => UiEvent::DeleteConversation { peer, everywhere },
+            Intent::Share { peer, location } => UiEvent::SharePosition { peer, location },
+            other => return Err(format!("not a request of the facade: {other:?}")),
+        };
+        self.lock().apply(event);
+        Ok(())
+    }
+
+    /// A request that is the phone's own glue, not the user's intent: the
+    /// address book's links.
+    fn platform(&self, request: Platform) -> Result<(), String> {
+        match request {
+            Platform::Link { peer, contact } => self.lock().link(peer, &contact),
+            Platform::Unlink { peer } => self.lock().unlink(peer),
+            Platform::NotNow { peer } => {
+                let mut inner = self.lock();
+                inner.book.not_now.insert(peer);
+                inner.dirty = true;
+                links::save(&inner.home, &inner.book)
+            }
+            Platform::Relink { rows } => {
                 let mut inner = self.lock();
                 let linked = inner.relink(&rows)?;
                 if linked > 0 {
@@ -722,21 +734,19 @@ impl Session {
                         text: format!("linked {linked} from your contacts"),
                     });
                 }
-                return Ok(());
+                Ok(())
             }
-        };
-        self.lock().apply(event);
-        Ok(())
+        }
     }
 
     /// Change one field of the reader's word on `peer`, the others as the
     /// model holds them; `change` gets the time now in unix seconds.
     fn change_state(
         &self,
-        peer: &str,
+        peer: &[u8; 16],
         change: impl FnOnce(&mut loquax::home::wire::PeerState, i64),
     ) -> Result<(), String> {
-        let peer = parse_peer(peer)?;
+        let peer = *peer;
         let mut inner = self.lock();
         let mut state = inner.model.peer_state(&peer);
         change(&mut state, wall_now(inner.offset).unix_secs);
@@ -1387,7 +1397,7 @@ impl Inner {
 
     /// The list's rows for the conversations `order` names, in its order.
     fn listed(&self, order: Vec<usize>) -> schema::Conversations {
-        let rows = chat::rows(&self.model, order)
+        let rows = scene::rows(&self.model, order)
             .into_iter()
             .map(|row| self.schema_row(row))
             .collect();
@@ -1422,10 +1432,13 @@ impl Inner {
 
     /// One row of the list for `peer`, empty when it has no conversation.
     fn list_row(&self, peer: &[u8; 16]) -> schema::ConversationRow {
-        self.schema_row(chat::list_row(&self.model, peer))
+        self.schema_row(scene::row(&self.model, peer))
     }
 
-    fn schema_row(&self, row: chat::ListRow) -> schema::ConversationRow {
+    /// A scene's row in the facade's words (1217): Java sees what it saw
+    /// before the scene, byte for byte.
+    fn schema_row(&self, row: scene::Row) -> schema::ConversationRow {
+        let row = row.row;
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
             name: row.name,
@@ -1660,11 +1673,17 @@ pub fn pins_in(home: &Path, now: WallTime) -> Result<Vec<MapPin>, String> {
     Ok(model.map_pins())
 }
 
-/// The bubbles of conversation `c`, as the app draws them
-/// ([`chat::bubbles`]): a reaction is a chip on the bubble it names, not a
-/// bubble, and a report with a position is the position line alone.
+/// The bubbles of conversation `c`, as the app draws them: the scene's
+/// chat ([`scene::chat`], from [`chat::bubbles`]) with its groups laid
+/// flat. A reaction is a chip on the bubble it names, not a bubble, and a
+/// report with a position is the position line alone.
 pub fn rows<B>(model: &UiModel<B>, c: usize) -> Vec<schema::MessageRow> {
-    chat::bubbles(model, c).into_iter().map(row).collect()
+    scene::chat(model, c)
+        .groups
+        .into_iter()
+        .flat_map(|group| group.bubbles)
+        .map(|node| row(node.bubble))
+        .collect()
 }
 
 /// One bubble in the facade's words.
@@ -1793,6 +1812,139 @@ pub fn shared<B>(
 /// The fix the app hands in for a share (1201), as the wire carries it;
 /// a place off the globe is refused, so a broken reading never leaves the
 /// phone.
+/// A facade request decoded at the boundary (1217): the user's intent, or
+/// the phone's address book glue, which is no intent.
+pub enum Decoded {
+    Intent(Intent),
+    Platform(Platform),
+}
+
+/// The requests that are the phone's own glue.
+pub enum Platform {
+    Link {
+        peer: [u8; 16],
+        contact: schema::ContactCopy,
+    },
+    Unlink {
+        peer: [u8; 16],
+    },
+    NotNow {
+        peer: [u8; 16],
+    },
+    Relink {
+        rows: Vec<schema::ImRow>,
+    },
+}
+
+/// `request` as an intent, with its addresses and ids parsed: every
+/// facade verb is one ([`loquax::ui::intent`]'s table names each).
+pub fn decode(request: schema::Request) -> Result<Decoded, String> {
+    use schema::Request as R;
+    let intent = match request {
+        R::Open { peer } => Intent::OpenChat {
+            peer: parse_peer(&peer)?,
+        },
+        R::Close => Intent::CloseChat,
+        R::Send { peer, body } => Intent::Send {
+            to: Target::Peer(parse_peer(&peer)?),
+            body: Some(body),
+        },
+        R::React {
+            peer,
+            target,
+            content,
+        } => Intent::React {
+            to: Target::Peer(parse_peer(&peer)?),
+            target: Some(parse_id(&target)?),
+            content: Some(content),
+        },
+        R::Reply { peer, target, body } => Intent::Reply {
+            to: Target::Peer(parse_peer(&peer)?),
+            target: parse_id(&target)?,
+            body: Some(body),
+        },
+        R::Forward { peer, key, to } => Intent::Forward {
+            from: parse_peer(&peer)?,
+            key: schema::model_key(key),
+            to: parse_peer(&to)?,
+        },
+        R::Delete { peer, keys } => Intent::Delete {
+            messages: Messages::Keys {
+                peer: parse_peer(&peer)?,
+                keys: keys.into_iter().map(schema::model_key).collect(),
+            },
+            confirmed: true,
+        },
+        R::Used { emoji } => Intent::Insert(emoji),
+        R::Pull => Intent::Pull,
+        R::Front { front } => Intent::Front(front),
+        R::Name { name } => Intent::Name(name),
+        R::Link { peer, contact } => {
+            return Ok(Decoded::Platform(Platform::Link {
+                peer: parse_peer(&peer)?,
+                contact,
+            }))
+        }
+        R::Unlink { peer } => {
+            return Ok(Decoded::Platform(Platform::Unlink {
+                peer: parse_peer(&peer)?,
+            }))
+        }
+        R::NotNow { peer } => {
+            return Ok(Decoded::Platform(Platform::NotNow {
+                peer: parse_peer(&peer)?,
+            }))
+        }
+        R::Relink { rows } => return Ok(Decoded::Platform(Platform::Relink { rows })),
+        R::Rename { peer, name } => Intent::Rename {
+            peer: Target::Peer(parse_peer(&peer)?),
+            name: Some(name),
+        },
+        R::Pin { peer, on } => Intent::Pin {
+            peer: Target::Peer(parse_peer(&peer)?),
+            on: Switch::of(on),
+        },
+        R::Mute { peer, secs } => Intent::Mute {
+            peer: Target::Peer(parse_peer(&peer)?),
+            secs,
+        },
+        R::Archive { peer, on } => Intent::Archive {
+            peer: Target::Peer(parse_peer(&peer)?),
+            on: Switch::of(on),
+        },
+        R::Block { peer, on } => Intent::Block {
+            peer: Target::Peer(parse_peer(&peer)?),
+            on: Switch::of(on),
+        },
+        R::Verify { peer, on } => Intent::Verify {
+            peer: Target::Peer(parse_peer(&peer)?),
+            on: Switch::of(on),
+        },
+        R::Unread { peer, on } => Intent::MarkUnread {
+            peer: Target::Peer(parse_peer(&peer)?),
+            on: Switch::of(on),
+        },
+        R::Forget { peer, everywhere } => Intent::Forget {
+            peer: Target::Peer(parse_peer(&peer)?),
+            everywhere,
+            confirmed: true,
+        },
+        R::Share {
+            peer,
+            lat_e6,
+            lon_e6,
+            alt_e2,
+            accuracy_e2,
+            at,
+        } => Intent::Share {
+            peer: parse_peer(&peer)?,
+            location: share_location(lat_e6, lon_e6, alt_e2, accuracy_e2, at)?,
+        },
+        R::AddContact { lxma, name } => Intent::AddContact { lxma, name },
+    };
+    Ok(Decoded::Intent(intent))
+}
+
 pub fn share_location(
     lat_e6: i32,
     lon_e6: i32,

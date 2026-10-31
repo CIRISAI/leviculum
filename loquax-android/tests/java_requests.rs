@@ -518,6 +518,50 @@ fn every_request_java_builds_decodes_as_java_means_it() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// Every request Java builds decodes into an intent at the boundary
+/// (1217), its addresses and ids parsed, but the address book's four,
+/// which are the phone's own glue; the intent carries what Java said.
+#[test]
+fn every_request_java_builds_is_an_intent_or_the_phones_glue() {
+    use loquax::ui::intent::{Intent, Switch, Target};
+    use loquax_android::session::{decode, Decoded};
+    let glue = ["link", "unlink", "notNow", "relink"];
+    let mut wrong = Vec::new();
+    for (name, bytes, _) in commands() {
+        let request = schema::decode::<Request>(&bytes).expect("decodes");
+        match (decode(request), glue.contains(&name)) {
+            (Ok(Decoded::Intent(_)), false) | (Ok(Decoded::Platform(_)), true) => {}
+            (Ok(Decoded::Intent(intent)), true) => wrong.push(format!("{name}: {intent:?}")),
+            (Ok(Decoded::Platform(_)), false) => wrong.push(format!("{name}: platform")),
+            // The table's react and reply name the message `ab`, which no id
+            // is: refused at the boundary, as the session refused it before.
+            (Err(error), false)
+                if ["react", "reply"].contains(&name) && error.contains("is not a message id") => {}
+            (Err(error), _) => wrong.push(format!("{name}: {error}")),
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    let peer = [0x3f; 16];
+    let pin = Request::Pin {
+        peer: loquax::address::to_hex(&peer),
+        on: false,
+    };
+    match decode(pin) {
+        Ok(Decoded::Intent(intent)) => assert_eq!(
+            intent,
+            Intent::Pin {
+                peer: Target::Peer(peer),
+                on: Switch::Off
+            }
+        ),
+        _ => panic!("pin is an intent"),
+    }
+    let bad = Request::Open {
+        peer: "not hex".to_string(),
+    };
+    assert!(decode(bad).is_err());
+}
+
 /// `Core.start` (later start, and the first with server, code and name)
 /// and `Core.startHere` (with and without a restore), as Java sends them.
 #[test]
