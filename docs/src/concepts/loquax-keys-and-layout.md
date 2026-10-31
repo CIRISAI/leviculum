@@ -912,7 +912,7 @@ first rung it is.
 `auto` there until 1042. Built as proposed:
 
 - a key `theme = auto|dark|light` in `loquax`'s config file
-  (`loquax/src/config.rs:214`, which holds `key = value` lines), `auto` the
+  (`loquax/src/config.rs:219`, which holds `key = value` lines), `auto` the
   default;
 - `--theme auto|dark|light` on the command line over the key, as `lnomad`
   has it (`lnomad/src/main.rs:57`);

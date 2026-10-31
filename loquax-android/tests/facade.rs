@@ -2749,7 +2749,8 @@ fn java_query<T: serde::de::DeserializeOwned>(
 /// the region with its size and date, the automatic download on (1089),
 /// the switch off stored and kept across a session's restart, and a new
 /// renderer reads it from the config; Delete removes the file; the map's
-/// theme is asked and set.
+/// theme is asked and set; the Advanced page's map fling (1188) is on
+/// until switched off, and the next frame says so.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_settings_pages_ask_the_renderer_in_javas_bytes() {
     let instance = instance();
@@ -2820,6 +2821,45 @@ async fn the_settings_pages_ask_the_renderer_in_javas_bytes() {
             &[("t", Java::Str("maptheme")), ("set", Java::Str("sepia"))],
         );
         assert!(refused.is_err(), "{refused:?}");
+
+        let fling: schema::MapFlingChoice =
+            java_query(&session, &[("t", Java::Str("mapfling"))]).expect("Advanced");
+        assert!(fling.ok && fling.fling, "on by default: {fling:?}");
+        let off: schema::MapFlingChoice = java_query(
+            &session,
+            &[("t", Java::Str("mapfling")), ("set", Java::Bool(false))],
+        )
+        .expect("the fling off");
+        assert!(off.ok && !off.fling, "{off:?}");
+        assert_eq!(
+            loquax::config::load(Path::new(&first.dir))
+                .expect("config")
+                .map_fling,
+            Some(false)
+        );
+        let ask = schema::MapRequest {
+            dir: first.dir.clone(),
+            w: 480,
+            h: 320,
+            density_milli: 1000,
+            ..schema::MapRequest::default()
+        };
+        let (shown, _) = schema::unframe(&loquax_android::map::render(
+            &ask,
+            Some(Vec::new()),
+            loquax::when::WallTime {
+                unix_secs: 1_790_000_000,
+                offset_secs: 0,
+            },
+        ))
+        .expect("a frame");
+        assert!(shown.ok && !shown.fling, "the frame says it: {shown:?}");
+        let on: schema::MapFlingChoice = java_query(
+            &session,
+            &[("t", Java::Str("mapfling")), ("set", Java::Bool(true))],
+        )
+        .expect("the fling on");
+        assert!(on.ok && on.fling, "{on:?}");
         session.stop();
     })
     .await

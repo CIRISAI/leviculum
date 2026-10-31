@@ -12,10 +12,10 @@
 
 use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Blob, CandidateRow, Chip, ContactCopy, ConversationRow,
-    Conversations, Detail, Done, Event, FriendRow, Friends, ImRow, Info, LinkRow, Links, MapMark,
-    MapRegions, MapRequest, MapShown, MapThemeChoice, Me, MessageRow, Messages, PositionRow, Query,
-    Recents, RegionRow, Request, Run, RunRow, Shared, SharedRow, Start, Started, SuggestionRow,
-    Suggestions,
+    Conversations, Detail, Done, Event, FriendRow, Friends, ImRow, Info, LinkRow, Links,
+    MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, Me, MessageRow,
+    Messages, PositionRow, Query, Recents, RegionRow, Request, Run, RunRow, Shared, SharedRow,
+    Start, Started, SuggestionRow, Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -242,6 +242,7 @@ fn query() -> impl Strategy<Value = Query> {
             }
         }),
         opt_text().prop_map(|set| Query::MapTheme { set }),
+        prop::option::of(any::<bool>()).prop_map(|set| Query::MapFling { set }),
     ]
 }
 
@@ -646,8 +647,8 @@ fn map_shown_1200() -> BoxedStrategy<MapShown> {
         .boxed()
 }
 
-/// The frame's fields of 1201 over [`map_shown_1200`]'s, boxed apart as
-/// for the request.
+/// The frame's fields of 1201 and 1188 over [`map_shown_1200`]'s, boxed
+/// apart as for the request.
 fn map_shown() -> impl Strategy<Value = MapShown> {
     (
         map_shown_1200(),
@@ -657,13 +658,19 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
             any::<bool>(),
         )
             .boxed(),
+        (any::<bool>(), u32s(), u32s()).boxed(),
     )
-        .prop_map(|(shown, (own_x, own_y, autoload))| MapShown {
-            own_x,
-            own_y,
-            autoload,
-            ..shown
-        })
+        .prop_map(
+            |(shown, (own_x, own_y, autoload), (fling, room_north, room_south))| MapShown {
+                own_x,
+                own_y,
+                autoload,
+                fling,
+                room_north,
+                room_south,
+                ..shown
+            },
+        )
 }
 
 fn regions() -> impl Strategy<Value = Vec<RegionRow>> {
@@ -918,6 +925,7 @@ proptest! {
     ) {
         round_trips(&MapRegions { v, ok, regions, region_bytes, autoload })?;
         round_trips(&MapThemeChoice { v, ok, theme, theme_chosen })?;
+        round_trips(&MapFlingChoice { v, ok, fling: autoload })?;
     }
 
     #[test]

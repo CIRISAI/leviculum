@@ -1768,3 +1768,152 @@ fn names_fade_out_and_in_by_the_clock() {
     ));
     assert!(settled == want, "the frame at rest after the fades");
 }
+
+/// A coast toward the pole (1188), as Java asks it: a moving frame at
+/// each step of the fling, the steps shrinking. Each frame moves the view
+/// by its step until the world's edge, says how far it may still go
+/// (`room_north`), and holds the view there once that is spent; a frame
+/// at rest at the end stays at the edge. North and south room together
+/// are the world's height less the screen's at every frame.
+#[test]
+fn a_coast_moves_less_each_frame_and_stops_at_the_worlds_edge() {
+    let home = tempfile::tempdir().expect("home");
+    std::fs::write(
+        home.path().join(loquax::config::CONFIG_FILE),
+        "map_autoload = off\n",
+    )
+    .expect("config");
+    let at = project(LatLon::from_degrees(60.0, 11.0));
+    let mut ask = MapRequest {
+        dir: home.path().display().to_string(),
+        w: W,
+        h: H,
+        density_milli: 1000,
+        x: Some(at.x),
+        y: Some(at.y),
+        zoom: Some(4),
+        ..MapRequest::default()
+    };
+    let (rest, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    assert!(rest.fling, "map_fling is on when the config does not say");
+    let world = 256u32 << 4;
+    let span = |s: &MapShown| s.room_north + s.room_south;
+    assert!(span(&rest).abs_diff(world - H) <= 1, "{rest:?}");
+    assert!(rest.room_north > 500, "{}", rest.room_north);
+    let unit = f64::from(1u32 << (24 - 4));
+    let mut room = rest.room_north;
+    let mut y = rest.y;
+    let mut moved = Vec::new();
+    let mut steps = 0;
+    for i in 0..40 {
+        let step = (400.0 * 0.85f64.powi(i)).round() as i32;
+        ask.x = Some(rest.x);
+        ask.y = Some(y);
+        ask.zoom = None;
+        ask.zoom_milli = Some(rest.zoom_milli);
+        ask.pan_y = -step;
+        ask.moving = true;
+        let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+        let went = ((f64::from(y) - f64::from(shown.y)) / unit).round() as u32;
+        assert_eq!(
+            went,
+            room.min(step as u32),
+            "frame {i}: a step of {step} with {room} to the edge"
+        );
+        assert_eq!(shown.room_north, room - went, "frame {i}");
+        assert!(
+            span(&shown).abs_diff(world - H) <= 1,
+            "frame {i}: {shown:?}"
+        );
+        moved.push(went);
+        room = shown.room_north;
+        y = shown.y;
+        steps += step as u32;
+    }
+    assert!(steps > rest.room_north, "the coast reaches the edge");
+    assert!(
+        moved.windows(2).all(|w| w[1] <= w[0]),
+        "each frame moves less: {moved:?}"
+    );
+    assert_eq!(room, 0, "stopped at the edge");
+    assert_eq!(*moved.last().unwrap_or(&1), 0, "held there: {moved:?}");
+    ask.y = Some(y);
+    ask.pan_y = 0;
+    ask.moving = false;
+    let (end, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    assert_eq!((end.y, end.room_north), (y, 0), "at rest at the edge");
+}
+
+/// A coast ends with a frame at rest (1188): the moving frames of the
+/// coast keep the names of the frame before it, moved, and the frame at
+/// rest after the last step sets the names of its view, the ones a fresh
+/// renderer sets there.
+#[test]
+fn a_coast_ends_with_a_frame_at_rest_that_sets_its_names() {
+    let first_home = home();
+    let dir = first_home.path().to_path_buf();
+    let rest = MapRequest {
+        w: 1280,
+        h: 960,
+        zoom: None,
+        zoom_milli: Some(15_000),
+        ..request(first_home.path(), false)
+    };
+    let draw = |ask: &MapRequest, at_ms: u64| {
+        loquax_android::map::tune_clock(&dir, Some(at_ms));
+        let (shown, _) = frame(&loquax_android::map::render(ask, Some(Vec::new()), now()));
+        let mut names: Vec<String> = loquax_android::map::drawn_names(&dir)
+            .expect("a renderer")
+            .into_iter()
+            .filter(|n| n.shown)
+            .map(|n| n.text)
+            .collect();
+        names.sort();
+        (shown, names)
+    };
+    let (start, before) = draw(&rest, 1000);
+    let mut ask = rest.clone();
+    let (mut x, mut y) = (start.x, start.y);
+    let mut at_ms = 1000;
+    for i in 0..30 {
+        let step = (90.0 * 0.85f64.powi(i)).round() as i32;
+        at_ms += 16;
+        ask.x = Some(x);
+        ask.y = Some(y);
+        ask.pan_x = step;
+        ask.pan_y = step / 2;
+        ask.moving = true;
+        let (shown, names) = draw(&ask, at_ms);
+        assert_eq!(names, before, "frame {i} of the coast keeps the names");
+        (x, y) = (shown.x, shown.y);
+    }
+    assert!(x > start.x, "the coast moved the view");
+    ask.x = Some(x);
+    ask.y = Some(y);
+    ask.pan_x = 0;
+    ask.pan_y = 0;
+    ask.moving = false;
+    let _ = draw(&ask, at_ms + 16);
+    let (end, after) = draw(&ask, at_ms + 400);
+    assert!(!end.pending, "the fades are done");
+    let fresh = home();
+    let fresh_ask = MapRequest {
+        dir: fresh.path().display().to_string(),
+        ..ask.clone()
+    };
+    loquax_android::map::tune_clock(fresh.path(), Some(0));
+    let _ = frame(&loquax_android::map::render(
+        &fresh_ask,
+        Some(Vec::new()),
+        now(),
+    ));
+    let mut placed: Vec<String> = loquax_android::map::drawn_names(fresh.path())
+        .expect("a renderer")
+        .into_iter()
+        .filter(|n| n.shown)
+        .map(|n| n.text)
+        .collect();
+    placed.sort();
+    assert_ne!(after, before, "the view at rest names other places");
+    assert_eq!(after, placed, "the frame at rest sets its view's names");
+}

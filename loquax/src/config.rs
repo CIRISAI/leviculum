@@ -16,7 +16,9 @@
 //! (500 by default). `map_theme`, `light` (the default), `dark` or `auto`
 //! (1099): the map's colour table, `auto` following the theme the screen
 //! is drawn in where the frontend has one (the terminal) and light where
-//! it has none (the window). And one key a terminal context for the map's
+//! it has none (the window). `map_fling`, `on` (the default) or `off`
+//! (1188): whether the phone's map coasts on after a finger that panned
+//! lifts. And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
 //! drawing the map the reader stayed on in that context, a `--graphics`
@@ -133,6 +135,8 @@ pub struct Config {
     pub outbox_days: Option<u64>,
     /// `map_theme`, when the file sets it; unset is light.
     pub map_theme: Option<ThemeFlag>,
+    /// `map_fling`, when the file sets it; unset is on.
+    pub map_fling: Option<bool>,
     /// `map_drawing.<context>` lines: each context and the drawing
     /// remembered for it, in file order, a later line for a context
     /// replacing an earlier one.
@@ -195,6 +199,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         for (name, slot) in [
             ("send_on_enter", &mut config.send_on_enter),
             ("home_wake", &mut config.home_wake),
+            ("map_fling", &mut config.map_fling),
         ] {
             if key.trim() == name {
                 *slot = Some(match value.trim().trim_matches('"') {
@@ -520,6 +525,12 @@ mod tests {
             Some(false)
         );
         assert!(parse_str("home_wake = sometimes\n").is_err());
+        assert_eq!(home.map_fling, None);
+        assert_eq!(
+            parse_str("map_fling = off\n").expect("off").map_fling,
+            Some(false)
+        );
+        assert!(parse_str("map_fling = sometimes\n").is_err());
         assert_eq!(home.outbox_retry_secs, Some(30));
         assert_eq!(home.outbox_days, Some(1));
         for (text, key) in [

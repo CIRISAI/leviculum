@@ -12,7 +12,7 @@
 //! |---|---|
 //! | `start` | [`Start`] |
 //! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`], [`Shared`], [`Profile`], [`Lxma`], [`MapRegions`] or [`MapThemeChoice`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`], [`Shared`], [`Profile`], [`Lxma`], [`MapRegions`], [`MapThemeChoice`] or [`MapFlingChoice`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
@@ -89,7 +89,11 @@
 //! `density_milli`, which that struct needs, so the request never decoded
 //! and both pages showed their empty defaults; those fields are gone. No
 //! new version: an app that sent them got nothing but the error, and the
-//! frame's own fields are unchanged.
+//! frame's own fields are unchanged. The Advanced page's switch of the
+//! map's fling (1188) is [`Query::MapFling`] with its [`MapFlingChoice`];
+//! the frame says the choice as `fling`, and how far its view may still
+//! move north and south before the world's edge as `room_north` and
+//! `room_south`, which a coast stops at. An older app reads none of them.
 
 use serde::{Deserialize, Serialize};
 
@@ -398,6 +402,12 @@ pub enum Query {
         #[serde(default)]
         set: Option<String>,
     },
+    /// The Advanced page's map fling (1188): `set` stored when given, the
+    /// choice in force answered.
+    MapFling {
+        #[serde(default)]
+        set: Option<bool>,
+    },
 }
 
 /// What [`Query::MapRegions`] answers: the regions, newest first, their
@@ -420,6 +430,15 @@ pub struct MapThemeChoice {
     pub ok: bool,
     pub theme: String,
     pub theme_chosen: bool,
+}
+
+/// What [`Query::MapFling`] answers: whether the map coasts on after a
+/// pan (on unless the config's `map_fling` says off, 1188).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapFlingChoice {
+    pub v: u32,
+    pub ok: bool,
+    pub fling: bool,
 }
 
 /// What [`Query::Shared`] answers: the positions we sent, newest first, at
@@ -1273,6 +1292,17 @@ pub struct MapShown {
     /// Whether the automatic download is on.
     #[serde(default)]
     pub autoload: bool,
+    /// Whether a pan coasts on after the finger lifts (1188): the config's
+    /// `map_fling`, on when unset.
+    #[serde(default)]
+    pub fling: bool,
+    /// How many view pixels the view's centre may still move north, and
+    /// south, before the view is held at the world's edge (1131, 1188):
+    /// what a coast may travel. x has no edge, the world goes round.
+    #[serde(default)]
+    pub room_north: u32,
+    #[serde(default)]
+    pub room_south: u32,
 }
 
 /// A map frame as the host's tests and tools read it: the description's

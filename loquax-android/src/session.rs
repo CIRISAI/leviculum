@@ -770,6 +770,10 @@ impl Session {
                 return crate::map::theme(&home, set.as_deref())
                     .map(|theme| schema::encode(&theme));
             }
+            schema::Query::MapFling { set } => {
+                let home = self.lock().home.clone();
+                return crate::map::fling(&home, set).map(|fling| schema::encode(&fling));
+            }
             _ => {}
         }
         let inner = self.lock();
@@ -842,7 +846,8 @@ impl Session {
             | schema::Query::Profile
             | schema::Query::Backup { .. }
             | schema::Query::MapRegions { .. }
-            | schema::Query::MapTheme { .. } => return Err("answered above".to_string()),
+            | schema::Query::MapTheme { .. }
+            | schema::Query::MapFling { .. } => return Err("answered above".to_string()),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner

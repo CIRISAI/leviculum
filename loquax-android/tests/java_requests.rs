@@ -475,6 +475,12 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
                 set: Some(s("dark")),
             },
         ),
+        ("mapFling", t("mapfling"), Query::MapFling { set: None }),
+        (
+            "mapFling (set)",
+            java_map(&[("t", Java::Str("mapfling")), ("set", Java::Bool(false))]),
+            Query::MapFling { set: Some(false) },
+        ),
         ("links", t("links"), Query::Links),
         (
             "detail",
