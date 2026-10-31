@@ -602,7 +602,12 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// decrypt failed and stays unsent, as the reference proves only what
     /// `Destination.receive` accepted (`RNS/Transport.py:2159-2160`).
     /// Cleared by the next `ProofRequested`, whichever packet it names.
-    undecrypted_packet: Option<[u8; 32]>,
+    ///
+    /// Boxed, as `split_internal` is: unboxed, its 33 bytes grew the node
+    /// box past the board's pinned budget and cost an endpoint link
+    /// (`NODE_BOX_BYTES` in `leviculum-nrf/heap-budget`); the box lives
+    /// only between a failed decrypt and the proof request behind it.
+    undecrypted_packet: Option<Box<[u8; 32]>>,
     /// Full destination names whose per-identity hash a peer-up report pulls
     /// a path for (Codeberg #365); see
     /// [`handle_interface_peer_up`](Self::handle_interface_peer_up).
@@ -2630,7 +2635,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         len: usize,
         interface_index: usize,
     ) {
-        self.undecrypted_packet = raw_hash;
+        self.undecrypted_packet = raw_hash.map(Box::new);
         self.events.push(NodeEvent::PacketUndecryptable {
             destination,
             len,
@@ -4652,7 +4657,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 peer,
             } => {
                 let dest_hash = DestinationHash::new(destination_hash);
-                if self.undecrypted_packet.take() == Some(packet_hash) {
+                if self.undecrypted_packet.take().as_deref() == Some(&packet_hash) {
                     crate::tracing::debug!(
                         dest = %HexShort(&destination_hash),
                         "No proof for a packet that did not decrypt"
