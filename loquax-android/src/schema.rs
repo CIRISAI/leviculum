@@ -61,6 +61,9 @@
 //! others out, [`ConversationRow::updates`] counts it in the list, and
 //! [`Query::Run`] expands it. An app without them shows the newest report
 //! alone, which is what it draws as it is; nothing is merged on disk.
+//! The list's `home_link` (1199), the map's `set_theme` and `ask_theme`
+//! and its answer's `theme` came within version 1 too: an older app reads neither and
+//! sends none.
 
 use serde::{Deserialize, Serialize};
 
@@ -616,6 +619,10 @@ pub struct Conversations {
     /// Whether a delete may reach every device of the home.
     #[serde(default)]
     pub home_client: bool,
+    /// Whether the watching link to the mailbox is up (1123): the status
+    /// dot on the bar's avatar, green or grey (1199).
+    #[serde(default)]
+    pub home_link: bool,
 }
 
 /// A reaction under a message: its content, how many sent it, and whether
@@ -849,6 +856,15 @@ pub struct MapRequest {
     /// auto`.
     #[serde(default)]
     pub follow_phone: bool,
+    /// Store the map's table as the settings page chose it (1199): `auto`
+    /// follows the phone, `light` and `dark` overrule it; the config's
+    /// `map_theme` as with `toggle_theme`. The answer draws nothing.
+    #[serde(default)]
+    pub set_theme: Option<String>,
+    /// Only say the choice in force, in the answer's `theme`: the
+    /// settings page opening. Draws nothing.
+    #[serde(default)]
+    pub ask_theme: bool,
     /// Draw a batch of the tiles around the last frame at rest instead of
     /// a frame (1135): the answer has no pixels. Java asks while the view
     /// is idle, the app in front and the battery saver off.
@@ -911,6 +927,10 @@ pub struct MapShown {
     pub dark: bool,
     #[serde(default)]
     pub theme_chosen: bool,
+    /// The config's `map_theme` as the settings page shows it: `auto`,
+    /// `light` or `dark`; `auto` when unset.
+    #[serde(default)]
+    pub theme: String,
     /// Tiles around the view are still to prefetch (1135): a frame at
     /// rest that owes none says so, a prefetch answer until its plan is
     /// done.

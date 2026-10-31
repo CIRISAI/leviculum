@@ -1739,6 +1739,27 @@ fn facade_shows_ugly(secs: u64) {
     }
 }
 
+/// Wait until the list's `home_link` (1199), the status dot, says `up`:
+/// the watching link came up or went down.
+fn facade_home_link(up: bool, secs: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let list: schema::Conversations = rmp_serde::from_slice(&loquax_android::query(
+            &schema::encode(&schema::Query::Conversations),
+        ))
+        .expect("Conversations");
+        if list.home_link == up {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the list's home_link never said {up} in {secs} s"
+        );
+        // The pump reads the watching link's word: let events flow.
+        let _ = loquax_android::next_event(Duration::from_millis(200));
+    }
+}
+
 fn link_event(up: bool, secs: u64) {
     facade_event(
         secs,
@@ -1789,7 +1810,8 @@ fn send_through_facade(peer: &str, body: &str, secs: u64) {
 /// and no server. The link event says when the TCP interface is up; the
 /// home node killed, it says down, and the leaf's TCP client redials the
 /// home node brought back on the same port, so a send goes through again
-/// in the same session. The engine dead, the library says `stopped` with
+/// in the same session. The list's `home_link`, the status dot (1199),
+/// follows the watching link up, down and up again. The engine dead, the library says `stopped` with
 /// why and drops the session; the service's next start, with neither code
 /// nor server, builds a fresh one, and a send goes through that.
 #[tokio::test(flavor = "multi_thread")]
@@ -1820,6 +1842,7 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
         assert!(answer.ok, "{answer:?}");
         assert_eq!(answer.server.as_deref(), Some(expected.as_str()));
         link_event(true, 30);
+        facade_home_link(true, 30);
         facade_shows_ugly(60);
         send_through_facade(&to, "vor dem Ausfall", 60);
     })
@@ -1827,9 +1850,12 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
     .expect("the first session");
 
     node.kill().await;
-    tokio::task::spawn_blocking(|| link_event(false, 30))
-        .await
-        .expect("the link goes down");
+    tokio::task::spawn_blocking(|| {
+        link_event(false, 30);
+        facade_home_link(false, 30);
+    })
+    .await
+    .expect("the link goes down");
 
     let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("the same port again");
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
@@ -1837,6 +1863,7 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
     tokio::task::spawn_blocking(move || {
         // The TCP client redials every 5 s, doubling after the third try.
         link_event(true, 90);
+        facade_home_link(true, 60);
         send_through_facade(&to, "nach dem Ausfall", 60);
     })
     .await

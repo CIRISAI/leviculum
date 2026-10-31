@@ -301,6 +301,75 @@ fn a_stored_map_theme_wins_over_the_phone() {
     assert!(same_share(&rgba, &picture(home.path(), MapTheme::Light)) >= 90);
 }
 
+/// The settings page's map theme (1199): asking draws nothing and says
+/// `auto` while unset; each choice stored is the config's `map_theme`,
+/// the other keys kept, and the next frame draws in it whatever the
+/// phone says; `auto` hands the choice back to the phone; a word the
+/// config does not know is refused and stores nothing.
+#[test]
+fn the_settings_page_sets_the_map_theme() {
+    let home = home();
+    let theme = |ask: bool, set: Option<&str>| {
+        let (shown, rgba) = schema::unframe(&loquax_android::map::render(
+            &MapRequest {
+                dir: home.path().display().to_string(),
+                ask_theme: ask,
+                set_theme: set.map(str::to_string),
+                ..MapRequest::default()
+            },
+            Some(Vec::new()),
+            now(),
+        ))
+        .map(|(shown, rgba)| (shown, rgba.len()))
+        .expect("an answer");
+        assert_eq!(rgba, 0, "no frame drawn");
+        shown
+    };
+    let shown = theme(true, None);
+    assert!(
+        shown.ok && shown.theme == "auto" && !shown.theme_chosen,
+        "{shown:?}"
+    );
+    let draw = |phone_dark: bool| {
+        frame(&loquax_android::map::render(
+            &request(home.path(), phone_dark),
+            Some(Vec::new()),
+            now(),
+        ))
+        .0
+    };
+    for (word, flag, dark) in [
+        ("dark", ThemeFlag::Dark, true),
+        ("light", ThemeFlag::Light, false),
+    ] {
+        let shown = theme(false, Some(word));
+        assert!(
+            shown.ok && shown.theme == word && shown.theme_chosen,
+            "{shown:?}"
+        );
+        let config = loquax::config::load(home.path()).expect("the config");
+        assert_eq!(config.map_theme, Some(flag));
+        assert_eq!(config.map_autoload, Some(false), "the other keys kept");
+        for phone_dark in [true, false] {
+            let shown = draw(phone_dark);
+            assert_eq!(shown.dark, dark, "{word}, phone dark {phone_dark}");
+            assert_eq!(shown.theme, word);
+        }
+        assert_eq!(theme(true, None).theme, word);
+    }
+    let shown = theme(false, Some("auto"));
+    assert!(shown.ok && !shown.theme_chosen, "{shown:?}");
+    assert!(draw(true).dark && !draw(false).dark, "the phone decides");
+    let shown = theme(false, Some("sepia"));
+    assert!(!shown.ok, "{shown:?}");
+    assert_eq!(
+        loquax::config::load(home.path())
+            .expect("the config")
+            .map_theme,
+        Some(ThemeFlag::Auto)
+    );
+}
+
 /// A tap on a pin's marker selects it and names it; the selected pin is
 /// drawn red. A pan moves the centre by the pixels at the zoom.
 #[test]

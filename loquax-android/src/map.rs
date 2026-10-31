@@ -194,14 +194,41 @@ impl Renderer {
         } else {
             return;
         };
-        let word = match next {
-            ThemeFlag::Auto => "auto",
-            ThemeFlag::Light => "light",
-            ThemeFlag::Dark => "dark",
-        };
-        match loquax::config::save(&self.dir, "map_theme", word) {
-            Ok(()) => self.theme = Some(next),
-            Err(error) => *notice = Some(format!("map: the choice was not stored: {error}")),
+        if let Err(error) = self.store_theme(next) {
+            *notice = Some(error);
+        }
+    }
+
+    /// Store `next` as the config's `map_theme` and draw in it from the
+    /// next frame; a write that failed keeps the old choice and says why.
+    fn store_theme(&mut self, next: ThemeFlag) -> Result<(), String> {
+        loquax::config::save(&self.dir, "map_theme", theme_word(Some(next)))
+            .map_err(|error| format!("map: the choice was not stored: {error}"))?;
+        self.theme = Some(next);
+        Ok(())
+    }
+
+    /// The settings page's map theme (1199): `set`, a word of the
+    /// config's `map_theme`, stored when given; the choice in force back
+    /// in the answer's `theme`, no frame drawn.
+    pub fn theme(&mut self, set: Option<&str>) -> MapShown {
+        if let Some(word) = set {
+            let next = match word {
+                "auto" => ThemeFlag::Auto,
+                "light" => ThemeFlag::Light,
+                "dark" => ThemeFlag::Dark,
+                other => return failed(format!("map: no theme {other:?}")),
+            };
+            if let Err(error) = self.store_theme(next) {
+                return failed(error);
+            }
+        }
+        MapShown {
+            v: VERSION,
+            ok: true,
+            theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
+            theme: theme_word(self.theme).to_string(),
+            ..MapShown::default()
         }
     }
 
@@ -403,6 +430,7 @@ impl Renderer {
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             dark: table == MapTheme::Dark,
             theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
+            theme: theme_word(self.theme).to_string(),
             prefetching: self.frames.at_rest(),
             prefetched: 0,
         };
@@ -493,6 +521,12 @@ static RENDERERS: Mutex<Vec<Renderer>> = Mutex::new(Vec::new());
 /// in the request's directory. The host's path, the tests' and the
 /// measuring tools': the app composes into its Bitmap ([`render_into`]).
 pub fn render(request: &MapRequest, pins: Option<Vec<MapPin>>, now: WallTime) -> Vec<u8> {
+    if request.ask_theme || request.set_theme.is_some() {
+        let shown = with_dir(request, |renderer| {
+            renderer.theme(request.set_theme.as_deref())
+        });
+        return crate::schema::frame(&shown, &[]);
+    }
     with_renderer(request, pins, now, |renderer, pins| {
         if request.prefetch {
             return crate::schema::frame(&renderer.prefetch(), &[]);
@@ -514,6 +548,11 @@ pub fn render_into(
     now: WallTime,
     canvas: &mut dyn Canvas,
 ) -> MapShown {
+    if request.ask_theme || request.set_theme.is_some() {
+        return with_dir(request, |renderer| {
+            renderer.theme(request.set_theme.as_deref())
+        });
+    }
     with_renderer(request, pins, now, |renderer, pins| {
         match request.prefetch {
             true => renderer.prefetch(),
@@ -542,17 +581,23 @@ fn with_renderer<T>(
             Vec::new()
         }
     };
+    with_dir(request, |renderer| f(renderer, &pins))
+}
+
+/// `f` with the renderer of the request's directory, made on first use.
+fn with_dir<T>(request: &MapRequest, f: impl FnOnce(&mut Renderer) -> T) -> T {
+    let dir = Path::new(&request.dir);
     let mut renderers = RENDERERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let at = match renderers.iter().position(|r| r.dir == dir) {
         Some(at) => at,
         None => {
-            renderers.push(Renderer::new(&dir));
+            renderers.push(Renderer::new(dir));
             renderers.len() - 1
         }
     };
-    f(&mut renderers[at], &pins)
+    f(&mut renderers[at])
 }
 
 /// What the tile cache of the renderer over `dir` did, when one runs:
@@ -622,6 +667,15 @@ pub fn tune_clock(dir: &Path, now_ms: Option<u64>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(r) = renderers.iter_mut().find(|r| r.dir == dir) {
         r.held_ms = now_ms;
+    }
+}
+
+/// The config's word for a map theme; unset follows the phone.
+fn theme_word(flag: Option<ThemeFlag>) -> &'static str {
+    match flag {
+        None | Some(ThemeFlag::Auto) => "auto",
+        Some(ThemeFlag::Light) => "light",
+        Some(ThemeFlag::Dark) => "dark",
     }
 }
 

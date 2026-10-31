@@ -1222,6 +1222,7 @@ impl Inner {
             initials,
             archived: 0,
             home_client: self.model.home_client,
+            home_link: self.watching,
         }
     }
 

@@ -369,16 +369,19 @@ fn conversations() -> impl Strategy<Value = Conversations> {
         text(),
         text(),
         u32s(),
-        any::<bool>(),
+        any::<(bool, bool)>(),
     )
         .prop_map(
-            |(v, conversations, address, initials, archived, home_client)| Conversations {
-                v,
-                conversations,
-                address,
-                initials,
-                archived,
-                home_client,
+            |(v, conversations, address, initials, archived, (home_client, home_link))| {
+                Conversations {
+                    v,
+                    conversations,
+                    address,
+                    initials,
+                    archived,
+                    home_client,
+                    home_link,
+                }
             },
         )
 }
@@ -476,6 +479,7 @@ fn map_request() -> impl Strategy<Value = MapRequest> {
         ),
         (any::<bool>(), u32s(), u32s()),
         any::<(bool, bool, bool, bool)>(),
+        (opt_text(), any::<bool>()),
     )
         .prop_map(
             |(
@@ -485,6 +489,7 @@ fn map_request() -> impl Strategy<Value = MapRequest> {
                 (tap_x, tap_y, fit, at_lat_e6, at_lon_e6),
                 (load, margin_x, margin_y),
                 (moving, toggle_theme, follow_phone, prefetch),
+                (set_theme, ask_theme),
             )| MapRequest {
                 dir,
                 w,
@@ -513,6 +518,8 @@ fn map_request() -> impl Strategy<Value = MapRequest> {
                 moving,
                 toggle_theme,
                 follow_phone,
+                set_theme,
+                ask_theme,
                 prefetch,
             },
         )
@@ -524,7 +531,7 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
         (u32s(), u32s(), u32s(), u8s(), u32s(), u8s()),
         (any::<bool>(), u8s(), u8s(), opt_text(), text(), u32s()),
         (opt_text(), opt_text(), any::<bool>(), opt_text(), u32s()),
-        (any::<(bool, bool, bool)>(), u32s()),
+        (any::<(bool, bool, bool)>(), u32s(), text()),
     )
         .prop_map(
             |(
@@ -532,7 +539,7 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                 (margin_y, x, y, zoom, zoom_milli, tile_zoom),
                 (pending, min_zoom, max_zoom, selected, attribution, pins),
                 (tapped, tapped_name, loading, notice, ms),
-                ((dark, theme_chosen, prefetching), prefetched),
+                ((dark, theme_chosen, prefetching), prefetched, theme),
             )| MapShown {
                 v,
                 ok,
@@ -559,6 +566,7 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                 ms,
                 dark,
                 theme_chosen,
+                theme,
                 prefetching,
                 prefetched,
             },
