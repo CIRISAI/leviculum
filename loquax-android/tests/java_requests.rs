@@ -487,9 +487,30 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
             java_map(&[("t", Java::Str("detail")), ("peer", Java::Str(PEER))]),
             Query::Detail { peer: s(PEER) },
         ),
-        ("archived", t("archived"), Query::Archived),
+        ("archived", t("archived"), Query::Archived { search: None }),
         ("blocked", t("blocked"), Query::Blocked),
-        ("conversations", t("conversations"), Query::Conversations),
+        (
+            "conversations",
+            t("conversations"),
+            Query::Conversations { search: None },
+        ),
+        (
+            "conversations (search)",
+            java_map(&[
+                ("t", Java::Str("conversations")),
+                ("search", Java::Str("anna rome")),
+            ]),
+            Query::Conversations {
+                search: Some(s("anna rome")),
+            },
+        ),
+        (
+            "archived (search)",
+            java_map(&[("t", Java::Str("archived")), ("search", Java::Str("anna"))]),
+            Query::Archived {
+                search: Some(s("anna")),
+            },
+        ),
         (
             "messages",
             java_map(&[("t", Java::Str("messages")), ("peer", Java::Str(PEER))]),
@@ -569,10 +590,15 @@ fn every_start_java_builds_decodes() {
     let s = |text: &str| Some(text.to_string());
     let cases = [
         (
-            java_map(&[("dir", Java::Str(DIR)), ("offset", Java::Long(3_600))]),
+            java_map(&[
+                ("dir", Java::Str(DIR)),
+                ("offset", Java::Long(3_600)),
+                ("lang", Java::Str("de-DE")),
+            ]),
             Start {
                 dir: DIR.to_string(),
                 offset: 3_600,
+                lang: s("de-DE"),
                 ..Start::default()
             },
         ),
@@ -597,11 +623,13 @@ fn every_start_java_builds_decodes() {
             java_map(&[
                 ("dir", Java::Str(DIR)),
                 ("offset", Java::Long(7_200)),
+                ("lang", Java::Str("en-US")),
                 ("here", Java::Bool(true)),
             ]),
             Start {
                 dir: DIR.to_string(),
                 offset: 7_200,
+                lang: s("en-US"),
                 here: true,
                 ..Start::default()
             },

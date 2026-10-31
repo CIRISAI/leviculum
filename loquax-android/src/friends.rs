@@ -16,7 +16,8 @@
 //! regions does it, the app opens the sheet filtered to them.
 
 use loquax::telemetry::Fix;
-use loquax::ui::{chat, UiModel};
+use loquax::ui::strings::Lang;
+use loquax::ui::{chat, scene, UiModel};
 
 use crate::schema::{self, FriendRow, VERSION};
 
@@ -126,11 +127,12 @@ pub fn split_zoom(
 /// a fix: every peer with a position but ourselves and the blocked,
 /// newest first, each with `recent` set within [`WINDOW_SECS`]; and our
 /// own position apart as `me`, for the map's pin of ours. `photo` gives a
-/// linked contact's thumbnail.
+/// linked contact's thumbnail; the card's words are in `lang`.
 pub fn friends<B>(
     model: &UiModel<B>,
     now: i64,
     own: Option<(i32, i32)>,
+    lang: Lang,
     photo: impl Fn(&[u8; 16]) -> Option<String>,
 ) -> schema::Friends {
     let row = |peer: &[u8; 16], fix: &Fix| {
@@ -154,6 +156,8 @@ pub fn friends<B>(
             liveness: list.liveness.state.word().to_string(),
             cadence_s: crate::session::cadence(&list.liveness),
             last_fix_at: list.liveness.last_fix_at.unwrap_or(0),
+            live: scene::row_live(&list.liveness, Some(now)).resolve(lang),
+            ring: crate::session::ring(scene::Ring::of(list.liveness.state)),
         }
     };
     let mut rows: Vec<FriendRow> = model

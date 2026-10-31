@@ -30,6 +30,7 @@ use loquax::store::Store;
 use loquax::ui::intent::{Intent, Messages, Switch, Target};
 use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
+use loquax::ui::strings::Lang;
 use loquax::ui::{chat, scene, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
@@ -109,6 +110,8 @@ struct Inner {
     client: HomeClient,
     home: PathBuf,
     offset: i32,
+    /// The phone's language: the scene's words are said in it (1217).
+    lang: Lang,
     sends: VecDeque<([u8; 16], String, Vec<Field>)>,
     sending: bool,
     pull_owed: bool,
@@ -288,6 +291,7 @@ impl Session {
             attached,
             client,
             start.offset,
+            Lang::of_tag(start.lang.as_deref().unwrap_or_default()),
             events_tx,
             runtime.handle().clone(),
             watch_rx,
@@ -788,7 +792,9 @@ impl Session {
         }
         let inner = self.lock();
         Ok(match query {
-            schema::Query::Conversations => schema::encode(&inner.conversations()),
+            schema::Query::Conversations { search } => {
+                schema::encode(&inner.conversations(search.as_deref()))
+            }
             schema::Query::Messages { peer } => schema::encode(&inner.messages(parse_peer(&peer)?)),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
@@ -826,15 +832,16 @@ impl Session {
                     .collect(),
             }),
             schema::Query::Detail { peer } => schema::encode(&inner.detail(parse_peer(&peer)?)?),
-            schema::Query::Archived => {
+            schema::Query::Archived { search } => {
                 let order = inner.model.archived_order();
-                schema::encode(&inner.listed(order))
+                schema::encode(&inner.listed(order, search.as_deref()))
             }
             schema::Query::Blocked => schema::encode(&inner.blocked()),
             schema::Query::Friends { lat_e6, lon_e6 } => schema::encode(&crate::friends::friends(
                 &inner.model,
                 wall_now(inner.offset).unix_secs,
                 lat_e6.zip(lon_e6),
+                inner.lang,
                 |peer| inner.photo(peer),
             )),
             schema::Query::Shared => schema::encode(&inner.shared()?),
@@ -938,6 +945,7 @@ impl Inner {
         attached: Attached,
         client: HomeClient,
         offset: i32,
+        lang: Lang,
         events: Sender<Event>,
         runtime: tokio::runtime::Handle,
         watch: tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
@@ -982,6 +990,7 @@ impl Inner {
             client,
             home: home.to_path_buf(),
             offset,
+            lang,
             sends: VecDeque::new(),
             sending: false,
             pull_owed: false,
@@ -1389,15 +1398,17 @@ impl Inner {
         self.apply(UiEvent::FetchDone(end.result));
     }
 
-    fn conversations(&self) -> schema::Conversations {
-        let mut listed = self.listed(self.model.order());
+    fn conversations(&self, search: Option<&str>) -> schema::Conversations {
+        let mut listed = self.listed(self.model.order(), search);
         listed.archived = u32::try_from(self.model.archived_order().len()).unwrap_or(u32::MAX);
         listed
     }
 
-    /// The list's rows for the conversations `order` names, in its order.
-    fn listed(&self, order: Vec<usize>) -> schema::Conversations {
-        let rows = scene::rows(&self.model, order)
+    /// The list's rows for the conversations `order` names, in its order;
+    /// with `search` only those it finds ([`chat::row_matches`]), so the
+    /// phone searches by the rule every loquax screen does (1217).
+    fn listed(&self, order: Vec<usize>, search: Option<&str>) -> schema::Conversations {
+        let rows = found(&self.model, order, search)
             .into_iter()
             .map(|row| self.schema_row(row))
             .collect();
@@ -1418,7 +1429,7 @@ impl Inner {
     /// Every blocked peer, with a conversation or without, as list rows
     /// (1146): the settings screen's "Blocked contacts".
     fn blocked(&self) -> schema::Conversations {
-        let mut listed = self.listed(Vec::new());
+        let mut listed = self.listed(Vec::new(), None);
         listed.conversations = self
             .model
             .names
@@ -1435,9 +1446,14 @@ impl Inner {
         self.schema_row(scene::row(&self.model, peer))
     }
 
-    /// A scene's row in the facade's words (1217): Java sees what it saw
-    /// before the scene, byte for byte.
+    /// A scene's row in the facade's words (1217): what Java saw before
+    /// the scene, and the scene's words in the phone's language.
     fn schema_row(&self, row: scene::Row) -> schema::ConversationRow {
+        let live = row
+            .live
+            .map(|live| live.resolve(self.lang))
+            .unwrap_or_default();
+        let ring = ring(row.avatar.ring);
         let row = row.row;
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
@@ -1460,6 +1476,8 @@ impl Inner {
             liveness: row.liveness.state.word().to_string(),
             cadence_s: cadence(&row.liveness),
             last_fix_at: row.liveness.last_fix_at.unwrap_or(0),
+            live,
+            ring,
         }
     }
 
@@ -1480,10 +1498,17 @@ impl Inner {
             .track(peer, POSITIONS_SHOWN)
             .map_err(|error| error.to_string())?
             .iter()
-            .map(|fix| schema::PositionRow {
-                at: fix.fix_time(),
-                lat_e6: fix.location.latitude_e6,
-                lon_e6: fix.location.longitude_e6,
+            .map(|fix| {
+                let at = WallTime {
+                    unix_secs: fix.fix_time(),
+                    offset_secs: self.offset,
+                };
+                schema::PositionRow {
+                    at: at.unix_secs,
+                    lat_e6: fix.location.latitude_e6,
+                    lon_e6: fix.location.longitude_e6,
+                    day: scene::day_words(&at, self.model.now.as_ref()).resolve(self.lang),
+                }
             })
             .collect();
         Ok(schema::Detail {
@@ -1530,7 +1555,7 @@ impl Inner {
         let index = self.model.conversations.iter().position(|c| c.peer == peer);
         let icon =
             index.and_then(|c| chat::latest_appearance(&self.model.conversations[c].messages));
-        let rows = index.map_or_else(Vec::new, |c| rows(&self.model, c));
+        let rows = index.map_or_else(Vec::new, |c| rows(&self.model, c, self.lang));
         let link = self.book.links.get(&peer);
         let heard = index.is_some_and(|c| {
             self.model.conversations[c]
@@ -1565,6 +1590,7 @@ impl Inner {
             liveness: liveness.state.word().to_string(),
             cadence_s: cadence(&liveness),
             last_fix_at: liveness.last_fix_at.unwrap_or(0),
+            ring: ring(scene::Ring::of(liveness.state)),
         }
     }
 
@@ -1673,20 +1699,48 @@ pub fn pins_in(home: &Path, now: WallTime) -> Result<Vec<MapPin>, String> {
     Ok(model.map_pins())
 }
 
-/// The bubbles of conversation `c`, as the app draws them: the scene's
-/// chat ([`scene::chat`], from [`chat::bubbles`]) with its groups laid
-/// flat. A reaction is a chip on the bubble it names, not a bubble, and a
-/// report with a position is the position line alone.
-pub fn rows<B>(model: &UiModel<B>, c: usize) -> Vec<schema::MessageRow> {
-    scene::chat(model, c)
-        .groups
-        .into_iter()
-        .flat_map(|group| group.bubbles)
-        .map(|node| row(node.bubble))
-        .collect()
+/// The scene's rows for the conversations `order` names, in its order,
+/// those `search` finds when given: every word of it in the name or the
+/// last line ([`chat::row_matches`], the desktop's rule too).
+pub fn found<B>(model: &UiModel<B>, order: Vec<usize>, search: Option<&str>) -> Vec<scene::Row> {
+    let mut rows = scene::rows(model, order);
+    if let Some(search) = search {
+        rows.retain(|row| chat::row_matches(&row.row, search));
+    }
+    rows
 }
 
-/// One bubble in the facade's words.
+/// The bubbles of conversation `c`, as the app draws them: the scene's
+/// chat ([`scene::chat`], from [`chat::bubbles`]) with its groups laid
+/// flat, each bubble with where it sits and its words in `lang`. A
+/// reaction is a chip on the bubble it names, not a bubble, and a report
+/// with a position is the position line alone.
+pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageRow> {
+    let groups = scene::chat(model, c).groups;
+    let last = groups.len().saturating_sub(1);
+    let mut rows = Vec::new();
+    for (g, group) in groups.into_iter().enumerate() {
+        let mut day = group.day.map(|day| day.words.resolve(lang));
+        for node in group.bubbles {
+            let mut row = row(node.bubble);
+            row.joins_before = node.place.joins_before;
+            row.joins_after = node.place.joins_after;
+            row.meta = node.place.meta;
+            row.newest = g == last;
+            row.day = day.take().unwrap_or_default();
+            row.live = node.live.map(|live| live.resolve(lang)).unwrap_or_default();
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// A ring as the facade carries it: its colour's name, empty for none.
+pub fn ring(ring: Option<scene::Ring>) -> String {
+    ring.map_or("", scene::Ring::word).to_string()
+}
+
+/// One bubble in the facade's words, placed by [`rows`].
 fn row(bubble: chat::Bubble) -> schema::MessageRow {
     let fix = bubble.fix.as_ref();
     schema::MessageRow {
@@ -1727,6 +1781,12 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         since: bubble.since.map_or(0, |at| at.unix_secs),
         liveness: bubble.liveness.map_or("", |l| l.state.word()).to_string(),
         cadence_s: bubble.liveness.map_or(0, |l| cadence(&l)),
+        joins_before: false,
+        joins_after: false,
+        meta: false,
+        newest: false,
+        day: String::new(),
+        live: String::new(),
     }
 }
 

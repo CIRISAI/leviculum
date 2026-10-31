@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
+use loquax::ui::strings::Lang;
 use loquax_android::schema::{self, Event, Request, Start, Started};
 use loquax_android::session::Session;
 
@@ -90,7 +91,7 @@ fn a_first_start_says_what_it_needs() {
             .expect("a Done");
     assert_eq!(done.error.as_deref(), Some("not started"));
     let done: schema::Done = rmp_serde::from_slice(&loquax_android::query(&schema::encode(
-        &schema::Query::Conversations,
+        &schema::Query::Conversations { search: None },
     )))
     .expect("a Done");
     assert_eq!(done.error.as_deref(), Some("not started"));
@@ -162,10 +163,15 @@ fn ugly_in(session: &Session) {
                 })
             })
     };
-    wait_for(session, schema::Query::Conversations, 60, shown);
     wait_for(
         session,
-        schema::Query::Archived,
+        schema::Query::Conversations { search: None },
+        60,
+        shown,
+    );
+    wait_for(
+        session,
+        schema::Query::Archived { search: None },
         20,
         |c: &schema::Conversations| {
             c.conversations
@@ -351,7 +357,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         }
         let list: schema::Conversations = wait_for(
             &session,
-            schema::Query::Conversations,
+            schema::Query::Conversations { search: None },
             5,
             |c: &schema::Conversations| c.conversations.iter().any(|row| row.peer == peer),
         );
@@ -452,9 +458,12 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 name: String::new(),
             })
             .expect("clear");
-        let list: schema::Conversations =
-            rmp_serde::from_slice(&session.query(schema::Query::Conversations).expect("list"))
-                .expect("decode");
+        let list: schema::Conversations = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Conversations { search: None })
+                .expect("list"),
+        )
+        .expect("decode");
         let row = list
             .conversations
             .iter()
@@ -534,7 +543,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         let shown = detail(&session);
         assert!(shown.muted && shown.pinned && shown.verified, "{shown:?}");
         assert!(shown.muted_until > 0);
-        let row = list(&session, schema::Query::Conversations);
+        let row = list(&session, schema::Query::Conversations { search: None });
         assert!(row
             .conversations
             .iter()
@@ -559,11 +568,11 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 on: true,
             })
             .expect("archive");
-        let main = list(&session, schema::Query::Conversations);
+        let main = list(&session, schema::Query::Conversations { search: None });
         assert!(main.conversations.iter().all(|r| r.peer != peer));
         // Beside the ugly store's archived one.
         assert_eq!(main.archived, 2);
-        let archived = list(&session, schema::Query::Archived);
+        let archived = list(&session, schema::Query::Archived { search: None });
         assert_eq!(archived.conversations.len(), 2);
         assert!(archived.conversations.iter().any(|r| r.peer == peer));
         session
@@ -583,7 +592,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         let blocked = list(&session, schema::Query::Blocked);
         assert_eq!(blocked.conversations.len(), 2);
         assert!(blocked.conversations.iter().any(|r| r.peer == peer));
-        let main = list(&session, schema::Query::Conversations);
+        let main = list(&session, schema::Query::Conversations { search: None });
         assert!(main.conversations.iter().all(|r| r.peer != peer));
         session
             .request(Request::Block {
@@ -594,7 +603,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         let blocked = list(&session, schema::Query::Blocked);
         assert_eq!(blocked.conversations.len(), 1);
         assert_eq!(blocked.conversations[0].peer, ugly_blocked);
-        let main = list(&session, schema::Query::Conversations);
+        let main = list(&session, schema::Query::Conversations { search: None });
         assert!(main.conversations.iter().any(|r| r.peer == peer));
         assert!(session
             .query(schema::Query::Detail {
@@ -791,7 +800,7 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
         loop {
             let list: schema::Conversations = rmp_serde::from_slice(
                 &session
-                    .query(schema::Query::Conversations)
+                    .query(schema::Query::Conversations { search: None })
                     .expect("a query"),
             )
             .expect("decode");
@@ -930,9 +939,12 @@ async fn imported_history_shows_in_the_live_session_under_its_name() {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
         pulled(&session, "the pull on open");
         ugly_in(&session);
-        let list: schema::Conversations =
-            rmp_serde::from_slice(&session.query(schema::Query::Conversations).expect("list"))
-                .expect("decode");
+        let list: schema::Conversations = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Conversations { search: None })
+                .expect("list"),
+        )
+        .expect("decode");
         let imported = loquax::address::to_hex(&[0x09; 16]);
         assert!(
             list.conversations.iter().all(|row| row.peer != imported),
@@ -956,7 +968,7 @@ async fn imported_history_shows_in_the_live_session_under_its_name() {
         pulled(&session, "the pull after the import");
         let list: schema::Conversations = wait_for(
             &session,
-            schema::Query::Conversations,
+            schema::Query::Conversations { search: None },
             20,
             |c: &schema::Conversations| {
                 c.conversations
@@ -1058,7 +1070,7 @@ async fn a_nomadnet_import_on_the_mailbox_shows_in_the_live_session_with_its_blo
         pulled(&session, "the pull after the import");
         let list: schema::Conversations = wait_for(
             &session,
-            schema::Query::Conversations,
+            schema::Query::Conversations { search: None },
             20,
             |c: &schema::Conversations| {
                 c.conversations
@@ -1384,7 +1396,8 @@ async fn every_keyed_request_reaches_an_imported_message_through_javas_codec() {
                     .unwrap_or_else(|error| panic!("{t} {i}: {error}"));
             }
             let list: schema::Conversations =
-                rmp_serde::from_slice(&ask(schema::Query::Conversations)).expect("a list");
+                rmp_serde::from_slice(&ask(schema::Query::Conversations { search: None }))
+                    .expect("a list");
             let row = list
                 .conversations
                 .iter()
@@ -1526,7 +1539,7 @@ async fn an_import_beside_the_running_mailbox_wakes_a_phone_that_only_watches() 
     tokio::task::spawn_blocking(move || {
         let list: schema::Conversations = wait_for(
             &session,
-            schema::Query::Conversations,
+            schema::Query::Conversations { search: None },
             WAKE_BOUND_SECS,
             |c: &schema::Conversations| {
                 c.conversations
@@ -1726,7 +1739,7 @@ fn facade_home_link(up: bool, secs: u64) {
     let deadline = std::time::Instant::now() + Duration::from_secs(secs);
     loop {
         let list: schema::Conversations = rmp_serde::from_slice(&loquax_android::query(
-            &schema::encode(&schema::Query::Conversations),
+            &schema::encode(&schema::Query::Conversations { search: None }),
         ))
         .expect("Conversations");
         if list.home_link == up {
@@ -1986,7 +1999,7 @@ async fn a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens() {
         loop {
             let list: schema::Conversations = rmp_serde::from_slice(
                 &session
-                    .query(schema::Query::Conversations)
+                    .query(schema::Query::Conversations { search: None })
                     .expect("a query"),
             )
             .expect("decode");
@@ -2140,7 +2153,7 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
         .position(|conversation| conversation.peer == peer)
         .expect("the run's conversation");
 
-    let rows = session::rows(&model, c);
+    let rows = session::rows(&model, c, Lang::En);
     let shape: Vec<(&str, u32)> = rows.iter().map(|r| (r.body.as_str(), r.updates)).collect();
     assert_eq!(
         shape,
@@ -2191,12 +2204,12 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
         })
     };
     update(&mut model, report(0xe1, 52_600_000));
-    let rows = session::rows(&model, c);
+    let rows = session::rows(&model, c, Lang::En);
     assert_eq!(rows.len(), 4);
     assert_eq!(rows[3].updates, 0, "one report is no run yet");
     assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 2);
     update(&mut model, report(0xe2, 52_600_001));
-    let rows = session::rows(&model, c);
+    let rows = session::rows(&model, c, Lang::En);
     assert_eq!(rows.len(), 4, "updated in place");
     assert_eq!((rows[3].updates, rows[3].lat_e6), (2, Some(52_600_001)));
     let row = loquax::ui::chat::list_row(&model, &peer);
@@ -2287,7 +2300,7 @@ fn a_position_report_is_a_state_not_a_message() {
         (State::Live, Some(600), Some(newest))
     );
     assert_eq!(list_row(&model, &peer).last, "📍 live");
-    let rows = session::rows(&model, c);
+    let rows = session::rows(&model, c, Lang::En);
     let newest_row = rows.last().expect("the run's row");
     assert_eq!(
         (
@@ -2302,7 +2315,7 @@ fn a_position_report_is_a_state_not_a_message() {
         "only the newest report's row says it"
     );
     let friend = |model: &loquax::ui::UiModel<session::Line>, at: i64| {
-        loquax_android::friends::friends(model, at, None, |_| None)
+        loquax_android::friends::friends(model, at, None, Lang::En, |_| None)
             .friends
             .into_iter()
             .find(|f| f.peer == loquax::address::to_hex(&peer))
@@ -2312,13 +2325,59 @@ fn a_position_report_is_a_state_not_a_message() {
         friend(&model, newest),
         Some(("live".to_string(), 600, newest))
     );
+    // The words and the ring come said (1217): the phone computes none.
+    let said = |model: &loquax::ui::UiModel<session::Line>, at: i64, lang: Lang| {
+        let row = session::rows(model, c, lang).pop().expect("the run's row");
+        let card = loquax_android::friends::friends(model, at, None, lang, |_| None)
+            .friends
+            .into_iter()
+            .find(|f| f.peer == loquax::address::to_hex(&peer))
+            .expect("the card");
+        let list = loquax_android::session::found(model, model.order(), None)
+            .into_iter()
+            .find(|r| r.row.peer == peer)
+            .expect("the list's row");
+        (
+            row.live,
+            card.live,
+            card.ring,
+            list.live.map(|l| l.resolve(lang)),
+            session::ring(list.avatar.ring),
+        )
+    };
+    assert_eq!(
+        said(&model, newest, Lang::En),
+        (
+            "live · every 10 min · now".to_string(),
+            "live · every 10 min · now".to_string(),
+            "accent".to_string(),
+            Some("live".to_string()),
+            "accent".to_string()
+        )
+    );
+    assert_eq!(
+        said(&model, newest, Lang::De).0,
+        "live · alle 10 Min. · gerade eben"
+    );
     // 25 minutes on, past twice the cadence: recent.
     update(&mut model, clock(newest + 25 * 60));
     assert_eq!(list_row(&model, &peer).liveness.state, State::Recent);
     assert_eq!(list_row(&model, &peer).last, "📍 25 min ago");
     assert_eq!(
-        session::rows(&model, c).last().map(|r| r.liveness.clone()),
+        session::rows(&model, c, Lang::En)
+            .last()
+            .map(|r| r.liveness.clone()),
         Some("recent".into())
+    );
+    assert_eq!(
+        said(&model, newest + 25 * 60, Lang::En),
+        (
+            "last position 25 min ago".to_string(),
+            "last position 25 min ago".to_string(),
+            "secondary".to_string(),
+            Some("25 min ago".to_string()),
+            "secondary".to_string()
+        )
     );
     // 25 hours on: stale.
     update(&mut model, clock(newest + 25 * 3600));
@@ -2353,6 +2412,132 @@ fn a_position_report_is_a_state_not_a_message() {
         ),
     );
     assert_eq!(list_row(&model, &peer).unread, 2);
+}
+
+/// 1217: the phone draws the chat's grouping, its day lines and the newest
+/// group from the scene and searches the list by the rule of every loquax
+/// screen, so it computes none of them again. Over the ugly store each
+/// bubble's placement is `chat::placements`, a day line stands above the
+/// first bubble of a day in the phone's language, and only the newest
+/// group is `newest`. "anna rome" finds Anna's row, whose last line says
+/// Rome, as the desktop's search does; the phone's old rule, the query
+/// whole as one substring, did not.
+#[test]
+fn the_phone_reads_grouping_days_and_search_from_the_scene() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::chat;
+    use loquax::ui::{update, UiEvent};
+    use loquax::when::WallTime;
+    use loquax_android::session;
+    let home = tempfile::tempdir().expect("app dir");
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    ugly_store::fill_store_of(home.path(), &identity);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let store = loquax::store::Store::open_in(home.path(), me).expect("the store");
+    let mut model = session::known(home.path(), &store).expect("a model");
+    model.home_client = true;
+    model.list_apart = true;
+    let now = ugly_store::BASE + 3 * 86_400;
+    update(
+        &mut model,
+        UiEvent::Clock(WallTime {
+            unix_secs: now,
+            offset_secs: 0,
+        }),
+    );
+    model.restore(store.restore().expect("restore"));
+    update(&mut model, UiEvent::Close);
+
+    let mut days = 0;
+    for c in 0..model.conversations.len() {
+        let rows = session::rows(&model, c, Lang::De);
+        let places = chat::placements(&chat::bubbles(&model, c));
+        assert_eq!(rows.len(), places.len());
+        let groups = loquax::ui::scene::chat(&model, c).groups;
+        let newest = groups.last().map_or(0, |g| g.bubbles.len());
+        for (i, (row, place)) in rows.iter().zip(&places).enumerate() {
+            assert_eq!(
+                (row.joins_before, row.joins_after, row.meta),
+                (place.joins_before, place.joins_after, place.meta),
+                "conversation {c} row {i}"
+            );
+            assert_eq!(!row.day.is_empty(), place.day, "conversation {c} row {i}");
+            assert_eq!(
+                row.newest,
+                i >= rows.len() - newest,
+                "conversation {c} row {i}"
+            );
+            if place.day {
+                days += 1;
+                let at = loquax::when::WallTime {
+                    unix_secs: row.at,
+                    offset_secs: 0,
+                };
+                let today = WallTime {
+                    unix_secs: now,
+                    offset_secs: 0,
+                };
+                assert_eq!(
+                    row.day,
+                    loquax::ui::scene::day_words(&at, Some(&today)).resolve(Lang::De)
+                );
+            }
+        }
+    }
+    assert!(days > 0, "the ugly store spans days");
+    let day_lines: Vec<String> = session::rows(&model, 0, Lang::De)
+        .into_iter()
+        .map(|r| r.day)
+        .filter(|d| !d.is_empty())
+        .collect();
+    assert!(
+        day_lines
+            .iter()
+            .any(|d| d == "Vorgestern" || d.contains(". ")),
+        "German day lines: {day_lines:?}"
+    );
+
+    // Search: Anna, whose last line says Rome.
+    let peer = ugly_store::peer(2);
+    update(
+        &mut model,
+        UiEvent::Rename {
+            peer,
+            name: "Anna".to_string(),
+        },
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [0xc1; 32],
+            source: peer,
+            title: Vec::new(),
+            body: b"Ciao from Rome".to_vec(),
+            fields: Vec::new(),
+            verified: true,
+        }),
+    );
+    let finds = |query: &str| -> Vec<[u8; 16]> {
+        session::found(&model, model.order(), Some(query))
+            .into_iter()
+            .map(|r| r.row.peer)
+            .collect()
+    };
+    assert_eq!(finds("anna rome"), [peer]);
+    assert_eq!(finds("ROME anna"), [peer], "any order, any case");
+    assert!(finds("anna paris").is_empty(), "every word");
+    assert_eq!(
+        finds("").len(),
+        model.order().len(),
+        "the empty query finds all"
+    );
+    // The desktop's rule says the same of the same row.
+    let row = chat::list_row(&model, &peer);
+    assert!(chat::row_matches(&row, "anna rome"));
+    // The phone's old rule did not find it: the query whole as one
+    // substring of the name or the last line.
+    let old = |text: &str| text.to_lowercase().contains("anna rome");
+    assert!(!old(&row.name) && !old(&row.last), "{row:?}");
 }
 
 /// The map's Friends sheet (1200), as the facade answers it from the
@@ -2403,7 +2588,7 @@ fn the_friends_sheet_lists_positions_newest_first_with_the_day_marked() {
     model.names.contacts.blocked.insert(dieter);
     let hex = |p: &[u8; 16]| loquax::address::to_hex(p);
 
-    let sheet = friends::friends(&model, now, None, |_| None);
+    let sheet = friends::friends(&model, now, None, Lang::En, |_| None);
     let order: Vec<(String, bool, i64)> = sheet
         .friends
         .iter()
@@ -2436,11 +2621,17 @@ fn the_friends_sheet_lists_positions_newest_first_with_the_day_marked() {
         &mut model,
         report(6, carla, now - friends::WINDOW_SECS, 52_554_360),
     );
-    let sheet = friends::friends(&model, now, None, |_| None);
+    let sheet = friends::friends(&model, now, None, Lang::En, |_| None);
     assert!(sheet.friends[2].recent, "{:?}", sheet.friends[2]);
 
     // With the phone's fix: a thousandth of a degree of latitude is 111 m.
-    let sheet = friends::friends(&model, now, Some((52_524_360, 11_256_000)), |_| None);
+    let sheet = friends::friends(
+        &model,
+        now,
+        Some((52_524_360, 11_256_000)),
+        Lang::En,
+        |_| None,
+    );
     let metres: Vec<Option<u32>> = sheet.friends.iter().map(|f| f.distance_m).collect();
     assert_eq!(metres, vec![Some(111), Some(556), Some(3_336)]);
 }
@@ -2525,7 +2716,7 @@ fn a_shared_position_reaches_the_privacy_list_and_a_bad_fix_is_refused() {
     let bytes = schema::encode(&list);
     assert_eq!(schema::decode::<schema::Shared>(&bytes), Ok(list));
     // Our bubble names where we were.
-    let rows = session::rows(&model, 0);
+    let rows = session::rows(&model, 0, Lang::En);
     assert!(
         rows.iter()
             .any(|row| row.ours && row.lat_e6 == Some(52_520_008) && row.place.is_some()),

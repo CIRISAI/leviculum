@@ -94,6 +94,11 @@
 //! the frame says the choice as `fling`, and how far its view may still
 //! move north and south before the world's edge as `room_north` and
 //! `room_south`, which a coast stops at. An older app reads none of them.
+//! The scene's words (1217) came within version 1 too: [`Start::lang`],
+//! the list's `search`, a row's `live` and `ring`, and a bubble's
+//! `joins_before`, `joins_after`, `day`, `meta`, `newest` and `live`. The
+//! app draws them and computes none of them again; an app that sends no
+//! `lang` gets English, one that sends no `search` the whole list.
 
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +127,11 @@ pub struct Start {
     /// writes into a message's history.
     #[serde(default)]
     pub offset: i32,
+    /// The phone's language, a locale tag (`de-DE`): the words of the
+    /// scene (liveness, the day line) are said in it (1217). English when
+    /// absent or not one the catalogue speaks.
+    #[serde(default)]
+    pub lang: Option<String>,
     /// Make this phone the mailbox (the first start's choice, 1152): the
     /// session starts the home node in the app and joins it itself, with no
     /// code and no server. A phone that chose it once keeps it without
@@ -337,8 +347,13 @@ impl<'de> Deserialize<'de> for Blob {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Query {
-    /// The conversation list, in the list's order.
-    Conversations,
+    /// The conversation list, in the list's order; with `search` only the
+    /// rows it finds, every word of it in the name or the last line
+    /// (`loquax::ui::chat::row_matches`, 1217).
+    Conversations {
+        #[serde(default)]
+        search: Option<String>,
+    },
     /// One conversation's messages, oldest first.
     Messages { peer: String },
     /// The detail of the message `key` of `peer`'s conversation.
@@ -357,8 +372,12 @@ pub enum Query {
     Links,
     /// What the contact screen shows of `peer` (1146).
     Detail { peer: String },
-    /// The archived conversations, as the list's rows.
-    Archived,
+    /// The archived conversations, as the list's rows; `search` as in
+    /// [`Query::Conversations`].
+    Archived {
+        #[serde(default)]
+        search: Option<String>,
+    },
     /// The blocked peers, as the list's rows, conversation or not.
     Blocked,
     /// This phone's own address, for the first start's last screen (1152).
@@ -522,6 +541,13 @@ pub struct FriendRow {
     pub cadence_s: u32,
     #[serde(default)]
     pub last_fix_at: i64,
+    /// The card's words for a peer that reports, in the phone's language
+    /// (1217, `scene::row_live`), empty for one known from a text alone;
+    /// the ring's colour as [`ConversationRow::ring`].
+    #[serde(default)]
+    pub live: String,
+    #[serde(default)]
+    pub ring: String,
 }
 
 /// What [`Query::Run`] answers: the run's reports, newest first; one for a
@@ -748,6 +774,10 @@ pub struct PositionRow {
     pub at: i64,
     pub lat_e6: i32,
     pub lon_e6: i32,
+    /// Its day in the phone's language, as the chat's day line says it
+    /// (1217, `scene::day_words`): `Today`, `Saturday, 24 October`.
+    #[serde(default)]
+    pub day: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -869,6 +899,15 @@ pub struct ConversationRow {
     pub cadence_s: u32,
     #[serde(default)]
     pub last_fix_at: i64,
+    /// The last line in the phone's language when the last row is a
+    /// report (1217, `scene::list_live`): `live`, `3 h ago`; empty for
+    /// any other row.
+    #[serde(default)]
+    pub live: String,
+    /// The avatar's ring (1217, `scene::Ring`): `accent`, `secondary`, or
+    /// empty for none.
+    #[serde(default)]
+    pub ring: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -966,6 +1005,26 @@ pub struct MessageRow {
     pub liveness: String,
     #[serde(default)]
     pub cadence_s: u32,
+    /// Where the bubble sits (1217, `chat::Placement`): it continues the
+    /// group above, the next continues its group, it shows its time and
+    /// mark; `day` is the day line above it in the phone's language, empty
+    /// when no day begins with it; `newest` whether it is in the newest
+    /// group, which says its time as an age.
+    #[serde(default)]
+    pub joins_before: bool,
+    #[serde(default)]
+    pub joins_after: bool,
+    #[serde(default)]
+    pub meta: bool,
+    #[serde(default)]
+    pub newest: bool,
+    #[serde(default)]
+    pub day: String,
+    /// The newest report's words in the phone's language (1217,
+    /// `scene::row_live`): `live · every 10 min · 2 min ago`, `last
+    /// position 3 h ago`; empty on every other row.
+    #[serde(default)]
+    pub live: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1018,6 +1077,9 @@ pub struct Messages {
     pub cadence_s: u32,
     #[serde(default)]
     pub last_fix_at: i64,
+    /// The ring's colour, as [`ConversationRow::ring`].
+    #[serde(default)]
+    pub ring: String,
 }
 
 /// What happened, for the screen.
@@ -1484,7 +1546,8 @@ mod tests {
     fn garbage_is_an_error_in_words() {
         let error = decode::<Request>(b"\xc1").expect_err("not msgpack");
         assert!(error.starts_with("the request did not decode"), "{error}");
-        let error = decode::<Request>(&encode(&Query::Conversations)).expect_err("a query");
+        let error = decode::<Request>(&encode(&Query::Conversations { search: None }))
+            .expect_err("a query");
         assert!(error.contains("conversations"), "{error}");
     }
 }

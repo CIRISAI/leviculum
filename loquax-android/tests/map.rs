@@ -22,6 +22,7 @@ use loquax::telemetry::Fix;
 use loquax::tiles;
 use loquax::ui::history::StoreWrite;
 use loquax::ui::map::MapPin;
+use loquax::ui::strings::Lang;
 use loquax::when::WallTime;
 use loquax_android::schema::{self, MapRegions, MapRequest, MapShown, MapThemeChoice};
 
@@ -844,7 +845,7 @@ fn a_tap_on_a_text_with_a_position_opens_the_map_at_it() {
             }),
         );
     }
-    let rows = loquax_android::session::rows(&model, 0);
+    let rows = loquax_android::session::rows(&model, 0, Lang::En);
     assert_eq!(rows.len(), 2, "{rows:?}");
     let with = &rows[0];
     assert_eq!(with.body, "Brandenburger Tor, Testposition");
