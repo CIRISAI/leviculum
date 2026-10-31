@@ -33,6 +33,7 @@ loquax/tui_snapshot loquax-tui cargo test -p loquax --features tui --bins --test
 loquax/home_node loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node
 # Needs the `history` feature, which the tui build carries.
 loquax/import loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import
+loquax/wire_props loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props
 # Run by `fast`, which `standard` depends on.
 leviculum-std/mvr mvr cargo test -p leviculum-std --test mvr
 leviculum-std/doc_citations citation-guard cargo test -p leviculum-std --test doc_citations
