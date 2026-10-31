@@ -140,7 +140,7 @@ pub fn avatar_colours(peer: &[u8; 16], icon: Option<&(String, String)>) -> (u32,
 pub fn kind(message: &Message) -> &'static str {
     if message.is_reaction() {
         "reaction"
-    } else if message.is_report() {
+    } else if message.is_position() {
         "position"
     } else {
         "text"
@@ -154,6 +154,9 @@ pub fn preview(message: &Message) -> String {
     }
     if message.is_report() {
         return "position report".to_string();
+    }
+    if message.is_position() {
+        return "position shared".to_string();
     }
     message.body.lines().next().unwrap_or_default().to_string()
 }
@@ -683,6 +686,10 @@ mod tests {
         // Text with telemetry is a text: the line shows what was written.
         let with_fix = message(false, "bin da", vec![(FIELD_TELEMETRY, vec![0xc0])]);
         assert_eq!(kind(&with_fix), "text");
+        // A position we shared (1201) is one too, worded as ours.
+        let shared = message(true, "", vec![(FIELD_TELEMETRY, vec![0xc0])]);
+        assert_eq!(kind(&shared), "position");
+        assert_eq!(preview(&shared), "position shared");
         let thumbs = Reaction {
             to: [7; 32],
             content: "👍".to_string(),

@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`] or [`Friends`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`] or [`Shared`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
@@ -68,6 +68,11 @@
 //! [`Friends`], the map's `avatars` with its answer's `marks`, and the
 //! answer's `offline` and `no_map`. An app that sends no `avatars` gets the
 //! pins drawn into the frame as before.
+//! Location (1201) came the same way: [`Request::Share`], the map's
+//! `at_zoom_milli`, `own_lat_e6` and `own_lon_e6` with the answer's
+//! `own_x` and `own_y`, the Maps page's `ask_regions`, `delete_region` and
+//! `set_autoload` with the answer's `regions`, `region_bytes` and
+//! `autoload`, and [`Query::Shared`] with its [`Shared`].
 
 use serde::{Deserialize, Serialize};
 
@@ -216,6 +221,20 @@ pub enum Request {
     /// Deleted the conversation from this device, or from every device of
     /// the home.
     Forget { peer: String, everywhere: bool },
+    /// Shared the phone's own position with `peer`, the user asked for it
+    /// (1201): from the empty map, a friend's card or the chat. The fix in
+    /// the wire's integers; `at` is when the phone took it, unix seconds.
+    Share {
+        peer: String,
+        lat_e6: i32,
+        lon_e6: i32,
+        #[serde(default)]
+        alt_e2: i32,
+        /// Metres times a hundred; 0 for unknown.
+        #[serde(default)]
+        accuracy_e2: u32,
+        at: i64,
+    },
 }
 
 /// What a contact said when loquax read it.
@@ -326,6 +345,36 @@ pub enum Query {
         #[serde(default)]
         lon_e6: Option<i32>,
     },
+    /// The positions we shared, newest first (1201): the privacy page's
+    /// list of who got one and when.
+    Shared,
+}
+
+/// What [`Query::Shared`] answers: the positions we sent, newest first, at
+/// most [`crate::session::SHARED_SHOWN`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shared {
+    pub v: u32,
+    pub shared: Vec<SharedRow>,
+}
+
+/// One position we sent: to whom, as the list draws them, and when.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedRow {
+    pub peer: String,
+    pub name: String,
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: Option<String>,
+    #[serde(default)]
+    pub icon_bg: Option<String>,
+    #[serde(default)]
+    pub photo: Option<String>,
+    /// When it was sent, unix seconds; the fix time where the store kept
+    /// no send time.
+    pub at: i64,
+    pub lat_e6: i32,
+    pub lon_e6: i32,
 }
 
 /// What [`Query::Friends`] answers (`crate::friends`): every peer with a
@@ -933,6 +982,52 @@ pub struct MapRequest {
     /// lie.
     #[serde(default)]
     pub avatars: bool,
+    /// With `at_lat_e6` and `at_lon_e6`: centre there at this zoom, in
+    /// thousandths of a step, held to the regions' zooms, instead of the
+    /// zoom a fit picks (1201): the crosshair's z16, and follow mode
+    /// keeping the zoom the user chose.
+    #[serde(default)]
+    pub at_zoom_milli: Option<u32>,
+    /// The phone's own fix, degrees times a million (1201): the answer
+    /// says where it lies in the view, `own_x` and `own_y`, for the app's
+    /// dot. Reading it sends nothing.
+    #[serde(default)]
+    pub own_lat_e6: Option<i32>,
+    #[serde(default)]
+    pub own_lon_e6: Option<i32>,
+    /// The Maps page (1201): only list the regions in `regions`, no frame.
+    #[serde(default)]
+    pub ask_regions: bool,
+    /// Delete the region file of this name ([`RegionRow::name`]) and list
+    /// the rest. A name that is no region file of the directory deletes
+    /// nothing and is refused.
+    #[serde(default)]
+    pub delete_region: Option<String>,
+    /// Store the config's `map_autoload`, on or off, and list the
+    /// regions.
+    #[serde(default)]
+    pub set_autoload: Option<bool>,
+}
+
+/// One region of the maps directory, for the Maps page (1201).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegionRow {
+    /// The file's name, which `delete_region` hands back.
+    pub name: String,
+    /// Its bytes on the phone.
+    pub bytes: u64,
+    /// When it was written or last viewed, unix seconds; 0 for unknown.
+    pub modified: i64,
+    /// The region's middle, degrees times a million: what the page names
+    /// it by, as the files carry no place name.
+    pub lat_e6: i32,
+    pub lon_e6: i32,
+    pub min_zoom: u8,
+    pub max_zoom: u8,
+    /// The autoload wrote it, so it may evict it under the cap; one the
+    /// user put there stays.
+    #[serde(default)]
+    pub auto: bool,
 }
 
 /// One avatar pin or cluster of them in a frame asked with `avatars`
@@ -1032,6 +1127,20 @@ pub struct MapShown {
     /// map's "No map here yet" chip.
     #[serde(default)]
     pub no_map: bool,
+    /// Where the request's own fix lies, in view pixels (1201); absent
+    /// without one.
+    #[serde(default)]
+    pub own_x: Option<i32>,
+    #[serde(default)]
+    pub own_y: Option<i32>,
+    /// The Maps page's answer (1201): the regions, newest first, their
+    /// bytes together, and whether the autoload is on.
+    #[serde(default)]
+    pub regions: Vec<RegionRow>,
+    #[serde(default)]
+    pub region_bytes: u64,
+    #[serde(default)]
+    pub autoload: bool,
 }
 
 /// A map frame as the host's tests and tools read it: the description's

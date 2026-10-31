@@ -2312,3 +2312,108 @@ fn the_friends_sheet_lists_positions_newest_first_with_the_day_marked() {
     let metres: Vec<Option<u32>> = sheet.friends.iter().map(|f| f.distance_m).collect();
     assert_eq!(metres, vec![Some(111), Some(556), Some(3_336)]);
 }
+
+/// 1201: a share is the user's position to one peer, a report of ours;
+/// the privacy page lists every one sent, newest first, with whom and
+/// when, from the store, and a text or a report received is none of them.
+/// A fix off the globe never leaves the phone.
+#[test]
+fn a_shared_position_reaches_the_privacy_list_and_a_bad_fix_is_refused() {
+    use loquax::store::Store;
+    use loquax::ui::{update, UiEffect, UiEvent, UiModel};
+    use loquax_android::session::{self, Line};
+    let now = ugly_store::BASE + 10 * 86_400;
+    let me = ugly_store::peer(90);
+    let (anna, bob) = (ugly_store::peer(91), ugly_store::peer(92));
+    let home = tempfile::tempdir().expect("home");
+    let mut store = Store::open_in(home.path(), me).expect("the store");
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some(me);
+    let clock = |model: &mut UiModel<Line>, at: i64| {
+        update(
+            model,
+            UiEvent::Clock(loquax::when::WallTime {
+                unix_secs: at,
+                offset_secs: 0,
+            }),
+        );
+    };
+    let share = |model: &mut UiModel<Line>, peer: [u8; 16], lat: i32, at: i64| {
+        let location = session::share_location(lat, 13_404_954, 3_400, 500, at).expect("a place");
+        let effects = update(model, UiEvent::SharePosition { peer, location });
+        assert!(
+            matches!(effects.as_slice(), [UiEffect::Send { body, .. }] if body.is_empty()),
+            "{effects:?}"
+        );
+    };
+    clock(&mut model, now - 600);
+    share(&mut model, anna, 52_520_008, now - 610);
+    update(
+        &mut model,
+        UiEvent::Write {
+            peer: bob,
+            body: "no position".to_string(),
+        },
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(loquax::outbox::OutboxEvent::Received {
+            message_id: [7; 32],
+            source: bob,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: ugly_store::position(now - 500, 48_000_000),
+            verified: true,
+        }),
+    );
+    clock(&mut model, now);
+    share(&mut model, bob, 52_530_000, now - 5);
+    store.write(&model.take_writes()).expect("written");
+
+    let list = session::shared(&model, &store, |_| None).expect("the list");
+    let seen: Vec<(String, i64, i32)> = list
+        .shared
+        .iter()
+        .map(|row| (row.peer.clone(), row.at, row.lat_e6))
+        .collect();
+    let hex = |p: &[u8; 16]| loquax::address::to_hex(p);
+    assert_eq!(
+        seen,
+        vec![
+            (hex(&bob), now, 52_530_000),
+            (hex(&anna), now - 600, 52_520_008)
+        ],
+        "newest first, sent time, our fixes only"
+    );
+    assert!(list
+        .shared
+        .iter()
+        .all(|row| !row.name.is_empty() && !row.initials.is_empty()));
+    // It crosses as the app reads it.
+    let bytes = schema::encode(&list);
+    assert_eq!(schema::decode::<schema::Shared>(&bytes), Ok(list));
+    // Our bubble names where we were.
+    let rows = session::rows(&model, 0);
+    assert!(
+        rows.iter()
+            .any(|row| row.ours && row.lat_e6 == Some(52_520_008) && row.place.is_some()),
+        "{rows:?}"
+    );
+
+    for (lat, lon) in [(90_000_001, 0), (0, -180_000_001), (i32::MIN, i32::MAX)] {
+        let refused = session::share_location(lat, lon, 0, 0, now);
+        assert!(refused.is_err(), "{lat}, {lon}");
+    }
+    assert!(session::share_location(-90_000_000, 180_000_000, 0, 0, now).is_ok());
+    // The request crosses as Java writes it, `at` a long.
+    let request: Request = schema::decode(&schema::encode(&Request::Share {
+        peer: hex(&anna),
+        lat_e6: 1,
+        lon_e6: 2,
+        alt_e2: 0,
+        accuracy_e2: 0,
+        at: now,
+    }))
+    .expect("decodes");
+    assert!(matches!(request, Request::Share { at, .. } if at == now));
+}

@@ -1549,3 +1549,145 @@ fn a_view_without_a_region_says_no_map_here_yet() {
     let (shown, _) = frame(&loquax_android::map::render(&away, Some(Vec::new()), now()));
     assert!(shown.no_map && !shown.loading, "{shown:?}");
 }
+
+/// The Maps page's call (1201) for `home`: no frame, the regions.
+fn regions(home: &Path, change: impl FnOnce(&mut MapRequest)) -> MapShown {
+    let mut ask = MapRequest {
+        dir: home.display().to_string(),
+        ask_regions: true,
+        ..MapRequest::default()
+    };
+    change(&mut ask);
+    let (shown, rgba) =
+        schema::unframe(&loquax_android::map::render(&ask, Some(Vec::new()), now()))
+            .map(|(shown, rgba)| (shown, rgba.len()))
+            .expect("an answer");
+    assert_eq!(rgba, 0, "no frame drawn");
+    shown
+}
+
+/// 1201: the Maps page lists the regions newest first with their sizes,
+/// their sum and the autoload; it switches the autoload in the config and
+/// deletes a region, which the next frame no longer draws; a name that is
+/// no region file of the directory deletes nothing.
+#[test]
+fn the_maps_page_lists_sizes_and_deletes_regions() {
+    let home = home();
+    let maps = home.path().join("maps");
+    let len = std::fs::metadata(maps.join("firenze.lmr"))
+        .expect("the region")
+        .len();
+    std::fs::copy(maps.join("firenze.lmr"), maps.join("auto-old.lmr")).expect("a second");
+    let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(maps.join("auto-old.lmr"))
+        .and_then(|f| f.set_modified(old))
+        .expect("an older time");
+    std::fs::write(maps.join("notes.txt"), "not a region").expect("a stray file");
+
+    let shown = regions(home.path(), |_| {});
+    assert!(shown.ok, "{shown:?}");
+    let names: Vec<&str> = shown.regions.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["firenze.lmr", "auto-old.lmr"], "newest first");
+    assert!(shown.regions.iter().all(|r| r.bytes == len));
+    assert_eq!(shown.region_bytes, 2 * len);
+    assert!(!shown.autoload, "the test home's config says off");
+    let florence = &shown.regions[0];
+    assert!(!florence.auto && shown.regions[1].auto);
+    assert_eq!(shown.regions[1].modified, 1_700_000_000);
+    assert!(
+        (florence.lat_e6 - 43_770_000).abs() < 50_000
+            && (florence.lon_e6 - 11_250_000).abs() < 50_000,
+        "named by its middle: {florence:?}"
+    );
+    assert!(florence.min_zoom <= florence.max_zoom && florence.max_zoom >= 14);
+
+    // The autoload, on and off, in the config.
+    let on = regions(home.path(), |ask| ask.set_autoload = Some(true));
+    assert!(on.ok && on.autoload, "{on:?}");
+    let config = loquax::config::load(home.path()).expect("the config");
+    assert_eq!(config.map_autoload, Some(true));
+    let off = regions(home.path(), |ask| ask.set_autoload = Some(false));
+    assert!(off.ok && !off.autoload);
+    assert_eq!(
+        loquax::config::load(home.path())
+            .expect("the config")
+            .map_autoload,
+        Some(false)
+    );
+
+    // Names that are no region file delete nothing.
+    for bad in ["../config", "notes.txt", "gone.lmr", "", "maps/firenze.lmr"] {
+        let refused = regions(home.path(), |ask| ask.delete_region = Some(bad.to_string()));
+        assert!(!refused.ok, "{bad:?}: {refused:?}");
+    }
+    assert!(home.path().join(loquax::config::CONFIG_FILE).is_file());
+    assert!(maps.join("notes.txt").is_file());
+
+    let left = regions(home.path(), |ask| {
+        ask.delete_region = Some("auto-old.lmr".to_string())
+    });
+    assert!(left.ok, "{left:?}");
+    assert_eq!(left.regions.len(), 1);
+    assert_eq!(left.region_bytes, len);
+    assert!(!maps.join("auto-old.lmr").exists());
+
+    // Florence still draws; once its region is deleted the frame says
+    // there is no map here.
+    let before = frame(&loquax_android::map::render(
+        &request(home.path(), false),
+        Some(Vec::new()),
+        now(),
+    ))
+    .0;
+    assert!(!before.no_map, "{before:?}");
+    let none = regions(home.path(), |ask| {
+        ask.delete_region = Some("firenze.lmr".to_string())
+    });
+    assert!(none.ok && none.regions.is_empty() && none.region_bytes == 0);
+    let after = frame(&loquax_android::map::render(
+        &request(home.path(), false),
+        Some(Vec::new()),
+        now(),
+    ))
+    .0;
+    assert!(after.no_map, "the deleted region is not drawn: {after:?}");
+}
+
+/// 1201: the crosshair centres on the phone's fix at the zoom it asks,
+/// held to the regions' deepest, and the frame says where the fix lies in
+/// the view; without a fix it says nothing.
+#[test]
+fn the_crosshair_centres_on_the_own_fix_and_the_frame_places_it() {
+    let home = home();
+    let (lat, lon) = (43_772_000, 11_255_000);
+    let ask = |zoom: u32, own: bool| {
+        let mut ask = request(home.path(), false);
+        ask.at_lat_e6 = Some(lat);
+        ask.at_lon_e6 = Some(lon);
+        ask.at_zoom_milli = Some(zoom);
+        if own {
+            ask.own_lat_e6 = Some(lat);
+            ask.own_lon_e6 = Some(lon);
+        }
+        frame(&loquax_android::map::render(&ask, Some(Vec::new()), now())).0
+    };
+    let shown = ask(15_000, true);
+    assert_eq!(shown.zoom_milli, 15_000, "{shown:?}");
+    let (x, y) = (shown.own_x.expect("x"), shown.own_y.expect("y"));
+    assert!(
+        (x - W as i32 / 2).abs() <= 1 && (y - H as i32 / 2).abs() <= 1,
+        "the fix in the middle: {x}, {y}"
+    );
+    let deep = ask(30_000, true);
+    assert_eq!(deep.zoom_milli, u32::from(deep.max_zoom) * 1000, "held");
+    let none = ask(15_000, false);
+    assert_eq!((none.own_x, none.own_y), (None, None));
+    // A fix off the view lies outside it, not clamped onto its edge.
+    let mut away = request(home.path(), false);
+    away.own_lat_e6 = Some(lat + 50_000);
+    away.own_lon_e6 = Some(lon);
+    let away = frame(&loquax_android::map::render(&away, Some(Vec::new()), now())).0;
+    assert!(away.own_y.expect("y") < 0, "{away:?}");
+}

@@ -861,6 +861,50 @@ impl Store {
             .collect()
     }
 
+    /// The positions we shared (1201), newest first, at most `limit`: who
+    /// got one, when we sent it (unix seconds, when the store knows), and
+    /// where we were. The privacy page's list; read from our own messages
+    /// that carry telemetry, so a deleted message leaves it.
+    pub fn shared(&self, limit: usize) -> Result<Vec<(Fix, Option<i64>)>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT seq, conversation, received_at, fields FROM messages \
+                 WHERE identity = ?1 AND direction = 1 AND fields IS NOT NULL \
+                 ORDER BY seq DESC",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        let mut shared = Vec::new();
+        for (seq, peer, sent, packed) in rows {
+            if shared.len() >= limit {
+                break;
+            }
+            let Some(fields) = unpack_fields(&packed) else {
+                continue;
+            };
+            let read = crate::telemetry::read(self.identity, &fields, sent);
+            if let Some(fix) = crate::telemetry::shown_fix(&read) {
+                let mut fix = fix.clone();
+                // Who got it: the conversation, not who measured.
+                fix.via = self.address(&peer)?;
+                fix.message = Some(key_of(seq));
+                shared.push((fix, sent));
+            }
+        }
+        Ok(shared)
+    }
+
     /// How many positions the store holds for `peer`: the track.
     pub fn track_len(&self, peer: [u8; 16]) -> Result<usize, StoreError> {
         let count: i64 = self
@@ -3032,6 +3076,41 @@ mod tests {
         // Scoped to our address like every table.
         let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
         assert!(other.positions().expect("positions").is_empty());
+    }
+
+    /// 1201: the positions we shared, newest first, each with whom and
+    /// when; a text of ours and a report we received are none of them.
+    #[test]
+    fn the_positions_we_shared_are_listed_newest_first_with_whom() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let place = |lat: i64, t: i64| Location::saturating(lat, 13_000_000, 0, 0, 0, 0, t);
+        let mut first = message(1, true, "");
+        first.fields = crate::ui::position_fields(place(52_000_000, 900));
+        put(&mut store, BOB, first);
+        put(&mut store, BOB, message(2, true, "just text"));
+        let mut theirs = message(3, false, "");
+        theirs.fields = crate::ui::position_fields(place(48_000_000, 950));
+        put(&mut store, BOB, theirs);
+        let mut second = message(4, true, "");
+        second.fields = crate::ui::position_fields(place(53_000_000, 990));
+        put(&mut store, ALICE, second);
+        let shared = store.shared(10).expect("shared");
+        let seen: Vec<([u8; 16], i32, Option<i64>)> = shared
+            .iter()
+            .map(|(fix, sent)| (fix.via, fix.location.latitude_e6, *sent))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (ALICE, 53_000_000, Some(1_004)),
+                (BOB, 52_000_000, Some(1_001))
+            ]
+        );
+        assert!(shared.iter().all(|(fix, _)| fix.peer == US));
+        assert_eq!(store.shared(1).expect("one").len(), 1);
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
+        assert!(other.shared(10).expect("shared").is_empty());
     }
 
     #[test]

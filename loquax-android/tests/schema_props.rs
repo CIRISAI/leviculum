@@ -13,8 +13,8 @@
 use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Blob, CandidateRow, Chip, ContactCopy, ConversationRow,
     Conversations, Detail, Done, Event, FriendRow, Friends, ImRow, Info, LinkRow, Links, MapMark,
-    MapRequest, MapShown, Me, MessageRow, Messages, PositionRow, Query, Recents, Request, Run,
-    RunRow, Start, Started, SuggestionRow, Suggestions,
+    MapRequest, MapShown, Me, MessageRow, Messages, PositionRow, Query, Recents, RegionRow,
+    Request, Run, RunRow, Shared, SharedRow, Start, Started, SuggestionRow, Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -186,6 +186,16 @@ fn request() -> impl Strategy<Value = Request> {
         (text(), any::<bool>()).prop_map(|(peer, on)| Request::Verify { peer, on }),
         (text(), any::<bool>()).prop_map(|(peer, on)| Request::Unread { peer, on }),
         (text(), any::<bool>()).prop_map(|(peer, everywhere)| Request::Forget { peer, everywhere }),
+        (text(), i32s(), i32s(), i32s(), u32s(), i64s()).prop_map(
+            |(peer, lat_e6, lon_e6, alt_e2, accuracy_e2, at)| Request::Share {
+                peer,
+                lat_e6,
+                lon_e6,
+                alt_e2,
+                accuracy_e2,
+                at,
+            }
+        ),
     ]
 }
 
@@ -221,6 +231,7 @@ fn query() -> impl Strategy<Value = Query> {
         (text(), i64s()).prop_map(|(peer, key)| Query::Run { peer, key }),
         (prop::option::of(i32s()), prop::option::of(i32s()))
             .prop_map(|(lat_e6, lon_e6)| Query::Friends { lat_e6, lon_e6 }),
+        Just(Query::Shared),
     ]
 }
 
@@ -461,7 +472,7 @@ fn detail() -> impl Strategy<Value = Detail> {
         )
 }
 
-fn map_request() -> impl Strategy<Value = MapRequest> {
+fn map_request_1200() -> BoxedStrategy<MapRequest> {
     (
         (text(), u32s(), u32s(), u32s(), any::<bool>()),
         (
@@ -524,11 +535,44 @@ fn map_request() -> impl Strategy<Value = MapRequest> {
                 ask_theme,
                 prefetch,
                 avatars,
+                ..MapRequest::default()
+            },
+        )
+        .boxed()
+}
+
+/// The map request's fields of 1201 over [`map_request_1200`]'s, boxed
+/// apart: one tuple of all of them overflows the test thread's stack.
+fn map_request() -> impl Strategy<Value = MapRequest> {
+    (
+        map_request_1200(),
+        (
+            prop::option::of(u32s()),
+            prop::option::of(i32s()),
+            prop::option::of(i32s()),
+            any::<bool>(),
+            opt_text(),
+            prop::option::of(any::<bool>()),
+        )
+            .boxed(),
+    )
+        .prop_map(
+            |(
+                request,
+                (at_zoom_milli, own_lat_e6, own_lon_e6, ask_regions, delete_region, set_autoload),
+            )| MapRequest {
+                at_zoom_milli,
+                own_lat_e6,
+                own_lon_e6,
+                ask_regions,
+                delete_region,
+                set_autoload,
+                ..request
             },
         )
 }
 
-fn map_shown() -> impl Strategy<Value = MapShown> {
+fn map_shown_1200() -> BoxedStrategy<MapShown> {
     (
         (u32s(), any::<bool>(), opt_text(), u32s(), u32s(), u32s()),
         (u32s(), u32s(), u32s(), u8s(), u32s(), u8s()),
@@ -577,8 +621,58 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                 marks,
                 offline,
                 no_map,
+                ..MapShown::default()
             },
         )
+        .boxed()
+}
+
+/// The frame's fields of 1201 over [`map_shown_1200`]'s, boxed apart as
+/// for the request.
+fn map_shown() -> impl Strategy<Value = MapShown> {
+    (
+        map_shown_1200(),
+        (
+            prop::option::of(i32s()),
+            prop::option::of(i32s()),
+            regions(),
+            any::<u64>(),
+            any::<bool>(),
+        )
+            .boxed(),
+    )
+        .prop_map(
+            |(shown, (own_x, own_y, regions, region_bytes, autoload))| MapShown {
+                own_x,
+                own_y,
+                regions,
+                region_bytes,
+                autoload,
+                ..shown
+            },
+        )
+}
+
+fn regions() -> impl Strategy<Value = Vec<RegionRow>> {
+    prop::collection::vec(
+        (
+            (text(), any::<u64>(), i64s()),
+            (i32s(), i32s(), u8s(), u8s(), any::<bool>()),
+        )
+            .prop_map(
+                |((name, bytes, modified), (lat_e6, lon_e6, min_zoom, max_zoom, auto))| RegionRow {
+                    name,
+                    bytes,
+                    modified,
+                    lat_e6,
+                    lon_e6,
+                    min_zoom,
+                    max_zoom,
+                    auto,
+                },
+            ),
+        0..3,
+    )
 }
 
 fn marks() -> impl Strategy<Value = Vec<MapMark>> {
@@ -801,6 +895,26 @@ proptest! {
         me in prop::option::of(friend_row()),
     ) {
         round_trips(&Friends { v, friends, me })?;
+    }
+
+    #[test]
+    fn the_shared_positions_round_trip(
+        v in u32s(),
+        rows in prop::collection::vec(
+            (
+                (text(), text(), text(), opt_text(), opt_text(), opt_text()),
+                (i64s(), i32s(), i32s()),
+            ),
+            0..4,
+        ),
+    ) {
+        let shared = rows
+            .into_iter()
+            .map(|((peer, name, initials, icon_fg, icon_bg, photo), (at, lat_e6, lon_e6))| {
+                SharedRow { peer, name, initials, icon_fg, icon_bg, photo, at, lat_e6, lon_e6 }
+            })
+            .collect();
+        round_trips(&Shared { v, shared })?;
     }
 
     #[test]
