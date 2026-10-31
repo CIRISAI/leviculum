@@ -328,6 +328,8 @@ pub struct Shown {
     pub attribution: String,
     /// Tiles it owes: the window asks again.
     pub missing: usize,
+    /// A name fades in or out: the window asks again.
+    pub fading: bool,
 }
 
 /// What the worker does next.
@@ -345,6 +347,7 @@ enum Job {
 pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
     let mut frames = frames.lock().unwrap_or_else(PoisonError::into_inner);
     frames.set_motion(order.motion);
+    let now_ms = frames.clock_ms();
     let shot = frames.frame(&Ask {
         view: order.view,
         margin: order.margin,
@@ -356,6 +359,7 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         zooms: order.zooms,
         draw_pins: false,
         measure: Some(map::measure),
+        now_ms: Some(now_ms),
         scaled_while_moving: true,
     });
     let (w, h) = shot.view.size();
@@ -365,6 +369,7 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         placed: frames.placed().to_vec(),
         attribution: shot.attribution,
         missing: shot.missing,
+        fading: shot.fading,
         order,
     })
 }
@@ -765,7 +770,7 @@ impl App {
         let current = self
             .shown
             .as_ref()
-            .is_some_and(|s| s.order == order && s.missing == 0);
+            .is_some_and(|s| s.order == order && s.missing == 0 && !s.fading);
         let job = match current {
             false => Job::Draw(order),
             true if self.prefetching && self.focused && !order.moving => {

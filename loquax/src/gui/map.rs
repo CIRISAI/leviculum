@@ -84,6 +84,7 @@ pub(super) mod tests {
             zooms: (0, 20),
             draw_pins: false,
             measure: Some(measure),
+            now_ms: None,
             scaled_while_moving: false,
         })
     }
@@ -216,6 +217,7 @@ pub(super) mod tests {
             zooms: (0, 20),
             draw_pins: false,
             measure: Some(measure),
+            now_ms: None,
             scaled_while_moving: false,
         });
         assert!(plain_frames.names().is_empty());

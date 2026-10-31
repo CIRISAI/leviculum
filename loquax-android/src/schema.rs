@@ -1214,8 +1214,8 @@ pub struct MapShown {
     /// The zoom step whose tiles the frame is composed from.
     #[serde(default)]
     pub tile_zoom: u8,
-    /// The frame still owes tiles it showed another step's tiles for:
-    /// ask again.
+    /// The frame still owes tiles it showed another step's tiles for, or
+    /// a name in it fades in or out (1205): ask again.
     #[serde(default)]
     pub pending: bool,
     /// The shallowest and the deepest zoom the regions allow.

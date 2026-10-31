@@ -53,7 +53,7 @@ use leviculum_map::mercator::{project, LatLon, World};
 use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::{MapTheme, Style};
 use leviculum_ui::theme::{Theme, ThemeFlag};
-use loquax::mapframe::{frame_size, hold, Ask, CarryCost, Framed, Frames};
+use loquax::mapframe::{frame_size, hold, Ask, CarryCost, DrawnName, Framed, Frames};
 use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
 use loquax::picture::{map_theme, Maps};
 use loquax::screenmap;
@@ -477,6 +477,7 @@ impl Renderer {
             zooms,
             draw_pins: !request.avatars,
             measure: None,
+            now_ms: Some(now),
             scaled_while_moving: true,
         };
         let shot = match draw(&mut self.frames, &ask) {
@@ -515,7 +516,7 @@ impl Renderer {
             zoom: rest_zoom,
             zoom_milli: shot.shows.zoom_milli(),
             tile_zoom: shot.tile_zoom,
-            pending: shot.missing > 0,
+            pending: shot.missing > 0 || shot.fading,
             min_zoom: zoom_floor(area, &setup),
             max_zoom: setup.zooms.1,
             selected: selected.map(|p| loquax::address::to_hex(&p)),
@@ -782,6 +783,18 @@ pub fn tile_stats(dir: &Path) -> Option<Stats> {
         .iter()
         .find(|r| r.dir == dir)
         .map(Renderer::tile_stats)
+}
+
+/// The names the last frame of the renderer over `dir` drew, where and
+/// at which alpha (1205): what a test reads a fade by.
+pub fn drawn_names(dir: &Path) -> Option<Vec<DrawnName>> {
+    let renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    renderers
+        .iter()
+        .find(|r| r.dir == dir)
+        .map(|r| r.frames.drawn_names())
 }
 
 /// What the last frame that zoomed of the renderer over `dir` spent on

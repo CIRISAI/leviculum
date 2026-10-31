@@ -778,7 +778,8 @@ final class MapView extends View {
                         && !Core.bool(shown, "loading");
             }
             if (Core.bool(shown, "pending")) {
-                // Tiles the frame showed from another step: draw them now.
+                // Tiles the frame showed from another step, or a name
+                // fading in or out: draw the next frame now.
                 ask();
             }
             if (Core.bool(shown, "loading")) {

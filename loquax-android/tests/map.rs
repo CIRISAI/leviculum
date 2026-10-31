@@ -973,6 +973,7 @@ fn a_pinch_keeps_its_tiles_within_a_step() {
     };
     let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
     assert_eq!(shown.tile_zoom, 14);
+    loquax_android::map::tune_clock(home.path(), Some(0));
     ask.moving = true;
     let mut steps = Vec::new();
     for z in [14_600, 14_900, 15_000, 15_300, 15_700, 14_800] {
@@ -994,6 +995,10 @@ fn a_pinch_keeps_its_tiles_within_a_step() {
     );
     ask.moving = false;
     ask.zoom_milli = Some(15_700);
+    let (rest, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    assert_eq!((rest.zoom_milli, rest.tile_zoom), (15_700, 16));
+    // The names new to the view fade in (1205): pending until they have.
+    loquax_android::map::tune_clock(home.path(), Some(loquax::mapframe::FADE_MS));
     let (rest, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
     assert_eq!(
         (rest.zoom_milli, rest.tile_zoom, rest.pending),
@@ -1672,4 +1677,94 @@ fn the_crosshair_centres_on_the_own_fix_and_the_frame_places_it() {
     away.own_lon_e6 = Some(lon);
     let away = frame(&loquax_android::map::render(&away, Some(Vec::new()), now())).0;
     assert!(away.own_y.expect("y") < 0, "{away:?}");
+}
+
+/// 1205: a name a pinch drops fades out by the renderer's clock (1167),
+/// from 255 to nothing over 150 ms; the names the frame at rest after the
+/// pinch places anew fade in over as long; while one fades the frame is
+/// pending, so Java asks again; and with the fades done the frame at rest
+/// is the one a fresh renderer draws there, byte for byte.
+#[test]
+fn names_fade_out_and_in_by_the_clock() {
+    let first_home = home();
+    let dir = first_home.path().to_path_buf();
+    let rest = MapRequest {
+        w: 1280,
+        h: 960,
+        zoom: None,
+        zoom_milli: Some(15_000),
+        ..request(first_home.path(), false)
+    };
+    let draw = |ask: &MapRequest, at_ms: u64| {
+        loquax_android::map::tune_clock(&dir, Some(at_ms));
+        let (shown, rgba) = frame(&loquax_android::map::render(ask, Some(Vec::new()), now()));
+        let names = loquax_android::map::drawn_names(&dir).expect("a renderer");
+        (shown, rgba, names)
+    };
+    let _ = frame(&loquax_android::map::render(&rest, Some(Vec::new()), now()));
+    let (shown, _, names) = draw(&rest, 1000);
+    assert!(
+        !shown.pending,
+        "the first frame at rest shows its names at once"
+    );
+    assert!(names.len() > 3 && names.iter().all(|n| n.alpha == 255));
+    // Pinched out to z14.4: the streets of z15 drop out and fade.
+    let pinch = MapRequest {
+        moving: true,
+        zoom_milli: Some(14_400),
+        ..rest.clone()
+    };
+    let (shown, _, names) = draw(&pinch, 2000);
+    let dropped: Vec<String> = names
+        .iter()
+        .filter(|n| !n.shown)
+        .map(|n| n.text.clone())
+        .collect();
+    assert!(dropped.len() > 2, "{names:?}");
+    assert!(
+        names.iter().all(|n| n.alpha == 255),
+        "the fade starts whole"
+    );
+    assert!(shown.pending, "fading: ask again");
+    let alpha_at = |at_ms: u64| {
+        let (shown, _, names) = draw(&pinch, at_ms);
+        let alphas: Vec<u8> = names
+            .iter()
+            .filter(|n| dropped.contains(&n.text))
+            .map(|n| n.alpha)
+            .collect();
+        (shown.pending, alphas)
+    };
+    assert_eq!(alpha_at(2050), (true, vec![170; dropped.len()]));
+    assert_eq!(alpha_at(2075), (true, vec![128; dropped.len()]));
+    assert_eq!(alpha_at(2149), (true, vec![2; dropped.len()]));
+    assert_eq!(alpha_at(2150), (false, Vec::new()), "gone at 150 ms");
+    // At rest at z15.6 the placement runs: what the pinch kept shows at
+    // once, the names new to the view fade in from nothing.
+    let after = MapRequest {
+        zoom_milli: Some(15_600),
+        ..rest.clone()
+    };
+    let (shown, _, first) = draw(&after, 3000);
+    assert!(shown.pending);
+    assert!(first.iter().all(|n| n.alpha == 255), "kept: {first:?}");
+    let (shown, _, half) = draw(&after, 3075);
+    assert!(shown.pending);
+    let (shown, settled, names) = draw(&after, 3150);
+    assert!(!shown.pending, "the fades are done");
+    assert!(names.iter().all(|n| n.alpha == 255));
+    assert!(first.len() < names.len(), "{first:?} {names:?}");
+    assert_eq!(half.len(), names.len());
+    let halfway = half.iter().filter(|n| n.alpha == 127).count();
+    assert_eq!(halfway, names.len() - first.len(), "{half:?}");
+    let fresh = home();
+    let (_, want) = frame(&loquax_android::map::render(
+        &MapRequest {
+            dir: fresh.path().display().to_string(),
+            ..after.clone()
+        },
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(settled == want, "the frame at rest after the fades");
 }

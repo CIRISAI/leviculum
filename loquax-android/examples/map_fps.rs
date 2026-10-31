@@ -86,7 +86,15 @@ fn main() {
     // As the app draws since 1155: straight into its Bitmap, the
     // description encoded for Java.
     let bitmap = RefCell::new(Bitmap::default());
+    // The renderer's clock held a second further each frame: every name's
+    // fade (1205) is done by the next, so a row measures what it did
+    // before the fades, a frame at rest asked again placing its names.
+    // The prefetch's rows run on the real clock, which orders the
+    // prefetch by the pan's velocity.
+    let clock = std::cell::Cell::new(Some(0u64));
     let draw = |ask: &MapRequest| -> MapShown {
+        clock.set(clock.get().map(|ms| ms + 1000));
+        loquax_android::map::tune_clock(&home, clock.get());
         let mut bitmap = bitmap.borrow_mut();
         let shown = loquax_android::map::render_into(ask, Some(Vec::new()), now, &mut *bitmap);
         std::hint::black_box(schema::encode(&shown));
@@ -258,6 +266,7 @@ fn main() {
         carried(&home, &base, &draw, &timed, &median, threads);
     }
     facade(&home, &base, &draw, now, median, workers);
+    clock.set(None);
     prefetch(&home, &base, draw, timed, median, workers);
     if let Some((tiles, bytes)) = loquax_android::map::tile_memory(&home) {
         println!(
