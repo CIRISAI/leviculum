@@ -1036,6 +1036,218 @@ fn import_ratspeak(home: &Path, peer: &[u8; 16]) {
     );
 }
 
+/// 1166, Lew's long press on a message of the imported conversation, then
+/// "Info": the store's keys lie on both sides of seq 0 since the import
+/// (1159), and a message key crosses JNI as Java's `long`, which its codec
+/// writes as a signed int64 (`d3`) and reads back from a uint64 bit for
+/// bit. Every request that carries a key, sent as `MsgPack.java` sends it
+/// with the key as `Core.num` read it from the list, must reach its
+/// message: Info answers with the message's detail, forward copies it,
+/// delete takes it away; reply and react, which name the id, ride along.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_keyed_request_reaches_an_imported_message_through_javas_codec() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        offset: 0,
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        session.request(Request::Pull).expect("pull");
+        session
+    })
+    .await
+    .expect("the session");
+
+    let peer = [0x0c; 16];
+    let peer_hex = loquax::address::to_hex(&peer);
+    let other_hex = loquax::address::to_hex(&[0x0d; 16]);
+    import_ratspeak(home.path(), &peer);
+
+    tokio::task::spawn_blocking(move || {
+        let messages = |peer: &str| -> JavaMessages {
+            let bytes = session
+                .query(schema::Query::Messages {
+                    peer: peer.to_string(),
+                })
+                .expect("a query");
+            rmp_serde::from_slice(&bytes).expect("decode as Java reads it")
+        };
+        let command = |entries: &[(&str, Java)]| -> Result<(), String> {
+            session.request(schema::decode(&java_map(entries))?)
+        };
+        session.request(Request::Pull).expect("pull");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let rows = loop {
+            let rows = messages(&peer_hex).messages;
+            if rows.len() == 2 {
+                break rows;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never imported: {rows:?}"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        };
+        let (older, newer) = (&rows[0], &rows[1]);
+        assert_eq!(older.body, "von Ratspeak");
+
+        // Info first, on every row: the query Lew's long press sent. The
+        // import lays its block out below seq 1, so the newer row sits at
+        // seq 0, whose key Java holds as `i64::MIN`; a row of this device's
+        // own lies above it.
+        for row in &rows {
+            let info = java_map(&[
+                ("t", Java::Str("info")),
+                ("peer", Java::Str(&peer_hex)),
+                ("key", Java::Long(row.key.0)),
+            ]);
+            let query = schema::decode::<schema::Query>(&info)
+                .unwrap_or_else(|error| panic!("info on {:?}: {error}", row.body));
+            let detail: schema::Info =
+                rmp_serde::from_slice(&session.query(query).expect("the detail")).expect("an Info");
+            let id_row = format!("id     {}", row.id);
+            assert!(detail.rows.contains(&id_row), "{:?}", detail.rows);
+        }
+
+        command(&[
+            ("t", Java::Str("reply")),
+            ("peer", Java::Str(&peer_hex)),
+            ("target", Java::Str(&older.id)),
+            ("body", Java::Str("antwort")),
+        ])
+        .expect("reply");
+        command(&[
+            ("t", Java::Str("react")),
+            ("peer", Java::Str(&peer_hex)),
+            ("target", Java::Str(&older.id)),
+            ("content", Java::Str("\u{1f44d}")),
+        ])
+        .expect("react");
+        command(&[
+            ("t", Java::Str("forward")),
+            ("peer", Java::Str(&peer_hex)),
+            ("key", Java::Long(older.key.0)),
+            ("to", Java::Str(&other_hex)),
+        ])
+        .expect("forward");
+        let forwarded = messages(&other_hex).messages;
+        assert!(
+            forwarded.iter().any(|row| row.body == "von Ratspeak"),
+            "{forwarded:?}"
+        );
+        command(&[
+            ("t", Java::Str("delete")),
+            ("peer", Java::Str(&peer_hex)),
+            ("keys", Java::Longs(&[newer.key.0])),
+        ])
+        .expect("delete");
+        let left = messages(&peer_hex).messages;
+        assert!(left.iter().all(|row| row.key != newer.key), "{left:?}");
+        assert!(left.iter().any(|row| row.key == older.key), "{left:?}");
+        session.stop();
+    })
+    .await
+    .expect("the keyed requests");
+    node.kill().await;
+}
+
+/// A [`schema::Messages`] as `MsgPack.java` and `Core.num` read it.
+#[derive(Debug, serde::Deserialize)]
+struct JavaMessages {
+    messages: Vec<JavaRow>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct JavaRow {
+    body: String,
+    id: String,
+    key: JavaLong,
+}
+
+/// An integer as Java's codec reads it into a `long`: a uint64 bit for bit
+/// (`case 0xcf: return be(8)`).
+#[derive(Debug, PartialEq, Eq)]
+struct JavaLong(i64);
+
+impl<'de> serde::Deserialize<'de> for JavaLong {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = JavaLong;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an integer")
+            }
+            fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<JavaLong, E> {
+                Ok(JavaLong(n))
+            }
+            fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<JavaLong, E> {
+                Ok(JavaLong(n as i64))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// A value of a request map as the app builds it.
+enum Java<'a> {
+    Str(&'a str),
+    Long(i64),
+    Longs(&'a [i64]),
+}
+
+/// A request map in the bytes `MsgPack.pack` writes: a long below -32 or
+/// above 127 as `d3` and eight bytes, whatever its size.
+fn java_map(entries: &[(&str, Java)]) -> Vec<u8> {
+    fn long(out: &mut Vec<u8>, n: i64) {
+        if (0..128).contains(&n) || (-32..0).contains(&n) {
+            out.push(n as u8);
+        } else {
+            out.push(0xd3);
+            out.extend_from_slice(&n.to_be_bytes());
+        }
+    }
+    fn string(out: &mut Vec<u8>, s: &str) {
+        let n = s.len();
+        if n < 32 {
+            out.push(0xa0 | n as u8);
+        } else if n < 0x100 {
+            out.extend_from_slice(&[0xd9, n as u8]);
+        } else {
+            out.push(0xda);
+            out.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        out.extend_from_slice(s.as_bytes());
+    }
+    let mut out = vec![0x80 | entries.len() as u8];
+    for (name, value) in entries {
+        string(&mut out, name);
+        match value {
+            Java::Str(s) => string(&mut out, s),
+            Java::Long(n) => long(&mut out, *n),
+            Java::Longs(ns) => {
+                out.push(0x90 | ns.len() as u8);
+                for n in *ns {
+                    long(&mut out, *n);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 1164: an import on the running mailbox runs outside its daemon, on a
 /// store connection of its own. A phone that only watches, its one pull on
 /// open done and its watching link up, asks for nothing more: the daemon
