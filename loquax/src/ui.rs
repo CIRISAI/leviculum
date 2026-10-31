@@ -447,6 +447,73 @@ impl Conversation {
         let at = self.messages.len().saturating_sub(1);
         self.new_rule.get_or_insert(NewRule { at, count: 0 }).count += 1;
     }
+
+    /// The message after `index` that has a row of its own: reactions are
+    /// drawn under their target, so they sit in no run's way.
+    fn next_shown(&self, index: usize) -> Option<usize> {
+        (index + 1..self.messages.len()).find(|&i| !self.messages[i].is_reaction())
+    }
+
+    /// Whether the report at `index` is folded into the next one, so the
+    /// screens draw one row for a run of a peer's position reports: the
+    /// newest, with the run's count (1184). Any message in between ends the
+    /// run, a text of either side; so do a day, a note and the `new` rule,
+    /// which say something about where the run is. Every screen folds by
+    /// this: the terminal's blocks, the bubbles, the unread count and the
+    /// toast. The store keeps every report.
+    pub fn report_folded(&self, index: usize) -> bool {
+        let Some(this) = self.messages.get(index) else {
+            return false;
+        };
+        let Some(next) = self.next_shown(index) else {
+            return false;
+        };
+        let that = &self.messages[next];
+        let between = index + 1..=next;
+        this.is_report()
+            && that.is_report()
+            && this.at.map(|at| at.day()) == that.at.map(|at| at.day())
+            && !self.notes.iter().any(|n| between.contains(&n.before))
+            && self.new_rule.is_none_or(|rule| !between.contains(&rule.at))
+    }
+
+    /// The reports the row of message `index` stands for, oldest first: the
+    /// run that ends there, or `index` alone when it is no report.
+    pub fn run(&self, index: usize) -> Vec<usize> {
+        let mut run = vec![index];
+        let mut at = index;
+        while let Some(before) = (0..at)
+            .rev()
+            .find(|&i| !self.messages[i].is_reaction())
+            .filter(|&i| self.report_folded(i))
+        {
+            run.push(before);
+            at = before;
+        }
+        run.reverse();
+        run
+    }
+
+    /// The unread count as the screens show it: a run of reports counts
+    /// once (1184). [`Conversation::unread`] stays the messages, which the
+    /// home's read marks name one by one.
+    pub fn unread_rows(&self) -> usize {
+        let mut left = self.unread;
+        let mut rows = 0;
+        for (i, message) in self.messages.iter().enumerate().rev() {
+            if left == 0 {
+                break;
+            }
+            if message.outbound || message.is_reaction() {
+                continue;
+            }
+            left -= 1;
+            if !self.report_folded(i) {
+                rows += 1;
+            }
+        }
+        rows
+    }
 }
 
 /// The mailbox as the header says it.
@@ -3003,12 +3070,16 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 model.conversations[index].mark_new();
             }
             let from = model.names.label(&source);
-            let report = model.conversations[index]
-                .messages
-                .last()
-                .is_some_and(Message::is_report);
+            let conversation = &model.conversations[index];
+            let report = conversation.messages.last().is_some_and(Message::is_report);
+            // A report that joins a run updates its row in place: the run's
+            // first said so already (1184).
+            let joins = conversation
+                .run(conversation.messages.len().saturating_sub(1))
+                .len()
+                > 1;
             let what = if report { "position" } else { "message" };
-            if raise {
+            if raise && !joins {
                 model.toast(ToastKind::Info, format!("{what} from {from}"));
             }
             return effects;
@@ -7239,6 +7310,11 @@ mod tests {
             lines[0].contains("◎ position 43.77350 N"),
             "the latest: {rows:?}"
         );
+        // And how many it stands for, since when (1184).
+        assert!(
+            rows.join(" ").contains("· 3 updates since 14:00"),
+            "{rows:?}"
+        );
         assert!(rows.contains(&"on my way  14:00".to_string()));
         // The store still gets every one of them.
         let writes = model.take_writes();
@@ -7262,6 +7338,68 @@ mod tests {
             2,
             "{rows:?}"
         );
+    }
+
+    /// Lew's phone, 2026-10-31 (1184): Columba sent a report a minute and
+    /// every one was a bubble, an unread count and a notification. A run is
+    /// one row on every screen, counted and told once; a text ends it, and
+    /// the next report starts a new one.
+    #[test]
+    fn a_run_of_reports_is_one_row_one_unread_and_one_toast() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(&mut model, OTHER, 1, "losgefahren", Vec::new());
+        for id in 2..16u8 {
+            let fix = fix_at(
+                52_524_360 + i32::from(id),
+                13_369_810,
+                two_pm() + i64::from(id) * 60,
+            );
+            arrive(&mut model, OTHER, id, "", report_of(&fix));
+        }
+        arrive(&mut model, OTHER, 16, "angekommen", Vec::new());
+        let c = model
+            .conversations
+            .iter()
+            .position(|c| c.peer == OTHER)
+            .expect("listed");
+        let bubbles = chat::bubbles(&model, c);
+        assert_eq!(bubbles.len(), 3, "{bubbles:?}");
+        assert_eq!(bubbles[1].body, "");
+        assert_eq!(
+            bubbles[1].fix.as_ref().map(|f| f.location.latitude_e6),
+            Some(52_524_375),
+            "the newest"
+        );
+        assert_eq!(chat::list_row(&model, &OTHER).unread, 3);
+        // A report after the text starts a new run, told and counted once.
+        arrive(
+            &mut model,
+            OTHER,
+            17,
+            "",
+            report_of(&fix_at(1, 1, two_pm())),
+        );
+        arrive(
+            &mut model,
+            OTHER,
+            18,
+            "",
+            report_of(&fix_at(2, 2, two_pm())),
+        );
+        assert_eq!(chat::bubbles(&model, c).len(), 4);
+        let row = chat::list_row(&model, &OTHER);
+        assert_eq!(row.unread, 4);
+        assert!(row.last.starts_with("position report"), "{row:?}");
+        let told = model
+            .toasts
+            .iter()
+            .filter(|t| t.text.starts_with("position from"))
+            .count();
+        assert_eq!(told, 2);
+        // The messages stay whole: the home's read marks name every one.
+        assert_eq!(model.conversations[c].messages.len(), 18);
+        assert_eq!(model.conversations[c].unread, 18);
     }
 
     #[test]

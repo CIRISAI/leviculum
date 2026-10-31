@@ -401,6 +401,10 @@ impl App {
             if let Some(accuracy) = loquax::telemetry::accuracy(&fix.location) {
                 words = format!("{words}  {accuracy}");
             }
+            words.push_str(&loquax::telemetry::run_words(
+                bubble.updates,
+                bubble.since.as_ref(),
+            ));
             let stale = self.seen.now.is_some_and(|now| {
                 fix.fix_time()
                     .saturating_add(loquax::telemetry::STALE_AFTER_SECS)

@@ -19,7 +19,7 @@ use leviculum_ui::delivery::DeliveryState;
 use super::reactions;
 use super::replies::Quoted;
 use super::{Message, UiModel};
-use crate::telemetry::Fix;
+use crate::telemetry::{run_words, Fix};
 use crate::when::WallTime;
 
 /// Messages of one sender this close together form a group.
@@ -169,7 +169,11 @@ pub struct ListRow {
     /// Whether that message is ours.
     pub ours: bool,
     pub at: Option<WallTime>,
+    /// Unread rows: a run of reports counts once (1184).
     pub unread: usize,
+    /// How many reports the last row folds when it is a run of them, else 0
+    /// (1184).
+    pub updates: usize,
     pub initials: String,
     /// The peer's own avatar colours, `rrggbb`.
     pub icon: Option<(String, String)>,
@@ -203,13 +207,20 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
     let conversation = model.conversations.iter().find(|c| c.peer == *peer);
     let messages = conversation.map_or(&[][..], |c| c.messages.as_slice());
     let last = messages.last();
+    // A run of reports is one line with its count, not the last of many.
+    let updates = conversation
+        .filter(|_| last.is_some_and(Message::is_report))
+        .map_or(0, |c| c.run(messages.len().saturating_sub(1)).len());
     ListRow {
         peer: *peer,
         name: model.names.label(peer),
-        last: last.map(preview).unwrap_or_default(),
+        last: last
+            .map(|m| preview(m) + &run_words(updates, None))
+            .unwrap_or_default(),
         ours: last.is_some_and(|m| m.outbound),
         at: last.and_then(|m| m.at),
-        unread: conversation.map_or(0, |c| c.unread),
+        unread: conversation.map_or(0, |c| c.unread_rows()),
+        updates,
         initials: initials(model.names.shown(peer), peer),
         icon: latest_appearance(messages),
         kind: last.map_or("", kind),
@@ -262,10 +273,17 @@ pub struct Bubble {
     pub fix: Option<Fix>,
     /// A reply's quote.
     pub quote: Option<Quoted>,
+    /// The reports a run's row stands for, it the newest, when there is
+    /// more than one; else 0. The row updates in place as the run grows
+    /// (1184).
+    pub updates: usize,
+    /// When the run's first report came.
+    pub since: Option<WallTime>,
 }
 
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
-/// the bubble it names, not a bubble.
+/// the bubble it names, not a bubble, and a run of reports is one bubble,
+/// its newest, as the terminal folds it ([`super::Conversation::run`]).
 pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
     let Some(conversation) = model.conversations.get(c) else {
         return Vec::new();
@@ -275,9 +293,14 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
         .messages
         .iter()
         .enumerate()
-        .filter(|(_, message)| !message.is_reaction())
+        .filter(|(m, message)| !message.is_reaction() && !conversation.report_folded(*m))
         .map(|(m, message)| {
             let fix = model.message_fix(c, m);
+            let run = conversation.run(m);
+            let (updates, since) = match run.len() {
+                1 => (0, None),
+                n => (n, run.first().and_then(|&f| conversation.messages[f].at)),
+            };
             Bubble {
                 key: message.activity,
                 id: message.id,
@@ -305,6 +328,8 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                     .unwrap_or_default(),
                 fix,
                 quote: model.quoted(c, m),
+                updates,
+                since,
             }
         })
         .collect()
@@ -672,6 +697,8 @@ mod tests {
             chips: Vec::new(),
             fix: None,
             quote: None,
+            updates: 0,
+            since: None,
         }
     }
 
@@ -717,6 +744,7 @@ mod tests {
             ours: false,
             at: None,
             unread: 0,
+            updates: 0,
             initials: "AS".to_string(),
             icon: None,
             kind: "text",

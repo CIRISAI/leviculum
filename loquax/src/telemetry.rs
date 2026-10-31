@@ -351,6 +351,17 @@ pub fn report_line(read: &Read) -> String {
     }
 }
 
+/// What a row folded from a run of `count` reports adds to its position
+/// line, the first of them at `since` (1184): ` · 14 updates since 14:45`;
+/// nothing for a report alone.
+pub fn run_words(count: usize, since: Option<&WallTime>) -> String {
+    match (count, since) {
+        (0 | 1, _) => String::new(),
+        (n, Some(at)) => format!(" · {n} updates since {}", at.hh_mm()),
+        (n, None) => format!(" · {n} updates"),
+    }
+}
+
 /// The detail view's rows for the telemetry in `fields`: every sensor the
 /// codec decoded, per reading, with the peer of a stream row named. A fix
 /// time ahead of `received_at` by more than [`FUTURE_TOLERANCE_SECS`] is
