@@ -126,6 +126,8 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 return true;
             }
         });
+        // Before the tabs: selecting one sets the search icon.
+        search = (ImageButton) findViewById(R.id.search);
         if (archivedView) {
             title.setText(R.string.archived);
             ((TextView) findViewById(R.id.empty)).setText(R.string.archived_none);
@@ -134,7 +136,6 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         } else {
             tabs(savedInstanceState != null && savedInstanceState.getBoolean(TAB, false));
         }
-        search = (ImageButton) findViewById(R.id.search);
         search.setImageDrawable(new Glyph(Glyph.Kind.SEARCH, text));
         search.setOnClickListener(new View.OnClickListener() {
             @Override
