@@ -10,6 +10,7 @@
 //!         [[key: int, value: bin], ...]]      -> [status, id: bin32]
 //! /mark  [flag: uint, [id: bin32, ...]]       -> [status]
 //! /watch [cursor: uint]                       -> [status, newest: uint]
+//! /key   [peer: bin16, public_key: bin64]     -> [status]
 //!
 //! wake   ["pull", newest: uint]               home node to client, on the
 //!                                             link that asked /watch
@@ -477,6 +478,27 @@ pub fn read_peer_state_entry(data: &[u8]) -> Result<([u8; 16], PeerState), Malfo
             muted_until,
         },
     ))
+}
+
+/// A `/key` request: a contact's address and its identity's public key.
+pub fn key_request(peer: &[u8; 16], public_key: &[u8; 64]) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::bin(&mut out, peer);
+    msgpack::bin(&mut out, public_key);
+    out
+}
+
+/// A `/key` request's address and key. Whether they belong together is
+/// the home node's check ([`crate::home::lxmf_address`]), not the wire's.
+pub fn read_key_request(data: &[u8]) -> Result<([u8; 16], [u8; 64]), Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    let peer = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    let key = <[u8; 64]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    Ok((peer, key))
 }
 
 /// A `/send` answer: the message id, or the status that refused it.

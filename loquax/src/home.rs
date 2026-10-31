@@ -83,6 +83,15 @@ pub const PEERSTATE_PATH: &str = "/peerstate";
 /// their schedule as they always did.
 pub const WATCH_PATH: &str = "/watch";
 
+/// A contact's public key the reader took from its contact code (1187,
+/// [`crate::lxma`]): the peer's address and the key in, a status out. The
+/// home node checks the address against the key and remembers the
+/// identity, so its first message to the peer goes out before any announce
+/// was heard. Nothing is archived: the transport's known destinations keep
+/// it. A home node from before it refuses the path, and the message waits
+/// for the peer's announce as it always did.
+pub const KEY_PATH: &str = "/key";
+
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;
 /// A message a client handed in with `/send`, packed as the home node
