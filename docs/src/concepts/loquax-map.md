@@ -296,7 +296,22 @@ The frontends:
   the exact zoom (one to one at a whole step). The names are placed at
   rest over the frame at the exact scale and kept; a frame while the
   finger moves draws those names where the view moved them and places
-  none, so no name leaves the picture during a pan or a pinch. The pins
+  none, so no name leaves the picture during a pan or a pinch. Since
+  1205 a frame that zooms holds them to the ladder of its own zoom
+  (each name's `min_zoom` against the step nearest the zoom, the step a
+  frame at rest there looks its names up at), then runs a collision pass
+  in the rule's order over their placement boxes at the new anchors, so
+  of two names the zoom brought together the more important stays; more
+  than a step from the rest frame's zoom it keeps none and shows the
+  ground until rest. A name that drops out fades over 150 ms, the names
+  the placement at rest sets anew fade in, an alpha on the sprite's
+  levels at blend time by the frontend's clock, and a frame says it
+  fades so the frontend asks again. A pan at the rest zoom keeps every
+  name, as before, and a frame at rest with its fades done is the same
+  bytes. On the Florence fixture pinched from z15 to z12 the old frames
+  drew all eight names, up to twenty-eight overlapping pairs and all
+  eight below the ladder; the passes cost 3 and 5 us a frame for the 57
+  names Frankfurt carries at z15 in `map_fps`. The pins
   are drawn over the tiles every frame, so a pin costs no tile. A pinch
   keeps the step it is composed from while it stays within a step of it,
   and a frame shows other steps' cached tiles where the new step's are
