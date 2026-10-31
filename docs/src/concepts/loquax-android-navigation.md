@@ -247,10 +247,11 @@ Your profile
                    "Chosen by your mailbox"), backup, app version
 ```
 
-The contact code is the one Columba and Sideband read
-(`IdentityQrCodeUtils.kt:8` and `:49` in Columba, the prefix at
-`ValidationConstants.kt:125`, the key's 64 bytes at `:58`): the address
-and the identity's public key as lowercase hex. `loquax::lxma` writes and
+The contact code is the one Columba and Sideband read (in Columba's
+checkout: `encodeToQrString` of `IdentityQrCodeUtils`, and
+`LXMF_IDENTITY_PREFIX` and `PUBLIC_KEY_LENGTH`, 64, of
+`ValidationConstants`): the address and the identity's public key as
+lowercase hex. `loquax::lxma` writes and
 parses it once for every frontend; its test pins the string byte for
 byte against Columba's encoder, and the QR code is byte mode, verbatim,
 because Columba compares the prefix case for case.
