@@ -441,3 +441,60 @@ class InputText(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Two records as `dumpsys notification --noredact` lists them on Android
+# 13, cut: the session's own, untagged, and a conversation's, tagged by its
+# peer; a record of another app between them.
+NOTIFICATIONS = """\
+  Notification List:
+    NotificationRecord(0x0a1b2c3d: pkg=network.leviculum.loquax.debug user=UserHandle{0} id=1 tag=null importance=2 key=0|network.leviculum.loquax.debug|1|null|10123: Notification(channel=session))
+      uid=10123 userId=0
+      mUpdateTimeMs=1793480000000
+    NotificationRecord(0x0e0f: pkg=com.android.systemui user=UserHandle{0} id=7 tag=abcd importance=3 key=x: Notification(channel=x))
+      mUpdateTimeMs=1793480000001
+    NotificationRecord(0x0b2c3d4e: pkg=network.leviculum.loquax.debug user=UserHandle{0} id=0 tag=3b5c00112233445566778899aabbccdd importance=4 key=0|network.leviculum.loquax.debug|0|3b5c00112233445566778899aabbccdd|10123: Notification(channel=messages))
+      uid=10123 userId=0
+      mUpdateTimeMs=1793480123456
+"""
+
+
+class Notifications(unittest.TestCase):
+    """The receive_report step's notification check (1209)."""
+
+    def test_the_conversations_records_by_tag_with_their_time(self):
+        got = walk.conversation_notifications(NOTIFICATIONS, walk.PACKAGE)
+        self.assertEqual(got, {"3b5c00112233445566778899aabbccdd": "1793480123456"})
+
+    def test_none_listed_is_none(self):
+        self.assertEqual(walk.conversation_notifications("", walk.PACKAGE), {})
+
+    def test_another_package_with_our_prefix_is_not_ours(self):
+        other = NOTIFICATIONS.replace("loquax.debug user", "loquax.debugx user")
+        self.assertEqual(walk.conversation_notifications(other, walk.PACKAGE), {})
+
+
+class Ring(unittest.TestCase):
+    """Where the receive_report step looks for the avatar's ring (1209)."""
+
+    def test_the_points_lie_on_the_rings_middle_inside_the_box(self):
+        box = (100, 200, 200, 300)
+        points = walk.ring_points(box)
+        self.assertEqual(len(points), 16)
+        self.assertEqual(points[0], (197, 250))
+        for x, y in points:
+            self.assertTrue(100 <= x <= 200 and 200 <= y <= 300, (x, y))
+            self.assertAlmostEqual(((x - 150) ** 2 + (y - 250) ** 2) ** 0.5, 47, delta=1)
+
+    def test_a_ring_drawn_into_a_screen_is_seen_changed(self):
+        side = 100
+        plain = filled(side, side, (255, 255, 255))
+        ringed = list(plain)
+        for x, y in walk.ring_points((0, 0, side, side)):
+            ringed[y * side + x] = (0, 90, 200)
+        a = walk.parse_screencap(screencap(side, side, plain))
+        b = walk.parse_screencap(screencap(side, side, ringed))
+        points = walk.ring_points((0, 0, side, side))
+        before = [a.pixel(x, y) for x, y in points]
+        after = [b.pixel(x, y) for x, y in points]
+        self.assertEqual(walk.changed_fraction(before, after), 1.0)

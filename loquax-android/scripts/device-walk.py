@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import signal
@@ -64,6 +65,7 @@ STEPS = [
     "info",
     "reply_send",
     "receive_wake",
+    "receive_report",
     "map",
     "friends",
     "settings",
@@ -119,6 +121,10 @@ FILE_SIZE = re.compile(r"\d+(?:[.,]\d+)?\s?(?:B|kB|KB|MB|GB)\b")
 # notification question, its battery exemption, the app's own (Asks.java).
 # "Not now" before "Leave it out": the latter opens a second, system dialog.
 DIALOG_BUTTONS = ["Allow", "ALLOW", "Not now"]
+# The list's last line for a peer whose position is live (1209, Ui.preview).
+LIVE_LINE = "\U0001f4cd live"
+# The liveness ring's width as a share of the avatar (AvatarView.RING).
+RING = 0.06
 # A delivery mark of ours the walk counts as a tick (Ui.state's words).
 TICKS = {"sent", "delivered ✓"}
 
@@ -526,6 +532,44 @@ def mean_luma(samples: list[tuple[int, int, int]]) -> float:
     if not samples:
         return 0.0
     return sum(0.299 * r + 0.587 * g + 0.114 * b for r, g, b in samples) / len(samples)
+
+
+def ring_points(
+    box: tuple[int, int, int, int], ring: float = RING, count: int = 16
+) -> list[tuple[int, int]]:
+    """`count` points on the middle of an avatar's liveness ring (1209):
+    the circle inside `box`, `ring` of its side wide at the edge."""
+    x1, y1, x2, y2 = box
+    side = min(x2 - x1, y2 - y1)
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    radius = side / 2 - side * ring / 2
+    return [
+        (
+            round(cx + radius * math.cos(2 * math.pi * i / count)),
+            round(cy + radius * math.sin(2 * math.pi * i / count)),
+        )
+        for i in range(count)
+    ]
+
+
+def conversation_notifications(dumpsys: str, package: str) -> dict[str, str]:
+    """The conversation notifications `dumpsys notification --noredact`
+    lists for `package`: each record's tag (LoquaxService tags one by the
+    peer) to the first time the record names (`mUpdateTimeMs`, `postTime`
+    or `when`), so a notification raised again shows as a new time. The
+    session's own, untagged, is left out."""
+    out: dict[str, str] = {}
+    blocks = re.split(r"(?=NotificationRecord\()", dumpsys)
+    for block in blocks:
+        head = re.match(r"NotificationRecord\([^\n]*", block)
+        if not head or f"pkg={package} " not in head.group(0) + " ":
+            continue
+        tag = re.search(r"\btag=(\S+)", head.group(0))
+        if not tag or tag.group(1) == "null":
+            continue
+        when = re.search(r"\b(?:mUpdateTimeMs|postTime|when)=(\d+)", block)
+        out[tag.group(1)] = when.group(1) if when else ""
+    return out
 
 
 def clean_detail(detail: str) -> str:
@@ -1200,6 +1244,73 @@ class Walk:
                 raise StepFailed(f"the bubble came after {begun:.1f}s, not within 3s")
             if begun > 3.0:
                 raise StepFailed(f"no bubble {body!r} within 3s of the send; {texts(nodes)[-6:]}")
+
+    def step_receive_report(self) -> str:
+        """A position report from the open conversation's peer, with the
+        conversation closed (1209): it raises no notification, the list's
+        line says `📍 live`, and the row's avatar gains its ring."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        peer = fixture.manifest["sender_peer"]
+        shown = fixture.manifest["open"]["shown"]
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+        nodes = dev.dump()
+        avatar = self.row_avatar(nodes, shown)
+        before = [dev.screen().pixel(x, y) for x, y in ring_points(avatar.bounds)]
+        told = conversation_notifications(
+            dev.shell("dumpsys notification --noredact"), PACKAGE
+        )
+        send = subprocess.run(
+            [
+                self.args.loquax,
+                "send",
+                "--config",
+                str(fixture.cfg),
+                "--via",
+                "direct",
+                "--position",
+                "43.7731,11.2560",
+                fixture.manifest["address"],
+            ],
+            env={**os.environ, "LNMSG_HOME": str(fixture.sender)},
+            capture_output=True,
+            timeout=60,
+        )
+        sent = time.monotonic()
+        if send.returncode != 0:
+            raise StepFailed(f"loquax send exit={send.returncode}: {send.stderr.decode()[-300:]}")
+        if not wait_for(lambda: find(dev.dump(), text=LIVE_LINE), 5, every=0.3):
+            raise StepFailed(f"no {LIVE_LINE!r} line within 5s; {texts(dev.dump())[:12]}")
+        seen_ms = int((time.monotonic() - sent) * 1000)
+        # The notification would come with the row; a moment more for it.
+        time.sleep(1.0)
+        after_told = conversation_notifications(
+            dev.shell("dumpsys notification --noredact"), PACKAGE
+        )
+        if after_told.get(peer) != told.get(peer):
+            raise StepFailed(
+                f"a notification for {peer[:8]}: before={told.get(peer)!r} after={after_told.get(peer)!r}"
+            )
+        avatar = self.row_avatar(dev.dump(), shown)
+        after = [dev.screen().pixel(x, y) for x, y in ring_points(avatar.bounds)]
+        ring = changed_fraction(before, after)
+        if ring < 0.5:
+            raise StepFailed(f"the avatar's ring did not change: {ring:.2f} of its points")
+        return f"live_line_ms={seen_ms} notified=no ring_changed={ring:.2f}"
+
+    def row_avatar(self, nodes: list[Node], shown: str) -> Node:
+        """The list row's avatar beside the name `shown`."""
+        names = find(nodes, rid="name", text=shown)
+        if not names:
+            raise StepFailed(f"no row {shown!r} in the list")
+        middle = (names[0].bounds[1] + names[0].bounds[3]) // 2
+        for node in find(nodes, rid="avatar"):
+            if node.bounds[1] <= middle <= node.bounds[3]:
+                return node
+        raise StepFailed(f"no avatar beside {shown!r}")
 
     def step_map(self) -> str:
         dev = self.need_device()
