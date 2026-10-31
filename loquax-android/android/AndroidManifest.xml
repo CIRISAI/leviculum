@@ -83,7 +83,10 @@
               a:exported='false'
               a:windowSoftInputMode='adjustResize'/>
 
-    <activity a:name='network.leviculum.loquax.MapActivity' a:exported='false'/>
+    <!-- The map from a chat (1199): the main views' layout as a sub view. -->
+    <activity a:name='network.leviculum.loquax.MapActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
 
     <activity a:name='network.leviculum.loquax.ContactActivity'
               a:theme='@style/Loquax.List'

@@ -267,6 +267,12 @@ a friend already on screen is one tap away from the map (the pin).
   Map gets the whole screen; moon, "All" and "Load area" go; the map
   theme control moves to Settings, Appearance; the settings list gets its
   eight entries (pages that do not exist yet show what exists today).
+  Built in 1199 with two choices of its own: on the Map tab the search
+  icon stays hidden until the Friends sheet of 1200 gives it something to
+  find, and the map's one chip says "Loading the map of this area…" or
+  a load's failure without the region's name and progress, which 1200's
+  loading chip adds. The status dot is the list's `home_link`, the
+  watching link of the session (`loquax-android/src/schema.rs`).
 - **1200: the map.** Avatar pins with age labels, clustering, the pin
   card with Chat and Navigate (`geo:`), the chat bubble to map to back
   path, the loading and offline chips, the Friends button and sheet.

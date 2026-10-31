@@ -82,8 +82,20 @@ What it does today:
   that joined without it on the first conversation list: notifications
   (Android 13 and later) and the battery optimisation exemption, with a
   plain reason. Neither is forced, neither is asked again.
+- **Two tabs, one bar** (1199, `docs/src/concepts/loquax-android-navigation.md`).
+  Chats and Map sit side by side under a bottom tab bar, each keeping
+  its state; the selected tab survives a rotation, and back on the map
+  goes to the chats. Both share one top bar: the user's avatar with a
+  status dot (green while the watching link to the mailbox is up, grey
+  otherwise), the tab's name, search on Chats, and a menu with Settings
+  and Help (the book on leviculum.network). Chats carries a badge with the
+  number of chats that hold unread messages. A chat, the archive, the
+  settings and the map opened from a chat are sub views: a back arrow,
+  no tabs. Settings is one list of eight pages: Profile, Mailbox,
+  Appearance, Notifications, Privacy, Maps, Backup, Advanced; a page
+  without controls yet says what exists today.
 - **Map.** The contacts' latest positions as pins over Loquax's own map
-  (the list's menu), drawn by the library with the window's
+  (the Map tab), drawn by the library with the window's
   renderer: the regions in the app's `maps/`, the world outline, the
   names, the pins, stale ones dimmed, in the map's dark colours when the
   phone is dark. One finger pans, a pinch or a double tap zooms, and the
@@ -93,16 +105,14 @@ What it does today:
   last frame at rest placed. At rest the map draws the tiles around the
   view ahead of time, first in the direction it last moved, while the
   app is in front and the battery saver is off. Never more than one
-  world shows. A tap on a pin
-  names it; "All" fits every pin, "Load area" loads the region of
-  the view. A tap on a position report in a chat opens the map on its
-  fix. Regions load by themselves around the pins and a report's place,
+  world shows. The map has the whole room between the bars and no
+  buttons: a chip at the top edge says when a region loads or a load
+  failed and goes by itself, a tap on a pin names it in one. A tap on a
+  position report in a chat opens the map on its fix. Regions load by
+  themselves around the pins, a report's place and where the user looks,
   as in the terminal (`map_autoload`, `map_source`, `map_cache_mb` in the
-  app's `config`). The sun or moon button switches only the map to its
-  other colours, whatever the phone says, and the app keeps that choice
-  (`map_theme` in the app's `config`); a long press on it follows the
-  phone again (`map_theme = auto`). Phone dark, text dark, map light is
-  one press.
+  app's `config`). Settings, Appearance chooses the map's colours: like
+  the phone, light or dark (`map_theme` in the app's `config`).
 - **Light or dark** by the phone's setting: the theme and every colour are
   resources with a `-night` set (`android/res/values-night/`), no AndroidX.
   Switching while a screen is open recreates it, as a rotation does; the

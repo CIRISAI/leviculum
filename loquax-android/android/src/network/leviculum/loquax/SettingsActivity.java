@@ -9,28 +9,54 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import java.util.List;
 import java.util.Map;
 
 /**
- * The app's settings (1146), from the list's menu: the blocked contacts,
- * each with its avatar, name and short hash and an "Unblock" that brings
- * its conversation back on every device of the home; and the service's
- * end, which the list's menu offered before.
+ * The settings (1199), after the modern messenger cut: one list, each
+ * entry a page of its own, this screen again with PAGE. Profile, Mailbox,
+ * Appearance, Notifications, Privacy, Maps, Backup, Advanced; a page that
+ * has no controls yet says what exists today.
  *
- * Above them the mailbox (1152): for a mailbox on this phone, "Back up
- * your mailbox". Below them the advanced settings, the only place the app
- * names a Propagation Node.
+ * Appearance holds the map's theme, which the map screen's moon held
+ * before: like the phone, light or dark, the config's `map_theme` (1133).
+ * Privacy holds the blocked contacts (1146), each with its avatar, name
+ * and an "Unblock" that brings its conversation back on every device of
+ * the home. Backup is the mailbox's backup when the mailbox is on this
+ * phone (1152). Advanced names the Propagation Node, the only place the
+ * app does, and ends the service.
  */
 public class SettingsActivity extends Activity implements Events.Listener {
+    /** The extra naming the page; absent for the list. */
+    static final String PAGE = "page";
+
+    /** The pages in the list's order, by their title's string. */
+    private static final int[] PAGES = {
+        R.string.settings_profile, R.string.mailbox, R.string.settings_appearance,
+        R.string.settings_notifications, R.string.settings_privacy, R.string.settings_maps,
+        R.string.settings_backup, R.string.advanced,
+    };
+    /** What each page holds, one line under its title in the list. */
+    private static final int[] SUMMARIES = {
+        R.string.settings_profile_summary, R.string.settings_mailbox_summary,
+        R.string.settings_appearance_summary, R.string.settings_notifications_summary,
+        R.string.settings_privacy_summary, R.string.settings_maps_summary,
+        R.string.settings_backup_summary, R.string.settings_advanced_summary,
+    };
+
     private LinearLayout body;
+    /** The page shown, a string of PAGES; 0 for the list. */
+    private int page;
     private final ServiceLink link = new ServiceLink(this);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        page = getIntent().getIntExtra(PAGE, 0);
         LinearLayout screen = new LinearLayout(this);
         screen.setOrientation(LinearLayout.VERTICAL);
         screen.setFitsSystemWindows(true);
@@ -50,7 +76,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
             }
         });
         bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
-        TextView title = text(getString(R.string.settings), 20, R.color.text);
+        TextView title = text(getString(page == 0 ? R.string.settings : page), 20, R.color.text);
         title.setPadding(dp(12), 0, 0, 0);
         bar.addView(title);
         screen.addView(bar, new LinearLayout.LayoutParams(
@@ -101,7 +127,148 @@ public class SettingsActivity extends Activity implements Events.Listener {
 
     private void refresh() {
         body.removeAllViews();
-        mailbox();
+        if (page == R.string.settings_profile) {
+            profile();
+        } else if (page == R.string.mailbox) {
+            mailbox();
+        } else if (page == R.string.settings_appearance) {
+            appearance();
+        } else if (page == R.string.settings_notifications) {
+            body.addView(padded(text(getString(R.string.settings_notifications_text), 15,
+                    R.color.text_secondary)));
+        } else if (page == R.string.settings_privacy) {
+            privacy();
+        } else if (page == R.string.settings_maps) {
+            body.addView(padded(text(getString(R.string.settings_maps_text), 15,
+                    R.color.text_secondary)));
+        } else if (page == R.string.settings_backup) {
+            backup();
+        } else if (page == R.string.advanced) {
+            advanced();
+        } else {
+            entries();
+        }
+    }
+
+    /** The list: each page's title and what it holds. */
+    private void entries() {
+        for (int i = 0; i < PAGES.length; i++) {
+            final int target = PAGES[i];
+            LinearLayout entry = new LinearLayout(this);
+            entry.setOrientation(LinearLayout.VERTICAL);
+            entry.setPadding(dp(16), dp(12), dp(16), dp(12));
+            entry.setBackgroundResource(android.R.drawable.list_selector_background);
+            entry.addView(text(getString(target), 16, R.color.text));
+            entry.addView(text(getString(SUMMARIES[i]), 14, R.color.text_secondary));
+            entry.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    startActivity(new Intent(SettingsActivity.this, SettingsActivity.class)
+                            .putExtra(PAGE, target));
+                }
+            });
+            body.addView(entry, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+    }
+
+    /** Our name, address and its code, until the profile of 1187. */
+    private void profile() {
+        Map<String, Object> me = Core.me();
+        if (me.containsKey("error")) {
+            body.addView(padded(text(Core.str(me, "error"), 15, R.color.text_secondary)));
+            return;
+        }
+        String name = Core.str(me, "name");
+        if (!name.isEmpty()) {
+            body.addView(padded(text(name, 18, R.color.text)));
+        }
+        body.addView(padded(text(getString(R.string.address_text), 15, R.color.text_secondary)));
+        body.addView(padded(text(Core.str(me, "fingerprint"), 16, R.color.text)));
+        LinearLayout.LayoutParams centred = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        centred.gravity = Gravity.CENTER_HORIZONTAL;
+        centred.topMargin = dp(16);
+        body.addView(QrCode.view(this, me, dp(240), Core.str(me, "fingerprint")), centred);
+    }
+
+    /** Where the mailbox is. */
+    private void mailbox() {
+        boolean phone = Core.bool(Core.me(), "here");
+        body.addView(padded(text(getString(phone ? R.string.mailbox_here : R.string.mailbox_away),
+                15, R.color.text_secondary)));
+    }
+
+    /**
+     * The map's theme, a choice of three (1199): like the phone, light,
+     * dark. The renderer stores it as the config's `map_theme` and draws
+     * the next frame in it.
+     */
+    private void appearance() {
+        TextView header = text(getString(R.string.settings_map_theme), 14, R.color.accent);
+        header.setPadding(dp(16), dp(16), dp(16), dp(4));
+        body.addView(header);
+        final String dir = getFilesDir().getAbsolutePath();
+        final String[] words = {"auto", "light", "dark"};
+        int[] labels = {R.string.map_theme_auto, R.string.map_theme_light, R.string.map_theme_dark};
+        final RadioButton[] choices = new RadioButton[words.length];
+        RadioGroup group = new RadioGroup(this);
+        group.setPadding(dp(16), 0, dp(16), dp(8));
+        for (int i = 0; i < words.length; i++) {
+            final String word = words[i];
+            RadioButton choice = new RadioButton(this);
+            choice.setId(View.generateViewId());
+            choice.setText(labels[i]);
+            choice.setTextSize(16);
+            choice.setTextColor(getColor(R.color.text));
+            choice.setMinHeight(dp(48));
+            choice.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    theme(dir, word, choices, words);
+                }
+            });
+            choices[i] = choice;
+            group.addView(choice);
+        }
+        body.addView(group);
+        body.addView(padded(text(getString(R.string.settings_app_theme_text), 14, R.color.text_secondary)));
+        theme(dir, null, choices, words);
+    }
+
+    /**
+     * Store `set` as the map's theme, or with null only ask, off the UI
+     * thread; the choice in force checked after, a failure said.
+     */
+    private void theme(final String dir, final String set, final RadioButton[] choices,
+            final String[] words) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final Map<String, Object> answer = Core.mapTheme(dir, set);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!Core.bool(answer, "ok")) {
+                            android.widget.Toast.makeText(SettingsActivity.this,
+                                    Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
+                            if (set != null) {
+                                theme(dir, null, choices, words);
+                            }
+                            return;
+                        }
+                        String chosen = Core.str(answer, "theme");
+                        for (int i = 0; i < words.length; i++) {
+                            choices[i].setChecked(words[i].equals(chosen));
+                        }
+                    }
+                });
+            }
+        }, "loquax-theme").start();
+    }
+
+    /** The blocked contacts. */
+    private void privacy() {
         TextView header = text(getString(R.string.blocked_contacts), 14, R.color.accent);
         header.setPadding(dp(16), dp(16), dp(16), dp(4));
         body.addView(header);
@@ -115,6 +282,36 @@ public class SettingsActivity extends Activity implements Events.Listener {
         for (Map<String, Object> row : rows) {
             body.addView(blocked(row));
         }
+    }
+
+    /** The mailbox's backup when it is on this phone. */
+    private void backup() {
+        boolean phone = Core.bool(Core.me(), "here");
+        if (!phone) {
+            body.addView(padded(text(getString(R.string.settings_backup_away), 15,
+                    R.color.text_secondary)));
+            return;
+        }
+        TextView backup = text(getString(R.string.backup_title), 16, R.color.text);
+        backup.setPadding(dp(16), dp(12), dp(16), dp(12));
+        backup.setBackgroundResource(android.R.drawable.list_selector_background);
+        backup.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(SettingsActivity.this, BackupActivity.class));
+            }
+        });
+        body.addView(backup, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    /** The Propagation Node, and the service's end. */
+    private void advanced() {
+        TextView node = text(getString(R.string.propagation_node), 16, R.color.text);
+        node.setPadding(dp(16), dp(16), dp(16), 0);
+        body.addView(node);
+        body.addView(padded(text(getString(R.string.propagation_node_text), 14,
+                R.color.text_secondary)));
         TextView stop = text(getString(R.string.stop_service), 16, R.color.text);
         stop.setPadding(dp(16), dp(24), dp(16), dp(16));
         stop.setBackgroundResource(android.R.drawable.list_selector_background);
@@ -128,38 +325,6 @@ public class SettingsActivity extends Activity implements Events.Listener {
             }
         });
         body.addView(stop, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        TextView advanced = text(getString(R.string.advanced), 14, R.color.accent);
-        advanced.setPadding(dp(16), dp(16), dp(16), dp(4));
-        body.addView(advanced);
-        TextView node = text(getString(R.string.propagation_node), 16, R.color.text);
-        node.setPadding(dp(16), dp(8), dp(16), 0);
-        body.addView(node);
-        body.addView(padded(text(getString(R.string.propagation_node_text), 14,
-                R.color.text_secondary)));
-    }
-
-    /** Where the mailbox is, and its backup when it is on this phone. */
-    private void mailbox() {
-        TextView header = text(getString(R.string.mailbox), 14, R.color.accent);
-        header.setPadding(dp(16), dp(16), dp(16), dp(4));
-        body.addView(header);
-        boolean phone = Core.bool(Core.me(), "here");
-        body.addView(padded(text(getString(phone ? R.string.mailbox_here : R.string.mailbox_away),
-                15, R.color.text_secondary)));
-        if (!phone) {
-            return;
-        }
-        TextView backup = text(getString(R.string.backup_title), 16, R.color.text);
-        backup.setPadding(dp(16), dp(12), dp(16), dp(12));
-        backup.setBackgroundResource(android.R.drawable.list_selector_background);
-        backup.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                startActivity(new Intent(SettingsActivity.this, BackupActivity.class));
-            }
-        });
-        body.addView(backup, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 

@@ -35,8 +35,12 @@ public class AvatarView extends View {
     private final Paint circle = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint letters = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint picture = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
     private String initials = "";
     private Bitmap photo;
+    /** The status dot on the lower right edge (1199): null draws none. */
+    private Boolean up;
 
     public AvatarView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -57,6 +61,20 @@ public class AvatarView extends View {
         letters.setColor(fg);
         photo = photo(Core.str(row, "photo"));
         setContentDescription(Core.str(row, "name"));
+        invalidate();
+    }
+
+    /**
+     * The bar's status dot (1199): green while the mailbox link is up,
+     * grey otherwise, in a ring of the background so it reads on any
+     * avatar; null for none.
+     */
+    void dot(Boolean linkUp) {
+        up = linkUp;
+        if (linkUp != null) {
+            dot.setColor(getContext().getColor(linkUp ? R.color.status_up : R.color.status_down));
+            ring.setColor(getContext().getColor(R.color.background));
+        }
         invalidate();
     }
 
@@ -104,11 +122,18 @@ public class AvatarView extends View {
             shader.setLocalMatrix(place);
             picture.setShader(shader);
             canvas.drawCircle(cx, cy, side / 2f, picture);
-            return;
+        } else {
+            canvas.drawCircle(cx, cy, side / 2f, circle);
+            letters.setTextSize(side * (initials.codePointCount(0, initials.length()) > 1 ? 0.38f : 0.45f));
+            Paint.FontMetrics m = letters.getFontMetrics();
+            canvas.drawText(initials, cx, cy - (m.ascent + m.descent) / 2f, letters);
         }
-        canvas.drawCircle(cx, cy, side / 2f, circle);
-        letters.setTextSize(side * (initials.codePointCount(0, initials.length()) > 1 ? 0.38f : 0.45f));
-        Paint.FontMetrics m = letters.getFontMetrics();
-        canvas.drawText(initials, cx, cy - (m.ascent + m.descent) / 2f, letters);
+        if (up != null && side > 0) {
+            // On the circle's edge at the lower right, pulled in enough
+            // that the ring stays inside the view.
+            float at = side / 2f * 0.6f;
+            canvas.drawCircle(cx + at, cy + at, side * 0.17f, ring);
+            canvas.drawCircle(cx + at, cy + at, side * 0.12f, dot);
+        }
     }
 }

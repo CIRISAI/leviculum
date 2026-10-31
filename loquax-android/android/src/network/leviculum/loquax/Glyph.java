@@ -11,10 +11,11 @@ import android.graphics.drawable.Drawable;
 /**
  * The few icons the chat and the list draw, as paths on a 24 by 24 grid
  * scaled to the bounds: no icon font, no AndroidX, no image assets (1129,
- * the list's search, close and pencil 1130).
+ * the list's search, close and pencil 1130, the tab bar's chat and pin
+ * 1199).
  */
 final class Glyph extends Drawable {
-    enum Kind { BACK, MENU, EMOJI, SEND, SENT, DELIVERED, QUEUED, FAILED, SEARCH, CLOSE, PENCIL }
+    enum Kind { BACK, MENU, EMOJI, SEND, SENT, DELIVERED, QUEUED, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN }
 
     private final Kind kind;
     private final int color;
@@ -127,6 +128,24 @@ final class Glyph extends Drawable {
                 pencil.close();
                 canvas.drawPath(pencil, stroke);
                 canvas.drawLine(13, 7.5f, 16.5f, 11, stroke);
+                break;
+            case CHAT:
+                // A speech bubble with its tail at the lower left.
+                Path bubble = path(5, 5, 19, 5, 19, 16, 10, 16, 5, 20, 5, 5);
+                bubble.close();
+                canvas.drawPath(bubble, stroke);
+                break;
+            case PIN:
+                // A map pin: a drop with a hole, its point at the bottom.
+                Path drop = new Path();
+                drop.moveTo(12, 21);
+                drop.cubicTo(7, 15.5f, 5, 12.5f, 5, 9.5f);
+                drop.cubicTo(5, 5.5f, 8.2f, 3, 12, 3);
+                drop.cubicTo(15.8f, 3, 19, 5.5f, 19, 9.5f);
+                drop.cubicTo(19, 12.5f, 17, 15.5f, 12, 21);
+                drop.close();
+                canvas.drawPath(drop, stroke);
+                canvas.drawCircle(12, 9.5f, 2.5f, stroke);
                 break;
             default:
                 break;

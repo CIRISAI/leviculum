@@ -319,6 +319,18 @@ final class Core {
         return answer(bytes);
     }
 
+    /**
+     * The map's theme (1199): `set` (`auto`, `light`, `dark`) stored, or
+     * with null only asked; the choice in force as `theme`. Waits for the
+     * frame a map may be drawing: not on the UI thread.
+     */
+    static Map<String, Object> mapTheme(String dir, String set) {
+        Map<String, Object> request = set == null
+                ? map("dir", dir, "ask_theme", true)
+                : map("dir", dir, "set_theme", set);
+        return renderMap(request, null);
+    }
+
     /** The next event, or null; blocks up to waitMs. */
     static Map<String, Object> nextEvent(int waitMs) {
         byte[] bytes = Native.nextEvent(waitMs);

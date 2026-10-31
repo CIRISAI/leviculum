@@ -39,4 +39,10 @@
     <color name="reaction_ours">#4f8f5b</color>
     <!-- A selected message's row: the accent at a quarter. -->
     <color name="selected_row">#4081c784</color>
+    <!-- The status dot on the bar's avatar (1199), in a ring of the
+         background: up and down, 8.8:1 and 4.5:1 on the background. The tab bar sits on the
+         background: the selected tab in the accent, the others in
+         text_secondary, and the map's chips are text on the bar. -->
+    <color name="status_up">#81c784</color>
+    <color name="status_down">#7d8087</color>
 </resources>
