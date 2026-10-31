@@ -67,6 +67,7 @@ STEPS = [
     "receive_wake",
     "receive_report",
     "map",
+    "fling",
     "friends",
     "settings",
     "profile",
@@ -525,6 +526,27 @@ def changed_fraction(
         1 for p, q in zip(a, b) if any(abs(x - y) > tolerance for x, y in zip(p, q))
     )
     return changed / len(a)
+
+
+def fling_problems(
+    early: list[tuple[int, int, int]],
+    later: list[tuple[int, int, int]],
+    final: list[tuple[int, int, int]],
+    least: float = 0.02,
+) -> list[str]:
+    """The fling step's verdict (1188): the map grabbed early in the coast,
+    later in it and at rest must differ pairwise by at least `least` of
+    the samples, or the map stood still between them."""
+    problems = []
+    for name, a, b in (
+        ("early=later", early, later),
+        ("early=final", early, final),
+        ("later=final", later, final),
+    ):
+        share = changed_fraction(a, b)
+        if share < least:
+            problems.append(f"{name} ({share:.3f} changed)")
+    return problems
 
 
 def mean_luma(samples: list[tuple[int, int, int]]) -> float:
@@ -1315,29 +1337,8 @@ class Walk:
     def step_map(self) -> str:
         dev = self.need_device()
         # Back to the list, then the Map tab (1199).
-        for _ in range(3):
-            if find(dev.dump(), rid="write"):
-                break
-            dev.key("KEYCODE_BACK")
-            time.sleep(0.6)
-        tabs = find(dev.dump(), rid="tab_map")
-        if not tabs:
-            raise StepFailed(f"no Map tab on the list: {texts(dev.dump())[:12]}")
-        dev.tap_node(tabs[0])
-        box = None
-
-        def framed():
-            nonlocal box
-            nodes = dev.dump()
-            if not find(nodes, rid="map"):
-                return None
-            box = self.map_box(nodes)
-            samples = sample_grid(dev.screen(), box)
-            return samples if not is_uniform(samples) else None
-
-        first = wait_for(framed, 20, every=0.5)
-        if not first or box is None:
-            raise StepFailed("no map frame within 20s: the map view is uniform or missing")
+        box = self.open_map()
+        first = sample_grid(dev.screen(), box)
         problems = map_screen_problems(dev.dump())
         if problems:
             raise StepFailed("; ".join(problems))
@@ -1379,6 +1380,73 @@ class Walk:
             raise StepFailed(f"Settings' map theme left the brightness at {lumas[0]:.0f} -> {lumas[1]:.0f}")
         dev.key("KEYCODE_BACK")
         return f"{' '.join(changes)} tabs=2 chrome=none theme_luma={lumas[0]:.0f}->{lumas[1]:.0f}"
+
+    def open_map(self) -> tuple[int, int, int, int]:
+        """The Map tab from wherever the walk is, once a frame shows: the
+        map view's box."""
+        dev = self.need_device()
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        tabs = find(dev.dump(), rid="tab_map")
+        if not tabs:
+            raise StepFailed(f"no Map tab on the list: {texts(dev.dump())[:12]}")
+        dev.tap_node(tabs[0])
+        box = None
+
+        def framed():
+            nonlocal box
+            nodes = dev.dump()
+            if not find(nodes, rid="map"):
+                return None
+            box = self.map_box(nodes)
+            return box if not is_uniform(sample_grid(dev.screen(), box)) else None
+
+        if not wait_for(framed, 20, every=0.5) or box is None:
+            raise StepFailed("no map frame within 20s: the map view is uniform or missing")
+        return box
+
+    def step_fling(self) -> str:
+        """A fast pan let go of coasts on (1188): the screen grabbed about
+        100 ms and 400 ms after the finger lifted and once at rest differ
+        pairwise. The grabs' times are measured from the swipe's return and
+        reported, a screencap takes its own while."""
+        dev = self.need_device()
+        box = self.open_map()
+        x1, y1, x2, y2 = box
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        time.sleep(1.5)
+        reach = (x2 - x1) * 3 // 8
+        # Half the width in 60 ms: thousands of pixels a second, far past
+        # ViewConfiguration's minimum fling velocity.
+        dev.swipe(cx + reach, cy, cx - reach, cy, 60)
+        lifted = time.monotonic()
+
+        def grab_at(ms: int) -> tuple[int, list[tuple[int, int, int]]]:
+            wait = lifted + ms / 1000 - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            took = int((time.monotonic() - lifted) * 1000)
+            return took, sample_grid(dev.screen(), box)
+
+        early_ms, early = grab_at(100)
+        later_ms, later = grab_at(400)
+        final_ms, final = grab_at(4000)
+        problems = fling_problems(early, later, final)
+        detail = (
+            f"grabs at +{early_ms}/+{later_ms}/+{final_ms} ms "
+            f"early-later={changed_fraction(early, later):.2f} "
+            f"later-final={changed_fraction(later, final):.2f}"
+        )
+        if problems:
+            raise StepFailed(f"the map stood still: {'; '.join(problems)}; {detail}")
+        black = black_cells(dev.screen(), box)
+        if black:
+            raise StepFailed(f"{black} black parts at rest after the fling; {detail}")
+        dev.key("KEYCODE_BACK")
+        return detail
 
     def step_friends(self) -> str:
         """The Map tab's Friends button (1200): the sheet lists the fixture's

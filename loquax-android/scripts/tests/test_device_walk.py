@@ -396,6 +396,17 @@ class Sampling(unittest.TestCase):
         self.assertEqual(walk.changed_fraction(a, b), 0.5)
         self.assertEqual(walk.changed_fraction(a, b[:3]), 1.0)
 
+    def test_fling_problems_want_three_different_grabs(self):
+        a = [(0, 0, 0)] * 10
+        b = [(0, 0, 0)] * 5 + [(200, 200, 200)] * 5
+        c = [(200, 200, 200)] * 10
+        self.assertEqual(walk.fling_problems(a, b, c), [])
+        self.assertEqual(walk.fling_problems(a, b, b), ["later=final (0.000 changed)"])
+        self.assertEqual(
+            walk.fling_problems(a, a, a),
+            ["early=later (0.000 changed)", "early=final (0.000 changed)", "later=final (0.000 changed)"],
+        )
+
     def test_mean_luma(self):
         self.assertAlmostEqual(walk.mean_luma([(255, 255, 255)]), 255.0)
         self.assertAlmostEqual(walk.mean_luma([(0, 0, 0), (255, 255, 255)]), 127.5)

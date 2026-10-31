@@ -389,7 +389,33 @@ The frontends:
   glyphs' blend (2159 of the 460800 bytes of each Florence golden, four
   of them by two). Through `map_fps` on the coder host the phone's
   sprites went from 9.19 MB to 0.89 MB and drawing them from 2.7 to
-  3.1 ms to 1.2 to 1.3 ms.
+  3.1 ms to 1.2 to 1.3 ms. Since 1188 a pan the finger lets go of while
+  it moves coasts on and slows down, with the platform's physics so it
+  feels like every other Android surface: VelocityTracker measures the
+  finger, an `OverScroller` flings with ListView's curve
+  (ViewConfiguration's scroll friction, the screen's density; AndroidX's
+  `FlingAnimation` is not used, the app has no AndroidX), and each
+  Choreographer frame moves the last bitmap by the scroller's step and
+  asks a moving frame, as a finger would, so the ground stays drawn and
+  the names are carried. The frame says how far its view may still go
+  north and south before the view is held to one world
+  (`room_north`, `room_south`), the scroller's y bounds, so a coast stops
+  at the Mercator edge without a bounce; x goes round. When the scroller
+  stops, the view is drawn at rest and the names are set, as after a
+  pan. Which gestures fling is `Fling.java`'s, plain Java the host's
+  tests compile and run (`loquax-android/tests/fling.rs`): a pan of one
+  finger, at ViewConfiguration's minimum fling velocity at least, still
+  moving 40 ms before it lifted (AOSP's VelocityTracker assumes a finger
+  stopped after that only since Android 13); a second finger at any time,
+  a pinch or a pan that ends under another finger, never flings, and a
+  finger down ends a coast where it is. The config's `map_fling`, on by
+  default, turns it off, the switch under Settings, Advanced. Through
+  `map_coast` on the coder host, the phone's 1620 x 3600 frame on a warm
+  cache, a coast of 10000 pixels a second asked one frame a vsync drew
+  60.4 frames a second in median 2.9 to 5.4 ms with no vsync missed on a
+  quiet host, the screen at most 217 to 266 pixels ahead of its frame
+  against a margin of 270; with the other lanes' builds on the host it
+  missed up to 15 of 103 vsyncs and ran up to 647 pixels ahead.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.

@@ -212,7 +212,7 @@ Settings
   Privacy         blocked contacts, read receipts, contact suggestions
   Maps            regions with sizes, delete, automatic download on/off
   Backup          back up the mailbox, restore
-  Advanced        propagation node, stop the service, logs
+  Advanced        propagation node, the map's fling, stop the service, logs
 ```
 
 "Load area" becomes the Maps entry: management, not an action on the
