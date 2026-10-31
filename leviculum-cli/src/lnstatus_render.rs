@@ -992,6 +992,25 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
         }
     }
 
+    // Admission (1190): a TCP server's connection counters, served as
+    // `connections`, `silent`, `capped` and `silent_closed`. Ours, and
+    // silent until the server has refused or closed a connection, on the same
+    // terms as the TX lines above: a server nobody floods renders as rnstatus
+    // renders it.
+    if let (Some(capped), Some(closed)) = (ji(ifstat, "capped"), ji(ifstat, "silent_closed")) {
+        if capped > 0 || closed > 0 {
+            let conns = ji(ifstat, "connections").unwrap_or(0);
+            let silent = ji(ifstat, "silent").unwrap_or(0);
+            pln(
+                out,
+                &format!(
+                    "    Admission : connections={conns} silent={silent} capped={capped} \
+                     silent_closed={closed} since start"
+                ),
+            );
+        }
+    }
+
     render_traffic_block(out, ifstat, opts, name, clients);
 }
 

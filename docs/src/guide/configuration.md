@@ -65,7 +65,7 @@ by content, not just extension (`config.rs:662-689`):
 In practice your `config` file uses the Python INI form shown
 throughout this page. Boolean values accept `Yes`, `yes`, `True`,
 `true`, `1`, `on` (and their false counterparts); anything else is an
-error naming the key, as in rnsd (`ini_config.rs:1125-1145`).
+error naming the key, as in rnsd (`ini_config.rs:1134-1154`).
 
 ## A file with a syntax error is refused
 
@@ -158,7 +158,7 @@ and are best set in a TOML config or left at their defaults.
 everywhere: `lnsd --storage`, then the config key, then
 `<config_dir>/storage` (Python's only choice, `Reticulum.py:246`). The
 client tools resolve it the same way (`resolve_storage_path`,
-`config.rs:1572`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
+`config.rs:1592`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
 same directory as the daemon and derive the same RPC authkey from its
 `transport_identity`. Point the key at an external disk and nothing else
 has to be told about it — but note that `--storage` moves the daemon
@@ -281,7 +281,7 @@ supported-type filter (`interface_type` (`ini_config.rs:328-353`)):
 `BackboneInterface` and `BackboneClientInterface` are accepted too:
 they are wire-identical to TCP and are mapped onto the TCP interface at
 parse time, as Python does (`normalize_backbone_interface`
-(`ini_config.rs:1044-1079`)). An interface of any other type is skipped
+(`ini_config.rs:1053-1088`)). An interface of any other type is skipped
 with a log line (`tracing::warn` (`ini_config.rs:344-349`)), not an
 error.
 
@@ -306,6 +306,26 @@ is `InterfaceConfig` (`config.rs:258-737`).
 |-----|------|---------|---------|
 | `listen_ip` | string | unset | Address to bind. (`listen_ip` (`ini_config.rs:784`)) |
 | `listen_port` | u16 | unset | Port to listen on. (`listen_port` (`ini_config.rs:785`)) |
+| `max_connections_per_source` | usize | `16` | Most connections one source holds at once; a source is an IPv4 address, or the /64 an IPv6 address sits in. A new connection past it is closed right after accept and logged as `TCP_SOURCE_CAPPED source=<addr> held=<n>`, once per source per minute. `0` turns the cap off. (`max_connections_per_source` (`ini_config.rs:1020`); `InterfaceConfig::max_connections_per_source` (`config.rs:1154-1159`); `DEFAULT_MAX_CONNECTIONS_PER_SOURCE` (`interfaces/tcp_admission.rs:28-31`)) |
+| `max_connections` | usize | `4096` | Most connections the server holds at once, lowered at start to the free file descriptors minus 64. At the cap a newcomer closes the oldest silent connection of the source holding the most; with no silent connection left it is refused and logged as `TCP_TOTAL_CAPPED`. `0` leaves only the descriptor bound. The same key is the BLE link cap below. (`max_connections` (`ini_config.rs:977`); `DEFAULT_MAX_CONNECTIONS` (`interfaces/tcp_admission.rs:32-34`)) |
+| `silent_timeout_secs` | u64 (sec) | `120` | A connection that has not delivered one valid HDLC frame within this is closed (`TCP_SILENT_CLOSED`). A client that has spoken is never closed by it. `0` never closes a silent connection. (`silent_timeout_secs` (`ini_config.rs:1021`); `InterfaceConfig::silent_timeout_secs` (`config.rs:1160-1163`)) |
+| `silent_timeout_pressure_secs` | u64 (sec) | `10` | The silent timeout while the server holds more than `pressure_fraction` of `max_connections`. (`silent_timeout_pressure_secs` (`ini_config.rs:1022`); `InterfaceConfig::silent_timeout_pressure_secs` (`config.rs:1164-1166`)) |
+| `pressure_fraction` | float | `0.8` | Share of `max_connections` above which the server is under pressure. Outside `(0, 1]` is refused at startup. (`pressure_fraction` (`ini_config.rs:1023`); `InterfaceConfig::pressure_fraction` (`config.rs:1167-1169`)) |
+
+Why these exist: on 2026-10-31 one address held 972 of the 1 135
+connections on a public lnsd's TCP server, and almost none of them ever
+sent a byte. The daemon ran out of file descriptors, its accept loop spun
+on the error writing hundreds of log lines a second, and no legitimate
+client could connect. Python's `TCPServerInterface` has no such limit
+either. The caps keep one source from owning the server, the silent
+timeout frees what a scanner or a stuck client holds, and the accept loop
+now pauses after an error (10 ms doubling to 1 s, one
+`TCP_ACCEPT_BACKOFF errors=<n> fds=<used>/<limit>` line per 10 s). At
+start lnsd raises its soft descriptor limit to the hard one (`FD_LIMIT`)
+and refuses a server interface with fewer than 256 descriptors free.
+`lnstatus` shows `Admission : connections=<n> silent=<n> capped=<n>
+silent_closed=<n> since start` under a server that has refused or closed
+a connection. None of it changes a byte on the wire.
 
 ```ini
 [interfaces]

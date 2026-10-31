@@ -42,7 +42,7 @@ start moved.
 ## Step 1, as built
 
 Without a `config` file lnsd now runs the file rnsd would have written,
-from memory (`load_or_default`, `leviculum-std/src/config.rs:1476`). The
+from memory (`load_or_default`, `leviculum-std/src/config.rs:1496`). The
 text is `RNSD_DEFAULT_CONFIG` (`leviculum-std/src/config.rs:729`): not
 the template literal of `Reticulum.py:1860` but what ConfigObj makes of
 it on `write()`, which indents every key by two spaces and drops the
@@ -50,7 +50,7 @@ last empty line. Captured from the vendored ConfigObj of the pinned
 reference, 4013 bytes. Two tests hold it: its lines are the template's
 lines, and, where `python3` runs, the template through the reference's
 own ConfigObj is byte for byte the same file. lnsd parses it with its
-own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1462`), so
+own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1482`), so
 what it runs and what rnsd would write cannot drift apart. It means:
 transport off, a shared instance named `default`, log level 4,
 `discover_interfaces` at lnsd's default, and one AutoInterface,
@@ -64,14 +64,14 @@ transport off, a shared instance named `default`, log level 4,
   builds any (`leviculum-std/src/driver/mod.rs:2334`), and once
   `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:195`).
 - `interface_stats` serves the origin as the `origin` key
-  (`leviculum-std/src/rpc/handlers.rs:672`), and `lnstatus` prints it,
+  (`leviculum-std/src/rpc/handlers.rs:674`), and `lnstatus` prints it,
   behind `--origin`, as an `Origin` line under `Status`. Without the flag
   the render is rnstatus's, which the drop-in parity tests pin
   (`leviculum-std/tests/rnsd_interop/status_parity_tests.rs`); rnsd serves
   no such key, so against rnsd the flag adds nothing. A row named after a section takes that
   section's origin; a row no section names (the shared instance, an
   AutoInterface's peers) takes the origin all sections share
-  (`origin_of`, `leviculum-std/src/interfaces/inventory.rs:263`), and
+  (`origin_of`, `leviculum-std/src/interfaces/inventory.rs:266`), and
   where no section is left, as on a start without a file under
   `LEVICULUM_NO_AUTO=1`, the origin of the configuration itself:
   `default` without a file, `configured` with one.

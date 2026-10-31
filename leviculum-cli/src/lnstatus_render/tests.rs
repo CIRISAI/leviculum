@@ -411,6 +411,50 @@ fn tx_queue_dedup_renders_when_positive_and_stays_silent_at_zero() {
 }
 
 #[test]
+fn tcp_server_admission_renders_once_it_refused_or_closed_something() {
+    // 1190: a TCP server serves `connections`, `silent`, `capped` and
+    // `silent_closed`. The line appears once the server has refused or closed
+    // a connection; a server nobody floods, and an rnsd entry without the
+    // keys, renders as rnstatus renders it.
+    let mut flooded = iface("TCPServerInterface[Public/0.0.0.0:4242]", 10_000_000, 0, 0);
+    flooded["connections"] = serde_json::json!(190);
+    flooded["silent"] = serde_json::json!(16);
+    flooded["capped"] = serde_json::json!(972);
+    flooded["silent_closed"] = serde_json::json!(40);
+    let mut quiet = iface("TCPServerInterface[Quiet/0.0.0.0:4243]", 10_000_000, 0, 0);
+    quiet["connections"] = serde_json::json!(3);
+    quiet["silent"] = serde_json::json!(1);
+    quiet["capped"] = serde_json::json!(0);
+    quiet["silent_closed"] = serde_json::json!(0);
+    let rnsd_shaped = iface("TCPServerInterface[Rnsd/0.0.0.0:4244]", 10_000_000, 0, 0);
+    let stats = serde_json::json!({
+        "interfaces": [flooded, quiet, rnsd_shaped],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+
+    let text = render_status(&stats, None, &StatusOptions::default());
+    let blocks: Vec<&str> = text.split("TCPServerInterface[").collect();
+    assert_eq!(blocks.len(), 4, "all three interfaces render:\n{text}");
+    assert!(
+        blocks[1].contains(
+            "    Admission : connections=190 silent=16 capped=972 silent_closed=40 since start\n"
+        ),
+        "a flooded server shows its counters:\n{text}"
+    );
+    assert!(
+        !blocks[2].contains("Admission"),
+        "an unflooded server stays silent:\n{text}"
+    );
+    assert!(
+        !blocks[3].contains("Admission"),
+        "rnsd's shape stays silent:\n{text}"
+    );
+
+    let json: Value = serde_json::from_str(&render_json(&stats)).unwrap();
+    assert_eq!(json["interfaces"][0]["capped"], serde_json::json!(972));
+}
+
+#[test]
 fn tx_stale_drops_renders_when_positive_and_stays_silent_at_zero() {
     // `tx_stale_drops` (#433) counts frames the send queue dropped because
     // they aged past the cap behind a duty hold. Same contract as TX dedup:

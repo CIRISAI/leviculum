@@ -11,10 +11,14 @@ use std::net::SocketAddr;
 #[cfg(test)]
 use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::inventory::{self as inventory_names, InterfaceIdentity, ListenerRow, SharedInventory};
+use super::tcp_admission::{
+    effective_total_cap, fd_usage, open_fds, raise_nofile_limit, AcceptBackoff, Admission,
+    AdmissionConfig, Closed, ConnTracker, Refusal, SourceKey, MIN_SERVER_FDS,
+};
 use super::{IncomingPacket, InterfaceCounters, InterfaceInfo, OutgoingPacket, ReadySignal};
 use crate::sync_ext::MutexRecover;
 use leviculum_core::constants::MTU;
@@ -268,16 +272,21 @@ const FRAME_BUFFER_MULTIPLIER: usize = 2;
 /// Read buffer multiplier (handles multiple packets per read)
 const READ_BUFFER_MULTIPLIER: usize = 4;
 
+/// Read buffer of a server connection before its first valid frame (1190).
+const PRE_FRAME_READ_BUFFER: usize = 256;
+
 /// Create channels, spawn the I/O task for an already-connected TCP stream,
 /// and return the resulting `InterfaceHandle`.
 ///
-/// Used by the TCP server accept loop for each incoming connection.
+/// Used by the TCP server accept loop for each incoming connection, which
+/// hands over the connection's place in its admission tracker (1190).
 pub(crate) fn spawn_tcp_interface_from_stream(
     id: InterfaceId,
     name: String,
     stream: tokio::net::TcpStream,
     buffer_size: usize,
     corrupt_every: Option<u64>,
+    lease: Option<ConnLease>,
 ) -> InterfaceHandle {
     let (incoming_tx, incoming_rx) = mpsc::channel(buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(buffer_size);
@@ -294,6 +303,7 @@ pub(crate) fn spawn_tcp_interface_from_stream(
             outgoing_rx,
             corrupt_every,
             task_counters,
+            lease,
         )
         .await;
     });
@@ -362,6 +372,7 @@ pub(crate) fn spawn_tcp_interface<A: ToSocketAddrs>(
         stream,
         buffer_size,
         corrupt_every,
+        None,
     ))
 }
 
@@ -405,6 +416,25 @@ pub(crate) struct TcpServerConfig {
     pub inventory: SharedInventory,
     /// Resolved `announce_rate_target/penalty/grace` of the listener.
     pub announce_rate: (Option<u32>, Option<u32>, Option<u32>),
+    /// Per-source and total caps and the silent timeouts (1190).
+    pub admission: AdmissionConfig,
+}
+
+/// A server connection's place in its listener's [`ConnTracker`] (1190).
+///
+/// The connection's task holds it: it reports the first valid frame, takes
+/// the tracker's order to close, and gives the place back when it ends,
+/// however it ends.
+pub(crate) struct ConnLease {
+    tracker: Arc<Mutex<ConnTracker>>,
+    id: u64,
+    close: Option<oneshot::Receiver<()>>,
+}
+
+impl Drop for ConnLease {
+    fn drop(&mut self) {
+        self.tracker.lock_recover().remove(self.id);
+    }
 }
 
 pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error> {
@@ -422,7 +452,37 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
         listener_id,
         inventory,
         announce_rate,
+        admission,
     } = config;
+
+    // A server holds one descriptor per client: use the hard limit, and do
+    // not start on fewer than a server needs (1190: 1 001 of 1 024 held).
+    let nofile = raise_nofile_limit();
+    let total_cap = match effective_total_cap(
+        admission.max_connections,
+        nofile.map(|l| l.soft),
+        open_fds(),
+    ) {
+        Ok(cap) => cap,
+        Err(free) => {
+            return Err(io::Error::other(format!(
+                "TCP server {section}: only {free} file descriptors are free, a server \
+                 needs at least {MIN_SERVER_FDS}; raise LimitNOFILE / ulimit -n"
+            )))
+        }
+    };
+    if total_cap != admission.max_connections {
+        tracing::info!(
+            "TCP server {}: total connection cap {} lowered to {} by the descriptor limit",
+            section,
+            admission.max_connections,
+            total_cap
+        );
+    }
+    let tracker = Arc::new(Mutex::new(ConnTracker::new(AdmissionConfig {
+        max_connections: total_cap,
+        ..admission
+    })));
 
     // Bind synchronously so errors propagate to the caller immediately. A
     // prebound listener is taken as it is: its port has been held since the
@@ -456,15 +516,40 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
             departed_rxb: 0,
             departed_txb: 0,
             bound_addr: Some(bound),
+            admission: Some(Arc::clone(&tracker)),
         },
     );
 
     tokio::spawn(async move {
+        let mut backoff = AcceptBackoff::default();
+        let mut janitor = tokio::time::interval(SILENT_CHECK_INTERVAL);
+        janitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, peer_addr)) => {
+                            backoff.on_success();
+                            let now = Instant::now();
+                            let decision = tracker.lock_recover().admit(peer_addr.ip(), now);
+                            let (conn_id, close) = match decision {
+                                Admission::Accept { id, close, evicted } => {
+                                    if let Some(victim) = evicted {
+                                        report_silent_close(&tracker, &section, &victim, now);
+                                        victim.close();
+                                    }
+                                    (id, close)
+                                }
+                                Admission::Refuse { reason, source, held, report } => {
+                                    refuse(stream, reason, source, held, report, &section, peer_addr);
+                                    continue;
+                                }
+                            };
+                            let lease = ConnLease {
+                                tracker: Arc::clone(&tracker),
+                                id: conn_id,
+                                close: Some(close),
+                            };
                             let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
                             let name = format!("tcp_server/{}", peer_addr);
                             inventory.lock_recover().add_spawned(
@@ -482,6 +567,7 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
                             apply_liveness_options(&stream).ok();
                             let mut handle = spawn_tcp_interface_from_stream(
                                 id, name.clone(), stream, buffer_size, corrupt_every,
+                                Some(lease),
                             );
                             // Inherit IFAC config from parent TCP server listener.
                             handle.info.ifac = ifac.clone();
@@ -504,8 +590,32 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
                             }
                         }
                         Err(e) => {
-                            tracing::warn!("TCP accept error: {}", e);
+                            // Pause before the next accept: on EMFILE the
+                            // connection stays queued and an immediate retry
+                            // fails the same way, a busy loop (1190).
+                            let (pause, report) = backoff.on_error(Instant::now());
+                            if let Some(errors) = report {
+                                tracing::warn!(
+                                    event = "TCP_ACCEPT_BACKOFF",
+                                    iface = %section,
+                                    errors = errors,
+                                    fds = %fd_usage(),
+                                    error = %e,
+                                );
+                            }
+                            tokio::select! {
+                                _ = tokio::time::sleep(pause) => {}
+                                _ = new_interface_tx.closed() => break,
+                            }
                         }
+                    }
+                }
+                _ = janitor.tick() => {
+                    let now = Instant::now();
+                    let closed = tracker.lock_recover().expire(now);
+                    for victim in closed {
+                        report_silent_close(&tracker, &section, &victim, now);
+                        victim.close();
                     }
                 }
                 _ = new_interface_tx.closed() => {
@@ -517,6 +627,60 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
     });
 
     Ok(())
+}
+
+/// How often the accept loop looks for connections past the silent timeout.
+const SILENT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Close a connection the admission tracker refused, right after accept, and
+/// say so when the tracker says a report is due. The close is a reset
+/// (`SO_LINGER` 0): a refused flood would otherwise leave one `TIME_WAIT`
+/// per attempt on our side.
+fn refuse(
+    stream: tokio::net::TcpStream,
+    reason: Refusal,
+    source: SourceKey,
+    held: usize,
+    report: bool,
+    section: &str,
+    peer: SocketAddr,
+) {
+    socket2::SockRef::from(&stream)
+        .set_linger(Some(Duration::ZERO))
+        .ok();
+    drop(stream);
+    if !report {
+        return;
+    }
+    match reason {
+        Refusal::Source => tracing::warn!(
+            event = "TCP_SOURCE_CAPPED",
+            iface = %section,
+            source = %source,
+            held = held,
+        ),
+        Refusal::Total => tracing::warn!(
+            event = "TCP_TOTAL_CAPPED",
+            iface = %section,
+            source = %peer.ip(),
+            held = held,
+        ),
+    }
+}
+
+/// Log a silent close, at most once per ten seconds (the tracker counts the
+/// rest into `suppressed`).
+fn report_silent_close(tracker: &Mutex<ConnTracker>, section: &str, closed: &Closed, now: Instant) {
+    if let Some(suppressed) = tracker.lock_recover().silent_report(now) {
+        tracing::info!(
+            event = "TCP_SILENT_CLOSED",
+            iface = %section,
+            source = %closed.peer,
+            after_s = closed.after.as_secs(),
+            reason = closed.reason,
+            suppressed = suppressed,
+        );
+    }
 }
 
 /// Spawn a TCP client interface with automatic reconnection.
@@ -972,6 +1136,7 @@ async fn tcp_client_reconnect_loop(
                     outgoing_rx,
                     corrupt_every,
                     Arc::clone(&counters),
+                    None,
                 )
                 .await;
                 tracing::warn!("{}: connection lost, will reconnect", name);
@@ -1113,16 +1278,49 @@ async fn tcp_interface_task(
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     corrupt_every: Option<u64>,
     counters: Arc<InterfaceCounters>,
+    mut lease: Option<ConnLease>,
 ) -> mpsc::Receiver<OutgoingPacket> {
     let (reader, mut writer) = stream.into_split();
 
-    let mut deframer = Deframer::with_max_frame(TCP_HW_MTU as usize);
-    let mut read_buf = vec![0u8; MTU * READ_BUFFER_MULTIPLIER];
-    let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
+    // A server connection that has not delivered a frame yet holds only a
+    // small read buffer: no deframer until its first byte, the full read
+    // buffer from its first frame on, and the frame buffer grows on the
+    // first send (1190; the incident's flood never sent a byte).
+    let mut close = lease.as_mut().and_then(|l| l.close.take());
+    let mut spoken = false;
+    let mut deframer: Option<Deframer> = None;
+    let full_read = MTU * READ_BUFFER_MULTIPLIER;
+    let mut read_buf = vec![
+        0u8;
+        if lease.is_some() {
+            PRE_FRAME_READ_BUFFER
+        } else {
+            full_read
+        }
+    ];
+    let mut frame_buf = if lease.is_some() {
+        Vec::new()
+    } else {
+        Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER)
+    };
     let mut corrupt_rng = Xorshift64::from_entropy();
 
     loop {
         tokio::select! {
+            // The listener's admission tracker closed this connection as
+            // silent, or to make room for a newcomer.
+            _ = async {
+                match close.as_mut() {
+                    Some(rx) => {
+                        let _ = rx.await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                tracing::debug!("TCP interface {} closed by admission control", name);
+                return outgoing_rx;
+            }
+
             // Read path: wait for socket readability, then try_read + deframe
             result = reader.readable() => {
                 match result {
@@ -1136,7 +1334,19 @@ async fn tcp_interface_task(
                                 }
                                 Ok(n) => {
                                     counters.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
-                                    let results = deframer.process(&read_buf[..n]);
+                                    let results = deframer
+                                        .get_or_insert_with(|| Deframer::with_max_frame(TCP_HW_MTU as usize))
+                                        .process(&read_buf[..n]);
+                                    if let Some(l) = lease.as_ref().filter(|_| !spoken) {
+                                        if results.iter().any(|r| matches!(r, DeframeResult::Frame(_))) {
+                                            // Spoken once is spoken for good; the lease
+                                            // stays until the task ends, so the connection
+                                            // keeps counting against its source's cap.
+                                            l.tracker.lock_recover().mark_spoken(l.id);
+                                            read_buf.resize(full_read, 0);
+                                            spoken = true;
+                                        }
+                                    }
                                     for r in results {
                                         // HW_MTU enforcement lives in the deframer now.
                                         if matches!(r, DeframeResult::Oversized) {
@@ -1534,6 +1744,7 @@ mod tests {
             listener_id: 99,
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
             announce_rate: (None, None, None),
+            admission: AdmissionConfig::default(),
         })
         .unwrap();
 
@@ -1579,6 +1790,7 @@ mod tests {
             listener_id: 99,
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
             announce_rate: (None, None, None),
+            admission: AdmissionConfig::default(),
         })
         .unwrap();
 
@@ -1631,6 +1843,7 @@ mod tests {
                 listener_id: 99,
                 inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
                 announce_rate: (None, None, None),
+                admission: AdmissionConfig::default(),
             })
             .unwrap();
 
@@ -1898,6 +2111,7 @@ mod tests {
                 outgoing_rx,
                 None,
                 task_counters,
+                None,
             )
             .await
         });

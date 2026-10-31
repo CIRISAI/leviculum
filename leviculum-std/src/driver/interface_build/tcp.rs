@@ -11,6 +11,10 @@ use crate::interfaces::tcp::{
     spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TcpServerConfig, TcpTarget,
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
+use crate::interfaces::tcp_admission::{
+    AdmissionConfig, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_SOURCE,
+    DEFAULT_PRESSURE_FRACTION, DEFAULT_SILENT_TIMEOUT_PRESSURE_SECS, DEFAULT_SILENT_TIMEOUT_SECS,
+};
 use crate::sync_ext::MutexRecover;
 use leviculum_core::transport::InterfaceId;
 
@@ -158,6 +162,40 @@ pub(super) fn build_server(
             ctx.transport_enabled,
             &ctx.default_announce_rate,
         ),
+        admission: admission_config(config)?,
     })?;
     Ok(Built::SelfManaged)
+}
+
+/// The TCP server's admission settings (1190), defaults for every key the
+/// section leaves out.
+pub(super) fn admission_config(config: &InterfaceConfig) -> Result<AdmissionConfig, Error> {
+    let pressure_fraction = config
+        .pressure_fraction
+        .unwrap_or(DEFAULT_PRESSURE_FRACTION);
+    // A fraction of zero or less puts every server under pressure from the
+    // first connection; above one never. Both are typos, not policies.
+    if !(pressure_fraction > 0.0 && pressure_fraction <= 1.0) {
+        return Err(Error::Config(format!(
+            "interface '{}': pressure_fraction must be above 0 and at most 1, got {}",
+            config.name, pressure_fraction
+        )));
+    }
+    Ok(AdmissionConfig {
+        max_connections_per_source: config
+            .max_connections_per_source
+            .unwrap_or(DEFAULT_MAX_CONNECTIONS_PER_SOURCE),
+        max_connections: config.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS),
+        silent_timeout: Duration::from_secs(
+            config
+                .silent_timeout_secs
+                .unwrap_or(DEFAULT_SILENT_TIMEOUT_SECS),
+        ),
+        silent_timeout_pressure: Duration::from_secs(
+            config
+                .silent_timeout_pressure_secs
+                .unwrap_or(DEFAULT_SILENT_TIMEOUT_PRESSURE_SECS),
+        ),
+        pressure_fraction,
+    })
 }

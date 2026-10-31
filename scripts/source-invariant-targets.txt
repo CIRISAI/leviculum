@@ -208,6 +208,7 @@ skip  leviculum-std   rnsd_interop               # drives Python rnsd over socke
 skip  leviculum-std   shared_instance_client_count # tokio runtime with a shared instance
 skip  leviculum-std   shared_instance_conflict   # tokio runtime with two competing instances
 skip  leviculum-std   supervised_spawn           # already run by the `supervised-spawn` step of `just fast`
+skip  leviculum-std   tcp_accept_backoff         # opens sockets and lowers the process descriptor limit; subject is the TCP accept loop
 skip  lndecode        agrees_with_the_writer     # decoder/writer agreement; subject is the code
 skip  lndecode        cli                        # spawns the lndecode binary
 skip  lnflash         cli                        # spawns the lnflash binary against temp dirs
