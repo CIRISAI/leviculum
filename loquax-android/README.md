@@ -141,7 +141,7 @@ Once per host:
 
 ```bash
 sudo apt install default-jdk-headless unzip make
-rustup target add aarch64-linux-android armv7-linux-androideabi
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 loquax-android/install-toolchain.sh      # build-tools 35.0.1, android-35, NDK r27d
 ```
 
@@ -150,9 +150,15 @@ Then, in this directory:
 ```bash
 make debug                               # android/bin/loquax-debug.apk, both ABIs
 make debug ABIS=arm64-v8a                # the 64-bit library only
+make waydroid                            # android/bin/loquax-debug-x86_64.apk, x86_64 only
 make install-debug start-debug           # onto a connected phone
 KSPASS=... make release                  # needs android/loquax.keystore
 ```
+
+`make waydroid` is the debug build for x86_64 Android, Waydroid or the
+emulator, under its own name so it never stands in for a phone's APK. The
+scripted device walk installs it (`scripts/device-walk.py`,
+[the walk's page](../docs/src/concepts/loquax-device-walk.md)).
 
 `make debug` makes `android/debug.keystore` on first use. No keystore goes
 into git (`.gitignore`); the release key is made by hand:
@@ -174,6 +180,8 @@ keytool -genkeypair -keystore android/loquax.keystore \
 | `android/src/network/leviculum/loquax/` | the four screens (`MainActivity` joins, `ConversationsActivity`, `ChatActivity`, `MapActivity` with its `MapView`), `LoquaxService`, which holds the session, and `ServiceLink`, the screens' binding to it, `Asks`, the two questions asked once, `Native`, the Java face of the library, `Core` and `MsgPack`, which read it, `Events`, and the chat's drawing: `AvatarView`, `BubbleLayout` (body with time and mark inside) and `Glyph` (its icons as paths) |
 | `android/res/` | layouts, the compose field's and badge's shapes, strings (the chat's times also in `values-de/`), the theme and its colours, light in `values/` and dark in `values-night/` |
 | `install-toolchain.sh` | the SDK and NDK pieces, checked by SHA-1 |
+| `scripts/device-walk.py`, `scripts/tests/` | the scripted walk through the app on one adb device, and its parsers' tests, which `tests/device_walk_script.rs` runs |
+| `examples/walk_mailbox.rs` | the walk's mailbox home: the 1173 ugly store in a mailbox's archive, and a manifest of what the screens must show |
 
 ## Where it differs from the template
 
