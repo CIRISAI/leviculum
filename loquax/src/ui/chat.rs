@@ -444,11 +444,15 @@ pub struct Colours {
     pub failed_mark_on_panel: u32,
     pub reaction_ours: u32,
     pub selected_row: u32,
+    /// The status dot on the bar's avatar (1199): the mailbox link up,
+    /// and down. Marks, so 3:1 on the background is their floor.
+    pub status_up: u32,
+    pub status_down: u32,
 }
 
 impl Colours {
     /// Each colour by its name, in the table's order.
-    pub fn named(&self) -> [(&'static str, u32); 24] {
+    pub fn named(&self) -> [(&'static str, u32); 26] {
         [
             ("background", self.background),
             ("text", self.text),
@@ -474,6 +478,8 @@ impl Colours {
             ("failed_mark_on_panel", self.failed_mark_on_panel),
             ("reaction_ours", self.reaction_ours),
             ("selected_row", self.selected_row),
+            ("status_up", self.status_up),
+            ("status_down", self.status_down),
         ]
     }
 }
@@ -504,6 +510,8 @@ pub const LIGHT: Colours = Colours {
     failed_mark_on_panel: 0xffba1a1a,
     reaction_ours: 0xff5f9a69,
     selected_row: 0x403a7d44,
+    status_up: 0xff2e7d32,
+    status_down: 0xff80848c,
 };
 
 /// The dark theme.
@@ -532,6 +540,8 @@ pub const DARK: Colours = Colours {
     failed_mark_on_panel: 0xffffb4ab,
     reaction_ours: 0xff4f8f5b,
     selected_row: 0x4081c784,
+    status_up: 0xff81c784,
+    status_down: 0xff7d8087,
 };
 
 /// The sizes of a pixel screen, in the phone's dp and sp, which the
