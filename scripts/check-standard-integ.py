@@ -35,7 +35,10 @@ each of them:
 
 Plus the prerequisite file both runners read (scripts/integ-prerequisites.txt):
 every target it names must exist, so a renamed suite cannot keep a skip
-that describes nothing.
+that describes nothing. And a target with required features that the file
+names runs in its recipe, not in either runner, so that recipe must run it
+through scripts/with-prerequisites.sh naming it, or the forge runs the tests
+the file excludes everywhere else (forge pipeline 598, 2026-10-31, 1167).
 
 The checker's own fixtures run first, every time: a guard that has never been
 seen to fire is not known to work.
@@ -68,6 +71,9 @@ FORGE_RUNNER = "scripts/ci-gate-integ.sh"
 FORGE_RULE = "check-standard-integ.py --gated"
 ELSEWHERE = "scripts/standard-integ-elsewhere.txt"
 PREREQUISITES = "scripts/integ-prerequisites.txt"
+# The wrapper a recipe runs a gated target's tests through so that file's
+# declarations reach them.
+PREREQ_RUNNER = "scripts/with-prerequisites.sh"
 
 
 def dump_recipes(justfile):
@@ -280,6 +286,7 @@ def findings(justfile, enumerated, metadata, elsewhere, prerequisites, forge_run
         )
 
     # 4. The prerequisites name real targets.
+    claim_lines = lines
     shown, lines = prerequisites
     for number, fields in lines:
         where = f"{shown}:{number}"
@@ -290,6 +297,25 @@ def findings(justfile, enumerated, metadata, elsewhere, prerequisites, forge_run
             out.append(
                 f"{where}: names {fields[1]}, which is not a test target in "
                 f"this tree. Drop the line, or follow the rename."
+            )
+
+    # 4b. A gated target's prerequisites reach the recipe that runs it.
+    declared = sorted({fields[1] for _, fields in lines if len(fields) >= 2} & set(gated))
+    for target in declared:
+        recipe = claimed_by(claim_lines, target)
+        if recipe is None:
+            continue
+        body = recipe_body(source, recipe) or ""
+        wrapped = re.compile(
+            re.escape(PREREQ_RUNNER) + r"[^\n]*\s" + re.escape(target) + r"(\s|$)", re.M
+        )
+        if not wrapped.search(body):
+            out.append(
+                f"{shown} declares prerequisites of {target}, which requires "
+                f"features and runs in recipe `{recipe}`, not in {RUNNER} or "
+                f"{FORGE_RUNNER}; `{recipe}` does not run it through "
+                f"`{PREREQ_RUNNER} {target}`, so a host without the "
+                f"prerequisite runs the tests the file excludes (1167)."
             )
     return out
 
@@ -306,7 +332,7 @@ orphan:
     cargo test -p a --test lonely
 
 tui:
-    {{manifest}} g -- cargo test -p a --features tui --test gated
+    {{manifest}} g -- bash scripts/with-prerequisites.sh a/gated -- cargo test -p a --features tui --test gated
 
 standard: fast tui
     {{manifest}} x -- cargo test -p a --test interop
@@ -381,6 +407,18 @@ def selftest():
             FIXTURE_JUSTFILE.replace("    {{just_executable()}} tui\n", ""),
             targets, gated, good_claims + [gated_claim], prereqs,
             "`ci-gate` does not run `tui`: the forge tests a/gated nowhere",
+        ),
+        (
+            "a gated target with a prerequisite, its recipe through the wrapper",
+            FIXTURE_JUSTFILE, targets, gated, good_claims + [gated_claim],
+            prereqs + [(2, ["reference/x", "a/gated", "one_test"])], None,
+        ),
+        (
+            "a gated target with a prerequisite, its recipe without the wrapper",
+            FIXTURE_JUSTFILE.replace("bash scripts/with-prerequisites.sh a/gated -- ", ""),
+            targets, gated, good_claims + [gated_claim],
+            prereqs + [(2, ["reference/x", "a/gated", "one_test"])],
+            "does not run it through `scripts/with-prerequisites.sh a/gated`",
         ),
         (
             "the forge runner drops the required-features rule",
