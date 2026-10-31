@@ -62,7 +62,9 @@ use loquax::ui::map::{fit, fit_at, want_pins, want_place, want_view, zoom_floor,
 use loquax::when::WallTime;
 
 use crate::friends;
-use crate::schema::{MapMark, MapRequest, MapShown, RegionRow, VERSION};
+use crate::schema::{
+    MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, RegionRow, VERSION,
+};
 use crate::session::pins_in;
 
 pub use loquax::mapframe::MOVING_TILES_PER_WORKER;
@@ -213,57 +215,56 @@ impl Renderer {
         Ok(())
     }
 
-    /// The settings page's map theme (1199): `set`, a word of the
-    /// config's `map_theme`, stored when given; the choice in force back
-    /// in the answer's `theme`, no frame drawn.
-    pub fn theme(&mut self, set: Option<&str>) -> MapShown {
+    /// The Appearance page's map theme (1199, 1207): `set`, a word of
+    /// the config's `map_theme`, stored when given; the choice in force
+    /// back, no frame drawn.
+    pub fn theme(&mut self, set: Option<&str>) -> Result<MapThemeChoice, String> {
         if let Some(word) = set {
             let next = match word {
                 "auto" => ThemeFlag::Auto,
                 "light" => ThemeFlag::Light,
                 "dark" => ThemeFlag::Dark,
-                other => return failed(format!("map: no theme {other:?}")),
+                other => return Err(format!("map: no theme {other:?}")),
             };
-            if let Err(error) = self.store_theme(next) {
-                return failed(error);
-            }
+            self.store_theme(next)?;
         }
-        MapShown {
+        Ok(MapThemeChoice {
             v: VERSION,
             ok: true,
             theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
             theme: theme_word(self.theme).to_string(),
-            ..MapShown::default()
-        }
+        })
     }
 
-    /// The Maps page (1201): `delete_region` and `set_autoload` done
-    /// when asked, then the regions of the directory, newest first, their
+    /// The Maps page (1201, 1207): `delete` and `set_autoload` done when
+    /// asked, then the regions of the directory, newest first, their
     /// bytes together and whether the autoload is on; no frame drawn. A
     /// name that is no region file of the directory deletes nothing.
-    pub fn regions(&mut self, request: &MapRequest) -> MapShown {
-        if let Some(on) = request.set_autoload {
+    pub fn regions(
+        &mut self,
+        delete: Option<&str>,
+        set_autoload: Option<bool>,
+    ) -> Result<MapRegions, String> {
+        if let Some(on) = set_autoload {
             let word = if on { "on" } else { "off" };
-            if let Err(error) = loquax::config::save(&self.dir, "map_autoload", word) {
-                return failed(format!("map: the choice was not stored: {error}"));
-            }
+            loquax::config::save(&self.dir, "map_autoload", word)
+                .map_err(|error| format!("map: the choice was not stored: {error}"))?;
             self.autoload = on;
         }
         let maps = self
             .maps
             .dir()
             .map_or_else(|| self.dir.join("maps"), Path::to_path_buf);
-        if let Some(name) = request.delete_region.as_deref() {
+        if let Some(name) = delete {
             let plain = !name.is_empty()
                 && !name.contains(['/', '\\'])
                 && !name.starts_with('.')
                 && name.ends_with(".lmr");
             if !plain || !maps.join(name).is_file() {
-                return failed(format!("map: no region {name:?}"));
+                return Err(format!("map: no region {name:?}"));
             }
-            if let Err(error) = std::fs::remove_file(maps.join(name)) {
-                return failed(format!("map: {name} was not deleted: {error}"));
-            }
+            std::fs::remove_file(maps.join(name))
+                .map_err(|error| format!("map: {name} was not deleted: {error}"))?;
             tracing::info!("MAPLOAD deleted file={name}");
             self.maps.changed();
             self.frames.refresh();
@@ -293,14 +294,13 @@ impl Renderer {
                 }
             })
             .collect();
-        MapShown {
+        Ok(MapRegions {
             v: VERSION,
             ok: true,
             region_bytes: regions.iter().map(|r| r.bytes).sum(),
             regions,
             autoload: self.autoload,
-            ..MapShown::default()
-        }
+        })
     }
 
     /// One frame for `request` over `pins`, in a buffer of its own.
@@ -537,7 +537,6 @@ impl Renderer {
             own_x: own.map(|o| o.0),
             own_y: own.map(|o| o.1),
             autoload: self.autoload,
-            ..MapShown::default()
         };
         shown
     }
@@ -689,9 +688,6 @@ static RENDERERS: Mutex<Vec<Renderer>> = Mutex::new(Vec::new());
 /// in the request's directory. The host's path, the tests' and the
 /// measuring tools': the app composes into its Bitmap ([`render_into`]).
 pub fn render(request: &MapRequest, pins: Option<Vec<MapPin>>, now: WallTime) -> Vec<u8> {
-    if let Some(shown) = settings(request) {
-        return crate::schema::frame(&shown, &[]);
-    }
     with_renderer(request, pins, now, |renderer, pins| {
         if request.prefetch {
             return crate::schema::frame(&renderer.prefetch(), &[]);
@@ -713,9 +709,6 @@ pub fn render_into(
     now: WallTime,
     canvas: &mut dyn Canvas,
 ) -> MapShown {
-    if let Some(shown) = settings(request) {
-        return shown;
-    }
     with_renderer(request, pins, now, |renderer, pins| {
         match request.prefetch {
             true => renderer.prefetch(),
@@ -724,18 +717,21 @@ pub fn render_into(
     })
 }
 
-/// The settings pages' answers, which draw no frame: the map theme
-/// (1199) and the Maps page (1201); `None` for a request of the map.
-fn settings(request: &MapRequest) -> Option<MapShown> {
-    if request.ask_theme || request.set_theme.is_some() {
-        return Some(with_dir(request, |renderer| {
-            renderer.theme(request.set_theme.as_deref())
-        }));
-    }
-    if request.ask_regions || request.delete_region.is_some() || request.set_autoload.is_some() {
-        return Some(with_dir(request, |renderer| renderer.regions(request)));
-    }
-    None
+/// The Appearance page's map theme (1207) of the app directory `dir`:
+/// [`Renderer::theme`] on the renderer the map draws with.
+pub fn theme(dir: &Path, set: Option<&str>) -> Result<MapThemeChoice, String> {
+    with_dir(dir, |renderer| renderer.theme(set))
+}
+
+/// The Maps page (1207) of the app directory `dir`: [`Renderer::regions`]
+/// on the renderer the map draws with, so a deleted region leaves its
+/// frames and its loader too.
+pub fn regions(
+    dir: &Path,
+    delete: Option<&str>,
+    set_autoload: Option<bool>,
+) -> Result<MapRegions, String> {
+    with_dir(dir, |renderer| renderer.regions(delete, set_autoload))
 }
 
 /// `f` with the renderer of the request's directory, made on its first
@@ -758,12 +754,11 @@ fn with_renderer<T>(
             Vec::new()
         }
     };
-    with_dir(request, |renderer| f(renderer, &pins))
+    with_dir(&dir, |renderer| f(renderer, &pins))
 }
 
-/// `f` with the renderer of the request's directory, made on first use.
-fn with_dir<T>(request: &MapRequest, f: impl FnOnce(&mut Renderer) -> T) -> T {
-    let dir = Path::new(&request.dir);
+/// `f` with the renderer of `dir`, made on first use.
+fn with_dir<T>(dir: &Path, f: impl FnOnce(&mut Renderer) -> T) -> T {
     let mut renderers = RENDERERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -274,16 +274,17 @@ final class Core {
     }
 
     /**
-     * The Maps page (1201), off the UI thread: with `delete` that region
-     * deleted, with `autoload` the automatic download switched; the
+     * The Maps page (1201, 1207), off the UI thread: with `delete` that
+     * region deleted, with `autoload` the automatic download switched; the
      * regions (name, bytes, modified, lat_e6, lon_e6, min_zoom, max_zoom,
-     * auto) under "regions", their sum as "region_bytes", "autoload".
+     * auto) under "regions", their sum as "region_bytes", "autoload". A
+     * question of its own, not a map frame: it carries no frame's fields.
      */
-    static Map<String, Object> mapRegions(String dir, String delete, Boolean autoload) {
-        Map<String, Object> request = map("dir", dir, "ask_regions", true);
-        if (delete != null) request.put("delete_region", delete);
+    static Map<String, Object> mapRegions(String delete, Boolean autoload) {
+        Map<String, Object> request = map("t", "mapregions");
+        if (delete != null) request.put("delete", delete);
         if (autoload != null) request.put("set_autoload", autoload);
-        return renderMap(request, null);
+        return answer(Native.query(MsgPack.pack(request)));
     }
 
     /** Every link: peer, lookup, contact_id, name. */
@@ -373,15 +374,14 @@ final class Core {
     }
 
     /**
-     * The map's theme (1199): `set` (`auto`, `light`, `dark`) stored, or
-     * with null only asked; the choice in force as `theme`. Waits for the
-     * frame a map may be drawing: not on the UI thread.
+     * The map's theme (1199, 1207): `set` (`auto`, `light`, `dark`)
+     * stored, or with null only asked; the choice in force as `theme`.
+     * Waits for the frame a map may be drawing: not on the UI thread.
      */
-    static Map<String, Object> mapTheme(String dir, String set) {
-        Map<String, Object> request = set == null
-                ? map("dir", dir, "ask_theme", true)
-                : map("dir", dir, "set_theme", set);
-        return renderMap(request, null);
+    static Map<String, Object> mapTheme(String set) {
+        Map<String, Object> request = map("t", "maptheme");
+        if (set != null) request.put("set", set);
+        return answer(Native.query(MsgPack.pack(request)));
     }
 
     /** The next event, or null; blocks up to waitMs. */

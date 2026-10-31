@@ -23,7 +23,7 @@ use loquax::tiles;
 use loquax::ui::history::StoreWrite;
 use loquax::ui::map::MapPin;
 use loquax::when::WallTime;
-use loquax_android::schema::{self, MapRequest, MapShown};
+use loquax_android::schema::{self, MapRegions, MapRequest, MapShown, MapThemeChoice};
 
 #[path = "../../loquax/tests/support/ugly_store.rs"]
 mod ugly_store;
@@ -309,23 +309,14 @@ fn a_stored_map_theme_wins_over_the_phone() {
 #[test]
 fn the_settings_page_sets_the_map_theme() {
     let home = home();
-    let theme = |ask: bool, set: Option<&str>| {
-        let (shown, rgba) = schema::unframe(&loquax_android::map::render(
-            &MapRequest {
-                dir: home.path().display().to_string(),
-                ask_theme: ask,
-                set_theme: set.map(str::to_string),
-                ..MapRequest::default()
-            },
-            Some(Vec::new()),
-            now(),
-        ))
-        .map(|(shown, rgba)| (shown, rgba.len()))
-        .expect("an answer");
-        assert_eq!(rgba, 0, "no frame drawn");
-        shown
+    let theme = |set: Option<&str>| {
+        loquax_android::map::theme(home.path(), set).unwrap_or_else(|error| MapThemeChoice {
+            ok: false,
+            theme: error,
+            ..MapThemeChoice::default()
+        })
     };
-    let shown = theme(true, None);
+    let shown = theme(None);
     assert!(
         shown.ok && shown.theme == "auto" && !shown.theme_chosen,
         "{shown:?}"
@@ -342,7 +333,7 @@ fn the_settings_page_sets_the_map_theme() {
         ("dark", ThemeFlag::Dark, true),
         ("light", ThemeFlag::Light, false),
     ] {
-        let shown = theme(false, Some(word));
+        let shown = theme(Some(word));
         assert!(
             shown.ok && shown.theme == word && shown.theme_chosen,
             "{shown:?}"
@@ -355,12 +346,12 @@ fn the_settings_page_sets_the_map_theme() {
             assert_eq!(shown.dark, dark, "{word}, phone dark {phone_dark}");
             assert_eq!(shown.theme, word);
         }
-        assert_eq!(theme(true, None).theme, word);
+        assert_eq!(theme(None).theme, word);
     }
-    let shown = theme(false, Some("auto"));
+    let shown = theme(Some("auto"));
     assert!(shown.ok && !shown.theme_chosen, "{shown:?}");
     assert!(draw(true).dark && !draw(false).dark, "the phone decides");
-    let shown = theme(false, Some("sepia"));
+    let shown = theme(Some("sepia"));
     assert!(!shown.ok, "{shown:?}");
     assert_eq!(
         loquax::config::load(home.path())
@@ -1550,20 +1541,15 @@ fn a_view_without_a_region_says_no_map_here_yet() {
     assert!(shown.no_map && !shown.loading, "{shown:?}");
 }
 
-/// The Maps page's call (1201) for `home`: no frame, the regions.
-fn regions(home: &Path, change: impl FnOnce(&mut MapRequest)) -> MapShown {
-    let mut ask = MapRequest {
-        dir: home.display().to_string(),
-        ask_regions: true,
-        ..MapRequest::default()
-    };
+/// The Maps page's call (1201, 1207) for `home`: no frame, the regions;
+/// a refusal as `ok: false`.
+fn regions(home: &Path, change: impl FnOnce(&mut (Option<String>, Option<bool>))) -> MapRegions {
+    let mut ask = (None, None);
     change(&mut ask);
-    let (shown, rgba) =
-        schema::unframe(&loquax_android::map::render(&ask, Some(Vec::new()), now()))
-            .map(|(shown, rgba)| (shown, rgba.len()))
-            .expect("an answer");
-    assert_eq!(rgba, 0, "no frame drawn");
-    shown
+    loquax_android::map::regions(home, ask.0.as_deref(), ask.1).unwrap_or_else(|_| MapRegions {
+        ok: false,
+        ..MapRegions::default()
+    })
 }
 
 /// 1201: the Maps page lists the regions newest first with their sizes,
@@ -1604,11 +1590,11 @@ fn the_maps_page_lists_sizes_and_deletes_regions() {
     assert!(florence.min_zoom <= florence.max_zoom && florence.max_zoom >= 14);
 
     // The autoload, on and off, in the config.
-    let on = regions(home.path(), |ask| ask.set_autoload = Some(true));
+    let on = regions(home.path(), |ask| ask.1 = Some(true));
     assert!(on.ok && on.autoload, "{on:?}");
     let config = loquax::config::load(home.path()).expect("the config");
     assert_eq!(config.map_autoload, Some(true));
-    let off = regions(home.path(), |ask| ask.set_autoload = Some(false));
+    let off = regions(home.path(), |ask| ask.1 = Some(false));
     assert!(off.ok && !off.autoload);
     assert_eq!(
         loquax::config::load(home.path())
@@ -1619,15 +1605,13 @@ fn the_maps_page_lists_sizes_and_deletes_regions() {
 
     // Names that are no region file delete nothing.
     for bad in ["../config", "notes.txt", "gone.lmr", "", "maps/firenze.lmr"] {
-        let refused = regions(home.path(), |ask| ask.delete_region = Some(bad.to_string()));
+        let refused = regions(home.path(), |ask| ask.0 = Some(bad.to_string()));
         assert!(!refused.ok, "{bad:?}: {refused:?}");
     }
     assert!(home.path().join(loquax::config::CONFIG_FILE).is_file());
     assert!(maps.join("notes.txt").is_file());
 
-    let left = regions(home.path(), |ask| {
-        ask.delete_region = Some("auto-old.lmr".to_string())
-    });
+    let left = regions(home.path(), |ask| ask.0 = Some("auto-old.lmr".to_string()));
     assert!(left.ok, "{left:?}");
     assert_eq!(left.regions.len(), 1);
     assert_eq!(left.region_bytes, len);
@@ -1642,9 +1626,7 @@ fn the_maps_page_lists_sizes_and_deletes_regions() {
     ))
     .0;
     assert!(!before.no_map, "{before:?}");
-    let none = regions(home.path(), |ask| {
-        ask.delete_region = Some("firenze.lmr".to_string())
-    });
+    let none = regions(home.path(), |ask| ask.0 = Some("firenze.lmr".to_string()));
     assert!(none.ok && none.regions.is_empty() && none.region_bytes == 0);
     let after = frame(&loquax_android::map::render(
         &request(home.path(), false),

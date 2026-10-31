@@ -19,6 +19,11 @@ mod nomadnet_tree;
 #[path = "../../loquax/tests/support/ugly_store.rs"]
 mod ugly_store;
 
+mod support {
+    pub mod java;
+}
+use support::java::{java_map, Java};
+
 /// The exported facade keeps one session per process, and the tests of a
 /// binary share the process: those that go through it take turns. Tokio's
 /// lock, which the async test holds across its awaits.
@@ -1453,60 +1458,14 @@ impl<'de> serde::Deserialize<'de> for JavaLong {
     }
 }
 
-/// A value of a request map as the app builds it.
-enum Java<'a> {
-    Str(&'a str),
-    Long(i64),
-    Longs(&'a [i64]),
-}
-
-/// A request map in the bytes `MsgPack.pack` writes: a long below -32 or
-/// above 127 as `d3` and eight bytes, whatever its size.
-fn java_map(entries: &[(&str, Java)]) -> Vec<u8> {
-    fn long(out: &mut Vec<u8>, n: i64) {
-        if (0..128).contains(&n) || (-32..0).contains(&n) {
-            out.push(n as u8);
-        } else {
-            out.push(0xd3);
-            out.extend_from_slice(&n.to_be_bytes());
-        }
-    }
-    fn string(out: &mut Vec<u8>, s: &str) {
-        let n = s.len();
-        if n < 32 {
-            out.push(0xa0 | n as u8);
-        } else if n < 0x100 {
-            out.extend_from_slice(&[0xd9, n as u8]);
-        } else {
-            out.push(0xda);
-            out.extend_from_slice(&(n as u16).to_be_bytes());
-        }
-        out.extend_from_slice(s.as_bytes());
-    }
-    let mut out = vec![0x80 | entries.len() as u8];
-    for (name, value) in entries {
-        string(&mut out, name);
-        match value {
-            Java::Str(s) => string(&mut out, s),
-            Java::Long(n) => long(&mut out, *n),
-            Java::Longs(ns) => {
-                out.push(0x90 | ns.len() as u8);
-                for n in *ns {
-                    long(&mut out, *n);
-                }
-            }
-        }
-    }
-    out
-}
-
 /// A request map of `t` with a peer and a boolean `on`, as `MsgPack.pack`
 /// writes a Java `boolean` (`c3` and `c2`).
 fn java_bool_map(t: &str, peer: &str, on: bool) -> Vec<u8> {
-    let mut out = java_map(&[("t", Java::Str(t)), ("peer", Java::Str(peer))]);
-    out[0] += 1;
-    out.extend_from_slice(&[0xa2, b'o', b'n', if on { 0xc3 } else { 0xc2 }]);
-    out
+    java_map(&[
+        ("t", Java::Str(t)),
+        ("peer", Java::Str(peer)),
+        ("on", Java::Bool(on)),
+    ])
 }
 
 /// 1164: an import on the running mailbox runs outside its daemon, on a
@@ -2617,4 +2576,159 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
             .any(|window| window == bob_key)),
         "the home node kept no key for Bob in {kept:?}"
     );
+}
+
+/// One query in the bytes Java sends, through the session as the facade's
+/// `query` hands it on, and its answer as `T`.
+fn java_query<T: serde::de::DeserializeOwned>(
+    session: &Session,
+    entries: &[(&str, Java)],
+) -> Result<T, String> {
+    let query: schema::Query = schema::decode(&java_map(entries))?;
+    let answer = session.query(query)?;
+    rmp_serde::from_slice(&answer).map_err(|error| error.to_string())
+}
+
+/// 1207, Lew's phone on 2026-10-31: the Maps page showed the switch off,
+/// "0 B" and no maps with Berlin installed, and the switch said "the
+/// request did not decode: missing field `w`". The page and Appearance
+/// now ask with queries of their own, here in Java's bytes with exactly
+/// the fields `Core.mapRegions` and `Core.mapTheme` put in, against a
+/// phone with one installed region and no `map_autoload` in its config:
+/// the region with its size and date, the automatic download on (1089),
+/// the switch off stored and kept across a session's restart, and a new
+/// renderer reads it from the config; Delete removes the file; the map's
+/// theme is asked and set.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_settings_pages_ask_the_renderer_in_javas_bytes() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let maps = phone.path().join("maps");
+    std::fs::create_dir_all(&maps).expect("maps dir");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/firenze.lmr");
+    std::fs::copy(&fixture, maps.join("firenze.lmr")).expect("the installed region");
+    let len = std::fs::metadata(maps.join("firenze.lmr"))
+        .expect("its size")
+        .len();
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let config = loquax::config::load(Path::new(&first.dir)).unwrap_or_default();
+        assert_eq!(config.map_autoload, None, "no choice stored yet");
+
+        let page: schema::MapRegions =
+            java_query(&session, &[("t", Java::Str("mapregions"))]).expect("the Maps page");
+        assert!(page.ok && page.autoload, "on by default (1089): {page:?}");
+        assert_eq!(page.regions.len(), 1, "{page:?}");
+        let region = &page.regions[0];
+        assert_eq!(region.name, "firenze.lmr");
+        assert_eq!((region.bytes, page.region_bytes), (len, len));
+        assert!(region.modified > 0, "a date: {region:?}");
+
+        let off: schema::MapRegions = java_query(
+            &session,
+            &[
+                ("t", Java::Str("mapregions")),
+                ("set_autoload", Java::Bool(false)),
+            ],
+        )
+        .expect("the switch off");
+        assert!(off.ok && !off.autoload && off.regions.len() == 1, "{off:?}");
+
+        let theme: schema::MapThemeChoice =
+            java_query(&session, &[("t", Java::Str("maptheme"))]).expect("Appearance");
+        assert!(
+            theme.ok && theme.theme == "auto" && !theme.theme_chosen,
+            "{theme:?}"
+        );
+        let dark: schema::MapThemeChoice = java_query(
+            &session,
+            &[("t", Java::Str("maptheme")), ("set", Java::Str("dark"))],
+        )
+        .expect("dark chosen");
+        assert!(
+            dark.ok && dark.theme == "dark" && dark.theme_chosen,
+            "{dark:?}"
+        );
+        let refused = java_query::<schema::MapThemeChoice>(
+            &session,
+            &[("t", Java::Str("maptheme")), ("set", Java::Str("sepia"))],
+        );
+        assert!(refused.is_err(), "{refused:?}");
+        session.stop();
+    })
+    .await
+    .expect("the first session");
+
+    // Restarted as the sticky service starts it: the switch is still off,
+    // and a renderer made afresh reads it from the config.
+    let again = Start {
+        dir: phone.path().display().to_string(),
+        ..Start::default()
+    };
+    let dir = phone.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        let page: schema::MapRegions =
+            java_query(&session, &[("t", Java::Str("mapregions"))]).expect("the Maps page");
+        assert!(page.ok && !page.autoload, "kept: {page:?}");
+        let fresh = loquax_android::map::Renderer::new(&dir)
+            .regions(None, None)
+            .expect("a fresh renderer");
+        assert!(!fresh.autoload, "stored in the config");
+        assert_eq!(
+            loquax::config::load(&dir).expect("config").map_autoload,
+            Some(false)
+        );
+
+        let on: schema::MapRegions = java_query(
+            &session,
+            &[
+                ("t", Java::Str("mapregions")),
+                ("set_autoload", Java::Bool(true)),
+            ],
+        )
+        .expect("the switch on");
+        assert!(on.ok && on.autoload, "{on:?}");
+
+        let refused = java_query::<schema::MapRegions>(
+            &session,
+            &[
+                ("t", Java::Str("mapregions")),
+                ("delete", Java::Str("../config.toml")),
+            ],
+        );
+        assert!(refused.is_err(), "{refused:?}");
+        let gone: schema::MapRegions = java_query(
+            &session,
+            &[
+                ("t", Java::Str("mapregions")),
+                ("delete", Java::Str("firenze.lmr")),
+            ],
+        )
+        .expect("deleted");
+        assert!(
+            gone.ok && gone.regions.is_empty() && gone.region_bytes == 0,
+            "{gone:?}"
+        );
+        assert!(!dir.join("maps/firenze.lmr").exists());
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+    node.stop().await;
 }

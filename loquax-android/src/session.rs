@@ -754,6 +754,21 @@ impl Session {
                     .backup(&passphrase)
                     .map(|backup| schema::encode(&backup))
             }
+            // The settings pages' map questions (1207) go to the renderer
+            // of the app's directory, not under the session's lock.
+            schema::Query::MapRegions {
+                delete,
+                set_autoload,
+            } => {
+                let home = self.lock().home.clone();
+                return crate::map::regions(&home, delete.as_deref(), set_autoload)
+                    .map(|regions| schema::encode(&regions));
+            }
+            schema::Query::MapTheme { set } => {
+                let home = self.lock().home.clone();
+                return crate::map::theme(&home, set.as_deref())
+                    .map(|theme| schema::encode(&theme));
+            }
             _ => {}
         }
         let inner = self.lock();
@@ -822,9 +837,11 @@ impl Session {
                         .to_string(),
                 })
             }
-            schema::Query::Me | schema::Query::Profile | schema::Query::Backup { .. } => {
-                return Err("answered above".to_string())
-            }
+            schema::Query::Me
+            | schema::Query::Profile
+            | schema::Query::Backup { .. }
+            | schema::Query::MapRegions { .. }
+            | schema::Query::MapTheme { .. } => return Err("answered above".to_string()),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner

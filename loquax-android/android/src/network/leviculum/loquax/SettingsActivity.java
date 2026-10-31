@@ -205,7 +205,6 @@ public class SettingsActivity extends Activity implements Events.Listener {
         TextView header = text(getString(R.string.settings_map_theme), 14, R.color.accent);
         header.setPadding(dp(16), dp(16), dp(16), dp(4));
         body.addView(header);
-        final String dir = getFilesDir().getAbsolutePath();
         final String[] words = {"auto", "light", "dark"};
         int[] labels = {R.string.map_theme_auto, R.string.map_theme_light, R.string.map_theme_dark};
         final RadioButton[] choices = new RadioButton[words.length];
@@ -222,7 +221,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
             choice.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    theme(dir, word, choices, words);
+                    theme(word, choices, words);
                 }
             });
             choices[i] = choice;
@@ -230,19 +229,19 @@ public class SettingsActivity extends Activity implements Events.Listener {
         }
         body.addView(group);
         body.addView(padded(text(getString(R.string.settings_app_theme_text), 14, R.color.text_secondary)));
-        theme(dir, null, choices, words);
+        theme(null, choices, words);
     }
 
     /**
      * Store `set` as the map's theme, or with null only ask, off the UI
      * thread; the choice in force checked after, a failure said.
      */
-    private void theme(final String dir, final String set, final RadioButton[] choices,
+    private void theme(final String set, final RadioButton[] choices,
             final String[] words) {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final Map<String, Object> answer = Core.mapTheme(dir, set);
+                final Map<String, Object> answer = Core.mapTheme(set);
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -250,7 +249,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
                             android.widget.Toast.makeText(SettingsActivity.this,
                                     Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
                             if (set != null) {
-                                theme(dir, null, choices, words);
+                                theme(null, choices, words);
                             }
                             return;
                         }
@@ -285,20 +284,27 @@ public class SettingsActivity extends Activity implements Events.Listener {
     /**
      * The Maps page (1201): ask the renderer off the UI thread, with a
      * region to delete or the autoload to switch when given, and show
-     * what it answers.
+     * what it answers; a change refused is said and the page asked again,
+     * so the switch shows what is stored (1207).
      */
     private void maps(final String delete, final Boolean autoload) {
-        final String dir = getFilesDir().getAbsolutePath();
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final Map<String, Object> answer = Core.mapRegions(dir, delete, autoload);
+                final Map<String, Object> answer = Core.mapRegions(delete, autoload);
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (page == R.string.settings_maps && !isFinishing()) {
-                            showMaps(answer);
+                        if (page != R.string.settings_maps || isFinishing()) {
+                            return;
                         }
+                        if (!Core.bool(answer, "ok") && (delete != null || autoload != null)) {
+                            android.widget.Toast.makeText(SettingsActivity.this,
+                                    Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
+                            maps(null, null);
+                            return;
+                        }
+                        showMaps(answer);
                     }
                 });
             }
