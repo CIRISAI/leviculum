@@ -281,6 +281,7 @@ fn carried(
     threads: usize,
 ) {
     let mut ladder = Vec::new();
+    let mut collision = Vec::new();
     let mut ms = Vec::new();
     let mut names = 0;
     for _ in 0..5 {
@@ -295,6 +296,7 @@ fn carried(
             if let Some(cost) = loquax_android::map::carry_cost(home) {
                 names = cost.carried;
                 ladder.push(cost.ladder_ns as f64 / 1e3);
+                collision.push(cost.collision_ns as f64 / 1e3);
             }
         }
     }
@@ -307,12 +309,12 @@ fn carried(
         1e3 / ms
     );
     let per200 = |us: f64| us * 200.0 / names.max(1) as f64;
-    let us = median(ladder);
-    println!(
-        "| names carried: {names}, ladder us a frame (for 200) | {threads} | {:.1} ({:.1}) | | | |",
-        us,
-        per200(us)
-    );
+    for (pass, us) in [("ladder", median(ladder)), ("collision", median(collision))] {
+        println!(
+            "| names carried: {names}, {pass} us a frame (for 200) | {threads} | {us:.1} ({:.1}) | | | |",
+            per200(us)
+        );
+    }
 }
 
 /// The prefetch rows (1135): five runs each with and without the

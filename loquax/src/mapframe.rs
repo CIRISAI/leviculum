@@ -17,7 +17,9 @@
 //! as sprites; a frame while the view moves draws them where the view
 //! moved them ([`moved`]), so they never leave the picture. A frame that
 //! zooms holds them to the ladder of its own zoom: a name whose
-//! `min_zoom` the zoom no longer reaches is not drawn (1205). The pins are
+//! `min_zoom` the zoom no longer reaches is not drawn, and of two whose
+//! boxes the zoom brought together the one placed first, the more
+//! important, is (1205). The pins are
 //! placed in every frame, and drawn in unless the frontend sets them
 //! itself ([`Ask::draw_pins`]).
 //!
@@ -37,7 +39,7 @@ use leviculum_map::labels::{LabelKind, Rect, SUBPIXEL};
 use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::{MapTheme, Style};
 
-use crate::mapnames::{self, Sprite, Typesetter};
+use crate::mapnames::{self, Sprite, Typesetter, MARGIN};
 use crate::picture::{Maps, Painter};
 use crate::screenmap::{self, Placed};
 use crate::tiles::{self, Frame as TileFrame, Motion, Plan, Stats, TileCache, BUDGET_MB};
@@ -209,6 +211,8 @@ pub struct Frames {
     drawn_names: Vec<(usize, (i64, i64))>,
     /// What the last frame that zoomed spent on the names it carried.
     carry: CarryCost,
+    /// The cells its collision pass filed the names' boxes in.
+    grid: Grid,
 }
 
 /// What a frame that zooms spends on the names of the last frame at rest
@@ -220,6 +224,82 @@ pub struct CarryCost {
     /// Each moved and held to the ladder of the frame's zoom, in
     /// nanoseconds.
     pub ladder_ns: u64,
+    /// Those the ladder kept held apart, in nanoseconds.
+    pub collision_ns: u64,
+}
+
+/// The side of a [`Grid`]'s cell in pixels.
+const CELL: i32 = 64;
+
+/// The boxes of the names a frame that zooms keeps, filed by the cells of
+/// [`CELL`] pixels of the frame they touch, so a name is tested against
+/// those near it alone (1205). A box past the frame's edge is filed in
+/// the edge's cells: the clamp keeps two boxes that meet in cells that
+/// meet.
+#[derive(Default)]
+struct Grid {
+    cols: i32,
+    rows: i32,
+    /// Each cell's boxes, by their index in `boxes`.
+    cells: Vec<Vec<u32>>,
+    boxes: Vec<Rect>,
+}
+
+impl Grid {
+    /// Empty, over a frame of `w` by `h` pixels; the cells' room kept.
+    fn reset(&mut self, w: u32, h: u32) {
+        let side = |n: u32| (i32::try_from(n).unwrap_or(i32::MAX) / CELL).saturating_add(1);
+        (self.cols, self.rows) = (side(w), side(h));
+        let n = (self.cols as usize) * (self.rows as usize);
+        self.cells.resize_with(n, Vec::new);
+        for cell in &mut self.cells {
+            cell.clear();
+        }
+        self.boxes.clear();
+    }
+
+    /// The cells `r` touches: columns and rows, inclusive.
+    fn span(&self, r: &Rect) -> (i32, i32, i32, i32) {
+        let col = |x: i32| x.div_euclid(CELL).clamp(0, self.cols - 1);
+        let row = |y: i32| y.div_euclid(CELL).clamp(0, self.rows - 1);
+        (col(r.x0), col(r.x1 - 1), row(r.y0), row(r.y1 - 1))
+    }
+
+    /// Whether `r`, grown by `margin`, meets no box filed.
+    fn free(&self, r: &Rect, margin: i32) -> bool {
+        let g = r.grown(margin);
+        let (c0, c1, r0, r1) = self.span(&g);
+        (r0..=r1).all(|row| {
+            (c0..=c1).all(|col| {
+                self.cells[(row * self.cols + col) as usize]
+                    .iter()
+                    .all(|&i| !self.boxes[i as usize].overlaps(&g))
+            })
+        })
+    }
+
+    /// File `r`.
+    fn add(&mut self, r: Rect) {
+        let i = u32::try_from(self.boxes.len()).unwrap_or(u32::MAX);
+        let (c0, c1, r0, r1) = self.span(&r);
+        for row in r0..=r1 {
+            for col in c0..=c1 {
+                self.cells[(row * self.cols + col) as usize].push(i);
+            }
+        }
+        self.boxes.push(r);
+    }
+}
+
+/// `r` moved by `(dx, dy)` pixels.
+fn shifted(r: &Rect, (dx, dy): (i64, i64)) -> Rect {
+    let by = |v: i64| i32::try_from(v).unwrap_or(0);
+    Rect {
+        x0: r.x0 + by(dx),
+        y0: r.y0 + by(dy),
+        x1: r.x1 + by(dx),
+        y1: r.y1 + by(dy),
+    }
 }
 
 /// A name a frame drew ([`Frames::drawn_names`]): where, in the frame's
@@ -249,6 +329,7 @@ impl Frames {
             placed: Vec::new(),
             drawn_names: Vec::new(),
             carry: CarryCost::default(),
+            grid: Grid::default(),
         }
     }
 
@@ -442,9 +523,29 @@ impl Frames {
                 self.drawn_names.push((i, (by.0 as i64, by.1 as i64)));
             }
             if zoomed {
+                let ladder_ns = nanos(started);
+                // Brought together by the zoom, the name placed first, the
+                // more important by the rule's order, keeps its place and
+                // the other is not drawn: the rule's margin between them,
+                // as at rest.
+                let started = Instant::now();
+                let margin = (MARGIN * scale).round() as i32;
+                let (names, grid) = (&self.names, &mut self.grid);
+                grid.reset(w, h);
+                self.drawn_names.retain(|&(i, by)| {
+                    let boxes = &names[i].boxes;
+                    let free = boxes.iter().all(|b| grid.free(&shifted(b, by), margin));
+                    if free {
+                        for b in boxes {
+                            grid.add(shifted(b, by));
+                        }
+                    }
+                    free
+                });
                 self.carry = CarryCost {
                     carried: self.names.len(),
-                    ladder_ns: nanos(started),
+                    ladder_ns,
+                    collision_ns: nanos(started),
                 };
             }
             for &(i, (dx, dy)) in &self.drawn_names {
@@ -546,21 +647,11 @@ impl Frames {
             .iter()
             .map(|&(i, (dx, dy))| {
                 let name = &self.names[i];
-                let by = |v: i64| i32::try_from(v).unwrap_or(0);
                 DrawnName {
                     text: name.text.clone(),
                     kind: name.kind,
                     min_zoom: name.min_zoom,
-                    boxes: name
-                        .boxes
-                        .iter()
-                        .map(|b| Rect {
-                            x0: b.x0 + by(dx),
-                            y0: b.y0 + by(dy),
-                            x1: b.x1 + by(dx),
-                            y1: b.y1 + by(dy),
-                        })
-                        .collect(),
+                    boxes: name.boxes.iter().map(|b| shifted(b, (dx, dy))).collect(),
                 }
             })
             .collect()
@@ -797,13 +888,32 @@ mod tests {
         );
     }
 
-    /// One frame of a pinch: its zoom, the names drawn, and those the
-    /// ladder of its zoom does not show.
+    /// One frame of a pinch: its zoom, the names drawn, the pairs of
+    /// them whose boxes overlap, those the ladder of its zoom does not
+    /// show, and the names a frame at rest of its view places.
     #[derive(Debug)]
     struct PinchFrame {
         zoom_milli: u32,
         drawn: usize,
+        overlapping: usize,
         below: usize,
+        budget: usize,
+    }
+
+    /// The overlapping pairs of `names`: two of them whose boxes cover
+    /// a pixel both.
+    fn overlapping(names: &[DrawnName]) -> usize {
+        let mut pairs = 0;
+        for (i, a) in names.iter().enumerate() {
+            for b in &names[i + 1..] {
+                let meet = a
+                    .boxes
+                    .iter()
+                    .any(|p| b.boxes.iter().any(|q| p.overlaps(q)));
+                pairs += usize::from(meet);
+            }
+        }
+        pairs
     }
 
     /// A pinch out from z15 to z12 over twenty frames on the Florence
@@ -827,10 +937,20 @@ mod tests {
             });
             let drawn = frames.drawn_names();
             let band = view.tile_zoom();
+            let budget = match drawn.is_empty() {
+                true => 0,
+                false => {
+                    let mut fresh = florence();
+                    fresh.frame(&ask(view, false, SCALE, theme));
+                    fresh.names().len()
+                }
+            };
             out.push(PinchFrame {
                 zoom_milli: view.zoom_milli(),
                 drawn: drawn.len(),
+                overlapping: overlapping(&drawn),
                 below: drawn.iter().filter(|n| n.min_zoom > band).count(),
+                budget,
             });
         }
         for f in &out {
@@ -839,18 +959,24 @@ mod tests {
         out
     }
 
-    /// 1205: a pinch out draws no name the ladder of the frame's zoom
-    /// does not show, so the streets of z15 are gone below z14.5. Before,
-    /// every frame drew all eight names of the frame at rest, seven of
-    /// them below the ladder from z14.4 and all eight from z13.35.
+    /// 1205: a pinch out draws no carpet: in every frame no name the
+    /// ladder of the frame's zoom does not show, no two names whose
+    /// boxes overlap, and no more names than a frame at rest of its view
+    /// places. Before, every frame drew all eight names of the frame at
+    /// rest, nine pairs of them overlapping from z14.85, twenty from
+    /// z13.95 and twenty-eight from z12.9, seven below the ladder from
+    /// z14.4 and all eight from z13.35, against six to none at rest.
     #[test]
-    fn a_pinch_out_holds_the_names_to_the_ladder() {
+    fn a_pinch_out_draws_no_carpet() {
         let frames = pinch_out();
         let below: Vec<_> = frames.iter().filter(|f| f.below > 0).collect();
         assert!(below.is_empty(), "names below the ladder: {below:?}");
-        let at = |z: u32| frames.iter().find(|f| f.zoom_milli == z).map(|f| f.drawn);
-        assert_eq!(at(14_850), Some(8), "the streets while z15's ladder holds");
-        assert!(at(14_400) < at(14_850), "fewer from z14.4");
+        let overlapping: Vec<_> = frames.iter().filter(|f| f.overlapping > 0).collect();
+        assert!(overlapping.is_empty(), "names overlap: {overlapping:?}");
+        let over: Vec<_> = frames.iter().filter(|f| f.drawn > f.budget).collect();
+        assert!(over.is_empty(), "more names than at rest: {over:?}");
+        assert!(frames[0].drawn > 1, "the first frame keeps names");
+        assert_eq!(frames.last().map(|f| f.zoom_milli), Some(12_000));
     }
 
     /// 1163: a pinch's frame at the step below covers more than the
