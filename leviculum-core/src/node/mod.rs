@@ -595,6 +595,14 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// with the destination hash; consumed take-once at the Single-destination
     /// decrypt site and always cleared before the call returns.
     pending_single_dest_plaintext: Option<SingleDestPlaintext>,
+    /// The hash of the packet whose decrypt just failed at one of our Single
+    /// destinations. Transport queues `ProofRequested` right behind the
+    /// `PacketReceived` for every locally addressed packet, before anyone
+    /// has tried to decrypt it; this is how the proof learns that the
+    /// decrypt failed and stays unsent, as the reference proves only what
+    /// `Destination.receive` accepted (`RNS/Transport.py:2159-2160`).
+    /// Cleared by the next `ProofRequested`, whichever packet it names.
+    undecrypted_packet: Option<[u8; 32]>,
     /// Full destination names whose per-identity hash a peer-up report pulls
     /// a path for (Codeberg #365); see
     /// [`handle_interface_peer_up`](Self::handle_interface_peer_up).
@@ -684,6 +692,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             resource_window_policy,
             announce_control: None,
             pending_single_dest_plaintext: None,
+            undecrypted_packet: None,
             peer_up_pull_names: Vec::new(),
         }
     }
@@ -696,6 +705,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     // Destination Management
+    /// Turn ratchets on for `dest` with this node's randomness and clock,
+    /// before it is registered: [`Self::register_destination`] then loads
+    /// the keys the storage kept for it, so a restarted process holds the
+    /// ratchets it announced before. The reference cadence is the
+    /// destination's default (30 minutes, 512 retained,
+    /// `RNS/Destination.py:85,90`), and the rotation happens on announce.
+    ///
+    /// # Errors
+    /// [`crate::destination::DestinationError::CannotEnableRatchetsOnOut`]
+    /// for an OUT destination.
+    pub fn enable_ratchets(
+        &mut self,
+        dest: &mut Destination,
+    ) -> Result<(), crate::destination::DestinationError> {
+        let now_ms = self.transport.clock().now_ms();
+        dest.enable_ratchets(&mut self.rng, now_ms)
+    }
+
     /// Register a destination to receive packets and/or connections
     ///
     /// # Arguments
@@ -2591,6 +2618,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // leak into a later call.
         self.pending_single_dest_plaintext = None;
         out
+    }
+
+    /// A packet for one of our Single destinations did not decrypt: say so to
+    /// the application, and keep the proof transport queued behind it from
+    /// going out.
+    fn undecryptable(
+        &mut self,
+        destination: DestinationHash,
+        raw_hash: Option<[u8; 32]>,
+        len: usize,
+        interface_index: usize,
+    ) {
+        self.undecrypted_packet = raw_hash;
+        self.events.push(NodeEvent::PacketUndecryptable {
+            destination,
+            len,
+            interface_index,
+        });
     }
 
     /// Snapshot the decrypt context for a registered Single destination, so
@@ -4491,6 +4536,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                             dest = %HexShort(destination_hash.as_ref()),
                                             "Dropped packet, ratchet enforcement"
                                         );
+                                        self.undecryptable(
+                                            dest_hash_typed,
+                                            raw_hash,
+                                            packet.data.len(),
+                                            interface_index,
+                                        );
                                         return;
                                     }
                                     m.plaintext
@@ -4514,6 +4565,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                             crate::tracing::trace!(
                                                 dest = %HexShort(destination_hash.as_ref()),
                                                 "Dropped packet, decryption failed"
+                                            );
+                                            self.undecryptable(
+                                                dest_hash_typed,
+                                                raw_hash,
+                                                packet.data.len(),
+                                                interface_index,
                                             );
                                             return;
                                         }
@@ -4595,6 +4652,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 peer,
             } => {
                 let dest_hash = DestinationHash::new(destination_hash);
+                if self.undecrypted_packet.take() == Some(packet_hash) {
+                    crate::tracing::debug!(
+                        dest = %HexShort(&destination_hash),
+                        "No proof for a packet that did not decrypt"
+                    );
+                    return;
+                }
                 let proof_strategy = self
                     .destinations
                     .get(&dest_hash)

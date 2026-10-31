@@ -98,6 +98,7 @@ pub use error::{Error, Result};
 pub use file_lxmf_store::FileLxmfStorage;
 pub use file_peer_store::FilePeerStore;
 pub use file_propagation_store::FilePropagationStore;
+pub use file_ratchet_store::dest_ratchet_keys_path;
 pub use reticulum::Reticulum;
 /// Client for the shared-instance RPC socket (`rnstatus`/`rnpath` protocol).
 /// Used by `lnstest diag` to query a running `lnsd`/`rnsd`.

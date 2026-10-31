@@ -795,6 +795,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "LNMSG_STORE_FAILED",
         required_keys: &["detail"],
     },
+    // A packet to loquax's own delivery destination that no ratchet it
+    // holds and not the identity key opened (1185): `dst` the destination,
+    // `len` the encrypted payload, `ratchets` how many it holds, `count`
+    // how many since the start. Lost, and not proven.
+    EventSchema {
+        name: "LXMF_RX_UNDECRYPTABLE",
+        required_keys: &["dst", "len", "ratchets", "count"],
+    },
     // lnpnd propagation-node events (Codeberg #384 part 1), one line per
     // accepted upload, per `/get`, per eviction. `tid` is the first 16 hex
     // chars of the transient ID, the same shortening the journey contract
