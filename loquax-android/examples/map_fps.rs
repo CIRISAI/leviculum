@@ -255,6 +255,7 @@ fn main() {
             ms.push(t);
         }
         row("pinch again, tiles held (median)", median(ms), 0.0, owed);
+        carried(&home, &base, &draw, &timed, &median, threads);
     }
     facade(&home, &base, &draw, now, median, workers);
     prefetch(&home, &base, draw, timed, median, workers);
@@ -265,6 +266,53 @@ fn main() {
             loquax::tiles::BUDGET_MB
         );
     }
+}
+
+/// The names a pinch out carries (1205): a frame at rest at z15, then a
+/// pinch out to z14.0 in tenths, the finger down; the frames' median,
+/// the names carried, and what the frame spent on them, the median of
+/// the frames of the pinch, also scaled to 200 names.
+fn carried(
+    home: &std::path::Path,
+    base: &MapRequest,
+    draw: &impl Fn(&MapRequest) -> MapShown,
+    timed: &impl Fn(&MapRequest) -> (f64, MapShown),
+    median: &impl Fn(Vec<f64>) -> f64,
+    threads: usize,
+) {
+    let mut ladder = Vec::new();
+    let mut ms = Vec::new();
+    let mut names = 0;
+    for _ in 0..5 {
+        let _ = draw(base);
+        let mut pinch = MapRequest {
+            moving: true,
+            ..base.clone()
+        };
+        for z in (14_000..15_000).rev().step_by(100) {
+            pinch.zoom_milli = Some(z);
+            ms.push(timed(&pinch).0);
+            if let Some(cost) = loquax_android::map::carry_cost(home) {
+                names = cost.carried;
+                ladder.push(cost.ladder_ns as f64 / 1e3);
+            }
+        }
+    }
+    // Back at rest at z15, so the rows after start where they did
+    // before this one: a frame that moves keeps the step of the last.
+    let _ = draw(base);
+    let ms = median(ms);
+    println!(
+        "| pinch out z15 to z14, names carried (median) | {threads} | {ms:.1} | {:.0} | | |",
+        1e3 / ms
+    );
+    let per200 = |us: f64| us * 200.0 / names.max(1) as f64;
+    let us = median(ladder);
+    println!(
+        "| names carried: {names}, ladder us a frame (for 200) | {threads} | {:.1} ({:.1}) | | | |",
+        us,
+        per200(us)
+    );
 }
 
 /// The prefetch rows (1135): five runs each with and without the

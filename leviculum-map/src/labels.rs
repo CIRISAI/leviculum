@@ -538,6 +538,10 @@ pub fn place(candidates: &[Candidate], taken: &[Rect], rule: Rule) -> Vec<usize>
 pub struct ViewLabel {
     pub kind: LabelKind,
     pub rank: u8,
+    /// The shallowest view zoom that shows it: the label's own, for a
+    /// line the least of its pieces'. The ladder a frame that moves holds
+    /// the names it carries to (1205).
+    pub min_zoom: u8,
     /// What the map shows: the name in the locale the region was cut for
     /// where the cut kept one, else the local name, never both.
     pub text: String,
@@ -585,7 +589,8 @@ impl<S: Storage> Region<S> {
         type Piece = ((u32, u32), Vec<(i64, i64)>);
         // Kind, local name, the name shown where it differs.
         type Name = (LabelKind, u32, Option<u32>);
-        let mut groups: Vec<(Name, Vec<Piece>)> = Vec::new();
+        // Each with the least `min_zoom` of its pieces.
+        let mut groups: Vec<(Name, u8, Vec<Piece>)> = Vec::new();
         let strings = self.string_count();
         for tile in view.tiles(self.zooms()) {
             let Some(e) = self.find_labels(tile.id)? else {
@@ -630,6 +635,7 @@ impl<S: Storage> Region<S> {
                 out.push(ViewLabel {
                     kind: p.kind,
                     rank: p.rank,
+                    min_zoom: p.min_zoom,
                     text,
                     local,
                     at: world(i64::from(p.x), i64::from(p.y)),
@@ -663,9 +669,10 @@ impl<S: Storage> Region<S> {
                 let to4096 = |v: i16| i64::from(v) << i32::from(fx.shift().max(0));
                 let key = (l.kind, l.string, s.alternate(n));
                 let at = groups.iter().position(|g| g.0 == key).unwrap_or_else(|| {
-                    groups.push((key, Vec::new()));
+                    groups.push((key, l.min_zoom, Vec::new()));
                     groups.len() - 1
                 });
+                groups[at].1 = groups[at].1.min(l.min_zoom);
                 for r in f.rings() {
                     let Some((x0, y0)) = r.points().next() else {
                         continue;
@@ -674,11 +681,11 @@ impl<S: Storage> Region<S> {
                         .points()
                         .map(|(x, y)| (origin.0 + scale(x), origin.1 + scale(y)))
                         .collect();
-                    groups[at].1.push((world(to4096(x0), to4096(y0)), line));
+                    groups[at].2.push((world(to4096(x0), to4096(y0)), line));
                 }
             }
         }
-        for ((kind, string, alternate), pieces) in groups {
+        for ((kind, string, alternate), min_zoom, pieces) in groups {
             let joined: Vec<Piece> = join_pieces(pieces)
                 .into_iter()
                 .filter(|(_, line)| line.iter().any(|&p| inside(p)))
@@ -700,6 +707,7 @@ impl<S: Storage> Region<S> {
                 out.push(ViewLabel {
                     kind,
                     rank: 0,
+                    min_zoom,
                     text: text.clone(),
                     local: local.clone(),
                     at,

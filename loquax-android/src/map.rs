@@ -53,7 +53,7 @@ use leviculum_map::mercator::{project, LatLon, World};
 use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::{MapTheme, Style};
 use leviculum_ui::theme::{Theme, ThemeFlag};
-use loquax::mapframe::{frame_size, hold, Ask, Framed, Frames};
+use loquax::mapframe::{frame_size, hold, Ask, CarryCost, Framed, Frames};
 use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
 use loquax::picture::{map_theme, Maps};
 use loquax::screenmap;
@@ -782,6 +782,18 @@ pub fn tile_stats(dir: &Path) -> Option<Stats> {
         .iter()
         .find(|r| r.dir == dir)
         .map(Renderer::tile_stats)
+}
+
+/// What the last frame that zoomed of the renderer over `dir` spent on
+/// the names it carried (1205): the measuring tool's row.
+pub fn carry_cost(dir: &Path) -> Option<CarryCost> {
+    let renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    renderers
+        .iter()
+        .find(|r| r.dir == dir)
+        .map(|r| r.frames.carry_cost())
 }
 
 /// The tiles and bytes the tile cache of the renderer over `dir` holds.

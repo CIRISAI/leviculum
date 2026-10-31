@@ -15,7 +15,9 @@
 //!
 //! The names are placed at rest, over the frame after the pins, and kept
 //! as sprites; a frame while the view moves draws them where the view
-//! moved them ([`moved`]), so they never leave the picture. The pins are
+//! moved them ([`moved`]), so they never leave the picture. A frame that
+//! zooms holds them to the ladder of its own zoom: a name whose
+//! `min_zoom` the zoom no longer reaches is not drawn (1205). The pins are
 //! placed in every frame, and drawn in unless the frontend sets them
 //! itself ([`Ask::draw_pins`]).
 //!
@@ -29,7 +31,9 @@
 //! changes (the theme, the screen's density), so a frontend needs no
 //! invalidation of its own.
 
-use leviculum_map::labels::SUBPIXEL;
+use std::time::Instant;
+
+use leviculum_map::labels::{LabelKind, Rect, SUBPIXEL};
 use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::{MapTheme, Style};
 
@@ -200,6 +204,33 @@ pub struct Frames {
     plan: Option<Plan>,
     /// The pins the last frame placed, in its pixels.
     placed: Vec<Placed>,
+    /// The names the last frame drew, by their index in `names`, each
+    /// moved by whole pixels from where it was placed.
+    drawn_names: Vec<(usize, (i64, i64))>,
+    /// What the last frame that zoomed spent on the names it carried.
+    carry: CarryCost,
+}
+
+/// What a frame that zooms spends on the names of the last frame at rest
+/// (1205): a measuring tool's row.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CarryCost {
+    /// The names it carried.
+    pub carried: usize,
+    /// Each moved and held to the ladder of the frame's zoom, in
+    /// nanoseconds.
+    pub ladder_ns: u64,
+}
+
+/// A name a frame drew ([`Frames::drawn_names`]): where, in the frame's
+/// pixels, and what it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawnName {
+    pub text: String,
+    pub kind: LabelKind,
+    pub min_zoom: u8,
+    /// The boxes it was placed by, moved with it.
+    pub boxes: Vec<Rect>,
 }
 
 impl Frames {
@@ -216,6 +247,8 @@ impl Frames {
             rest: None,
             plan: None,
             placed: Vec::new(),
+            drawn_names: Vec::new(),
+            carry: CarryCost::default(),
         }
     }
 
@@ -391,11 +424,31 @@ impl Frames {
             }
             self.names_view = Some(drawn);
         }
+        self.drawn_names.clear();
         if let Some(rest) = self.names_view {
-            for name in &self.names {
+            // A frame that zooms away from the names' frame draws those
+            // the ladder of its own zoom shows: the step a frame at rest
+            // there would look its names up at. A pan at that zoom keeps
+            // them all, as at rest.
+            let zoomed = ask.moving && rest.zoom_milli() != view.zoom_milli();
+            let band = rest_zoom;
+            let started = Instant::now();
+            for (i, name) in self.names.iter().enumerate() {
+                if zoomed && name.min_zoom > band {
+                    continue;
+                }
                 let (x, y) = moved(&rest, &drawn, name.centre);
-                let (dx, dy) = (x - name.centre.0, y - name.centre.1);
-                name.draw(rgba, w, h, theme, dx.round() as i64, dy.round() as i64);
+                let by = ((x - name.centre.0).round(), (y - name.centre.1).round());
+                self.drawn_names.push((i, (by.0 as i64, by.1 as i64)));
+            }
+            if zoomed {
+                self.carry = CarryCost {
+                    carried: self.names.len(),
+                    ladder_ns: nanos(started),
+                };
+            }
+            for &(i, (dx, dy)) in &self.drawn_names {
+                self.names[i].draw(rgba, w, h, theme, dx, dy);
             }
         }
         if ask.draw_pins {
@@ -486,6 +539,38 @@ impl Frames {
         self.names.iter().map(|n| n.text.clone()).collect()
     }
 
+    /// The names the last frame drew, in the order drawn, where it drew
+    /// them.
+    pub fn drawn_names(&self) -> Vec<DrawnName> {
+        self.drawn_names
+            .iter()
+            .map(|&(i, (dx, dy))| {
+                let name = &self.names[i];
+                let by = |v: i64| i32::try_from(v).unwrap_or(0);
+                DrawnName {
+                    text: name.text.clone(),
+                    kind: name.kind,
+                    min_zoom: name.min_zoom,
+                    boxes: name
+                        .boxes
+                        .iter()
+                        .map(|b| Rect {
+                            x0: b.x0 + by(dx),
+                            y0: b.y0 + by(dy),
+                            x1: b.x1 + by(dx),
+                            y1: b.y1 + by(dy),
+                        })
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// What the last frame that zoomed spent on the names it carried.
+    pub fn carry_cost(&self) -> CarryCost {
+        self.carry
+    }
+
     /// What the tile cache did.
     pub fn tile_stats(&self) -> Stats {
         self.tiles.stats
@@ -511,6 +596,11 @@ impl Frames {
     pub fn clear_tiles(&mut self) {
         self.tiles.clear();
     }
+}
+
+/// The nanoseconds since `started`.
+fn nanos(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// `view` as every frontend shows it: one world at most, the zoom between
@@ -705,6 +795,62 @@ mod tests {
             got.rgba == want.rgba,
             "a pan at the zoom at rest is as before"
         );
+    }
+
+    /// One frame of a pinch: its zoom, the names drawn, and those the
+    /// ladder of its zoom does not show.
+    #[derive(Debug)]
+    struct PinchFrame {
+        zoom_milli: u32,
+        drawn: usize,
+        below: usize,
+    }
+
+    /// A pinch out from z15 to z12 over twenty frames on the Florence
+    /// fixture, the phone's way (the frame at the step, scaled by the
+    /// frontend), after a frame at rest at z15: each frame's names.
+    fn pinch_out() -> Vec<PinchFrame> {
+        const SCALE: f32 = 1.0;
+        let centre = project(LatLon::from_degrees(43.7757, 11.2603));
+        let theme = MapTheme::Light;
+        let rest = ExactView::new(centre, 15 * MILLI, 1280, 960);
+        let mut frames = florence();
+        frames.frame(&ask(rest, false, SCALE, theme));
+        assert!(frames.names().len() > 5, "{:?}", frames.names());
+        let mut out = Vec::new();
+        for i in 1..=20u32 {
+            let mut view = rest;
+            view.zoom_about(15_000 - 150 * i, 640.0, 480.0);
+            frames.frame(&Ask {
+                scaled_while_moving: true,
+                ..ask(view, true, SCALE, theme)
+            });
+            let drawn = frames.drawn_names();
+            let band = view.tile_zoom();
+            out.push(PinchFrame {
+                zoom_milli: view.zoom_milli(),
+                drawn: drawn.len(),
+                below: drawn.iter().filter(|n| n.min_zoom > band).count(),
+            });
+        }
+        for f in &out {
+            eprintln!("{f:?}");
+        }
+        out
+    }
+
+    /// 1205: a pinch out draws no name the ladder of the frame's zoom
+    /// does not show, so the streets of z15 are gone below z14.5. Before,
+    /// every frame drew all eight names of the frame at rest, seven of
+    /// them below the ladder from z14.4 and all eight from z13.35.
+    #[test]
+    fn a_pinch_out_holds_the_names_to_the_ladder() {
+        let frames = pinch_out();
+        let below: Vec<_> = frames.iter().filter(|f| f.below > 0).collect();
+        assert!(below.is_empty(), "names below the ladder: {below:?}");
+        let at = |z: u32| frames.iter().find(|f| f.zoom_milli == z).map(|f| f.drawn);
+        assert_eq!(at(14_850), Some(8), "the streets while z15's ladder holds");
+        assert!(at(14_400) < at(14_850), "fewer from z14.4");
     }
 
     /// 1163: a pinch's frame at the step below covers more than the

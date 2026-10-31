@@ -456,6 +456,10 @@ pub fn straight_runs(line: &[Vec<(f64, f64)>]) -> Vec<((f64, f64), f64, f64)> {
 pub struct PlacedName {
     pub text: String,
     pub kind: LabelKind,
+    /// The shallowest view zoom that shows it ([`ViewLabel::min_zoom`]).
+    pub min_zoom: u8,
+    /// The boxes the rule placed it by, in the picture's pixels.
+    pub boxes: Vec<Rect>,
     pub centre: (f64, f64),
     pub angle: f64,
     pub mask: Mask,
@@ -470,6 +474,7 @@ struct Setting {
     mask: Arc<Mask>,
     size: f32,
     kind: LabelKind,
+    min_zoom: u8,
 }
 
 /// Set the names of `names` that the rule places into `rgba`, `w` by `h`
@@ -569,6 +574,7 @@ pub fn place(
                 mask,
                 size,
                 kind: l.kind,
+                min_zoom: l.min_zoom,
             });
         }
     }
@@ -594,6 +600,8 @@ pub fn place(
             PlacedName {
                 text: text.clone(),
                 kind: s.kind,
+                min_zoom: s.min_zoom,
+                boxes: candidates[i].boxes.clone(),
                 centre: s.centre,
                 angle: s.angle,
                 halo,
@@ -781,6 +789,11 @@ fn blend_at(rgba: &mut [u8], w: u32, x: i64, y: i64, colour: [u8; 3], a: f64) {
 pub struct Sprite {
     pub text: String,
     pub kind: LabelKind,
+    /// The shallowest view zoom that shows it.
+    pub min_zoom: u8,
+    /// The boxes the rule placed it by, where it was placed: what a frame
+    /// that moves holds it apart from the others by (1205).
+    pub boxes: Vec<Rect>,
     /// Where its middle was placed.
     pub centre: (f64, f64),
     /// The box's top left pixel where it was placed.
@@ -870,6 +883,8 @@ impl Sprite {
         Self {
             text: name.text.clone(),
             kind: name.kind,
+            min_zoom: name.min_zoom,
+            boxes: name.boxes.clone(),
             centre: name.centre,
             at: (x0 + c0 as i64, y0 + r0 as i64),
             w,
@@ -922,7 +937,22 @@ impl Sprite {
     /// moved by `(dx, dy)` pixels from where it was placed: each pixel the
     /// halo blended, then the glyphs.
     pub fn draw(&self, rgba: &mut [u8], w: u32, h: u32, theme: MapTheme, dx: i64, dy: i64) {
-        if self.w == 0 {
+        self.draw_faded(rgba, w, h, theme, (dx, dy), 255);
+    }
+
+    /// [`draw`](Self::draw) at `alpha` out of 255, a name fading in or out
+    /// (1205): each level scaled by it as the blend reads it, so at 255
+    /// the bytes of [`draw`](Self::draw) and nothing drawn at 0.
+    pub fn draw_faded(
+        &self,
+        rgba: &mut [u8],
+        w: u32,
+        h: u32,
+        theme: MapTheme,
+        (dx, dy): (i64, i64),
+        alpha: u8,
+    ) {
+        if self.w == 0 || alpha == 0 {
             return;
         }
         let (ink, halo) = colours(self.kind, theme);
@@ -942,12 +972,27 @@ impl Sprite {
             else {
                 return;
             };
-            for (px, &[ha, ia]) in row.chunks_exact_mut(4).zip(src) {
-                blend_level(px, halo, ha);
-                blend_level(px, ink, ia);
+            match alpha {
+                255 => {
+                    for (px, &[ha, ia]) in row.chunks_exact_mut(4).zip(src) {
+                        blend_level(px, halo, ha);
+                        blend_level(px, ink, ia);
+                    }
+                }
+                _ => {
+                    for (px, &[ha, ia]) in row.chunks_exact_mut(4).zip(src) {
+                        blend_level(px, halo, faded(ha, alpha));
+                        blend_level(px, ink, faded(ia, alpha));
+                    }
+                }
             }
         }
     }
+}
+
+/// The level `a` at `alpha`, both out of 255, rounded to the nearest.
+fn faded(a: u8, alpha: u8) -> u8 {
+    ((u32::from(a) * u32::from(alpha) + 127) / 255) as u8
 }
 
 /// Blend `colour` at level `a` out of 255 into the RGBA pixel `px`: the
@@ -1019,6 +1064,8 @@ mod tests {
                 let name = PlacedName {
                     text: "Via dei Calzaiuoli".to_string(),
                     kind: LabelKind::MinorRoad,
+                    min_zoom: 15,
+                    boxes: Vec::new(),
                     centre,
                     angle,
                     mask: mask.clone(),
@@ -1058,6 +1105,8 @@ mod tests {
                     let name = PlacedName {
                         text: text.to_string(),
                         kind,
+                        min_zoom: 0,
+                        boxes: Vec::new(),
                         centre,
                         angle,
                         mask: mask.clone(),
