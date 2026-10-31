@@ -1436,6 +1436,134 @@ mod tests {
         assert_eq!(frames.last().map(|f| f.zoom_milli), Some(12_000));
     }
 
+    /// The frames over the Berlin fixture, names from z10 to z14.
+    fn berlin() -> Frames {
+        let dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/berlin");
+        Frames::new(crate::picture::Maps::new(Some(dir)))
+    }
+
+    /// The names a frame at rest at `view` places, as drawn.
+    fn at_rest(frames: fn() -> Frames, view: ExactView, scale: f32) -> Vec<DrawnName> {
+        let mut fresh = frames();
+        fresh.frame(&ask(view, false, scale, MapTheme::Light));
+        fresh.drawn_names()
+    }
+
+    /// 1225: a pinch out from z14 to z10 in eight steps, the phone's way,
+    /// never clears the names: every frame shows the names a frame at
+    /// rest at its zoom places, each within a pixel of where that frame
+    /// puts it. Before, from z13 on none (1205's step limit), and the
+    /// frames that kept some carried them from z14.
+    #[test]
+    fn a_pinch_out_from_z14_to_z10_thins_the_names_and_never_clears_them() {
+        let centre = project(LatLon::from_degrees(52.5175, 13.3950));
+        let rest = ExactView::new(centre, 14 * MILLI, 1280, 960);
+        let mut frames = berlin();
+        frames.frame(&ask(rest, false, 1.0, MapTheme::Light));
+        let mut counts = Vec::new();
+        for i in 1..=8u32 {
+            let mut view = rest;
+            view.zoom_about(14_000 - 500 * i, 640.0, 480.0);
+            frames.frame(&Ask {
+                scaled_while_moving: true,
+                ..ask(view, true, 1.0, MapTheme::Light)
+            });
+            let shown: Vec<DrawnName> = frames
+                .drawn_names()
+                .into_iter()
+                .filter(|n| n.shown)
+                .collect();
+            let want = at_rest(berlin, view, 1.0);
+            let z = view.zoom_milli();
+            assert!(!want.is_empty(), "z{z}: the frame at rest places names");
+            assert!(!shown.is_empty(), "z{z}: no name, at rest {}", want.len());
+            for n in &shown {
+                let near = want.iter().find(|m| {
+                    m.text == n.text
+                        && m.kind == n.kind
+                        && (m.at.0 - n.at.0).abs() <= 1.0
+                        && (m.at.1 - n.at.1).abs() <= 1.0
+                });
+                assert!(
+                    near.is_some(),
+                    "z{z}: {} at {:?}, at rest {want:?}",
+                    n.text,
+                    n.at
+                );
+            }
+            let names = |v: &[DrawnName]| {
+                let mut t: Vec<String> = v.iter().map(|n| n.text.clone()).collect();
+                t.sort();
+                t
+            };
+            assert_eq!(
+                names(&shown),
+                names(&want),
+                "z{z}: the names of the frame at rest"
+            );
+            counts.push((z, shown.len()));
+        }
+        eprintln!("{counts:?}");
+        assert_eq!(counts.last().map(|c| c.0), Some(10_000));
+    }
+
+    /// 1225: a street's name in a pinch's frame is laid along the street
+    /// as the frame's own zoom draws it: its middle and its angle where a
+    /// frame at rest at that zoom lays it, and its glyphs drawn into the
+    /// step's frame at the inverse of the frontend's scale, so on screen
+    /// they are as long as at rest; carried, they were the step's.
+    #[test]
+    fn a_street_name_follows_its_street_through_a_pinch() {
+        let centre = project(LatLon::from_degrees(43.7731, 11.2560));
+        let theme = MapTheme::Light;
+        let rest = ExactView::new(centre, 15 * MILLI, 900, 700);
+        let mut frames = florence();
+        frames.frame(&ask(rest, false, 2.75, theme));
+        let mut streets = 0;
+        for z in [15_250, 15_600, 15_900] {
+            let mut view = rest;
+            view.zoom_about(z, 450.0, 350.0);
+            let got = frames.frame(&Ask {
+                scaled_while_moving: true,
+                ..ask(view, true, 2.75, theme)
+            });
+            let k = got.view.scale_at(0) / view.scale_at(0);
+            assert!(k < 0.96, "z{z}: drawn at the step ({k})");
+            let want = at_rest(florence, view, 2.75);
+            let span = |n: &DrawnName| {
+                let x0 = n.boxes.iter().map(|b| b.x0).min().unwrap_or(0);
+                let x1 = n.boxes.iter().map(|b| b.x1).max().unwrap_or(0);
+                let y0 = n.boxes.iter().map(|b| b.y0).min().unwrap_or(0);
+                let y1 = n.boxes.iter().map(|b| b.y1).max().unwrap_or(0);
+                f64::from(x1 - x0).hypot(f64::from(y1 - y0))
+            };
+            for n in frames.drawn_names().iter().filter(|n| n.kind.is_line()) {
+                let Some(m) = want.iter().find(|m| m.text == n.text && m.kind == n.kind) else {
+                    panic!("z{z}: {} is not at rest", n.text);
+                };
+                assert!(
+                    (m.at.0 - n.at.0).abs() <= 1.0 && (m.at.1 - n.at.1).abs() <= 1.0,
+                    "z{z}: {} at {:?}, at rest {:?}",
+                    n.text,
+                    n.at,
+                    m.at
+                );
+                assert!((m.angle - n.angle).abs() < 1e-9, "z{z}: {}", n.text);
+                // Its run on screen, the frame scaled by 1 / k, against
+                // the run at rest: within the boxes' rounding.
+                let (on_screen, at_rest) = (span(n) / k, span(m));
+                assert!(
+                    (on_screen - at_rest).abs() <= 4.0 / k,
+                    "z{z}: {} {on_screen} against {at_rest}",
+                    n.text
+                );
+                streets += 1;
+            }
+        }
+        assert!(streets > 2, "street names laid ({streets})");
+    }
+
     /// 1163: a pinch's frame at the step below covers more than the
     /// frontend shows of it scaled; the tiles outside the screen and the
     /// margins are not owed. After a frame at rest at z14.3 the step's
