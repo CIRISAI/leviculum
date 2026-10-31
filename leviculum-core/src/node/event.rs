@@ -90,6 +90,26 @@ pub enum NodeEvent {
         interface_index: usize,
     },
 
+    /// A packet addressed to one of our Single destinations that no
+    /// retained ratchet and not the identity key could decrypt (or that
+    /// ratchet enforcement refused). It is dropped and NOT proven, as the
+    /// reference proves only what `Destination.receive` accepted
+    /// (`RNS/Transport.py:2159-2160`): a proof here would tell the sender
+    /// its message landed.
+    ///
+    /// Which ratchet the sender used cannot be told: the token carries
+    /// only the sender's ephemeral key, and the reference learns the
+    /// ratchet id only from the key that decrypted (`RNS/Identity.py`,
+    /// `decrypt`).
+    PacketUndecryptable {
+        /// The destination hash it was addressed to
+        destination: DestinationHash,
+        /// The encrypted payload's length in bytes
+        len: usize,
+        /// Interface it arrived on
+        interface_index: usize,
+    },
+
     /// Delivery confirmation for a sent packet
     PacketDeliveryConfirmed {
         /// The packet hash identifying the sent packet
@@ -629,6 +649,7 @@ impl NodeEvent {
             | NodeEvent::PathRequestReceived { .. }
             | NodeEvent::PathLost { .. }
             | NodeEvent::PacketReceived { .. }
+            | NodeEvent::PacketUndecryptable { .. }
             | NodeEvent::PacketDeliveryConfirmed { .. }
             | NodeEvent::DeliveryFailed { .. }
             | NodeEvent::PacketProofRequested { .. }
@@ -683,6 +704,10 @@ impl NodeEvent {
             // payloads and their per-packet confirmation, the per-chunk
             // resource progress tick, and the disposable retransmit notice.
             NodeEvent::PacketReceived { .. }
+            // One per packet a peer encrypted to a key we do not hold: the
+            // volume of the traffic itself, so data plane like the arrival
+            // it stands in for.
+            | NodeEvent::PacketUndecryptable { .. }
             | NodeEvent::PacketDeliveryConfirmed { .. }
             | NodeEvent::DeliveryFailed { .. }
             | NodeEvent::MessageReceived { .. }
@@ -775,6 +800,7 @@ impl NodeEvent {
             NodeEvent::PacketDropped { .. } => "PacketDropped",
             NodeEvent::AnnounceTransmitted { .. } => "AnnounceTransmitted",
             NodeEvent::PacketReceived { .. } => "PacketReceived",
+            NodeEvent::PacketUndecryptable { .. } => "PacketUndecryptable",
             NodeEvent::PacketDeliveryConfirmed { .. } => "PacketDeliveryConfirmed",
             NodeEvent::DeliveryFailed { .. } => "DeliveryFailed",
             NodeEvent::LinkEstablished { .. } => "LinkEstablished",

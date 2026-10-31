@@ -67,6 +67,15 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     // to know whether its own traffic arrived uses the delivery-confirmation
     // events it already gets. The line exists to be read from a capture.
     "PacketDropped",
+    // A packet to one of the application's own Single destinations that no
+    // key it holds opened (1185). The core already did the one thing that
+    // matters, it sends no proof, so the sender is not told it arrived; the
+    // drop is counted (`single-decrypt-fail`) and journey-logged. A C
+    // application can do nothing with it besides a log line: what makes such
+    // packets readable is holding the right ratchets before they come
+    // (`lev_destination_enable_ratchets` and its persistence), not a reaction
+    // after. Loquax reads it inside the engine, where it can.
+    "PacketUndecryptable",
 ];
 
 /// Variants whose `destination_hash` is deliberately not projected into
