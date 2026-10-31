@@ -1343,6 +1343,28 @@ mod tests {
         assert_eq!(cli.networkname.as_deref(), Some("abc"));
     }
 
+    /// `max_connections_per_source` (1190) reaches the interface: a value
+    /// above the default, zero (cap off), and an absent key that leaves the
+    /// default to `admission_config`. The hub load test relies on the first.
+    #[test]
+    fn max_connections_per_source_parses_on_a_tcp_server() {
+        let section = |line: &str| {
+            let config = parse_ini(&format!(
+                "[interfaces]\n  [[Srv]]\n    type = TCPServerInterface\n    \
+                 listen_port = 4242\n    {line}\n"
+            ))
+            .expect("config parses");
+            config
+                .interfaces
+                .get("Srv")
+                .expect("srv")
+                .max_connections_per_source
+        };
+        assert_eq!(section("max_connections_per_source = 1024"), Some(1024));
+        assert_eq!(section("max_connections_per_source = 0"), Some(0));
+        assert_eq!(section("enabled = yes"), None);
+    }
+
     /// `advertise_when_full` (752) parses both ways, and a value that is
     /// not a bool refuses the config instead of silently meaning off.
     #[test]
