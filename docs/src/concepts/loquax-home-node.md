@@ -469,7 +469,12 @@ even when it alone is larger than the cap.
 To every sender the home node is an ordinary `lxmf.delivery` destination:
 senders deliver DIRECT and get their proof. It announces at start and every
 360 minutes, the interval lxmd's config template offers for the same
-announce (`reference/LXMF/LXMF/Utilities/lxmd.py:1140`). It also collects
+announce (`reference/LXMF/LXMF/Utilities/lxmd.py:1140`). For a day after
+its identity moved in (an import adopted it or brought its ratchets,
+`$LNMSG_HOME/identity.moved`) it announces every 30 minutes instead, the
+reference's ratchet interval, so peers that remember the old program's
+ratchet hear a new one soon (order 1185, `loquax-import.md`, "Ratchets").
+Its delivery destination has ratchets, as every Python LXMF router's does. It also collects
 from its propagation node on the messenger's own schedule
 (`loquax-mailbox.md`, "When to sync"), so mail that senders propagated
 arrives too; those senders get no direct proof from it.

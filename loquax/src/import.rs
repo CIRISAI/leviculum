@@ -38,6 +38,7 @@ pub mod archive;
 pub mod key;
 mod mpack;
 pub mod nomadnet;
+pub mod ratchets;
 pub mod ratspeak;
 
 use std::collections::BTreeSet;
@@ -124,6 +125,24 @@ impl Found {
     /// Whether there is anything this slice can bring over.
     pub fn importable(&self) -> bool {
         !matches!(self.source, Source::Protected)
+    }
+
+    /// The file the source app keeps its delivery destination's own
+    /// ratchets in, when there is one: NomadNet's router writes
+    /// `<storage>/lxmf/ratchets/<address>.ratchets` (`LXMRouter.py:130-131`
+    /// and `:357`), Ratspeak its ring beside the identity
+    /// (`identities/<hash>/ratchets/ring`). Taken over with the identity
+    /// ([`ratchets`]).
+    pub fn ratchets_file(&self) -> Option<PathBuf> {
+        let path = match (&self.source, self.app) {
+            (Source::NomadNet(tree), _) => tree
+                .root()
+                .join("storage/lxmf/ratchets")
+                .join(format!("{}.ratchets", to_hex(&self.address?))),
+            (Source::Identity(_), "Ratspeak") => self.path.parent()?.join("ratchets/ring"),
+            _ => return None,
+        };
+        path.is_file().then_some(path)
     }
 
     /// The identity's 64 bytes, when it has one.
@@ -417,6 +436,9 @@ pub struct Report {
     /// What the source says about itself: the identities a database holds
     /// and which one is imported, and how its times were read.
     pub notes: Vec<String>,
+    /// The source app's ratchets taken over with its identity, as the
+    /// line says it ([`ratchets::line`]).
+    pub ratchets: Option<String>,
 }
 
 impl Report {
@@ -492,6 +514,9 @@ impl Report {
         }
         for (path, reason) in &self.refused {
             out.push(format!("unreadable: {}: {reason}", path.display()));
+        }
+        if let Some(line) = &self.ratchets {
+            out.push(line.clone());
         }
         if let Some(pn) = self.propagation_node {
             out.push(format!(
@@ -571,12 +596,41 @@ pub fn import(
         if !dry_run {
             let adopted = key::adopt(home, &key).map_err(|e| ImportError::new(home, e))?;
             report.adopted = Some(adopted);
+            if let Some(file) = found.ratchets_file() {
+                match take_ratchets(home, &file, false) {
+                    Ok(line) => report.ratchets = Some(line),
+                    Err(error) => report.refused.push((file, error)),
+                }
+            }
         }
     }
     if !dry_run {
         log_report(home, found, &report);
     }
     Ok(report)
+}
+
+/// Take the ratchet file `file` over for the identity loquax answers on in
+/// `home`, under the delivery lock ([`ratchets::take_over`]), and say so in
+/// one line.
+pub fn take_ratchets(home: &Path, file: &Path, dry_run: bool) -> Result<String, String> {
+    let path = home.join("identity");
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Err(format!(
+            "{}: no identity here yet; the ratchets belong to one, import it first",
+            path.display()
+        ));
+    }
+    let identity = crate::identity::load_or_create(&path).map_err(|e| e.to_string())?;
+    let _lock = match dry_run {
+        true => None,
+        false => Some(crate::home::lock::DeliveryLock::acquire(
+            home,
+            "the ratchet import",
+        )?),
+    };
+    let (format, taken) = ratchets::import_file(home, &identity, file, dry_run)?;
+    Ok(ratchets::line(file, format, &taken, dry_run))
 }
 
 fn contacts(

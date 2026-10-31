@@ -119,6 +119,7 @@ pub fn adopt(home: &Path, key: &[u8; KEY_LEN]) -> Result<Adopted, String> {
     }
     let encoded = encode_identity(&identity).ok_or("the identity has no private key")?;
     write_private(&path, &encoded)?;
+    crate::identity::mark_moved(home)?;
     Ok(Adopted::Switched { address, set_aside })
 }
 

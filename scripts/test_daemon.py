@@ -1992,6 +1992,16 @@ class TestDaemon:
                 )
             finally:
                 signal_module.signal = original_signal
+            # An identity that moved in from another program brings its
+            # delivery destination's ratchets (leviculum 1185): the file as
+            # that program kept it, put where this router's
+            # register_delivery_identity loads it from (LXMRouter.py:357).
+            ratchets_hex = params.get("ratchets")
+            if ratchets_hex:
+                delivery_hash = RNS.Destination.hash(self.lxmf_identity, "lxmf", "delivery")
+                os.makedirs(self.lxmf_router.ratchetpath, exist_ok=True)
+                with open(os.path.join(self.lxmf_router.ratchetpath, delivery_hash.hex() + ".ratchets"), "wb") as f:
+                    f.write(bytes.fromhex(ratchets_hex))
             self.lxmf_dest = self.lxmf_router.register_delivery_identity(
                 self.lxmf_identity,
                 display_name=display_name,
@@ -2002,6 +2012,10 @@ class TestDaemon:
             return {"result": {
                 "delivery_hash": self.lxmf_dest.hash.hex(),
                 "public_key": self.lxmf_identity.get_public_key().hex(),
+                # The router enables ratchets on its delivery destination
+                # (LXMRouter.py:357); the file is what an identity moving to
+                # another program takes along (leviculum 1185).
+                "ratchets_path": self.lxmf_dest.ratchets_path,
             }}
 
         elif method == "lxmf_announce":
@@ -2054,6 +2068,27 @@ class TestDaemon:
                 return {"result": {"message_hash": message_hash}}
             except Exception as e:
                 return {"error": f"lxmf_send failed: {str(e)}"}
+
+        elif method == "lxmf_known_ratchet":
+            # The ratchet this node remembers for a destination from its
+            # announces (Identity.get_ratchet), the one every packet to it
+            # is encrypted to; None when it remembers none.
+            ratchet = RNS.Identity.get_ratchet(bytes.fromhex(params.get("dest_hash")))
+            return {"result": ratchet.hex() if ratchet else None}
+
+        elif method == "lxmf_encrypt_for":
+            # Encrypt as a single packet to an lxmf.delivery destination
+            # would be (Destination.encrypt, the remembered ratchet first),
+            # so a test can check what the receiver holds against it.
+            dest_hash_bytes = bytes.fromhex(params.get("dest_hash"))
+            recalled = RNS.Identity.recall(dest_hash_bytes)
+            if recalled is None:
+                return {"error": "no identity known for " + params.get("dest_hash")}
+            dest_out = RNS.Destination(
+                recalled, RNS.Destination.OUT, RNS.Destination.SINGLE,
+                "lxmf", "delivery",
+            )
+            return {"result": dest_out.encrypt(bytes.fromhex(params.get("plaintext"))).hex()}
 
         elif method == "lxmf_get_outbound_status":
             import LXMF

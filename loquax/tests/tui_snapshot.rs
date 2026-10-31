@@ -2473,11 +2473,16 @@ async fn a_message_left_at_the_mailbox_arrives_without_a_key() {
     // our announce to encrypt to us, and the daemon forgets the path of a
     // client that has gone, so a CLI run of ours that announced and left
     // would not do.
-    let storage = tempfile::tempdir().expect("our storage");
+    // In the screen's own storage: the announce carries the delivery
+    // destination's ratchet (1185), the sender encrypts the deposit to it,
+    // and the screen opens it with the ratchets it loads from there. An
+    // identity that announced from one storage and reads in another is the
+    // identity moved without its ratchets.
+    let storage = tempfile::tempdir().expect("our notices");
     let early = attach(AttachConfig {
         instance: daemon.instance.clone(),
         config_dir: Some(daemon.config_dir.path().to_path_buf()),
-        storage_dir: storage.path().to_path_buf(),
+        storage_dir: home.path().join("storage"),
         identity: fixed_identity(0x11),
         display_name: b"tui".to_vec(),
         notices: Terminal::new(storage.path().to_path_buf()),
