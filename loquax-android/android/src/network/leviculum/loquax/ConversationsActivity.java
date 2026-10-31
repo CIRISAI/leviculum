@@ -239,7 +239,18 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         findViewById(R.id.tab_map).setSelected(map);
         if (map) {
             mapPane.ask();
+        } else if (mapPane != null) {
+            // The map's position is read only while it is shown (1201).
+            mapPane.pause();
         }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        if (mapPane != null && mapPane.permission(request)) {
+            return;
+        }
+        super.onRequestPermissionsResult(request, permissions, results);
     }
 
     /** One tab's icon and label, in the accent when selected. */
@@ -412,6 +423,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
 
     @Override
     protected void onPause() {
+        if (mapPane != null) {
+            mapPane.pause();
+        }
         ticker.removeCallbacks(tick);
         Core.front(false);
         Events.listen(null);

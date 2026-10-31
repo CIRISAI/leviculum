@@ -25,6 +25,13 @@
        without a camera pastes the code instead. -->
   <uses-permission a:name='android.permission.CAMERA'/>
   <uses-feature a:name='android.hardware.camera.any' a:required='false'/>
+  <!-- The phone's own position (1201): asked at the first tap on the
+       map's crosshair or on "Share my position", never at start; read
+       while the map is in front and once for a share. It leaves the phone
+       only when the user shares it, to one chat. -->
+  <uses-permission a:name='android.permission.ACCESS_FINE_LOCATION'/>
+  <uses-permission a:name='android.permission.ACCESS_COARSE_LOCATION'/>
+  <uses-feature a:name='android.hardware.location' a:required='false'/>
 
   <!-- Navigate on a friend's card (1200) hands a geo: link to the phone's
        navigation app; from Android 11 on the app sees whether one takes

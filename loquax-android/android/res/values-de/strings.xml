@@ -239,10 +239,9 @@
     <string name="settings_notifications_summary">Neue Nachrichten, stumme Chats</string>
     <string name="settings_notifications_text">Loquax meldet jede neue Nachricht. Um einen Chat stumm zu schalten, halte ihn in der Liste gedrückt, dann Stumm. Ton und Vibration stehen in Androids Einstellungen für Loquax.</string>
     <string name="settings_privacy">Privatsphäre</string>
-    <string name="settings_privacy_summary">Blockierte Kontakte</string>
+    <string name="settings_privacy_summary">Blockierte Kontakte, geteilte Positionen</string>
     <string name="settings_maps">Karten</string>
-    <string name="settings_maps_summary">Regionen auf diesem Telefon</string>
-    <string name="settings_maps_text">Die Karte der Gegend, die du anschaust, lädt von selbst und bleibt auf dem Telefon. Die Liste der Regionen, ihre Größen und das Löschen kommen hierher.</string>
+    <string name="settings_maps_summary">Karten auf diesem Telefon, automatisch laden</string>
     <string name="settings_backup">Sicherung</string>
     <string name="settings_backup_summary">Das Postfach sichern</string>
     <string name="settings_backup_away">Dein Postfach ist auf einem anderen Gerät. Sichere es dort.</string>
@@ -252,4 +251,32 @@
     <string name="map_theme_light">Hell</string>
     <string name="map_theme_dark">Dunkel</string>
     <string name="settings_app_theme_text">Die App selbst folgt der hellen oder dunklen Einstellung des Telefons.</string>
+    <!-- Location and the Maps page (1201). -->
+    <string name="locate">Zeigen, wo ich bin</string>
+    <string name="following">Die Karte folgt dir</string>
+    <string name="location_why">Damit die Karte zeigt, wo du bist. Loquax sendet deine Position nur, wenn du sie teilst.</string>
+    <string name="location_continue">Weiter</string>
+    <string name="location_not_now">Nicht jetzt</string>
+    <string name="location_off">Standort ist aus</string>
+    <string name="location_finding">Suche deine Position…</string>
+    <string name="location_none">Das Telefon weiß noch nicht, wo du bist. Versuch es draußen noch einmal.</string>
+    <string name="map_empty">Noch keine Freunde auf der Karte</string>
+    <string name="share_position">Meine Position teilen</string>
+    <string name="card_share">Meine teilen</string>
+    <string name="share_with">Deine Position teilen mit</string>
+    <string name="share_nobody">Fang zuerst einen Chat an und teile deine Position dort.</string>
+    <string name="shared_to">Deine Position ging an %1$s</string>
+    <string name="share_failed">Nicht gesendet: %1$s</string>
+    <string name="attach">Anhängen</string>
+    <string name="attach_position">Meine Position</string>
+    <string name="maps_auto">Karten automatisch laden</string>
+    <string name="maps_auto_text">Die Karte der Gegend, die du anschaust, lädt von selbst und bleibt auf dem Telefon.</string>
+    <string name="maps_used">Belegter Speicher: %1$s</string>
+    <string name="maps_none">Noch keine Karten auf diesem Telefon.</string>
+    <string name="maps_region">Um %1$s</string>
+    <string name="maps_region_line">%1$s · %2$s · Zoom %3$d bis %4$d</string>
+    <string name="maps_delete">Löschen</string>
+    <string name="maps_delete_ask">Diese Karte löschen? Sie lädt wieder, wenn du dort hinschaust.</string>
+    <string name="privacy_shared">Geteilte Positionen</string>
+    <string name="privacy_shared_none">Du hast deine Position noch nicht geteilt.</string>
 </resources>

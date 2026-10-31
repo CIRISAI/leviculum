@@ -244,6 +244,33 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "friends"))));
     }
 
+    /** The same, with distances from the phone's own fix (1201), degrees times a million. */
+    static Map<String, Object> friends(long latE6, long lonE6) {
+        return answer(Native.query(MsgPack.pack(map("t", "friends", "lat_e6", latE6, "lon_e6", lonE6))));
+    }
+
+    /**
+     * The positions we shared, newest first (1201): each row peer, name,
+     * initials, icon_fg, icon_bg, photo, at, lat_e6, lon_e6 under
+     * "shared"; an "error" key without a session.
+     */
+    static Map<String, Object> shared() {
+        return answer(Native.query(MsgPack.pack(map("t", "shared"))));
+    }
+
+    /**
+     * The Maps page (1201), off the UI thread: with `delete` that region
+     * deleted, with `autoload` the automatic download switched; the
+     * regions (name, bytes, modified, lat_e6, lon_e6, min_zoom, max_zoom,
+     * auto) under "regions", their sum as "region_bytes", "autoload".
+     */
+    static Map<String, Object> mapRegions(String dir, String delete, Boolean autoload) {
+        Map<String, Object> request = map("dir", dir, "ask_regions", true);
+        if (delete != null) request.put("delete_region", delete);
+        if (autoload != null) request.put("set_autoload", autoload);
+        return renderMap(request, null);
+    }
+
     /** Every link: peer, lookup, contact_id, name. */
     static List<Map<String, Object>> links() {
         return list(answer(Native.query(MsgPack.pack(map("t", "links")))), "links");

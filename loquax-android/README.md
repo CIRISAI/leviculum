@@ -93,7 +93,11 @@ What it does today:
   settings and the map opened from a chat are sub views: a back arrow,
   no tabs. Settings is one list of eight pages: Profile, Mailbox,
   Appearance, Notifications, Privacy, Maps, Backup, Advanced; a page
-  without controls yet says what exists today.
+  without controls yet says what exists today. Maps (1201) is where
+  "Load area" went: the switch for the automatic download, the storage
+  the maps take, and each map with its place, size, date and zooms and a
+  Delete. Privacy lists the positions you shared, to whom and when, under
+  the blocked contacts.
 - **Map.** The contacts' latest positions as pins over Loquax's own map
   (the Map tab), drawn by the library with the window's
   renderer: the regions in the app's `maps/`, the world outline, the
@@ -118,7 +122,16 @@ What it does today:
   the last day first, older ones greyed under a divider; a tap flies the
   map there and opens the card. A tap on a position report in a chat
   opens the map on its fix with the sender's card, and back returns to
-  the chat. Regions load by
+  the chat. Location (1201): the crosshair above the Friends button
+  centres on the phone's own position at about z16, a second tap follows
+  it until a finger moves the map; while the map is in front the own
+  position is a dot and the friends' distances are measured from it. The
+  permission is asked at the first tap on the crosshair or on "Share my
+  position", after a line that says why, never at start; refused, a chip
+  says "Location is off". Reading sends nothing: the position leaves the
+  phone only when shared, once, to one chat, from the empty map's "Share
+  my position", a friend's card ("Share mine") or the chat's attachment
+  menu (the paper clip, "My position"). Regions load by
   themselves around the pins, a report's place and where the user looks,
   as in the terminal (`map_autoload`, `map_source`, `map_cache_mb` in the
   app's `config`). Settings, Appearance chooses the map's colours: like

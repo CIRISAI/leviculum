@@ -294,6 +294,24 @@ a friend already on screen is one tap away from the map (the pin).
   above, "Share my position" from the empty state, the card and the
   chat's attachment menu; the Maps settings page (regions, sizes, delete,
   automatic download).
+  Built in 1201 with these choices of its own: the position is read with
+  Android's LocationManager (GPS and the network provider, the newest fix
+  wins; no Play services), only while the map is in front and once for a
+  share; a share takes the phone's last fix when it is under two minutes
+  old, else waits up to 30 s for one. The crosshair's first tap without a
+  fix yet centres on the first fix that comes; a finger, a pinch or a
+  double tap ends both centring and follow mode; follow mode keeps the
+  zoom the user has. The own position is an accent dot in a ring of the
+  background, below the friends' pins. The empty map's "Share my
+  position" picks the chat first (the empty map has no friend to send
+  to), so it is two taps there; the card's "Share mine" and the chat's
+  attachment menu (a paper clip in the compose field, one entry "My
+  position" for now) send at once. A share is a report of ours with no
+  text, the Telemeter alone, and the chat shows it as our bubble with the
+  position line. The Maps page names a map by its middle ("Around 52.52°
+  N, 13.40° E"), since the region files carry no place name; Delete asks
+  first. Privacy got the list of the positions shared, to whom and when,
+  read from our own messages.
 
 ## Not decided (for Lew)
 

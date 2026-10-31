@@ -63,13 +63,14 @@ def node(rid="", text="", desc=""):
     return walk.Node(text=text, desc=desc, rid=pkg + rid if rid else "", cls="", bounds=(0, 0, 1, 1))
 
 
-# The Map tab as 1199 builds it: the bar, the map, the credit, two tabs
-# with their icons and labels.
+# The Map tab as 1199 builds it: the bar, the map, the credit, the
+# crosshair of 1201, two tabs with their icons and labels.
 MAP_SCREEN = [
     node("title", "Map"),
     node("menu", desc="More"),
     node("map"),
     node("credit", "© OpenStreetMap contributors"),
+    node("locate", desc="Show where I am"),
     node("tab_chats", desc="Chats"),
     node("tab_chats_icon"),
     node("tab_chats_label", "Chats"),
@@ -101,6 +102,10 @@ class MapScreen(unittest.TestCase):
         self.assertEqual(walk.map_screen_problems([n for n in MAP_SCREEN if not n.is_id("map")]),
                          ["no map view"])
 
+    def test_no_crosshair_is_a_problem(self):
+        self.assertEqual(walk.map_screen_problems([n for n in MAP_SCREEN if not n.is_id("locate")]),
+                         ["no crosshair"])
+
 
 def at(rid, text, top):
     """A node of a dump `top` pixels down."""
@@ -130,6 +135,54 @@ class FriendsSheet(unittest.TestCase):
         rows = [at("friend_name", "Bob", 100)]
         self.assertFalse(walk.divider_above(rows))
         self.assertFalse(walk.divider_above(rows + [at("friends_older", "Older than a day", 160)]))
+
+
+def settings_list(titles=None, summaries=None):
+    """The settings list as SettingsActivity builds it, one entry a 100
+    pixels down: its title and its one line under it."""
+    titles = walk.SETTINGS_PAGES if titles is None else titles
+    summaries = ["what it holds"] * len(titles) if summaries is None else summaries
+    nodes = [node("title", "Settings")]
+    for i, title in enumerate(titles):
+        nodes.append(at("settings_entry_title", title, 200 + 100 * i))
+    for i, summary in enumerate(summaries):
+        nodes.append(at("settings_entry_summary", summary, 240 + 100 * i))
+    return nodes
+
+
+class Settings(unittest.TestCase):
+    def test_the_eight_entries_as_built_have_no_problem(self):
+        titles, problems = walk.settings_list_problems(settings_list())
+        self.assertEqual(titles, walk.SETTINGS_PAGES)
+        self.assertEqual(problems, [])
+
+    def test_a_missing_entry_a_missing_line_and_the_wrong_order(self):
+        _, problems = walk.settings_list_problems(settings_list(walk.SETTINGS_PAGES[:-1]))
+        self.assertEqual(problems, [f"entries {walk.SETTINGS_PAGES[:-1]}, want {walk.SETTINGS_PAGES}"])
+        _, problems = walk.settings_list_problems(settings_list(summaries=["x"] * 7 + [""]))
+        self.assertEqual(problems, ["8 entries with 7 descriptions"])
+        swapped = ["Mailbox", "Profile"] + walk.SETTINGS_PAGES[2:]
+        _, problems = walk.settings_list_problems(settings_list(swapped))
+        self.assertEqual(len(problems), 1)
+
+    def test_a_raw_hash_on_a_main_row_and_a_line_that_did_not_decode(self):
+        lines = ["what it holds"] * 8
+        lines[1] = "Mailbox 3e35f10c9a7b4d2e8f1a0b6c5d4e3f21"
+        _, problems = walk.settings_list_problems(settings_list(summaries=lines))
+        self.assertEqual(problems, [f"a raw hash on a main row: {lines[1]!r}"])
+        lines[1] = "on <3e35f10c…>"
+        _, problems = walk.settings_list_problems(settings_list(summaries=lines))
+        self.assertEqual(problems, ["a raw hash on a main row: 'on <3e35f10c…>'"])
+        broken = settings_list() + [node("status", "the request did not decode: x")]
+        _, problems = walk.settings_list_problems(broken)
+        self.assertEqual(problems, ["on screen: 'the request did not decode: x'"])
+
+    def test_a_page_shows_its_own_mark(self):
+        self.assertIsNone(walk.page_mark_missing("Maps", [node("maps_auto")]))
+        self.assertEqual(walk.page_mark_missing("Maps", [node("title", "Maps")]),
+                         "Maps without its rid 'maps_auto'")
+        self.assertIsNone(walk.page_mark_missing("Privacy", [node("", "Positions you shared")]))
+        self.assertIsNone(walk.page_mark_missing("Backup", []))
 
 
 class Dump(unittest.TestCase):

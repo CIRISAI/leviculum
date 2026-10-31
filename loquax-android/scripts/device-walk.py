@@ -66,6 +66,7 @@ STEPS = [
     "receive_wake",
     "map",
     "friends",
+    "settings",
     "teardown",
 ]
 
@@ -94,6 +95,17 @@ MAP_CHROME_IDS = ["load", "fit", "theme"]
 # The tab bar's tabs (activity_conversations.xml): Chats and Map.
 TABS = ["tab_chats", "tab_map"]
 NOT_DECODED = "did not decode"
+# The settings' entries in the list's order (1199, SettingsActivity.PAGES).
+SETTINGS_PAGES = [
+    "Profile", "Mailbox", "Appearance", "Notifications", "Privacy", "Maps", "Backup", "Advanced",
+]
+# Each page's mark that it is that page and not a copy of another (1201):
+# an id or a text only it shows. Pages with no mark of their own say none.
+SETTINGS_PAGE_MARKS = {
+    "Appearance": ("text", THEME_AUTO),
+    "Privacy": ("text", "Positions you shared"),
+    "Maps": ("rid", "maps_auto"),
+}
 # The buttons of the dialogs a first start may raise: Android's
 # notification question, its battery exemption, the app's own (Asks.java).
 # "Not now" before "Leave it out": the latter opens a second, system dialog.
@@ -260,6 +272,9 @@ def map_screen_problems(nodes: list[Node]) -> list[str]:
         problems.append(f"tabs {tabs}, want {TABS}")
     if not find(nodes, rid="map"):
         problems.append("no map view")
+    # The crosshair (1201), the one round button above Friends.
+    if not find(nodes, rid="locate"):
+        problems.append("no crosshair")
     return problems
 
 
@@ -289,6 +304,44 @@ def divider_above(nodes: list[Node]) -> bool:
 
 
 HASH_NAME = re.compile(r"<[0-9a-f]{8}…>")
+# Reticulum's vocabulary as a main row of the settings must not show it
+# (1201): a raw address of 32 hex digits, or one cut to `<8 hex…>`.
+RAW_HASH = re.compile(r"[0-9a-f]{32}|<[0-9a-f]{8}…>")
+
+
+def settings_list_problems(nodes: list[Node]) -> tuple[list[str], list[str]]:
+    """The settings list's titles from the top down (1201), and what is
+    wrong: not the eight pages in their order, a title without its one
+    line description, a raw hash on a main row, a line that did not
+    decode."""
+    titles = [n.text for n in by_top(find(nodes, rid="settings_entry_title"))]
+    summaries = [n.text for n in by_top(find(nodes, rid="settings_entry_summary"))]
+    problems = []
+    if titles != SETTINGS_PAGES:
+        problems.append(f"entries {titles}, want {SETTINGS_PAGES}")
+    if len(summaries) != len(titles) or any(not s.strip() for s in summaries):
+        problems.append(f"{len(titles)} entries with {len([s for s in summaries if s.strip()])} descriptions")
+    for text in titles + summaries:
+        if RAW_HASH.search(text):
+            problems.append(f"a raw hash on a main row: {text!r}")
+    problems += decode_problems(nodes)
+    return titles, problems
+
+
+def decode_problems(nodes: list[Node]) -> list[str]:
+    """A line that says something did not decode, anywhere on screen."""
+    return [f"on screen: {t!r}" for t in texts(nodes) if NOT_DECODED in t]
+
+
+def page_mark_missing(page: str, nodes: list[Node]) -> str | None:
+    """What `page` lacks of its own mark (SETTINGS_PAGE_MARKS); None when
+    it shows it or has none."""
+    mark = SETTINGS_PAGE_MARKS.get(page)
+    if mark is None:
+        return None
+    kind, want = mark
+    found = find(nodes, rid=want) if kind == "rid" else find(nodes, text=want)
+    return None if found else f"{page} without its {kind} {want!r}"
 
 
 def is_hash_name(text: str) -> bool:
@@ -1183,6 +1236,47 @@ class Walk:
             f"friends={len(names)} of {len(allowed)} with a position, first={names[0]!r} "
             f"card=ok navigate={'shown' if navigate else 'hidden (no app takes geo:)'} chat=ok back=card,chats"
         )
+
+    def step_settings(self) -> str:
+        """The settings (1201): More, Settings; the eight entries in their
+        order, each with a one line description and no raw hash; each page
+        opened and left with back, none with a line that did not decode,
+        each with its own mark where it has one; back to the chats."""
+        dev = self.need_device()
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        self.tap_text(MORE)
+        self.tap_text(SETTINGS)
+        self.wait_id("settings_entry_title", 10)
+        titles, problems = settings_list_problems(dev.dump())
+        if problems:
+            raise StepFailed("; ".join(problems))
+        walked = []
+        for page in SETTINGS_PAGES:
+            self.tap_text(page)
+            time.sleep(1.0)
+            nodes = dev.dump()
+            if find(nodes, rid="settings_entry_title"):
+                raise StepFailed(f"{page} did not open: still the list")
+            trouble = decode_problems(nodes)
+            missing = page_mark_missing(page, nodes)
+            if missing:
+                trouble.append(missing)
+            if trouble:
+                raise StepFailed(f"{page}: " + "; ".join(trouble))
+            if page == "Maps":
+                regions = len(find(nodes, rid="maps_region"))
+                walked.append(f"Maps(regions={regions})")
+            else:
+                walked.append(page)
+            dev.key("KEYCODE_BACK")
+            self.wait_id("settings_entry_title", 10)
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        return f"entries={len(titles)} walked={','.join(walked)} back=chats"
 
     def map_theme(self, choice: str) -> None:
         """From the Map tab: menu, Settings, Appearance, `choice`, and back

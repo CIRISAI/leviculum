@@ -6,7 +6,12 @@ import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
+import android.text.format.DateUtils;
+import android.text.format.Formatter;
 import android.widget.Button;
+import android.widget.Switch;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
@@ -29,6 +34,12 @@ import java.util.Map;
  * the home. Backup is the mailbox's backup when the mailbox is on this
  * phone (1152). Advanced names the Propagation Node, the only place the
  * app does, and ends the service.
+ *
+ * Maps (1201) is the management "Load area" was an action for: the
+ * switch for the automatic download, the storage the regions take, and
+ * each region with its size and date and a delete. Privacy lists the
+ * positions the user shared, to whom and when, under the blocked
+ * contacts.
  */
 public class SettingsActivity extends Activity implements Events.Listener {
     /** The extra naming the page; absent for the list. */
@@ -139,8 +150,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
         } else if (page == R.string.settings_privacy) {
             privacy();
         } else if (page == R.string.settings_maps) {
-            body.addView(padded(text(getString(R.string.settings_maps_text), 15,
-                    R.color.text_secondary)));
+            maps(null, null);
         } else if (page == R.string.settings_backup) {
             backup();
         } else if (page == R.string.advanced) {
@@ -158,8 +168,13 @@ public class SettingsActivity extends Activity implements Events.Listener {
             entry.setOrientation(LinearLayout.VERTICAL);
             entry.setPadding(dp(16), dp(12), dp(16), dp(12));
             entry.setBackgroundResource(android.R.drawable.list_selector_background);
-            entry.addView(text(getString(target), 16, R.color.text));
-            entry.addView(text(getString(SUMMARIES[i]), 14, R.color.text_secondary));
+            entry.setId(R.id.settings_entry);
+            TextView title = text(getString(target), 16, R.color.text);
+            title.setId(R.id.settings_entry_title);
+            entry.addView(title);
+            TextView summary = text(getString(SUMMARIES[i]), 14, R.color.text_secondary);
+            summary.setId(R.id.settings_entry_summary);
+            entry.addView(summary);
             entry.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -281,6 +296,145 @@ public class SettingsActivity extends Activity implements Events.Listener {
         }
         for (Map<String, Object> row : rows) {
             body.addView(blocked(row));
+        }
+        sharedPositions();
+    }
+
+    /**
+     * The Maps page (1201): ask the renderer off the UI thread, with a
+     * region to delete or the autoload to switch when given, and show
+     * what it answers.
+     */
+    private void maps(final String delete, final Boolean autoload) {
+        final String dir = getFilesDir().getAbsolutePath();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final Map<String, Object> answer = Core.mapRegions(dir, delete, autoload);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (page == R.string.settings_maps && !isFinishing()) {
+                            showMaps(answer);
+                        }
+                    }
+                });
+            }
+        }, "loquax-regions").start();
+    }
+
+    /** The switch, the storage used and the regions, as the renderer listed them. */
+    private void showMaps(Map<String, Object> answer) {
+        body.removeAllViews();
+        if (!Core.bool(answer, "ok")) {
+            android.widget.Toast.makeText(this, Core.str(answer, "error"),
+                    android.widget.Toast.LENGTH_LONG).show();
+        }
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), dp(12), dp(16), dp(12));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        words.addView(text(getString(R.string.maps_auto), 16, R.color.text));
+        words.addView(text(getString(R.string.maps_auto_text), 14, R.color.text_secondary));
+        row.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        final Switch auto = new Switch(this);
+        auto.setId(R.id.maps_auto);
+        auto.setChecked(Core.bool(answer, "autoload"));
+        auto.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                maps(null, auto.isChecked());
+            }
+        });
+        row.addView(auto);
+        body.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView used = text(getString(R.string.maps_used,
+                Formatter.formatShortFileSize(this, Core.num(answer, "region_bytes"))), 14, R.color.accent);
+        used.setPadding(dp(16), dp(16), dp(16), dp(4));
+        body.addView(used);
+        List<Map<String, Object>> regions = Core.list(answer, "regions");
+        if (regions.isEmpty()) {
+            body.addView(padded(text(getString(R.string.maps_none), 15, R.color.text_secondary)));
+        }
+        for (Map<String, Object> region : regions) {
+            body.addView(region(region));
+        }
+    }
+
+    /** One region: where it is, its size, date and zooms, and Delete with a question first. */
+    private View region(Map<String, Object> region) {
+        final String name = Core.str(region, "name");
+        LinearLayout line = new LinearLayout(this);
+        line.setId(R.id.maps_region);
+        line.setGravity(Gravity.CENTER_VERTICAL);
+        line.setPadding(dp(16), dp(8), dp(8), dp(8));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        words.addView(text(getString(R.string.maps_region,
+                Ui.place(Core.num(region, "lat_e6"), Core.num(region, "lon_e6"))), 16, R.color.text));
+        long modified = Core.num(region, "modified");
+        String when = modified == 0 ? "" : DateUtils.formatDateTime(this, modified * 1000,
+                DateUtils.FORMAT_SHOW_DATE | DateUtils.FORMAT_ABBREV_MONTH);
+        words.addView(text(getString(R.string.maps_region_line,
+                Formatter.formatShortFileSize(this, Core.num(region, "bytes")), when,
+                (int) Core.num(region, "min_zoom"), (int) Core.num(region, "max_zoom")), 14,
+                R.color.text_secondary));
+        line.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button delete = new Button(this);
+        delete.setText(R.string.maps_delete);
+        delete.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                new AlertDialog.Builder(SettingsActivity.this)
+                        .setMessage(R.string.maps_delete_ask)
+                        .setPositiveButton(R.string.maps_delete, new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                maps(name, null);
+                            }
+                        })
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .show();
+            }
+        });
+        line.addView(delete);
+        return line;
+    }
+
+    /** The positions the user shared (1201): to whom, and when. */
+    private void sharedPositions() {
+        TextView header = text(getString(R.string.privacy_shared), 14, R.color.accent);
+        header.setPadding(dp(16), dp(24), dp(16), dp(4));
+        body.addView(header);
+        Map<String, Object> answer = Core.shared();
+        List<Map<String, Object>> rows = Core.list(answer, "shared");
+        if (answer.containsKey("error")) {
+            body.addView(padded(text(Core.str(answer, "error"), 15, R.color.text_secondary)));
+            return;
+        }
+        if (rows.isEmpty()) {
+            body.addView(padded(text(getString(R.string.privacy_shared_none), 15, R.color.text_secondary)));
+        }
+        for (Map<String, Object> row : rows) {
+            String peer = Core.str(row, "peer");
+            LinearLayout line = new LinearLayout(this);
+            line.setId(R.id.privacy_shared_row);
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            line.setPadding(dp(16), dp(8), dp(16), dp(8));
+            AvatarView avatar = new AvatarView(this, null);
+            avatar.show(peer, row);
+            line.addView(avatar, new LinearLayout.LayoutParams(dp(40), dp(40)));
+            TextView name = text(Core.str(row, "name"), 16, R.color.text);
+            name.setPadding(dp(16), 0, dp(8), 0);
+            name.setSingleLine(true);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            line.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            line.addView(text(DateUtils.getRelativeTimeSpanString(Core.num(row, "at") * 1000,
+                    System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString(), 14,
+                    R.color.text_secondary));
+            body.addView(line);
         }
     }
 

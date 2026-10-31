@@ -71,6 +71,14 @@ public class MapActivity extends Activity implements Events.Listener {
     }
 
     @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        if (map.permission(request)) {
+            return;
+        }
+        super.onRequestPermissionsResult(request, permissions, results);
+    }
+
+    @Override
     public void onBackPressed() {
         if (map.back()) {
             return;
@@ -100,6 +108,7 @@ public class MapActivity extends Activity implements Events.Listener {
 
     @Override
     protected void onPause() {
+        map.pause();
         Core.front(false);
         Events.listen(null);
         super.onPause();

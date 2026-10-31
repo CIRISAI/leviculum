@@ -55,6 +55,11 @@ import java.util.Map;
  * the listener's; a cluster's tap or a friend picked in the sheet flies
  * the map there, an animated pan and zoom that asks frames as a finger
  * would.
+ *
+ * The phone's own position (1201) is a dot in the accent with a ring of
+ * the background, where the frame says the fix lies; the crosshair centres
+ * on it at a zoom of its choosing (centreAt), and a finger that moves the
+ * map tells the listener, which ends follow mode.
  */
 final class MapView extends View {
     /** What a frame said, on the UI thread. */
@@ -66,6 +71,9 @@ final class MapView extends View {
 
         /** A tap on the map away from every pin. */
         void onTapAway();
+
+        /** A finger moved or zoomed the map (1201): follow mode ends. */
+        void onFinger();
     }
 
     /** An avatar pin's diameter, as the library clusters them (friends.rs PIN_DP). */
@@ -135,6 +143,13 @@ final class MapView extends View {
     private boolean touching;
     private Long atLat;
     private Long atLon;
+    /** The zoom to centre on atLat, atLon at, in thousandths; null lets the library fit. */
+    private Long atZoom;
+    /** The phone's own fix (1201), and where the last frame put it in its view. */
+    private Long ownLat;
+    private Long ownLon;
+    private Long ownX;
+    private Long ownY;
     /** A frame is owed: the view changed since the last request. */
     private boolean owed;
     /** The last frame was at rest and the library has tiles to prefetch. */
@@ -161,6 +176,7 @@ final class MapView extends View {
 
             @Override
             public boolean onScroll(MotionEvent a, MotionEvent b, float dx, float dy) {
+                listener.onFinger();
                 synchronized (MapView.this) {
                     offX -= dx;
                     offY -= dy;
@@ -183,6 +199,7 @@ final class MapView extends View {
 
             @Override
             public boolean onDoubleTap(MotionEvent e) {
+                listener.onFinger();
                 zoomAbout(2f, e.getX(), e.getY());
                 return true;
             }
@@ -190,6 +207,7 @@ final class MapView extends View {
         pinch = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override
             public boolean onScale(ScaleGestureDetector detector) {
+                listener.onFinger();
                 zoomAbout(detector.getScaleFactor(), detector.getFocusX(), detector.getFocusY());
                 return true;
             }
@@ -217,6 +235,44 @@ final class MapView extends View {
         if (peer != null) {
             selected = peer;
         }
+    }
+
+    /**
+     * Centre on a place, degrees times a million, at `zoomMilli` (held to
+     * the regions' zooms by the library): the crosshair (1201). Ends a
+     * fly and drops what the fingers did to the frame on screen.
+     */
+    void centreAt(long latE6, long lonE6, long zoomMilli) {
+        if (fly != null && fly.isRunning()) {
+            fly.cancel();
+        }
+        synchronized (this) {
+            flying = false;
+            atLat = latE6;
+            atLon = lonE6;
+            atZoom = zoomMilli;
+            owed = true;
+            notifyAll();
+        }
+    }
+
+    /** The phone's own fix, degrees times a million; null for none. */
+    void own(Long latE6, Long lonE6) {
+        synchronized (this) {
+            ownLat = latE6;
+            ownLon = lonE6;
+            if (latE6 == null) {
+                ownX = null;
+                ownY = null;
+            }
+        }
+        invalidate();
+        ask();
+    }
+
+    /** The last frame's exact zoom in thousandths; 0 before the first. */
+    synchronized long zoom() {
+        return zoomMilli == null ? 0 : zoomMilli;
     }
 
     /** The people the marks name, by peer, and the peer whose card is open. */
@@ -450,7 +506,21 @@ final class MapView extends View {
         canvas.scale(scale, scale);
         canvas.drawBitmap(bitmap, -marginX, -marginY, paint);
         canvas.restore();
+        drawOwn(canvas);
         drawMarks(canvas);
+    }
+
+    /** The phone's own position (1201): an accent dot in a ring of the background. */
+    private void drawOwn(Canvas canvas) {
+        if (ownX == null || ownY == null || ownLat == null) {
+            return;
+        }
+        float cx = offX + scale * ownX;
+        float cy = offY + scale * ownY;
+        ring.setColor(getContext().getColor(R.color.background));
+        canvas.drawCircle(cx, cy, 9 * density, ring);
+        circle.setColor(getContext().getColor(R.color.accent));
+        canvas.drawCircle(cx, cy, 6 * density, circle);
     }
 
     /**
@@ -603,9 +673,15 @@ final class MapView extends View {
                 if (atLat != null) {
                     request.put("at_lat_e6", atLat);
                     request.put("at_lon_e6", atLon);
+                    if (atZoom != null) request.put("at_zoom_milli", atZoom);
+                }
+                if (ownLat != null) {
+                    request.put("own_lat_e6", ownLat);
+                    request.put("own_lon_e6", ownLon);
                 }
                 atLat = null;
                 atLon = null;
+                atZoom = null;
             }
             // The frame is the view and the margins on both sides (the
             // margins are at most a quarter screen, within the library's
@@ -626,6 +702,8 @@ final class MapView extends View {
                     y = Core.num(shown, "y");
                     zoomMilli = Core.num(shown, "zoom_milli");
                     marks = Core.list(shown, "marks");
+                    ownX = shown.get("own_x") instanceof Number ? Core.num(shown, "own_x") : null;
+                    ownY = shown.get("own_y") instanceof Number ? Core.num(shown, "own_y") : null;
                     viewW = w;
                     viewH = h;
                     maxZoom = Core.num(shown, "max_zoom");

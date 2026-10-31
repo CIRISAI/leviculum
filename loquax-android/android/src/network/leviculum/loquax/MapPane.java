@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
+import android.location.Location;
 import android.net.Uri;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -44,10 +45,26 @@ import java.util.Map;
  * day first, older ones greyed under a divider; a tap flies the map to
  * the friend and opens the card. The map's search is that sheet with its
  * search field (friends only; places come later).
+ *
+ * Location (1201): the crosshair above the Friends button centres on the
+ * phone's own position at about z16 on the first tap and follows it on
+ * the second, until a finger moves the map. Its first tap ever asks for
+ * the permission, with a line that says why (Locator); refused, the
+ * crosshair keeps the view where the user looked and a chip says
+ * "Location is off". While the map is in front and the permission is
+ * there, the own position is a dot and the friends' distances are
+ * measured from it. Nothing of it is sent: "Share my position" on the
+ * empty map (to a chat the user picks) and "Share mine" on a friend's card
+ * send it, once, to one peer.
  */
 final class MapPane implements MapView.Listener {
     /** How long a chip that tells of an event stays. */
     private static final long CHIP_MS = 4000;
+    /** The crosshair's zoom, about z16 (1201), in thousandths. */
+    private static final long LOCATE_ZOOM = 16_000;
+
+    /** What the crosshair did last: nothing, centred once, following. */
+    private enum Locate { NONE, CENTRED, FOLLOWING }
 
     /** Where the pane goes beyond the map: a friend's chat. */
     interface Host {
@@ -59,7 +76,15 @@ final class MapPane implements MapView.Listener {
     private final TextView chip;
     private final TextView credit;
     private final ImageButton friendsButton;
+    private final ImageButton locateButton;
+    private final View empty;
     private final View card;
+    private final Locator locator;
+    private Locate locate = Locate.NONE;
+    /** The crosshair was tapped and waits for the first fix to centre on. */
+    private boolean locateOwed;
+    /** The phone's own fix, while the map is in front and allowed to read it. */
+    private Location fix;
     private final MapView map;
     private final Runnable hide = new Runnable() {
         @Override
@@ -97,6 +122,22 @@ final class MapPane implements MapView.Listener {
                 showSheet(null, false);
             }
         });
+        locator = new Locator(activity);
+        locateButton = (ImageButton) activity.findViewById(R.id.locate);
+        tintLocate();
+        locateButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                locate();
+            }
+        });
+        empty = activity.findViewById(R.id.map_empty);
+        activity.findViewById(R.id.map_share).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickAndShare();
+            }
+        });
         map = new MapView(activity, activity.getFilesDir().getAbsolutePath(), this);
         ((FrameLayout) activity.findViewById(R.id.map)).addView(map);
         refresh();
@@ -108,10 +149,161 @@ final class MapPane implements MapView.Listener {
         cardOwed = peer;
     }
 
-    /** Draw anew: the screen came to the front, or the pins changed. */
+    /**
+     * Draw anew: the screen came to the front, or the pins changed. With
+     * the permission there, the own position is heard of while in front.
+     */
     void ask() {
+        if (locator.allowed()) {
+            watch();
+        }
         refresh();
         map.ask();
+    }
+
+    /** The map left the front: the position is no longer read. */
+    void pause() {
+        locator.stop();
+    }
+
+    /** The system's answer to the permission question: whether it was the pane's. */
+    boolean permission(int request) {
+        return locator.result(request);
+    }
+
+    /** Hear of the own position: the dot, the distances, follow mode. */
+    private void watch() {
+        locator.watch(new Locator.Fix() {
+            @Override
+            public void on(Location location) {
+                moved(location);
+            }
+        });
+    }
+
+    /** A new own fix: the dot moves, the distances change, follow mode follows. */
+    private void moved(Location location) {
+        boolean first = fix == null;
+        fix = location;
+        map.own(Math.round(location.getLatitude() * 1e6), Math.round(location.getLongitude() * 1e6));
+        if (locateOwed && Locator.fresh(location)) {
+            locateOwed = false;
+            centre(LOCATE_ZOOM);
+            locate = Locate.CENTRED;
+            tintLocate();
+        } else if (locate == Locate.FOLLOWING) {
+            centre(map.zoom());
+        }
+        if (first) {
+            refresh();
+        }
+    }
+
+    /** Centre on the own fix at `zoomMilli`. */
+    private void centre(long zoomMilli) {
+        if (fix == null) {
+            return;
+        }
+        map.centreAt(Math.round(fix.getLatitude() * 1e6), Math.round(fix.getLongitude() * 1e6),
+                zoomMilli == 0 ? LOCATE_ZOOM : zoomMilli);
+    }
+
+    /**
+     * The crosshair (1201): first tap centres at about z16, the second
+     * follows; the first tap ever asks for the permission. Refused, the
+     * view stays where the user looked and a chip says so.
+     */
+    private void locate() {
+        locator.ask(new Runnable() {
+            @Override
+            public void run() {
+                if (locate == Locate.CENTRED && fix != null) {
+                    locate = Locate.FOLLOWING;
+                    say(activity.getString(R.string.following));
+                    centre(map.zoom());
+                } else if (fix != null && Locator.fresh(fix)) {
+                    locate = Locate.CENTRED;
+                    centre(LOCATE_ZOOM);
+                } else {
+                    // No fix yet: the first that comes is centred on.
+                    locateOwed = true;
+                    say(activity.getString(R.string.location_finding));
+                    watch();
+                }
+                tintLocate();
+            }
+        }, new Runnable() {
+            @Override
+            public void run() {
+                locate = Locate.NONE;
+                tintLocate();
+                say(activity.getString(R.string.location_off));
+            }
+        });
+    }
+
+    /**
+     * The crosshair's words for a screen reader: what the next tap does.
+     * The look stays the one round button style; follow mode says itself
+     * in a chip when it starts.
+     */
+    private void tintLocate() {
+        boolean following = locate == Locate.FOLLOWING;
+        locateButton.setImageDrawable(new Glyph(Glyph.Kind.LOCATE, activity.getColor(R.color.on_send)));
+        locateButton.setSelected(following);
+        locateButton.setContentDescription(activity.getString(
+                following ? R.string.following : R.string.locate));
+    }
+
+    @Override
+    public void onFinger() {
+        if (locate != Locate.NONE || locateOwed) {
+            locate = Locate.NONE;
+            locateOwed = false;
+            tintLocate();
+        }
+    }
+
+    /**
+     * "Share my position" on the empty map: the chats to pick from, then
+     * the share to the one picked.
+     */
+    private void pickAndShare() {
+        Map<String, Object> answer = Core.conversations();
+        final List<Map<String, Object>> rows = Core.list(answer, "conversations");
+        if (rows.isEmpty()) {
+            say(activity.getString(R.string.share_nobody));
+            return;
+        }
+        String[] names = new String[rows.size()];
+        for (int i = 0; i < rows.size(); i++) {
+            names[i] = Core.str(rows.get(i), "name");
+        }
+        new android.app.AlertDialog.Builder(activity)
+                .setTitle(R.string.share_with)
+                .setItems(names, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface dialog, int which) {
+                        Map<String, Object> row = rows.get(which);
+                        share(Core.str(row, "peer"), Core.str(row, "name"));
+                    }
+                })
+                .show();
+    }
+
+    /** Share the own position with `peer`, once (1201). */
+    private void share(String peer, String name) {
+        locator.shareWith(peer, name, new Locator.Fix() {
+            @Override
+            public void on(Location location) {
+                moved(location);
+            }
+        }, new Locator.Say() {
+            @Override
+            public void line(String text) {
+                say(text);
+            }
+        });
     }
 
     /** The map's search (1200): the Friends sheet with its search field. */
@@ -130,7 +322,8 @@ final class MapPane implements MapView.Listener {
 
     /** The friends again from the library: the pins' faces, the card's words. */
     private void refresh() {
-        Map<String, Object> answer = Core.friends();
+        Map<String, Object> answer = fix == null ? Core.friends()
+                : Core.friends(Math.round(fix.getLatitude() * 1e6), Math.round(fix.getLongitude() * 1e6));
         if (answer.containsKey("error")) {
             return;
         }
@@ -152,6 +345,8 @@ final class MapPane implements MapView.Listener {
         if (carded != null && people.containsKey(carded)) {
             fillCard(people.get(carded));
         }
+        // The empty map (1201): one line and "Share my position".
+        empty.setVisibility(friends.isEmpty() && carded == null ? View.VISIBLE : View.GONE);
     }
 
     @Override
@@ -234,6 +429,8 @@ final class MapPane implements MapView.Listener {
         fillCard(row);
         card.setVisibility(View.VISIBLE);
         friendsButton.setVisibility(View.GONE);
+        locateButton.setVisibility(View.GONE);
+        empty.setVisibility(View.GONE);
         map.people(people, carded);
     }
 
@@ -241,6 +438,8 @@ final class MapPane implements MapView.Listener {
         carded = null;
         card.setVisibility(View.GONE);
         friendsButton.setVisibility(View.VISIBLE);
+        locateButton.setVisibility(View.VISIBLE);
+        empty.setVisibility(friends.isEmpty() ? View.VISIBLE : View.GONE);
         map.people(people, null);
     }
 
@@ -256,6 +455,14 @@ final class MapPane implements MapView.Listener {
             @Override
             public void onClick(View v) {
                 host.chat(peer);
+            }
+        });
+        View share = activity.findViewById(R.id.card_share);
+        share.setVisibility(peer.equals(own) ? View.GONE : View.VISIBLE);
+        share.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                share(peer, Core.str(row, "name"));
             }
         });
         final Intent navigate = new Intent(Intent.ACTION_VIEW, Uri.parse(Core.str(row, "geo")));

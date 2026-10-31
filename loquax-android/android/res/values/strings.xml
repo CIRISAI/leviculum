@@ -274,10 +274,9 @@
     <string name="settings_notifications_summary">New messages, muted chats</string>
     <string name="settings_notifications_text">Loquax tells you of every new message. To mute one chat, hold it in the list, then Mute. Sound and vibration are in Android\'s settings for Loquax.</string>
     <string name="settings_privacy">Privacy</string>
-    <string name="settings_privacy_summary">Blocked contacts</string>
+    <string name="settings_privacy_summary">Blocked contacts, positions you shared</string>
     <string name="settings_maps">Maps</string>
-    <string name="settings_maps_summary">Regions on this phone</string>
-    <string name="settings_maps_text">The map of the area you look at loads by itself and stays on the phone. The list of regions, their sizes and deleting them come here.</string>
+    <string name="settings_maps_summary">Maps on this phone, automatic download</string>
     <string name="settings_backup">Backup</string>
     <string name="settings_backup_summary">Back up the mailbox</string>
     <string name="settings_backup_away">Your mailbox is on another device. Back it up there.</string>
@@ -287,4 +286,32 @@
     <string name="map_theme_light">Light</string>
     <string name="map_theme_dark">Dark</string>
     <string name="settings_app_theme_text">The app itself follows the phone\'s light or dark setting.</string>
+    <!-- Location and the Maps page (1201). -->
+    <string name="locate">Show where I am</string>
+    <string name="following">The map follows you</string>
+    <string name="location_why">To show where you are on the map. Loquax sends your position only when you share it.</string>
+    <string name="location_continue">Continue</string>
+    <string name="location_not_now">Not now</string>
+    <string name="location_off">Location is off</string>
+    <string name="location_finding">Finding your position…</string>
+    <string name="location_none">The phone does not know where you are yet. Try again outside.</string>
+    <string name="map_empty">No friends on the map yet</string>
+    <string name="share_position">Share my position</string>
+    <string name="card_share">Share mine</string>
+    <string name="share_with">Share your position with</string>
+    <string name="share_nobody">Start a chat first, then share your position in it.</string>
+    <string name="shared_to">Your position went to %1$s</string>
+    <string name="share_failed">Not sent: %1$s</string>
+    <string name="attach">Attach</string>
+    <string name="attach_position">My position</string>
+    <string name="maps_auto">Download maps automatically</string>
+    <string name="maps_auto_text">The map of the area you look at loads by itself and stays on the phone.</string>
+    <string name="maps_used">Storage used: %1$s</string>
+    <string name="maps_none">No maps on this phone yet.</string>
+    <string name="maps_region">Around %1$s</string>
+    <string name="maps_region_line">%1$s · %2$s · zoom %3$d to %4$d</string>
+    <string name="maps_delete">Delete</string>
+    <string name="maps_delete_ask">Delete this map? It loads again when you look there.</string>
+    <string name="privacy_shared">Positions you shared</string>
+    <string name="privacy_shared_none">You have not shared your position yet.</string>
 </resources>

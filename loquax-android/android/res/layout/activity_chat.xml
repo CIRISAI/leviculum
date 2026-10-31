@@ -257,7 +257,7 @@
             android:minHeight="48dp"
             android:orientation="horizontal"
             android:paddingStart="4dp"
-            android:paddingEnd="12dp">
+            android:paddingEnd="4dp">
 
             <ImageButton
                 android:id="@+id/emoji"
@@ -285,6 +285,17 @@
                 android:textColor="@color/text"
                 android:textColorHint="@color/text_secondary"
                 android:textSize="17sp" />
+
+            <!-- The attachment menu (1201): the own position, for now. -->
+            <ImageButton
+                android:id="@+id/attach"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_gravity="bottom"
+                android:layout_marginBottom="4dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/attach"
+                android:padding="8dp" />
         </LinearLayout>
 
         <ImageButton

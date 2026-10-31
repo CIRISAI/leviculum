@@ -131,8 +131,10 @@
 
         <!-- Map: the whole room, a chip at the top edge only while
              something happens, the credit at the bottom, the Friends
-             button bottom right in the pencil's style, and a tapped
-             friend's card at the bottom (MapPane, 1200). -->
+             button bottom right in the pencil's style with the crosshair
+             above it (1201), a tapped friend's card at the bottom
+             (MapPane, 1200), and the empty map's line and "Share my
+             position" in the middle while nobody is on it (1201). -->
         <FrameLayout
             android:id="@+id/pane_map"
             android:layout_width="match_parent"
@@ -174,6 +176,50 @@
                 android:paddingEnd="6dp"
                 android:textColor="@color/text_secondary"
                 android:textSize="11sp" />
+
+            <LinearLayout
+                android:id="@+id/map_empty"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:layout_margin="32dp"
+                android:background="@drawable/panel_round"
+                android:elevation="4dp"
+                android:gravity="center_horizontal"
+                android:orientation="vertical"
+                android:padding="16dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:text="@string/map_empty"
+                    android:textColor="@color/text"
+                    android:textSize="16sp" />
+
+                <Button
+                    android:id="@+id/map_share"
+                    style="?android:attr/borderlessButtonStyle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/share_position"
+                    android:textAllCaps="false"
+                    android:textColor="@color/accent"
+                    android:textSize="16sp" />
+            </LinearLayout>
+
+            <ImageButton
+                android:id="@+id/locate"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:layout_gravity="bottom|end"
+                android:layout_marginEnd="16dp"
+                android:layout_marginBottom="84dp"
+                android:background="@drawable/send_circle"
+                android:contentDescription="@string/locate"
+                android:elevation="6dp"
+                android:padding="16dp" />
 
             <ImageButton
                 android:id="@+id/friends"
@@ -262,6 +308,17 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:text="@string/card_navigate"
+                        android:textAllCaps="false"
+                        android:textColor="@color/accent"
+                        android:textSize="16sp" />
+
+                    <Button
+                        android:id="@+id/card_share"
+                        style="?android:attr/borderlessButtonStyle"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/card_share"
                         android:textAllCaps="false"
                         android:textColor="@color/accent"
                         android:textSize="16sp" />
