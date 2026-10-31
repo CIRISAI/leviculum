@@ -143,6 +143,7 @@ pub mod reactions;
 pub mod replies;
 pub mod search;
 pub mod state;
+pub mod strings;
 
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
 /// seconds.

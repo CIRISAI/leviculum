@@ -2503,6 +2503,16 @@ loquax-gui:
     cargo clippy -p loquax --features gui --all-targets -- -D warnings
     {{manifest}} loquax-gui -- cargo test -p loquax --features gui --lib --bins --target "$(rustc -vV | sed -n 's/^host: //p')"
 
+# 1217, #232: the phone's strings of the list and the chat come from the core's
+# catalogue (`loquax/src/ui/strings.rs`, English and German), which this writes
+# to `loquax-android/android/res/values{,-de}/strings_scene.xml`. The library's
+# tests refuse a generated file that differs from the catalogue and an Android
+# `strings.xml` that still holds one of its keys, so a forgotten run is red in
+# every lib run. ~10 s warm, the library's tests filtered to the catalogue.
+[doc('Write the phone strings_scene.xml from the core catalogue (#232)')]
+loquax-strings:
+    LOQUAX_WRITE_STRINGS=1 cargo test -p loquax --lib ui::strings::tests::the_phone_reads_the_catalogue
+
 # 1147, #232: the messenger is Loquax in prose (Lew, 2026-10-30); `loquax` is
 # the command, the package, the crate and every path, so in the docs it is code,
 # a path, a hyphenated page name or a man page's bold command. Refuses a bare
