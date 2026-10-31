@@ -832,4 +832,15 @@ const _: () =
 /// slack is 8 B, the boot serve cap is still 0 B, and 9 more bytes in
 /// `NodeCore` cost a link and fail the binaries'
 /// `MAX_ENDPOINT_LINKS >= ble::MAX_LINKS` assert.
+///
+/// That assert fired once more on 27165081 (Codeberg #232, the ratchet
+/// work): `NodeCore::undecrypted_packet`, the hash of the last packet that
+/// failed to decrypt, held inline as `Option<[u8; 32]>`, grew the node box
+/// by 32 B to 31 784 B. 81f50698 boxed it the way `split_internal` is, and
+/// its 4 B pointer fits the struct's alignment padding: measured on the
+/// bsp-t114 build, the node box is 31 752 B with the boxed field and
+/// 31 752 B with no field at all, so this number and the 8 B slack hold.
+/// The 32 B live on the heap only between a failed decrypt and the proof
+/// request behind it. No ratchet state entered the box: the ratchet keys
+/// live in `Destination`, which a board without ratchets never fills.
 pub const NODE_BOX_BYTES: usize = 31_752;

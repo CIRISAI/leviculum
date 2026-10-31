@@ -11551,6 +11551,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // semantics are the ones a peer expects. It measurably improves
             // Priority 1: the packets that follow take one carrier crossing
             // instead of two and stop depending on a third node staying up.
+            // It stays so when the kept copy's peer dies before the release:
+            // `drop_held_announces_via_peer` then drops the copy, which is the
+            // state a node without the hold reaches too (the short path
+            // installed, the longer copy refused, the path culled with its
+            // peer), so no route through a dead link is ever released (#480).
             //
             // A tie takes the newest: at equal route quality the later announce
             // is the fresher statement (newer ratchet, newer app data).
@@ -11578,6 +11583,43 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 true
             }
         }
+    }
+
+    /// Forget every announce held on `iface` that arrived through `peer`,
+    /// returning how many went (Codeberg #480). Called beside
+    /// [`drop_paths_via_peer`](Self::drop_paths_via_peer) when that peer's
+    /// link dies.
+    ///
+    /// A held entry carries its arrival peer to the release (#589), so a
+    /// release after the peer is gone installs a path through a link that
+    /// no longer exists and rebroadcasts it; nothing replaces it until a
+    /// shorter announce arrives (ble_room_20, 2026-10-31: three probes died
+    /// as `BLE_TX_ROUTE_MISS`). The hold keeps one copy per destination, the
+    /// shorter one (see `hold_announce`), so a longer copy through a live
+    /// peer is not there to fall back to. Dropping the entry reaches the
+    /// state a node reaches with no hold at all: the short path installed,
+    /// the longer copy of the same emission refused, the path culled with
+    /// its peer. The destination is then unknown, and the next copy or a
+    /// path request learns it through whoever is still up.
+    ///
+    /// Python has no multi-peer interface and drops held announces only with
+    /// the interface; this is the per-peer grain of the same cleanup, local
+    /// to the table and silent on the wire.
+    pub fn drop_held_announces_via_peer(
+        &mut self,
+        iface: usize,
+        peer: &[u8; TRUNCATED_HASHBYTES],
+    ) -> usize {
+        let Some(queue) = self.interface_held_announces.get_mut(&iface) else {
+            return 0;
+        };
+        let before = queue.len();
+        queue.retain(|_, held| held.peer != Some(*peer));
+        let dropped = before - queue.len();
+        if queue.is_empty() {
+            self.interface_held_announces.remove(&iface);
+        }
+        dropped
     }
 
     /// Release at most one held announce for `iface` back into the normal inbound

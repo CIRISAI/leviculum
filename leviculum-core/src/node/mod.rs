@@ -65,6 +65,8 @@ mod mvr_ble_departure_loop;
 #[cfg(test)]
 mod mvr_ble_held_announce_peer;
 #[cfg(test)]
+mod mvr_ble_held_announce_peer_lost;
+#[cfg(test)]
 mod mvr_ble_link_table_delivery_hint;
 #[cfg(test)]
 mod mvr_ble_peer_loss_reroute;
@@ -602,7 +604,12 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// decrypt failed and stays unsent, as the reference proves only what
     /// `Destination.receive` accepted (`RNS/Transport.py:2159-2160`).
     /// Cleared by the next `ProofRequested`, whichever packet it names.
-    undecrypted_packet: Option<[u8; 32]>,
+    ///
+    /// Boxed, as `split_internal` is: unboxed, its 33 bytes grew the node
+    /// box past the board's pinned budget and cost an endpoint link
+    /// (`NODE_BOX_BYTES` in `leviculum-nrf/heap-budget`); the box lives
+    /// only between a failed decrypt and the proof request behind it.
+    undecrypted_packet: Option<Box<[u8; 32]>>,
     /// Full destination names whose per-identity hash a peer-up report pulls
     /// a path for (Codeberg #365); see
     /// [`handle_interface_peer_up`](Self::handle_interface_peer_up).
@@ -2630,7 +2637,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         len: usize,
         interface_index: usize,
     ) {
-        self.undecrypted_packet = raw_hash;
+        self.undecrypted_packet = raw_hash.map(Box::new);
         self.events.push(NodeEvent::PacketUndecryptable {
             destination,
             len,
@@ -3378,6 +3385,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         peer: [u8; TRUNCATED_HASHBYTES],
     ) -> crate::transport::TickOutput {
         let lost_paths = self.transport.drop_paths_via_peer(iface.0, &peer);
+        // An announce held through the lost link would be released with it
+        // as next hop, a route nothing can carry (#480).
+        let dropped_holds = self.transport.drop_held_announces_via_peer(iface.0, &peer);
+        if dropped_holds > 0 {
+            crate::tracing::debug!(
+                event = "ANN_HELD_DROPPED",
+                peer = %HexShort(&peer),
+                iface = %self.transport.iface_name(iface.0),
+                reason = "peer_lost",
+                n = dropped_holds,
+            );
+        }
 
         crate::tracing::debug!(
             "Peer <{}> lost on {}, removed {} paths",
@@ -4652,7 +4671,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 peer,
             } => {
                 let dest_hash = DestinationHash::new(destination_hash);
-                if self.undecrypted_packet.take() == Some(packet_hash) {
+                if self.undecrypted_packet.take().as_deref() == Some(&packet_hash) {
                     crate::tracing::debug!(
                         dest = %HexShort(&destination_hash),
                         "No proof for a packet that did not decrypt"
