@@ -565,7 +565,18 @@ fn a_frame_with_margins_covers_them() {
         moving: true,
         ..request(home.path(), false)
     };
-    let (shown, big) = frame(&loquax_android::map::render(&wide, Some(Vec::new()), now()));
+    // A frame while the finger moves draws a few missing tiles a worker
+    // and owes the rest (`MOVING_TILES_PER_WORKER`), so with few cores the
+    // first one shows stand-ins: ask again while it owes any, as Java does
+    // (1167). Each answer draws more, so this ends.
+    let (mut shown, mut big) = frame(&loquax_android::map::render(&wide, Some(Vec::new()), now()));
+    for _ in 0..64 {
+        if !shown.pending {
+            break;
+        }
+        (shown, big) = frame(&loquax_android::map::render(&wide, Some(Vec::new()), now()));
+    }
+    assert!(!shown.pending, "the frame still owes tiles after 64 asks");
     assert_eq!((shown.w, shown.h), (2 * W, 2 * H));
     assert_eq!((shown.margin_x, shown.margin_y), (mx, my));
     assert!(big.chunks(4).all(|px| px[3] == 0xff), "every pixel set");
@@ -583,11 +594,12 @@ fn a_frame_with_margins_covers_them() {
             moving: true,
             ..request(home.path(), false)
         };
-        let (_, small) = frame(&loquax_android::map::render(
+        let (panned_shown, small) = frame(&loquax_android::map::render(
             &panned,
             Some(Vec::new()),
             now(),
         ));
+        assert!(!panned_shown.pending, "the margins held its tiles");
         // The panned screen is the big frame's window at the margin plus
         // the pan.
         let (x0, y0) = ((mx as i32 + dx) as usize, (my as i32 + dy) as usize);
@@ -942,11 +954,19 @@ fn a_pin_costs_no_tile() {
     assert_eq!(after.hits, before.hits + 3 * before.misses);
 }
 
+/// The milliseconds between the frames [`pan_and_rest`] asks for, on the
+/// renderer's held clock: a phone's 60 a second.
+const FRAME_MS: u64 = 16;
+
 /// Pan the view of `ask` by `(dx, dy)` five times with the finger down,
-/// then a frame at rest: the request for the view it left.
-fn pan_and_rest(ask: &MapRequest, dx: i32, dy: i32) -> (MapShown, MapRequest) {
+/// then a frame at rest: the request for the view it left. The renderer's
+/// clock is held, a frame every [`FRAME_MS`] from `at_ms`, so the pan's
+/// velocity is the gesture's and not how fast the host draws (1167).
+fn pan_and_rest(ask: &MapRequest, dx: i32, dy: i32, at_ms: u64) -> (MapShown, MapRequest) {
+    let dir = PathBuf::from(&ask.dir);
     let mut ask = ask.clone();
-    for _ in 0..5 {
+    for i in 0..5 {
+        loquax_android::map::tune_clock(&dir, Some(at_ms + i * FRAME_MS));
         ask.pan_x = dx;
         ask.pan_y = dy;
         ask.moving = true;
@@ -959,6 +979,7 @@ fn pan_and_rest(ask: &MapRequest, dx: i32, dy: i32) -> (MapShown, MapRequest) {
     ask.pan_x = 0;
     ask.pan_y = 0;
     ask.moving = false;
+    loquax_android::map::tune_clock(&dir, Some(at_ms + 5 * FRAME_MS));
     let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
     (shown, ask)
 }
@@ -985,8 +1006,9 @@ fn the_prefetch_draws_the_tile_ahead_of_the_pan_first() {
         let ask = request(home.path(), false);
         let _ = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
         loquax_android::map::tune_tiles(home.path(), Some(1), false);
-        let (rest, ask) = pan_and_rest(&ask, 0, way * 40);
+        let (rest, ask) = pan_and_rest(&ask, 0, way * 40, 1000);
         assert!(rest.prefetching, "a frame at rest owing nothing prefetches");
+        loquax_android::map::tune_clock(home.path(), Some(1000 + 6 * FRAME_MS));
         let one = prefetch(&ask);
         assert_eq!(one.prefetched, 1);
         assert!(one.prefetching);
