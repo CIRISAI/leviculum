@@ -893,7 +893,11 @@ impl Inner {
         let mut wake = false;
         while let Ok(event) = self.watch.try_recv() {
             match event {
-                WatchEvent::Watching(up) => self.watching = up,
+                WatchEvent::Watching(up) => {
+                    // The list's status dot (1199) shows it: a `changed`.
+                    self.dirty |= self.watching != up;
+                    self.watching = up;
+                }
                 WatchEvent::Wake(newest) => {
                     let cursor = loquax::home::client::load_cursor(&self.home);
                     wake |= watch::wants_pull(newest, cursor);
