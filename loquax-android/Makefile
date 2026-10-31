@@ -2,6 +2,12 @@
 # Gradle, no AndroidX, the SDK's command line tools, and the Rust library
 # of this directory's crate cross-built by cargo with the NDK's linker.
 # README.md says what to install; docs/drafts/loquax-android-2026-10.md why.
+#
+#   make debug      debug APK for phones: arm64-v8a and armeabi-v7a
+#   make waydroid   debug APK for x86_64 only, bin/loquax-debug-x86_64.apk:
+#                   Waydroid and the emulator, where the scripted device
+#                   walk runs (scripts/device-walk.py,
+#                   docs/src/concepts/loquax-device-walk.md)
 
 # --- Project ---
 APP_MODULE=loquax
@@ -46,9 +52,14 @@ CLANG_arm64-v8a=aarch64-linux-android
 CLANG_armeabi-v7a=armv7a-linux-androideabi
 ENV_arm64-v8a=AARCH64_LINUX_ANDROID
 ENV_armeabi-v7a=ARMV7_LINUX_ANDROIDEABI
+# x86_64 for Waydroid and the emulator (`make waydroid`), never in a phone's APK.
+TRIPLE_x86_64=x86_64-linux-android
+CLANG_x86_64=x86_64-linux-android
+ENV_x86_64=X86_64_LINUX_ANDROID
 # The cc crate's names for the C compiler, for SQLite inside the store.
 CC_ENV_arm64-v8a=aarch64_linux_android
 CC_ENV_armeabi-v7a=armv7_linux_androideabi
+CC_ENV_x86_64=x86_64_linux_android
 # 16 KiB pages: Android 15 devices may run with them; a library aligned to
 # 4 KiB needs a compatibility mode there, and one whose RELRO segment ends
 # off a 16 KiB boundary crashes. NDK r28 aligns by default, r27 needs both
@@ -92,7 +103,7 @@ PACKAGE_NAME?=$(NAMESPACE)
 PACKAGE=$(BIN)/$(APP_MODULE)$(APK_SUFFIX).apk
 UNALIGNED_PACKAGE=$(BIN)/$(APP_MODULE)$(APK_SUFFIX).unaligned.apk
 
-.PHONY: all release debug build install install-debug uninstall uninstall-debug start start-debug logcat clean compile compile_android manifest native pack check-kspass FORCE
+.PHONY: all release debug waydroid build install install-debug uninstall uninstall-debug start start-debug logcat clean compile compile_android manifest native pack check-kspass FORCE
 
 all: release
 
@@ -110,6 +121,15 @@ debug: APK_SUFFIX=-debug
 debug: AAPT_EXTRA_FLAGS=--debug-mode
 debug: PACKAGE_NAME=$(NAMESPACE).debug
 debug: $(PROJ)/debug.keystore build
+
+# The debug APK with the x86_64 library alone, under its own name so it
+# never stands in for a phone's: the device walk installs it in Waydroid
+# on hamster, which runs x86_64 Android. Same package, same debug key. A
+# second make, because a prerequisite list (`native`'s) is expanded when
+# the Makefile is read, before a target's own ABIS could apply; variables
+# on the command line win over `debug`'s APK_SUFFIX.
+waydroid:
+	$(MAKE) debug ABIS=x86_64 APK_SUFFIX=-debug-x86_64
 
 build: compile native pack
 

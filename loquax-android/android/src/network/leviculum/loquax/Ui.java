@@ -37,6 +37,17 @@ final class Ui {
     }
 
     /** A time of day, in the phone's locale: 18:34 or 6:34 PM. */
+    /**
+     * A place, degrees times a million, as the Maps page names a region
+     * (1201): "52.52° N, 13.40° E", two decimals, in the phone's way of
+     * writing them.
+     */
+    static String place(long latE6, long lonE6) {
+        return String.format(java.util.Locale.getDefault(), "%.2f° %s, %.2f° %s",
+                Math.abs(latE6) / 1e6, latE6 < 0 ? "S" : "N",
+                Math.abs(lonE6) / 1e6, lonE6 < 0 ? "W" : "E");
+    }
+
     static String clock(long unixSecs) {
         return DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(unixSecs * 1000));
     }

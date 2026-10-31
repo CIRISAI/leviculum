@@ -3,6 +3,7 @@ package network.leviculum.loquax;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -26,21 +27,29 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * The conversation list, after a modern messenger's overview (1130): our
- * avatar, the app's name, search and a menu in the bar; each row an avatar,
+ * The main views (1199): the chat list and the map side by side under a
+ * bottom tab bar, one top bar over both: our avatar with the status dot
+ * (green while the mailbox link is up), the tab's name, search and a menu
+ * of Settings and Help. The selected tab survives a rotation; system back
+ * on the map goes to the chats first.
+ *
+ * The conversation list, after a modern messenger's overview (1130): each row an avatar,
  * the name, two lines of the last message, the time, and the unread count
  * or our last message's delivery mark; newest activity first, as the
  * library orders it, again on every `changed`; a round button for a new one.
  *
  * A long press on a row (1146), after Signal's, marks it and opens its
  * menu: read or unread, pin, mute, archive, delete. The archived
- * conversations are this screen again with ARCHIVED, reached from the
- * menu and from the list's last row; the menu's settings hold the blocked
- * contacts and the service's end.
+ * conversations are this screen again with ARCHIVED, a sub view with the
+ * back arrow and no tabs, reached from the list's last row.
  */
 public class ConversationsActivity extends Activity implements Events.Listener {
     /** The extra that makes this screen the archived view. */
     static final String ARCHIVED = "archived";
+    /** The saved state's key of the selected tab. */
+    private static final String TAB = "tab";
+    /** Help (1199): the book, until the app has a page of its own. */
+    static final String HELP_URL = "https://leviculum.network/docs/";
     /** Every row the library listed, and those the search leaves. */
     private final List<Map<String, Object>> all = new ArrayList<>();
     private final List<Map<String, Object>> rows = new ArrayList<>();
@@ -52,6 +61,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private Adapter adapter;
     private boolean archivedView;
     private boolean homeClient;
+    /** The map tab is selected; its pane is made on first selection. */
+    private boolean onMap;
+    private MapPane mapPane;
     /** The list's last row: the archived view, with how many. */
     private TextView archivedRow;
     private final ServiceLink link = new ServiceLink(this);
@@ -75,6 +87,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         own = (AvatarView) findViewById(R.id.avatar);
         archivedView = getIntent().getBooleanExtra(ARCHIVED, false);
         int text = getColor(R.color.text);
+        own.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                // The profile of 1187 once it exists; until then the settings.
+                startActivity(new Intent(ConversationsActivity.this, SettingsActivity.class));
+            }
+        });
         ListView list = (ListView) findViewById(R.id.list);
         archivedRow = new TextView(this);
         archivedRow.setTextColor(getColor(R.color.text_secondary));
@@ -107,16 +126,24 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 return true;
             }
         });
+        // Before the tabs: selecting one sets the search icon.
+        search = (ImageButton) findViewById(R.id.search);
         if (archivedView) {
             title.setText(R.string.archived);
             ((TextView) findViewById(R.id.empty)).setText(R.string.archived_none);
             findViewById(R.id.write).setVisibility(View.GONE);
+            subView(this);
+        } else {
+            tabs(savedInstanceState != null && savedInstanceState.getBoolean(TAB, false));
         }
-        search = (ImageButton) findViewById(R.id.search);
         search.setImageDrawable(new Glyph(Glyph.Kind.SEARCH, text));
         search.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (onMap) {
+                    mapPane.search();
+                    return;
+                }
                 searching(query.getVisibility() != View.VISIBLE);
             }
         });
@@ -151,27 +178,117 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         Asks.once(this);
     }
 
-    /** The bar's menu: pull now, the map, the archived view, the settings. */
-    private void showMenu(View anchor) {
-        PopupMenu popup = new PopupMenu(this, anchor);
-        popup.getMenu().add(0, R.string.refresh, 0, R.string.refresh);
-        popup.getMenu().add(0, R.string.map, 1, R.string.map);
-        if (!archivedView) {
-            popup.getMenu().add(0, R.string.archived, 2, R.string.archived);
+    /**
+     * The layout as a sub view (1199): the back arrow in the avatar's
+     * place, no tab bar. The archive and the map opened from a chat.
+     */
+    static void subView(final Activity screen) {
+        screen.findViewById(R.id.avatar).setVisibility(View.GONE);
+        screen.findViewById(R.id.tabs).setVisibility(View.GONE);
+        ImageButton back = (ImageButton) screen.findViewById(R.id.back);
+        back.setVisibility(View.VISIBLE);
+        back.setImageDrawable(new Glyph(Glyph.Kind.BACK, screen.getColor(R.color.text)));
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                screen.finish();
+            }
+        });
+    }
+
+    /** The tab bar: Chats and Map, `map` selected at the start. */
+    private void tabs(boolean map) {
+        findViewById(R.id.tab_chats).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                select(false);
+            }
+        });
+        findViewById(R.id.tab_map).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                select(true);
+            }
+        });
+        select(map);
+    }
+
+    /** Show the map (`true`) or the chats, each pane keeping its state. */
+    private void select(boolean map) {
+        if (map && query.getVisibility() == View.VISIBLE) {
+            searching(false);
         }
-        popup.getMenu().add(0, R.string.settings, 3, R.string.settings);
+        onMap = map;
+        if (map && mapPane == null) {
+            mapPane = new MapPane(this, new MapPane.Host() {
+                @Override
+                public void chat(String peer) {
+                    ConversationsActivity.this.chat(peer);
+                }
+            });
+        }
+        findViewById(R.id.pane_chats).setVisibility(map ? View.GONE : View.VISIBLE);
+        findViewById(R.id.pane_map).setVisibility(map ? View.VISIBLE : View.GONE);
+        title.setText(map ? R.string.map : R.string.tab_chats);
+        // On the map the search finds friends, in the Friends sheet (1200).
+        search.setImageDrawable(new Glyph(Glyph.Kind.SEARCH, getColor(R.color.text)));
+        search.setContentDescription(getString(map ? R.string.friends_search : R.string.search));
+        tint(R.id.tab_chats_icon, R.id.tab_chats_label, Glyph.Kind.CHAT, !map);
+        tint(R.id.tab_map_icon, R.id.tab_map_label, Glyph.Kind.PIN, map);
+        findViewById(R.id.tab_chats).setSelected(!map);
+        findViewById(R.id.tab_map).setSelected(map);
+        if (map) {
+            mapPane.ask();
+        } else if (mapPane != null) {
+            // The map's position is read only while it is shown (1201).
+            mapPane.pause();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        if (mapPane != null && mapPane.permission(request)) {
+            return;
+        }
+        super.onRequestPermissionsResult(request, permissions, results);
+    }
+
+    /** One tab's icon and label, in the accent when selected. */
+    private void tint(int icon, int label, Glyph.Kind kind, boolean selected) {
+        int colour = getColor(selected ? R.color.accent : R.color.text_secondary);
+        ((ImageView) findViewById(icon)).setImageDrawable(new Glyph(kind, colour));
+        TextView words = (TextView) findViewById(label);
+        words.setTextColor(colour);
+        words.setTypeface(null, selected ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        state.putBoolean(TAB, onMap);
+    }
+
+    /** The bar's menu (1199): Settings and Help, nothing else. */
+    private void showMenu(View anchor) {
+        showMenu(this, anchor);
+    }
+
+    /** The main views' menu, on `screen`'s bar. */
+    static void showMenu(final Activity screen, View anchor) {
+        PopupMenu popup = new PopupMenu(screen, anchor);
+        popup.getMenu().add(0, R.string.settings, 0, R.string.settings);
+        popup.getMenu().add(0, R.string.help, 1, R.string.help);
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
-                int id = item.getItemId();
-                if (id == R.string.refresh) {
-                    say(Core.pull());
-                } else if (id == R.string.map) {
-                    startActivity(new Intent(ConversationsActivity.this, MapActivity.class));
-                } else if (id == R.string.archived) {
-                    archived();
+                if (item.getItemId() == R.string.help) {
+                    try {
+                        screen.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(HELP_URL)));
+                    } catch (android.content.ActivityNotFoundException e) {
+                        android.widget.Toast.makeText(screen, HELP_URL, android.widget.Toast.LENGTH_LONG).show();
+                    }
                 } else {
-                    startActivity(new Intent(ConversationsActivity.this, SettingsActivity.class));
+                    screen.startActivity(new Intent(screen, SettingsActivity.class));
                 }
                 return true;
             }
@@ -259,6 +376,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             searching(false);
             return;
         }
+        if (onMap && mapPane.back()) {
+            return;
+        }
+        if (onMap) {
+            select(false);
+            return;
+        }
         super.onBackPressed();
     }
 
@@ -291,11 +415,17 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         }
         Core.front(true);
         refresh();
+        if (onMap) {
+            mapPane.ask();
+        }
         ticker.postDelayed(tick, 30_000);
     }
 
     @Override
     protected void onPause() {
+        if (mapPane != null) {
+            mapPane.pause();
+        }
         ticker.removeCallbacks(tick);
         Core.front(false);
         Events.listen(null);
@@ -320,6 +450,11 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             return;
         }
         own.show(Core.str(answer, "address"), answer);
+        if (!archivedView) {
+            boolean up = Core.bool(answer, "home_link");
+            own.dot(up);
+            own.setContentDescription(getString(up ? R.string.mailbox_connected : R.string.mailbox_not_connected));
+        }
         homeClient = Core.bool(answer, "home_client");
         long archived = Core.num(answer, "archived");
         archivedRow.setVisibility(!archivedView && archived > 0 ? View.VISIBLE : View.GONE);
@@ -327,6 +462,24 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         all.clear();
         all.addAll(Core.list(answer, "conversations"));
         filter();
+        if (!archivedView) {
+            badge();
+        }
+    }
+
+    /** The Chats tab's badge: how many chats hold unread messages. */
+    private void badge() {
+        int chats = 0;
+        for (Map<String, Object> row : all) {
+            if (Core.num(row, "unread") > 0) {
+                chats++;
+            }
+        }
+        TextView badge = (TextView) findViewById(R.id.tab_chats_badge);
+        badge.setVisibility(chats > 0 ? View.VISIBLE : View.GONE);
+        badge.setText(String.valueOf(chats));
+        findViewById(R.id.tab_chats).setContentDescription(chats > 0
+                ? getString(R.string.tab_chats_unread, chats) : getString(R.string.tab_chats));
     }
 
     /** The rows whose name or last line hold what the search field holds, in the library's order. */
@@ -348,6 +501,10 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         String kind = Core.str(event, "t");
         if ("changed".equals(kind)) {
             refresh();
+            if (onMap) {
+                // A position that came moves its pin.
+                mapPane.ask();
+            }
         } else if ("stopped".equals(kind)) {
             // The notification's stop button, the menu's, or the engine
             // gone: the session is over, and so is the app until it starts
@@ -355,7 +512,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             finish();
         } else {
             String line = Ui.eventLine(this, event);
-            if (line != null) {
+            if (onMap) {
+                // The map shows what happened as a chip; a pull's progress
+                // is the list's business.
+                if (!"sync".equals(kind)) {
+                    mapPane.event(line);
+                }
+            } else if (line != null) {
                 Ui.showLine(status, line, Ui.stays(event));
             }
         }

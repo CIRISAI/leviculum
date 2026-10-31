@@ -49,6 +49,8 @@ const SETTLE: Duration = Duration::from_secs(5);
 const LINK_EVERY: u32 = 10;
 /// How many of a peer's newest positions the contact screen lists.
 const POSITIONS_SHOWN: usize = 10;
+/// How many of the positions we shared the privacy page lists (1201).
+pub const SHARED_SHOWN: usize = 100;
 
 /// Why the session did not start, and what the join screen has to ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -583,6 +585,17 @@ impl Session {
                 peer: parse_peer(&peer)?,
                 everywhere,
             },
+            schema::Request::Share {
+                peer,
+                lat_e6,
+                lon_e6,
+                alt_e2,
+                accuracy_e2,
+                at,
+            } => UiEvent::SharePosition {
+                peer: parse_peer(&peer)?,
+                location: share_location(lat_e6, lon_e6, alt_e2, accuracy_e2, at)?,
+            },
             schema::Request::Relink { rows } => {
                 let mut inner = self.lock();
                 let linked = inner.relink(&rows)?;
@@ -671,6 +684,13 @@ impl Session {
                 schema::encode(&inner.listed(order))
             }
             schema::Query::Blocked => schema::encode(&inner.blocked()),
+            schema::Query::Friends { lat_e6, lon_e6 } => schema::encode(&crate::friends::friends(
+                &inner.model,
+                wall_now(inner.offset).unix_secs,
+                lat_e6.zip(lon_e6),
+                |peer| inner.photo(peer),
+            )),
+            schema::Query::Shared => schema::encode(&inner.shared()?),
             schema::Query::Me | schema::Query::Backup { .. } => {
                 return Err("answered above".to_string())
             }
@@ -893,7 +913,11 @@ impl Inner {
         let mut wake = false;
         while let Ok(event) = self.watch.try_recv() {
             match event {
-                WatchEvent::Watching(up) => self.watching = up,
+                WatchEvent::Watching(up) => {
+                    // The list's status dot (1199) shows it: a `changed`.
+                    self.dirty |= self.watching != up;
+                    self.watching = up;
+                }
                 WatchEvent::Wake(newest) => {
                     let cursor = loquax::home::client::load_cursor(&self.home);
                     wake |= watch::wants_pull(newest, cursor);
@@ -1222,6 +1246,7 @@ impl Inner {
             initials,
             archived: 0,
             home_client: self.model.home_client,
+            home_link: self.watching,
         }
     }
 
@@ -1268,6 +1293,11 @@ impl Inner {
     }
 
     /// The contact screen of `peer` (1146).
+    /// The positions we shared, newest first (1201).
+    fn shared(&self) -> Result<schema::Shared, String> {
+        shared(&self.model, &self.store, |peer| self.photo(peer))
+    }
+
     fn detail(&self, peer: [u8; 16]) -> Result<schema::Detail, String> {
         let row = self.list_row(&peer);
         let facts = self.model.contact_facts(&peer);
@@ -1557,6 +1587,61 @@ pub fn run<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> schema::Run {
             })
             .collect(),
     }
+}
+
+/// The privacy page's list (1201): the positions `store` says we sent,
+/// newest first, each with its recipient as `model`'s list draws them.
+pub fn shared<B>(
+    model: &UiModel<B>,
+    store: &Store,
+    photo: impl Fn(&[u8; 16]) -> Option<String>,
+) -> Result<schema::Shared, String> {
+    let shared = store
+        .shared(SHARED_SHOWN)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(fix, sent)| {
+            let row = chat::list_row(model, &fix.via);
+            schema::SharedRow {
+                peer: loquax::address::to_hex(&fix.via),
+                name: row.name,
+                initials: row.initials,
+                icon_fg: row.icon.as_ref().map(|(fg, _)| fg.clone()),
+                icon_bg: row.icon.map(|(_, bg)| bg),
+                photo: photo(&fix.via),
+                at: sent.unwrap_or_else(|| fix.fix_time()),
+                lat_e6: fix.location.latitude_e6,
+                lon_e6: fix.location.longitude_e6,
+            }
+        })
+        .collect();
+    Ok(schema::Shared { v: VERSION, shared })
+}
+
+/// The fix the app hands in for a share (1201), as the wire carries it;
+/// a place off the globe is refused, so a broken reading never leaves the
+/// phone.
+pub fn share_location(
+    lat_e6: i32,
+    lon_e6: i32,
+    alt_e2: i32,
+    accuracy_e2: u32,
+    at: i64,
+) -> Result<leviculum_lxmf::telemetry::Location, String> {
+    if !(-90_000_000..=90_000_000).contains(&lat_e6)
+        || !(-180_000_000..=180_000_000).contains(&lon_e6)
+    {
+        return Err(format!("no place on Earth: {lat_e6}, {lon_e6}"));
+    }
+    Ok(leviculum_lxmf::telemetry::Location::saturating(
+        i64::from(lat_e6),
+        i64::from(lon_e6),
+        i64::from(alt_e2),
+        0,
+        0,
+        i64::from(accuracy_e2),
+        at,
+    ))
 }
 
 /// A join that failed, in words for the join screen.

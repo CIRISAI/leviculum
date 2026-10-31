@@ -356,7 +356,13 @@ impl Message {
     /// A telemetry report: no text, a telemetry field. It is drawn as one
     /// `◎ position` line instead of an empty block.
     pub fn is_report(&self) -> bool {
-        !self.outbound && self.body.trim().is_empty() && telemetry::has_telemetry(&self.fields)
+        !self.outbound && self.is_position()
+    }
+
+    /// A position without text, either way: a peer's report, or one we
+    /// shared (1201).
+    pub fn is_position(&self) -> bool {
+        self.body.trim().is_empty() && telemetry::has_telemetry(&self.fields)
     }
 
     fn note(&mut self, at: Option<WallTime>, what: &str) {
@@ -1158,6 +1164,14 @@ pub enum UiEvent {
     /// Delete the messages `keys` of `peer`'s conversation without asking,
     /// as `y` after `d` does for one: a frontend that asked already.
     Delete { peer: [u8; 16], keys: Vec<u64> },
+    /// Send the phone's own position to `peer`, the user asked for it
+    /// (1201): a report with no text, its one field the Telemeter of
+    /// `location` with the fix time as its time. Reading a position sends
+    /// nothing; only this does.
+    SharePosition {
+        peer: [u8; 16],
+        location: leviculum_lxmf::telemetry::Location,
+    },
     /// Make `name` the reader's name for `peer`, the empty one clearing it,
     /// as the palette's `rename` does with what was typed: a frontend with
     /// a dialog of its own (1139).
@@ -1398,7 +1412,26 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.delete_messages(peer, &keys);
             Vec::new()
         }
+        UiEvent::SharePosition { peer, location } => {
+            let index = model.conversation(peer);
+            model.send_fields(index, String::new(), position_fields(location))
+        }
     }
+}
+
+/// The fields of a position we share (1201): the Telemeter of `location`
+/// alone, timed at its fix, as `docs/src/concepts/telemetry.md` asks of a
+/// report (no title, no text, so a receiver shows no notification text).
+pub fn position_fields(location: leviculum_lxmf::telemetry::Location) -> Vec<Field> {
+    let telemetry = leviculum_lxmf::telemetry::Telemetry {
+        time: Some(location.last_update),
+        location: Some(location),
+        ..Default::default()
+    };
+    vec![(
+        leviculum_lxmf::constants::FIELD_TELEMETRY,
+        telemetry.encode_field_value(),
+    )]
 }
 
 /// The fetch ended. One the reader asked for says how it went either way;
@@ -3179,6 +3212,16 @@ pub fn message_fix(peer: [u8; 16], message: &Message) -> Option<Fix> {
     telemetry::shown_fix(&read).cloned()
 }
 
+/// The fix a message of ours carries, measured by `own`: a position we
+/// shared (1201). `None` for any other message.
+pub fn own_fix(own: [u8; 16], message: &Message) -> Option<Fix> {
+    if !message.outbound || !telemetry::has_telemetry(&message.fields) {
+        return None;
+    }
+    let read = telemetry::read(own, &message.fields, message.at.map(|at| at.unix_secs));
+    telemetry::shown_fix(&read).cloned()
+}
+
 impl<B> UiModel<B> {
     /// The map's pins in `Tab` order: every peer with a position, our own
     /// named `you`.
@@ -3202,7 +3245,13 @@ impl<B> UiModel<B> {
     /// The fix message `m` of conversation `c` carries ([`message_fix`]).
     pub fn message_fix(&self, c: usize, m: usize) -> Option<Fix> {
         let conversation = self.conversations.get(c)?;
-        message_fix(conversation.peer, conversation.messages.get(m)?)
+        let message = conversation.messages.get(m)?;
+        match message.outbound {
+            // A position we shared (1201) is ours: its line shows where we
+            // were, measured by us.
+            true => self.address.and_then(|own| own_fix(own, message)),
+            false => message_fix(conversation.peer, message),
+        }
     }
 
     /// The cells the map's picture covers.
@@ -9202,6 +9251,53 @@ mod tests {
                 "{app}"
             );
         }
+    }
+
+    /// 1201: a shared position is a report of ours with no text, its one
+    /// field the Telemeter of the fix; its bubble names where we were, the
+    /// list calls it a position, and nothing of it becomes a peer's pin.
+    #[test]
+    fn a_shared_position_is_a_report_of_ours_and_its_bubble_says_where() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.address = Some(OTHER);
+        clock(&mut model, 26, 14, 0);
+        let location = leviculum_lxmf::telemetry::Location::saturating(
+            52_520_008,
+            13_404_954,
+            3_400,
+            0,
+            0,
+            500,
+            1_790_000_000,
+        );
+        let effects = update(
+            &mut model,
+            UiEvent::SharePosition {
+                peer: PEER,
+                location,
+            },
+        );
+        let [UiEffect::Send { to, body, fields }] = effects.as_slice() else {
+            panic!("one send: {effects:?}");
+        };
+        assert_eq!((*to, body.as_str()), (PEER, ""));
+        assert_eq!(fields.len(), 1, "the Telemeter alone: {fields:?}");
+        let read = telemetry::read(OTHER, fields, None);
+        assert_eq!(read.fixes.len(), 1, "{read:?}");
+        assert_eq!(read.fixes[0].location, location);
+        let fix = model.message_fix(0, 0).expect("our bubble names the fix");
+        assert_eq!(fix.peer, OTHER);
+        assert_eq!(fix.location.latitude_e6, 52_520_008);
+        let message = &model.conversations[0].messages[0];
+        assert!(message.outbound && message.is_position() && !message.is_report());
+        assert_eq!(chat::kind(message), "position");
+        assert!(
+            !model.positions.contains_key(&PEER),
+            "our fix is no pin of the peer's"
+        );
+        // Without our address there is no one it measured.
+        model.address = None;
+        assert_eq!(model.message_fix(0, 0), None);
     }
 
     /// Ours and theirs on one message: each content once with its count,

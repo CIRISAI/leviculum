@@ -89,6 +89,8 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     private final List<Map<String, Object>> rows = new ArrayList<>();
     private String peer;
+    /** The own position for the attachment menu's share (1201). */
+    private final Locator locator = new Locator(this);
     private TextView title;
     private AvatarView avatar;
     private TextView status;
@@ -170,6 +172,14 @@ public class ChatActivity extends Activity implements Events.Listener {
             @Override
             public void onClick(View v) {
                 pickEmoji();
+            }
+        });
+        final ImageButton attach = (ImageButton) findViewById(R.id.attach);
+        attach.setImageDrawable(new Glyph(Glyph.Kind.ATTACH, getColor(R.color.text_secondary)));
+        attach.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                attach(attach);
             }
         });
         replyBar = findViewById(R.id.reply_bar);
@@ -494,9 +504,41 @@ public class ChatActivity extends Activity implements Events.Listener {
         return getString(R.string.matched_display);
     }
 
+    /**
+     * The attachment menu (1201): the own position, sent once to this
+     * chat when the user picks it; the permission first if need be.
+     */
+    private void attach(View anchor) {
+        PopupMenu popup = new PopupMenu(this, anchor);
+        popup.getMenu().add(0, R.string.attach_position, 0, R.string.attach_position);
+        popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
+            @Override
+            public boolean onMenuItemClick(MenuItem item) {
+                if (item.getItemId() == R.string.attach_position) {
+                    locator.shareWith(peer, Core.str(header, "name"), new Locator.Fix() {
+                        @Override
+                        public void on(android.location.Location location) {
+                            refresh();
+                        }
+                    }, new Locator.Say() {
+                        @Override
+                        public void line(String text) {
+                            ChatActivity.this.line(text);
+                        }
+                    });
+                }
+                return true;
+            }
+        });
+        popup.show();
+    }
+
     @Override
     public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(code, permissions, results);
+        if (locator.result(code)) {
+            return;
+        }
         if (code == Book.ASK && Book.canRead(this)) {
             Book.observe(this);
             choose();

@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`] or [`Run`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`] or [`Shared`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
@@ -61,6 +61,18 @@
 //! others out, [`ConversationRow::updates`] counts it in the list, and
 //! [`Query::Run`] expands it. An app without them shows the newest report
 //! alone, which is what it draws as it is; nothing is merged on disk.
+//! The list's `home_link` (1199), the map's `set_theme` and `ask_theme`
+//! and its answer's `theme` came within version 1 too: an older app reads neither and
+//! sends none.
+//! The map's people (1200) came the same way: [`Query::Friends`] and its
+//! [`Friends`], the map's `avatars` with its answer's `marks`, and the
+//! answer's `offline` and `no_map`. An app that sends no `avatars` gets the
+//! pins drawn into the frame as before.
+//! Location (1201) came the same way: [`Request::Share`], the map's
+//! `at_zoom_milli`, `own_lat_e6` and `own_lon_e6` with the answer's
+//! `own_x` and `own_y`, the Maps page's `ask_regions`, `delete_region` and
+//! `set_autoload` with the answer's `regions`, `region_bytes` and
+//! `autoload`, and [`Query::Shared`] with its [`Shared`].
 
 use serde::{Deserialize, Serialize};
 
@@ -209,6 +221,20 @@ pub enum Request {
     /// Deleted the conversation from this device, or from every device of
     /// the home.
     Forget { peer: String, everywhere: bool },
+    /// Shared the phone's own position with `peer`, the user asked for it
+    /// (1201): from the empty map, a friend's card or the chat. The fix in
+    /// the wire's integers; `at` is when the phone took it, unix seconds.
+    Share {
+        peer: String,
+        lat_e6: i32,
+        lon_e6: i32,
+        #[serde(default)]
+        alt_e2: i32,
+        /// Metres times a hundred; 0 for unknown.
+        #[serde(default)]
+        accuracy_e2: u32,
+        at: i64,
+    },
 }
 
 /// What a contact said when loquax read it.
@@ -311,6 +337,90 @@ pub enum Query {
     /// Every report the row `key` ([`MessageRow::key`]) of `peer`'s
     /// conversation folds (1184): the long press's "Show all positions".
     Run { peer: String, key: i64 },
+    /// Everyone with a position, for the map's Friends sheet and its pins
+    /// (1200), with distances from the phone's own fix when given.
+    Friends {
+        #[serde(default)]
+        lat_e6: Option<i32>,
+        #[serde(default)]
+        lon_e6: Option<i32>,
+    },
+    /// The positions we shared, newest first (1201): the privacy page's
+    /// list of who got one and when.
+    Shared,
+}
+
+/// What [`Query::Shared`] answers: the positions we sent, newest first, at
+/// most [`crate::session::SHARED_SHOWN`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shared {
+    pub v: u32,
+    pub shared: Vec<SharedRow>,
+}
+
+/// One position we sent: to whom, as the list draws them, and when.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedRow {
+    pub peer: String,
+    pub name: String,
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: Option<String>,
+    #[serde(default)]
+    pub icon_bg: Option<String>,
+    #[serde(default)]
+    pub photo: Option<String>,
+    /// When it was sent, unix seconds; the fix time where the store kept
+    /// no send time.
+    pub at: i64,
+    pub lat_e6: i32,
+    pub lon_e6: i32,
+}
+
+/// What [`Query::Friends`] answers (`crate::friends`): every peer with a
+/// position but ourselves and the blocked, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Friends {
+    pub v: u32,
+    pub friends: Vec<FriendRow>,
+    /// Our own position, when the store has one: the map's pin of ours.
+    #[serde(default)]
+    pub me: Option<FriendRow>,
+}
+
+/// One person on the map: the avatar as the list draws it, the fix, how
+/// far, and where Navigate goes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FriendRow {
+    pub peer: String,
+    /// As the list names the peer, with its avatar's letters and colours
+    /// ([`ConversationRow`]'s fields of the same names).
+    pub name: String,
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: Option<String>,
+    #[serde(default)]
+    pub icon_bg: Option<String>,
+    #[serde(default)]
+    pub photo: Option<String>,
+    /// When the fix was taken, unix seconds: its claim, or when it came
+    /// where the claim is ahead of our clock.
+    pub at: i64,
+    pub lat_e6: i32,
+    pub lon_e6: i32,
+    /// Metres from the phone's own fix; absent without one.
+    #[serde(default)]
+    pub distance_m: Option<u32>,
+    /// Within the last day: the sheet's upper part; the older ones are
+    /// greyed under a divider.
+    #[serde(default)]
+    pub recent: bool,
+    /// Old enough that the map draws it faded.
+    #[serde(default)]
+    pub stale: bool,
+    /// The `geo:` URI Navigate hands to the phone.
+    #[serde(default)]
+    pub geo: String,
 }
 
 /// What [`Query::Run`] answers: the run's reports, newest first; one for a
@@ -616,6 +726,10 @@ pub struct Conversations {
     /// Whether a delete may reach every device of the home.
     #[serde(default)]
     pub home_client: bool,
+    /// Whether the watching link to the mailbox is up (1123): the status
+    /// dot on the bar's avatar, green or grey (1199).
+    #[serde(default)]
+    pub home_link: bool,
 }
 
 /// A reaction under a message: its content, how many sent it, and whether
@@ -849,11 +963,89 @@ pub struct MapRequest {
     /// auto`.
     #[serde(default)]
     pub follow_phone: bool,
+    /// Store the map's table as the settings page chose it (1199): `auto`
+    /// follows the phone, `light` and `dark` overrule it; the config's
+    /// `map_theme` as with `toggle_theme`. The answer draws nothing.
+    #[serde(default)]
+    pub set_theme: Option<String>,
+    /// Only say the choice in force, in the answer's `theme`: the
+    /// settings page opening. Draws nothing.
+    #[serde(default)]
+    pub ask_theme: bool,
     /// Draw a batch of the tiles around the last frame at rest instead of
     /// a frame (1135): the answer has no pixels. Java asks while the view
     /// is idle, the app in front and the battery saver off.
     #[serde(default)]
     pub prefetch: bool,
+    /// The app draws the pins itself, as avatar circles (1200): the frame
+    /// draws none and says in its `marks` where they and their clusters
+    /// lie.
+    #[serde(default)]
+    pub avatars: bool,
+    /// With `at_lat_e6` and `at_lon_e6`: centre there at this zoom, in
+    /// thousandths of a step, held to the regions' zooms, instead of the
+    /// zoom a fit picks (1201): the crosshair's z16, and follow mode
+    /// keeping the zoom the user chose.
+    #[serde(default)]
+    pub at_zoom_milli: Option<u32>,
+    /// The phone's own fix, degrees times a million (1201): the answer
+    /// says where it lies in the view, `own_x` and `own_y`, for the app's
+    /// dot. Reading it sends nothing.
+    #[serde(default)]
+    pub own_lat_e6: Option<i32>,
+    #[serde(default)]
+    pub own_lon_e6: Option<i32>,
+    /// The Maps page (1201): only list the regions in `regions`, no frame.
+    #[serde(default)]
+    pub ask_regions: bool,
+    /// Delete the region file of this name ([`RegionRow::name`]) and list
+    /// the rest. A name that is no region file of the directory deletes
+    /// nothing and is refused.
+    #[serde(default)]
+    pub delete_region: Option<String>,
+    /// Store the config's `map_autoload`, on or off, and list the
+    /// regions.
+    #[serde(default)]
+    pub set_autoload: Option<bool>,
+}
+
+/// One region of the maps directory, for the Maps page (1201).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegionRow {
+    /// The file's name, which `delete_region` hands back.
+    pub name: String,
+    /// Its bytes on the phone.
+    pub bytes: u64,
+    /// When it was written or last viewed, unix seconds; 0 for unknown.
+    pub modified: i64,
+    /// The region's middle, degrees times a million: what the page names
+    /// it by, as the files carry no place name.
+    pub lat_e6: i32,
+    pub lon_e6: i32,
+    pub min_zoom: u8,
+    pub max_zoom: u8,
+    /// The autoload wrote it, so it may evict it under the cap; one the
+    /// user put there stays.
+    #[serde(default)]
+    pub auto: bool,
+}
+
+/// One avatar pin or cluster of them in a frame asked with `avatars`
+/// (1200): where it sits in the view's pixels (the frame's less its
+/// margins, so a margin's pin is negative or past the size), who it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapMark {
+    pub x: i32,
+    pub y: i32,
+    /// The pins' peers, hex: one for a pin, the first the one the cluster
+    /// sits on.
+    pub peers: Vec<String>,
+    /// The cluster's tap: the zoom in thousandths at which its pins lie a
+    /// circle apart; absent for a cluster no zoom of the regions parts,
+    /// whose tap opens the Friends sheet filtered to it. A pin's own zoom
+    /// for a pin.
+    #[serde(default)]
+    pub split_milli: Option<u32>,
 }
 
 /// The map frame's description; its pixels follow it (see the table
@@ -911,6 +1103,10 @@ pub struct MapShown {
     pub dark: bool,
     #[serde(default)]
     pub theme_chosen: bool,
+    /// The config's `map_theme` as the settings page shows it: `auto`,
+    /// `light` or `dark`; `auto` when unset.
+    #[serde(default)]
+    pub theme: String,
     /// Tiles around the view are still to prefetch (1135): a frame at
     /// rest that owes none says so, a prefetch answer until its plan is
     /// done.
@@ -919,6 +1115,32 @@ pub struct MapShown {
     /// Tiles a prefetch answer drew.
     #[serde(default)]
     pub prefetched: u32,
+    /// The pins and clusters to draw, with `avatars` (1200), in the order
+    /// to draw them.
+    #[serde(default)]
+    pub marks: Vec<MapMark>,
+    /// The last load found no internet, and none landed since: the map's
+    /// "Offline" chip.
+    #[serde(default)]
+    pub offline: bool,
+    /// No region holds the view at its zoom and none loads for it: the
+    /// map's "No map here yet" chip.
+    #[serde(default)]
+    pub no_map: bool,
+    /// Where the request's own fix lies, in view pixels (1201); absent
+    /// without one.
+    #[serde(default)]
+    pub own_x: Option<i32>,
+    #[serde(default)]
+    pub own_y: Option<i32>,
+    /// The Maps page's answer (1201): the regions, newest first, their
+    /// bytes together, and whether the autoload is on.
+    #[serde(default)]
+    pub regions: Vec<RegionRow>,
+    #[serde(default)]
+    pub region_bytes: u64,
+    #[serde(default)]
+    pub autoload: bool,
 }
 
 /// A map frame as the host's tests and tools read it: the description's

@@ -301,6 +301,146 @@ fn a_stored_map_theme_wins_over_the_phone() {
     assert!(same_share(&rgba, &picture(home.path(), MapTheme::Light)) >= 90);
 }
 
+/// The settings page's map theme (1199): asking draws nothing and says
+/// `auto` while unset; each choice stored is the config's `map_theme`,
+/// the other keys kept, and the next frame draws in it whatever the
+/// phone says; `auto` hands the choice back to the phone; a word the
+/// config does not know is refused and stores nothing.
+#[test]
+fn the_settings_page_sets_the_map_theme() {
+    let home = home();
+    let theme = |ask: bool, set: Option<&str>| {
+        let (shown, rgba) = schema::unframe(&loquax_android::map::render(
+            &MapRequest {
+                dir: home.path().display().to_string(),
+                ask_theme: ask,
+                set_theme: set.map(str::to_string),
+                ..MapRequest::default()
+            },
+            Some(Vec::new()),
+            now(),
+        ))
+        .map(|(shown, rgba)| (shown, rgba.len()))
+        .expect("an answer");
+        assert_eq!(rgba, 0, "no frame drawn");
+        shown
+    };
+    let shown = theme(true, None);
+    assert!(
+        shown.ok && shown.theme == "auto" && !shown.theme_chosen,
+        "{shown:?}"
+    );
+    let draw = |phone_dark: bool| {
+        frame(&loquax_android::map::render(
+            &request(home.path(), phone_dark),
+            Some(Vec::new()),
+            now(),
+        ))
+        .0
+    };
+    for (word, flag, dark) in [
+        ("dark", ThemeFlag::Dark, true),
+        ("light", ThemeFlag::Light, false),
+    ] {
+        let shown = theme(false, Some(word));
+        assert!(
+            shown.ok && shown.theme == word && shown.theme_chosen,
+            "{shown:?}"
+        );
+        let config = loquax::config::load(home.path()).expect("the config");
+        assert_eq!(config.map_theme, Some(flag));
+        assert_eq!(config.map_autoload, Some(false), "the other keys kept");
+        for phone_dark in [true, false] {
+            let shown = draw(phone_dark);
+            assert_eq!(shown.dark, dark, "{word}, phone dark {phone_dark}");
+            assert_eq!(shown.theme, word);
+        }
+        assert_eq!(theme(true, None).theme, word);
+    }
+    let shown = theme(false, Some("auto"));
+    assert!(shown.ok && !shown.theme_chosen, "{shown:?}");
+    assert!(draw(true).dark && !draw(false).dark, "the phone decides");
+    let shown = theme(false, Some("sepia"));
+    assert!(!shown.ok, "{shown:?}");
+    assert_eq!(
+        loquax::config::load(home.path())
+            .expect("the config")
+            .map_theme,
+        Some(ThemeFlag::Auto)
+    );
+}
+
+/// The Map tab's loading chip (1199) reads the frame's `loading`: a map
+/// opened on a place no region holds asks the autoload for it, and while
+/// the download runs (a fake source that takes the connection and never
+/// answers) every frame says `loading`, so Java asks again and the chip
+/// stays. A source that refuses ends the load with a notice, the chip's
+/// line for a load that could not start, and `loading` drops.
+#[test]
+fn a_missing_region_loads_by_itself_and_the_frame_says_so() {
+    let stalls = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let refuses = std::net::TcpListener::bind("127.0.0.1:0").expect("another port");
+    let refused_port = refuses.local_addr().expect("its address").port();
+    drop(refuses);
+    let berlin = |home: &Path| MapRequest {
+        at_lat_e6: Some(52_520_000),
+        at_lon_e6: Some(13_405_000),
+        ..request(home, false)
+    };
+    let source = |home: &Path, port: u16| {
+        std::fs::write(
+            home.join(loquax::config::CONFIG_FILE),
+            format!("map_source = \"http://127.0.0.1:{port}/planet.pmtiles\"\n"),
+        )
+        .expect("config");
+    };
+
+    let home = home();
+    source(
+        home.path(),
+        stalls.local_addr().expect("its address").port(),
+    );
+    let (shown, _) = frame(&loquax_android::map::render(
+        &berlin(home.path()),
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(shown.loading, "the autoload runs: {shown:?}");
+    let (shown, _) = frame(&loquax_android::map::render(
+        &request(home.path(), false),
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(
+        shown.loading && shown.notice.is_none(),
+        "still loading: {shown:?}"
+    );
+
+    let home = self::home();
+    source(home.path(), refused_port);
+    let (shown, _) = frame(&loquax_android::map::render(
+        &berlin(home.path()),
+        Some(Vec::new()),
+        now(),
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut last = shown;
+    while last.notice.is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no notice for a refused source: {last:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        last = frame(&loquax_android::map::render(
+            &request(home.path(), false),
+            Some(Vec::new()),
+            now(),
+        ))
+        .0;
+    }
+    assert!(!last.loading, "the load ended: {last:?}");
+}
+
 /// A tap on a pin's marker selects it and names it; the selected pin is
 /// drawn red. A pan moves the centre by the pixels at the zoom.
 #[test]
@@ -1284,4 +1424,270 @@ fn a_frame_into_the_bitmap_is_the_frame_of_the_host_path() {
     };
     let answer = loquax_android::map::render_into(&ahead, Some(Vec::new()), now(), &mut none);
     assert!(answer.ok, "{answer:?}");
+}
+
+/// The map's people (1200): asked with `avatars`, the frame draws no pin
+/// of its own and says where the app draws its avatar circles. Over
+/// Florence at z13 two friends 150 m apart are one cluster of two, a third
+/// a kilometre east a pin of its own; at the zoom the cluster names they
+/// lie a circle apart and are two pins. Two in one place never part: their
+/// cluster has no zoom, and its tap opens the filtered sheet.
+#[test]
+fn avatar_pins_cluster_and_split_at_the_zoom_they_name() {
+    let home = home();
+    let pair_lat: f64 = 43.7752;
+    let (west, east) = (
+        11.2650,
+        11.2650 + 150.0 / (111_320.0 * pair_lat.to_radians().cos()),
+    );
+    let far = 11.2650 + 1_000.0 / (111_320.0 * pair_lat.to_radians().cos());
+    let pins = vec![
+        pin(1, "anna", pair_lat, west),
+        pin(2, "bob", pair_lat, east),
+        pin(3, "carla", pair_lat, far),
+    ];
+    let centre = project(LatLon::from_degrees(pair_lat, (west + far) / 2.0));
+    let ask = MapRequest {
+        x: Some(centre.x),
+        y: Some(centre.y),
+        zoom: Some(13),
+        avatars: true,
+        ..request(home.path(), false)
+    };
+    let (shown, rgba) = frame(&loquax_android::map::render(
+        &ask,
+        Some(pins.clone()),
+        now(),
+    ));
+    let hex = |b: u8| format!("{b:02x}").repeat(16);
+    let peers: Vec<Vec<String>> = shown.marks.iter().map(|m| m.peers.clone()).collect();
+    assert_eq!(peers, vec![vec![hex(1), hex(2)], vec![hex(3)]], "{shown:?}");
+    // The cluster sits on its first pin, where the view puts anna.
+    let view = ExactView::new(centre, 13_000, W, H);
+    let (ax, ay) = view.to_screen(pins[0].at);
+    assert_eq!(
+        (shown.marks[0].x, shown.marks[0].y),
+        (ax.round() as i32, ay.round() as i32)
+    );
+    // No marker drawn there: neither pin colour under anna.
+    let at = (ay as usize * W as usize + ax as usize) * 4;
+    assert_ne!(&rgba[at..at + 3], &[0xd0, 0x30, 0x30]);
+    let split = shown.marks[0].split_milli.expect("the regions part them");
+    assert!(
+        split > 13_000 && split <= u32::from(shown.max_zoom) * 1000,
+        "{split}"
+    );
+    assert_eq!(shown.marks[1].split_milli, Some(13_000), "a pin is split");
+
+    // At that zoom, about the pair's middle, anna and bob are two pins.
+    let middle = project(LatLon::from_degrees(pair_lat, (west + east) / 2.0));
+    let zoomed = MapRequest {
+        x: Some(middle.x),
+        y: Some(middle.y),
+        zoom: None,
+        zoom_milli: Some(split),
+        ..ask.clone()
+    };
+    let (shown, _) = frame(&loquax_android::map::render(
+        &zoomed,
+        Some(pins.clone()),
+        now(),
+    ));
+    let alone: Vec<usize> = shown.marks.iter().map(|m| m.peers.len()).collect();
+    assert!(alone.iter().all(|&n| n == 1), "{shown:?}");
+    assert!(shown.marks.iter().any(|m| m.peers == [hex(1)]));
+    assert!(shown.marks.iter().any(|m| m.peers == [hex(2)]));
+    // A fifth of a step short of it they are one again: the zoom named is
+    // where they part, not far past it.
+    let short = MapRequest {
+        zoom_milli: Some(split - 200),
+        ..zoomed.clone()
+    };
+    let (shown, _) = frame(&loquax_android::map::render(&short, Some(pins), now()));
+    assert!(shown.marks.iter().any(|m| m.peers.len() == 2), "{shown:?}");
+
+    // Two in one place: a cluster no zoom parts.
+    let same = vec![
+        pin(4, "dora", pair_lat, west),
+        pin(5, "emil", pair_lat, west),
+    ];
+    let (shown, _) = frame(&loquax_android::map::render(&ask, Some(same), now()));
+    assert_eq!(shown.marks.len(), 1);
+    assert_eq!(shown.marks[0].split_milli, None);
+
+    // Without `avatars` the frame draws its pins and says no marks.
+    let drawn = MapRequest {
+        avatars: false,
+        ..ask
+    };
+    let (shown, _) = frame(&loquax_android::map::render(
+        &drawn,
+        Some(vec![pin(6, "fritz", pair_lat, west)]),
+        now(),
+    ));
+    assert!(shown.marks.is_empty());
+    assert_eq!(shown.pins, 1);
+}
+
+/// "No map here yet" (1200): a view no region holds, with the autoload
+/// off, says so; the Florence view does not.
+#[test]
+fn a_view_without_a_region_says_no_map_here_yet() {
+    let home = home();
+    let (shown, _) = frame(&loquax_android::map::render(
+        &request(home.path(), false),
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(!shown.no_map && !shown.offline, "{shown:?}");
+    let berlin = project(LatLon::from_degrees(52.52, 13.405));
+    let away = MapRequest {
+        x: Some(berlin.x),
+        y: Some(berlin.y),
+        ..request(home.path(), false)
+    };
+    let (shown, _) = frame(&loquax_android::map::render(&away, Some(Vec::new()), now()));
+    assert!(shown.no_map && !shown.loading, "{shown:?}");
+}
+
+/// The Maps page's call (1201) for `home`: no frame, the regions.
+fn regions(home: &Path, change: impl FnOnce(&mut MapRequest)) -> MapShown {
+    let mut ask = MapRequest {
+        dir: home.display().to_string(),
+        ask_regions: true,
+        ..MapRequest::default()
+    };
+    change(&mut ask);
+    let (shown, rgba) =
+        schema::unframe(&loquax_android::map::render(&ask, Some(Vec::new()), now()))
+            .map(|(shown, rgba)| (shown, rgba.len()))
+            .expect("an answer");
+    assert_eq!(rgba, 0, "no frame drawn");
+    shown
+}
+
+/// 1201: the Maps page lists the regions newest first with their sizes,
+/// their sum and the autoload; it switches the autoload in the config and
+/// deletes a region, which the next frame no longer draws; a name that is
+/// no region file of the directory deletes nothing.
+#[test]
+fn the_maps_page_lists_sizes_and_deletes_regions() {
+    let home = home();
+    let maps = home.path().join("maps");
+    let len = std::fs::metadata(maps.join("firenze.lmr"))
+        .expect("the region")
+        .len();
+    std::fs::copy(maps.join("firenze.lmr"), maps.join("auto-old.lmr")).expect("a second");
+    let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(maps.join("auto-old.lmr"))
+        .and_then(|f| f.set_modified(old))
+        .expect("an older time");
+    std::fs::write(maps.join("notes.txt"), "not a region").expect("a stray file");
+
+    let shown = regions(home.path(), |_| {});
+    assert!(shown.ok, "{shown:?}");
+    let names: Vec<&str> = shown.regions.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["firenze.lmr", "auto-old.lmr"], "newest first");
+    assert!(shown.regions.iter().all(|r| r.bytes == len));
+    assert_eq!(shown.region_bytes, 2 * len);
+    assert!(!shown.autoload, "the test home's config says off");
+    let florence = &shown.regions[0];
+    assert!(!florence.auto && shown.regions[1].auto);
+    assert_eq!(shown.regions[1].modified, 1_700_000_000);
+    assert!(
+        (florence.lat_e6 - 43_770_000).abs() < 50_000
+            && (florence.lon_e6 - 11_250_000).abs() < 50_000,
+        "named by its middle: {florence:?}"
+    );
+    assert!(florence.min_zoom <= florence.max_zoom && florence.max_zoom >= 14);
+
+    // The autoload, on and off, in the config.
+    let on = regions(home.path(), |ask| ask.set_autoload = Some(true));
+    assert!(on.ok && on.autoload, "{on:?}");
+    let config = loquax::config::load(home.path()).expect("the config");
+    assert_eq!(config.map_autoload, Some(true));
+    let off = regions(home.path(), |ask| ask.set_autoload = Some(false));
+    assert!(off.ok && !off.autoload);
+    assert_eq!(
+        loquax::config::load(home.path())
+            .expect("the config")
+            .map_autoload,
+        Some(false)
+    );
+
+    // Names that are no region file delete nothing.
+    for bad in ["../config", "notes.txt", "gone.lmr", "", "maps/firenze.lmr"] {
+        let refused = regions(home.path(), |ask| ask.delete_region = Some(bad.to_string()));
+        assert!(!refused.ok, "{bad:?}: {refused:?}");
+    }
+    assert!(home.path().join(loquax::config::CONFIG_FILE).is_file());
+    assert!(maps.join("notes.txt").is_file());
+
+    let left = regions(home.path(), |ask| {
+        ask.delete_region = Some("auto-old.lmr".to_string())
+    });
+    assert!(left.ok, "{left:?}");
+    assert_eq!(left.regions.len(), 1);
+    assert_eq!(left.region_bytes, len);
+    assert!(!maps.join("auto-old.lmr").exists());
+
+    // Florence still draws; once its region is deleted the frame says
+    // there is no map here.
+    let before = frame(&loquax_android::map::render(
+        &request(home.path(), false),
+        Some(Vec::new()),
+        now(),
+    ))
+    .0;
+    assert!(!before.no_map, "{before:?}");
+    let none = regions(home.path(), |ask| {
+        ask.delete_region = Some("firenze.lmr".to_string())
+    });
+    assert!(none.ok && none.regions.is_empty() && none.region_bytes == 0);
+    let after = frame(&loquax_android::map::render(
+        &request(home.path(), false),
+        Some(Vec::new()),
+        now(),
+    ))
+    .0;
+    assert!(after.no_map, "the deleted region is not drawn: {after:?}");
+}
+
+/// 1201: the crosshair centres on the phone's fix at the zoom it asks,
+/// held to the regions' deepest, and the frame says where the fix lies in
+/// the view; without a fix it says nothing.
+#[test]
+fn the_crosshair_centres_on_the_own_fix_and_the_frame_places_it() {
+    let home = home();
+    let (lat, lon) = (43_772_000, 11_255_000);
+    let ask = |zoom: u32, own: bool| {
+        let mut ask = request(home.path(), false);
+        ask.at_lat_e6 = Some(lat);
+        ask.at_lon_e6 = Some(lon);
+        ask.at_zoom_milli = Some(zoom);
+        if own {
+            ask.own_lat_e6 = Some(lat);
+            ask.own_lon_e6 = Some(lon);
+        }
+        frame(&loquax_android::map::render(&ask, Some(Vec::new()), now())).0
+    };
+    let shown = ask(15_000, true);
+    assert_eq!(shown.zoom_milli, 15_000, "{shown:?}");
+    let (x, y) = (shown.own_x.expect("x"), shown.own_y.expect("y"));
+    assert!(
+        (x - W as i32 / 2).abs() <= 1 && (y - H as i32 / 2).abs() <= 1,
+        "the fix in the middle: {x}, {y}"
+    );
+    let deep = ask(30_000, true);
+    assert_eq!(deep.zoom_milli, u32::from(deep.max_zoom) * 1000, "held");
+    let none = ask(15_000, false);
+    assert_eq!((none.own_x, none.own_y), (None, None));
+    // A fix off the view lies outside it, not clamped onto its edge.
+    let mut away = request(home.path(), false);
+    away.own_lat_e6 = Some(lat + 50_000);
+    away.own_lon_e6 = Some(lon);
+    let away = frame(&loquax_android::map::render(&away, Some(Vec::new()), now())).0;
+    assert!(away.own_y.expect("y") < 0, "{away:?}");
 }

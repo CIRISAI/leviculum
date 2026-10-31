@@ -11,10 +11,12 @@ import android.graphics.drawable.Drawable;
 /**
  * The few icons the chat and the list draw, as paths on a 24 by 24 grid
  * scaled to the bounds: no icon font, no AndroidX, no image assets (1129,
- * the list's search, close and pencil 1130).
+ * the list's search, close and pencil 1130, the tab bar's chat and pin
+ * 1199, the map's people button 1200, the crosshair and the chat's
+ * attachment menu 1201).
  */
 final class Glyph extends Drawable {
-    enum Kind { BACK, MENU, EMOJI, SEND, SENT, DELIVERED, QUEUED, FAILED, SEARCH, CLOSE, PENCIL }
+    enum Kind { BACK, MENU, EMOJI, SEND, SENT, DELIVERED, QUEUED, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN, PEOPLE, LOCATE, ATTACH }
 
     private final Kind kind;
     private final int color;
@@ -127,6 +129,63 @@ final class Glyph extends Drawable {
                 pencil.close();
                 canvas.drawPath(pencil, stroke);
                 canvas.drawLine(13, 7.5f, 16.5f, 11, stroke);
+                break;
+            case CHAT:
+                // A speech bubble with its tail at the lower left.
+                Path bubble = path(5, 5, 19, 5, 19, 16, 10, 16, 5, 20, 5, 5);
+                bubble.close();
+                canvas.drawPath(bubble, stroke);
+                break;
+            case PIN:
+                // A map pin: a drop with a hole, its point at the bottom.
+                Path drop = new Path();
+                drop.moveTo(12, 21);
+                drop.cubicTo(7, 15.5f, 5, 12.5f, 5, 9.5f);
+                drop.cubicTo(5, 5.5f, 8.2f, 3, 12, 3);
+                drop.cubicTo(15.8f, 3, 19, 5.5f, 19, 9.5f);
+                drop.cubicTo(19, 12.5f, 17, 15.5f, 12, 21);
+                drop.close();
+                canvas.drawPath(drop, stroke);
+                canvas.drawCircle(12, 9.5f, 2.5f, stroke);
+                break;
+            case PEOPLE:
+                // Two heads and shoulders, the one behind to the right.
+                canvas.drawCircle(9, 8, 3.2f, stroke);
+                Path front = new Path();
+                front.moveTo(3, 20);
+                front.cubicTo(3, 15.5f, 5.7f, 13.5f, 9, 13.5f);
+                front.cubicTo(12.3f, 13.5f, 15, 15.5f, 15, 20);
+                canvas.drawPath(front, stroke);
+                canvas.drawCircle(16.5f, 7, 2.6f, stroke);
+                Path behind = new Path();
+                behind.moveTo(16.5f, 12);
+                behind.cubicTo(19.3f, 12, 21, 14, 21, 17.5f);
+                canvas.drawPath(behind, stroke);
+                break;
+            case ATTACH:
+                // A paper clip: two nested rounded loops, open at the top.
+                Path clip = new Path();
+                clip.moveTo(15.5f, 7);
+                clip.lineTo(15.5f, 16);
+                clip.cubicTo(15.5f, 18.2f, 13.9f, 20, 12, 20);
+                clip.cubicTo(10.1f, 20, 8.5f, 18.2f, 8.5f, 16);
+                clip.lineTo(8.5f, 6.5f);
+                clip.cubicTo(8.5f, 5.1f, 9.6f, 4, 11, 4);
+                clip.cubicTo(12.4f, 4, 13.5f, 5.1f, 13.5f, 6.5f);
+                clip.lineTo(13.5f, 15.5f);
+                clip.cubicTo(13.5f, 16.3f, 12.8f, 17, 12, 17);
+                clip.cubicTo(11.2f, 17, 10.5f, 16.3f, 10.5f, 15.5f);
+                clip.lineTo(10.5f, 8);
+                canvas.drawPath(clip, stroke);
+                break;
+            case LOCATE:
+                // A ring with four ticks and a dot: the crosshair.
+                canvas.drawCircle(12, 12, 6.5f, stroke);
+                canvas.drawCircle(12, 12, 2.2f, fill);
+                canvas.drawLine(12, 2, 12, 5.5f, stroke);
+                canvas.drawLine(12, 18.5f, 12, 22, stroke);
+                canvas.drawLine(2, 12, 5.5f, 12, stroke);
+                canvas.drawLine(18.5f, 12, 22, 12, stroke);
                 break;
             default:
                 break;

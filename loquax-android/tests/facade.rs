@@ -1739,6 +1739,27 @@ fn facade_shows_ugly(secs: u64) {
     }
 }
 
+/// Wait until the list's `home_link` (1199), the status dot, says `up`:
+/// the watching link came up or went down.
+fn facade_home_link(up: bool, secs: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let list: schema::Conversations = rmp_serde::from_slice(&loquax_android::query(
+            &schema::encode(&schema::Query::Conversations),
+        ))
+        .expect("Conversations");
+        if list.home_link == up {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the list's home_link never said {up} in {secs} s"
+        );
+        // The pump reads the watching link's word: let events flow.
+        let _ = loquax_android::next_event(Duration::from_millis(200));
+    }
+}
+
 fn link_event(up: bool, secs: u64) {
     facade_event(
         secs,
@@ -1789,7 +1810,8 @@ fn send_through_facade(peer: &str, body: &str, secs: u64) {
 /// and no server. The link event says when the TCP interface is up; the
 /// home node killed, it says down, and the leaf's TCP client redials the
 /// home node brought back on the same port, so a send goes through again
-/// in the same session. The engine dead, the library says `stopped` with
+/// in the same session. The list's `home_link`, the status dot (1199),
+/// follows the watching link up, down and up again. The engine dead, the library says `stopped` with
 /// why and drops the session; the service's next start, with neither code
 /// nor server, builds a fresh one, and a send goes through that.
 #[tokio::test(flavor = "multi_thread")]
@@ -1820,6 +1842,7 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
         assert!(answer.ok, "{answer:?}");
         assert_eq!(answer.server.as_deref(), Some(expected.as_str()));
         link_event(true, 30);
+        facade_home_link(true, 30);
         facade_shows_ugly(60);
         send_through_facade(&to, "vor dem Ausfall", 60);
     })
@@ -1827,9 +1850,12 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
     .expect("the first session");
 
     node.kill().await;
-    tokio::task::spawn_blocking(|| link_event(false, 30))
-        .await
-        .expect("the link goes down");
+    tokio::task::spawn_blocking(|| {
+        link_event(false, 30);
+        facade_home_link(false, 30);
+    })
+    .await
+    .expect("the link goes down");
 
     let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("the same port again");
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
@@ -1837,6 +1863,7 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
     tokio::task::spawn_blocking(move || {
         // The TCP client redials every 5 s, doubling after the third try.
         link_event(true, 90);
+        facade_home_link(true, 60);
         send_through_facade(&to, "nach dem Ausfall", 60);
     })
     .await
@@ -2194,4 +2221,199 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
     // Every report is still there, and every one unread for the read marks.
     assert_eq!(model.conversations[c].messages.len(), RUN_REPORTS + 4);
     assert_eq!(model.conversations[c].unread, RUN_REPORTS + 4);
+}
+
+/// The map's Friends sheet (1200), as the facade answers it from the
+/// session's model: everyone with a position, newest first, the last 24 h
+/// marked recent and the older after them; ourselves apart as `me`, the
+/// blocked not at all; a distance only with the phone's own fix, and each
+/// row's `geo:` link for Navigate.
+#[test]
+fn the_friends_sheet_lists_positions_newest_first_with_the_day_marked() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{update, UiEvent, UiModel};
+    use loquax_android::friends;
+    use loquax_android::session::Line;
+    let now = ugly_store::BASE + 10 * 86_400;
+    let me = ugly_store::peer(90);
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some(me);
+    update(
+        &mut model,
+        UiEvent::Clock(loquax::when::WallTime {
+            unix_secs: now,
+            offset_secs: 0,
+        }),
+    );
+    let report = |n: u8, peer: [u8; 16], at: i64, lat: i32| {
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [n; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: ugly_store::position(at, lat),
+            verified: true,
+        })
+    };
+    let (anna, bob, carla, dieter) = (
+        ugly_store::peer(91),
+        ugly_store::peer(92),
+        ugly_store::peer(93),
+        ugly_store::peer(94),
+    );
+    // Bob an hour ago, Carla 30 h ago, Anna five minutes ago, Dieter
+    // blocked a minute ago, ourselves now: received in no order.
+    update(&mut model, report(1, bob, now - 3_600, 52_529_360));
+    update(&mut model, report(2, carla, now - 30 * 3_600, 52_554_360));
+    update(&mut model, report(3, anna, now - 300, 52_525_360));
+    update(&mut model, report(4, dieter, now - 60, 52_524_360));
+    update(&mut model, report(5, me, now, 52_524_360));
+    model.names.contacts.blocked.insert(dieter);
+    let hex = |p: &[u8; 16]| loquax::address::to_hex(p);
+
+    let sheet = friends::friends(&model, now, None, |_| None);
+    let order: Vec<(String, bool, i64)> = sheet
+        .friends
+        .iter()
+        .map(|f| (f.peer.clone(), f.recent, f.at))
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            (hex(&anna), true, now - 300),
+            (hex(&bob), true, now - 3_600),
+            (hex(&carla), false, now - 30 * 3_600),
+        ],
+        "newest first, the day marked, neither us nor the blocked"
+    );
+    assert!(
+        sheet.friends.iter().all(|f| f.distance_m.is_none()),
+        "no distance without the phone's fix"
+    );
+    let ours = sheet.me.expect("our own position apart");
+    assert_eq!((ours.peer, ours.lat_e6), (hex(&me), 52_524_360));
+    let anna_row = &sheet.friends[0];
+    assert_eq!(anna_row.lon_e6, 11_256_000);
+    assert!(!anna_row.initials.is_empty() && !anna_row.name.is_empty());
+    assert_eq!(
+        anna_row.geo,
+        friends::geo_uri(52_525_360, 11_256_000, &anna_row.name)
+    );
+    // The window's edge: exactly 24 h old is still recent.
+    update(
+        &mut model,
+        report(6, carla, now - friends::WINDOW_SECS, 52_554_360),
+    );
+    let sheet = friends::friends(&model, now, None, |_| None);
+    assert!(sheet.friends[2].recent, "{:?}", sheet.friends[2]);
+
+    // With the phone's fix: a thousandth of a degree of latitude is 111 m.
+    let sheet = friends::friends(&model, now, Some((52_524_360, 11_256_000)), |_| None);
+    let metres: Vec<Option<u32>> = sheet.friends.iter().map(|f| f.distance_m).collect();
+    assert_eq!(metres, vec![Some(111), Some(556), Some(3_336)]);
+}
+
+/// 1201: a share is the user's position to one peer, a report of ours;
+/// the privacy page lists every one sent, newest first, with whom and
+/// when, from the store, and a text or a report received is none of them.
+/// A fix off the globe never leaves the phone.
+#[test]
+fn a_shared_position_reaches_the_privacy_list_and_a_bad_fix_is_refused() {
+    use loquax::store::Store;
+    use loquax::ui::{update, UiEffect, UiEvent, UiModel};
+    use loquax_android::session::{self, Line};
+    let now = ugly_store::BASE + 10 * 86_400;
+    let me = ugly_store::peer(90);
+    let (anna, bob) = (ugly_store::peer(91), ugly_store::peer(92));
+    let home = tempfile::tempdir().expect("home");
+    let mut store = Store::open_in(home.path(), me).expect("the store");
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some(me);
+    let clock = |model: &mut UiModel<Line>, at: i64| {
+        update(
+            model,
+            UiEvent::Clock(loquax::when::WallTime {
+                unix_secs: at,
+                offset_secs: 0,
+            }),
+        );
+    };
+    let share = |model: &mut UiModel<Line>, peer: [u8; 16], lat: i32, at: i64| {
+        let location = session::share_location(lat, 13_404_954, 3_400, 500, at).expect("a place");
+        let effects = update(model, UiEvent::SharePosition { peer, location });
+        assert!(
+            matches!(effects.as_slice(), [UiEffect::Send { body, .. }] if body.is_empty()),
+            "{effects:?}"
+        );
+    };
+    clock(&mut model, now - 600);
+    share(&mut model, anna, 52_520_008, now - 610);
+    update(
+        &mut model,
+        UiEvent::Write {
+            peer: bob,
+            body: "no position".to_string(),
+        },
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(loquax::outbox::OutboxEvent::Received {
+            message_id: [7; 32],
+            source: bob,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: ugly_store::position(now - 500, 48_000_000),
+            verified: true,
+        }),
+    );
+    clock(&mut model, now);
+    share(&mut model, bob, 52_530_000, now - 5);
+    store.write(&model.take_writes()).expect("written");
+
+    let list = session::shared(&model, &store, |_| None).expect("the list");
+    let seen: Vec<(String, i64, i32)> = list
+        .shared
+        .iter()
+        .map(|row| (row.peer.clone(), row.at, row.lat_e6))
+        .collect();
+    let hex = |p: &[u8; 16]| loquax::address::to_hex(p);
+    assert_eq!(
+        seen,
+        vec![
+            (hex(&bob), now, 52_530_000),
+            (hex(&anna), now - 600, 52_520_008)
+        ],
+        "newest first, sent time, our fixes only"
+    );
+    assert!(list
+        .shared
+        .iter()
+        .all(|row| !row.name.is_empty() && !row.initials.is_empty()));
+    // It crosses as the app reads it.
+    let bytes = schema::encode(&list);
+    assert_eq!(schema::decode::<schema::Shared>(&bytes), Ok(list));
+    // Our bubble names where we were.
+    let rows = session::rows(&model, 0);
+    assert!(
+        rows.iter()
+            .any(|row| row.ours && row.lat_e6 == Some(52_520_008) && row.place.is_some()),
+        "{rows:?}"
+    );
+
+    for (lat, lon) in [(90_000_001, 0), (0, -180_000_001), (i32::MIN, i32::MAX)] {
+        let refused = session::share_location(lat, lon, 0, 0, now);
+        assert!(refused.is_err(), "{lat}, {lon}");
+    }
+    assert!(session::share_location(-90_000_000, 180_000_000, 0, 0, now).is_ok());
+    // The request crosses as Java writes it, `at` a long.
+    let request: Request = schema::decode(&schema::encode(&Request::Share {
+        peer: hex(&anna),
+        lat_e6: 1,
+        lon_e6: 2,
+        alt_e2: 0,
+        accuracy_e2: 0,
+        at: now,
+    }))
+    .expect("decodes");
+    assert!(matches!(request, Request::Share { at, .. } if at == now));
 }

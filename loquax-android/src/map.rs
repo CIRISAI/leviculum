@@ -61,7 +61,8 @@ use loquax::tiles::{Frame as TileFrame, Stats, TILE};
 use loquax::ui::map::{fit, fit_at, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant};
 use loquax::when::WallTime;
 
-use crate::schema::{MapRequest, MapShown, VERSION};
+use crate::friends;
+use crate::schema::{MapMark, MapRequest, MapShown, RegionRow, VERSION};
 use crate::session::pins_in;
 
 pub use loquax::mapframe::MOVING_TILES_PER_WORKER;
@@ -85,6 +86,9 @@ pub trait Canvas {
 /// frames with their tile cache and names, the loader, the fit.
 pub struct Renderer {
     dir: PathBuf,
+    /// The directory the frames and the loader share: a region deleted is
+    /// told to both (1201).
+    maps: Maps,
     frames: Frames,
     loader: Loader,
     autoload: bool,
@@ -111,6 +115,7 @@ impl Renderer {
         let cache = config.map_cache_mb.unwrap_or(CACHE_DEFAULT_MB) << 20;
         Self {
             dir: dir.to_path_buf(),
+            maps: maps.clone(),
             frames: Frames::new(maps.clone()),
             notice_owed: None,
             loader: Loader::new(maps, source, cache),
@@ -194,14 +199,107 @@ impl Renderer {
         } else {
             return;
         };
-        let word = match next {
-            ThemeFlag::Auto => "auto",
-            ThemeFlag::Light => "light",
-            ThemeFlag::Dark => "dark",
-        };
-        match loquax::config::save(&self.dir, "map_theme", word) {
-            Ok(()) => self.theme = Some(next),
-            Err(error) => *notice = Some(format!("map: the choice was not stored: {error}")),
+        if let Err(error) = self.store_theme(next) {
+            *notice = Some(error);
+        }
+    }
+
+    /// Store `next` as the config's `map_theme` and draw in it from the
+    /// next frame; a write that failed keeps the old choice and says why.
+    fn store_theme(&mut self, next: ThemeFlag) -> Result<(), String> {
+        loquax::config::save(&self.dir, "map_theme", theme_word(Some(next)))
+            .map_err(|error| format!("map: the choice was not stored: {error}"))?;
+        self.theme = Some(next);
+        Ok(())
+    }
+
+    /// The settings page's map theme (1199): `set`, a word of the
+    /// config's `map_theme`, stored when given; the choice in force back
+    /// in the answer's `theme`, no frame drawn.
+    pub fn theme(&mut self, set: Option<&str>) -> MapShown {
+        if let Some(word) = set {
+            let next = match word {
+                "auto" => ThemeFlag::Auto,
+                "light" => ThemeFlag::Light,
+                "dark" => ThemeFlag::Dark,
+                other => return failed(format!("map: no theme {other:?}")),
+            };
+            if let Err(error) = self.store_theme(next) {
+                return failed(error);
+            }
+        }
+        MapShown {
+            v: VERSION,
+            ok: true,
+            theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
+            theme: theme_word(self.theme).to_string(),
+            ..MapShown::default()
+        }
+    }
+
+    /// The Maps page (1201): `delete_region` and `set_autoload` done
+    /// when asked, then the regions of the directory, newest first, their
+    /// bytes together and whether the autoload is on; no frame drawn. A
+    /// name that is no region file of the directory deletes nothing.
+    pub fn regions(&mut self, request: &MapRequest) -> MapShown {
+        if let Some(on) = request.set_autoload {
+            let word = if on { "on" } else { "off" };
+            if let Err(error) = loquax::config::save(&self.dir, "map_autoload", word) {
+                return failed(format!("map: the choice was not stored: {error}"));
+            }
+            self.autoload = on;
+        }
+        let maps = self
+            .maps
+            .dir()
+            .map_or_else(|| self.dir.join("maps"), Path::to_path_buf);
+        if let Some(name) = request.delete_region.as_deref() {
+            let plain = !name.is_empty()
+                && !name.contains(['/', '\\'])
+                && !name.starts_with('.')
+                && name.ends_with(".lmr");
+            if !plain || !maps.join(name).is_file() {
+                return failed(format!("map: no region {name:?}"));
+            }
+            if let Err(error) = std::fs::remove_file(maps.join(name)) {
+                return failed(format!("map: {name} was not deleted: {error}"));
+            }
+            tracing::info!("MAPLOAD deleted file={name}");
+            self.maps.changed();
+            self.frames.refresh();
+            self.fitted_at = None;
+        }
+        let (installed, _) = loquax::picture::load(&maps);
+        let regions: Vec<RegionRow> = loquax::picture::newest_first(&installed)
+            .into_iter()
+            .map(|region| {
+                let header = region.region.header();
+                let b = header.bounds;
+                // The bounds are degrees times ten million; the page's
+                // middle is times a million, as every place that crosses.
+                let middle = |a: i32, z: i32| ((i64::from(a) + i64::from(z)) / 20) as i32;
+                RegionRow {
+                    name: region.name.clone(),
+                    bytes: std::fs::metadata(maps.join(&region.name)).map_or(0, |m| m.len()),
+                    modified: region
+                        .modified
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
+                    lat_e6: middle(b.south, b.north),
+                    lon_e6: middle(b.west, b.east),
+                    min_zoom: header.min_zoom,
+                    max_zoom: header.max_zoom,
+                    auto: loquax::picture::is_auto(&region.name),
+                }
+            })
+            .collect();
+        MapShown {
+            v: VERSION,
+            ok: true,
+            region_bytes: regions.iter().map(|r| r.bytes).sum(),
+            regions,
+            autoload: self.autoload,
+            ..MapShown::default()
         }
     }
 
@@ -285,7 +383,19 @@ impl Renderer {
             );
         };
         if let Some(at) = at {
-            fit_to(&mut view, fit_at(at, area, &setup));
+            match request.at_zoom_milli {
+                // The crosshair's zoom and follow mode's (1201), held to
+                // the regions' zooms below.
+                Some(zoom) => {
+                    view = ExactView::new(
+                        at,
+                        zoom.clamp(floor, ceiling.max(floor)),
+                        view.size().0,
+                        view.size().1,
+                    )
+                }
+                None => fit_to(&mut view, fit_at(at, area, &setup)),
+            }
             self.fitted_at = None;
             if let Some(want) = want_place(at, &setup.regions) {
                 self.ask(want, &mut notice);
@@ -365,7 +475,7 @@ impl Renderer {
             pins,
             selected,
             zooms,
-            draw_pins: true,
+            draw_pins: !request.avatars,
             measure: None,
             scaled_while_moving: true,
         };
@@ -374,7 +484,22 @@ impl Renderer {
             Err(error) => return failed(error),
         };
         let (w, h) = shot.view.size();
+        let marks = match request.avatars {
+            true => marks(pins, &shot.shows, (mx, my), scale, ceiling.max(floor)),
+            false => Vec::new(),
+        };
+        let no_map =
+            !self.loader.busy() && !any_region(&setup.regions, &shot.shows.at_zoom(rest_zoom));
         let name = |peer: [u8; 16]| pins.iter().find(|p| p.peer == peer).map(|p| p.words());
+        let own = match (request.own_lat_e6, request.own_lon_e6) {
+            (Some(lat), Some(lon)) => {
+                let (x, y) = shot.shows.to_screen(project(LatLon::from_e6(lat, lon)));
+                let pixel =
+                    |v: f64| v.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+                Some((pixel(x), pixel(y)))
+            }
+            _ => None,
+        };
         let shown = MapShown {
             v: VERSION,
             ok: true,
@@ -403,8 +528,16 @@ impl Renderer {
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             dark: table == MapTheme::Dark,
             theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
+            theme: theme_word(self.theme).to_string(),
             prefetching: self.frames.at_rest(),
             prefetched: 0,
+            marks,
+            offline: self.loader.offline(),
+            no_map,
+            own_x: own.map(|o| o.0),
+            own_y: own.map(|o| o.1),
+            autoload: self.autoload,
+            ..MapShown::default()
         };
         shown
     }
@@ -484,6 +617,69 @@ impl Renderer {
     }
 }
 
+/// The avatar pins of `pins` in the screen's view `shows` (1200), in
+/// view pixels, clustered by [`friends::cluster`] with circles of
+/// [`friends::PIN_DP`] at `scale`: those that land in the frame, its
+/// `margin` on each side included; each cluster with the zoom that parts
+/// it, no deeper than `max_milli`.
+pub fn marks(
+    pins: &[MapPin],
+    shows: &ExactView,
+    margin: (u32, u32),
+    scale: f32,
+    max_milli: u32,
+) -> Vec<MapMark> {
+    let (w, h) = shows.size();
+    let (mx, my) = (f64::from(margin.0), f64::from(margin.1));
+    let in_frame = |(x, y): (f64, f64)| {
+        (-mx..f64::from(w) + mx).contains(&x) && (-my..f64::from(h) + my).contains(&y)
+    };
+    let landed: Vec<(&MapPin, (f64, f64))> = pins
+        .iter()
+        .map(|pin| (pin, shows.to_screen(pin.at)))
+        .filter(|(_, at)| in_frame(*at))
+        .collect();
+    let points: Vec<(f64, f64)> = landed.iter().map(|(_, at)| *at).collect();
+    let diameter = f64::from(friends::PIN_DP) * f64::from(scale);
+    friends::cluster(&points, diameter)
+        .into_iter()
+        .map(|members| {
+            let (x, y) = points[members[0]];
+            MapMark {
+                x: x.round() as i32,
+                y: y.round() as i32,
+                peers: members
+                    .iter()
+                    .map(|&i| loquax::address::to_hex(&landed[i].0.peer))
+                    .collect(),
+                split_milli: friends::split_zoom(
+                    &points,
+                    &members,
+                    shows.zoom_milli(),
+                    diameter,
+                    max_milli,
+                ),
+            }
+        })
+        .collect()
+}
+
+/// Whether any of `regions` reaches into `view` at some zoom: without one
+/// the map shows only the world's outline there, "No map here yet"
+/// (1200). A box across the antimeridian counts as reaching in.
+fn any_region(
+    regions: &[leviculum_map::region::Header],
+    view: &leviculum_map::viewport::Viewport,
+) -> bool {
+    let b = view.bounds();
+    regions.iter().any(|h| {
+        let r = h.bounds;
+        r.west > r.east
+            || b.west > b.east
+            || (r.west <= b.east && b.west <= r.east && r.south <= b.north && b.south <= r.north)
+    })
+}
+
 /// The process's renderers, one a directory: the app has one; a test
 /// process one a test.
 static RENDERERS: Mutex<Vec<Renderer>> = Mutex::new(Vec::new());
@@ -493,6 +689,9 @@ static RENDERERS: Mutex<Vec<Renderer>> = Mutex::new(Vec::new());
 /// in the request's directory. The host's path, the tests' and the
 /// measuring tools': the app composes into its Bitmap ([`render_into`]).
 pub fn render(request: &MapRequest, pins: Option<Vec<MapPin>>, now: WallTime) -> Vec<u8> {
+    if let Some(shown) = settings(request) {
+        return crate::schema::frame(&shown, &[]);
+    }
     with_renderer(request, pins, now, |renderer, pins| {
         if request.prefetch {
             return crate::schema::frame(&renderer.prefetch(), &[]);
@@ -514,12 +713,29 @@ pub fn render_into(
     now: WallTime,
     canvas: &mut dyn Canvas,
 ) -> MapShown {
+    if let Some(shown) = settings(request) {
+        return shown;
+    }
     with_renderer(request, pins, now, |renderer, pins| {
         match request.prefetch {
             true => renderer.prefetch(),
             false => renderer.frame_into(request, pins, canvas),
         }
     })
+}
+
+/// The settings pages' answers, which draw no frame: the map theme
+/// (1199) and the Maps page (1201); `None` for a request of the map.
+fn settings(request: &MapRequest) -> Option<MapShown> {
+    if request.ask_theme || request.set_theme.is_some() {
+        return Some(with_dir(request, |renderer| {
+            renderer.theme(request.set_theme.as_deref())
+        }));
+    }
+    if request.ask_regions || request.delete_region.is_some() || request.set_autoload.is_some() {
+        return Some(with_dir(request, |renderer| renderer.regions(request)));
+    }
+    None
 }
 
 /// `f` with the renderer of the request's directory, made on its first
@@ -542,17 +758,23 @@ fn with_renderer<T>(
             Vec::new()
         }
     };
+    with_dir(request, |renderer| f(renderer, &pins))
+}
+
+/// `f` with the renderer of the request's directory, made on first use.
+fn with_dir<T>(request: &MapRequest, f: impl FnOnce(&mut Renderer) -> T) -> T {
+    let dir = Path::new(&request.dir);
     let mut renderers = RENDERERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let at = match renderers.iter().position(|r| r.dir == dir) {
         Some(at) => at,
         None => {
-            renderers.push(Renderer::new(&dir));
+            renderers.push(Renderer::new(dir));
             renderers.len() - 1
         }
     };
-    f(&mut renderers[at], &pins)
+    f(&mut renderers[at])
 }
 
 /// What the tile cache of the renderer over `dir` did, when one runs:
@@ -622,6 +844,15 @@ pub fn tune_clock(dir: &Path, now_ms: Option<u64>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(r) = renderers.iter_mut().find(|r| r.dir == dir) {
         r.held_ms = now_ms;
+    }
+}
+
+/// The config's word for a map theme; unset follows the phone.
+fn theme_word(flag: Option<ThemeFlag>) -> &'static str {
+    match flag {
+        None | Some(ThemeFlag::Auto) => "auto",
+        Some(ThemeFlag::Light) => "light",
+        Some(ThemeFlag::Dark) => "dark",
     }
 }
 
