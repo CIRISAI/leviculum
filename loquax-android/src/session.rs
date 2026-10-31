@@ -511,12 +511,12 @@ impl Session {
             },
             schema::Request::Forward { peer, key, to } => UiEvent::Forward {
                 from: parse_peer(&peer)?,
-                key,
+                key: schema::model_key(key),
                 to: parse_peer(&to)?,
             },
             schema::Request::Delete { peer, keys } => UiEvent::Delete {
                 peer: parse_peer(&peer)?,
-                keys,
+                keys: keys.into_iter().map(schema::model_key).collect(),
             },
             schema::Request::Used { emoji } => {
                 self.lock().used(&emoji);
@@ -632,7 +632,7 @@ impl Session {
             schema::Query::Messages { peer } => schema::encode(&inner.messages(parse_peer(&peer)?)),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
-                let detail = loquax::ui::message_detail(&inner.model, peer, key)
+                let detail = loquax::ui::message_detail(&inner.model, peer, schema::model_key(key))
                     .ok_or_else(|| "no such message".to_string())?;
                 schema::encode(&schema::Info {
                     v: VERSION,
@@ -1499,7 +1499,7 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
             f.fix_time()
                 .saturating_add(loquax::telemetry::STALE_AFTER_SECS)
         }),
-        key: bubble.key,
+        key: schema::wire_key(bubble.key),
         quote_ours: bubble.quote.as_ref().and_then(|q| q.ours),
         quote_to: bubble
             .quote

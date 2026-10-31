@@ -50,6 +50,11 @@
 //! requests and queries, a row's `photo` and `linked`, and the header's
 //! link fields; and the map's `prefetch` with its answer's `prefetching`
 //! and `prefetched` (1135).
+//! A message key crossing as a signed integer (1166) is no new version
+//! either: Java always held it in a `long`, read a uint64 into one bit for
+//! bit and wrote it back as an int64, so the values Java sees and keeps
+//! (a pinned message's key) stay what they were; only Rust's side now
+//! reads what Java writes. See [`wire_key`].
 
 use serde::{Deserialize, Serialize};
 
@@ -143,10 +148,10 @@ pub enum Request {
     },
     /// Forwarded the message `key` ([`MessageRow::key`]) of `peer`'s
     /// conversation to `to`: its text and content fields again.
-    Forward { peer: String, key: u64, to: String },
+    Forward { peer: String, key: i64, to: String },
     /// Deleted the messages `keys` of `peer`'s conversation, the user asked
     /// already; on a client of a home node from its every device.
-    Delete { peer: String, keys: Vec<u64> },
+    Delete { peer: String, keys: Vec<i64> },
     /// Picked `emoji` into a message: it joins the recents, as a reaction
     /// sent does.
     Used { emoji: String },
@@ -274,7 +279,7 @@ pub enum Query {
     /// One conversation's messages, oldest first.
     Messages { peer: String },
     /// The detail of the message `key` of `peer`'s conversation.
-    Info { peer: String, key: u64 },
+    Info { peer: String, key: i64 },
     /// The emoji the user used last, newest first.
     Recents,
     /// Which of `candidates`, contacts of the address book, `peer`'s
@@ -610,9 +615,10 @@ pub struct MessageRow {
     #[serde(default)]
     pub stale_at: Option<i64>,
     /// The message's key on this device, for the long press's forward,
-    /// delete and info; a send not yet queued has one too.
+    /// delete and info; a send not yet queued has one too. As
+    /// [`wire_key`] lays it out.
     #[serde(default)]
-    pub key: u64,
+    pub key: i64,
     /// A reply's quote: the target's text, or what the sender quoted when
     /// this device lacks it; whether the target is ours, absent when
     /// unknown; and the target's id.
@@ -886,6 +892,23 @@ pub fn unframe(frame: &[u8]) -> Result<(MapShown, &[u8]), String> {
     Ok((decode(head)?, pixels))
 }
 
+/// A message's key as it crosses: the model's unsigned key
+/// ([`loquax::store::key_of`]) with its bits read as Java's `long`. Since
+/// the import (1159) a key is a store row's seq with its sign bit flipped,
+/// so every row at seq 0 and above, an imported block's newest and all of
+/// this device's own, has a key above `i64::MAX`. Java's codec reads such
+/// a uint64 into a negative `long` and writes it back as an int64, which an
+/// unsigned field refused: "invalid value: integer
+/// `-9223372036854775803`, expected u64" (1166).
+pub fn wire_key(key: u64) -> i64 {
+    key as i64
+}
+
+/// The model's key for a key Java hands back; [`wire_key`] undone.
+pub fn model_key(wire: i64) -> u64 {
+    wire as u64
+}
+
 /// Encode an answer.
 pub fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     // A map of strings, numbers and vectors always encodes; an empty
@@ -983,6 +1006,40 @@ mod tests {
         assert_eq!(unframe(&bytes), Ok((shown, &pixels[..])));
         assert!(unframe(&bytes[..3]).is_err());
         assert!(unframe(&bytes[..4 + head - 1]).is_err());
+    }
+
+    /// 1166: a key of either side of seq 0 crosses both ways, written as
+    /// Java writes a `long` (`d3`, eight bytes) and as rmp writes it.
+    #[test]
+    fn a_message_key_round_trips_whatever_its_sign() {
+        for seq in [i64::MIN + 1, -1, 0, 1, 5, i64::MAX] {
+            let key = loquax::store::key_of(seq);
+            let wire = wire_key(key);
+            assert_eq!(model_key(wire), key);
+            let info = Query::Info {
+                peer: "ab".repeat(16),
+                key: wire,
+            };
+            assert_eq!(decode::<Query>(&encode(&info)), Ok(info));
+            let mut java = b"\x83\xa1t\xa4info\xa4peer\xd9\x20".to_vec();
+            java.extend_from_slice("ab".repeat(16).as_bytes());
+            java.extend_from_slice(b"\xa3key\xd3");
+            java.extend_from_slice(&wire.to_be_bytes());
+            assert_eq!(
+                decode::<Query>(&java),
+                Ok(Query::Info {
+                    peer: "ab".repeat(16),
+                    key: wire,
+                })
+            );
+            let delete = Request::Delete {
+                peer: "ab".repeat(16),
+                keys: vec![wire, wire_key(loquax::store::key_of(seq.wrapping_add(1)))],
+            };
+            assert_eq!(decode::<Request>(&encode(&delete)), Ok(delete));
+        }
+        assert_eq!(wire_key(loquax::store::key_of(i64::MIN + 1)), 1);
+        assert_eq!(wire_key(loquax::store::key_of(5)), i64::MIN + 5);
     }
 
     #[test]
