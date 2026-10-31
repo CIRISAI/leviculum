@@ -182,6 +182,12 @@ impl Loader {
         self.running.is_some() || !self.queue.is_empty()
     }
 
+    /// Whether the last load found no internet and none landed since: the
+    /// phone's map says "Offline" while it holds (1200).
+    pub fn offline(&self) -> bool {
+        self.offline_said
+    }
+
     /// Queue `want`, and start it when nothing runs. `now_ms` is the
     /// shell's monotonic clock.
     pub fn ask(&mut self, want: MapWant, now_ms: u64) -> Vec<Step> {

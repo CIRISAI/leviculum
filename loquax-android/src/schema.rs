@@ -12,7 +12,7 @@
 //! |---|---|
 //! | `start` | [`Start`] |
 //! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`] or [`Run`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`] or [`Friends`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
@@ -64,6 +64,10 @@
 //! The list's `home_link` (1199), the map's `set_theme` and `ask_theme`
 //! and its answer's `theme` came within version 1 too: an older app reads neither and
 //! sends none.
+//! The map's people (1200) came the same way: [`Query::Friends`] and its
+//! [`Friends`], the map's `avatars` with its answer's `marks`, and the
+//! answer's `offline` and `no_map`. An app that sends no `avatars` gets the
+//! pins drawn into the frame as before.
 
 use serde::{Deserialize, Serialize};
 
@@ -314,6 +318,60 @@ pub enum Query {
     /// Every report the row `key` ([`MessageRow::key`]) of `peer`'s
     /// conversation folds (1184): the long press's "Show all positions".
     Run { peer: String, key: i64 },
+    /// Everyone with a position, for the map's Friends sheet and its pins
+    /// (1200), with distances from the phone's own fix when given.
+    Friends {
+        #[serde(default)]
+        lat_e6: Option<i32>,
+        #[serde(default)]
+        lon_e6: Option<i32>,
+    },
+}
+
+/// What [`Query::Friends`] answers (`crate::friends`): every peer with a
+/// position but ourselves and the blocked, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Friends {
+    pub v: u32,
+    pub friends: Vec<FriendRow>,
+    /// Our own position, when the store has one: the map's pin of ours.
+    #[serde(default)]
+    pub me: Option<FriendRow>,
+}
+
+/// One person on the map: the avatar as the list draws it, the fix, how
+/// far, and where Navigate goes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FriendRow {
+    pub peer: String,
+    /// As the list names the peer, with its avatar's letters and colours
+    /// ([`ConversationRow`]'s fields of the same names).
+    pub name: String,
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: Option<String>,
+    #[serde(default)]
+    pub icon_bg: Option<String>,
+    #[serde(default)]
+    pub photo: Option<String>,
+    /// When the fix was taken, unix seconds: its claim, or when it came
+    /// where the claim is ahead of our clock.
+    pub at: i64,
+    pub lat_e6: i32,
+    pub lon_e6: i32,
+    /// Metres from the phone's own fix; absent without one.
+    #[serde(default)]
+    pub distance_m: Option<u32>,
+    /// Within the last day: the sheet's upper part; the older ones are
+    /// greyed under a divider.
+    #[serde(default)]
+    pub recent: bool,
+    /// Old enough that the map draws it faded.
+    #[serde(default)]
+    pub stale: bool,
+    /// The `geo:` URI Navigate hands to the phone.
+    #[serde(default)]
+    pub geo: String,
 }
 
 /// What [`Query::Run`] answers: the run's reports, newest first; one for a
@@ -870,6 +928,29 @@ pub struct MapRequest {
     /// is idle, the app in front and the battery saver off.
     #[serde(default)]
     pub prefetch: bool,
+    /// The app draws the pins itself, as avatar circles (1200): the frame
+    /// draws none and says in its `marks` where they and their clusters
+    /// lie.
+    #[serde(default)]
+    pub avatars: bool,
+}
+
+/// One avatar pin or cluster of them in a frame asked with `avatars`
+/// (1200): where it sits in the view's pixels (the frame's less its
+/// margins, so a margin's pin is negative or past the size), who it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapMark {
+    pub x: i32,
+    pub y: i32,
+    /// The pins' peers, hex: one for a pin, the first the one the cluster
+    /// sits on.
+    pub peers: Vec<String>,
+    /// The cluster's tap: the zoom in thousandths at which its pins lie a
+    /// circle apart; absent for a cluster no zoom of the regions parts,
+    /// whose tap opens the Friends sheet filtered to it. A pin's own zoom
+    /// for a pin.
+    #[serde(default)]
+    pub split_milli: Option<u32>,
 }
 
 /// The map frame's description; its pixels follow it (see the table
@@ -939,6 +1020,18 @@ pub struct MapShown {
     /// Tiles a prefetch answer drew.
     #[serde(default)]
     pub prefetched: u32,
+    /// The pins and clusters to draw, with `avatars` (1200), in the order
+    /// to draw them.
+    #[serde(default)]
+    pub marks: Vec<MapMark>,
+    /// The last load found no internet, and none landed since: the map's
+    /// "Offline" chip.
+    #[serde(default)]
+    pub offline: bool,
+    /// No region holds the view at its zoom and none loads for it: the
+    /// map's "No map here yet" chip.
+    #[serde(default)]
+    pub no_map: bool,
 }
 
 /// A map frame as the host's tests and tools read it: the description's

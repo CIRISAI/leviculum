@@ -61,7 +61,8 @@ use loquax::tiles::{Frame as TileFrame, Stats, TILE};
 use loquax::ui::map::{fit, fit_at, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant};
 use loquax::when::WallTime;
 
-use crate::schema::{MapRequest, MapShown, VERSION};
+use crate::friends;
+use crate::schema::{MapMark, MapRequest, MapShown, VERSION};
 use crate::session::pins_in;
 
 pub use loquax::mapframe::MOVING_TILES_PER_WORKER;
@@ -392,7 +393,7 @@ impl Renderer {
             pins,
             selected,
             zooms,
-            draw_pins: true,
+            draw_pins: !request.avatars,
             measure: None,
             scaled_while_moving: true,
         };
@@ -401,6 +402,12 @@ impl Renderer {
             Err(error) => return failed(error),
         };
         let (w, h) = shot.view.size();
+        let marks = match request.avatars {
+            true => marks(pins, &shot.shows, (mx, my), scale, ceiling.max(floor)),
+            false => Vec::new(),
+        };
+        let no_map =
+            !self.loader.busy() && !any_region(&setup.regions, &shot.shows.at_zoom(rest_zoom));
         let name = |peer: [u8; 16]| pins.iter().find(|p| p.peer == peer).map(|p| p.words());
         let shown = MapShown {
             v: VERSION,
@@ -433,6 +440,9 @@ impl Renderer {
             theme: theme_word(self.theme).to_string(),
             prefetching: self.frames.at_rest(),
             prefetched: 0,
+            marks,
+            offline: self.loader.offline(),
+            no_map,
         };
         shown
     }
@@ -510,6 +520,69 @@ impl Renderer {
     pub fn names(&self) -> Vec<String> {
         self.frames.names()
     }
+}
+
+/// The avatar pins of `pins` in the screen's view `shows` (1200), in
+/// view pixels, clustered by [`friends::cluster`] with circles of
+/// [`friends::PIN_DP`] at `scale`: those that land in the frame, its
+/// `margin` on each side included; each cluster with the zoom that parts
+/// it, no deeper than `max_milli`.
+pub fn marks(
+    pins: &[MapPin],
+    shows: &ExactView,
+    margin: (u32, u32),
+    scale: f32,
+    max_milli: u32,
+) -> Vec<MapMark> {
+    let (w, h) = shows.size();
+    let (mx, my) = (f64::from(margin.0), f64::from(margin.1));
+    let in_frame = |(x, y): (f64, f64)| {
+        (-mx..f64::from(w) + mx).contains(&x) && (-my..f64::from(h) + my).contains(&y)
+    };
+    let landed: Vec<(&MapPin, (f64, f64))> = pins
+        .iter()
+        .map(|pin| (pin, shows.to_screen(pin.at)))
+        .filter(|(_, at)| in_frame(*at))
+        .collect();
+    let points: Vec<(f64, f64)> = landed.iter().map(|(_, at)| *at).collect();
+    let diameter = f64::from(friends::PIN_DP) * f64::from(scale);
+    friends::cluster(&points, diameter)
+        .into_iter()
+        .map(|members| {
+            let (x, y) = points[members[0]];
+            MapMark {
+                x: x.round() as i32,
+                y: y.round() as i32,
+                peers: members
+                    .iter()
+                    .map(|&i| loquax::address::to_hex(&landed[i].0.peer))
+                    .collect(),
+                split_milli: friends::split_zoom(
+                    &points,
+                    &members,
+                    shows.zoom_milli(),
+                    diameter,
+                    max_milli,
+                ),
+            }
+        })
+        .collect()
+}
+
+/// Whether any of `regions` reaches into `view` at some zoom: without one
+/// the map shows only the world's outline there, "No map here yet"
+/// (1200). A box across the antimeridian counts as reaching in.
+fn any_region(
+    regions: &[leviculum_map::region::Header],
+    view: &leviculum_map::viewport::Viewport,
+) -> bool {
+    let b = view.bounds();
+    regions.iter().any(|h| {
+        let r = h.bounds;
+        r.west > r.east
+            || b.west > b.east
+            || (r.west <= b.east && b.west <= r.east && r.south <= b.north && b.south <= r.north)
+    })
 }
 
 /// The process's renderers, one a directory: the app has one; a test

@@ -12,9 +12,9 @@
 
 use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Blob, CandidateRow, Chip, ContactCopy, ConversationRow,
-    Conversations, Detail, Done, Event, ImRow, Info, LinkRow, Links, MapRequest, MapShown, Me,
-    MessageRow, Messages, PositionRow, Query, Recents, Request, Run, RunRow, Start, Started,
-    SuggestionRow, Suggestions,
+    Conversations, Detail, Done, Event, FriendRow, Friends, ImRow, Info, LinkRow, Links, MapMark,
+    MapRequest, MapShown, Me, MessageRow, Messages, PositionRow, Query, Recents, Request, Run,
+    RunRow, Start, Started, SuggestionRow, Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -219,6 +219,8 @@ fn query() -> impl Strategy<Value = Query> {
         Just(Query::Me),
         text().prop_map(|passphrase| Query::Backup { passphrase }),
         (text(), i64s()).prop_map(|(peer, key)| Query::Run { peer, key }),
+        (prop::option::of(i32s()), prop::option::of(i32s()))
+            .prop_map(|(lat_e6, lon_e6)| Query::Friends { lat_e6, lon_e6 }),
     ]
 }
 
@@ -479,7 +481,7 @@ fn map_request() -> impl Strategy<Value = MapRequest> {
         ),
         (any::<bool>(), u32s(), u32s()),
         any::<(bool, bool, bool, bool)>(),
-        (opt_text(), any::<bool>()),
+        (opt_text(), any::<bool>(), any::<bool>()),
     )
         .prop_map(
             |(
@@ -489,7 +491,7 @@ fn map_request() -> impl Strategy<Value = MapRequest> {
                 (tap_x, tap_y, fit, at_lat_e6, at_lon_e6),
                 (load, margin_x, margin_y),
                 (moving, toggle_theme, follow_phone, prefetch),
-                (set_theme, ask_theme),
+                (set_theme, ask_theme, avatars),
             )| MapRequest {
                 dir,
                 w,
@@ -521,6 +523,7 @@ fn map_request() -> impl Strategy<Value = MapRequest> {
                 set_theme,
                 ask_theme,
                 prefetch,
+                avatars,
             },
         )
 }
@@ -532,6 +535,7 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
         (any::<bool>(), u8s(), u8s(), opt_text(), text(), u32s()),
         (opt_text(), opt_text(), any::<bool>(), opt_text(), u32s()),
         (any::<(bool, bool, bool)>(), u32s(), text()),
+        (marks(), any::<(bool, bool)>()),
     )
         .prop_map(
             |(
@@ -540,6 +544,7 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                 (pending, min_zoom, max_zoom, selected, attribution, pins),
                 (tapped, tapped_name, loading, notice, ms),
                 ((dark, theme_chosen, prefetching), prefetched, theme),
+                (marks, (offline, no_map)),
             )| MapShown {
                 v,
                 ok,
@@ -569,6 +574,52 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                 theme,
                 prefetching,
                 prefetched,
+                marks,
+                offline,
+                no_map,
+            },
+        )
+}
+
+fn marks() -> impl Strategy<Value = Vec<MapMark>> {
+    prop::collection::vec(
+        (i32s(), i32s(), texts(), prop::option::of(u32s())).prop_map(
+            |(x, y, peers, split_milli)| MapMark {
+                x,
+                y,
+                peers,
+                split_milli,
+            },
+        ),
+        0..4,
+    )
+}
+
+fn friend_row() -> impl Strategy<Value = FriendRow> {
+    (
+        (text(), text(), text(), opt_text(), opt_text(), opt_text()),
+        (i64s(), i32s(), i32s(), prop::option::of(u32s())),
+        (any::<(bool, bool)>(), text()),
+    )
+        .prop_map(
+            |(
+                (peer, name, initials, icon_fg, icon_bg, photo),
+                (at, lat_e6, lon_e6, distance_m),
+                ((recent, stale), geo),
+            )| FriendRow {
+                peer,
+                name,
+                initials,
+                icon_fg,
+                icon_bg,
+                photo,
+                at,
+                lat_e6,
+                lon_e6,
+                distance_m,
+                recent,
+                stale,
+                geo,
             },
         )
 }
@@ -741,6 +792,15 @@ proptest! {
         let (back, pixels) = schema::unframe(&framed).map_err(TestCaseError::fail)?;
         prop_assert_eq!(back, shown);
         prop_assert_eq!(pixels, &rgba[..]);
+    }
+
+    #[test]
+    fn the_friends_round_trip(
+        v in u32s(),
+        friends in prop::collection::vec(friend_row(), 0..4),
+        me in prop::option::of(friend_row()),
+    ) {
+        round_trips(&Friends { v, friends, me })?;
     }
 
     #[test]

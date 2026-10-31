@@ -2222,3 +2222,93 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
     assert_eq!(model.conversations[c].messages.len(), RUN_REPORTS + 4);
     assert_eq!(model.conversations[c].unread, RUN_REPORTS + 4);
 }
+
+/// The map's Friends sheet (1200), as the facade answers it from the
+/// session's model: everyone with a position, newest first, the last 24 h
+/// marked recent and the older after them; ourselves apart as `me`, the
+/// blocked not at all; a distance only with the phone's own fix, and each
+/// row's `geo:` link for Navigate.
+#[test]
+fn the_friends_sheet_lists_positions_newest_first_with_the_day_marked() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{update, UiEvent, UiModel};
+    use loquax_android::friends;
+    use loquax_android::session::Line;
+    let now = ugly_store::BASE + 10 * 86_400;
+    let me = ugly_store::peer(90);
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some(me);
+    update(
+        &mut model,
+        UiEvent::Clock(loquax::when::WallTime {
+            unix_secs: now,
+            offset_secs: 0,
+        }),
+    );
+    let report = |n: u8, peer: [u8; 16], at: i64, lat: i32| {
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [n; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: ugly_store::position(at, lat),
+            verified: true,
+        })
+    };
+    let (anna, bob, carla, dieter) = (
+        ugly_store::peer(91),
+        ugly_store::peer(92),
+        ugly_store::peer(93),
+        ugly_store::peer(94),
+    );
+    // Bob an hour ago, Carla 30 h ago, Anna five minutes ago, Dieter
+    // blocked a minute ago, ourselves now: received in no order.
+    update(&mut model, report(1, bob, now - 3_600, 52_529_360));
+    update(&mut model, report(2, carla, now - 30 * 3_600, 52_554_360));
+    update(&mut model, report(3, anna, now - 300, 52_525_360));
+    update(&mut model, report(4, dieter, now - 60, 52_524_360));
+    update(&mut model, report(5, me, now, 52_524_360));
+    model.names.contacts.blocked.insert(dieter);
+    let hex = |p: &[u8; 16]| loquax::address::to_hex(p);
+
+    let sheet = friends::friends(&model, now, None, |_| None);
+    let order: Vec<(String, bool, i64)> = sheet
+        .friends
+        .iter()
+        .map(|f| (f.peer.clone(), f.recent, f.at))
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            (hex(&anna), true, now - 300),
+            (hex(&bob), true, now - 3_600),
+            (hex(&carla), false, now - 30 * 3_600),
+        ],
+        "newest first, the day marked, neither us nor the blocked"
+    );
+    assert!(
+        sheet.friends.iter().all(|f| f.distance_m.is_none()),
+        "no distance without the phone's fix"
+    );
+    let ours = sheet.me.expect("our own position apart");
+    assert_eq!((ours.peer, ours.lat_e6), (hex(&me), 52_524_360));
+    let anna_row = &sheet.friends[0];
+    assert_eq!(anna_row.lon_e6, 11_256_000);
+    assert!(!anna_row.initials.is_empty() && !anna_row.name.is_empty());
+    assert_eq!(
+        anna_row.geo,
+        friends::geo_uri(52_525_360, 11_256_000, &anna_row.name)
+    );
+    // The window's edge: exactly 24 h old is still recent.
+    update(
+        &mut model,
+        report(6, carla, now - friends::WINDOW_SECS, 52_554_360),
+    );
+    let sheet = friends::friends(&model, now, None, |_| None);
+    assert!(sheet.friends[2].recent, "{:?}", sheet.friends[2]);
+
+    // With the phone's fix: a thousandth of a degree of latitude is 111 m.
+    let sheet = friends::friends(&model, now, Some((52_524_360, 11_256_000)), |_| None);
+    let metres: Vec<Option<u32>> = sheet.friends.iter().map(|f| f.distance_m).collect();
+    assert_eq!(metres, vec![Some(111), Some(556), Some(3_336)]);
+}

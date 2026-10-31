@@ -1425,3 +1425,127 @@ fn a_frame_into_the_bitmap_is_the_frame_of_the_host_path() {
     let answer = loquax_android::map::render_into(&ahead, Some(Vec::new()), now(), &mut none);
     assert!(answer.ok, "{answer:?}");
 }
+
+/// The map's people (1200): asked with `avatars`, the frame draws no pin
+/// of its own and says where the app draws its avatar circles. Over
+/// Florence at z13 two friends 150 m apart are one cluster of two, a third
+/// a kilometre east a pin of its own; at the zoom the cluster names they
+/// lie a circle apart and are two pins. Two in one place never part: their
+/// cluster has no zoom, and its tap opens the filtered sheet.
+#[test]
+fn avatar_pins_cluster_and_split_at_the_zoom_they_name() {
+    let home = home();
+    let pair_lat: f64 = 43.7752;
+    let (west, east) = (
+        11.2650,
+        11.2650 + 150.0 / (111_320.0 * pair_lat.to_radians().cos()),
+    );
+    let far = 11.2650 + 1_000.0 / (111_320.0 * pair_lat.to_radians().cos());
+    let pins = vec![
+        pin(1, "anna", pair_lat, west),
+        pin(2, "bob", pair_lat, east),
+        pin(3, "carla", pair_lat, far),
+    ];
+    let centre = project(LatLon::from_degrees(pair_lat, (west + far) / 2.0));
+    let ask = MapRequest {
+        x: Some(centre.x),
+        y: Some(centre.y),
+        zoom: Some(13),
+        avatars: true,
+        ..request(home.path(), false)
+    };
+    let (shown, rgba) = frame(&loquax_android::map::render(
+        &ask,
+        Some(pins.clone()),
+        now(),
+    ));
+    let hex = |b: u8| format!("{b:02x}").repeat(16);
+    let peers: Vec<Vec<String>> = shown.marks.iter().map(|m| m.peers.clone()).collect();
+    assert_eq!(peers, vec![vec![hex(1), hex(2)], vec![hex(3)]], "{shown:?}");
+    // The cluster sits on its first pin, where the view puts anna.
+    let view = ExactView::new(centre, 13_000, W, H);
+    let (ax, ay) = view.to_screen(pins[0].at);
+    assert_eq!(
+        (shown.marks[0].x, shown.marks[0].y),
+        (ax.round() as i32, ay.round() as i32)
+    );
+    // No marker drawn there: neither pin colour under anna.
+    let at = (ay as usize * W as usize + ax as usize) * 4;
+    assert_ne!(&rgba[at..at + 3], &[0xd0, 0x30, 0x30]);
+    let split = shown.marks[0].split_milli.expect("the regions part them");
+    assert!(
+        split > 13_000 && split <= u32::from(shown.max_zoom) * 1000,
+        "{split}"
+    );
+    assert_eq!(shown.marks[1].split_milli, Some(13_000), "a pin is split");
+
+    // At that zoom, about the pair's middle, anna and bob are two pins.
+    let middle = project(LatLon::from_degrees(pair_lat, (west + east) / 2.0));
+    let zoomed = MapRequest {
+        x: Some(middle.x),
+        y: Some(middle.y),
+        zoom: None,
+        zoom_milli: Some(split),
+        ..ask.clone()
+    };
+    let (shown, _) = frame(&loquax_android::map::render(
+        &zoomed,
+        Some(pins.clone()),
+        now(),
+    ));
+    let alone: Vec<usize> = shown.marks.iter().map(|m| m.peers.len()).collect();
+    assert!(alone.iter().all(|&n| n == 1), "{shown:?}");
+    assert!(shown.marks.iter().any(|m| m.peers == [hex(1)]));
+    assert!(shown.marks.iter().any(|m| m.peers == [hex(2)]));
+    // A fifth of a step short of it they are one again: the zoom named is
+    // where they part, not far past it.
+    let short = MapRequest {
+        zoom_milli: Some(split - 200),
+        ..zoomed.clone()
+    };
+    let (shown, _) = frame(&loquax_android::map::render(&short, Some(pins), now()));
+    assert!(shown.marks.iter().any(|m| m.peers.len() == 2), "{shown:?}");
+
+    // Two in one place: a cluster no zoom parts.
+    let same = vec![
+        pin(4, "dora", pair_lat, west),
+        pin(5, "emil", pair_lat, west),
+    ];
+    let (shown, _) = frame(&loquax_android::map::render(&ask, Some(same), now()));
+    assert_eq!(shown.marks.len(), 1);
+    assert_eq!(shown.marks[0].split_milli, None);
+
+    // Without `avatars` the frame draws its pins and says no marks.
+    let drawn = MapRequest {
+        avatars: false,
+        ..ask
+    };
+    let (shown, _) = frame(&loquax_android::map::render(
+        &drawn,
+        Some(vec![pin(6, "fritz", pair_lat, west)]),
+        now(),
+    ));
+    assert!(shown.marks.is_empty());
+    assert_eq!(shown.pins, 1);
+}
+
+/// "No map here yet" (1200): a view no region holds, with the autoload
+/// off, says so; the Florence view does not.
+#[test]
+fn a_view_without_a_region_says_no_map_here_yet() {
+    let home = home();
+    let (shown, _) = frame(&loquax_android::map::render(
+        &request(home.path(), false),
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(!shown.no_map && !shown.offline, "{shown:?}");
+    let berlin = project(LatLon::from_degrees(52.52, 13.405));
+    let away = MapRequest {
+        x: Some(berlin.x),
+        y: Some(berlin.y),
+        ..request(home.path(), false)
+    };
+    let (shown, _) = frame(&loquax_android::map::render(&away, Some(Vec::new()), now()));
+    assert!(shown.no_map && !shown.loading, "{shown:?}");
+}

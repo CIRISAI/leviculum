@@ -671,6 +671,12 @@ impl Session {
                 schema::encode(&inner.listed(order))
             }
             schema::Query::Blocked => schema::encode(&inner.blocked()),
+            schema::Query::Friends { lat_e6, lon_e6 } => schema::encode(&crate::friends::friends(
+                &inner.model,
+                wall_now(inner.offset).unix_secs,
+                lat_e6.zip(lon_e6),
+                |peer| inner.photo(peer),
+            )),
             schema::Query::Me | schema::Query::Backup { .. } => {
                 return Err("answered above".to_string())
             }
