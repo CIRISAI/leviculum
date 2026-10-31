@@ -169,4 +169,12 @@
 # which runs in the suite. Run by hand with LNPND_LOAD_DIR on the disk under
 # test (see the module docs of lnpnd/src/engine_hook_load.rs) whenever the
 # engine's hooks or the stores' write paths change.
-1    -p lnpnd --lib
+# 1 -> 2 (2026-10-31, order 1171, #478): sync_tick_cost_over_a_field_sized_store
+# prices one outbound sync tick, one sync link coming up and one batch plan
+# over a file store of 300 000 messages, the store as it was against the
+# store as it is. Filling it writes 300 000 files (11 s release on the
+# coder host, 1.2 GB on disk at a block a file), which no tier should do per run. What it measured is pinned deterministically by
+# a_sync_round_asks_the_store_without_walking_it, which runs in the suite.
+# Run by hand with LNPND_BENCH_DIR (lnpnd/src/peering.rs, the test's docs)
+# whenever the peering path or the file store's indexes change.
+2    -p lnpnd --lib

@@ -146,7 +146,7 @@ reference's `rotate_peers`,
 `reference/LXMF/LXMF/LXMRouter.py:2060-2126`, every 22 min 24 s,
 `ROTATION_INTERVAL_SECS`, `leviculum-lxmf/src/peering.rs:110`);
 lnpnd runs it on its tick (`rotate_peers`,
-`lnpnd/src/peering.rs:432`, landed 0a1d7e38). The board never calls
+`lnpnd/src/peering.rs:447`, landed 0a1d7e38). The board never calls
 it (the arm that names the reason says so,
 `leviculum-nrf/src/pn.rs:1636-1639`), and the inputs do not exist
 there: `PeerTraffic` is a host-side map persisted with the host's
@@ -167,7 +167,7 @@ the keys of #388 pass 3 already ate; plus ~26 B per persisted record
 pass. CPU and airtime: none (rotation only unpeers).
 Test: the shared-crate rule is pinned
 (`a_restored_full_table_rotates_out_its_two_lowest_acceptance_peers_on_the_tick`,
-`lnpnd/src/peering.rs:2042`); a board engine test would assert the
+`lnpnd/src/peering.rs:2039`); a board engine test would assert the
 counters survive `PeerRecord` round-trips through the record log.
 
 **D4 — no static peers on the board.** lnpnd and the reference take
@@ -210,7 +210,7 @@ empty), red before the fix (no record, no list), and the reclaim rule by
 **D5 — the peer-back recall is RAM-only and does not survive a
 reset.** Both stacks peer back a node whose sync lands by recalling
 its last announce (`peer_from_recalled_announce`,
-`leviculum-nrf/src/pn.rs:2256` and `lnpnd/src/peering.rs:1223`,
+`leviculum-nrf/src/pn.rs:2256` and `lnpnd/src/peering.rs:1238`,
 against `reference/LXMF/LXMF/LXMRouter.py:2355-2375`). The
 reference recalls from `Identity.known_destinations`, which is
 persisted; the board recalls from `EmbeddedStorage`'s 16-entry RAM
@@ -252,7 +252,7 @@ more tests beside them.
 
 **D6 — lnpnd judges an inbound sync by its link's hops when no path
 is known; the board does not.** lnpnd's deliberate deviation 556
-(8756a5df, documented at `lnpnd/src/peering.rs:1204-1222`): the
+(8756a5df, documented at `lnpnd/src/peering.rs:1219-1237`): the
 reference reads only the path table, which answers `PATHFINDER_M`
 for an unknown path, so after a restart a recallable neighbour is
 "too deep" until its next announce; the link the sync arrived over
@@ -307,7 +307,7 @@ peers whose keys are ready wait out the mine — 10-32 s at cost 18.
 The reference mines on a thread per peer and its scheduler keeps
 picking others (`generate_peering_key` off the sync thread,
 `reference/LXMF/LXMF/LXMPeer.py:285-286`); lnpnd likewise holds only
-the mining peer (`MiningJob`, `lnpnd/src/peering.rs:131`).
+the mining peer (`MiningJob`, `lnpnd/src/peering.rs:146`).
 What a peer sees: its due sync starts up to half a minute late, once
 per newly met peer. Class: timing.
 Price to close: 0 B (scheduling change: skip the mining peer instead
@@ -324,7 +324,7 @@ already `KeyMining`, and `mining_peer` already says the miner is busy.
 Pinned by `a_busy_miner_holds_only_the_peers_that_need_it`
 (`leviculum-lxmf/src/peering_tests.rs`), red against the early return.
 lnpnd's tick carries the same early return
-(`lnpnd/src/peering.rs:1326`, `self.mining.is_some()`), so the
+(`lnpnd/src/peering.rs:1341`, `self.mining.is_some()`), so the
 sentence above about lnpnd does not hold; not changed here.
 
 ## 2. The store, pricing, and what the board announces
