@@ -2103,7 +2103,8 @@ fn hex(bytes: &[u8]) -> String {
 /// Lew's phone, 2026-10-31 (1184): Columba's report a minute was a bubble,
 /// an unread count and a notification each. Over the ugly store with a run
 /// of 14 reports between two texts, the facade answers three rows, the
-/// run's with its count and when it began, and counts it unread once; the
+/// run's with its count and when it began, and counts it unread not at all
+/// (1209, it counted once at 1184); the
 /// expand lists all 14, newest first. A report after the text starts a new
 /// run, a row of its own counted once, which the next report updates in
 /// place. The store keeps every report.
@@ -2161,7 +2162,8 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
         ugly_store::BASE + 86_400 + 60,
         "the first report"
     );
-    assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 3);
+    // The texts count, the run not (1209).
+    assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 2);
 
     let expanded = session::run(&model, peer, loquax_android::schema::model_key(run.key));
     assert_eq!(expanded.positions.len(), RUN_REPORTS);
@@ -2177,7 +2179,7 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
     assert_eq!(alone.positions.len(), 1);
 
     // After the text a report starts a new run: a row of its own, unread
-    // once; the next report updates that row, and counts nothing more.
+    // never (1209); the next report updates that row.
     let report = |id: u8, lat: i32| {
         UiEvent::Engine(OutboxEvent::Received {
             message_id: [id; 32],
@@ -2192,16 +2194,165 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
     let rows = session::rows(&model, c);
     assert_eq!(rows.len(), 4);
     assert_eq!(rows[3].updates, 0, "one report is no run yet");
-    assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 4);
+    assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 2);
     update(&mut model, report(0xe2, 52_600_001));
     let rows = session::rows(&model, c);
     assert_eq!(rows.len(), 4, "updated in place");
     assert_eq!((rows[3].updates, rows[3].lat_e6), (2, Some(52_600_001)));
     let row = loquax::ui::chat::list_row(&model, &peer);
-    assert_eq!((row.unread, row.updates), (4, 2));
+    assert_eq!((row.unread, row.updates), (2, 2));
     // Every report is still there, and every one unread for the read marks.
     assert_eq!(model.conversations[c].messages.len(), RUN_REPORTS + 4);
     assert_eq!(model.conversations[c].unread, RUN_REPORTS + 4);
+}
+
+/// Lew, 2026-10-31 (1209): a position report is a state, not a message.
+/// Over the ugly store, six reports from one peer ten minutes apart raise
+/// no unread count (the phone's notification grows with it), no toast (the
+/// facade's `notice`) and no move in the list; a text from the same peer
+/// still does all three.
+#[test]
+fn a_position_report_is_a_state_not_a_message() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::chat::list_row;
+    use loquax::ui::{update, UiEvent};
+    use loquax::when::WallTime;
+    use loquax_android::session;
+    let home = tempfile::tempdir().expect("app dir");
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    ugly_store::fill_store_of(home.path(), &identity);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let store = loquax::store::Store::open_in(home.path(), me).expect("the store");
+    let mut model = session::known(home.path(), &store).expect("a model");
+    model.home_client = true;
+    model.list_apart = true;
+    let clock = |at: i64| {
+        UiEvent::Clock(WallTime {
+            unix_secs: at,
+            offset_secs: 0,
+        })
+    };
+    let start = ugly_store::BASE + 3 * 86_400;
+    update(&mut model, clock(start));
+    model.restore(store.restore().expect("restore"));
+    update(&mut model, UiEvent::Close);
+    // A conversation in the middle of the list, read.
+    let order = model.order();
+    let c = order[order.len() / 2];
+    let peer = model.conversations[c].peer;
+    model.conversations[c].unread = 0;
+    model.conversations[c].new_rule = None;
+    assert_eq!(list_row(&model, &peer).unread, 0);
+    let toasts = model.toasts.len();
+    let received = |id: u8, body: &str, fields: Vec<_>| {
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [id; 32],
+            source: peer,
+            title: Vec::new(),
+            body: body.as_bytes().to_vec(),
+            fields,
+            verified: true,
+        })
+    };
+    let newest = start + 5 * 600;
+    for i in 0..6u8 {
+        let at = start + i64::from(i) * 600;
+        update(&mut model, clock(at));
+        update(
+            &mut model,
+            received(
+                0xa0 + i,
+                "",
+                ugly_store::position(at, 52_500_000 + i32::from(i)),
+            ),
+        );
+    }
+    assert_eq!(list_row(&model, &peer).unread, 0, "a report counts nothing");
+    assert_eq!(model.toasts.len(), toasts, "nor toasts: {:?}", model.toasts);
+    assert_eq!(model.order(), order, "nor moves the conversation up");
+    assert_eq!(
+        model.conversations[c].unread, 6,
+        "the read marks still name them"
+    );
+    assert!(
+        model.conversations[c].new_rule.is_none(),
+        "nor sets the new rule"
+    );
+    // Alive: six reports ten minutes apart are every 10 minutes, and the
+    // newest is the row that says so, on the list, the bubble and the map.
+    use loquax::ui::liveness::State;
+    let live = list_row(&model, &peer).liveness;
+    assert_eq!(
+        (live.state, live.cadence_s, live.last_fix_at),
+        (State::Live, Some(600), Some(newest))
+    );
+    assert_eq!(list_row(&model, &peer).last, "📍 live");
+    let rows = session::rows(&model, c);
+    let newest_row = rows.last().expect("the run's row");
+    assert_eq!(
+        (
+            newest_row.liveness.as_str(),
+            newest_row.cadence_s,
+            newest_row.updates
+        ),
+        ("live", 600, 6)
+    );
+    assert!(
+        rows[..rows.len() - 1].iter().all(|r| r.liveness.is_empty()),
+        "only the newest report's row says it"
+    );
+    let friend = |model: &loquax::ui::UiModel<session::Line>, at: i64| {
+        loquax_android::friends::friends(model, at, None, |_| None)
+            .friends
+            .into_iter()
+            .find(|f| f.peer == loquax::address::to_hex(&peer))
+            .map(|f| (f.liveness, f.cadence_s, f.last_fix_at))
+    };
+    assert_eq!(
+        friend(&model, newest),
+        Some(("live".to_string(), 600, newest))
+    );
+    // 25 minutes on, past twice the cadence: recent.
+    update(&mut model, clock(newest + 25 * 60));
+    assert_eq!(list_row(&model, &peer).liveness.state, State::Recent);
+    assert_eq!(list_row(&model, &peer).last, "📍 25 min ago");
+    assert_eq!(
+        session::rows(&model, c).last().map(|r| r.liveness.clone()),
+        Some("recent".into())
+    );
+    // 25 hours on: stale.
+    update(&mut model, clock(newest + 25 * 3600));
+    assert_eq!(list_row(&model, &peer).liveness.state, State::Stale);
+    assert_eq!(
+        friend(&model, newest + 25 * 3600).map(|f| f.0),
+        Some("stale".to_string())
+    );
+    assert_eq!(
+        model.toasts.len(),
+        toasts,
+        "time passing raises nothing either"
+    );
+
+    // A text from the same peer still notifies, counts and moves up.
+    update(&mut model, clock(newest + 25 * 3600 + 60));
+    update(&mut model, received(0xb0, "bin da", Vec::new()));
+    assert_eq!(list_row(&model, &peer).unread, 1);
+    let first_unpinned = model
+        .order()
+        .into_iter()
+        .find(|&i| !model.conversations[i].pinned);
+    assert_eq!(first_unpinned, Some(c), "on top, under the pinned");
+    assert_eq!(model.toasts.len(), toasts + 1);
+    // A text that carries a position stays a message.
+    update(
+        &mut model,
+        received(
+            0xb1,
+            "hier",
+            ugly_store::position(newest + 25 * 3600, 52_600_000),
+        ),
+    );
+    assert_eq!(list_row(&model, &peer).unread, 2);
 }
 
 /// The map's Friends sheet (1200), as the facade answers it from the

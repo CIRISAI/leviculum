@@ -16,6 +16,11 @@
     <string name="run_updates">%1$d Meldungen seit %2$s</string>
     <string name="action_run">Alle %1$d Positionen zeigen</string>
     <string name="run_title">%1$d Positionen</string>
+    <string name="live">live</string>
+    <string name="live_every">alle %1$s</string>
+    <string name="live_ago">vor %1$s</string>
+    <string name="live_now">gerade eben</string>
+    <string name="last_position">letzte Position %1$s</string>
     <string name="reacted">hat mit %1$s reagiert</string>
     <string name="you_reacted">Du hast mit %1$s reagiert</string>
     <string name="search">Suchen</string>

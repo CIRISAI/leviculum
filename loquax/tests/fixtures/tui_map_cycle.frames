@@ -26,7 +26,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: octant ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││𜵢𜺨    ▛𜴁𜺨    𜺫𜴅𜴴𜴅𜴦𜺣    𜵰▘𜴗𜺨     𜵰𜴂▛𜺫𜺨𜴧𜺣𜴅𜴦🮅𜴦𜴂𜵩𜵀𜴘𜵄▞𜺨 ▛│
-│▌◎ position             ││𜺨    ▛▀     𜵰𜺣  𜵰▀𜴷𜴦𜺣𜵰𜴂▛𜴦𜺣𜵰🮅𜵈   𜺫𜴅𜴦🮂𜴦𜺣 𜴃🯦𜺣𜴅𜴅𜴦𜺫𜴘𜴐𜺫🮂𜴏𜵰│
+│▌◎ position · live      ││𜺨    ▛▀     𜵰𜺣  𜵰▀𜴷𜴦𜺣𜵰𜴂▛𜴦𜺣𜵰🮅𜵈   𜺫𜴅𜴦🮂𜴦𜺣 𜴃🯦𜺣𜴅𜴅𜴦𜺫𜴘𜴐𜺫🮂𜴏𜵰│
 │                        ││𜴸▀🮅 𜴏𜴂     𜴗𜺨▘▛▀𜴊𜺨𜴘𜴀𜴴𜺨𜴼𜵰𜴇𜴅𜴳𜴦𜺣      𜺫𜴅𜴦🯦𜵰𜴂𜴘▀𜴅𜴴𜴅𜴦𜴦🮅𜴂▛𜴈│
 │                        ││ 🮂▀𜺫🮂🮅𜺣   𜵊𜵰𜴦𜺫𜴃𜴉𜴘𜴖𜵰🮅𜴓𜺨𜴦𜺫𜴅𜺣𜺫𜺫▀𜵀𜴦         🮂𜴥𜴂  𜺫𜴅𜺣𜺨🯧𜺣 │
 │                        ││ 𜵰▘𜴏𜺫𜴅𜴦🮂▀𜺣 𜺨  𜵰𜵎𜴇𜵀▝𜴂    🮂𜴦𜺫𜴦𜺣𜺫𜺫<33333333…> · 3 h ◉🮅𜴅│
@@ -51,7 +51,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: blocks ---
 ┌  Loquax afbda7b3───────┐┌● map───────────────────── blocks · z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││▛▘    ▛▛▇    ▝▀▂▅▃▁    ▛▘▀▘     ▁▘▛▇▀▅▂▅▃▃▃▊▞▅▆▃▞▘ ▂│
-│▌◎ position             ││▘    ▛▛     ▛▁  ▛▀▞▀▁▛▘▛▀▁▁▃▖   ▇▅▂▆▀▖▝▀▅▖▅▅▃▝▂▂▘▆▛▛│
+│▌◎ position · live      ││▘    ▛▛     ▛▁  ▛▀▞▀▁▛▘▛▀▁▁▃▖   ▇▅▂▆▀▖▝▀▅▖▅▅▃▝▂▂▘▆▛▛│
 │                        ││▇▀▂ ▛▛     ▛▇▘▛▘▃▘▅▎▁▇▘▛▇▀▆▂▁      ▇▅▃▌▛▘▛▅▀▂▅▃▃▁▘▛▃│
 │                        ││ ▆▀▇▆▂▁   ▛▛▀▝▝▝▂▃▘▅▛▇▃▇▅▂▇▇▅▆▃▁        ▇▃▀  ▝▀▖▘▌▁ │
 │                        ││ ▛▘▛▇▅▃▆▀▁ ▇  ▛▞▀▝▛▅    ▆▀▝▃▁▇▆<33333333…> · 3 h ◉▂▁│
@@ -76,7 +76,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: halfblocks ---
 ┌  Loquax afbda7b3───────┐┌● map───────────────── halfblocks · z14 · 1 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
-│▌◎ position             ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│▌◎ position · live      ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -101,7 +101,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 5: braille-thin ---
 ┌  Loquax afbda7b3───────┐┌● map─────────────── braille-thin · z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││⡿⠃    ⢠⡟      ⠙⠻⣦⣄     ⢀⣴⠏       ⣰⠏⠈⠛⠿⣷⣦⣀   ⢯⡙⠢⠤⡴⠁ ⢠│
-│▌◎ position             ││⠁    ⢠⡟         ⢀⣽⢷⣦⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠑⠿⠷⣦⣀ ⠈⠢⠔⠁ ⣰⡟│
+│▌◎ position · live      ││⠁    ⢠⡟         ⢀⣽⢷⣦⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠑⠿⠷⣦⣀ ⠈⠢⠔⠁ ⣰⡟│
 │                        ││⢶⣄⡀ ⣰⠏        ⢀⣔⠟⠁⣠⠛⢿⣿⡃ ⠈⠙⠶⣄        ⠉⠻⠆    ⠙⠻⣦⣄  ⣴⠟ │
 │                        ││ ⠈⠙⣷⣯⣀        ⠰⢅⢠⠞⠁⣴⡟⠉⠛⢷⣄⡀ ⠈⠛⢦⣄               ⠙⢻⣾⣏  │
 │                        ││  ⣼⠏ ⠙⠳⢦⣄⡀    ⢠⡾⠛⣦⠞⠋    ⠈⠛⢶⣄  ⠈<33333333…> · 3 h ◉⢿⣦│
@@ -126,7 +126,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 6: mosaic ---
 ┌  Loquax afbda7b3───────┐┌● map───────────────────── mosaic · z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position             ││                                                    │
+│▌◎ position · live      ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                               <33333333…> · 3 h ◉  │
@@ -151,7 +151,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 7: braille ---
 ┌  Loquax afbda7b3───────┐┌● map──────────────────── braille · z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
-│▌◎ position             ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
+│▌◎ position · live      ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
 │                        ││ ⠈⠛⣷⣿⣀        ⠐⢅⢀⠞⠁⣰⠗⠉⠙⢷⣄⡀ ⠈⠙⢦⣄               ⠙⠻⣶⣏  │
 │                        ││  ⣴⠏⠈⠙⠳⢦⣄⡀    ⢀⡼⠛⢦⠞⠋    ⠈⠛⢶⣄  ⠈<33333333…> · 3 h ◉⢷⣦│
@@ -176,7 +176,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 8: back to mosaic ---
 ┌  Loquax afbda7b3───────┐┌● map───────────────────── mosaic · z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position             ││                                                    │
+│▌◎ position · live      ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                               <33333333…> · 3 h ◉  │
@@ -201,7 +201,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 9: the name gone ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position             ││                                                    │
+│▌◎ position · live      ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                               <33333333…> · 3 h ◉  │
@@ -226,7 +226,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 10: glyph test ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position             ││                                                    │
+│▌◎ position · live      ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││ ┌ glyph test · g closes ────────────────────────┐  │
@@ -251,7 +251,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 11: glyph test closed ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position             ││                                                    │
+│▌◎ position · live      ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                               <33333333…> · 3 h ◉  │

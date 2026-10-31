@@ -125,6 +125,7 @@ const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames")
 const EXPECTED_NAMES: &str = include_str!("fixtures/tui_names.frames");
 const EXPECTED_HISTORY: &str = include_str!("fixtures/tui_history.frames");
 const EXPECTED_TELEMETRY: &str = include_str!("fixtures/tui_telemetry.frames");
+const EXPECTED_LIVENESS: &str = include_str!("fixtures/tui_liveness.frames");
 const EXPECTED_MAP: &str = include_str!("fixtures/tui_map.frames");
 const EXPECTED_MAPLOAD: &str = include_str!("fixtures/tui_mapload.frames");
 const EXPECTED_MAP_CYCLE: &str = include_str!("fixtures/tui_map_cycle.frames");
@@ -1874,6 +1875,68 @@ async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              loquax/tests/fixtures/tui_telemetry.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// A position report is a state, not a message (1209): six reports ten
+/// minutes apart are one line that says the position is live, every 10
+/// min, with no badge in the list; 25 minutes later it is recent (`last
+/// position 25 min ago`), 25 hours later stale.
+const LIVENESS_SCRIPT: &str = "\
+clock 2026-10-26 14:00
+until ready 20
+frame attached
+until received 6 60
+tick 12
+frame live
+clock 2026-10-26 14:25
+tick 12
+frame recent
+clock 2026-10-27 15:00
+tick 12
+frame stale
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge() {
+    let messages = |_: [u8; 16]| {
+        (0..6)
+            .map(|i| {
+                (
+                    "",
+                    position_report(50 - i * 10, 43_770_000 + i as i32 * 100),
+                )
+            })
+            .collect()
+    };
+    let frames = peer_session("liveness", "80x24", LIVENESS_SCRIPT, &[], |_| {}, messages)
+        .await
+        .0;
+    let live = frame(&frames, "live");
+    let joined = |f: &str| f.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(joined(live).contains("live · every 10 min · now"), "{live}");
+    assert!(live.contains("◎ position · live"), "{live}");
+    assert!(
+        !live.contains("[1]") && !live.contains("[6]"),
+        "no badge\n{live}"
+    );
+    let recent = frame(&frames, "recent");
+    assert!(
+        joined(recent).contains("last position 25 min ago"),
+        "{recent}"
+    );
+    assert!(recent.contains("◎ position · 25 min a…"), "{recent}");
+    let stale = frame(&frames, "stale");
+    assert!(joined(stale).contains("last position 25 h ago"), "{stale}");
+    if frames != EXPECTED_LIVENESS {
+        let kept = std::env::temp_dir().join("loquax-tui-liveness.frames");
+        let _ = std::fs::write(&kept, &frames);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_liveness.frames\n{frames}",
             kept.display()
         );
     }

@@ -27,6 +27,7 @@ use loquax::home::runner::{self, HomeClient};
 use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
+use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
 use loquax::ui::{chat, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
@@ -1438,6 +1439,9 @@ impl Inner {
             pinned: row.pinned,
             muted: row.muted,
             updates: u32::try_from(row.updates).unwrap_or(u32::MAX),
+            liveness: row.liveness.state.word().to_string(),
+            cadence_s: cadence(&row.liveness),
+            last_fix_at: row.liveness.last_fix_at.unwrap_or(0),
         }
     }
 
@@ -1517,6 +1521,7 @@ impl Inner {
                 .any(|m| !m.outbound)
         });
         let names = &self.model.names;
+        let liveness = self.model.liveness(&peer);
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
@@ -1539,6 +1544,9 @@ impl Inner {
                 .map(|other| names.label(other))
                 .collect(),
             verified: self.model.verified(&peer),
+            liveness: liveness.state.word().to_string(),
+            cadence_s: cadence(&liveness),
+            last_fix_at: liveness.last_fix_at.unwrap_or(0),
         }
     }
 
@@ -1693,7 +1701,17 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         quote: bubble.quote.map(|q| q.text),
         updates: u32::try_from(bubble.updates).unwrap_or(u32::MAX),
         since: bubble.since.map_or(0, |at| at.unix_secs),
+        liveness: bubble.liveness.map_or("", |l| l.state.word()).to_string(),
+        cadence_s: bubble.liveness.map_or(0, |l| cadence(&l)),
     }
+}
+
+/// A liveness's cadence as the facade carries it: seconds, 0 before one
+/// was learned.
+pub fn cadence(liveness: &Liveness) -> u32 {
+    liveness
+        .cadence_s
+        .map_or(0, |s| u32::try_from(s).unwrap_or(u32::MAX))
 }
 
 /// The reports the row `key` of `peer`'s conversation stands for, newest

@@ -276,6 +276,7 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
         (prop::option::of(i64s()), prop::option::of(i64s()), i64s()),
         (opt_text(), prop::option::of(any::<bool>()), opt_text()),
         (u32s(), i64s()),
+        (text(), u32s()),
     )
         .prop_map(
             |(
@@ -284,6 +285,7 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
                 (fix_at, stale_at, key),
                 (quote, quote_ours, quote_to),
                 (updates, since),
+                (liveness, cadence_s),
             )| MessageRow {
                 id,
                 ours,
@@ -303,6 +305,8 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
                 quote_to,
                 updates,
                 since,
+                liveness,
+                cadence_s,
             },
         )
 }
@@ -323,6 +327,7 @@ fn messages() -> impl Strategy<Value = Messages> {
             any::<bool>(),
         ),
         (opt_text(), opt_text(), texts(), any::<bool>()),
+        live(),
     )
         .prop_map(
             |(
@@ -330,6 +335,7 @@ fn messages() -> impl Strategy<Value = Messages> {
                 (initials, icon_fg, icon_bg, home_client, photo),
                 (linked, lookup, contact_id, ask_link),
                 (announced, petname, others, verified),
+                (liveness, cadence_s, last_fix_at),
             )| Messages {
                 v,
                 peer,
@@ -348,8 +354,17 @@ fn messages() -> impl Strategy<Value = Messages> {
                 petname,
                 others,
                 verified,
+                liveness,
+                cadence_s,
+                last_fix_at,
             },
         )
+}
+
+/// A liveness as the rows carry it (1209): the word, the cadence and the
+/// newest fix's time.
+fn live() -> impl Strategy<Value = (String, u32, i64)> {
+    (text(), u32s(), i64s())
 }
 
 fn conversation_row() -> impl Strategy<Value = ConversationRow> {
@@ -357,12 +372,14 @@ fn conversation_row() -> impl Strategy<Value = ConversationRow> {
         (text(), text(), text(), any::<bool>(), i64s(), u32s()),
         (text(), opt_text(), opt_text(), text(), opt_text()),
         (text(), opt_text(), any::<(bool, bool, bool)>(), u32s()),
+        live(),
     )
         .prop_map(
             |(
                 (peer, name, last, ours, at, unread),
                 (initials, icon_fg, icon_bg, kind, reaction),
                 (state, photo, (linked, pinned, muted), updates),
+                (liveness, cadence_s, last_fix_at),
             )| ConversationRow {
                 peer,
                 name,
@@ -381,6 +398,9 @@ fn conversation_row() -> impl Strategy<Value = ConversationRow> {
                 pinned,
                 muted,
                 updates,
+                liveness,
+                cadence_s,
+                last_fix_at,
             },
         )
 }
@@ -687,12 +707,14 @@ fn friend_row() -> impl Strategy<Value = FriendRow> {
         (text(), text(), text(), opt_text(), opt_text(), opt_text()),
         (i64s(), i32s(), i32s(), prop::option::of(u32s())),
         (any::<(bool, bool)>(), text()),
+        live(),
     )
         .prop_map(
             |(
                 (peer, name, initials, icon_fg, icon_bg, photo),
                 (at, lat_e6, lon_e6, distance_m),
                 ((recent, stale), geo),
+                (liveness, cadence_s, last_fix_at),
             )| FriendRow {
                 peer,
                 name,
@@ -707,6 +729,9 @@ fn friend_row() -> impl Strategy<Value = FriendRow> {
                 recent,
                 stale,
                 geo,
+                liveness,
+                cadence_s,
+                last_fix_at,
             },
         )
 }

@@ -137,6 +137,7 @@ pub mod contacts;
 pub mod history;
 pub mod hit;
 pub mod layout;
+pub mod liveness;
 pub mod map;
 pub mod reactions;
 pub mod replies;
@@ -500,12 +501,18 @@ impl Conversation {
         run
     }
 
-    /// The unread count as the screens show it: a run of reports counts
-    /// once (1184). [`Conversation::unread`] stays the messages, which the
-    /// home's read marks name one by one.
+    /// The unread count as the screens show it: a position report counts
+    /// nothing (1209), it is a state and no message. [`Conversation::unread`]
+    /// stays the messages, which the home's read marks name one by one.
     pub fn unread_rows(&self) -> usize {
+        self.unread_messages().len()
+    }
+
+    /// The unread messages that ask for attention, oldest first: the raw
+    /// [`Conversation::unread`] newest received, less the reports.
+    fn unread_messages(&self) -> Vec<usize> {
         let mut left = self.unread;
-        let mut rows = 0;
+        let mut shown = Vec::new();
         for (i, message) in self.messages.iter().enumerate().rev() {
             if left == 0 {
                 break;
@@ -514,11 +521,60 @@ impl Conversation {
                 continue;
             }
             left -= 1;
-            if !self.report_folded(i) {
-                rows += 1;
+            if !message.is_report() {
+                shown.push(i);
             }
         }
-        rows
+        shown.reverse();
+        shown
+    }
+
+    /// The `new` rule the raw unread count gives, as a restart sets it:
+    /// above the first unread message that is no report (1209).
+    pub(crate) fn rule_from_unread(&self) -> Option<NewRule> {
+        let shown = self.unread_messages();
+        shown.first().map(|&at| NewRule {
+            at,
+            count: shown.len(),
+        })
+    }
+
+    /// Whether the peer's position is alive (1209), from the reports the
+    /// conversation holds, the newest [`liveness::CADENCE_GAPS`] and one
+    /// with a position: each at its fix's time (the receive time where the
+    /// sender's clock claims the future), judged at `now`.
+    pub fn liveness(&self, now: Option<i64>) -> liveness::Liveness {
+        // The newest few teach the cadence; older ones say nothing.
+        let times: Vec<i64> = self
+            .messages
+            .iter()
+            .rev()
+            .filter(|m| m.is_report())
+            .filter_map(|m| message_fix(self.peer, m))
+            .take(liveness::CADENCE_GAPS + 1)
+            .map(|fix| fix.order_time())
+            .collect();
+        liveness::Liveness::of(&times, now)
+    }
+
+    /// The newest report with a position: the row that says whether the
+    /// position is alive (1209). A report without one says so and no more.
+    pub fn newest_fix_report(&self) -> Option<usize> {
+        self.messages
+            .iter()
+            .rposition(|m| m.is_report() && message_fix(self.peer, m).is_some())
+    }
+
+    /// Where the list orders the conversation (1209): at its newest
+    /// message that is no position report, or its first message when it
+    /// has only reports.
+    pub(crate) fn list_activity(&self) -> u64 {
+        self.messages
+            .iter()
+            .rev()
+            .find(|m| !m.is_report())
+            .or(self.messages.first())
+            .map_or(0, |m| m.activity)
     }
 }
 
@@ -3030,7 +3086,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             let at = model.now;
             let activity = model.bump();
             let conversation = &mut model.conversations[index];
-            conversation.activity = activity;
+            let first = conversation.messages.is_empty();
             conversation.messages.push(Message {
                 outbound: false,
                 size: body.len(),
@@ -3055,6 +3111,13 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 activity,
                 fields,
             });
+            let report = conversation.messages.last().is_some_and(Message::is_report);
+            // A position report is a state, not a message (1209): it moves
+            // the conversation nowhere in the list, unless it is the first
+            // the conversation has.
+            if !report || first {
+                conversation.activity = activity;
+            }
             let peer = conversation.peer;
             let reaction = conversation
                 .messages
@@ -3081,13 +3144,27 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 }
                 return effects;
             }
-            // Muted: counted, raised nowhere; archived and not muted: back
-            // in the list (1146).
-            let raise = model.arrived(index);
             if open && model.home_client {
                 // Read where it arrived, so read on the home's other devices.
                 model.mark_out(crate::home::wire::MarkFlag::Read, vec![message_id]);
             }
+            // A position report asks for no attention (1209): it is counted
+            // in the raw unread the read marks need, and read silently when
+            // the chat opens, but it raises no shown count, no `new` rule,
+            // no toast and brings no archived conversation back. Its row
+            // and the peer's liveness say what it changed.
+            if report {
+                if !open {
+                    model.changed_peers.insert(peer);
+                    model.conversations[index].unread += 1;
+                } else if follow {
+                    model.message_cursor = model.conversations[index].messages.len() - 1;
+                }
+                return effects;
+            }
+            // Muted: counted, raised nowhere; archived and not muted: back
+            // in the list (1146).
+            let raise = model.arrived(index);
             if !open {
                 model.changed_peers.insert(peer);
                 let conversation = &mut model.conversations[index];
@@ -3102,18 +3179,9 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 // says where the new ones begin.
                 model.conversations[index].mark_new();
             }
-            let from = model.names.label(&source);
-            let conversation = &model.conversations[index];
-            let report = conversation.messages.last().is_some_and(Message::is_report);
-            // A report that joins a run updates its row in place: the run's
-            // first said so already (1184).
-            let joins = conversation
-                .run(conversation.messages.len().saturating_sub(1))
-                .len()
-                > 1;
-            let what = if report { "position" } else { "message" };
-            if raise && !joins {
-                model.toast(ToastKind::Info, format!("{what} from {from}"));
+            if raise {
+                let from = model.names.label(&source);
+                model.toast(ToastKind::Info, format!("message from {from}"));
             }
             return effects;
         }
@@ -3240,6 +3308,16 @@ impl<B> UiModel<B> {
             self.address,
             self.now.map(|now| now.unix_secs),
         )
+    }
+
+    /// Whether `peer`'s position is alive (1209), at the model's clock
+    /// ([`Conversation::liveness`]); stale for a peer without one.
+    pub fn liveness(&self, peer: &[u8; 16]) -> liveness::Liveness {
+        self.conversations
+            .iter()
+            .find(|c| c.peer == *peer)
+            .map(|c| c.liveness(self.now.map(|now| now.unix_secs)))
+            .unwrap_or_default()
     }
 
     /// The fix message `m` of conversation `c` carries ([`message_fix`]).
@@ -7297,24 +7375,23 @@ mod tests {
             "",
             report_of(&fix_at(43_773_100, 11_256_000, two_pm() - 240)),
         );
+        // The newest report says whether the position is alive (1209).
         assert_eq!(
             shown(&model),
             vec![
                 layout::EARLIEST.to_string(),
                 "── Today ──".to_string(),
-                "◎ position 43.77310 N 11.25600 E  14:00".to_string(),
+                "◎ position 43.77310 N 11.25600 E ·".to_string(),
+                "live · 4 min ago  14:00".to_string(),
             ]
         );
         assert_eq!(view(&model).messages_title_right, "pos 4 min · no pn");
         let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
         assert!(
-            list[1].contains("◎ position"),
+            list[1].contains("◎ position · live"),
             "the list's preview: {list:?}"
         );
-        assert_eq!(
-            model.toasts.last().map(|t| t.text.as_str()),
-            Some("position from <abababab…>")
-        );
+        assert!(model.toasts.is_empty(), "a report toasts nothing");
         update(
             &mut model,
             UiEvent::Resize {
@@ -7359,9 +7436,10 @@ mod tests {
             lines[0].contains("◎ position 43.77350 N"),
             "the latest: {rows:?}"
         );
-        // And how many it stands for, since when (1184).
+        // The newest says whether the position is alive (1209): 13:50,
+        // 13:55 and 13:59, so every 5 minutes, the last a minute ago.
         assert!(
-            rows.join(" ").contains("· 3 updates since 14:00"),
+            rows.join(" ").contains("· live · every 5 min · 1 min ago"),
             "{rows:?}"
         );
         assert!(rows.contains(&"on my way  14:00".to_string()));
@@ -7387,14 +7465,20 @@ mod tests {
             2,
             "{rows:?}"
         );
+        // The older run says how many it stands for, since when (1184).
+        assert!(
+            rows.join(" ").contains("· 3 updates since 14:00"),
+            "{rows:?}"
+        );
     }
 
     /// Lew's phone, 2026-10-31 (1184): Columba sent a report a minute and
     /// every one was a bubble, an unread count and a notification. A run is
-    /// one row on every screen, counted and told once; a text ends it, and
-    /// the next report starts a new one.
+    /// one row on every screen; a text ends it, and the next report starts
+    /// a new one. A report is a state, not a message (1209): it counts
+    /// nothing unread and toasts nothing, only the texts do.
     #[test]
-    fn a_run_of_reports_is_one_row_one_unread_and_one_toast() {
+    fn a_run_of_reports_is_one_row_and_asks_for_no_attention() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         clock(&mut model, 26, 14, 0);
         arrive(&mut model, OTHER, 1, "losgefahren", Vec::new());
@@ -7420,8 +7504,8 @@ mod tests {
             Some(52_524_375),
             "the newest"
         );
-        assert_eq!(chat::list_row(&model, &OTHER).unread, 3);
-        // A report after the text starts a new run, told and counted once.
+        assert_eq!(chat::list_row(&model, &OTHER).unread, 2);
+        // A report after the text starts a new run, told and counted not.
         arrive(
             &mut model,
             OTHER,
@@ -7438,14 +7522,10 @@ mod tests {
         );
         assert_eq!(chat::bubbles(&model, c).len(), 4);
         let row = chat::list_row(&model, &OTHER);
-        assert_eq!(row.unread, 4);
-        assert!(row.last.starts_with("position report"), "{row:?}");
-        let told = model
-            .toasts
-            .iter()
-            .filter(|t| t.text.starts_with("position from"))
-            .count();
-        assert_eq!(told, 2);
+        assert_eq!(row.unread, 2);
+        assert_eq!(row.last, "📍 live", "{row:?}");
+        let told: Vec<&str> = model.toasts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(told, ["message from <cdcdcdcd…>"; 2], "the texts alone");
         // The messages stay whole: the home's read marks name every one.
         assert_eq!(model.conversations[c].messages.len(), 18);
         assert_eq!(model.conversations[c].unread, 18);
@@ -7602,7 +7682,12 @@ mod tests {
             report_of(&fix_at(1_000_000, 1_000_000, two_pm() + 7200)),
         );
         assert_eq!(view(&model).messages_title_right, "pos ahead · no pn");
-        assert!(shown(&model).contains(&"◎ position 1.00000 N 1.00000 E  14:00".to_string()));
+        // Its liveness counts from when it came, not from the claim (1209).
+        let rows = shown(&model).join(" ");
+        assert!(
+            rows.contains("◎ position 1.00000 N 1.00000 E · live · now  14:00"),
+            "{rows:?}"
+        );
         // An honest fix a minute later replaces it: the claim sorted at 14:00.
         clock(&mut model, 26, 14, 2);
         arrive(

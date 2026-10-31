@@ -485,7 +485,12 @@ final class MapPane implements MapView.Listener {
     /** "5 min ago · 1.2 km": the age, and the distance only when the library gave one. */
     private String cardLine(Map<String, Object> row) {
         long at = Core.num(row, "at");
-        String age = Ui.nowSecs() - at < 60 ? activity.getString(R.string.just_now)
+        long fixAt = Core.num(row, "last_fix_at");
+        // A peer that reports says whether it is alive, in the chat row's
+        // words (1209); one known from a text alone how old its fix is.
+        String age = fixAt > 0
+                ? Ui.liveRow(activity, Core.str(row, "liveness"), Core.num(row, "cadence_s"), fixAt, Ui.nowSecs())
+                : Ui.nowSecs() - at < 60 ? activity.getString(R.string.just_now)
                 : activity.getString(R.string.card_ago, Ui.age(activity, at, Ui.nowSecs()));
         String distance = distance(row);
         return distance == null ? age : age + " · " + distance;

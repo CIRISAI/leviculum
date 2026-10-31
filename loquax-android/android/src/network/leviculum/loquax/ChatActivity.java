@@ -869,12 +869,17 @@ public class ChatActivity extends Activity implements Events.Listener {
         if (!accuracy.isEmpty()) {
             line.append(" \u00B7 ").append(accuracy);
         }
-        if (row.get("fix_at") != null) {
+        String liveness = Core.str(row, "liveness");
+        if (!liveness.isEmpty() && row.get("fix_at") != null) {
+            // The newest report says whether the position is alive (1209).
+            line.append(" \u00B7 ").append(Ui.liveRow(this, liveness, Core.num(row, "cadence_s"),
+                    Core.num(row, "fix_at"), now));
+        } else if (row.get("fix_at") != null) {
             line.append(" \u00B7 ").append(Ui.age(this, Core.num(row, "fix_at"), now));
         }
-        // The newest of a run stands for all of it (1184): how many, since when.
+        // An older run stands for all of it (1184): how many, since when.
         long updates = Core.num(row, "updates");
-        if (updates > 1) {
+        if (updates > 1 && liveness.isEmpty()) {
             String since = android.text.format.DateFormat.getTimeFormat(this)
                     .format(new java.util.Date(Core.num(row, "since") * 1000));
             line.append(" \u00B7 ").append(getString(R.string.run_updates, (int) updates, since));

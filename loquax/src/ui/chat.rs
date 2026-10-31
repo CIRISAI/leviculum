@@ -8,6 +8,7 @@
 //! The terminal draws the same model through [`super::layout`]; it has
 //! cells, not bubbles, and reads none of this.
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -16,10 +17,11 @@ use leviculum_lxmf::msgpack;
 use leviculum_lxmf::Field;
 use leviculum_ui::delivery::DeliveryState;
 
+use super::liveness::Liveness;
 use super::reactions;
 use super::replies::Quoted;
 use super::{Message, UiModel};
-use crate::telemetry::{run_words, Fix};
+use crate::telemetry::Fix;
 use crate::when::WallTime;
 
 /// Messages of one sender this close together form a group.
@@ -172,7 +174,7 @@ pub struct ListRow {
     /// Whether that message is ours.
     pub ours: bool,
     pub at: Option<WallTime>,
-    /// Unread rows: a run of reports counts once (1184).
+    /// Unread rows: a position report counts nothing (1209).
     pub unread: usize,
     /// How many reports the last row folds when it is a run of them, else 0
     /// (1184).
@@ -189,6 +191,8 @@ pub struct ListRow {
     pub mark: Option<Mark>,
     pub pinned: bool,
     pub muted: bool,
+    /// Whether the peer's position is alive (1209): the avatar's ring.
+    pub liveness: Liveness,
 }
 
 /// The conversation list as the model orders it.
@@ -210,15 +214,21 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
     let conversation = model.conversations.iter().find(|c| c.peer == *peer);
     let messages = conversation.map_or(&[][..], |c| c.messages.as_slice());
     let last = messages.last();
-    // A run of reports is one line with its count, not the last of many.
+    // A run of reports is one line, and it says whether the position is
+    // alive (1209), not how many came.
     let updates = conversation
         .filter(|_| last.is_some_and(Message::is_report))
         .map_or(0, |c| c.run(messages.len().saturating_sub(1)).len());
+    let liveness = model.liveness(peer);
+    let now = model.now.map(|now| now.unix_secs);
     ListRow {
         peer: *peer,
         name: model.names.label(peer),
         last: last
-            .map(|m| preview(m) + &run_words(updates, None))
+            .map(|m| match m.is_report() {
+                true => format!("{PIN} {}", liveness.list_words(now)),
+                false => preview(m),
+            })
             .unwrap_or_default(),
         ours: last.is_some_and(|m| m.outbound),
         at: last.and_then(|m| m.at),
@@ -234,8 +244,24 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
         mark: last.filter(|m| m.outbound).map(|m| Mark::of(m.delivery)),
         pinned: conversation.is_some_and(|c| c.pinned),
         muted: model.muted(peer),
+        liveness,
     }
 }
+
+/// The avatar's ring for a peer whose position is `state` (1209): the
+/// accent while live, the secondary text colour once it stopped, none when
+/// stale. Every screen rings the same: the list, the chat's bar, the
+/// Friends sheet and the map's pin.
+pub fn ring(state: super::liveness::State, colours: &Colours) -> Option<u32> {
+    match state {
+        super::liveness::State::Live => Some(colours.accent),
+        super::liveness::State::Recent => Some(colours.text_secondary),
+        super::liveness::State::Stale => None,
+    }
+}
+
+/// The list's mark for a report's line: `📍 live`.
+pub const PIN: &str = "\u{1f4cd}";
 
 /// Whether `row` is found by the list's search `query`: every word of it,
 /// case folded, in the name or the last line. The empty query finds all.
@@ -282,6 +308,9 @@ pub struct Bubble {
     pub updates: usize,
     /// When the run's first report came.
     pub since: Option<WallTime>,
+    /// The newest report's row only: whether the peer's position is alive
+    /// (1209), which the row says instead of a count.
+    pub liveness: Option<Liveness>,
 }
 
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
@@ -292,6 +321,8 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
         return Vec::new();
     };
     let chips = reactions::gather(conversation);
+    let newest_report = conversation.newest_fix_report();
+    let liveness = newest_report.map(|_| model.liveness(&conversation.peer));
     conversation
         .messages
         .iter()
@@ -333,6 +364,7 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 quote: model.quoted(c, m),
                 updates,
                 since,
+                liveness: liveness.filter(|_| newest_report == Some(m)),
             }
         })
         .collect()
@@ -348,6 +380,8 @@ pub struct Open {
     pub icon: Option<(String, String)>,
     pub bubbles: Vec<Bubble>,
     pub placements: Vec<Placement>,
+    /// Whether the peer's position is alive (1209): the bar avatar's ring.
+    pub liveness: Liveness,
 }
 
 /// The conversation the model has open, if any.
@@ -363,6 +397,7 @@ pub fn open<B>(model: &UiModel<B>) -> Option<Open> {
         icon: latest_appearance(&conversation.messages),
         placements: placements(&bubbles),
         bubbles,
+        liveness: model.liveness(&peer),
     })
 }
 
@@ -716,6 +751,7 @@ mod tests {
             quote: None,
             updates: 0,
             since: None,
+            liveness: None,
         }
     }
 
@@ -769,6 +805,7 @@ mod tests {
             mark: None,
             pinned: false,
             muted: false,
+            liveness: Liveness::default(),
         };
         assert!(row_matches(&row, ""));
         assert!(row_matches(&row, "anna"));

@@ -406,16 +406,24 @@ fn block(
         (true, _) => {
             let received = message.at.map(|at| at.unix_secs);
             let read = telemetry::read(peer, &message.fields, received);
-            // The newest of a run, which stands for all of it (1184).
-            let run = conversation.run(index);
-            let since = run
-                .first()
-                .and_then(|&first| conversation.messages[first].at);
-            format!(
-                "{}{}",
-                telemetry::report_line(&read),
-                telemetry::run_words(run.len(), since.as_ref())
-            )
+            // The newest report says whether the position is alive
+            // (1209); an older run, which stands for all of it, its count
+            // (1184).
+            let newest = conversation.newest_fix_report();
+            let words = match newest == Some(index) {
+                true => {
+                    let now = draw.now.map(|now| now.unix_secs);
+                    format!(" · {}", conversation.liveness(now).row_words(now))
+                }
+                false => {
+                    let run = conversation.run(index);
+                    let since = run
+                        .first()
+                        .and_then(|&first| conversation.messages[first].at);
+                    telemetry::run_words(run.len(), since.as_ref())
+                }
+            };
+            format!("{}{words}", telemetry::report_line(&read))
         }
         (false, Some(query)) => super::search::mark_first(&message.body, query),
         (false, None) => message.body.clone(),
@@ -651,15 +659,13 @@ fn entry(
     };
     let preview = match last {
         Some(message) if message.is_reaction() => reactions::preview(message).unwrap_or_default(),
+        // Whether the position is alive, not how many came (1209).
         Some(message) if message.is_report() => format!(
-            "{} position{}",
+            "{} position · {}",
             telemetry::REPORT_MARK,
-            telemetry::run_words(
-                conversation
-                    .run(conversation.messages.len().saturating_sub(1))
-                    .len(),
-                None
-            )
+            conversation
+                .liveness(now.map(|now| now.unix_secs))
+                .list_words(now.map(|now| now.unix_secs))
         ),
         Some(message) => {
             let first = message.body.split('\n').next().unwrap_or("");

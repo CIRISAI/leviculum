@@ -74,6 +74,13 @@
 //! The profile (1187) came the same way: [`Query::Profile`] with its
 //! [`Profile`], [`Query::Lxma`] with its [`Lxma`], and
 //! [`Request::AddContact`].
+//! A position report asking for no attention (1209) is no new version
+//! either: [`ConversationRow::unread`] no longer counts reports, so the
+//! app's notification, which grows with it, stays quiet for them; and the
+//! liveness of a peer's position came as fields, `liveness`, `cadence_s`
+//! and `last_fix_at` on [`ConversationRow`], [`FriendRow`] and
+//! [`Messages`], `liveness` and `cadence_s` on the newest report's
+//! [`MessageRow`]. An older app reads none of them and draws no ring.
 //! The settings pages' map questions (1207) are queries of their own:
 //! [`Query::MapRegions`] with its [`MapRegions`] and [`Query::MapTheme`]
 //! with its [`MapThemeChoice`]. 1199 and 1201 had sent them as a
@@ -486,6 +493,16 @@ pub struct FriendRow {
     /// The `geo:` URI Navigate hands to the phone.
     #[serde(default)]
     pub geo: String,
+    /// Whether the peer's position is alive (1209): `live`, `recent` or
+    /// `stale` (`loquax::ui::liveness`), the avatar's ring; the learned
+    /// report cadence in seconds, 0 before three reports taught one; when
+    /// the newest report's fix was taken, unix seconds, 0 for none.
+    #[serde(default)]
+    pub liveness: String,
+    #[serde(default)]
+    pub cadence_s: u32,
+    #[serde(default)]
+    pub last_fix_at: i64,
 }
 
 /// What [`Query::Run`] answers: the run's reports, newest first; one for a
@@ -778,8 +795,9 @@ pub struct ConversationRow {
     pub ours: bool,
     /// When it was written or came, seconds since 1970 UTC; 0 for none.
     pub at: i64,
-    /// Unread rows: a run of reports counts once (1184), so a report that
-    /// joins one raises no count and no notification.
+    /// Unread rows: a position report counts nothing (1209), so it raises
+    /// no count and no notification; the raw count the read marks name is
+    /// not here.
     pub unread: u32,
     /// The avatar's letters (1129): from the name, or the address's first
     /// two hex digits for a peer without one.
@@ -818,10 +836,20 @@ pub struct ConversationRow {
     #[serde(default)]
     pub muted: bool,
     /// How many reports the last row folds when it is a run of them, else
-    /// 0 (1184): the list says `📍 Position · 14`, and `unread` counted the
-    /// run once.
+    /// 0 (1184). The list says whether the position is alive instead
+    /// (1209), `📍 live` or `📍 3 h ago`, from the fields below.
     #[serde(default)]
     pub updates: u32,
+    /// Whether the peer's position is alive (1209): `live`, `recent` or
+    /// `stale` (`loquax::ui::liveness`), the avatar's ring; the learned
+    /// report cadence in seconds, 0 before three reports taught one; when
+    /// the newest report's fix was taken, unix seconds, 0 for none.
+    #[serde(default)]
+    pub liveness: String,
+    #[serde(default)]
+    pub cadence_s: u32,
+    #[serde(default)]
+    pub last_fix_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -910,6 +938,15 @@ pub struct MessageRow {
     pub updates: u32,
     #[serde(default)]
     pub since: i64,
+    /// The newest report's row only (1209): the peer's liveness and the
+    /// learned cadence, as in [`ConversationRow`], which the row says
+    /// instead of a count, `live · every 10 min · 2 min ago` or `last
+    /// position 3 h ago` with [`MessageRow::fix_at`]'s age; empty and 0 on
+    /// every other row.
+    #[serde(default)]
+    pub liveness: String,
+    #[serde(default)]
+    pub cadence_s: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -955,6 +992,13 @@ pub struct Messages {
     /// header's mark.
     #[serde(default)]
     pub verified: bool,
+    /// The bar avatar's ring (1209), as in [`ConversationRow`].
+    #[serde(default)]
+    pub liveness: String,
+    #[serde(default)]
+    pub cadence_s: u32,
+    #[serde(default)]
+    pub last_fix_at: i64,
 }
 
 /// What happened, for the screen.
