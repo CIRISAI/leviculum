@@ -195,6 +195,29 @@ pub fn store(path: &Path, identity: &Identity) -> Result<(), IdentityError> {
         .map_err(|e| IdentityError::Io(path.to_owned(), e))
 }
 
+/// The file under the loquax home that says when the identity last moved
+/// in: an import adopted one, or brought its ratchets over. Its content is
+/// the Unix time in seconds.
+pub const MOVED_FILE: &str = "identity.moved";
+
+/// Note that the identity moved in now. Loquax Mailbox announces more often
+/// for a day after it (`crate::home::daemon`), so peers that remember the
+/// old program's ratchet hear the new one sooner.
+pub fn mark_moved(home: &Path) -> Result<(), String> {
+    let path = home.join(MOVED_FILE);
+    let now = leviculum_std::local_time::unix_now_secs();
+    std::fs::write(&path, format!("{now}\n")).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// When the identity last moved in, in Unix seconds, if it ever did.
+pub fn moved_at(home: &Path) -> Option<i64> {
+    std::fs::read_to_string(home.join(MOVED_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

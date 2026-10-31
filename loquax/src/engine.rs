@@ -316,6 +316,10 @@ pub struct Engine {
     /// Whether every received message is also handed out packed
     /// ([`OutboxEvent::Packed`]): a home node archives it as it came.
     hands_out_packed: bool,
+    /// Packets to our delivery destination that no key we hold opened,
+    /// since the start: each is an `LXMF_RX_UNDECRYPTABLE` line and carries
+    /// this count. See [`Engine::undecryptable`].
+    undecryptable: u64,
 }
 
 impl Engine {
@@ -340,6 +344,7 @@ impl Engine {
             pending_selection: None,
             unheard: BTreeMap::new(),
             hands_out_packed: false,
+            undecryptable: 0,
         }
     }
 
@@ -1265,6 +1270,32 @@ impl Engine {
         }
     }
 
+    /// A packet to our delivery destination that no key we hold opened: the
+    /// sender encrypted it to a ratchet we never had or no longer keep, and
+    /// it is lost. Never silent: one warning per packet, with how many
+    /// ratchets we do hold and the count since the start. The core sends
+    /// no proof for it, as the reference does not, so the sender is not
+    /// told it arrived. Which ratchet the sender used cannot be read from
+    /// the packet ([`NodeEvent::PacketUndecryptable`]).
+    fn undecryptable<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &NodeCore<R, C, S>,
+        destination: DestinationHash,
+        len: usize,
+    ) {
+        self.undecryptable += 1;
+        let ratchets = core
+            .destination(&destination)
+            .map_or(0, leviculum_core::Destination::ratchet_count);
+        tracing::warn!(
+            event = "LXMF_RX_UNDECRYPTABLE",
+            dst = %crate::address::to_hex(destination.as_bytes()),
+            len = len,
+            ratchets = ratchets,
+            count = self.undecryptable,
+        );
+    }
+
     /// Hold one received message until its sender's key is known.
     fn hold(&mut self, message_id: [u8; 32], source: [u8; 16], packed: Vec<u8>) {
         let unheard = self.unheard.entry(source).or_insert_with(|| Unheard {
@@ -1522,8 +1553,18 @@ fn register<R: CryptoRngCore, C: CoreClock, S: Storage>(
         .map_err(|e| format!("the identity has no private key: {e:?}"))?;
     let copy = Identity::from_private_key_bytes(&bytes)
         .map_err(|e| format!("could not copy the identity: {e:?}"))?;
-    let destination =
+    let mut destination =
         LxmfNode::delivery_destination(copy).map_err(|e| format!("delivery destination: {e:?}"))?;
+    // Ratchets, as every Python LXMF router has them on its delivery
+    // destination (`reference/LXMF/LXMF/LXMRouter.py:357`). A peer that ever
+    // heard this identity announced with one, from any program, encrypts
+    // every single packet to it for 30 days (`RNS/Identity.py:69`); only an
+    // announce that carries a ratchet replaces it (`:618-619`). Without
+    // ours, such a packet decrypted with nothing (leviculum 1185). The
+    // registration loads the ratchets the storage kept, an import's among
+    // them, and every announce rotates on the reference cadence.
+    core.enable_ratchets(&mut destination)
+        .map_err(|e| format!("delivery destination ratchets: {e:?}"))?;
     let address = *destination.hash().as_bytes();
     let node = LxmfNode::register(core, destination, LxmfNodeConfig::default())
         .map_err(|e| format!("register delivery destination: {e:?}"))?;
@@ -1576,6 +1617,14 @@ impl Engine {
         {
             let heard = *announce.destination_hash().as_bytes();
             pending.asked.retain(|node| *node != heard);
+        }
+        if let NodeEvent::PacketUndecryptable {
+            destination, len, ..
+        } = event
+        {
+            if *destination.as_bytes() == ready.address {
+                self.undecryptable(core, *destination, *len);
+            }
         }
         if let NodeEvent::AnnounceReceived { announce, .. } = event {
             if is_propagation_node(announce.name_hash()) {
@@ -1765,6 +1814,128 @@ mod tests {
             StdClock::new(),
             StdStorage::new(dir).expect("storage under a fresh temp dir"),
         )
+    }
+
+    /// The ratchet public key in the delivery announce among `out`'s
+    /// packets, `None` when it carries none; panics without an announce.
+    fn announced_ratchet(out: &TickOutput, address: [u8; 16]) -> Option<[u8; 32]> {
+        out.actions
+            .iter()
+            .find_map(|action| match action {
+                leviculum_core::Action::SendPacket { data, .. }
+                | leviculum_core::Action::Broadcast { data, .. } => {
+                    leviculum_core::packet::Packet::unpack(data)
+                        .ok()
+                        .filter(|p| {
+                            p.flags.packet_type == leviculum_core::packet::PacketType::Announce
+                                && p.destination_hash == address
+                        })
+                }
+            })
+            .map(|p| {
+                // An announce with a ratchet says so in its context flag and
+                // carries it after the name hash and the random blob
+                // (`RNS/Destination.py`, announce): 64 + 10 + 10 bytes in.
+                p.flags.context_flag.then(|| {
+                    let data = p.data.as_slice();
+                    let mut ratchet = [0u8; 32];
+                    ratchet.copy_from_slice(&data[84..116]);
+                    ratchet
+                })
+            })
+            .expect("a delivery announce went out")
+    }
+
+    /// 1185: the delivery destination announces with a ratchet on the
+    /// reference cadence, rotates on announce once the interval passed, and
+    /// a restarted engine on the same storage holds what was announced.
+    /// Before 1185 the announce carried none, and a packet a peer encrypted
+    /// to the ratchet an earlier program of the same identity announced
+    /// decrypted with nothing.
+    #[test]
+    fn the_delivery_destination_announces_a_ratchet_and_keeps_it_across_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = leviculum_std::generate_identity();
+        let address = delivery_address(&identity).expect("address");
+        let copy = || {
+            Identity::from_private_key_bytes(&identity.private_key_bytes().expect("key"))
+                .expect("copy")
+        };
+        let hash = DestinationHash::new(address);
+
+        let mut core1 = core(dir.path());
+        let mut engine = Engine::new(copy(), b"r".to_vec());
+        let now_ms = core1.now_ms();
+        let out = engine.on_tick(&mut core1, now_ms);
+        let first = announced_ratchet(&out, address).expect("the announce carries a ratchet");
+        let destination = core1.destination(&hash).expect("registered");
+        assert_eq!(destination.current_ratchet_public(), Some(first));
+        // The reference cadence: `RNS/Destination.py:85,90`.
+        assert_eq!(destination.ratchet_interval(), 30 * 60 * 1000);
+        assert_eq!(destination.retained_ratchet_count(), 512);
+
+        // Rotation is the announce's, once the interval passed; shortened
+        // here to the core's minimum so the test need not wait half an hour.
+        core1
+            .destination_mut(&hash)
+            .expect("registered")
+            .set_ratchet_interval(1000);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        engine.submit(Command::Announce);
+        // The command is read after this tick's announce slot: the
+        // announce goes out on the tick after it.
+        let now_ms = core1.now_ms();
+        let _ = engine.on_tick(&mut core1, now_ms);
+        let out = engine.on_tick(&mut core1, now_ms);
+        let second = announced_ratchet(&out, address).expect("a ratchet again");
+        assert_ne!(second, first, "the announce after the interval rotates");
+        assert_eq!(
+            core1
+                .destination(&hash)
+                .expect("registered")
+                .ratchet_count(),
+            2
+        );
+        drop(core1);
+
+        // A restart on the same storage: the same ratchets, the newest
+        // announced first.
+        let mut core2 = core(dir.path());
+        let mut engine = Engine::new(copy(), b"r".to_vec());
+        let now_ms = core2.now_ms();
+        let out = engine.on_tick(&mut core2, now_ms);
+        assert_eq!(announced_ratchet(&out, address), Some(second));
+        assert_eq!(
+            core2
+                .destination(&hash)
+                .expect("registered")
+                .ratchet_count(),
+            2
+        );
+    }
+
+    /// 1185: a packet to our delivery destination that did not decrypt is
+    /// counted and said (`LXMF_RX_UNDECRYPTABLE`); one to another of the
+    /// core's destinations is not ours to report.
+    #[test]
+    fn an_undecryptable_packet_to_our_address_is_counted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let identity = leviculum_std::generate_identity();
+        let address = delivery_address(&identity).expect("address");
+        let mut engine = Engine::new(identity, b"u".to_vec());
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let undecryptable = |destination: [u8; 16]| NodeEvent::PacketUndecryptable {
+            destination: DestinationHash::new(destination),
+            len: 211,
+            interface_index: 0,
+        };
+        let _ = engine.on_event(&mut core, &undecryptable([0x77; 16]));
+        assert_eq!(engine.undecryptable, 0);
+        let _ = engine.on_event(&mut core, &undecryptable(address));
+        let _ = engine.on_event(&mut core, &undecryptable(address));
+        assert_eq!(engine.undecryptable, 2);
     }
 
     /// A home node's identity, the engine's client of it, and a core.

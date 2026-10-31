@@ -138,6 +138,16 @@ done <<EOF
 $GATED
 EOF
 
+# `<dir>/<target><TAB><recipe>`, one per gated target whose recipe runs it
+# through scripts/with-prerequisites.sh naming it. A by-name line of
+# scripts/integ-prerequisites.txt for such a target is not stale although
+# this run excludes the target: the recipe applies the line (1203). Forge
+# land gate on e6dd4eaf: red on the four loquax/home_node lines 1167 added,
+# which the coder host never saw because its submodules exclude nothing.
+WRAPPED="$(python3 scripts/check-standard-integ.py --wrapped)" ||
+    die "could not read which gated targets run through scripts/with-prerequisites.sh
+(python3 scripts/check-standard-integ.py --wrapped)."
+
 # Both directions of drift. A stale exclusion is not cosmetic: the entry is
 # what carries the reason a suite is out of the push gate, so an entry naming
 # a target that no longer exists means the reason is describing nothing.
@@ -267,10 +277,22 @@ SKIP_ARGS=()
 declare -A LISTING=()
 while read -r target test; do
     [ -n "$target" ] || continue
-    has_line "$target" "$SELECTED" ||
+    if ! has_line "$target" "$SELECTED"; then
+        recipe="$(awk -F'\t' -v t="$target" '$1 == t { print $2 }' <<<"$WRAPPED")"
+        if [ -n "$recipe" ]; then
+            say "excluded test: $target $test (target runs in recipe $recipe, which applies scripts/integ-prerequisites.txt through scripts/with-prerequisites.sh)"
+            continue
+        fi
+        recipe="$(awk -F'\t' -v t="$target" '$1 == t { print $3 }' <<<"$GATED")"
+        [ -z "$recipe" ] ||
+            die "scripts/integ-prerequisites.txt names '$test' in '$target', which is not a selected
+test target in this tree. It requires features and runs in recipe '$recipe',
+which does not run it through 'scripts/with-prerequisites.sh $target', so
+nothing applies the line there. Route that recipe through the wrapper."
         die "scripts/integ-prerequisites.txt names '$test' in '$target', which is not a selected
 test target in this tree. Fix the target path, or drop the line if the
 target itself went onto EXCLUDED."
+    fi
     name="${target##*/}"
     if [ -z "${LISTING[$name]+set}" ]; then
         say "listing target $name to check its excluded tests"

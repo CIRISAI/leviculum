@@ -230,6 +230,11 @@ serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Ratspeak's ratchet ring is written by rsReticulum through rmp-serde
+# (1185): the import's test writes its fixture with the same crate and the
+# same struct. Both in the lock already.
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
 # `test-util` for the paused runtime clock: the send loop's timeouts are
 # measured on tokio's clock precisely so they can be tested without waiting.
 tokio = { version = "1", features = ["full", "test-util"] }

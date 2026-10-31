@@ -1298,11 +1298,22 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
         "{fetched}"
     );
 
-    // The recipient comes up and collects from the propagation node.
+    // The recipient comes up and collects from the propagation node. Its
+    // identity moves from that loquax run to a Python router, and its
+    // ratchets move with it (1185): the home node encrypted the copy to
+    // the ratchet the loquax run announced, and an identity that moved
+    // without it could not open it. The file loquax kept is the one Python
+    // loads, unchanged.
+    let ratchets = std::fs::read(leviculum_std::dest_ratchet_keys_path(
+        &once.path().join("storage"),
+        &loquax::engine::delivery_address(&recipient).expect("address"),
+    ))
+    .expect("the loquax run kept its ratchets");
     let started = recipient_peer.rpc(
         "lxmf_init",
         serde_json::json!({
             "identity_prv": hex::encode(recipient.private_key_bytes().expect("private key")),
+            "ratchets": hex::encode(ratchets),
         }),
     );
     assert_eq!(
@@ -1671,4 +1682,212 @@ async fn imported_history_shows_on_the_running_screen_under_its_name() {
 
     drop(node);
     mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// The path entry's timestamp the Python peer holds for `destination`, 0
+/// for none: it moves when an announce of it replaced the entry.
+fn path_stamp(peer: &PythonPeer, destination: &str) -> f64 {
+    peer.rpc("get_path_table", serde_json::json!({}))
+        .get(destination)
+        .and_then(|entry| entry.get("timestamp"))
+        .and_then(|t| t.as_f64())
+        .unwrap_or(0.0)
+}
+
+/// The ratchet the Python peer remembers for `destination`, if any.
+fn known_ratchet(peer: &PythonPeer, destination: &str) -> Option<String> {
+    peer.rpc(
+        "lxmf_known_ratchet",
+        serde_json::json!({ "dest_hash": destination }),
+    )
+    .as_str()
+    .map(str::to_string)
+}
+
+/// Lew's mailbox on 2026-10-31 (leviculum 1185): the identity came from an
+/// app that, like every Python LXMF router (`LXMRouter.py:357`), announced
+/// its delivery destination with a ratchet, and a peer that heard it
+/// encrypts every single packet to that ratchet for 30 days
+/// (`RNS/Identity.py:69`). The old app here is a stock Python router on the
+/// mailbox's identity; it announces, the sender remembers the ratchet, and
+/// the old app goes away. The mailbox then runs on the identity and
+/// announces, and the sender delivers a short message OPPORTUNISTIC, one
+/// packet, as Columba does.
+///
+/// Without ratchets of its own the mailbox announced none, which clears
+/// nothing at a peer, could not decrypt the packet, and proved it anyway:
+/// lost, and "delivered" at the sender. With them the announce replaces the
+/// remembered ratchet (`import` false); and with the old app's ratchet file
+/// imported, what the sender encrypts to the old ratchet decrypts with what
+/// the mailbox holds before any announce has crossed (`import` true).
+async fn stale_ratchet_round(import: bool) {
+    let peer = PythonPeer::start();
+    peer.lxmf_init();
+    let old = PythonPeer::start();
+    let mut mesh = Mesh::start_many(&[peer.rns_port, old.rns_port]).await;
+    let home = mesh.home.path().to_path_buf();
+    let address = local(&home, &["address"]);
+    assert_eq!(address.code, Some(0), "{address}");
+    let address = address.stdout.trim().to_string();
+    let identity = loquax::identity::load_or_create(&home.join("identity")).expect("identity");
+    let key = identity.private_key_bytes().expect("a private key");
+
+    let init = old.rpc(
+        "lxmf_init",
+        serde_json::json!({ "identity_prv": hex::encode(key) }),
+    );
+    assert_eq!(
+        init.get("delivery_hash").and_then(|v| v.as_str()),
+        Some(address.as_str()),
+        "the old app runs on the mailbox's identity"
+    );
+    let ratchets_path = init
+        .get("ratchets_path")
+        .and_then(|v| v.as_str())
+        .expect("the old app's ratchet file")
+        .to_string();
+    old.lxmf_announce();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let stale = loop {
+        if let Some(ratchet) = known_ratchet(&peer, &address) {
+            break ratchet;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never remembered the old app's ratchet"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    // A path is replaced only by an announce emitted in a later second
+    // (`RNS/Transport.py:1772`, the emission time is whole seconds in the
+    // random blob): the old app's and the mailbox's announces in one second
+    // left the sender on the old path in one run of four.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let ratchets = home.join("old.ratchets");
+    std::fs::copy(&ratchets_path, &ratchets).expect("copy the old app's ratchet file");
+    drop(old);
+
+    if import {
+        let imported = local(
+            &home,
+            &[
+                "import",
+                "--ratchets",
+                ratchets.to_str().expect("utf-8 path"),
+            ],
+        );
+        assert_eq!(imported.code, Some(0), "{imported}");
+        assert!(imported.stdout.contains("ratchets:"), "{imported}");
+        // What the sender encrypts now, to the old app's ratchet, opens
+        // with what the mailbox will load.
+        let plaintext = b"an den alten Ratchet";
+        let token = peer.rpc(
+            "lxmf_encrypt_for",
+            serde_json::json!({ "dest_hash": address, "plaintext": hex::encode(plaintext) }),
+        );
+        let token = hex::decode(token.as_str().expect("a token")).expect("hex");
+        let held = std::fs::read(leviculum_std::dest_ratchet_keys_path(
+            &home.join("storage"),
+            &loquax::address::parse(&address).expect("address"),
+        ))
+        .expect("the mailbox's ratchet file");
+        let mut destination = leviculum_lxmf::node::LxmfNode::delivery_destination(
+            loquax::identity::load_or_create(&home.join("identity")).expect("identity"),
+        )
+        .expect("delivery destination");
+        destination
+            .load_ratchets_signed(&held)
+            .expect("the imported file is ours and signed");
+        assert_eq!(
+            destination
+                .decrypt(&token)
+                .expect("the old ratchet decrypts"),
+            plaintext
+        );
+    }
+
+    let before = path_stamp(&peer, &address);
+    let node = HomeNode::start(&home, &mesh.instance).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while path_stamp(&peer, &address) <= before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never heard the mailbox's announce: {before} {:?}\n{}",
+            peer.rpc("get_path_table", serde_json::json!({}))
+                .get(&address),
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let now = known_ratchet(&peer, &address);
+    if !import {
+        assert!(
+            now.is_some() && now.as_deref() != Some(stale.as_str()),
+            "the mailbox's announce must replace the stale ratchet: {now:?}\n{}",
+            node.log()
+        );
+    }
+
+    let body = "Klaro";
+    let sent = peer.rpc(
+        "lxmf_send",
+        serde_json::json!({
+            "dest_hash": address,
+            "method": "opportunistic",
+            "content": hex::encode(body),
+        }),
+    );
+    let message_hash = sent
+        .get("message_hash")
+        .and_then(|v| v.as_str())
+        .expect("a message hash")
+        .to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": message_hash }),
+        );
+        let archived = node
+            .log()
+            .contains(&format!("HOME archived message={message_hash}"));
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => {
+                assert!(
+                    archived,
+                    "proven but not archived: the message was lost\n{}",
+                    node.log()
+                );
+                break;
+            }
+            Some("FAILED") | Some("REJECTED") => {
+                panic!("the sender gave up: {state}\n{}", node.log())
+            }
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never got DELIVERED: {state}, archived {archived}\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        !node.log().contains("LXMF_RX_UNDECRYPTABLE"),
+        "{}",
+        node.log()
+    );
+
+    drop(node);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sender_holding_the_old_apps_ratchet_reaches_the_mailbox_after_its_announce() {
+    stale_ratchet_round(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them() {
+    stale_ratchet_round(true).await;
 }

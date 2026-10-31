@@ -59,7 +59,9 @@ reference/LXMF/LXMF/__init__.py loquax/python_interop
 # start one outside python_interop, by exact name: the rest of each target
 # needs no reference. Measured 2026-10-31 with a python3 that fails
 # scripts/test_daemon.py: these five, and only these, fail in loquax-android
-# and in the loquax-tui recipe's targets (1167). home_node requires the `tui`
+# and in the loquax-tui recipe's targets (1167). The two ratchet tests came
+# with 7688ae64 (stale_ratchet_round starts two peers) and failed in a clone
+# without submodules the same way (1203). home_node requires the `tui`
 # feature, so it runs in the `loquax-tui` recipe and not in the computed runs;
 # that recipe reads these lines through scripts/with-prerequisites.sh.
 reference/Reticulum/RNS/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
@@ -72,3 +74,7 @@ reference/Reticulum/RNS/__init__.py loquax/home_node a_message_the_recipient_can
 reference/LXMF/LXMF/__init__.py loquax/home_node a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once
 reference/Reticulum/RNS/__init__.py loquax/home_node what_one_client_reads_and_sends_shows_on_the_other
 reference/LXMF/LXMF/__init__.py loquax/home_node what_one_client_reads_and_sends_shows_on_the_other
+reference/Reticulum/RNS/__init__.py loquax/home_node a_sender_holding_the_old_apps_ratchet_reaches_the_mailbox_after_its_announce
+reference/LXMF/LXMF/__init__.py loquax/home_node a_sender_holding_the_old_apps_ratchet_reaches_the_mailbox_after_its_announce
+reference/Reticulum/RNS/__init__.py loquax/home_node the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them
+reference/LXMF/LXMF/__init__.py loquax/home_node the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them

@@ -55,6 +55,33 @@ use crate::sync::{Schedule, SyncEvent};
 /// in minutes).
 pub const ANNOUNCE_EVERY: Duration = Duration::from_secs(360 * 60);
 
+/// How often it announces instead for [`AFTER_MOVE`] after its identity
+/// moved in from another program (`crate::identity::MOVED_FILE`, written by
+/// an import that adopted the identity or brought its ratchets): every peer
+/// that heard the old program announce remembers its ratchet for 30 days
+/// (`RNS/Identity.py:69`) and replaces it only with the next ratchet it
+/// hears announced (leviculum 1185). Thirty minutes is the reference's
+/// ratchet interval (`RNS/Destination.py:90`), so each of these announces
+/// carries a new ratchet, and it stays far inside what the reference asks
+/// of an announcing destination: no default rate limit applies to it
+/// (`announce_rate_target` is off unless an interface sets one), and 48
+/// announces of about 200 bytes in a day average 0.9 bit/s, under 4 % of
+/// the 2 % announce cap (`RNS/Reticulum.py:114`) on a 1200 bit/s link.
+pub const ANNOUNCE_EVERY_AFTER_MOVE: Duration = Duration::from_secs(30 * 60);
+
+/// How long the shorter cadence lasts after a move.
+pub const AFTER_MOVE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The announce interval at Unix time `now` for an identity that moved in
+/// at `moved_at`, if it ever did.
+pub fn announce_period(moved_at: Option<i64>, now: i64) -> Duration {
+    let window = i64::try_from(AFTER_MOVE.as_secs()).unwrap_or(i64::MAX);
+    match moved_at {
+        Some(at) if (0..window).contains(&now.saturating_sub(at)) => ANNOUNCE_EVERY_AFTER_MOVE,
+        _ => ANNOUNCE_EVERY,
+    }
+}
+
 /// How often the engine's events are read.
 const PUMP: Duration = Duration::from_millis(20);
 /// How often the outbox looks for a due retry or a passed horizon. Both are
@@ -275,8 +302,18 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let mut pump = tokio::time::interval(PUMP);
     let mut outbox_tick = tokio::time::interval(OUTBOX_TICK);
     let mut outside = tokio::time::interval(OUTSIDE_LOOK);
-    let mut announce =
-        tokio::time::interval_at(tokio::time::Instant::now() + ANNOUNCE_EVERY, ANNOUNCE_EVERY);
+    // The first announce goes out with the engine's registration; the next
+    // one after the period, read again at every announce so the shorter
+    // cadence ends a day after the move.
+    let moved_at = crate::identity::moved_at(&home);
+    if announce_period(moved_at, unix_now()) == ANNOUNCE_EVERY_AFTER_MOVE {
+        tracing::warn!(
+            "HOME identity moved in {} s ago: announcing every {} min for the first day",
+            unix_now().saturating_sub(moved_at.unwrap_or(0)),
+            ANNOUNCE_EVERY_AFTER_MOVE.as_secs() / 60
+        );
+    }
+    let mut next_announce = tokio::time::Instant::now() + announce_period(moved_at, unix_now());
     // A home node inside an app leaves the process's signals to the app.
     let mut terminate = match stop {
         Some(_) => None,
@@ -415,7 +452,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     }
                 }
             }
-            _ = announce.tick() => {
+            _ = tokio::time::sleep_until(next_announce) => {
+                next_announce = tokio::time::Instant::now() + announce_period(moved_at, unix_now());
                 if attached.outbox.submit(Command::Announce).is_err() {
                     break Err("the message engine stopped".to_string());
                 }
@@ -934,6 +972,22 @@ impl Collector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1185: half an hour for a day after the identity moved in, the
+    /// ordinary six hours before a move, after the day and for a mark from
+    /// the future.
+    #[test]
+    fn the_announce_cadence_is_shorter_for_a_day_after_a_move() {
+        let at = 1_793_000_000;
+        assert_eq!(announce_period(None, at), ANNOUNCE_EVERY);
+        assert_eq!(announce_period(Some(at), at), ANNOUNCE_EVERY_AFTER_MOVE);
+        assert_eq!(
+            announce_period(Some(at), at + 86_399),
+            ANNOUNCE_EVERY_AFTER_MOVE
+        );
+        assert_eq!(announce_period(Some(at), at + 86_400), ANNOUNCE_EVERY);
+        assert_eq!(announce_period(Some(at), at - 10), ANNOUNCE_EVERY);
+    }
 
     const US: [u8; 16] = [0x11; 16];
     const FRIEND: [u8; 16] = [0x22; 16];

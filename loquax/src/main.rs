@@ -410,6 +410,16 @@ struct ImportArgs {
     /// Without it, the apps' default places are scanned; a Ratspeak database
     /// is never looked for.
     path: Option<PathBuf>,
+
+    /// The ratchet file of the app the identity came from, for the identity
+    /// Loquax answers on (after the import, when it adopts one): Python
+    /// LXMF's `<destination hash>.ratchets` (NomadNet, Sideband) or
+    /// Ratspeak's `identities/<hash>/ratchets/ring`, told apart by content.
+    /// Peers that heard that app's announce encrypt short messages to its
+    /// ratchet for up to 30 days. NomadNet's and Ratspeak's are taken
+    /// along by themselves when the identity is adopted from their place.
+    #[arg(long, value_name = "FILE")]
+    ratchets: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -805,6 +815,9 @@ fn run_import(args: ImportArgs) -> ExitCode {
     };
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
+    if args.ratchets.is_some() && args.path.is_none() && !args.key {
+        return import_ratchets(&home, args.ratchets.as_deref(), args.dry_run);
+    }
     let found = if args.key {
         let mut line = String::new();
         if let Err(error) = std::io::BufRead::read_line(&mut input, &mut line) {
@@ -852,15 +865,44 @@ fn run_import(args: ImportArgs) -> ExitCode {
                 println!("identity: offered, adopted only on a typed yes");
             }
         }
-        return match failed {
-            true => ExitCode::from(EXIT_FAILURE),
-            false => ExitCode::SUCCESS,
-        };
+        if failed {
+            return ExitCode::from(EXIT_FAILURE);
+        }
+        return import_ratchets(&home, args.ratchets.as_deref(), true);
     }
     let mut output = std::io::stdout();
     match import::ask_and_import(&found, &home, &mut input, &mut output) {
-        Ok(reports) if reports.iter().all(Result::is_ok) => ExitCode::SUCCESS,
+        Ok(reports) if reports.iter().all(Result::is_ok) => {
+            import_ratchets(&home, args.ratchets.as_deref(), false)
+        }
         Ok(_) => ExitCode::from(EXIT_FAILURE),
+        Err(error) => failure(error, "import-failed"),
+    }
+}
+
+#[cfg(feature = "history")]
+/// `loquax import --ratchets FILE`: the ratchets of the app the identity came
+/// from, for the identity Loquax answers on now. Nothing to do without one.
+fn import_ratchets(home: &Path, file: Option<&Path>, dry_run: bool) -> ExitCode {
+    let Some(file) = file else {
+        return ExitCode::SUCCESS;
+    };
+    match loquax::home::client::load_client(home) {
+        Ok(Some(_)) => {
+            return failure(
+                "this Loquax is a client of a home node and answers on its address; \
+                 ratchets are imported on the home node",
+                "import-failed",
+            )
+        }
+        Ok(None) => {}
+        Err(error) => return failure(error, "no-home"),
+    }
+    match loquax::import::take_ratchets(home, file, dry_run) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
         Err(error) => failure(error, "import-failed"),
     }
 }
