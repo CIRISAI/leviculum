@@ -15,7 +15,9 @@ import android.widget.TextView;
 
 /**
  * A new conversation, from the list's pencil (1130): the address pasted or
- * typed, opened as the list's field did before. A scan comes later.
+ * typed, opened as the list's field did before. A contact code
+ * (`lxma://`, 1187) pasted here adds the contact under the name asked for
+ * and opens its chat; the scanner is on the profile.
  */
 public class NewConversationActivity extends Activity {
     private EditText address;
@@ -91,6 +93,15 @@ public class NewConversationActivity extends Activity {
     private void open() {
         String peer = address.getText().toString().trim();
         if (peer.isEmpty()) {
+            return;
+        }
+        if (AddContact.is(peer)) {
+            AddContact.ask(this, peer, new Runnable() {
+                @Override
+                public void run() {
+                    finish();
+                }
+            });
             return;
         }
         String why = Core.open(peer);

@@ -185,6 +185,32 @@ class Settings(unittest.TestCase):
         self.assertIsNone(walk.page_mark_missing("Backup", []))
 
 
+ME = "3e35f10c9a7b4d2e8f1a0b6c5d4e3f21"
+
+
+class Profile(unittest.TestCase):
+    def test_the_profile_as_built_has_no_problem(self):
+        nodes = [node("profile_address", ME), node("profile_qr"), node("profile_share", "Share")]
+        self.assertEqual(walk.profile_problems(nodes, ME), (ME, []))
+        self.assertEqual(walk.profile_problems(nodes, None), (ME, []))
+
+    def test_a_missing_or_wrong_address_a_missing_code_and_share(self):
+        self.assertEqual(walk.profile_problems([], None),
+                         ("", ["no address row", "no QR code", "no Share"]))
+        other = "0" * 32
+        _, problems = walk.profile_problems(
+            [node("profile_address", other), node("profile_qr"), node("profile_share")], ME)
+        self.assertEqual(problems, [f"the address row shows {other}, the mailbox is {ME}"])
+        _, problems = walk.profile_problems(
+            [node("profile_address", "<3e35f10c…>"), node("profile_qr"), node("profile_share")], ME)
+        self.assertEqual(problems, ["the address row shows '<3e35f10c…>'"])
+
+    def test_the_settings_profile_entry_shows_the_code(self):
+        self.assertIsNone(walk.page_mark_missing("Profile", [node("profile_qr")]))
+        self.assertEqual(walk.page_mark_missing("Profile", []),
+                         "Profile without its rid 'profile_qr'")
+
+
 class Dump(unittest.TestCase):
     def setUp(self):
         self.nodes = walk.parse_dump(DUMP)

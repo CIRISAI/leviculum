@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The ids of views made in code: the Friends sheet's (MapPane, 1200),
      the settings' entries and the Maps and Privacy pages' rows (1201),
-     which the device walk finds by them. -->
+     which the device walk finds by them, and the profile's (1187). -->
 <resources>
     <item name="friends_sheet" type="id" />
     <item name="friend_row" type="id" />
@@ -15,4 +15,17 @@
     <item name="maps_auto" type="id" />
     <item name="maps_region" type="id" />
     <item name="privacy_shared_row" type="id" />
+    <item name="profile_avatar" type="id" />
+    <item name="profile_name" type="id" />
+    <item name="profile_address" type="id" />
+    <item name="profile_copy" type="id" />
+    <item name="profile_qr" type="id" />
+    <item name="profile_share" type="id" />
+    <item name="profile_share_picture" type="id" />
+    <item name="profile_copy_address" type="id" />
+    <item name="profile_scan" type="id" />
+    <item name="profile_mailbox" type="id" />
+    <item name="profile_mailbox_change" type="id" />
+    <item name="profile_advanced" type="id" />
+    <item name="profile_advanced_body" type="id" />
 </resources>

@@ -314,4 +314,24 @@
     <string name="maps_delete_ask">Delete this map? It loads again when you look there.</string>
     <string name="privacy_shared">Positions you shared</string>
     <string name="privacy_shared_none">You have not shared your position yet.</string>
+    <!-- The profile behind our avatar (1187). -->
+    <string name="profile_title">Your profile</string>
+    <string name="profile_name_hint">Your name</string>
+    <string name="profile_name_elsewhere">Your name is set where your mailbox runs.</string>
+    <string name="profile_name_saved">Name saved</string>
+    <string name="profile_address">Your address</string>
+    <string name="profile_qr_caption">Scan this code to add me as a contact</string>
+    <string name="profile_share_picture">Share as picture</string>
+    <string name="profile_copy_address">Copy address</string>
+    <string name="profile_scan">Scan a contact\'s code</string>
+    <string name="profile_mailbox_here">Mailbox: on this phone</string>
+    <string name="profile_mailbox_away">Mailbox: on %1$s, since %2$s</string>
+    <string name="profile_mailbox_away_undated">Mailbox: on %1$s</string>
+    <string name="profile_mailbox_change">Use another mailbox</string>
+    <string name="profile_identity">Identity hash</string>
+    <string name="profile_home_node">Home node</string>
+    <string name="profile_pn_chosen">Chosen by your mailbox</string>
+    <string name="profile_version">App version</string>
+    <string name="add_contact">Add contact</string>
+    <string name="add_contact_name">What do you call this contact?</string>
 </resources>

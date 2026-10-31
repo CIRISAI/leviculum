@@ -510,6 +510,8 @@ pub struct Profile {
     pub name_editable: bool,
     /// Our LXMF address, the one to give people, as lowercase hex.
     pub address: String,
+    /// The avatar's letters, as the list's own avatar has them.
+    pub initials: String,
     /// The contact code Columba and Sideband read,
     /// `lxma://<address>:<public key>` (`loquax::lxma`).
     pub lxma: String,

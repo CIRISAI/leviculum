@@ -108,6 +108,21 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "me"))));
     }
 
+    /** The profile behind our avatar (1187): name, address, contact code and its QR, mailbox, advanced facts; `error` when not. */
+    static Map<String, Object> profile() {
+        return answer(Native.query(MsgPack.pack(map("t", "profile"))));
+    }
+
+    /** Whose contact code `text` is (`address`, `lxma`, `known`); `error` when it is none. */
+    static Map<String, Object> lxma(String text) {
+        return answer(Native.query(MsgPack.pack(map("t", "lxma", "text", text))));
+    }
+
+    /** The contact of `lxma` under `name` (none when empty), its key to the mailbox, its chat open. */
+    static String addContact(String lxma, String name) {
+        return command(map("t", "addcontact", "lxma", lxma, "name", name));
+    }
+
     /** The name recipients see, for the mailbox on this phone. Blocks a moment: not on the UI thread. */
     static String name(String name) {
         return command(map("t", "name", "name", name));

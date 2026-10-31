@@ -37,7 +37,8 @@ import java.util.Arrays;
  *
  * Started for a result; the code's text comes back as {@link #TEXT}.
  * {@link #PREFIX} says what is wanted: `lqxh1` for a mailbox's join code,
- * `lqxb1` for a paper backup. Another code in view is ignored.
+ * `lqxb1` for a paper backup, `lxma://` for a contact's code (1187);
+ * several, split by `|`, take any of them. Another code in view is ignored.
  */
 public class ScanActivity extends Activity {
     static final String PREFIX = "prefix";
@@ -48,7 +49,7 @@ public class ScanActivity extends Activity {
 
     private TextureView preview;
     private TextView said;
-    private String prefix;
+    private String[] prefixes;
     private HandlerThread worker;
     private Handler background;
     private CameraDevice camera;
@@ -60,10 +61,8 @@ public class ScanActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        prefix = getIntent().getStringExtra(PREFIX);
-        if (prefix == null) {
-            prefix = "";
-        }
+        String prefix = getIntent().getStringExtra(PREFIX);
+        prefixes = (prefix == null ? "" : prefix).split("\\|", -1);
         FrameLayout frame = new FrameLayout(this);
         frame.setBackgroundColor(0xff000000);
         preview = new TextureView(this);
@@ -241,8 +240,7 @@ public class ScanActivity extends Activity {
         image.close();
         String text = Native.scan(bytes, width, height, stride);
         decoding = false;
-        if (text != null && text.regionMatches(true, 0, prefix, 0, prefix.length())
-                && !text.isEmpty()) {
+        if (text != null && !text.isEmpty() && wanted(text)) {
             found = true;
             final String code = text;
             runOnUiThread(new Runnable() {
@@ -253,6 +251,16 @@ public class ScanActivity extends Activity {
                 }
             });
         }
+    }
+
+    /** Whether `text` begins with one of the prefixes asked for, in any case. */
+    private boolean wanted(String text) {
+        for (String prefix : prefixes) {
+            if (text.regionMatches(true, 0, prefix, 0, prefix.length())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void failed() {

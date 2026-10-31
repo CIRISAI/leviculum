@@ -392,9 +392,13 @@ impl Session {
 
     /// The profile behind our avatar ([`schema::Query::Profile`], 1187).
     fn profile(&self) -> Result<schema::Profile, String> {
-        let (home, public_key) = {
+        let (home, public_key, initials) = {
             let inner = self.lock();
-            (inner.home.clone(), inner.client.public_key)
+            (
+                inner.home.clone(),
+                inner.client.public_key,
+                inner.initials(&self.address),
+            )
         };
         let here = self.is_here();
         let lxma = loquax::lxma::encode(&public_key)?;
@@ -423,6 +427,7 @@ impl Session {
             },
             name_editable: here,
             address: loquax::address::to_hex(&self.address),
+            initials,
             lxma,
             qr_size,
             qr: schema::Blob(modules.into_iter().map(u8::from).collect()),

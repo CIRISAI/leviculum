@@ -25,7 +25,8 @@ import java.util.Map;
  * The settings (1199), after the modern messenger cut: one list, each
  * entry a page of its own, this screen again with PAGE. Profile, Mailbox,
  * Appearance, Notifications, Privacy, Maps, Backup, Advanced; a page that
- * has no controls yet says what exists today.
+ * has no controls yet says what exists today. Profile opens the screen
+ * behind the avatar (ProfileActivity, 1187).
  *
  * Appearance holds the map's theme, which the map screen's moon held
  * before: like the phone, light or dark, the config's `map_theme` (1133).
@@ -138,9 +139,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
 
     private void refresh() {
         body.removeAllViews();
-        if (page == R.string.settings_profile) {
-            profile();
-        } else if (page == R.string.mailbox) {
+        if (page == R.string.mailbox) {
             mailbox();
         } else if (page == R.string.settings_appearance) {
             appearance();
@@ -178,33 +177,16 @@ public class SettingsActivity extends Activity implements Events.Listener {
             entry.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    startActivity(new Intent(SettingsActivity.this, SettingsActivity.class)
-                            .putExtra(PAGE, target));
+                    // Profile is the screen behind the avatar (1187), not a page of its own.
+                    startActivity(target == R.string.settings_profile
+                            ? new Intent(SettingsActivity.this, ProfileActivity.class)
+                            : new Intent(SettingsActivity.this, SettingsActivity.class)
+                                    .putExtra(PAGE, target));
                 }
             });
             body.addView(entry, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
-    }
-
-    /** Our name, address and its code, until the profile of 1187. */
-    private void profile() {
-        Map<String, Object> me = Core.me();
-        if (me.containsKey("error")) {
-            body.addView(padded(text(Core.str(me, "error"), 15, R.color.text_secondary)));
-            return;
-        }
-        String name = Core.str(me, "name");
-        if (!name.isEmpty()) {
-            body.addView(padded(text(name, 18, R.color.text)));
-        }
-        body.addView(padded(text(getString(R.string.address_text), 15, R.color.text_secondary)));
-        body.addView(padded(text(Core.str(me, "fingerprint"), 16, R.color.text)));
-        LinearLayout.LayoutParams centred = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        centred.gravity = Gravity.CENTER_HORIZONTAL;
-        centred.topMargin = dp(16);
-        body.addView(QrCode.view(this, me, dp(240), Core.str(me, "fingerprint")), centred);
     }
 
     /** Where the mailbox is. */

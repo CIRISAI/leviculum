@@ -67,6 +67,7 @@ STEPS = [
     "map",
     "friends",
     "settings",
+    "profile",
     "teardown",
 ]
 
@@ -102,6 +103,7 @@ SETTINGS_PAGES = [
 # Each page's mark that it is that page and not a copy of another (1201):
 # an id or a text only it shows. Pages with no mark of their own say none.
 SETTINGS_PAGE_MARKS = {
+    "Profile": ("rid", "profile_qr"),
     "Appearance": ("text", THEME_AUTO),
     "Privacy": ("text", "Positions you shared"),
     "Maps": ("rid", "maps_auto"),
@@ -326,6 +328,31 @@ def settings_list_problems(nodes: list[Node]) -> tuple[list[str], list[str]]:
             problems.append(f"a raw hash on a main row: {text!r}")
     problems += decode_problems(nodes)
     return titles, problems
+
+
+ADDRESS = re.compile(r"[0-9a-f]{32}")
+
+
+def profile_problems(nodes: list[Node], want: str | None) -> tuple[str, list[str]]:
+    """The profile behind the avatar (1187): the address it shows, and
+    what is wrong: no address row or one that is not 32 hex digits, not
+    the mailbox's address `want` (when known), no QR code, no Share, a
+    line that did not decode."""
+    rows = find(nodes, rid="profile_address")
+    shown = rows[0].text.strip() if rows else ""
+    problems = []
+    if not rows:
+        problems.append("no address row")
+    elif not ADDRESS.fullmatch(shown):
+        problems.append(f"the address row shows {shown!r}")
+    elif want is not None and shown != want:
+        problems.append(f"the address row shows {shown}, the mailbox is {want}")
+    if not find(nodes, rid="profile_qr"):
+        problems.append("no QR code")
+    if not find(nodes, rid="profile_share"):
+        problems.append("no Share")
+    problems += decode_problems(nodes)
+    return shown, problems
 
 
 def decode_problems(nodes: list[Node]) -> list[str]:
@@ -1292,6 +1319,26 @@ class Walk:
         dev.key("KEYCODE_BACK")
         self.wait_id("write", 10)
         return f"entries={len(titles)} walked={','.join(walked)} back=chats"
+
+    def step_profile(self) -> str:
+        """The profile (1187): our avatar at the top left of the chats
+        opens it; the address row shows the mailbox's address, the QR code
+        and Share are there; back to the chats."""
+        dev = self.need_device()
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        dev.tap_node(self.wait_id("avatar", 10)[0])
+        self.wait_id("profile_address", 10)
+        want = self.fixture.manifest["address"] if self.fixture is not None else None
+        shown, problems = profile_problems(dev.dump(), want)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        return f"address={shown} qr=shown share=shown back=chats"
 
     def map_theme(self, choice: str) -> None:
         """From the Map tab: menu, Settings, Appearance, `choice`, and back
