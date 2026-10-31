@@ -97,7 +97,7 @@ holds no path and has no local clients, re-originates nothing: the
 reference gates the search on the receiving interface's mode
 (`reference/Reticulum/RNS/Transport.py:2918`), and so does lnsd
 (`discovers_paths`, `leviculum-core/src/traits.rs:115`;
-`leviculum-core/src/transport.rs:12450`). lnsd widens the gate only for
+`leviculum-core/src/transport.rs:12492`). lnsd widens the gate only for
 interfaces that report live peers, and today only BLE does
 (`leviculum-std/src/interfaces/ble/mod.rs:1811`). Since `loquax.home` is
 never announced, no relay holds its path from an announce either. So A

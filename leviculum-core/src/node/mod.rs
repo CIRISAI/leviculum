@@ -65,6 +65,8 @@ mod mvr_ble_departure_loop;
 #[cfg(test)]
 mod mvr_ble_held_announce_peer;
 #[cfg(test)]
+mod mvr_ble_held_announce_peer_lost;
+#[cfg(test)]
 mod mvr_ble_link_table_delivery_hint;
 #[cfg(test)]
 mod mvr_ble_peer_loss_reroute;
@@ -3383,6 +3385,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         peer: [u8; TRUNCATED_HASHBYTES],
     ) -> crate::transport::TickOutput {
         let lost_paths = self.transport.drop_paths_via_peer(iface.0, &peer);
+        // An announce held through the lost link would be released with it
+        // as next hop, a route nothing can carry (#480).
+        let dropped_holds = self.transport.drop_held_announces_via_peer(iface.0, &peer);
+        if dropped_holds > 0 {
+            crate::tracing::debug!(
+                event = "ANN_HELD_DROPPED",
+                peer = %HexShort(&peer),
+                iface = %self.transport.iface_name(iface.0),
+                reason = "peer_lost",
+                n = dropped_holds,
+            );
+        }
 
         crate::tracing::debug!(
             "Peer <{}> lost on {}, removed {} paths",

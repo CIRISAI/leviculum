@@ -441,6 +441,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_HELD",
         required_keys: &["dst", "hops", "iface", "held"],
     },
+    // Announces the ingress burst limiter held through one peer link,
+    // dropped because that link died before their release (Codeberg #480,
+    // `NodeCore::handle_interface_peer_lost`). Released, each would install
+    // a path through the dead link. One line per loss that dropped any;
+    // `n` is how many, `reason` is `peer_lost`.
+    EventSchema {
+        name: "ANN_HELD_DROPPED",
+        required_keys: &["peer", "iface", "reason", "n"],
+    },
     // An announce the per-interface cap queue held past its life
     // (`QUEUED_ANNOUNCE_LIFE_MS`, 24 h) and dropped at release instead of
     // keying, as Python prunes its announce queue by `QUEUED_ANNOUNCE_LIFE`.
