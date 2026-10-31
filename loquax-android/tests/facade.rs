@@ -16,6 +16,9 @@ mod python_peer;
 #[path = "../../loquax/tests/support/nomadnet_tree.rs"]
 mod nomadnet_tree;
 
+#[path = "../../loquax/tests/support/ugly_store.rs"]
+mod ugly_store;
+
 /// The exported facade keeps one session per process, and the tests of a
 /// binary share the process: those that go through it take turns. Tokio's
 /// lock, which the async test holds across its awaits.
@@ -125,6 +128,75 @@ fn admit(home: &Path) -> String {
     .encode()
 }
 
+/// Fill the home node's archive in `home` with the ugly store (1173): a
+/// Ratspeak and a NomadNet import, 800 messages over 20 conversations,
+/// names, petnames, a block, an archived conversation. Every test that
+/// opens a session against a home node does so on it; the phone's pull on
+/// open brings all of it.
+fn ugly(home: &Path) {
+    let filled = ugly_store::fill_archive(home);
+    assert_eq!(
+        filled.messages,
+        ugly_store::CONVERSATIONS * ugly_store::PER_CONVERSATION
+    );
+}
+
+/// Wait until `session` shows the ugly store whole: every conversation
+/// listed under its name where it has one, the archived one in the
+/// archive, the blocked one among the blocked, and each conversation's
+/// rows decoded.
+fn ugly_in(session: &Session) {
+    use ugly_store::{ARCHIVED, BLOCKED, CONVERSATIONS, PER_CONVERSATION, REACTIONS};
+    let shown = |c: &schema::Conversations| {
+        (0..CONVERSATIONS)
+            .filter(|i| ![ARCHIVED, BLOCKED].contains(i))
+            .all(|i| {
+                c.conversations.iter().any(|row| {
+                    row.peer == ugly_store::peer_hex(i)
+                        && ugly_store::shown_name(i).is_none_or(|name| row.name.starts_with(&name))
+                })
+            })
+    };
+    wait_for(session, schema::Query::Conversations, 60, shown);
+    wait_for(
+        session,
+        schema::Query::Archived,
+        20,
+        |c: &schema::Conversations| {
+            c.conversations
+                .iter()
+                .any(|row| row.peer == ugly_store::peer_hex(ARCHIVED))
+        },
+    );
+    wait_for(
+        session,
+        schema::Query::Blocked,
+        20,
+        |c: &schema::Conversations| {
+            c.conversations
+                .iter()
+                .any(|row| row.peer == ugly_store::peer_hex(BLOCKED))
+        },
+    );
+    for i in (0..CONVERSATIONS).filter(|i| *i != BLOCKED) {
+        let messages: schema::Messages = wait_for(
+            session,
+            schema::Query::Messages {
+                peer: ugly_store::peer_hex(i),
+            },
+            20,
+            |m: &schema::Messages| m.messages.len() == PER_CONVERSATION - REACTIONS,
+        );
+        assert!(
+            messages
+                .messages
+                .iter()
+                .any(|m| m.body == ugly_store::long_body()),
+            "conversation {i}: the long body"
+        );
+    }
+}
+
 /// Wait for a query's answer to satisfy `ok`, reading events meanwhile.
 fn wait_for<T: serde::de::DeserializeOwned + std::fmt::Debug>(
     session: &Session,
@@ -159,6 +231,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     let port = listener.local_addr().expect("its address").port();
     let home = tempfile::tempdir().expect("home node dir");
     let code = admit(home.path());
+    ugly(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
     let home_dir = home.path().to_path_buf();
 
@@ -175,6 +248,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     let peer = loquax::address::to_hex(&[0x5a; 16]);
     let (address, peer) = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        ugly_in(&session);
         let address = loquax::address::to_hex(&session.address());
         session
             .request(Request::Send {
@@ -274,15 +348,21 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
             &session,
             schema::Query::Conversations,
             5,
-            |c: &schema::Conversations| !c.conversations.is_empty(),
+            |c: &schema::Conversations| c.conversations.iter().any(|row| row.peer == peer),
         );
-        assert_eq!(list.conversations[0].peer, peer);
-        assert_eq!(list.conversations[0].last, "you reacted \u{1F44D}");
-        assert!(list.conversations[0].ours);
-        assert_eq!(list.conversations[0].initials, peer[..2].to_uppercase());
+        // The newest conversation, below the ugly store's pinned one.
+        assert_eq!(
+            list.conversations[0].peer,
+            ugly_store::peer_hex(ugly_store::PINNED)
+        );
+        let row = &list.conversations[1];
+        assert_eq!(row.peer, peer);
+        assert_eq!(row.last, "you reacted \u{1F44D}");
+        assert!(row.ours);
+        assert_eq!(row.initials, peer[..2].to_uppercase());
         // The row's mark (1130): ours is last, so a delivery word, a text.
-        assert_eq!(list.conversations[0].kind, "reaction");
-        assert!(!list.conversations[0].state.is_empty());
+        assert_eq!(row.kind, "reaction");
+        assert!(!row.state.is_empty());
         assert_eq!(list.initials.chars().count(), 2);
         assert_eq!(list.address.len(), 32);
 
@@ -319,7 +399,12 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 .expect("query"),
         )
         .expect("decode");
-        assert_eq!(shown.name, format!("Mum ·{short}"), "the petname first");
+        // The petname first, and the ugly store's other "Mum" marks both.
+        assert_eq!(
+            shown.name,
+            format!("Mum ·{short} {}", loquax::names::COLLISION),
+            "the petname first"
+        );
         assert!(shown.linked);
         assert_eq!(
             (shown.lookup.as_deref(), shown.contact_id),
@@ -343,6 +428,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 .iter()
                 .filter(|e| e.kind == loquax::home::KIND_PETNAME)
                 .map(|e| loquax::home::wire::read_petname_entry(&e.packed).expect("petname"))
+                .filter(|(peer, _)| *peer == [0x5a; 16])
                 .collect();
             if !petnames.is_empty() {
                 assert_eq!(petnames, [([0x5a; 16], Some("Mum".to_string()))]);
@@ -364,7 +450,11 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         let list: schema::Conversations =
             rmp_serde::from_slice(&session.query(schema::Query::Conversations).expect("list"))
                 .expect("decode");
-        let row = &list.conversations[0];
+        let row = list
+            .conversations
+            .iter()
+            .find(|row| row.peer == peer)
+            .expect("listed");
         assert_eq!(row.name, format!("Alice Schmidt ·{short}"));
         assert_eq!(row.initials, "AS");
         assert_eq!(
@@ -466,10 +556,11 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
             .expect("archive");
         let main = list(&session, schema::Query::Conversations);
         assert!(main.conversations.iter().all(|r| r.peer != peer));
-        assert_eq!(main.archived, 1);
+        // Beside the ugly store's archived one.
+        assert_eq!(main.archived, 2);
         let archived = list(&session, schema::Query::Archived);
-        assert_eq!(archived.conversations.len(), 1);
-        assert_eq!(archived.conversations[0].peer, peer);
+        assert_eq!(archived.conversations.len(), 2);
+        assert!(archived.conversations.iter().any(|r| r.peer == peer));
         session
             .request(Request::Archive {
                 peer: peer.clone(),
@@ -482,9 +573,11 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 on: true,
             })
             .expect("block");
+        // Beside the ugly store's blocked one.
+        let ugly_blocked = ugly_store::peer_hex(ugly_store::BLOCKED);
         let blocked = list(&session, schema::Query::Blocked);
-        assert_eq!(blocked.conversations.len(), 1);
-        assert_eq!(blocked.conversations[0].peer, peer);
+        assert_eq!(blocked.conversations.len(), 2);
+        assert!(blocked.conversations.iter().any(|r| r.peer == peer));
         let main = list(&session, schema::Query::Conversations);
         assert!(main.conversations.iter().all(|r| r.peer != peer));
         session
@@ -493,9 +586,9 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 on: false,
             })
             .expect("unblock");
-        assert!(list(&session, schema::Query::Blocked)
-            .conversations
-            .is_empty());
+        let blocked = list(&session, schema::Query::Blocked);
+        assert_eq!(blocked.conversations.len(), 1);
+        assert_eq!(blocked.conversations[0].peer, ugly_blocked);
         let main = list(&session, schema::Query::Conversations);
         assert!(main.conversations.iter().any(|r| r.peer == peer));
         assert!(session
@@ -607,6 +700,7 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
     let port = listener.local_addr().expect("its address").port();
     let home = tempfile::tempdir().expect("home node dir");
     let code = admit(home.path());
+    ugly(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
 
     let phone = tempfile::tempdir().expect("app dir");
@@ -633,6 +727,7 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
                 _ => assert!(std::time::Instant::now() < deadline, "no pull ended"),
             }
         }
+        ugly_in(&session);
         std::thread::sleep(Duration::from_secs(3));
         while session.next_event(Duration::ZERO).is_some() {}
         session
@@ -801,6 +896,7 @@ async fn imported_history_shows_in_the_live_session_under_its_name() {
     let port = listener.local_addr().expect("its address").port();
     let home = tempfile::tempdir().expect("home node dir");
     let code = admit(home.path());
+    ugly(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
 
     let phone = tempfile::tempdir().expect("app dir");
@@ -828,10 +924,15 @@ async fn imported_history_shows_in_the_live_session_under_its_name() {
     let session = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
         pulled(&session, "the pull on open");
+        ugly_in(&session);
         let list: schema::Conversations =
             rmp_serde::from_slice(&session.query(schema::Query::Conversations).expect("list"))
                 .expect("decode");
-        assert!(list.conversations.is_empty(), "{list:?}");
+        let imported = loquax::address::to_hex(&[0x09; 16]);
+        assert!(
+            list.conversations.iter().all(|row| row.peer != imported),
+            "{list:?}"
+        );
         session
     })
     .await
@@ -895,6 +996,7 @@ async fn a_nomadnet_import_on_the_mailbox_shows_in_the_live_session_with_its_blo
     let port = listener.local_addr().expect("its address").port();
     let home = tempfile::tempdir().expect("home node dir");
     let code = admit(home.path());
+    ugly(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
 
     let phone = tempfile::tempdir().expect("app dir");
@@ -922,6 +1024,7 @@ async fn a_nomadnet_import_on_the_mailbox_shows_in_the_live_session_with_its_blo
     let session = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
         pulled(&session, "the pull on open");
+        ugly_in(&session);
         session
     })
     .await
@@ -982,7 +1085,8 @@ async fn a_nomadnet_import_on_the_mailbox_shows_in_the_live_session_with_its_blo
             20,
             |c: &schema::Conversations| c.conversations.iter().any(|row| row.peer == blocked_hex),
         );
-        assert_eq!(blocked.conversations.len(), 1, "{blocked:?}");
+        // Beside the ugly store's blocked one.
+        assert_eq!(blocked.conversations.len(), 2, "{blocked:?}");
         session.stop();
     })
     .await
@@ -1052,6 +1156,7 @@ async fn every_keyed_request_reaches_an_imported_message_through_javas_codec() {
     let port = listener.local_addr().expect("its address").port();
     let home = tempfile::tempdir().expect("home node dir");
     let code = admit(home.path());
+    ugly(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
 
     let phone = tempfile::tempdir().expect("app dir");
@@ -1104,10 +1209,10 @@ async fn every_keyed_request_reaches_an_imported_message_through_javas_codec() {
         let (older, newer) = (&rows[0], &rows[1]);
         assert_eq!(older.body, "von Ratspeak");
 
-        // Info first, on every row: the query Lew's long press sent. The
-        // import lays its block out below seq 1, so the newer row sits at
-        // seq 0, whose key Java holds as `i64::MIN`; a row of this device's
-        // own lies above it.
+        // Info first, on every row: the query Lew's long press sent. Each
+        // import lays its block out below the store's lowest key, so these
+        // rows lie below the ugly store's imports, whose newest sits at seq
+        // 0 (checked below); a row of this device's own lies above them.
         for row in &rows {
             let info = java_map(&[
                 ("t", Java::Str("info")),
@@ -1157,6 +1262,153 @@ async fn every_keyed_request_reaches_an_imported_message_through_javas_codec() {
         let left = messages(&peer_hex).messages;
         assert!(left.iter().all(|row| row.key != newer.key), "{left:?}");
         assert!(left.iter().any(|row| row.key == older.key), "{left:?}");
+
+        // 1173: the ugly store's two imports, a Ratspeak one (entry
+        // version 1) and a NomadNet one (version 2, with provenance), get
+        // every request the facade knows, keyed ones in Java's bytes.
+        ugly_in(&session);
+        let mut seen = Vec::new();
+        let ask = |query: schema::Query| -> Vec<u8> {
+            session
+                .query(query.clone())
+                .unwrap_or_else(|error| panic!("{query:?}: {error}"))
+        };
+        for i in [ugly_store::RATSPEAK, ugly_store::NOMADNET] {
+            let peer = ugly_store::peer_hex(i);
+            let name = ugly_store::petname(i).expect("a petname");
+            command(&[("t", Java::Str("open")), ("peer", Java::Str(&peer))])
+                .unwrap_or_else(|error| panic!("open {i}: {error}"));
+            let rows = messages(&peer).messages;
+            let keys: Vec<i64> = rows.iter().map(|r| r.key.0).collect();
+            seen.extend_from_slice(&keys);
+            assert_eq!(
+                rows.len(),
+                ugly_store::PER_CONVERSATION - ugly_store::REACTIONS,
+                "{i}: {keys:?}"
+            );
+            assert!(rows.iter().any(|r| r.body == ugly_store::long_body()));
+            // The imports lay their blocks out below seq 1 (1159): store
+            // keys of negative seqs, Java's sign the other way round.
+            assert!(
+                keys.iter()
+                    .all(|key| loquax::store::seq_of(*key as u64) < 1),
+                "{i}: {keys:?}"
+            );
+            let typed: schema::Messages =
+                rmp_serde::from_slice(&ask(schema::Query::Messages { peer: peer.clone() }))
+                    .expect("Messages");
+            assert!(typed.name.starts_with(name), "{i}: {:?}", typed.name);
+            assert!(
+                typed.messages.iter().any(|m| m.quote_to.is_some()),
+                "{i}: a reply"
+            );
+            assert!(
+                typed.messages.iter().any(|m| !m.chips.is_empty()),
+                "{i}: a reaction"
+            );
+            assert!(
+                typed.messages.iter().any(|m| m.lat_e6.is_some()),
+                "{i}: a position"
+            );
+            for row in &rows {
+                let info = java_map(&[
+                    ("t", Java::Str("info")),
+                    ("peer", Java::Str(&peer)),
+                    ("key", Java::Long(row.key.0)),
+                ]);
+                let query = schema::decode::<schema::Query>(&info).expect("an info query");
+                let detail: schema::Info = rmp_serde::from_slice(&ask(query)).expect("an Info");
+                assert!(
+                    detail.rows.contains(&format!("id     {}", row.id)),
+                    "{i}: {:?}",
+                    detail.rows
+                );
+            }
+            let detail: schema::Detail =
+                rmp_serde::from_slice(&ask(schema::Query::Detail { peer: peer.clone() }))
+                    .expect("a Detail");
+            assert_eq!(detail.peer, peer);
+            let (first, last) = (&rows[0], &rows[rows.len() - 1]);
+            command(&[
+                ("t", Java::Str("reply")),
+                ("peer", Java::Str(&peer)),
+                ("target", Java::Str(&first.id)),
+                ("body", Java::Str("Antwort auf den Ältesten")),
+            ])
+            .unwrap_or_else(|error| panic!("reply {i}: {error}"));
+            command(&[
+                ("t", Java::Str("react")),
+                ("peer", Java::Str(&peer)),
+                ("target", Java::Str(&first.id)),
+                ("content", Java::Str("\u{2764}\u{FE0F}")),
+            ])
+            .unwrap_or_else(|error| panic!("react {i}: {error}"));
+            command(&[
+                ("t", Java::Str("forward")),
+                ("peer", Java::Str(&peer)),
+                ("key", Java::Long(first.key.0)),
+                ("to", Java::Str(&other_hex)),
+            ])
+            .unwrap_or_else(|error| panic!("forward {i}: {error}"));
+            assert!(
+                messages(&other_hex)
+                    .messages
+                    .iter()
+                    .any(|r| r.body == first.body),
+                "{i}: forwarded"
+            );
+            command(&[
+                ("t", Java::Str("delete")),
+                ("peer", Java::Str(&peer)),
+                ("keys", Java::Longs(&[last.key.0])),
+            ])
+            .unwrap_or_else(|error| panic!("delete {i}: {error}"));
+            assert!(messages(&peer).messages.iter().all(|r| r.key != last.key));
+            // Mark unread and read again, the petname cleared and given
+            // back, the peer blocked and unblocked.
+            for (t, on) in [
+                ("unread", true),
+                ("unread", false),
+                ("block", true),
+                ("block", false),
+            ] {
+                let request = schema::decode::<Request>(&java_bool_map(t, &peer, on))
+                    .unwrap_or_else(|error| panic!("{t} {i}: {error}"));
+                session
+                    .request(request)
+                    .unwrap_or_else(|error| panic!("{t} {i}: {error}"));
+            }
+            let list: schema::Conversations =
+                rmp_serde::from_slice(&ask(schema::Query::Conversations)).expect("a list");
+            let row = list
+                .conversations
+                .iter()
+                .find(|row| row.peer == peer)
+                .expect("listed again after the unblock");
+            assert_eq!(row.unread, 0, "{row:?}");
+            for name in ["", name] {
+                command(&[
+                    ("t", Java::Str("rename")),
+                    ("peer", Java::Str(&peer)),
+                    ("name", Java::Str(name)),
+                ])
+                .unwrap_or_else(|error| panic!("rename {i}: {error}"));
+            }
+            let typed: schema::Messages =
+                rmp_serde::from_slice(&ask(schema::Query::Messages { peer: peer.clone() }))
+                    .expect("Messages");
+            assert!(typed.name.starts_with(name), "{i}: {:?}", typed.name);
+            assert!(
+                typed
+                    .messages
+                    .iter()
+                    .any(|m| m.body == "Antwort auf den Ältesten"),
+                "{i}: the reply"
+            );
+        }
+        // The first import's newest row at seq 0: Java holds its key as
+        // `i64::MIN`, the key Lew's Info failed on before 1166.
+        assert!(seen.contains(&i64::MIN), "{seen:?}");
         session.stop();
     })
     .await
@@ -1248,6 +1500,15 @@ fn java_map(entries: &[(&str, Java)]) -> Vec<u8> {
     out
 }
 
+/// A request map of `t` with a peer and a boolean `on`, as `MsgPack.pack`
+/// writes a Java `boolean` (`c3` and `c2`).
+fn java_bool_map(t: &str, peer: &str, on: bool) -> Vec<u8> {
+    let mut out = java_map(&[("t", Java::Str(t)), ("peer", Java::Str(peer))]);
+    out[0] += 1;
+    out.extend_from_slice(&[0xa2, b'o', b'n', if on { 0xc3 } else { 0xc2 }]);
+    out
+}
+
 /// 1164: an import on the running mailbox runs outside its daemon, on a
 /// store connection of its own. A phone that only watches, its one pull on
 /// open done and its watching link up, asks for nothing more: the daemon
@@ -1262,6 +1523,7 @@ async fn an_import_beside_the_running_mailbox_wakes_a_phone_that_only_watches() 
     let port = listener.local_addr().expect("its address").port();
     let home = tempfile::tempdir().expect("home node dir");
     let code = admit(home.path());
+    ugly(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
 
     let phone = tempfile::tempdir().expect("app dir");
@@ -1286,6 +1548,7 @@ async fn an_import_beside_the_running_mailbox_wakes_a_phone_that_only_watches() 
                 _ => assert!(std::time::Instant::now() < deadline, "no pull ended"),
             }
         }
+        ugly_in(&session);
         // The start's other pulls end and the watching link comes up.
         let settled = std::time::Instant::now() + Duration::from_secs(3);
         while std::time::Instant::now() < settled {
@@ -1437,6 +1700,45 @@ fn facade_event(secs: u64, what: &str, want: impl Fn(&Event) -> bool) -> Event {
     }
 }
 
+/// Wait up to `secs` for the exported facade to list both imported
+/// conversations of the ugly store under their names, and for Info to
+/// answer on every row of each.
+fn facade_shows_ugly(secs: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    for i in [ugly_store::RATSPEAK, ugly_store::NOMADNET] {
+        let peer = ugly_store::peer_hex(i);
+        let rows = loop {
+            let messages: schema::Messages = rmp_serde::from_slice(&loquax_android::query(
+                &schema::encode(&schema::Query::Messages { peer: peer.clone() }),
+            ))
+            .expect("Messages");
+            if messages.messages.len() == ugly_store::PER_CONVERSATION - ugly_store::REACTIONS {
+                break messages.messages;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the facade never showed conversation {i}: {} rows",
+                messages.messages.len()
+            );
+            let _ = loquax_android::next_event(Duration::from_millis(200));
+        };
+        for row in rows {
+            let info: schema::Info = rmp_serde::from_slice(&loquax_android::query(
+                &schema::encode(&schema::Query::Info {
+                    peer: peer.clone(),
+                    key: row.key,
+                }),
+            ))
+            .unwrap_or_else(|error| panic!("info on {:?}: {error}", row.body));
+            assert!(
+                info.rows.iter().any(|r| r.contains(&row.id)),
+                "{:?}",
+                info.rows
+            );
+        }
+    }
+}
+
 fn link_event(up: bool, secs: u64) {
     facade_event(
         secs,
@@ -1499,6 +1801,7 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
     let port = listener.local_addr().expect("its address").port();
     let home = tempfile::tempdir().expect("home node dir");
     let code = admit(home.path());
+    ugly(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
 
     let phone = tempfile::tempdir().expect("app dir");
@@ -1517,6 +1820,7 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
         assert!(answer.ok, "{answer:?}");
         assert_eq!(answer.server.as_deref(), Some(expected.as_str()));
         link_event(true, 30);
+        facade_shows_ugly(60);
         send_through_facade(&to, "vor dem Ausfall", 60);
     })
     .await
@@ -1600,13 +1904,19 @@ async fn a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens() {
         format!("127.0.0.1:{}\n", peer.rns_port),
     )
     .expect("servers file");
+    // The phone's own mailbox holds the ugly store; its screens are its
+    // client and take it on their pull.
+    let filled = ugly_store::fill_archive(&mailbox);
+    assert_eq!(filled.imported, 2 * ugly_store::PER_CONVERSATION);
     let first = Start {
         dir: phone.path().display().to_string(),
         here: true,
         ..Start::default()
     };
     let session = tokio::task::spawn_blocking(move || {
-        Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"))
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        ugly_in(&session);
+        session
     })
     .await
     .expect("the session");
