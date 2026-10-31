@@ -758,6 +758,9 @@ impl App {
         if self.busy || self.screen != Screen::Map {
             return None;
         }
+        // The first job since the last pan freezes the heading the
+        // prefetch plans by, before the order carries it (1189).
+        self.motion.asked(self.now_ms());
         let order = self.order()?;
         let current = self
             .shown

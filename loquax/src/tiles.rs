@@ -906,6 +906,9 @@ fn to_rgba(fb: &[u16]) -> Vec<u8> {
 pub struct Motion {
     velocity: (f64, f64),
     at_ms: Option<u64>,
+    /// When the first frame since the last pan was asked: the heading
+    /// the prefetch plans by is frozen there (1189).
+    asked_ms: Option<u64>,
     /// The last zoom the fingers made went out.
     pub zoomed_out: bool,
 }
@@ -922,6 +925,15 @@ impl Motion {
         let (ix, iy) = (dx * 1000.0 / dt, dy * 1000.0 / dt);
         self.velocity = (vx + a * (ix - vx), vy + a * (iy - vy));
         self.at_ms = Some(now_ms);
+        self.asked_ms = None;
+    }
+
+    /// A frame was asked at `now_ms`. The first since the last pan
+    /// freezes the heading [`rest_heading`](Self::rest_heading) gives:
+    /// the finger's last direction, not what is left of it once a slow
+    /// renderer has drawn the frame at rest (1189).
+    pub fn asked(&mut self, now_ms: u64) {
+        self.asked_ms.get_or_insert(now_ms);
     }
 
     /// The fingers zoomed by `by_milli` thousandths of a step.
@@ -945,6 +957,13 @@ impl Motion {
     pub fn heading(&self, now_ms: u64) -> Option<(f64, f64)> {
         let (vx, vy) = self.velocity(now_ms);
         (vx.hypot(vy) >= MOTION_FLOOR).then_some((vx, vy))
+    }
+
+    /// The heading a prefetch at `now_ms` plans by: the one when the
+    /// first frame since the last pan was asked ([`asked`](Self::asked)),
+    /// the one at `now_ms` when none was.
+    pub fn rest_heading(&self, now_ms: u64) -> Option<(f64, f64)> {
+        self.heading(self.asked_ms.map_or(now_ms, |at| at.min(now_ms)))
     }
 }
 
@@ -1895,6 +1914,24 @@ mod tests {
             p.wants.iter().all(|w| !held.contains(&w.key)),
             "none on screen"
         );
+    }
+
+    /// The heading a prefetch plans by is the one when the first frame
+    /// since the last pan was asked; a later ask moves it no further, a
+    /// pan lets it go (1189).
+    #[test]
+    fn the_rest_heading_freezes_at_the_first_ask() {
+        let mut m = Motion::default();
+        for i in 0..20 {
+            m.pan(0.0, -80.0, i * 16);
+        }
+        assert!(m.rest_heading(320 + 3000).is_none(), "no ask, no freeze");
+        m.asked(320);
+        m.asked(2000);
+        assert_eq!(m.rest_heading(320 + 3000), m.heading(320));
+        assert!(m.rest_heading(320 + 3000).is_some());
+        m.pan(0.0, 0.0, 3320);
+        assert_eq!(m.rest_heading(3320 + 3000), None);
     }
 
     /// The velocity decays at rest: no direction a few seconds after the
