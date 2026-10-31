@@ -603,7 +603,12 @@ mod tests {
     fn the_fast_paths_give_the_frames_of_the_old_ones() {
         let centre = project(LatLon::from_degrees(43.7731, 11.2560));
         for (scale, theme) in [(1.0, MapTheme::Light), (2.75, MapTheme::Dark)] {
+            // Both on the same workers: a moving frame draws
+            // `MOVING_TILES_PER_WORKER` missing tiles a worker, so a side
+            // left on the host's count owes others where it has few cores
+            // (1167).
             let mut old = reference();
+            old.set_workers(4);
             let mut new = florence();
             new.set_workers(4);
             let mut view = ExactView::new(centre, 15 * MILLI, 900, 700);
