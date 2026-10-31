@@ -1,0 +1,100 @@
+--- frame 1: list ---
+┌● Loquax afbda7b3───────┐┌  Jürgen 🚲  ·1d0a  unknown─────── pos 155 d · no pn ┐
+│▌Jürgen 🚲  ·1d0a 29 May ││                                                    │
+│▌you: ok 👍              ││ Treffen wir uns um 18:00 am Bahnhof?               │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││ 01:46 · unverified                                 │
+│ Peer 17 ·1d38   29 May ││                                                    │
+│ you: Grüße aus Kö… [3] ││     naïve façade, smörgåsbord, Ærøskøbing  01:56 ✓ │
+│                        ││                                                    │
+│ <cd32a602…>     29 May ││ Antwort 34: genau, äh, so 🙂   02:06 · unverified   │
+│ you: ja            [3] ││                                                    │
+│                        ││                   😀 🐀 🚲  drei Emoji am Stück  02:16│
+│ Peer 15 ·3d1a   29 May ││                                                    │
+│ you: zwei          [3] ││ zwei                                               │
+│                        ││ Zeilen  02:26 · unverified                         │
+│ <b305ba3b…>     29 May ││                                                    │
+│ you: 😀 🐀 🚲  drei … [3] ││                                        ja  02:36 ⌂ │
+│                        ││                                                    │
+│ Peer 13 ·0d1e   29 May ││ Grüße aus Köln, die Straße ist nass                │
+│ you: 日 本 語 の テ キ … [3] ││ 02:46 · unverified                                 │
+│                        ││                                                    │
+│ <0d7cc5d4…>     29 May ││                                      ok 👍   02:56 ○│
+│ you: naïve façade… [3] │├  to Jürgen 🚲  ·1d0a Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: bottom ---
+┌● Loquax afbda7b3───────┐┌  Nomadin Ünal ·bffb  known──── no propagation node ┐
+│ Peer 7 ·0d94    29 May ││                                                    │
+│ you: zwei              ││       Grüße aus Köln, die Straße ist nass  01:36 ○ │
+│                        ││                                                    │
+│ <57b9131c…>     29 May ││ ok 👍   01:46                                       │
+│ you: 😀 🐀 🚲  drei Emoj… ││                                                    │
+│                        ││      Treffen wir uns um 18:00 am Bahnhof?  01:56 ✓ │
+│ Peer 5 ·9bf4    29 May ││                                                    │
+│ you: 日 本 語 の テ キ ス ト … ││ Antwort 34: genau, äh, so 🙂   02:06 · unverified   │
+│                        ││                                                    │
+│ Mum ·8f77       29 May ││                                 日 本 語 の テ キ ス ト も  │
+│ you: naïve façade, sm… ││                                                    │
+│                        ││ 😀 🐀 🚲  drei Emoji am Stück  02:26                  │
+│ Zoë 💬  Æ… ·b66d 29 May ││                                                    │
+│ you: Treffen wir uns … ││                                    zwei            │
+│                        ││                                    Zeilen  02:36 ⌂ │
+│ Rat… ·4a36 29 May 2025 ││                                                    │
+│ you: ja                ││ ja  02:46 · unverified                             │
+│                        ││                                                    │
+│▌Nom… ·bffb 29 May 2025 ││       Grüße aus Köln, die Straße ist nass  02:56 ○ │
+│▌you: Grüße aus Köln, … │├  to Nomadin Ünal ·b Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: opened ---
+┌  Loquax afbda7b3───────┐┌● Nomadin Ünal ·bffb  known──── no propagation node ┐
+│ Peer 7 ·0d94    29 May ││                                                    │
+│ you: zwei              ││       Grüße aus Köln, die Straße ist nass  01:36 ○ │
+│                        ││                                                    │
+│ <57b9131c…>     29 May ││ ok 👍   01:46                                       │
+│ you: 😀 🐀 🚲  drei Emoj… ││                                                    │
+│                        ││      Treffen wir uns um 18:00 am Bahnhof?  01:56 ✓ │
+│ Peer 5 ·9bf4    29 May ││                                                    │
+│ you: 日 本 語 の テ キ ス ト … ││ Antwort 34: genau, äh, so 🙂   02:06 · unverified   │
+│                        ││                                                    │
+│ Mum ·8f77       29 May ││                                 日 本 語 の テ キ ス ト も  │
+│ you: naïve façade, sm… ││                                                    │
+│                        ││ 😀 🐀 🚲  drei Emoji am Stück  02:26                  │
+│ Zoë 💬  Æ… ·b66d 29 May ││                                                    │
+│ you: Treffen wir uns … ││                                    zwei            │
+│                        ││                                    Zeilen  02:36 ⌂ │
+│ Rat… ·4a36 29 May 2025 ││                                                    │
+│ you: ja                ││ ja  02:46 · unverified                             │
+│                        ││                                                    │
+│▌Nom… ·bffb 29 May 2025 ││      ▌Grüße aus Köln, die Straße ist nass  02:56 ○ │
+│▌you: Grüße aus Köln, … │├  to Nomadin Ünal ·b Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 4: oldest ---
+┌  Loquax afbda7b3───────┐┌● Nomadin Ünal ·bffb  known──── no propagation node ┐
+│ Peer 7 ·0d94    29 May ││            ── Wednesday 28 May 2025 ──             │
+│ you: zwei              ││▌ok 👍   20:26                                       │
+│                        ││                                                    │
+│ <57b9131c…>     29 May ││      Treffen wir uns um 18:00 am Bahnhof?  20:36 ✓ │
+│ you: 😀 🐀 🚲  drei Emoj… ││                                                    │
+│                        ││ naïve façade, smörgåsbord, Ærøskøbing              │
+│ Peer 5 ·9bf4    29 May ││ 20:46 · unverified                                 │
+│ you: 日 本 語 の テ キ ス ト … ││                                                    │
+│                        ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│ Mum ·8f77       29 May ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│ you: naïve façade, sm… ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│                        ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│ Zoë 💬  Æ… ·b66d 29 May ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│ you: Treffen wir uns … ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│                        ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│ Rat… ·4a36 29 May 2025 ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│ you: ja                ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│                        ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│▌Nom… ·bffb 29 May 2025 ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│▌you: Grüße aus Köln, … │├  to Nomadin Ünal ·b Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

@@ -75,6 +75,13 @@
 //! cadence for twenty seconds after the first message. No frames are pinned;
 //! the counts and `tui.log`'s `SYNC` lines are what is under test.
 //!
+//! The ugly store's session (1173) opens a store shaped like a year of use
+//! and two imports (`support/ugly_store.rs`), goes to the bottom of the
+//! list, opens the import there and scrolls to its oldest row. Pinned in
+//! `tests/fixtures/tui_ugly.frames`. The fetch sessions, whose frames are
+//! not under test, run on the same store; the others pin frames of a
+//! store they build themselves, so they keep it.
+//!
 //! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
 //! is a second loquax engine attached to it in this process
 //! (`loquax::engine::attach`), a full LXMF router, so the proof that turns the
@@ -102,6 +109,9 @@ mod support;
 #[path = "support/nomadnet_tree.rs"]
 mod nomadnet_tree;
 
+#[path = "support/ugly_store.rs"]
+mod ugly_store;
+
 use support::daemon;
 
 const LNMSG: &str = env!("CARGO_BIN_EXE_loquax");
@@ -118,6 +128,7 @@ const EXPECTED_TELEMETRY: &str = include_str!("fixtures/tui_telemetry.frames");
 const EXPECTED_MAP: &str = include_str!("fixtures/tui_map.frames");
 const EXPECTED_MAPLOAD: &str = include_str!("fixtures/tui_mapload.frames");
 const EXPECTED_MAP_CYCLE: &str = include_str!("fixtures/tui_map_cycle.frames");
+const EXPECTED_UGLY: &str = include_str!("fixtures/tui_ugly.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -2652,6 +2663,8 @@ async fn a_send_does_not_wait_behind_a_fetch_that_stalls() {
         encode_identity(&fixed_identity(0x11)).expect("storable"),
     )
     .expect("write the identity");
+    // The ugly store (1173): nothing on screen is under test here.
+    ugly_store::fill_store(home.path());
     let theirs = fixed_identity(0x22);
     let their_hex: String = delivery_address(&theirs)
         .expect("their address")
@@ -2766,6 +2779,8 @@ async fn a_failed_fetch_leaves_its_end_in_the_log() {
         encode_identity(&fixed_identity(0x11)).expect("storable"),
     )
     .expect("write the identity");
+    // The ugly store (1173): nothing on screen is under test here.
+    ugly_store::fill_store(home.path());
     let script = home.path().join("fail.script");
     let frames = home.path().join("fail.frames");
     std::fs::write(&script, FAILED_FETCH_SCRIPT).expect("write the script");
@@ -3052,4 +3067,65 @@ async fn the_palettes_import_shows_at_once() {
         opened.contains(nomadnet_tree::SENT) && opened.contains(nomadnet_tree::RECEIVED),
         "the opened conversation shows the imported rows:\n{got}"
     );
+}
+
+/// The ugly store's session (1173): a terminal loquax whose store holds a
+/// year of use and two imports (`support/ugly_store.rs`) lists its
+/// conversations, goes to the bottom of the list, where the Ratspeak
+/// import lies, opens it and scrolls to its oldest row. The clock is the
+/// script's, so every date on screen is the same on every run. Pinned in
+/// `tests/fixtures/tui_ugly.frames`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_imported_conversation_opens_and_scrolls_to_its_oldest_row() {
+    let daemon = daemon("tui-ugly", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let filled = ugly_store::fill_store(home.path());
+    assert_eq!(filled.imported, 2 * ugly_store::PER_CONVERSATION);
+    let script = "clock 2026-10-31 12:00\nuntil ready 20\nframe list\nkey G\n\
+                  frame bottom\nkey enter\nframe opened\nkey g\nframe oldest\nkey q\n";
+    let script_path = home.path().join("ugly.script");
+    let frames = home.path().join("ugly.frames");
+    std::fs::write(&script_path, script).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--script".into(),
+        script_path.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x24".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    })
+    .await
+    .expect("the loquax child thread");
+    let got = std::fs::read_to_string(&frames).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nframes:\n{got}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(got, EXPECTED_UGLY, "the frames differ:\n{got}");
 }
