@@ -27,6 +27,16 @@ impl Lang {
     /// Both, in the order the generated files are written.
     pub const ALL: [Lang; 2] = [Lang::En, Lang::De];
 
+    /// The language a BCP 47 tag or a locale names (`de`, `de-AT`,
+    /// `de_DE`): German for German, English for any other.
+    pub fn of_tag(tag: &str) -> Self {
+        let primary = tag.split(['-', '_']).next().unwrap_or_default();
+        match primary.eq_ignore_ascii_case("de") {
+            true => Lang::De,
+            false => Lang::En,
+        }
+    }
+
     /// The Android resource directory of the language.
     pub fn values_dir(self) -> &'static str {
         match self {
@@ -396,6 +406,16 @@ mod tests {
         assert_eq!(text.resolve(Lang::En), "last position 3 h");
         assert_eq!(text.resolve(Lang::De), "letzte Position 3 h");
         assert_eq!(Text::Raw("Anna".to_string()).resolve(Lang::De), "Anna");
+    }
+
+    #[test]
+    fn a_locale_names_its_language() {
+        for tag in ["de", "DE", "de-AT", "de_DE"] {
+            assert_eq!(Lang::of_tag(tag), Lang::De, "{tag}");
+        }
+        for tag in ["", "en", "en-US", "fr", "dee", "d"] {
+            assert_eq!(Lang::of_tag(tag), Lang::En, "{tag}");
+        }
     }
 
     #[test]

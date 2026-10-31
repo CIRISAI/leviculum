@@ -211,6 +211,14 @@ pub enum Ring {
 }
 
 impl Ring {
+    /// The ring's colour as the phone's `colors.xml` names it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Ring::Accent => "accent",
+            Ring::Secondary => "secondary",
+        }
+    }
+
     pub fn of(state: liveness::State) -> Option<Self> {
         match state {
             liveness::State::Live => Some(Ring::Accent),
