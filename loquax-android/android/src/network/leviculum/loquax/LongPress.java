@@ -39,6 +39,8 @@ final class LongPress {
     private final Activity activity;
     private final Dialog dialog;
     private final Listener listener;
+    /** The actions' words where their string id is not enough; may be null. */
+    private CharSequence[] labels;
 
     private LongPress(Activity activity, Listener listener) {
         this.activity = activity;
@@ -54,7 +56,20 @@ final class LongPress {
      */
     static void show(Activity activity, View bubble, boolean ours, boolean reactions,
             String[] quick, String current, int[] actions, Listener listener) {
-        new LongPress(activity, listener).open(bubble, ours, reactions, quick, current, actions);
+        show(activity, bubble, ours, reactions, quick, current, actions, null, listener);
+    }
+
+    /**
+     * The same, with `labels` worded for the actions whose string needs a
+     * number (1184: "Show all 14 positions"); null or a null entry words
+     * the action by its string id.
+     */
+    static void show(Activity activity, View bubble, boolean ours, boolean reactions,
+            String[] quick, String current, int[] actions, CharSequence[] labels,
+            Listener listener) {
+        LongPress press = new LongPress(activity, listener);
+        press.labels = labels;
+        press.open(bubble, ours, reactions, quick, current, actions);
     }
 
     private int dp(float dp) {
@@ -243,9 +258,14 @@ final class LongPress {
         list.setPadding(0, dp(6), 0, dp(6));
         // Taps between the items stay on the list, not the dim that closes.
         list.setClickable(true);
-        for (final int action : actions) {
+        for (int i = 0; i < actions.length; i++) {
+            final int action = actions[i];
             TextView item = new TextView(activity);
-            item.setText(action);
+            if (labels != null && i < labels.length && labels[i] != null) {
+                item.setText(labels[i]);
+            } else {
+                item.setText(action);
+            }
             item.setTextSize(16);
             item.setTextColor(activity.getColor(action == R.string.action_delete
                     ? R.color.failed_mark_on_panel : R.color.text));

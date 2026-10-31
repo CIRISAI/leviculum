@@ -13,8 +13,8 @@
 use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Blob, CandidateRow, Chip, ContactCopy, ConversationRow,
     Conversations, Detail, Done, Event, ImRow, Info, LinkRow, Links, MapRequest, MapShown, Me,
-    MessageRow, Messages, PositionRow, Query, Recents, Request, Start, Started, SuggestionRow,
-    Suggestions,
+    MessageRow, Messages, PositionRow, Query, Recents, Request, Run, RunRow, Start, Started,
+    SuggestionRow, Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -218,6 +218,7 @@ fn query() -> impl Strategy<Value = Query> {
         Just(Query::Blocked),
         Just(Query::Me),
         text().prop_map(|passphrase| Query::Backup { passphrase }),
+        (text(), i64s()).prop_map(|(peer, key)| Query::Run { peer, key }),
     ]
 }
 
@@ -251,6 +252,7 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
         ),
         (prop::option::of(i64s()), prop::option::of(i64s()), i64s()),
         (opt_text(), prop::option::of(any::<bool>()), opt_text()),
+        (u32s(), i64s()),
     )
         .prop_map(
             |(
@@ -258,6 +260,7 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
                 (chips, lat_e6, lon_e6, place, accuracy),
                 (fix_at, stale_at, key),
                 (quote, quote_ours, quote_to),
+                (updates, since),
             )| MessageRow {
                 id,
                 ours,
@@ -275,6 +278,8 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
                 quote,
                 quote_ours,
                 quote_to,
+                updates,
+                since,
             },
         )
 }
@@ -328,13 +333,13 @@ fn conversation_row() -> impl Strategy<Value = ConversationRow> {
     (
         (text(), text(), text(), any::<bool>(), i64s(), u32s()),
         (text(), opt_text(), opt_text(), text(), opt_text()),
-        (text(), opt_text(), any::<(bool, bool, bool)>()),
+        (text(), opt_text(), any::<(bool, bool, bool)>(), u32s()),
     )
         .prop_map(
             |(
                 (peer, name, last, ours, at, unread),
                 (initials, icon_fg, icon_bg, kind, reaction),
-                (state, photo, (linked, pinned, muted)),
+                (state, photo, (linked, pinned, muted), updates),
             )| ConversationRow {
                 peer,
                 name,
@@ -352,6 +357,7 @@ fn conversation_row() -> impl Strategy<Value = ConversationRow> {
                 linked,
                 pinned,
                 muted,
+                updates,
             },
         )
 }
@@ -681,6 +687,38 @@ proptest! {
             }],
         })?;
         round_trips(&Info { v, rows: Vec::new() })?;
+        round_trips(&Run { v, positions: Vec::new() })?;
+    }
+
+    #[test]
+    fn a_run_round_trips(
+        v in u32s(),
+        rows in prop::collection::vec(
+            (
+                i64s(),
+                i64s(),
+                prop::option::of(i32s()),
+                prop::option::of(i32s()),
+                opt_text(),
+                opt_text(),
+                prop::option::of(i64s()),
+            ),
+            0..4,
+        ),
+    ) {
+        let positions = rows
+            .into_iter()
+            .map(|(key, at, lat_e6, lon_e6, place, accuracy, fix_at)| RunRow {
+                key,
+                at,
+                lat_e6,
+                lon_e6,
+                place,
+                accuracy,
+                fix_at,
+            })
+            .collect();
+        round_trips(&Run { v, positions })?;
     }
 
     #[test]

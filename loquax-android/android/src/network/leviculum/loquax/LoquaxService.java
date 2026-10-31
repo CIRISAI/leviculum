@@ -304,7 +304,7 @@ public class LoquaxService extends Service implements Events.Listener {
         Notification.Builder builder = new Notification.Builder(this, MESSAGES_CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
                 .setContentTitle(Core.str(row, "name"))
-                .setContentText(Core.str(row, "last"))
+                .setContentText(Ui.preview(this, row))
                 .setNumber((int) Math.min(Integer.MAX_VALUE, Core.num(row, "unread")))
                 .setContentIntent(opening)
                 .setAutoCancel(true);

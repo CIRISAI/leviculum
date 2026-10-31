@@ -639,6 +639,11 @@ impl Session {
                     rows: detail.rows,
                 })
             }
+            schema::Query::Run { peer, key } => schema::encode(&run(
+                &inner.model,
+                parse_peer(&peer)?,
+                schema::model_key(key),
+            )),
             schema::Query::Recents => schema::encode(&schema::Recents {
                 v: VERSION,
                 emoji: loquax::emoji::load_recents(&inner.home).0,
@@ -1258,6 +1263,7 @@ impl Inner {
             linked: self.book.links.contains_key(&row.peer),
             pinned: row.pinned,
             muted: row.muted,
+            updates: u32::try_from(row.updates).unwrap_or(u32::MAX),
         }
     }
 
@@ -1506,6 +1512,50 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
             .as_ref()
             .map(|q| loquax::address::to_hex(&q.to)),
         quote: bubble.quote.map(|q| q.text),
+        updates: u32::try_from(bubble.updates).unwrap_or(u32::MAX),
+        since: bubble.since.map_or(0, |at| at.unix_secs),
+    }
+}
+
+/// The reports the row `key` of `peer`'s conversation stands for, newest
+/// first ([`schema::Query::Run`]).
+pub fn run<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> schema::Run {
+    let found = model
+        .conversations
+        .iter()
+        .enumerate()
+        .find_map(|(c, conv)| {
+            (conv.peer == peer)
+                .then(|| conv.messages.iter().position(|m| m.activity == key))
+                .flatten()
+                .map(|m| (c, conv.run(m)))
+        });
+    let Some((c, run)) = found else {
+        return schema::Run {
+            v: VERSION,
+            positions: Vec::new(),
+        };
+    };
+    let messages = &model.conversations[c].messages;
+    schema::Run {
+        v: VERSION,
+        positions: run
+            .into_iter()
+            .rev()
+            .map(|m| {
+                let fix = model.message_fix(c, m);
+                let fix = fix.as_ref();
+                schema::RunRow {
+                    key: schema::wire_key(messages[m].activity),
+                    at: messages[m].at.map_or(0, |at| at.unix_secs),
+                    lat_e6: fix.map(|f| f.location.latitude_e6),
+                    lon_e6: fix.map(|f| f.location.longitude_e6),
+                    place: fix.map(|f| loquax::telemetry::coordinates(&f.location)),
+                    accuracy: fix.and_then(|f| loquax::telemetry::accuracy(&f.location)),
+                    fix_at: fix.map(|f| f.order_time()),
+                }
+            })
+            .collect(),
     }
 }
 

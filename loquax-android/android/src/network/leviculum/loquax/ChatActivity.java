@@ -830,6 +830,13 @@ public class ChatActivity extends Activity implements Events.Listener {
         if (row.get("fix_at") != null) {
             line.append(" \u00B7 ").append(Ui.age(this, Core.num(row, "fix_at"), now));
         }
+        // The newest of a run stands for all of it (1184): how many, since when.
+        long updates = Core.num(row, "updates");
+        if (updates > 1) {
+            String since = android.text.format.DateFormat.getTimeFormat(this)
+                    .format(new java.util.Date(Core.num(row, "since") * 1000));
+            line.append(" \u00B7 ").append(getString(R.string.run_updates, (int) updates, since));
+        }
         SpannableStringBuilder out = new SpannableStringBuilder(body);
         if (out.length() > 0) {
             out.append('\n');
@@ -865,8 +872,19 @@ public class ChatActivity extends Activity implements Events.Listener {
             R.string.action_select, R.string.action_info,
             isPinned ? R.string.action_unpin : R.string.action_pin, R.string.action_delete,
         };
+        CharSequence[] labels = null;
+        long updates = Core.num(row, "updates");
+        if (updates > 1) {
+            // A run's row (1184): every report it folds, first in the list.
+            int[] more = new int[actions.length + 1];
+            more[0] = R.string.action_run;
+            System.arraycopy(actions, 0, more, 1, actions.length);
+            actions = more;
+            labels = new CharSequence[actions.length];
+            labels[0] = getString(R.string.action_run, (int) updates);
+        }
         LongPress.show(this, view.findViewById(R.id.bubble), Core.bool(row, "ours"), hasId,
-                QUICK, ourReaction(row), actions, new LongPress.Listener() {
+                QUICK, ourReaction(row), actions, labels, new LongPress.Listener() {
                     @Override
                     public void react(String emoji) {
                         say(Core.react(peer, Core.str(row, "id"), emoji));
@@ -903,7 +921,42 @@ public class ChatActivity extends Activity implements Events.Listener {
             pin(0);
         } else if (action == R.string.action_delete) {
             askDelete(one);
+        } else if (action == R.string.action_run) {
+            showRun(row);
         }
+    }
+
+    /**
+     * Every report the run's row folds (1184), newest first: when, where,
+     * how exact; a tap opens the map on that one, as the row does on the
+     * newest.
+     */
+    private void showRun(Map<String, Object> row) {
+        final List<Map<String, Object>> run = Core.run(peer, Core.num(row, "key"));
+        java.text.DateFormat time = android.text.format.DateFormat.getTimeFormat(this);
+        String[] lines = new String[run.size()];
+        for (int i = 0; i < run.size(); i++) {
+            Map<String, Object> one = run.get(i);
+            StringBuilder line = new StringBuilder(
+                    time.format(new java.util.Date(Core.num(one, "at") * 1000)));
+            if (one.get("place") != null) {
+                line.append("  \uD83D\uDCCD ").append(Core.str(one, "place"));
+            }
+            String accuracy = Core.str(one, "accuracy");
+            if (!accuracy.isEmpty()) {
+                line.append(" \u00B7 ").append(accuracy);
+            }
+            lines[i] = line.toString();
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.run_title, run.size()))
+                .setItems(lines, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        showFix(run.get(which));
+                    }
+                })
+                .show();
     }
 
     /** Write a reply to `row`, its quote above the field; null ends it. */

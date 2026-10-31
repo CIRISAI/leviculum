@@ -192,6 +192,14 @@ pub struct Row {
     pub packed: Option<Vec<u8>>,
 }
 
+/// A conversation beside the twenty, for the fold of 1184: a text, a run
+/// of [`RUN_REPORTS`] position reports a minute apart, a text, all unread
+/// ([`fill_run_of`]).
+pub const RUN: usize = CONVERSATIONS;
+/// The reports of [`RUN`]'s run, as Lew's phone got them from Columba in
+/// twelve minutes on 2026-10-31.
+pub const RUN_REPORTS: usize = 14;
+
 /// The [`LONG_CHARS`] character body: umlauts and emoji, so a cut in the
 /// middle of a character would show.
 pub fn long_body() -> String {
@@ -571,4 +579,68 @@ pub fn fill_store_of(home: &Path, own: &Identity) -> Filled {
         }
     }
     filled
+}
+
+/// Write conversation [`RUN`] into the store of the loquax in `home` for the
+/// address of `own`, after [`fill_store_of`]: `losgefahren`, then
+/// [`RUN_REPORTS`] position reports a minute apart, then `angekommen`,
+/// every one received and unread. Their keys lie above the ugly store's.
+pub fn fill_run_of(home: &Path, own: &Identity) -> Filled {
+    use loquax::ui::history::{Flags, StoreWrite};
+    use loquax::when::WallTime;
+    let me = loquax::engine::delivery_address(own).expect("address");
+    let mut store = Store::open_in(home, me).expect("the store");
+    let peer = peer(RUN);
+    let start = BASE + 86_400;
+    let mut writes = Vec::new();
+    let count = RUN_REPORTS + 2;
+    for j in 0..count {
+        let at = start + j as i64 * 60;
+        let (body, fields) = match j {
+            0 => ("losgefahren".to_string(), Vec::new()),
+            j if j == count - 1 => ("angekommen".to_string(), Vec::new()),
+            j => (String::new(), position(at, 52_524_360 + j as i32)),
+        };
+        let key = loquax::store::key_of(10_000 + j as i64);
+        let id = [0x84 ^ j as u8; 32];
+        let fixes = loquax::telemetry::read(peer, &fields, Some(at)).fixes;
+        writes.push(StoreWrite::Message {
+            peer,
+            message: loquax::ui::Message {
+                outbound: false,
+                size: body.len(),
+                body,
+                id: Some(id),
+                delivery: None,
+                signature: Signature::Unverified,
+                leg: None,
+                unproven: false,
+                at: Some(WallTime {
+                    unix_secs: at,
+                    offset_secs: 0,
+                }),
+                ledger: Vec::new(),
+                last_leg: None,
+                activity: key,
+                fields,
+            },
+        });
+        writes.extend(fixes.into_iter().map(|fix| {
+            StoreWrite::Position(loquax::telemetry::Fix {
+                message: Some(key),
+                ..fix
+            })
+        }));
+    }
+    writes.push(StoreWrite::Conversation {
+        peer,
+        pinned: false,
+        unread: count,
+        flags: Flags::default(),
+    });
+    store.write(&writes).expect("the run");
+    Filled {
+        messages: count,
+        imported: 0,
+    }
 }

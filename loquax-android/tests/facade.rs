@@ -2091,3 +2091,107 @@ async fn a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens() {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+/// Lew's phone, 2026-10-31 (1184): Columba's report a minute was a bubble,
+/// an unread count and a notification each. Over the ugly store with a run
+/// of 14 reports between two texts, the facade answers three rows, the
+/// run's with its count and when it began, and counts it unread once; the
+/// expand lists all 14, newest first. A report after the text starts a new
+/// run, a row of its own counted once, which the next report updates in
+/// place. The store keeps every report.
+#[test]
+fn a_run_of_reports_is_one_row_counted_once_and_expands() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{update, UiEvent};
+    use loquax_android::session;
+    use ugly_store::{RUN, RUN_REPORTS};
+    let home = tempfile::tempdir().expect("app dir");
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    ugly_store::fill_store_of(home.path(), &identity);
+    ugly_store::fill_run_of(home.path(), &identity);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let store = loquax::store::Store::open_in(home.path(), me).expect("the store");
+    // As the session starts: the store's conversations, none open.
+    let mut model = session::known(home.path(), &store).expect("a model");
+    model.home_client = true;
+    model.list_apart = true;
+    update(
+        &mut model,
+        UiEvent::Clock(loquax::when::WallTime {
+            unix_secs: ugly_store::BASE + 2 * 86_400,
+            offset_secs: 0,
+        }),
+    );
+    model.restore(store.restore().expect("restore"));
+    update(&mut model, UiEvent::Close);
+    let peer = ugly_store::peer(RUN);
+    let c = model
+        .conversations
+        .iter()
+        .position(|conversation| conversation.peer == peer)
+        .expect("the run's conversation");
+
+    let rows = session::rows(&model, c);
+    let shape: Vec<(&str, u32)> = rows.iter().map(|r| (r.body.as_str(), r.updates)).collect();
+    assert_eq!(
+        shape,
+        [
+            ("losgefahren", 0),
+            ("", RUN_REPORTS as u32),
+            ("angekommen", 0)
+        ]
+    );
+    let run = &rows[1];
+    assert_eq!(
+        run.lat_e6,
+        Some(52_524_360 + RUN_REPORTS as i32),
+        "the newest"
+    );
+    assert!(run.place.is_some() && run.accuracy.is_some(), "{run:?}");
+    assert_eq!(
+        run.since,
+        ugly_store::BASE + 86_400 + 60,
+        "the first report"
+    );
+    assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 3);
+
+    let expanded = session::run(&model, peer, loquax_android::schema::model_key(run.key));
+    assert_eq!(expanded.positions.len(), RUN_REPORTS);
+    assert_eq!(expanded.positions[0].key, run.key, "newest first");
+    let lats: Vec<i32> = expanded.positions.iter().filter_map(|p| p.lat_e6).collect();
+    let want: Vec<i32> = (1..=RUN_REPORTS as i32)
+        .rev()
+        .map(|j| 52_524_360 + j)
+        .collect();
+    assert_eq!(lats, want);
+    // A text's row expands to itself alone.
+    let alone = session::run(&model, peer, loquax_android::schema::model_key(rows[0].key));
+    assert_eq!(alone.positions.len(), 1);
+
+    // After the text a report starts a new run: a row of its own, unread
+    // once; the next report updates that row, and counts nothing more.
+    let report = |id: u8, lat: i32| {
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [id; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: ugly_store::position(ugly_store::BASE + 2 * 86_400, lat),
+            verified: true,
+        })
+    };
+    update(&mut model, report(0xe1, 52_600_000));
+    let rows = session::rows(&model, c);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[3].updates, 0, "one report is no run yet");
+    assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 4);
+    update(&mut model, report(0xe2, 52_600_001));
+    let rows = session::rows(&model, c);
+    assert_eq!(rows.len(), 4, "updated in place");
+    assert_eq!((rows[3].updates, rows[3].lat_e6), (2, Some(52_600_001)));
+    let row = loquax::ui::chat::list_row(&model, &peer);
+    assert_eq!((row.unread, row.updates), (4, 2));
+    // Every report is still there, and every one unread for the read marks.
+    assert_eq!(model.conversations[c].messages.len(), RUN_REPORTS + 4);
+    assert_eq!(model.conversations[c].unread, RUN_REPORTS + 4);
+}

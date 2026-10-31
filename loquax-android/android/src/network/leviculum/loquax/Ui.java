@@ -127,7 +127,10 @@ final class Ui {
     static String preview(Context context, Map<String, Object> row) {
         String kind = Core.str(row, "kind");
         if ("position".equals(kind)) {
-            return context.getString(R.string.position);
+            // A run of reports is one line with its count (1184).
+            long updates = Core.num(row, "updates");
+            String line = "\uD83D\uDCCD " + context.getString(R.string.position);
+            return updates > 1 ? context.getString(R.string.position_run, line, (int) updates) : line;
         }
         String reaction = Core.str(row, "reaction");
         if ("reaction".equals(kind) && !reaction.isEmpty()) {
