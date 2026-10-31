@@ -612,13 +612,25 @@ class Fixture:
                 proc.wait(timeout=5)
 
 
-def lnsd_config(instance: str, listen_ip: str, port: int) -> str:
+def lnsd_config(
+    instance: str,
+    listen_ip: str,
+    port: int,
+    mode: str | None = None,
+    link_keepalive: int | None = None,
+) -> str:
+    """The fixture's config. `mode` is the TCP server's interface mode
+    (`access_point` keeps announces off the device's connection) and
+    `link_keepalive` the `keepalive_interval` in seconds of every link
+    the host's side holds; both are the power proxy's levers (1177)."""
+    keepalive = f"  keepalive_interval = {link_keepalive}\n" if link_keepalive else ""
+    server_mode = f"    mode = {mode}\n" if mode else ""
     return f"""[reticulum]
   enable_transport = True
   share_instance = Yes
   instance_name = {instance}
   panic_on_interface_error = No
-
+{keepalive}
 [logging]
   loglevel = 4
 
@@ -628,7 +640,7 @@ def lnsd_config(instance: str, listen_ip: str, port: int) -> str:
     enabled = yes
     listen_ip = {listen_ip}
     listen_port = {port}
-"""
+{server_mode}"""
 
 
 def wait_for(predicate, timeout: float, every: float = 0.25):
@@ -838,7 +850,10 @@ class Walk:
             raise StepFailed(f"walk_mailbox: {filled.stderr.decode(errors='replace')[-400:]}")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         (cfg / "config").write_text(
-            lnsd_config(f"walk{os.getpid()}", args.listen, port), encoding="utf-8"
+            lnsd_config(
+                f"walk{os.getpid()}", args.listen, port, args.server_mode, args.link_keepalive
+            ),
+            encoding="utf-8",
         )
         fixture = Fixture(root, cfg, mailbox, sender, manifest, code="")
         self.fixture = fixture
@@ -1333,6 +1348,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="host:port of the mailbox's TCP server as the device reaches it",
     )
     p.add_argument("--listen", default="0.0.0.0", help="the TCP server's listen address")
+    p.add_argument(
+        "--server-mode",
+        help="the TCP server's interface mode, e.g. access_point; default: full",
+    )
+    p.add_argument(
+        "--link-keepalive",
+        type=int,
+        help="keepalive_interval in seconds of the host's links; default: from the RTT",
+    )
     p.add_argument("--loquax", default=str(debug / "loquax"), help="host loquax (--features tui)")
     p.add_argument("--lnsd", default=str(debug / "lnsd"), help="host lnsd")
     p.add_argument(
