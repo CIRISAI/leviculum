@@ -54,3 +54,21 @@ reference/LXMF/LXMF/__init__.py leviculum-lxmf/reference_lock
 # PythonPeer::start asserts the daemon says READY; there is no skip guard.
 reference/Reticulum/RNS/__init__.py loquax/python_interop
 reference/LXMF/LXMF/__init__.py loquax/python_interop
+
+# The same Python peer (loquax/tests/support/python_peer.rs) in the tests that
+# start one outside python_interop, by exact name: the rest of each target
+# needs no reference. Measured 2026-10-31 with a python3 that fails
+# scripts/test_daemon.py: these five, and only these, fail in loquax-android
+# and in the loquax-tui recipe's targets (1167). home_node requires the `tui`
+# feature, so it runs in the `loquax-tui` recipe and not in the computed runs;
+# that recipe reads these lines through scripts/with-prerequisites.sh.
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
+reference/Reticulum/RNS/__init__.py loquax/home_node a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it
+reference/LXMF/LXMF/__init__.py loquax/home_node a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it
+reference/Reticulum/RNS/__init__.py loquax/home_node a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
+reference/LXMF/LXMF/__init__.py loquax/home_node a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
+reference/Reticulum/RNS/__init__.py loquax/home_node a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once
+reference/LXMF/LXMF/__init__.py loquax/home_node a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once
+reference/Reticulum/RNS/__init__.py loquax/home_node what_one_client_reads_and_sends_shows_on_the_other
+reference/LXMF/LXMF/__init__.py loquax/home_node what_one_client_reads_and_sends_shows_on_the_other

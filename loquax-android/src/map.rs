@@ -90,6 +90,9 @@ pub struct Renderer {
     autoload: bool,
     theme: Option<ThemeFlag>,
     origin: Instant,
+    /// The clock a test holds instead of [`origin`](Self::origin)'s
+    /// ([`tune_clock`]).
+    held_ms: Option<u64>,
     /// The view the last fit chose: a region that lands fits again while
     /// the view is still there.
     fitted_at: Option<(World, u32)>,
@@ -114,13 +117,15 @@ impl Renderer {
             autoload: config.map_autoload.unwrap_or(true),
             theme: config.map_theme,
             origin: Instant::now(),
+            held_ms: None,
             fitted_at: None,
             pins_asked: false,
         }
     }
 
     fn now_ms(&self) -> u64 {
-        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+        self.held_ms
+            .unwrap_or_else(|| u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 
     /// Ask for `want` when the autoload is on; a line for the user when it
@@ -603,6 +608,19 @@ pub fn tune_tiles(dir: &Path, n: Option<usize>, clear: bool) {
         if clear {
             r.frames.clear_tiles();
         }
+    }
+}
+
+/// Hold the clock of the renderer over `dir` at `now_ms`, or with `None`
+/// let it run again. The pan's velocity, which orders the prefetch
+/// (1135), is pixels over these milliseconds: a test that reads the
+/// order holds them, or how fast the host draws decides it (1167).
+pub fn tune_clock(dir: &Path, now_ms: Option<u64>) {
+    let mut renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(r) = renderers.iter_mut().find(|r| r.dir == dir) {
+        r.held_ms = now_ms;
     }
 }
 
