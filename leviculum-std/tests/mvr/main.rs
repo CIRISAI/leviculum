@@ -61,7 +61,7 @@ pub use harness::port_alloc;
 /// Per-thread arming was necessary and not sufficient. libtest gives each
 /// test its own thread, so no other test's *own* allocations land in this
 /// window — but `tracing` dispatch runs on the thread that emits the event,
-/// and `EventLogLayer::emit`, under `on_event` (`leviculum-std/src/event_log.rs:2112`)
+/// and `EventLogLayer::emit`, under `on_event` (`leviculum-std/src/event_log.rs:2145`)
 /// pushes one `String` into the buffer of EVERY capture handle any test has
 /// registered, "regardless of which test emitted it" (that module's own doc).
 /// So the code under test emitting `PKT_TX`
@@ -378,6 +378,7 @@ mod alloc_probe_self_test {
     }
 }
 
+mod a_connection_flood_starves_the_tcp_server;
 mod a_dead_sync_link_ends_the_round_beside_a_second_node;
 // The `serial`-gated modules drive the RNode channel or the serial radio
 // bring-up in-process, so a build without that feature has nothing for them

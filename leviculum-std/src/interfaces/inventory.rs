@@ -163,6 +163,9 @@ pub(crate) struct ListenerRow {
     /// kernel-assigned port, which is how a caller learns it (Codeberg #221);
     /// `None` for non-IP listeners (the shared-instance Unix socket).
     pub bound_addr: Option<SocketAddr>,
+    /// The TCP server's admission tracker (1190), which `lnstatus` reads its
+    /// connection counters from; `None` for every other listener.
+    pub admission: Option<Arc<Mutex<crate::interfaces::tcp_admission::ConnTracker>>>,
 }
 
 /// The reporting-side interface inventory (see the module docs).
@@ -383,6 +386,7 @@ mod tests {
                 departed_rxb: 0,
                 departed_txb: 0,
                 bound_addr: None,
+                admission: None,
             },
         );
         inv.set_section_origin("s", InterfaceOrigin::Configured);
@@ -443,6 +447,7 @@ mod tests {
                 departed_rxb: 0,
                 departed_txb: 0,
                 bound_addr: Some("127.0.0.1:1".parse().unwrap()),
+                admission: None,
             },
         );
         inv.add_spawned(

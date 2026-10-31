@@ -464,6 +464,8 @@ struct StatRow {
     /// What TAKING the carrier costs at worst, as the interface prices it;
     /// `None` for a medium that transmits as soon as it is asked.
     acquisition: Option<leviculum_core::transport::AcquisitionCeiling>,
+    /// A TCP server's admission counters (1190); `None` for every other row.
+    admission: Option<crate::interfaces::tcp_admission::AdmissionStats>,
 }
 
 /// Serialise one row into the Python `interface_stats` per-interface dict.
@@ -756,6 +758,23 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         }
     }
 
+    // 1190: a TCP server's admission counters. Additive like `origin`:
+    // rnstatus reads keys by name and passes these unread; lnstatus prints
+    // them as the `Admission` line. `connections` and `silent` are now,
+    // `capped` and `silent_closed` count since start.
+    if let Some(a) = row.admission {
+        fields.push((
+            pickle_str_key("connections"),
+            pickle_int(a.connections as i64),
+        ));
+        fields.push((pickle_str_key("silent"), pickle_int(a.silent as i64)));
+        fields.push((pickle_str_key("capped"), pickle_int(a.capped as i64)));
+        fields.push((
+            pickle_str_key("silent_closed"),
+            pickle_int(a.silent_closed as i64),
+        ));
+    }
+
     pickle_dict(fields)
 }
 
@@ -992,6 +1011,7 @@ pub(crate) fn build_interface_stats(
             tx_jitter_max_ms: entry.link_profile.and_then(|p| p.tx_jitter_max_ms),
             tx_hold_spread_max_ms: entry.link_profile.and_then(|p| p.tx_hold_spread_max_ms),
             acquisition: entry.link_profile.and_then(|p| p.acquisition),
+            admission: None,
         });
     }
 
@@ -1044,6 +1064,10 @@ pub(crate) fn build_interface_stats(
             tx_jitter_max_ms: None,
             tx_hold_spread_max_ms: None,
             acquisition: None,
+            admission: listener
+                .admission
+                .as_ref()
+                .map(|t| t.lock_recover().stats()),
         });
     }
 
@@ -2500,6 +2524,7 @@ mod tests {
             departed_rxb: 0,
             departed_txb: 0,
             bound_addr: None,
+            admission: None,
         };
 
         // The shared-instance server alone: 1 Gbps, and it counts.
@@ -2565,6 +2590,7 @@ mod tests {
                 departed_rxb: 0,
                 departed_txb: 0,
                 bound_addr: None,
+                admission: None,
             },
         );
 
@@ -3455,6 +3481,7 @@ mod tests {
                     departed_rxb: 100,
                     departed_txb: 10,
                     bound_addr: Some("127.0.0.1:4242".parse().unwrap()),
+                    admission: None,
                 },
             );
             inv.add_spawned(
@@ -3606,6 +3633,7 @@ mod tests {
                     departed_rxb: 0,
                     departed_txb: 0,
                     bound_addr: Some("127.0.0.1:4242".parse().unwrap()),
+                    admission: None,
                 },
             );
             inv.add_spawned(
@@ -3913,7 +3941,7 @@ mod tests {
     // a peer/instance label that matches none of `interface_type`'s name
     // prefixes, so a LoRa radio is reported as the generic "Interface". That
     // is not only a wrong medium column in rnstatus: `itype` also picks the
-    // bitrate guess (handlers.rs:765-771), so the radio is advertised at 10 Mbps.
+    // bitrate guess (handlers.rs:784-790), so the radio is advertised at 10 Mbps.
     #[test]
     fn interface_type_comes_from_the_transport_not_the_name() {
         use crate::clock::SystemClock;

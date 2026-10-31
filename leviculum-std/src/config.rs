@@ -1151,6 +1151,22 @@ pub struct InterfaceConfig {
     /// taking the advertisement off the air; absent is off, the boards'
     /// dark-when-full policy. A measurement knob (752). No reference key.
     pub advertise_when_full: Option<bool>,
+    /// Most connections one source (an IPv4 address, or an IPv6 /64) holds
+    /// on a TCP server at once; a new one past it is closed right after
+    /// accept (1190). Absent is 16, `0` turns the cap off. The total cap of
+    /// a TCP server is `max_connections`. No reference key: Python's
+    /// `TCPServerInterface` accepts every connection.
+    pub max_connections_per_source: Option<usize>,
+    /// Seconds a TCP server connection may stay open without delivering one
+    /// valid HDLC frame (1190). Absent is 120, `0` never closes a silent
+    /// connection. No reference key.
+    pub silent_timeout_secs: Option<u64>,
+    /// The silent timeout above while the server holds more than
+    /// `pressure_fraction` of its total cap (1190). Absent is 10.
+    pub silent_timeout_pressure_secs: Option<u64>,
+    /// Fraction of `max_connections` above which a TCP server is under
+    /// pressure (1190). Absent is 0.8; outside `(0, 1]` is refused.
+    pub pressure_fraction: Option<f64>,
     /// A TCP server's listener, bound by the caller and handed over instead
     /// of an address (`ReticulumNodeBuilder::add_tcp_server_listener`). Never
     /// a config-file key: a bound socket is not representable there, which is
@@ -1317,6 +1333,10 @@ impl Default for InterfaceConfig {
             fragment_mtu: None,
             central_links: None,
             advertise_when_full: None,
+            max_connections_per_source: None,
+            silent_timeout_secs: None,
+            silent_timeout_pressure_secs: None,
+            pressure_fraction: None,
             prebound_tcp_listener: None,
         }
     }

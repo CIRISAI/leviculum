@@ -11284,6 +11284,7 @@ mod tests {
                         departed_rxb: 0,
                         departed_txb: 0,
                         bound_addr: None,
+                        admission: None,
                     },
                 );
             }

@@ -891,7 +891,7 @@ fn is_quiet(stats: &Value) -> bool {
 
 /// One tick of the 1 Hz traffic counter, on BOTH stacks: ours samples the byte
 /// counters once a second and caches `(delta * 8) / elapsed`
-/// (`spawn_traffic_counter`, leviculum-std/src/interfaces/mod.rs:359-377),
+/// (`spawn_traffic_counter`, leviculum-std/src/interfaces/mod.rs:360-378),
 /// Python's `Transport.count_traffic_loop` does the same.
 const SPEED_SAMPLE_PERIOD: Duration = Duration::from_secs(1);
 
@@ -2614,7 +2614,7 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // `tx_unaccounted` is additive on exactly the same terms: it counts the
     // frames an RNode modem was handed and never accounted for on its own
     // airtime ledger, a packet-loss condition no reference key names. It is
-    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:459-486) and
+    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:459-488) and
     // so appears on this TCP interface too, reading 0 — the honest value for
     // a medium that keeps no such ledger. Reference tolerance re-measured on
     // the pinned vendor tree for this key: rnstatus reads interface fields

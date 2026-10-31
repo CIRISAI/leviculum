@@ -742,6 +742,39 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "AUTO_PEER_REFUSED",
         required_keys: &["reason", "src", "port", "nic", "peers", "suppressed"],
     },
+    // TCP server admission (1190, `interfaces/tcp_admission.rs`). The accept
+    // loop paused after a failed accept: one line per 10 s, `errors` counts
+    // the failures since the last one, `fds` is `used/limit`.
+    EventSchema {
+        name: "TCP_ACCEPT_BACKOFF",
+        required_keys: &["iface", "errors", "fds", "error"],
+    },
+    // A new connection from a source (IPv4 address or IPv6 /64) that holds
+    // `max_connections_per_source` was closed right after accept; once per
+    // source per minute.
+    EventSchema {
+        name: "TCP_SOURCE_CAPPED",
+        required_keys: &["iface", "source", "held"],
+    },
+    // The server holds `max_connections` and no silent connection could make
+    // room; once per minute.
+    EventSchema {
+        name: "TCP_TOTAL_CAPPED",
+        required_keys: &["iface", "source", "held"],
+    },
+    // A connection that delivered no valid frame was closed: `reason` is
+    // `timeout` (the silent timeout in force) or `evicted` (room for a
+    // newcomer at the total cap). One line per 10 s; `suppressed` counts the
+    // closes in between.
+    EventSchema {
+        name: "TCP_SILENT_CLOSED",
+        required_keys: &["iface", "source", "after_s", "reason", "suppressed"],
+    },
+    // The descriptor limit a TCP server found and raised, once per process.
+    EventSchema {
+        name: "FD_LIMIT",
+        required_keys: &["soft", "hard", "raised_from"],
+    },
     // `loquax`, the LXMF messenger. The program was called lnmsg until #232
     // renamed it; its events keep the `LNMSG_` prefix until a later order
     // renames them here, in the emitters and in periculum's cells together.

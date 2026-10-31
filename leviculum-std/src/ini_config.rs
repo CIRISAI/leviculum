@@ -1014,6 +1014,13 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         "discovery_frequency" => iface.discovery_frequency = value.parse().ok(),
         "discovery_bandwidth" => iface.discovery_bandwidth = value.parse().ok(),
         "discovery_modulation" => iface.discovery_modulation = value.parse().ok(),
+        // TCP server admission (1190). No Python equivalent: the reference
+        // accepts every connection. `max_connections`, the total cap, shares
+        // the BLE arm above.
+        "max_connections_per_source" => iface.max_connections_per_source = value.parse().ok(),
+        "silent_timeout_secs" => iface.silent_timeout_secs = value.parse().ok(),
+        "silent_timeout_pressure_secs" => iface.silent_timeout_pressure_secs = value.parse().ok(),
+        "pressure_fraction" => iface.pressure_fraction = value.parse().ok(),
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
         // bind, id_callsign, modulation, ...) must never make lnsd reject an
