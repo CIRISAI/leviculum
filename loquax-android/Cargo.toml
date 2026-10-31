@@ -67,3 +67,6 @@ serde_json = "1"
 # into RGBA as the window does (1128); both in the lock through loquax.
 png = "0.18"
 embedded-graphics = "0.8"
+# The schema's property tests (1173), the workspace's version; in the
+# lock already, through leviculum-core.
+proptest.workspace = true
