@@ -52,6 +52,13 @@ Usage:
       print `<dir>/<target><TAB><features><TAB><recipe or ->` for every
       test target with required features, and check nothing: the rule
       scripts/ci-gate-integ.sh excludes by
+  python3 scripts/check-standard-integ.py --wrapped [--justfile PATH]
+      print `<dir>/<target><TAB><recipe>` for every test target with
+      required features whose recipe runs it through
+      scripts/with-prerequisites.sh naming it (rule 4b), and check nothing:
+      scripts/ci-gate-integ.sh accepts a by-name entry of
+      scripts/integ-prerequisites.txt for such a target, which its own run
+      excludes, because that recipe applies it (1203)
 """
 
 import argparse
@@ -184,6 +191,26 @@ def claimed_by(claims, target):
     return None
 
 
+def runs_through_wrapper(source, recipe, target):
+    """Does `recipe`'s body run `target` through PREREQ_RUNNER, naming it?"""
+    body = recipe_body(source, recipe) or ""
+    wrapped = re.compile(
+        re.escape(PREREQ_RUNNER) + r"[^\n]*\s" + re.escape(target) + r"(\s|$)", re.M
+    )
+    return wrapped.search(body) is not None
+
+
+def wrapped_targets(source, metadata, claims):
+    """[(target, recipe)] of every target with required features whose
+    claimed recipe runs it through PREREQ_RUNNER: what `--wrapped` prints."""
+    out = []
+    for target, features in sorted(metadata.items()):
+        recipe = claimed_by(claims, target) if features else None
+        if recipe is not None and runs_through_wrapper(source, recipe, target):
+            out.append((target, recipe))
+    return out
+
+
 def findings(justfile, enumerated, metadata, elsewhere, prerequisites, forge_runner):
     """One line per way `standard` or the forge gate can miss a target.
 
@@ -305,11 +332,7 @@ def findings(justfile, enumerated, metadata, elsewhere, prerequisites, forge_run
         recipe = claimed_by(claim_lines, target)
         if recipe is None:
             continue
-        body = recipe_body(source, recipe) or ""
-        wrapped = re.compile(
-            re.escape(PREREQ_RUNNER) + r"[^\n]*\s" + re.escape(target) + r"(\s|$)", re.M
-        )
-        if not wrapped.search(body):
+        if not runs_through_wrapper(source, recipe, target):
             out.append(
                 f"{shown} declares prerequisites of {target}, which requires "
                 f"features and runs in recipe `{recipe}`, not in {RUNNER} or "
@@ -438,6 +461,17 @@ def selftest():
                 failed.append(f"{label}: expected no finding, got {got}")
             elif expect is not None and not any(expect in line for line in got):
                 failed.append(f"{label}: expected a finding with `{expect}`, got {got}")
+    # `--wrapped`, which scripts/ci-gate-integ.sh trusts to call a by-name
+    # line for a target it excludes applied elsewhere (1203): the wrapped
+    # recipe is listed, the same recipe without the wrapper is not.
+    claims = good_claims + [gated_claim]
+    got = wrapped_targets(FIXTURE_JUSTFILE, gated, claims)
+    if got != [("a/gated", "tui")]:
+        failed.append(f"--wrapped on the clean fixture: expected [('a/gated', 'tui')], got {got}")
+    bare = FIXTURE_JUSTFILE.replace("bash scripts/with-prerequisites.sh a/gated -- ", "")
+    got = wrapped_targets(bare, gated, claims)
+    if got:
+        failed.append(f"--wrapped with the recipe unwrapped: expected nothing, got {got}")
     return failed
 
 
@@ -445,7 +479,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--justfile", default=os.path.join(REPO_DIR, "Justfile"))
     parser.add_argument("--gated", action="store_true")
+    parser.add_argument("--wrapped", action="store_true")
     args = parser.parse_args()
+
+    if args.wrapped:
+        try:
+            claims = data_lines(os.path.join(REPO_DIR, ELSEWHERE))
+            with open(args.justfile, encoding="utf-8") as handle:
+                source = handle.read()
+            for target, recipe in wrapped_targets(source, metadata_targets(), claims):
+                print(f"{target}\t{recipe}")
+        except (RuntimeError, OSError) as error:
+            print(f"check-standard-integ: could not list wrapped targets: {error}", file=sys.stderr)
+            return 1
+        return 0
 
     if args.gated:
         try:
