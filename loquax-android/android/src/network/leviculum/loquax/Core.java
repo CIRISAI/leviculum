@@ -233,6 +233,17 @@ final class Core {
                 map("t", "run", "peer", peer, "key", key)))), "positions");
     }
 
+    /**
+     * Everyone with a position (1200), newest first: the map's pins and
+     * its Friends sheet. Each row peer, name, initials, icon_fg, icon_bg,
+     * photo, at, lat_e6, lon_e6, distance_m (only with the phone's fix),
+     * recent (the last 24 h), stale, geo; our own apart under "me". An
+     * "error" key without a session.
+     */
+    static Map<String, Object> friends() {
+        return answer(Native.query(MsgPack.pack(map("t", "friends"))));
+    }
+
     /** Every link: peer, lookup, contact_id, name. */
     static List<Map<String, Object>> links() {
         return list(answer(Native.query(MsgPack.pack(map("t", "links")))), "links");

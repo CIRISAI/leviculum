@@ -276,6 +276,20 @@ a friend already on screen is one tap away from the map (the pin).
 - **1200: the map.** Avatar pins with age labels, clustering, the pin
   card with Chat and Navigate (`geo:`), the chat bubble to map to back
   path, the loading and offline chips, the Friends button and sheet.
+  Built in 1200 with the reviewer's answers below and these choices of
+  its own: the pins are drawn by the app over the library's frame (the
+  library draws none when asked with `avatars` and says where they lie),
+  so a pin is the list's avatar circle with its photo; a cluster is a
+  circle in the badge colours with its count, sitting on its first pin;
+  two pins cluster when their centres lie closer than one circle (40 dp),
+  a pin joining the first cluster whose first pin is that close; a
+  cluster's tap flies to the zoom where its closest pair lies a circle and
+  a tenth apart, and at a zoom deeper than the regions allow opens the
+  filtered sheet. The Friends sheet is the map's search too (friends
+  only). The loading chip still has no region name and progress: the
+  loader knows neither (no place index, no progress from the cut); the
+  Offline and No map here yet chips came. The empty map's line and
+  "Share my position" wait for 1201, which sends.
 - **1201: location.** The crosshair (centre, follow), the permission flow
   above, "Share my position" from the empty state, the card and the
   chat's attachment menu; the Maps settings page (regions, sizes, delete,

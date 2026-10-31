@@ -1,6 +1,7 @@
 package network.leviculum.loquax;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.ImageButton;
@@ -9,7 +10,9 @@ import java.util.Map;
 
 /**
  * The map as a sub view (1199): opened from a chat or a contact on a
- * message's fix, with its sender's pin selected, or from a chat's menu.
+ * message's fix, with its sender's card open (1200), or from a chat's
+ * menu. Chat on the card of the friend whose chat opened the map goes
+ * back to that chat, where it was.
  * The main views' layout with the back arrow and no tabs; back returns to
  * where the user came from. The map itself is {@link MapPane}'s, the same
  * as the Map tab's.
@@ -29,7 +32,15 @@ public class MapActivity extends Activity implements Events.Listener {
         setContentView(R.layout.activity_conversations);
         ConversationsActivity.subView(this);
         ((TextView) findViewById(R.id.title)).setText(R.string.map);
-        findViewById(R.id.search).setVisibility(View.GONE);
+        findViewById(R.id.search).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                map.search();
+            }
+        });
+        ((ImageButton) findViewById(R.id.search)).setImageDrawable(
+                new Glyph(Glyph.Kind.SEARCH, getColor(R.color.text)));
+        ((ImageButton) findViewById(R.id.search)).setContentDescription(getString(R.string.friends_search));
         findViewById(R.id.pane_chats).setVisibility(View.GONE);
         findViewById(R.id.pane_map).setVisibility(View.VISIBLE);
         final ImageButton menu = (ImageButton) findViewById(R.id.menu);
@@ -40,11 +51,31 @@ public class MapActivity extends Activity implements Events.Listener {
                 ConversationsActivity.showMenu(MapActivity.this, menu);
             }
         });
-        map = new MapPane(this);
+        final String from = getIntent().getStringExtra(SELECTED);
+        map = new MapPane(this, new MapPane.Host() {
+            @Override
+            public void chat(String peer) {
+                if (peer.equals(from)) {
+                    // Opened from this chat: back to it, where it was.
+                    finish();
+                    return;
+                }
+                startActivity(new Intent(MapActivity.this, ChatActivity.class)
+                        .putExtra(ChatActivity.PEER, peer));
+            }
+        });
         if (getIntent().hasExtra(LAT_E6) && getIntent().hasExtra(LON_E6)) {
             map.centreOn(getIntent().getLongExtra(LAT_E6, 0), getIntent().getLongExtra(LON_E6, 0),
                     getIntent().getStringExtra(SELECTED));
         }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (map.back()) {
+            return;
+        }
+        super.onBackPressed();
     }
 
     @Override

@@ -37,6 +37,17 @@
     <string name="battery_no">Not now</string>
     <string name="map">Map</string>
     <string name="map_loading">Loading the map of this area…</string>
+    <!-- 1200: the map's state chips, its people, the card and the Friends sheet. -->
+    <string name="map_offline">Offline</string>
+    <string name="map_no_map">No map here yet</string>
+    <string name="friends">Friends</string>
+    <string name="friends_search">Find a friend</string>
+    <string name="friends_older">Older than a day</string>
+    <string name="friends_none">No friends on the map yet. When a friend shares their position with you, they appear here.</string>
+    <string name="friends_no_match">No friend by that name.</string>
+    <string name="card_chat">Chat</string>
+    <string name="card_navigate">Navigate</string>
+    <string name="card_ago">%1$s ago</string>
     <string name="back">Back</string>
     <string name="menu">More</string>
     <string name="emoji">Emoji</string>

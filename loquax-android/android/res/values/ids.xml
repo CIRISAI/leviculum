@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The ids of views made in code: the Friends sheet's (MapPane, 1200),
+     which the device walk finds by them. -->
+<resources>
+    <item name="friends_sheet" type="id" />
+    <item name="friend_row" type="id" />
+    <item name="friend_name" type="id" />
+    <item name="friend_age" type="id" />
+    <item name="friends_older" type="id" />
+    <item name="friends_empty" type="id" />
+</resources>

@@ -12,10 +12,10 @@ import android.graphics.drawable.Drawable;
  * The few icons the chat and the list draw, as paths on a 24 by 24 grid
  * scaled to the bounds: no icon font, no AndroidX, no image assets (1129,
  * the list's search, close and pencil 1130, the tab bar's chat and pin
- * 1199).
+ * 1199, the map's people button 1200).
  */
 final class Glyph extends Drawable {
-    enum Kind { BACK, MENU, EMOJI, SEND, SENT, DELIVERED, QUEUED, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN }
+    enum Kind { BACK, MENU, EMOJI, SEND, SENT, DELIVERED, QUEUED, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN, PEOPLE }
 
     private final Kind kind;
     private final int color;
@@ -146,6 +146,20 @@ final class Glyph extends Drawable {
                 drop.close();
                 canvas.drawPath(drop, stroke);
                 canvas.drawCircle(12, 9.5f, 2.5f, stroke);
+                break;
+            case PEOPLE:
+                // Two heads and shoulders, the one behind to the right.
+                canvas.drawCircle(9, 8, 3.2f, stroke);
+                Path front = new Path();
+                front.moveTo(3, 20);
+                front.cubicTo(3, 15.5f, 5.7f, 13.5f, 9, 13.5f);
+                front.cubicTo(12.3f, 13.5f, 15, 15.5f, 15, 20);
+                canvas.drawPath(front, stroke);
+                canvas.drawCircle(16.5f, 7, 2.6f, stroke);
+                Path behind = new Path();
+                behind.moveTo(16.5f, 12);
+                behind.cubicTo(19.3f, 12, 21, 14, 21, 17.5f);
+                canvas.drawPath(behind, stroke);
                 break;
             default:
                 break;

@@ -105,10 +105,20 @@ What it does today:
   last frame at rest placed. At rest the map draws the tiles around the
   view ahead of time, first in the direction it last moved, while the
   app is in front and the battery saver is off. Never more than one
-  world shows. The map has the whole room between the bars and no
-  buttons: a chip at the top edge says when a region loads or a load
-  failed and goes by itself, a tap on a pin names it in one. A tap on a
-  position report in a chat opens the map on its fix. Regions load by
+  world shows. The map has the whole room between the bars: a chip at
+  the top edge says when a region loads, when there is no internet, when
+  no region holds the view ("No map here yet") or a load failed. The
+  people are the app's own (1200): each friend an avatar circle with the
+  fix's age under it, overlapping ones one circle with a count, which a
+  tap zooms into until they part (or, where no zoom parts them, lists in
+  the Friends sheet). A tap on a pin opens its card: name, age, Chat, and
+  Navigate, a `geo:` link for the phone's navigation app, hidden when
+  none takes it. The round Friends button bottom right, and the search
+  icon on the Map tab, open the Friends sheet: everyone with a position,
+  the last day first, older ones greyed under a divider; a tap flies the
+  map there and opens the card. A tap on a position report in a chat
+  opens the map on its fix with the sender's card, and back returns to
+  the chat. Regions load by
   themselves around the pins, a report's place and where the user looks,
   as in the terminal (`map_autoload`, `map_source`, `map_cache_mb` in the
   app's `config`). Settings, Appearance chooses the map's colours: like

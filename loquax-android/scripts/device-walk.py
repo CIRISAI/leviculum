@@ -65,6 +65,7 @@ STEPS = [
     "reply_send",
     "receive_wake",
     "map",
+    "friends",
     "teardown",
 ]
 
@@ -260,6 +261,31 @@ def map_screen_problems(nodes: list[Node]) -> list[str]:
     if not find(nodes, rid="map"):
         problems.append("no map view")
     return problems
+
+
+def friends_sheet_problems(nodes: list[Node], allowed: set[str]) -> tuple[list[str], list[str]]:
+    """The Friends sheet's names from the top down (1200), and what is wrong
+    with them: no row at all, a name the fixture gave no position, a name
+    twice."""
+    names = [n.text for n in by_top(find(nodes, rid="friend_name"))]
+    problems = []
+    if not names:
+        problems.append("no friend in the sheet")
+    strangers = [name for name in names if name not in allowed]
+    if strangers:
+        problems.append(f"names without a position in the fixture: {strangers}")
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        problems.append(f"listed twice: {twice}")
+    return names, problems
+
+
+def divider_above(nodes: list[Node]) -> bool:
+    """Whether the sheet's \"Older than a day\" divider stands above its
+    first row: the ugly store's positions are all months old (1200)."""
+    older = find(nodes, rid="friends_older")
+    rows = by_top(find(nodes, rid="friend_name"))
+    return bool(older) and bool(rows) and older[0].bounds[1] < rows[0].bounds[1]
 
 
 HASH_NAME = re.compile(r"<[0-9a-f]{8}…>")
@@ -1106,6 +1132,57 @@ class Walk:
             raise StepFailed(f"Settings' map theme left the brightness at {lumas[0]:.0f} -> {lumas[1]:.0f}")
         dev.key("KEYCODE_BACK")
         return f"{' '.join(changes)} tabs=2 chrome=none theme_luma={lumas[0]:.0f}->{lumas[1]:.0f}"
+
+    def step_friends(self) -> str:
+        """The Map tab's Friends button (1200): the sheet lists the fixture's
+        peers with a position, under the divider of the older ones; a tap
+        on one closes it and opens that friend's card; Chat on the card
+        opens the chat, and back returns to the map with the card; back
+        closes the card, then goes to the chats."""
+        dev = self.need_device()
+        allowed = set(self.need_fixture().manifest.get("friends", []))
+        for _ in range(3):
+            if find(dev.dump(), rid="tab_map"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        dev.tap_node(self.wait_id("tab_map", 10)[0])
+        dev.tap_node(self.wait_id("friends", 10)[0])
+        self.wait_id("friend_name", 10)
+        nodes = dev.dump()
+        names, problems = friends_sheet_problems(nodes, allowed)
+        if names and not divider_above(nodes):
+            problems.append("no 'Older than a day' divider above the rows")
+        self.note(f"friends sheet: {names}")
+        if problems:
+            raise StepFailed("; ".join(problems))
+        first = by_top(find(nodes, rid="friend_row"))
+        if not first:
+            raise StepFailed("no friend row to tap")
+        dev.tap_node(first[0])
+        card = self.wait_id("card_name", 10)
+        if card[0].text != names[0]:
+            raise StepFailed(f"the card says {card[0].text!r}, the row {names[0]!r}")
+        nodes = dev.dump()
+        navigate = bool(find(nodes, rid="card_navigate"))
+        chats = find(nodes, rid="card_chat")
+        if not chats:
+            raise StepFailed(f"no Chat on the card: {texts(nodes)[:12]}")
+        dev.tap_node(chats[0])
+        self.wait_id("compose", 10)
+        dev.key("KEYCODE_BACK")
+        back = self.wait_id("card_name", 10)
+        if back[0].text != names[0]:
+            raise StepFailed(f"back from the chat the card says {back[0].text!r}")
+        dev.key("KEYCODE_BACK")
+        if not wait_for(lambda: not find(dev.dump(), rid="card_name"), 5):
+            raise StepFailed("back did not close the card")
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        return (
+            f"friends={len(names)} of {len(allowed)} with a position, first={names[0]!r} "
+            f"card=ok navigate={'shown' if navigate else 'hidden (no app takes geo:)'} chat=ok back=card,chats"
+        )
 
     def map_theme(self, choice: str) -> None:
         """From the Map tab: menu, Settings, Appearance, `choice`, and back

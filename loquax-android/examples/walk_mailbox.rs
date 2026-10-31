@@ -27,6 +27,24 @@ fn shown(i: usize) -> String {
     ugly_store::shown_name(i).unwrap_or_else(|| format!("<{}…>", &ugly_store::peer_hex(i)[..8]))
 }
 
+/// The names the map's Friends sheet may list (1200): every conversation
+/// but the blocked one whose peer sent a position, archived ones too.
+fn friends(own: &leviculum_core::Identity) -> Vec<String> {
+    (0..ugly_store::CONVERSATIONS)
+        .filter(|&i| i != ugly_store::BLOCKED)
+        .filter(|&i| {
+            ugly_store::rows(own, i).iter().any(|row| {
+                !row.outbound
+                    && row
+                        .fields
+                        .iter()
+                        .any(|(key, _)| *key == leviculum_lxmf::constants::FIELD_TELEMETRY)
+            })
+        })
+        .map(shown)
+        .collect()
+}
+
 fn run(mailbox: PathBuf, sender: PathBuf, manifest: PathBuf) -> Result<(), String> {
     std::fs::create_dir_all(&mailbox).map_err(|e| format!("{}: {e}", mailbox.display()))?;
     std::fs::create_dir_all(&sender).map_err(|e| format!("{}: {e}", sender.display()))?;
@@ -65,6 +83,7 @@ fn run(mailbox: PathBuf, sender: PathBuf, manifest: PathBuf) -> Result<(), Strin
             "oldest_at": rows.first().map_or(0, |row| row.at),
         },
         "sender_peer": ugly_store::peer_hex(them),
+        "friends": friends(&own),
     });
     let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     std::fs::write(&manifest, text).map_err(|e| format!("{}: {e}", manifest.display()))?;

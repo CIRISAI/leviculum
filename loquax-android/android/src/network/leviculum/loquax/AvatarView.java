@@ -51,17 +51,70 @@ public class AvatarView extends View {
     /** Show the peer `peer` (hex) as `row` of the facade describes it. */
     void show(String peer, Map<String, Object> row) {
         initials = Core.str(row, "initials");
-        int bg = colour(Core.str(row, "icon_bg"));
-        int fg = colour(Core.str(row, "icon_fg"));
-        if (bg == 0 || fg == 0) {
-            bg = PALETTE[peer.length() >= 2 ? Integer.parseInt(peer.substring(0, 2), 16) % PALETTE.length : 0];
-            fg = Color.WHITE;
-        }
-        circle.setColor(bg);
-        letters.setColor(fg);
+        int[] colours = colours(peer, row);
+        circle.setColor(colours[0]);
+        letters.setColor(colours[1]);
         photo = photo(Core.str(row, "photo"));
         setContentDescription(Core.str(row, "name"));
         invalidate();
+    }
+
+    /**
+     * The circle's and the letters' colours of `peer` as `row` describes
+     * it: its own icon appearance, else one of the palette by the address
+     * with white letters.
+     */
+    static int[] colours(String peer, Map<String, Object> row) {
+        int bg = colour(Core.str(row, "icon_bg"));
+        int fg = colour(Core.str(row, "icon_fg"));
+        if (bg == 0 || fg == 0) {
+            int at = 0;
+            try {
+                at = peer.length() >= 2 ? Integer.parseInt(peer.substring(0, 2), 16) % PALETTE.length : 0;
+            } catch (NumberFormatException e) {
+                at = 0;
+            }
+            bg = PALETTE[at];
+            fg = Color.WHITE;
+        }
+        return new int[] {bg, fg};
+    }
+
+    /**
+     * `peer` as `row` describes it, a circle `side` wide about (cx, cy)
+     * on `canvas`, with the caller's paints: the map's avatar pins draw
+     * the list's circle (1200).
+     */
+    static void drawAt(Canvas canvas, float cx, float cy, float side, String peer,
+            Map<String, Object> row, Paint circle, Paint letters, Paint picture) {
+        int[] colours = colours(peer, row);
+        circle.setColor(colours[0]);
+        letters.setColor(colours[1]);
+        letters.setTextAlign(Paint.Align.CENTER);
+        letters.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        paint(canvas, cx, cy, side, photo(Core.str(row, "photo")), Core.str(row, "initials"),
+                circle, letters, picture);
+    }
+
+    /** The photo's middle square in the circle, or the circle with the initials. */
+    private static void paint(Canvas canvas, float cx, float cy, float side, Bitmap photo,
+            String initials, Paint circle, Paint letters, Paint picture) {
+        if (photo != null && side > 0) {
+            // The photo's middle square, scaled to the circle.
+            BitmapShader shader = new BitmapShader(photo, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+            float scale = side / Math.min(photo.getWidth(), photo.getHeight());
+            Matrix place = new Matrix();
+            place.setScale(scale, scale);
+            place.postTranslate(cx - photo.getWidth() * scale / 2f, cy - photo.getHeight() * scale / 2f);
+            shader.setLocalMatrix(place);
+            picture.setShader(shader);
+            canvas.drawCircle(cx, cy, side / 2f, picture);
+            return;
+        }
+        canvas.drawCircle(cx, cy, side / 2f, circle);
+        letters.setTextSize(side * (initials.codePointCount(0, initials.length()) > 1 ? 0.38f : 0.45f));
+        Paint.FontMetrics m = letters.getFontMetrics();
+        canvas.drawText(initials, cx, cy - (m.ascent + m.descent) / 2f, letters);
     }
 
     /**
@@ -112,22 +165,7 @@ public class AvatarView extends View {
         float side = Math.min(getWidth(), getHeight());
         float cx = getWidth() / 2f;
         float cy = getHeight() / 2f;
-        if (photo != null && side > 0) {
-            // The photo's middle square, scaled to the circle.
-            BitmapShader shader = new BitmapShader(photo, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
-            float scale = side / Math.min(photo.getWidth(), photo.getHeight());
-            Matrix place = new Matrix();
-            place.setScale(scale, scale);
-            place.postTranslate(cx - photo.getWidth() * scale / 2f, cy - photo.getHeight() * scale / 2f);
-            shader.setLocalMatrix(place);
-            picture.setShader(shader);
-            canvas.drawCircle(cx, cy, side / 2f, picture);
-        } else {
-            canvas.drawCircle(cx, cy, side / 2f, circle);
-            letters.setTextSize(side * (initials.codePointCount(0, initials.length()) > 1 ? 0.38f : 0.45f));
-            Paint.FontMetrics m = letters.getFontMetrics();
-            canvas.drawText(initials, cx, cy - (m.ascent + m.descent) / 2f, letters);
-        }
+        paint(canvas, cx, cy, side, photo, initials, circle, letters, picture);
         if (up != null && side > 0) {
             // On the circle's edge at the lower right, pulled in enough
             // that the ring stays inside the view.

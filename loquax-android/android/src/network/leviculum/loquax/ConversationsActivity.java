@@ -140,6 +140,10 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         search.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (onMap) {
+                    mapPane.search();
+                    return;
+                }
                 searching(query.getVisibility() != View.VISIBLE);
             }
         });
@@ -216,13 +220,19 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         }
         onMap = map;
         if (map && mapPane == null) {
-            mapPane = new MapPane(this);
+            mapPane = new MapPane(this, new MapPane.Host() {
+                @Override
+                public void chat(String peer) {
+                    ConversationsActivity.this.chat(peer);
+                }
+            });
         }
         findViewById(R.id.pane_chats).setVisibility(map ? View.GONE : View.VISIBLE);
         findViewById(R.id.pane_map).setVisibility(map ? View.VISIBLE : View.GONE);
         title.setText(map ? R.string.map : R.string.tab_chats);
-        // The map's search finds friends with the Friends sheet (1200).
-        search.setVisibility(map ? View.GONE : View.VISIBLE);
+        // On the map the search finds friends, in the Friends sheet (1200).
+        search.setImageDrawable(new Glyph(Glyph.Kind.SEARCH, getColor(R.color.text)));
+        search.setContentDescription(getString(map ? R.string.friends_search : R.string.search));
         tint(R.id.tab_chats_icon, R.id.tab_chats_label, Glyph.Kind.CHAT, !map);
         tint(R.id.tab_map_icon, R.id.tab_map_label, Glyph.Kind.PIN, map);
         findViewById(R.id.tab_chats).setSelected(!map);
@@ -353,6 +363,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     public void onBackPressed() {
         if (query.getVisibility() == View.VISIBLE) {
             searching(false);
+            return;
+        }
+        if (onMap && mapPane.back()) {
             return;
         }
         if (onMap) {

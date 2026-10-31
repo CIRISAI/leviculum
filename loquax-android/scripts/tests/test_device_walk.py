@@ -102,6 +102,36 @@ class MapScreen(unittest.TestCase):
                          ["no map view"])
 
 
+def at(rid, text, top):
+    """A node of a dump `top` pixels down."""
+    pkg = "network.leviculum.loquax.debug:id/"
+    return walk.Node(text=text, desc="", rid=pkg + rid, cls="", bounds=(0, top, 100, top + 40))
+
+
+class FriendsSheet(unittest.TestCase):
+    ALLOWED = {"Anna", "Bob", "Jürgen 🚲"}
+
+    def test_the_names_from_the_top_with_no_problem(self):
+        nodes = [at("friend_name", "Bob", 300), at("friends_older", "Older than a day", 200),
+                 at("friend_name", "Jürgen 🚲", 250)]
+        names, problems = walk.friends_sheet_problems(nodes, self.ALLOWED)
+        self.assertEqual(names, ["Jürgen 🚲", "Bob"])
+        self.assertEqual(problems, [])
+        self.assertTrue(walk.divider_above(nodes))
+
+    def test_an_empty_sheet_a_stranger_and_a_name_twice(self):
+        self.assertEqual(walk.friends_sheet_problems([], self.ALLOWED), ([], ["no friend in the sheet"]))
+        nodes = [at("friend_name", "Carla", 100), at("friend_name", "Bob", 150), at("friend_name", "Bob", 200)]
+        _, problems = walk.friends_sheet_problems(nodes, self.ALLOWED)
+        self.assertEqual(problems, ["names without a position in the fixture: ['Carla']",
+                                    "listed twice: ['Bob']"])
+
+    def test_the_divider_below_a_row_or_missing_is_not_above(self):
+        rows = [at("friend_name", "Bob", 100)]
+        self.assertFalse(walk.divider_above(rows))
+        self.assertFalse(walk.divider_above(rows + [at("friends_older", "Older than a day", 160)]))
+
+
 class Dump(unittest.TestCase):
     def setUp(self):
         self.nodes = walk.parse_dump(DUMP)

@@ -1,9 +1,29 @@
 package network.leviculum.loquax;
 
 import android.app.Activity;
+import android.app.Dialog;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.net.Uri;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
+import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageButton;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -11,41 +31,127 @@ import java.util.Map;
  * ({@link MapView}) over the whole room between the bars, the credit at
  * the bottom, and a chip at the top edge only while something happens: a
  * region loading by itself where the user looks (the autoload of 1089),
- * a load that could not start, a pin tapped. No buttons: the theme is
- * Settings, Appearance; regions load by themselves.
+ * no internet, no map where the user looks, a load that could not start.
+ *
+ * The map's people (1200): the friends are avatar pins with their age,
+ * clustered where they overlap (the library's rule, friends.rs). A tap on
+ * a pin opens its card at the bottom: name, age and distance (only with
+ * the phone's own fix, which 1201 brings), Chat and Navigate, which hands
+ * a geo: link to the phone's navigation app and is hidden when none takes
+ * it. A tap on a cluster flies in until its pins part, or, where no zoom
+ * parts them, opens the Friends sheet filtered to them. The round Friends
+ * button bottom right opens the sheet: everyone with a position, the last
+ * day first, older ones greyed under a divider; a tap flies the map to
+ * the friend and opens the card. The map's search is that sheet with its
+ * search field (friends only; places come later).
  */
 final class MapPane implements MapView.Listener {
     /** How long a chip that tells of an event stays. */
     private static final long CHIP_MS = 4000;
 
+    /** Where the pane goes beyond the map: a friend's chat. */
+    interface Host {
+        void chat(String peer);
+    }
+
+    private final Activity activity;
+    private final Host host;
     private final TextView chip;
     private final TextView credit;
+    private final ImageButton friendsButton;
+    private final View card;
     private final MapView map;
     private final Runnable hide = new Runnable() {
         @Override
         public void run() {
+            eventShown = false;
             chip.setVisibility(View.GONE);
+            state(lastShown);
         }
     };
-    /** The chip shows the load: it goes by itself when the load ends. */
-    private boolean loadingShown;
+    /** An event's chip is up: the state chips wait until it goes. */
+    private boolean eventShown;
+    private Map<String, Object> lastShown;
+    /** Everyone with a position, newest first, and the people by peer, ours among them. */
+    private final List<Map<String, Object>> friends = new ArrayList<>();
+    private final Map<String, Map<String, Object>> people = new HashMap<>();
+    /** Our own address when the store has a position of ours: its card has no Chat. */
+    private String own;
+    /** The peer whose card is open, or whose card opens once the map has it. */
+    private String carded;
+    private String cardOwed;
+    private Dialog sheet;
 
     /** The pane in `activity`'s layout (activity_conversations.xml). */
-    MapPane(Activity activity) {
+    MapPane(Activity activity, Host host) {
+        this.activity = activity;
+        this.host = host;
         chip = (TextView) activity.findViewById(R.id.chip);
         credit = (TextView) activity.findViewById(R.id.credit);
+        card = activity.findViewById(R.id.card);
+        friendsButton = (ImageButton) activity.findViewById(R.id.friends);
+        friendsButton.setImageDrawable(new Glyph(Glyph.Kind.PEOPLE, activity.getColor(R.color.on_send)));
+        friendsButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showSheet(null, false);
+            }
+        });
         map = new MapView(activity, activity.getFilesDir().getAbsolutePath(), this);
         ((FrameLayout) activity.findViewById(R.id.map)).addView(map);
+        refresh();
     }
 
-    /** Open on a place, as a message's fix does, with `peer`'s pin selected. */
+    /** Open on a place, as a message's fix does, with `peer`'s card open. */
     void centreOn(long latE6, long lonE6, String peer) {
         map.centreOn(latE6, lonE6, peer);
+        cardOwed = peer;
     }
 
     /** Draw anew: the screen came to the front, or the pins changed. */
     void ask() {
+        refresh();
         map.ask();
+    }
+
+    /** The map's search (1200): the Friends sheet with its search field. */
+    void search() {
+        showSheet(null, true);
+    }
+
+    /** Back closes the card first: whether it did. */
+    boolean back() {
+        if (carded != null) {
+            closeCard();
+            return true;
+        }
+        return false;
+    }
+
+    /** The friends again from the library: the pins' faces, the card's words. */
+    private void refresh() {
+        Map<String, Object> answer = Core.friends();
+        if (answer.containsKey("error")) {
+            return;
+        }
+        friends.clear();
+        friends.addAll(Core.list(answer, "friends"));
+        people.clear();
+        own = null;
+        for (Map<String, Object> row : friends) {
+            people.put(Core.str(row, "peer"), row);
+        }
+        Object me = answer.get("me");
+        if (me instanceof Map) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> ours = (Map<String, Object>) me;
+            own = Core.str(ours, "peer");
+            people.put(own, ours);
+        }
+        map.people(people, carded);
+        if (carded != null && people.containsKey(carded)) {
+            fillCard(people.get(carded));
+        }
     }
 
     @Override
@@ -54,20 +160,328 @@ final class MapPane implements MapView.Listener {
             say(Core.str(shown, "error"));
             return;
         }
+        lastShown = shown;
         credit.setText(Core.str(shown, "attribution"));
-        if (shown.get("tapped_name") != null) {
-            say(Core.str(shown, "tapped_name"));
-        } else if (shown.get("notice") != null) {
+        if (shown.get("notice") != null) {
             say(Core.str(shown, "notice"));
-        } else if (Core.bool(shown, "loading")) {
-            chip.removeCallbacks(hide);
-            chip.setText(R.string.map_loading);
-            chip.setVisibility(View.VISIBLE);
-            loadingShown = true;
-        } else if (loadingShown) {
-            loadingShown = false;
-            chip.setVisibility(View.GONE);
+        } else if (!eventShown) {
+            state(shown);
         }
+        if (cardOwed != null && people.containsKey(cardOwed)) {
+            String peer = cardOwed;
+            cardOwed = null;
+            openCard(peer);
+        }
+    }
+
+    /**
+     * The chip of the map's state, when no event's chip is up: loading,
+     * offline, no map here; none when all is well.
+     */
+    private void state(Map<String, Object> shown) {
+        if (shown == null) {
+            return;
+        }
+        int words;
+        if (Core.bool(shown, "loading")) {
+            words = R.string.map_loading;
+        } else if (Core.bool(shown, "offline")) {
+            words = R.string.map_offline;
+        } else if (Core.bool(shown, "no_map")) {
+            words = R.string.map_no_map;
+        } else {
+            chip.setVisibility(View.GONE);
+            return;
+        }
+        chip.removeCallbacks(hide);
+        chip.setText(words);
+        chip.setVisibility(View.VISIBLE);
+    }
+
+    @Override
+    public void onMark(Map<String, Object> mark) {
+        List<String> peers = new ArrayList<>();
+        Object value = mark.get("peers");
+        if (value instanceof List) {
+            for (Object peer : (List<?>) value) {
+                peers.add(String.valueOf(peer));
+            }
+        }
+        if (peers.size() == 1) {
+            openCard(peers.get(0));
+            return;
+        }
+        closeCard();
+        if (mark.get("split_milli") != null) {
+            map.flyInto(mark);
+        } else {
+            showSheet(peers, false);
+        }
+    }
+
+    @Override
+    public void onTapAway() {
+        closeCard();
+    }
+
+    /** `peer`'s card at the bottom, its pin in the accent ring. */
+    private void openCard(String peer) {
+        Map<String, Object> row = people.get(peer);
+        if (row == null) {
+            return;
+        }
+        carded = peer;
+        fillCard(row);
+        card.setVisibility(View.VISIBLE);
+        friendsButton.setVisibility(View.GONE);
+        map.people(people, carded);
+    }
+
+    private void closeCard() {
+        carded = null;
+        card.setVisibility(View.GONE);
+        friendsButton.setVisibility(View.VISIBLE);
+        map.people(people, null);
+    }
+
+    /** The card's words and buttons for `row`. */
+    private void fillCard(final Map<String, Object> row) {
+        final String peer = Core.str(row, "peer");
+        ((AvatarView) activity.findViewById(R.id.card_avatar)).show(peer, row);
+        ((TextView) activity.findViewById(R.id.card_name)).setText(Core.str(row, "name"));
+        ((TextView) activity.findViewById(R.id.card_line)).setText(cardLine(row));
+        View chat = activity.findViewById(R.id.card_chat);
+        chat.setVisibility(peer.equals(own) ? View.GONE : View.VISIBLE);
+        chat.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                host.chat(peer);
+            }
+        });
+        final Intent navigate = new Intent(Intent.ACTION_VIEW, Uri.parse(Core.str(row, "geo")));
+        View go = activity.findViewById(R.id.card_navigate);
+        boolean handled = !Core.str(row, "geo").isEmpty()
+                && navigate.resolveActivity(activity.getPackageManager()) != null;
+        go.setVisibility(handled ? View.VISIBLE : View.GONE);
+        go.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    activity.startActivity(navigate);
+                } catch (ActivityNotFoundException e) {
+                    v.setVisibility(View.GONE);
+                }
+            }
+        });
+    }
+
+    /** "5 min ago · 1.2 km": the age, and the distance only when the library gave one. */
+    private String cardLine(Map<String, Object> row) {
+        long at = Core.num(row, "at");
+        String age = Ui.nowSecs() - at < 60 ? activity.getString(R.string.just_now)
+                : activity.getString(R.string.card_ago, Ui.age(activity, at, Ui.nowSecs()));
+        String distance = distance(row);
+        return distance == null ? age : age + " · " + distance;
+    }
+
+    /** The distance in the phone's way of writing numbers; null without one. */
+    static String distance(Map<String, Object> row) {
+        Object metres = row.get("distance_m");
+        if (!(metres instanceof Number)) {
+            return null;
+        }
+        long m = ((Number) metres).longValue();
+        if (m < 1000) {
+            return String.format(Locale.getDefault(), "%d m", m);
+        }
+        if (m < 10_000) {
+            return String.format(Locale.getDefault(), "%.1f km", m / 1000.0);
+        }
+        return String.format(Locale.getDefault(), "%d km", Math.round(m / 1000.0));
+    }
+
+    /**
+     * The Friends sheet (1200): everyone with a position, the last day
+     * first, older ones greyed under a divider; only `only` when given (a
+     * cluster no zoom parts); with the search field when `searching`. A
+     * tap closes it and flies the map to the friend with the card open.
+     */
+    private void showSheet(final List<String> only, boolean searching) {
+        refresh();
+        if (sheet != null) {
+            sheet.dismiss();
+        }
+        float density = activity.getResources().getDisplayMetrics().density;
+        final int pad = Math.round(16 * density);
+        final Dialog dialog = new Dialog(activity);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout root = new LinearLayout(activity);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setId(R.id.friends_sheet);
+        root.setBackgroundResource(R.drawable.sheet);
+        root.setPadding(0, Math.round(8 * density), 0, pad);
+        View handle = new View(activity);
+        handle.setBackgroundResource(R.drawable.handle);
+        LinearLayout.LayoutParams handleAt = new LinearLayout.LayoutParams(Math.round(32 * density), Math.round(4 * density));
+        handleAt.gravity = Gravity.CENTER_HORIZONTAL;
+        handleAt.bottomMargin = Math.round(8 * density);
+        root.addView(handle, handleAt);
+        TextView title = new TextView(activity);
+        title.setText(R.string.friends);
+        title.setTextColor(activity.getColor(R.color.text));
+        title.setTextSize(20);
+        title.setPadding(pad, 0, pad, Math.round(8 * density));
+        root.addView(title);
+        final EditText query = new EditText(activity);
+        query.setHint(R.string.friends_search);
+        query.setSingleLine(true);
+        query.setTextColor(activity.getColor(R.color.text));
+        query.setHintTextColor(activity.getColor(R.color.text_secondary));
+        query.setBackground(null);
+        query.setPadding(pad, Math.round(4 * density), pad, Math.round(8 * density));
+        query.setVisibility(searching ? View.VISIBLE : View.GONE);
+        root.addView(query);
+        final LinearLayout rows = new LinearLayout(activity);
+        rows.setOrientation(LinearLayout.VERTICAL);
+        ScrollView scroll = new ScrollView(activity);
+        scroll.addView(rows);
+        root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        final Runnable fill = new Runnable() {
+            @Override
+            public void run() {
+                fillSheet(rows, only, query.getText().toString(), dialog);
+            }
+        };
+        query.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                fill.run();
+            }
+        });
+        fill.run();
+        dialog.setContentView(root);
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            window.setGravity(Gravity.BOTTOM);
+            window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (searching) {
+                window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+            }
+        }
+        if (searching) {
+            query.requestFocus();
+        }
+        sheet = dialog;
+        dialog.show();
+    }
+
+    /** The sheet's rows into `rows`: `only` when given, those whose name holds `needle`. */
+    private void fillSheet(LinearLayout rows, List<String> only, String needle, final Dialog dialog) {
+        rows.removeAllViews();
+        float density = activity.getResources().getDisplayMetrics().density;
+        int pad = Math.round(16 * density);
+        String find = needle.trim().toLowerCase(Locale.getDefault());
+        boolean divided = false;
+        int shown = 0;
+        for (final Map<String, Object> row : friends) {
+            String peer = Core.str(row, "peer");
+            if (only != null && !only.contains(peer)) {
+                continue;
+            }
+            if (!find.isEmpty() && !Core.str(row, "name").toLowerCase(Locale.getDefault()).contains(find)) {
+                continue;
+            }
+            boolean recent = Core.bool(row, "recent");
+            if (!recent && !divided) {
+                divided = true;
+                TextView divider = new TextView(activity);
+                divider.setId(R.id.friends_older);
+                divider.setText(R.string.friends_older);
+                divider.setTextColor(activity.getColor(R.color.text_secondary));
+                divider.setTextSize(13);
+                divider.setPadding(pad, Math.round(12 * density), pad, Math.round(4 * density));
+                rows.addView(divider);
+            }
+            rows.addView(sheetRow(row, recent, dialog));
+            shown++;
+        }
+        if (shown == 0) {
+            TextView none = new TextView(activity);
+            none.setId(R.id.friends_empty);
+            none.setText(friends.isEmpty() ? R.string.friends_none : R.string.friends_no_match);
+            none.setTextColor(activity.getColor(R.color.text_secondary));
+            none.setTextSize(15);
+            none.setPadding(pad, pad, pad, pad);
+            rows.addView(none);
+        }
+    }
+
+    /** One friend in the sheet: avatar, name, age, distance; greyed when older than a day. */
+    private View sheetRow(final Map<String, Object> row, boolean recent, final Dialog dialog) {
+        float density = activity.getResources().getDisplayMetrics().density;
+        int pad = Math.round(16 * density);
+        LinearLayout line = new LinearLayout(activity);
+        line.setId(R.id.friend_row);
+        line.setOrientation(LinearLayout.HORIZONTAL);
+        line.setGravity(Gravity.CENTER_VERTICAL);
+        line.setPadding(pad, Math.round(8 * density), pad, Math.round(8 * density));
+        line.setBackgroundResource(android.R.drawable.list_selector_background);
+        line.setAlpha(recent ? 1f : 0.55f);
+        final String peer = Core.str(row, "peer");
+        AvatarView avatar = new AvatarView(activity, null);
+        avatar.show(peer, row);
+        int side = Math.round(40 * density);
+        line.addView(avatar, new LinearLayout.LayoutParams(side, side));
+        TextView name = new TextView(activity);
+        name.setId(R.id.friend_name);
+        name.setText(Core.str(row, "name"));
+        name.setTextColor(activity.getColor(R.color.text));
+        name.setTextSize(16);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams nameAt = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        nameAt.setMarginStart(pad);
+        line.addView(name, nameAt);
+        TextView age = new TextView(activity);
+        age.setId(R.id.friend_age);
+        age.setText(Ui.age(activity, Core.num(row, "at"), Ui.nowSecs()));
+        age.setTextColor(activity.getColor(R.color.text_secondary));
+        age.setTextSize(14);
+        age.setPadding(pad, 0, 0, 0);
+        line.addView(age);
+        String far = distance(row);
+        if (far != null) {
+            TextView distance = new TextView(activity);
+            distance.setText(far);
+            distance.setTextColor(activity.getColor(R.color.text_secondary));
+            distance.setTextSize(14);
+            distance.setMinWidth(Math.round(64 * density));
+            distance.setGravity(Gravity.END);
+            line.addView(distance);
+        }
+        line.setContentDescription(Core.str(row, "name"));
+        line.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dialog.dismiss();
+                fly(peer, row);
+            }
+        });
+        return line;
+    }
+
+    /** Fly the map to `row`'s place and open its card. */
+    private void fly(String peer, Map<String, Object> row) {
+        map.flyTo(Core.num(row, "lat_e6"), Core.num(row, "lon_e6"));
+        openCard(peer);
     }
 
     /** A line from the session the map shows as a chip; null leaves the chip. */
@@ -77,9 +491,9 @@ final class MapPane implements MapView.Listener {
         }
     }
 
-    /** A chip for an event: it goes after a while. */
+    /** A chip for an event: it goes after a while, and the map's state shows again. */
     private void say(String text) {
-        loadingShown = false;
+        eventShown = true;
         chip.setText(text);
         chip.setVisibility(View.VISIBLE);
         chip.removeCallbacks(hide);
