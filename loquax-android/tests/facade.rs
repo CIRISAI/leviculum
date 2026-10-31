@@ -1615,6 +1615,8 @@ fn instance() -> String {
 struct HomeNode {
     transport: ReticulumNode,
     daemon: tokio::task::JoinHandle<Result<(), String>>,
+    /// The daemon's stop: dropping it stops the daemon too.
+    stop: tokio::sync::oneshot::Sender<()>,
 }
 
 impl HomeNode {
@@ -1638,6 +1640,7 @@ impl HomeNode {
         let identity = loquax::identity::load_or_create(&home.join("identity")).expect("identity");
         let daemon_storage = home.join("storage");
         std::fs::create_dir_all(&daemon_storage).expect("daemon storage");
+        let (stop, stopped) = tokio::sync::oneshot::channel();
         let daemon = tokio::spawn(loquax::home::daemon::run(
             loquax::home::daemon::DaemonOptions {
                 home: home.to_path_buf(),
@@ -1659,15 +1662,34 @@ impl HomeNode {
                 sync_bound_ms: None,
                 fetch_budget: Duration::from_secs(10),
                 wake: true,
-                stop: None,
+                stop: Some(stopped),
             },
         ));
-        Self { transport, daemon }
+        Self {
+            transport,
+            daemon,
+            stop,
+        }
+    }
+
+    /// Stop both as a shutdown does: the daemon closes its node, which
+    /// writes what it keeps to disk.
+    async fn stop(mut self) {
+        let _ = self.stop.send(());
+        self.daemon
+            .await
+            .expect("the daemon task")
+            .expect("the daemon stopped cleanly");
+        self.transport
+            .stop()
+            .await
+            .expect("stop the transport node");
     }
 
     /// Kill both, as a power cut does to the box they run on: the daemon
     /// gone with its lock, the TCP server closed.
     async fn kill(mut self) {
+        drop(self.stop);
         self.daemon.abort();
         let _ = self.daemon.await;
         self.transport
@@ -2416,4 +2438,183 @@ fn a_shared_position_reaches_the_privacy_list_and_a_bad_fix_is_refused() {
     }))
     .expect("decodes");
     assert!(matches!(request, Request::Share { at, .. } if at == now));
+}
+
+/// The texts of the QR code `size` squared modules draw, read back by the
+/// scanner's decoder: what a phone pointed at the profile reads.
+fn read_qr(size: u32, modules: &[u8]) -> Vec<String> {
+    let (size, scale) = (size as usize, 4);
+    let side = (size + 8) * scale;
+    let mut luma = vec![255u8; side * side];
+    for y in 0..size {
+        for x in 0..size {
+            if modules[y * size + x] != 0 {
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        luma[((y + 4) * scale + dy) * side + (x + 4) * scale + dx] = 0;
+                    }
+                }
+            }
+        }
+    }
+    loquax_android::scan::decode(side, side, side, &luma)
+}
+
+/// Every file under `dir` named `name`, however deep.
+fn files_named(dir: &Path, name: &str) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_named(&path, name));
+        } else if path.file_name().is_some_and(|n| n == name) {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// The profile behind the avatar (1187) and a contact from its code: the
+/// profile names our address, the contact code of the mailbox's identity
+/// and a QR code that reads back as exactly that code, where the mailbox
+/// is and the advanced facts. Our own code parses back to our address; a
+/// contact code adds the contact under the name given, its key reaches
+/// the home node, which keeps it on disk, and a malformed code is refused
+/// with words for the screen.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let home_identity =
+        loquax::identity::load_or_create(&home.path().join("identity")).expect("identity");
+    let home_key = home_identity.public_key_bytes();
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let bob = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let bob_key = bob.public_key_bytes();
+    let bob_code = loquax::lxma::encode(&bob_key).expect("bob's code");
+    let bob_address = loquax::address::to_hex(&loquax::home::lxmf_address(&bob_key).expect("a"));
+    let session = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let profile: schema::Profile =
+            rmp_serde::from_slice(&session.query(schema::Query::Profile).expect("profile"))
+                .expect("decode");
+        let address = loquax::address::to_hex(&session.address());
+        assert_eq!(profile.address, address);
+        assert_eq!(profile.lxma, loquax::lxma::encode(&home_key).expect("code"));
+        assert!(profile.lxma.starts_with(&format!("lxma://{address}:")));
+        assert_eq!(
+            profile.qr.0.len(),
+            (profile.qr_size * profile.qr_size) as usize
+        );
+        assert_eq!(
+            read_qr(profile.qr_size, &profile.qr.0),
+            vec![profile.lxma.clone()]
+        );
+        assert!(!profile.here && !profile.name_editable);
+        assert_eq!(profile.mailbox, "127.0.0.1");
+        assert!(profile.since > 0, "{profile:?}");
+        assert_eq!(profile.identity, hex(home_identity.hash()));
+        assert_eq!(
+            profile.home_node,
+            hex(&loquax::home::destination_hash(&home_key).expect("home"))
+        );
+        assert_eq!(profile.version, loquax::VERSION);
+
+        // Our own code, parsed back: our address.
+        let ours: schema::Lxma = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Lxma {
+                    text: profile.lxma.clone(),
+                })
+                .expect("our code parses"),
+        )
+        .expect("decode");
+        assert_eq!(ours.address, address);
+
+        // Bob's, pasted with a newline in capitals: whose it is, then added.
+        let scanned: schema::Lxma = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Lxma {
+                    text: format!("{}\n", bob_code.to_uppercase()),
+                })
+                .expect("bob's code parses"),
+        )
+        .expect("decode");
+        assert_eq!(scanned.address, bob_address);
+        assert_eq!(scanned.lxma, bob_code);
+        assert_eq!(scanned.known, "");
+        session
+            .request(Request::AddContact {
+                lxma: scanned.lxma.clone(),
+                name: Some("Bob".to_string()),
+            })
+            .expect("added");
+        wait_for(
+            &session,
+            schema::Query::Lxma {
+                text: bob_code.clone(),
+            },
+            20,
+            |l: &schema::Lxma| l.known == "Bob",
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while session.keys_told() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the home node never took the key"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+
+        // A code with a wrong digit, and no code at all: refused, in words.
+        let mut wrong = bob_code.clone();
+        let at = "lxma://".len();
+        let flipped = if wrong.as_bytes()[at] == b'0' {
+            "1"
+        } else {
+            "0"
+        };
+        wrong.replace_range(at..at + 1, flipped);
+        let refused = session
+            .request(Request::AddContact {
+                lxma: wrong.clone(),
+                name: None,
+            })
+            .expect_err("a wrong code");
+        assert!(refused.contains("does not match"), "{refused}");
+        let refused = session
+            .query(schema::Query::Lxma {
+                text: "hello".to_string(),
+            })
+            .expect_err("no code");
+        assert!(refused.contains("lxma://"), "{refused}");
+        session
+    })
+    .await
+    .expect("the profile");
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+    node.stop().await;
+    let kept = files_named(home.path(), "known_destinations");
+    assert!(
+        kept.iter().any(|file| std::fs::read(file)
+            .unwrap_or_default()
+            .windows(bob_key.len())
+            .any(|window| window == bob_key)),
+        "the home node kept no key for Bob in {kept:?}"
+    );
 }

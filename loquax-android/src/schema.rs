@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`] or [`Shared`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`], [`Shared`], [`Profile`] or [`Lxma`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
@@ -73,6 +73,9 @@
 //! `own_x` and `own_y`, the Maps page's `ask_regions`, `delete_region` and
 //! `set_autoload` with the answer's `regions`, `region_bytes` and
 //! `autoload`, and [`Query::Shared`] with its [`Shared`].
+//! The profile (1187) came the same way: [`Query::Profile`] with its
+//! [`Profile`], [`Query::Lxma`] with its [`Lxma`], and
+//! [`Request::AddContact`].
 
 use serde::{Deserialize, Serialize};
 
@@ -235,6 +238,16 @@ pub enum Request {
         accuracy_e2: u32,
         at: i64,
     },
+    /// A contact from its contact code, `lxma://<address>:<key>` (1187,
+    /// `loquax::lxma`): scanned or pasted. `name`, when given, becomes the
+    /// reader's name for it; the home node is handed the key, so a message
+    /// can go out before any announce was heard; the conversation opens.
+    #[serde(rename = "addcontact")]
+    AddContact {
+        lxma: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
 }
 
 /// What a contact said when loquax read it.
@@ -348,6 +361,13 @@ pub enum Query {
     /// The positions we shared, newest first (1201): the privacy page's
     /// list of who got one and when.
     Shared,
+    /// The profile screen behind our avatar (1187): name, address, the
+    /// contact code and its QR, where the mailbox is, and the advanced
+    /// facts.
+    Profile,
+    /// Whether `text` is a contact code, and whose (1187): what the scanner
+    /// and the new conversation field ask before the name.
+    Lxma { text: String },
 }
 
 /// What [`Query::Shared`] answers: the positions we sent, newest first, at
@@ -477,6 +497,53 @@ pub struct Me {
     pub name: String,
     /// Whether the mailbox is on this phone.
     pub here: bool,
+}
+
+/// What [`Query::Profile`] answers, top to bottom as the screen shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    pub v: u32,
+    /// The name our announce carries; empty when none was given.
+    pub name: String,
+    /// Whether the name can be changed here: only with the mailbox on this
+    /// phone, which announces it.
+    pub name_editable: bool,
+    /// Our LXMF address, the one to give people, as lowercase hex.
+    pub address: String,
+    /// The contact code Columba and Sideband read,
+    /// `lxma://<address>:<public key>` (`loquax::lxma`).
+    pub lxma: String,
+    pub qr_size: u32,
+    /// The QR code of [`Profile::lxma`], byte mode, verbatim:
+    /// `qr_size` squared modules, one byte each, row by row.
+    pub qr: Blob,
+    /// Whether the mailbox is on this phone.
+    pub here: bool,
+    /// Where it is otherwise: the host of its server.
+    pub mailbox: String,
+    /// Since when this phone reads it, unix seconds; 0 when unknown.
+    pub since: i64,
+    /// Advanced: the identity hash behind the address.
+    pub identity: String,
+    /// Advanced: the home node's own destination, which the phone talks to.
+    pub home_node: String,
+    /// Advanced: the propagation node the mailbox is told to use; empty
+    /// when it chooses one itself.
+    pub propagation_node: String,
+    /// Advanced: the app's version and commit.
+    pub version: String,
+}
+
+/// What [`Query::Lxma`] answers for a contact code: whose it is, and the
+/// code as it parsed, for [`Request::AddContact`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lxma {
+    pub v: u32,
+    pub address: String,
+    pub lxma: String,
+    /// The name every screen gives that address today: a petname or an
+    /// announced name when one is known, else empty.
+    pub known: String,
 }
 
 /// One contact's name fields, for [`Query::Suggest`].
