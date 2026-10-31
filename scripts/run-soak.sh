@@ -32,11 +32,14 @@ elif [ -n "${1:-}" ]; then
     exit 2
 fi
 
+# The smoke also runs the per-source cap test (1229): it needs the same
+# release lnsd, and the cap is what the hub's config raises for the load.
 if [ "$FULL" = "1" ]; then
-    TEST="loadtest_tcp_hub_tests::loadtest_tcp_hub_soak"
+    TESTS=("loadtest_tcp_hub_tests::loadtest_tcp_hub_soak")
     VARIANT="soak (heavy)"
 else
-    TEST="loadtest_tcp_hub_tests::loadtest_tcp_hub_smoke"
+    TESTS=("loadtest_tcp_hub_tests::loadtest_tcp_hub_smoke"
+        "loadtest_tcp_hub_tests::a_seventeenth_client_from_one_source_is_refused_and_the_sixteen_lose_nothing")
     VARIANT="smoke"
 fi
 
@@ -58,14 +61,14 @@ echo "[run-soak] building lnsd (release)..."
 cargo build -p leviculum-cli --release --bin lnsd
 
 # 2. Run the chosen variant. It is #[ignore]d (spawns the lnsd binary), so
-#    --ignored --exact selects exactly it. --nocapture surfaces the PASS block
+#    --ignored --exact selects exactly its tests. --nocapture surfaces the PASS block
 #    with the "rss plateau:" and "fds:" lines.
 #
 #    Through run-with-manifest.py (Guarantee B step 1): `--exact` is the
 #    by-name form where a typo runs nothing and still exits 0, which is what
 #    the manifest exists to make visible. Two variants, two manifests, because
 #    a smoke run must not be readable as evidence that the heavy soak ran.
-echo "[run-soak] running $TEST ..."
+echo "[run-soak] running ${TESTS[*]} ..."
 python3 scripts/run-with-manifest.py --gate "soak-$([ "$FULL" = 1 ] && echo full || echo smoke)" -- \
     cargo test -p leviculum-std --test rnsd_interop -- \
-    --ignored --exact "$TEST" --nocapture
+    --ignored --exact "${TESTS[@]}" --nocapture

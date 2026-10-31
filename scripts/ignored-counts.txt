@@ -97,7 +97,12 @@
 # the acceptance for `lnstatus --origin` (952, #471). Observed group:
 # run-status-parity.sh runs it by name in `just standard` and the land
 # gate's status-parity step, its EXPECTED moved to 5 in the same commit.
-24   -p leviculum-std --test rnsd_interop
+#
+# 24 -> 25 (2026-11-01): a_seventeenth_client_from_one_source_is_refused_and_
+# the_sixteen_lose_nothing (1229), the per-source TCP cap against a release
+# lnsd. Observed group: scripts/run-soak.sh runs it by name in the smoke
+# variant (`just standard`), beside loadtest_tcp_hub_smoke.
+25   -p leviculum-std --test rnsd_interop
 
 # ble_link_gap_floor (2026-10-10, #379): the measurement grid behind
 # docs/measurements/2026-10-10-ble-link-gap-floor.md. It needs the patched
