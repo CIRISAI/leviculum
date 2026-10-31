@@ -269,7 +269,7 @@ final class MapPane implements MapView.Listener {
      * the share to the one picked.
      */
     private void pickAndShare() {
-        Map<String, Object> answer = Core.conversations();
+        Map<String, Object> answer = Core.conversations(null);
         final List<Map<String, Object>> rows = Core.list(answer, "conversations");
         if (rows.isEmpty()) {
             say(activity.getString(R.string.share_nobody));
@@ -485,11 +485,11 @@ final class MapPane implements MapView.Listener {
     /** "5 min ago · 1.2 km": the age, and the distance only when the library gave one. */
     private String cardLine(Map<String, Object> row) {
         long at = Core.num(row, "at");
-        long fixAt = Core.num(row, "last_fix_at");
+        String live = Core.str(row, "live");
         // A peer that reports says whether it is alive, in the chat row's
-        // words (1209); one known from a text alone how old its fix is.
-        String age = fixAt > 0
-                ? Ui.liveRow(activity, Core.str(row, "liveness"), Core.num(row, "cadence_s"), fixAt, Ui.nowSecs())
+        // words as the library says them (1209, 1217); one known from a
+        // text alone how old its fix is.
+        String age = !live.isEmpty() ? live
                 : Ui.nowSecs() - at < 60 ? activity.getString(R.string.just_now)
                 : activity.getString(R.string.card_ago, Ui.age(activity, at, Ui.nowSecs()));
         String distance = distance(row);

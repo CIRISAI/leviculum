@@ -4,6 +4,7 @@ import android.graphics.Bitmap;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TimeZone;
 
@@ -75,9 +76,14 @@ final class Core {
         return TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000;
     }
 
+    /** The phone's language as a locale tag (de-DE): the library says its words in it (1217). */
+    static String lang() {
+        return Locale.getDefault().toLanguageTag();
+    }
+
     /** Start; code and server null on a later start. Blocks: not on the UI thread. */
     static Map<String, Object> start(String dir, String server, String code, String name) {
-        Map<String, Object> request = map("dir", dir, "offset", (long) offset());
+        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang());
         if (server != null) request.put("server", server);
         if (code != null) request.put("code", code);
         if (name != null) request.put("name", name);
@@ -90,7 +96,7 @@ final class Core {
      * it restores the address first. Blocks: not on the UI thread.
      */
     static Map<String, Object> startHere(String dir, String restore, String passphrase) {
-        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "here", true);
+        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(), "here", true);
         if (restore != null) {
             request.put("restore", restore);
             request.put("passphrase", passphrase);
@@ -330,8 +336,10 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "detail", "peer", peer))));
     }
 
-    static Map<String, Object> archived() {
-        return answer(Native.query(MsgPack.pack(map("t", "archived"))));
+    /** The archived conversations; with `search` only those the library's search finds (1217). */
+    static Map<String, Object> archived(String search) {
+        return answer(Native.query(MsgPack.pack(search == null
+                ? map("t", "archived") : map("t", "archived", "search", search))));
     }
 
     static Map<String, Object> blocked() {
@@ -347,8 +355,13 @@ final class Core {
         return command(map("t", "front", "front", front));
     }
 
-    static Map<String, Object> conversations() {
-        return answer(Native.query(MsgPack.pack(map("t", "conversations"))));
+    /**
+     * The conversation list; with `search` only the rows the library's
+     * search finds, every word in the name or the last line (1217).
+     */
+    static Map<String, Object> conversations(String search) {
+        return answer(Native.query(MsgPack.pack(search == null
+                ? map("t", "conversations") : map("t", "conversations", "search", search))));
     }
 
     static Map<String, Object> messages(String peer) {

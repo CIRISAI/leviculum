@@ -23,7 +23,6 @@ import android.widget.PopupMenu;
 import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -68,12 +67,15 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     /** The list's last row: the archived view, with how many. */
     private TextView archivedRow;
     private final ServiceLink link = new ServiceLink(this);
-    /** "Jetzt" turns into "1 Min." without a message: the rows redraw twice a minute. */
+    /**
+     * "Jetzt" turns into "1 Min." without a message: the rows are asked
+     * again twice a minute, the library's words (a position's age) with them.
+     */
     private final Handler ticker = new Handler(Looper.getMainLooper());
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
-            adapter.notifyDataSetChanged();
+            refresh();
             ticker.postDelayed(this, 30_000);
         }
     };
@@ -444,7 +446,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     }
 
     private void refresh() {
-        Map<String, Object> answer = archivedView ? Core.archived() : Core.conversations();
+        Map<String, Object> answer = archivedView ? Core.archived(null) : Core.conversations(null);
         if (answer.containsKey("error")) {
             line(Core.str(answer, "error"));
             return;
@@ -482,16 +484,19 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 ? getString(R.string.tab_chats_unread, chats) : getString(R.string.tab_chats));
     }
 
-    /** The rows whose name or last line hold what the search field holds, in the library's order. */
+    /**
+     * The rows the search field finds, by the library's rule (1217): every
+     * word in the name or the last line, as on the desktop. The whole list
+     * while the field is empty.
+     */
     private void filter() {
-        String needle = query.getText().toString().trim().toLowerCase(Locale.getDefault());
+        String needle = query.getText().toString().trim();
         rows.clear();
-        for (Map<String, Object> row : all) {
-            if (needle.isEmpty()
-                    || Core.str(row, "name").toLowerCase(Locale.getDefault()).contains(needle)
-                    || Ui.preview(this, row).toLowerCase(Locale.getDefault()).contains(needle)) {
-                rows.add(row);
-            }
+        if (needle.isEmpty()) {
+            rows.addAll(all);
+        } else {
+            Map<String, Object> found = archivedView ? Core.archived(needle) : Core.conversations(needle);
+            rows.addAll(Core.list(found, "conversations"));
         }
         adapter.notifyDataSetChanged();
     }

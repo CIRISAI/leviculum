@@ -219,7 +219,7 @@ public class LoquaxService extends Service implements Events.Listener {
      * whose unread grew since the last look.
      */
     private void look(boolean tell) {
-        Map<String, Object> answer = Core.conversations();
+        Map<String, Object> answer = Core.conversations(null);
         if (answer.containsKey("error")) {
             return;
         }
