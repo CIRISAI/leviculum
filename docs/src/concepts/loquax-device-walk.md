@@ -33,7 +33,7 @@ failure.
 | `info` | a long press on an imported message, Info: the "Message details" sheet shows and no text on screen says "did not decode" |
 | `reply_send` | a long press, Reply, a typed body, Send: the bubble shows with a delivery mark of "sent" or "delivered ✓" within 5 s, and the mailbox's log says `HOME send accepted` |
 | `receive_wake` | a second `loquax` on the host, with the Ratspeak peer's identity, sends to the mailbox; the bubble appears in the open chat without a tap, seen by a UI dump begun within 3 s of the send |
-| `map` | the map opens; its view is not uniform and has no black part of sixteen; after each of two zooms and a pan, at least 5 % of the sampled pixels changed and no part is black; the theme switch changes the mean brightness |
+| `map` | the Map tab opens the map; its view is not uniform and has no black part of sixteen; the dump shows exactly the two tabs Chats and Map and none of the old header controls ("Load area", "All", the sun or moon, 1199); after each of two zooms and a pan, at least 5 % of the sampled pixels changed and no part is black; Settings, Appearance set to light and then dark changes the map's mean brightness |
 | `teardown` | the device revoked on the mailbox, lnsd and the mailbox stopped, the app uninstalled |
 
 Every assertion reads the screen: the texts and content descriptions of a

@@ -57,6 +57,51 @@ class Bounds(unittest.TestCase):
             self.assertIsNone(walk.parse_bounds(text), text)
 
 
+def node(rid="", text="", desc=""):
+    """One node of a dump, its bounds of no matter."""
+    pkg = "network.leviculum.loquax.debug:id/"
+    return walk.Node(text=text, desc=desc, rid=pkg + rid if rid else "", cls="", bounds=(0, 0, 1, 1))
+
+
+# The Map tab as 1199 builds it: the bar, the map, the credit, two tabs
+# with their icons and labels.
+MAP_SCREEN = [
+    node("title", "Map"),
+    node("menu", desc="More"),
+    node("map"),
+    node("credit", "© OpenStreetMap contributors"),
+    node("tab_chats", desc="Chats"),
+    node("tab_chats_icon"),
+    node("tab_chats_label", "Chats"),
+    node("tab_map", desc="Map"),
+    node("tab_map_icon"),
+    node("tab_map_label", "Map"),
+]
+
+
+class MapScreen(unittest.TestCase):
+    def test_the_map_tab_as_built_has_no_problem(self):
+        self.assertEqual(walk.tab_ids(MAP_SCREEN), ["tab_chats", "tab_map"])
+        self.assertEqual(walk.map_screen_problems(MAP_SCREEN), [])
+
+    def test_the_old_header_is_found_by_text_and_by_id(self):
+        problems = walk.map_screen_problems(MAP_SCREEN + [node("load", "Load area")])
+        self.assertEqual(problems, ["text 'Load area' on the map screen", "id 'load' on the map screen"])
+        self.assertEqual(walk.map_screen_problems(MAP_SCREEN + [node("theme", "\u263e")]),
+                         ["text '\u263e' on the map screen", "id 'theme' on the map screen"])
+
+    def test_a_tab_missing_or_a_third_one_is_a_problem(self):
+        self.assertEqual(walk.map_screen_problems(MAP_SCREEN[:7] + [node("map_x")]),
+                         ["tabs ['tab_chats'], want ['tab_chats', 'tab_map']"])
+        calls = MAP_SCREEN + [node("tab_calls", desc="Calls")]
+        self.assertEqual(walk.map_screen_problems(calls),
+                         ["tabs ['tab_chats', 'tab_map', 'tab_calls'], want ['tab_chats', 'tab_map']"])
+
+    def test_no_map_view_is_a_problem(self):
+        self.assertEqual(walk.map_screen_problems([n for n in MAP_SCREEN if not n.is_id("map")]),
+                         ["no map view"])
+
+
 class Dump(unittest.TestCase):
     def setUp(self):
         self.nodes = walk.parse_dump(DUMP)

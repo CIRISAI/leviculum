@@ -81,7 +81,17 @@ INFO_TITLE = "Message details"
 MAP = "Map"
 MORE = "More"
 SEND = "Send"
-MAP_THEME = "Light or dark map; a long press follows the phone"
+SETTINGS = "Settings"
+APPEARANCE = "Appearance"
+THEME_LIGHT = "Light"
+THEME_DARK = "Dark"
+THEME_AUTO = "Like the phone"
+# What the map screen lost in 1199: the header's buttons. Their texts and
+# their old ids; neither may be on screen.
+MAP_CHROME_TEXTS = ["Load area", "All", "\u263e", "\u2600"]
+MAP_CHROME_IDS = ["load", "fit", "theme"]
+# The tab bar's tabs (activity_conversations.xml): Chats and Map.
+TABS = ["tab_chats", "tab_map"]
 NOT_DECODED = "did not decode"
 # The buttons of the dialogs a first start may raise: Android's
 # notification question, its battery exemption, the app's own (Asks.java).
@@ -218,6 +228,38 @@ def find(
 def by_top(nodes: list[Node]) -> list[Node]:
     """The nodes from the top of the screen down."""
     return sorted(nodes, key=lambda n: (n.bounds[1], n.bounds[0]))
+
+
+TAB_ID = re.compile(r":id/(tab_[a-z]+)$")
+
+
+def tab_ids(nodes: list[Node]) -> list[str]:
+    """The tab bar's tabs on screen, by id: `tab_chats`, not its icon's
+    `tab_chats_icon`."""
+    out = []
+    for n in nodes:
+        m = TAB_ID.search(n.rid)
+        if m:
+            out.append(m.group(1))
+    return out
+
+
+def map_screen_problems(nodes: list[Node]) -> list[str]:
+    """What is wrong with the Map tab's dump (1199): any of the old header
+    controls, or a tab bar other than exactly Chats and Map."""
+    problems = []
+    for text in MAP_CHROME_TEXTS:
+        if find(nodes, text=text):
+            problems.append(f"text {text!r} on the map screen")
+    for rid in MAP_CHROME_IDS:
+        if find(nodes, rid=rid):
+            problems.append(f"id {rid!r} on the map screen")
+    tabs = tab_ids(nodes)
+    if tabs != TABS:
+        problems.append(f"tabs {tabs}, want {TABS}")
+    if not find(nodes, rid="map"):
+        problems.append("no map view")
+    return problems
 
 
 HASH_NAME = re.compile(r"<[0-9a-f]{8}…>")
@@ -999,14 +1041,16 @@ class Walk:
 
     def step_map(self) -> str:
         dev = self.need_device()
-        # Back to the list, its menu, Map.
+        # Back to the list, then the Map tab (1199).
         for _ in range(3):
             if find(dev.dump(), rid="write"):
                 break
             dev.key("KEYCODE_BACK")
             time.sleep(0.6)
-        self.tap_text(MORE)
-        self.tap_text(MAP)
+        tabs = find(dev.dump(), rid="tab_map")
+        if not tabs:
+            raise StepFailed(f"no Map tab on the list: {texts(dev.dump())[:12]}")
+        dev.tap_node(tabs[0])
         box = None
 
         def framed():
@@ -1021,6 +1065,9 @@ class Walk:
         first = wait_for(framed, 20, every=0.5)
         if not first or box is None:
             raise StepFailed("no map frame within 20s: the map view is uniform or missing")
+        problems = map_screen_problems(dev.dump())
+        if problems:
+            raise StepFailed("; ".join(problems))
         screen = dev.screen()
         black = black_cells(screen, box)
         if black:
@@ -1047,19 +1094,33 @@ class Walk:
             if black:
                 raise StepFailed(f"{black} black parts after {name}: {changes}")
             previous = now
-        before = mean_luma(previous)
-        themes = find(dev.dump(), rid="theme") or find(dev.dump(), desc=MAP_THEME)
-        if not themes:
-            raise StepFailed("no theme switch on the map screen")
-        dev.tap_node(themes[0])
-        time.sleep(1.5)
-        after_samples = sample_grid(dev.screen(), box)
-        after = mean_luma(after_samples)
-        if abs(after - before) < 20:
-            raise StepFailed(f"the theme switch left the brightness at {before:.0f} -> {after:.0f}")
-        dev.tap_node(themes[0])
+        # The map's theme lives in Settings, Appearance now: light, then
+        # dark, each judged on the map tab it returns to.
+        lumas = []
+        for choice in (THEME_LIGHT, THEME_DARK):
+            self.map_theme(choice)
+            time.sleep(1.5)
+            lumas.append(mean_luma(sample_grid(dev.screen(), box)))
+        self.map_theme(THEME_AUTO)
+        if lumas[0] - lumas[1] < 20:
+            raise StepFailed(f"Settings' map theme left the brightness at {lumas[0]:.0f} -> {lumas[1]:.0f}")
         dev.key("KEYCODE_BACK")
-        return f"{' '.join(changes)} theme_luma={before:.0f}->{after:.0f}"
+        return f"{' '.join(changes)} tabs=2 chrome=none theme_luma={lumas[0]:.0f}->{lumas[1]:.0f}"
+
+    def map_theme(self, choice: str) -> None:
+        """From the Map tab: menu, Settings, Appearance, `choice`, and back
+        to the map."""
+        dev = self.need_device()
+        self.tap_text(MORE)
+        self.tap_text(SETTINGS)
+        self.tap_text(APPEARANCE)
+        self.tap_text(choice)
+        time.sleep(0.5)
+        for _ in range(2):
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        if not find(dev.dump(), rid="map"):
+            raise StepFailed(f"not back on the map after the theme {choice!r}")
 
     def step_teardown(self) -> str:
         done = []
