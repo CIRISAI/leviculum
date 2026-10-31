@@ -1,9 +1,12 @@
-//! The device walk's parsers (1175): `scripts/device-walk.py` reads the
-//! screen through a UI dump and the pixels of a screencap and writes one
-//! `WALK` line a step. The walk itself needs a device and runs on the
-//! reviewer's host (docs/src/concepts/loquax-device-walk.md); what it reads
-//! and writes is pinned here, by its unit tests under `scripts/tests/`, so
-//! `cargo test -p loquax-android` fails when a parser breaks.
+//! The device walk's parsers (1175) and the power proxy's (1177):
+//! `scripts/device-walk.py` reads the screen through a UI dump and the
+//! pixels of a screencap and writes one `WALK` line a step;
+//! `scripts/power-proxy.py` reads `ss`, `/proc` and dumpsys and writes one
+//! `POWER` line a phase. Both need a device and run on the reviewer's host
+//! (docs/src/concepts/loquax-device-walk.md,
+//! docs/src/concepts/loquax-phone-power.md); what they read and write is
+//! pinned here, by their unit tests under `scripts/tests/`, so `cargo test
+//! -p loquax-android` fails when a parser breaks.
 
 use std::path::PathBuf;
 use std::process::Command;

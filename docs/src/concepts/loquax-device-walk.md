@@ -87,7 +87,9 @@ python3 -I loquax-android/scripts/device-walk.py \
 debug ones), `--apk` another APK, `--listen` the address the TCP server
 binds (default `0.0.0.0`), `--walk-mailbox` a built `walk_mailbox` example
 (default: `cargo run` it), `--steps` a subset of the steps in the walk's
-order, `--keep` leaves the fixture, the device's admission and the app in
+order, `--server-mode` and `--link-keepalive` set the TCP server's interface
+mode and the host's link keepalive (the power proxy's levers,
+[tier P](loquax-phone-power.md)), `--keep` leaves the fixture, the device's admission and the app in
 place for a look by hand. The fixture's homes, logs and the code live in
 `OUT/fixture-*/`.
 
