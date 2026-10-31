@@ -286,7 +286,7 @@
     <string name="settings_backup">Backup</string>
     <string name="settings_backup_summary">Back up the mailbox</string>
     <string name="settings_backup_away">Your mailbox is on another device. Back it up there.</string>
-    <string name="settings_advanced_summary">Propagation Node, stop the service</string>
+    <string name="settings_advanced_summary">Propagation Node, map glide, stop the service</string>
     <string name="settings_map_theme">Map</string>
     <string name="map_theme_auto">Like the phone</string>
     <string name="map_theme_light">Light</string>
@@ -310,6 +310,8 @@
     <string name="share_failed">Not sent: %1$s</string>
     <string name="attach">Attach</string>
     <string name="attach_position">My position</string>
+    <string name="map_fling">Map keeps moving</string>
+    <string name="map_fling_text">A swipe on the map lets it glide on and slow down after your finger lifts.</string>
     <string name="maps_auto">Download maps automatically</string>
     <string name="maps_auto_text">The map of the area you look at loads by itself and stays on the phone.</string>
     <string name="maps_used">Storage used: %1$s</string>

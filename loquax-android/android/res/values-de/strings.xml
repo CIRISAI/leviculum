@@ -250,7 +250,7 @@
     <string name="settings_backup">Sicherung</string>
     <string name="settings_backup_summary">Das Postfach sichern</string>
     <string name="settings_backup_away">Dein Postfach ist auf einem anderen Gerät. Sichere es dort.</string>
-    <string name="settings_advanced_summary">Propagation Node, Dienst beenden</string>
+    <string name="settings_advanced_summary">Propagation Node, Nachgleiten, Dienst beenden</string>
     <string name="settings_map_theme">Karte</string>
     <string name="map_theme_auto">Wie das Telefon</string>
     <string name="map_theme_light">Hell</string>
@@ -274,6 +274,8 @@
     <string name="share_failed">Nicht gesendet: %1$s</string>
     <string name="attach">Anhängen</string>
     <string name="attach_position">Meine Position</string>
+    <string name="map_fling">Karte gleitet nach</string>
+    <string name="map_fling_text">Nach einem Wisch gleitet die Karte weiter und wird langsamer, wenn dein Finger loslässt.</string>
     <string name="maps_auto">Karten automatisch laden</string>
     <string name="maps_auto_text">Die Karte der Gegend, die du anschaust, lädt von selbst und bleibt auf dem Telefon.</string>
     <string name="maps_used">Belegter Speicher: %1$s</string>

@@ -384,6 +384,17 @@ final class Core {
         return answer(Native.query(MsgPack.pack(request)));
     }
 
+    /**
+     * The map's fling (1188): `set` stored as the config's `map_fling`, or
+     * with null only asked; the choice in force as `fling`. Waits for the
+     * frame a map may be drawing: not on the UI thread.
+     */
+    static Map<String, Object> mapFling(Boolean set) {
+        Map<String, Object> request = map("t", "mapfling");
+        if (set != null) request.put("set", set);
+        return answer(Native.query(MsgPack.pack(request)));
+    }
+
     /** The next event, or null; blocks up to waitMs. */
     static Map<String, Object> nextEvent(int waitMs) {
         byte[] bytes = Native.nextEvent(waitMs);

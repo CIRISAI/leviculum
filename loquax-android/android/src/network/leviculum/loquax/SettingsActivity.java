@@ -452,13 +452,34 @@ public class SettingsActivity extends Activity implements Events.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
-    /** The Propagation Node, and the service's end. */
+    /** The Propagation Node, the map's fling, and the service's end. */
     private void advanced() {
+        mapFling(null);
         TextView node = text(getString(R.string.propagation_node), 16, R.color.text);
         node.setPadding(dp(16), dp(16), dp(16), 0);
         body.addView(node);
         body.addView(padded(text(getString(R.string.propagation_node_text), 14,
                 R.color.text_secondary)));
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), dp(16), dp(16), dp(4));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        words.addView(text(getString(R.string.map_fling), 16, R.color.text));
+        words.addView(text(getString(R.string.map_fling_text), 14, R.color.text_secondary));
+        row.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        final Switch flings = new Switch(this);
+        flings.setId(R.id.map_fling);
+        flings.setChecked(true);
+        flings.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                mapFling(flings.isChecked());
+            }
+        });
+        row.addView(flings);
+        body.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView stop = text(getString(R.string.stop_service), 16, R.color.text);
         stop.setPadding(dp(16), dp(24), dp(16), dp(16));
         stop.setBackgroundResource(android.R.drawable.list_selector_background);
@@ -473,6 +494,33 @@ public class SettingsActivity extends Activity implements Events.Listener {
         });
         body.addView(stop, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    /**
+     * The map's fling (1188): `set` stored when given, then the switch
+     * shows the choice in force; off the UI thread, as the renderer may
+     * be drawing.
+     */
+    private void mapFling(final Boolean set) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final Map<String, Object> answer = Core.mapFling(set);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!Core.bool(answer, "ok")) {
+                            android.widget.Toast.makeText(SettingsActivity.this,
+                                    Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
+                        }
+                        View shown = body.findViewById(R.id.map_fling);
+                        if (shown instanceof Switch) {
+                            ((Switch) shown).setChecked(Core.bool(answer, "fling"));
+                        }
+                    }
+                });
+            }
+        }, "loquax-fling").start();
     }
 
     /** One blocked peer: its avatar and name as every screen shows it, and "Unblock". */
