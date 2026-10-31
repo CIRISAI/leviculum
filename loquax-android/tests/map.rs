@@ -25,6 +25,9 @@ use loquax::ui::map::MapPin;
 use loquax::when::WallTime;
 use loquax_android::schema::{self, MapRequest, MapShown};
 
+#[path = "../../loquax/tests/support/ugly_store.rs"]
+mod ugly_store;
+
 /// The Florence view of the window's golden of the names: z16, 480 x 320.
 const LAT: f64 = 43.7752;
 const LON: f64 = 11.2660;
@@ -389,6 +392,32 @@ fn a_position_in_the_store_makes_a_pin() {
     assert_eq!(shown.pins, 1, "{shown:?}");
     assert_eq!(shown.selected.as_deref(), Some("42".repeat(16).as_str()));
     assert!(shown.zoom > 11, "one pin fits deep: {}", shown.zoom);
+}
+
+/// The ugly store (1173) under the phone's client address, with no
+/// session running: the frame comes, and every peer whose received
+/// position the store keeps is a pin but the blocked one, whose pin the
+/// model's pins leave out. The imports keep their positions in their
+/// rows' fields only, so their peers have no pin.
+#[test]
+fn the_ugly_store_makes_a_pin_of_each_position() {
+    let home = home();
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    loquax::home::client::save_client(home.path(), &identity.public_key_bytes()).expect("client");
+    let filled = ugly_store::fill_store_of(home.path(), &identity);
+    assert_eq!(
+        filled.messages,
+        ugly_store::CONVERSATIONS * ugly_store::PER_CONVERSATION
+    );
+    let first = MapRequest {
+        x: None,
+        y: None,
+        zoom: None,
+        ..request(home.path(), false)
+    };
+    let (shown, _) = frame(&loquax_android::render_map(&schema::encode(&first)));
+    let live = ugly_store::CONVERSATIONS - 2;
+    assert_eq!(shown.pins as usize, live - 1, "{shown:?}");
 }
 
 /// How long a phone's whole screen takes on this host, for the report:

@@ -473,18 +473,24 @@ pub fn fill_archive(home: &Path) -> Filled {
 /// Fill the store and contacts file of the loquax in `home` (its
 /// `identity` file made if missing), as a terminal loquax holds the same
 /// year: the imports through the import's own write, the live rows as the
-/// screen writes them.
+/// screen writes them, each received position with its message.
 pub fn fill_store(home: &Path) -> Filled {
+    let own = loquax::identity::load_or_create(&home.join("identity")).expect("identity");
+    fill_store_of(home, &own)
+}
+
+/// [`fill_store`] for the address of `own`, whatever `home` holds: a
+/// phone's client store, whose address is the mailbox's.
+pub fn fill_store_of(home: &Path, own: &Identity) -> Filled {
     use loquax::ui::history::{Flags, StoreWrite};
     use loquax::when::WallTime;
-    let own = loquax::identity::load_or_create(&home.join("identity")).expect("identity");
-    let me = loquax::engine::delivery_address(&own).expect("address");
+    let me = loquax::engine::delivery_address(own).expect("address");
     let mut store = Store::open_in(home, me).expect("the store");
     let mut filled = Filled::default();
     let mut seq = 1;
     for i in 0..CONVERSATIONS {
         let peer = peer(i);
-        let rows = rows(&own, i);
+        let rows = rows(own, i);
         if i == RATSPEAK || i == NOMADNET {
             let import: Vec<ImportRow> = rows.iter().map(Row::import_row).collect();
             let counts = store
@@ -501,6 +507,7 @@ pub fn fill_store(home: &Path) -> Filled {
                 unix_secs: row.at,
                 offset_secs: 0,
             });
+            let key = loquax::store::key_of(seq);
             writes.push(StoreWrite::Message {
                 peer,
                 message: loquax::ui::Message {
@@ -518,10 +525,19 @@ pub fn fill_store(home: &Path) -> Filled {
                     size: row.body.len(),
                     ledger: Vec::new(),
                     last_leg: None,
-                    activity: loquax::store::key_of(seq),
+                    activity: key,
                     fields: row.fields.clone(),
                 },
             });
+            if !row.outbound {
+                let read = loquax::telemetry::read(peer, &row.fields, Some(row.at));
+                writes.extend(read.fixes.into_iter().map(|fix| {
+                    StoreWrite::Position(loquax::telemetry::Fix {
+                        message: Some(key),
+                        ..fix
+                    })
+                }));
+            }
             seq += 1;
             filled.messages += 1;
         }
