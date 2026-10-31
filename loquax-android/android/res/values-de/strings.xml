@@ -16,6 +16,11 @@
     <string name="run_updates">%1$d Meldungen seit %2$s</string>
     <string name="action_run">Alle %1$d Positionen zeigen</string>
     <string name="run_title">%1$d Positionen</string>
+    <string name="live">live</string>
+    <string name="live_every">alle %1$s</string>
+    <string name="live_ago">vor %1$s</string>
+    <string name="live_now">gerade eben</string>
+    <string name="last_position">letzte Position %1$s</string>
     <string name="reacted">hat mit %1$s reagiert</string>
     <string name="you_reacted">Du hast mit %1$s reagiert</string>
     <string name="search">Suchen</string>
@@ -279,4 +284,24 @@
     <string name="maps_delete_ask">Diese Karte löschen? Sie lädt wieder, wenn du dort hinschaust.</string>
     <string name="privacy_shared">Geteilte Positionen</string>
     <string name="privacy_shared_none">Du hast deine Position noch nicht geteilt.</string>
+    <!-- Das Profil hinter unserem Avatar (1187). -->
+    <string name="profile_title">Dein Profil</string>
+    <string name="profile_name_hint">Dein Name</string>
+    <string name="profile_name_elsewhere">Dein Name wird dort festgelegt, wo dein Postfach läuft.</string>
+    <string name="profile_name_saved">Name gespeichert</string>
+    <string name="profile_address">Deine Adresse</string>
+    <string name="profile_qr_caption">Scanne diesen Code, um mich als Kontakt hinzuzufügen</string>
+    <string name="profile_share_picture">Als Bild teilen</string>
+    <string name="profile_copy_address">Adresse kopieren</string>
+    <string name="profile_scan">Code eines Kontakts scannen</string>
+    <string name="profile_mailbox_here">Postfach: auf diesem Telefon</string>
+    <string name="profile_mailbox_away">Postfach: auf %1$s, seit %2$s</string>
+    <string name="profile_mailbox_away_undated">Postfach: auf %1$s</string>
+    <string name="profile_mailbox_change">Anderes Postfach verwenden</string>
+    <string name="profile_identity">Identitäts-Hash</string>
+    <string name="profile_home_node">Heimknoten</string>
+    <string name="profile_pn_chosen">Von deinem Postfach gewählt</string>
+    <string name="profile_version">App-Version</string>
+    <string name="add_contact">Kontakt hinzufügen</string>
+    <string name="add_contact_name">Wie nennst du diesen Kontakt?</string>
 </resources>

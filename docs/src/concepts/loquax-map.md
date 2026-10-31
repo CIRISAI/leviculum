@@ -32,7 +32,7 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:3174`), and the store keeps the fields whole in its
+`loquax/src/ui.rs:3242`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:2299`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:173`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
@@ -88,16 +88,41 @@ notification. One model rule, `Conversation::report_folded`
 the bubbles of the phone and the window, the list and the toast. A
 reaction does not break a run; any other message does, a text of
 either side included. The row is the newest report, its line followed
-by the count, `· 14 updates since 14:45`, and the list's last line says
-`◎ position · 14 updates` (the phone: `📍 Position · 14`). A report that
-joins a run updates the row in place: no new row, no toast, and the
-unread count and the phone's notification count the run once
-(`Conversation::unread_rows`). The conversation's own unread counter
+by the count, `· 14 updates since 14:45` (the newest run says whether
+the position is alive instead, 1209 below). A report that joins a run
+updates the row in place: no new row, and no toast. The conversation's own unread counter
 still counts every message, because the home's read marks name each
 one. Nothing is merged on disk: the store and the archive keep every
 report. On the phone a long press on the run's row offers "Show all 14
 positions", which lists them, newest first, through the facade's `run`
 query; a tap on one opens the map there.
+
+**A report is a state, not a message** (1209). Users opened the app
+for a human and found a coordinate. A position report (a telemetry
+field and no text, `Message::is_report`) now asks for no attention at
+all: in `loquax/src/ui.rs`, `OutboxEvent::Received` gives a report no
+toast, no `new` rule, no move in the list (the conversation's
+`activity` stays, `Conversation::list_activity` orders it by its newest
+message that is no report, after a restart too) and brings no archived
+conversation back; `Conversation::unread_rows` counts no report, so the
+phone's notification, which grows with that count, stays quiet. The raw
+`unread` counter still counts reports for the home's read marks, and an
+open chat reads them silently. A text that carries a position stays a
+message. What is worth seeing is whether the position is alive:
+`ui::liveness` learns the cadence from the median of the last five gaps
+between reports (at least 60 s, from three reports on) and calls the
+peer `live` while the newest is younger than twice the cadence (15 min
+before a cadence), `recent` within 24 h, `stale` after that or without
+a report. The newest report's row says `live · every 10 min · 2 min
+ago` or `last position 3 h ago` (older runs keep their count), the
+list's line `📍 live` or `📍 3 h ago` (the terminal `◎ position ·
+live`), and every avatar of the peer carries a thin ring: the accent
+while live, the secondary text colour when recent, none when stale, in
+the list, the chat's bar, the Friends sheet and on the map's pin, where
+a live ring pulses (one alpha cycle of 2 s, redrawn only while the map
+is on screen) and a stale pin is drawn grey. The phone's card says the
+row's words. The facade carries `liveness`, `cadence_s` and
+`last_fix_at` on the list's, the friends' and the chat's rows.
 
 **A text with a position** (1132). Sideband and a stock LXMF client can
 send a body and a telemetry field in one message. Such a message from a

@@ -27,6 +27,7 @@ use loquax::home::runner::{self, HomeClient};
 use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
+use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
 use loquax::ui::{chat, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
@@ -136,6 +137,8 @@ struct Inner {
     fallback: Fallback,
     /// loquax's links to the phone's address book (1139).
     book: Book,
+    /// The contact keys the home node took (1187), for the facade test.
+    keys_told: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// A running session.
@@ -388,6 +391,109 @@ impl Session {
         })
     }
 
+    /// The profile behind our avatar ([`schema::Query::Profile`], 1187).
+    fn profile(&self) -> Result<schema::Profile, String> {
+        let (home, public_key, initials) = {
+            let inner = self.lock();
+            (
+                inner.home.clone(),
+                inner.client.public_key,
+                inner.initials(&self.address),
+            )
+        };
+        let here = self.is_here();
+        let lxma = loquax::lxma::encode(&public_key)?;
+        let (qr_size, modules) = loquax::home::qr::verbatim_modules(&lxma)?;
+        let identity = leviculum_core::Identity::from_public_key_bytes(&public_key)
+            .map_err(|error| format!("the mailbox's key: {error:?}"))?;
+        let since = std::fs::metadata(home.join(loquax::home::client::CLIENT_FILE))
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |at| i64::try_from(at.as_secs()).unwrap_or(0));
+        let propagation_node = match here {
+            true => loquax::config::load(&home.join(mailbox::DIR))
+                .ok()
+                .and_then(|config| config.propagation_node)
+                .map(|node| loquax::address::to_hex(&node))
+                .unwrap_or_default(),
+            false => String::new(),
+        };
+        Ok(schema::Profile {
+            v: VERSION,
+            name: if here {
+                mailbox::name(&home)
+            } else {
+                String::new()
+            },
+            name_editable: here,
+            address: loquax::address::to_hex(&self.address),
+            initials,
+            lxma,
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+            here,
+            mailbox: if here {
+                String::new()
+            } else {
+                server_host(&self.server).to_string()
+            },
+            since,
+            identity: loquax::address::to_hex(identity.hash()),
+            home_node: loquax::address::to_hex(&loquax::home::destination_hash(&public_key)?),
+            propagation_node,
+            version: loquax::VERSION.to_string(),
+        })
+    }
+
+    /// A contact from its contact code ([`schema::Request::AddContact`],
+    /// 1187): its name kept when one was given, its key handed to the home
+    /// node in the background, and its conversation open. A home node that
+    /// cannot take the key now is said as a notice: the contact is there,
+    /// and the first message waits for its announce.
+    fn add_contact(&self, lxma: &str, name: Option<&str>) -> Result<(), String> {
+        let contact = loquax::lxma::parse(lxma).map_err(|error| error.to_string())?;
+        let peer = contact.address;
+        let mut inner = self.lock();
+        if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
+            inner.apply(UiEvent::Rename {
+                peer,
+                name: name.to_string(),
+            });
+        }
+        let node = inner.client.node.clone();
+        let public_key = inner.client.public_key;
+        let device = inner.client.device.clone();
+        let events = inner.events.clone();
+        let keys_told = Arc::clone(&inner.keys_told);
+        inner.runtime.spawn(async move {
+            let told = loquax::home::client::key(
+                &node,
+                &public_key,
+                &device,
+                &peer,
+                &contact.public_key,
+                BUDGET,
+            )
+            .await;
+            if told.is_ok() {
+                keys_told.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Err(error) = told {
+                tracing::warn!("key for {}: {error}", loquax::address::to_hex(&peer));
+                let _ = events.send(Event::Notice {
+                    v: VERSION,
+                    text: "Your mailbox did not take the contact's key yet: the first \
+                           message goes out once the contact is heard."
+                        .to_string(),
+                });
+            }
+        });
+        inner.apply(UiEvent::Open { peer });
+        inner.dirty = true;
+        Ok(())
+    }
+
     /// The address's backup ([`schema::Query::Backup`]), when the mailbox is
     /// on this phone: a reader of a mailbox elsewhere holds no address.
     fn backup(&self, passphrase: &str) -> Result<schema::Backup, String> {
@@ -469,6 +575,14 @@ impl Session {
         self.lock().attached.outbox.sever();
     }
 
+    /// How many contact keys the home node took. For the facade test.
+    #[doc(hidden)]
+    pub fn keys_told(&self) -> usize {
+        self.lock()
+            .keys_told
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         // A panic under the lock is caught at the JNI edge; what it left
         // is still the best state there is.
@@ -536,6 +650,9 @@ impl Session {
                 return Ok(());
             }
             schema::Request::Name { name } => return self.rename(&name),
+            schema::Request::AddContact { lxma, name } => {
+                return self.add_contact(&lxma, name.as_deref())
+            }
             schema::Request::Link { peer, contact } => {
                 let peer = parse_peer(&peer)?;
                 return self.lock().link(peer, &contact);
@@ -632,10 +749,26 @@ impl Session {
     pub fn query(&self, query: schema::Query) -> Result<Vec<u8>, String> {
         match query {
             schema::Query::Me => return self.me().map(|me| schema::encode(&me)),
+            schema::Query::Profile => return self.profile().map(|p| schema::encode(&p)),
             schema::Query::Backup { passphrase } => {
                 return self
                     .backup(&passphrase)
                     .map(|backup| schema::encode(&backup))
+            }
+            // The settings pages' map questions (1207) go to the renderer
+            // of the app's directory, not under the session's lock.
+            schema::Query::MapRegions {
+                delete,
+                set_autoload,
+            } => {
+                let home = self.lock().home.clone();
+                return crate::map::regions(&home, delete.as_deref(), set_autoload)
+                    .map(|regions| schema::encode(&regions));
+            }
+            schema::Query::MapTheme { set } => {
+                let home = self.lock().home.clone();
+                return crate::map::theme(&home, set.as_deref())
+                    .map(|theme| schema::encode(&theme));
             }
             _ => {}
         }
@@ -691,9 +824,25 @@ impl Session {
                 |peer| inner.photo(peer),
             )),
             schema::Query::Shared => schema::encode(&inner.shared()?),
-            schema::Query::Me | schema::Query::Backup { .. } => {
-                return Err("answered above".to_string())
+            schema::Query::Lxma { text } => {
+                let contact = loquax::lxma::parse(&text).map_err(|error| error.to_string())?;
+                schema::encode(&schema::Lxma {
+                    v: VERSION,
+                    address: loquax::address::to_hex(&contact.address),
+                    lxma: loquax::lxma::encode_parts(&contact.address, &contact.public_key),
+                    known: inner
+                        .model
+                        .names
+                        .shown(&contact.address)
+                        .unwrap_or_default()
+                        .to_string(),
+                })
             }
+            schema::Query::Me
+            | schema::Query::Profile
+            | schema::Query::Backup { .. }
+            | schema::Query::MapRegions { .. }
+            | schema::Query::MapTheme { .. } => return Err("answered above".to_string()),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -839,6 +988,7 @@ impl Inner {
             front: false,
             fallback: Fallback::default(),
             book: links::load(home),
+            keys_told: Arc::default(),
         })
     }
 
@@ -1289,6 +1439,9 @@ impl Inner {
             pinned: row.pinned,
             muted: row.muted,
             updates: u32::try_from(row.updates).unwrap_or(u32::MAX),
+            liveness: row.liveness.state.word().to_string(),
+            cadence_s: cadence(&row.liveness),
+            last_fix_at: row.liveness.last_fix_at.unwrap_or(0),
         }
     }
 
@@ -1368,6 +1521,7 @@ impl Inner {
                 .any(|m| !m.outbound)
         });
         let names = &self.model.names;
+        let liveness = self.model.liveness(&peer);
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
@@ -1390,6 +1544,9 @@ impl Inner {
                 .map(|other| names.label(other))
                 .collect(),
             verified: self.model.verified(&peer),
+            liveness: liveness.state.word().to_string(),
+            cadence_s: cadence(&liveness),
+            last_fix_at: liveness.last_fix_at.unwrap_or(0),
         }
     }
 
@@ -1544,7 +1701,17 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         quote: bubble.quote.map(|q| q.text),
         updates: u32::try_from(bubble.updates).unwrap_or(u32::MAX),
         since: bubble.since.map_or(0, |at| at.unix_secs),
+        liveness: bubble.liveness.map_or("", |l| l.state.word()).to_string(),
+        cadence_s: bubble.liveness.map_or(0, |l| cadence(&l)),
     }
+}
+
+/// A liveness's cadence as the facade carries it: seconds, 0 before one
+/// was learned.
+pub fn cadence(liveness: &Liveness) -> u32 {
+    liveness
+        .cadence_s
+        .map_or(0, |s| u32::try_from(s).unwrap_or(u32::MAX))
 }
 
 /// The reports the row `key` of `peer`'s conversation stands for, newest
@@ -1675,6 +1842,12 @@ pub fn fingerprint(peer: &[u8; 16]) -> String {
         .map(|group| String::from_utf8_lossy(group).into_owned())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The host of a `host:port` server, an IPv6 host without its brackets.
+fn server_host(server: &str) -> &str {
+    let host = server.rsplit_once(':').map_or(server, |(host, _)| host);
+    host.trim_start_matches('[').trim_end_matches(']')
 }
 
 fn wall_now(offset: i32) -> WallTime {

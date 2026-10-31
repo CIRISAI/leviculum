@@ -174,17 +174,8 @@ impl<B> UiModel<B> {
         conversation.flags = stored.flags;
         conversation.earlier = stored.earlier;
         conversation.unread = stored.unread;
-        let len = conversation.messages.len();
-        if stored.unread > 0 && len > 0 {
-            conversation.new_rule = Some(NewRule {
-                at: len - stored.unread.min(len),
-                count: stored.unread,
-            });
-        }
-        conversation.activity = conversation
-            .messages
-            .last()
-            .map_or(0, |message| message.activity);
+        conversation.new_rule = conversation.rule_from_unread();
+        conversation.activity = conversation.list_activity();
         for message in &mut conversation.messages {
             if cut_off(message) {
                 message.delivery = Some(DeliveryState::Queued);
@@ -226,10 +217,9 @@ impl<B> UiModel<B> {
             let conversation = &self.conversations[c];
             let (Some(first), earlier) = (conversation.messages.first(), conversation.earlier)
             else {
-                let newest = stored.messages.last().map_or(0, |m| m.activity);
                 self.prepend(stored.peer, stored.messages, stored.earlier);
                 let conversation = &mut self.conversations[c];
-                conversation.activity = conversation.activity.max(newest);
+                conversation.activity = conversation.activity.max(conversation.list_activity());
                 continue;
             };
             let (older, more) = below(stored.peer, first.activity)?;

@@ -109,6 +109,18 @@
               a:theme='@style/Loquax.List'
               a:exported='false'/>
 
+    <!-- Our profile behind the list's avatar (1187). -->
+    <activity a:name='network.leviculum.loquax.ProfileActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
+    <!-- The profile's QR code as a picture for the share sheet: one file,
+         read only, to the app the user picks (QrProvider). -->
+    <provider a:name='network.leviculum.loquax.QrProvider'
+              a:authorities='{{PACKAGE_NAME}}.qr'
+              a:exported='false'
+              a:grantUriPermissions='true'/>
+
     <activity a:name='network.leviculum.loquax.SettingsActivity'
               a:theme='@style/Loquax.List'
               a:exported='false'/>

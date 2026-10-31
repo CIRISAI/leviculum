@@ -83,6 +83,7 @@ pub mod identity;
 #[cfg(feature = "history")]
 pub mod import;
 pub mod keys;
+pub mod lxma;
 pub mod mailbox;
 pub mod mailbox_state;
 #[cfg(feature = "screenmap")]

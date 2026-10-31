@@ -13,8 +13,9 @@
 use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Blob, CandidateRow, Chip, ContactCopy, ConversationRow,
     Conversations, Detail, Done, Event, FriendRow, Friends, ImRow, Info, LinkRow, Links, MapMark,
-    MapRequest, MapShown, Me, MessageRow, Messages, PositionRow, Query, Recents, RegionRow,
-    Request, Run, RunRow, Shared, SharedRow, Start, Started, SuggestionRow, Suggestions,
+    MapRegions, MapRequest, MapShown, MapThemeChoice, Me, MessageRow, Messages, PositionRow, Query,
+    Recents, RegionRow, Request, Run, RunRow, Shared, SharedRow, Start, Started, SuggestionRow,
+    Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -232,6 +233,15 @@ fn query() -> impl Strategy<Value = Query> {
         (prop::option::of(i32s()), prop::option::of(i32s()))
             .prop_map(|(lat_e6, lon_e6)| Query::Friends { lat_e6, lon_e6 }),
         Just(Query::Shared),
+        Just(Query::Profile),
+        text().prop_map(|text| Query::Lxma { text }),
+        (opt_text(), prop::option::of(any::<bool>())).prop_map(|(delete, set_autoload)| {
+            Query::MapRegions {
+                delete,
+                set_autoload,
+            }
+        }),
+        opt_text().prop_map(|set| Query::MapTheme { set }),
     ]
 }
 
@@ -266,6 +276,7 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
         (prop::option::of(i64s()), prop::option::of(i64s()), i64s()),
         (opt_text(), prop::option::of(any::<bool>()), opt_text()),
         (u32s(), i64s()),
+        (text(), u32s()),
     )
         .prop_map(
             |(
@@ -274,6 +285,7 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
                 (fix_at, stale_at, key),
                 (quote, quote_ours, quote_to),
                 (updates, since),
+                (liveness, cadence_s),
             )| MessageRow {
                 id,
                 ours,
@@ -293,6 +305,8 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
                 quote_to,
                 updates,
                 since,
+                liveness,
+                cadence_s,
             },
         )
 }
@@ -313,6 +327,7 @@ fn messages() -> impl Strategy<Value = Messages> {
             any::<bool>(),
         ),
         (opt_text(), opt_text(), texts(), any::<bool>()),
+        live(),
     )
         .prop_map(
             |(
@@ -320,6 +335,7 @@ fn messages() -> impl Strategy<Value = Messages> {
                 (initials, icon_fg, icon_bg, home_client, photo),
                 (linked, lookup, contact_id, ask_link),
                 (announced, petname, others, verified),
+                (liveness, cadence_s, last_fix_at),
             )| Messages {
                 v,
                 peer,
@@ -338,8 +354,17 @@ fn messages() -> impl Strategy<Value = Messages> {
                 petname,
                 others,
                 verified,
+                liveness,
+                cadence_s,
+                last_fix_at,
             },
         )
+}
+
+/// A liveness as the rows carry it (1209): the word, the cadence and the
+/// newest fix's time.
+fn live() -> impl Strategy<Value = (String, u32, i64)> {
+    (text(), u32s(), i64s())
 }
 
 fn conversation_row() -> impl Strategy<Value = ConversationRow> {
@@ -347,12 +372,14 @@ fn conversation_row() -> impl Strategy<Value = ConversationRow> {
         (text(), text(), text(), any::<bool>(), i64s(), u32s()),
         (text(), opt_text(), opt_text(), text(), opt_text()),
         (text(), opt_text(), any::<(bool, bool, bool)>(), u32s()),
+        live(),
     )
         .prop_map(
             |(
                 (peer, name, last, ours, at, unread),
                 (initials, icon_fg, icon_bg, kind, reaction),
                 (state, photo, (linked, pinned, muted), updates),
+                (liveness, cadence_s, last_fix_at),
             )| ConversationRow {
                 peer,
                 name,
@@ -371,6 +398,9 @@ fn conversation_row() -> impl Strategy<Value = ConversationRow> {
                 pinned,
                 muted,
                 updates,
+                liveness,
+                cadence_s,
+                last_fix_at,
             },
         )
 }
@@ -492,7 +522,7 @@ fn map_request_1200() -> BoxedStrategy<MapRequest> {
         ),
         (any::<bool>(), u32s(), u32s()),
         any::<(bool, bool, bool, bool)>(),
-        (opt_text(), any::<bool>(), any::<bool>()),
+        any::<bool>(),
     )
         .prop_map(
             |(
@@ -502,7 +532,7 @@ fn map_request_1200() -> BoxedStrategy<MapRequest> {
                 (tap_x, tap_y, fit, at_lat_e6, at_lon_e6),
                 (load, margin_x, margin_y),
                 (moving, toggle_theme, follow_phone, prefetch),
-                (set_theme, ask_theme, avatars),
+                avatars,
             )| MapRequest {
                 dir,
                 w,
@@ -531,8 +561,6 @@ fn map_request_1200() -> BoxedStrategy<MapRequest> {
                 moving,
                 toggle_theme,
                 follow_phone,
-                set_theme,
-                ask_theme,
                 prefetch,
                 avatars,
                 ..MapRequest::default()
@@ -550,23 +578,14 @@ fn map_request() -> impl Strategy<Value = MapRequest> {
             prop::option::of(u32s()),
             prop::option::of(i32s()),
             prop::option::of(i32s()),
-            any::<bool>(),
-            opt_text(),
-            prop::option::of(any::<bool>()),
         )
             .boxed(),
     )
         .prop_map(
-            |(
-                request,
-                (at_zoom_milli, own_lat_e6, own_lon_e6, ask_regions, delete_region, set_autoload),
-            )| MapRequest {
+            |(request, (at_zoom_milli, own_lat_e6, own_lon_e6))| MapRequest {
                 at_zoom_milli,
                 own_lat_e6,
                 own_lon_e6,
-                ask_regions,
-                delete_region,
-                set_autoload,
                 ..request
             },
         )
@@ -635,22 +654,16 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
         (
             prop::option::of(i32s()),
             prop::option::of(i32s()),
-            regions(),
-            any::<u64>(),
             any::<bool>(),
         )
             .boxed(),
     )
-        .prop_map(
-            |(shown, (own_x, own_y, regions, region_bytes, autoload))| MapShown {
-                own_x,
-                own_y,
-                regions,
-                region_bytes,
-                autoload,
-                ..shown
-            },
-        )
+        .prop_map(|(shown, (own_x, own_y, autoload))| MapShown {
+            own_x,
+            own_y,
+            autoload,
+            ..shown
+        })
 }
 
 fn regions() -> impl Strategy<Value = Vec<RegionRow>> {
@@ -694,12 +707,14 @@ fn friend_row() -> impl Strategy<Value = FriendRow> {
         (text(), text(), text(), opt_text(), opt_text(), opt_text()),
         (i64s(), i32s(), i32s(), prop::option::of(u32s())),
         (any::<(bool, bool)>(), text()),
+        live(),
     )
         .prop_map(
             |(
                 (peer, name, initials, icon_fg, icon_bg, photo),
                 (at, lat_e6, lon_e6, distance_m),
                 ((recent, stale), geo),
+                (liveness, cadence_s, last_fix_at),
             )| FriendRow {
                 peer,
                 name,
@@ -714,6 +729,9 @@ fn friend_row() -> impl Strategy<Value = FriendRow> {
                 recent,
                 stale,
                 geo,
+                liveness,
+                cadence_s,
+                last_fix_at,
             },
         )
 }
@@ -886,6 +904,20 @@ proptest! {
         let (back, pixels) = schema::unframe(&framed).map_err(TestCaseError::fail)?;
         prop_assert_eq!(back, shown);
         prop_assert_eq!(pixels, &rgba[..]);
+    }
+
+    #[test]
+    fn the_settings_pages_map_answers_round_trip(
+        v in u32s(),
+        ok in any::<bool>(),
+        regions in regions(),
+        region_bytes in any::<u64>(),
+        autoload in any::<bool>(),
+        theme in text(),
+        theme_chosen in any::<bool>(),
+    ) {
+        round_trips(&MapRegions { v, ok, regions, region_bytes, autoload })?;
+        round_trips(&MapThemeChoice { v, ok, theme, theme_chosen })?;
     }
 
     #[test]

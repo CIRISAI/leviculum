@@ -37,7 +37,10 @@ public class AvatarView extends View {
     private final Paint picture = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint live = new Paint(Paint.ANTI_ALIAS_FLAG);
     private String initials = "";
+    /** The liveness ring's colour (1209), 0 for none. */
+    private int liveRing;
     private Bitmap photo;
     /** The status dot on the lower right edge (1199): null draws none. */
     private Boolean up;
@@ -55,9 +58,27 @@ public class AvatarView extends View {
         circle.setColor(colours[0]);
         letters.setColor(colours[1]);
         photo = photo(Core.str(row, "photo"));
+        liveRing = ring(getContext(), row);
         setContentDescription(Core.str(row, "name"));
         invalidate();
     }
+
+    /**
+     * The liveness ring of the peer `row` describes (1209, loquax's
+     * `chat::ring`): the accent while its position is live, the secondary
+     * text colour once the reports stopped, 0 (none) when stale or for a
+     * row without `liveness`.
+     */
+    static int ring(Context context, Map<String, Object> row) {
+        switch (Core.str(row, "liveness")) {
+            case "live": return context.getColor(R.color.accent);
+            case "recent": return context.getColor(R.color.text_secondary);
+            default: return 0;
+        }
+    }
+
+    /** The ring's width as a share of the avatar's side: thin. */
+    static final float RING = 0.06f;
 
     /**
      * The circle's and the letters' colours of `peer` as `row` describes
@@ -165,6 +186,15 @@ public class AvatarView extends View {
         float side = Math.min(getWidth(), getHeight());
         float cx = getWidth() / 2f;
         float cy = getHeight() / 2f;
+        if (liveRing != 0 && side > 0) {
+            // The ring on the edge, the avatar inside it with a gap of the
+            // background, so a photo's edge never reads as the ring.
+            live.setStyle(Paint.Style.STROKE);
+            live.setStrokeWidth(side * RING);
+            live.setColor(liveRing);
+            canvas.drawCircle(cx, cy, side / 2f - side * RING / 2f, live);
+            side = side * (1f - 3f * RING);
+        }
         paint(canvas, cx, cy, side, photo, initials, circle, letters, picture);
         if (up != null && side > 0) {
             // On the circle's edge at the lower right, pulled in enough

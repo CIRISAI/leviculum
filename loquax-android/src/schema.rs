@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`] or [`Shared`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`], [`Shared`], [`Profile`], [`Lxma`], [`MapRegions`] or [`MapThemeChoice`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
@@ -61,18 +61,35 @@
 //! others out, [`ConversationRow::updates`] counts it in the list, and
 //! [`Query::Run`] expands it. An app without them shows the newest report
 //! alone, which is what it draws as it is; nothing is merged on disk.
-//! The list's `home_link` (1199), the map's `set_theme` and `ask_theme`
-//! and its answer's `theme` came within version 1 too: an older app reads neither and
-//! sends none.
+//! The list's `home_link` (1199) and the frame's `theme` came within
+//! version 1 too: an older app reads neither.
 //! The map's people (1200) came the same way: [`Query::Friends`] and its
 //! [`Friends`], the map's `avatars` with its answer's `marks`, and the
 //! answer's `offline` and `no_map`. An app that sends no `avatars` gets the
 //! pins drawn into the frame as before.
 //! Location (1201) came the same way: [`Request::Share`], the map's
 //! `at_zoom_milli`, `own_lat_e6` and `own_lon_e6` with the answer's
-//! `own_x` and `own_y`, the Maps page's `ask_regions`, `delete_region` and
-//! `set_autoload` with the answer's `regions`, `region_bytes` and
-//! `autoload`, and [`Query::Shared`] with its [`Shared`].
+//! `own_x` and `own_y`, the frame's `autoload`, and [`Query::Shared`]
+//! with its [`Shared`].
+//! The profile (1187) came the same way: [`Query::Profile`] with its
+//! [`Profile`], [`Query::Lxma`] with its [`Lxma`], and
+//! [`Request::AddContact`].
+//! A position report asking for no attention (1209) is no new version
+//! either: [`ConversationRow::unread`] no longer counts reports, so the
+//! app's notification, which grows with it, stays quiet for them; and the
+//! liveness of a peer's position came as fields, `liveness`, `cadence_s`
+//! and `last_fix_at` on [`ConversationRow`], [`FriendRow`] and
+//! [`Messages`], `liveness` and `cadence_s` on the newest report's
+//! [`MessageRow`]. An older app reads none of them and draws no ring.
+//! The settings pages' map questions (1207) are queries of their own:
+//! [`Query::MapRegions`] with its [`MapRegions`] and [`Query::MapTheme`]
+//! with its [`MapThemeChoice`]. 1199 and 1201 had sent them as a
+//! [`MapRequest`] (`ask_theme`, `set_theme`, `ask_regions`,
+//! `delete_region`, `set_autoload`) without the frame's `w`, `h` and
+//! `density_milli`, which that struct needs, so the request never decoded
+//! and both pages showed their empty defaults; those fields are gone. No
+//! new version: an app that sent them got nothing but the error, and the
+//! frame's own fields are unchanged.
 
 use serde::{Deserialize, Serialize};
 
@@ -235,6 +252,16 @@ pub enum Request {
         accuracy_e2: u32,
         at: i64,
     },
+    /// A contact from its contact code, `lxma://<address>:<key>` (1187,
+    /// `loquax::lxma`): scanned or pasted. `name`, when given, becomes the
+    /// reader's name for it; the home node is handed the key, so a message
+    /// can go out before any announce was heard; the conversation opens.
+    #[serde(rename = "addcontact")]
+    AddContact {
+        lxma: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
 }
 
 /// What a contact said when loquax read it.
@@ -348,6 +375,51 @@ pub enum Query {
     /// The positions we shared, newest first (1201): the privacy page's
     /// list of who got one and when.
     Shared,
+    /// The profile screen behind our avatar (1187): name, address, the
+    /// contact code and its QR, where the mailbox is, and the advanced
+    /// facts.
+    Profile,
+    /// Whether `text` is a contact code, and whose (1187): what the scanner
+    /// and the new conversation field ask before the name.
+    Lxma { text: String },
+    /// The Maps page (1207): with `delete` that region file deleted
+    /// ([`RegionRow::name`]), with `set_autoload` the automatic download
+    /// stored, then the regions of the app's maps directory. A page's
+    /// question of its own: it carries none of a frame's fields.
+    MapRegions {
+        #[serde(default)]
+        delete: Option<String>,
+        #[serde(default)]
+        set_autoload: Option<bool>,
+    },
+    /// The Appearance page's map theme (1207): `set` (`auto`, `light`,
+    /// `dark`) stored when given, the choice in force answered.
+    MapTheme {
+        #[serde(default)]
+        set: Option<String>,
+    },
+}
+
+/// What [`Query::MapRegions`] answers: the regions, newest first, their
+/// bytes together, and whether the automatic download is on (on unless
+/// the config's `map_autoload` says off, 1089).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapRegions {
+    pub v: u32,
+    pub ok: bool,
+    pub regions: Vec<RegionRow>,
+    pub region_bytes: u64,
+    pub autoload: bool,
+}
+
+/// What [`Query::MapTheme`] answers: the config's `map_theme` as the
+/// page shows it (`auto` when unset), and whether it overrules the phone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapThemeChoice {
+    pub v: u32,
+    pub ok: bool,
+    pub theme: String,
+    pub theme_chosen: bool,
 }
 
 /// What [`Query::Shared`] answers: the positions we sent, newest first, at
@@ -421,6 +493,16 @@ pub struct FriendRow {
     /// The `geo:` URI Navigate hands to the phone.
     #[serde(default)]
     pub geo: String,
+    /// Whether the peer's position is alive (1209): `live`, `recent` or
+    /// `stale` (`loquax::ui::liveness`), the avatar's ring; the learned
+    /// report cadence in seconds, 0 before three reports taught one; when
+    /// the newest report's fix was taken, unix seconds, 0 for none.
+    #[serde(default)]
+    pub liveness: String,
+    #[serde(default)]
+    pub cadence_s: u32,
+    #[serde(default)]
+    pub last_fix_at: i64,
 }
 
 /// What [`Query::Run`] answers: the run's reports, newest first; one for a
@@ -477,6 +559,55 @@ pub struct Me {
     pub name: String,
     /// Whether the mailbox is on this phone.
     pub here: bool,
+}
+
+/// What [`Query::Profile`] answers, top to bottom as the screen shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    pub v: u32,
+    /// The name our announce carries; empty when none was given.
+    pub name: String,
+    /// Whether the name can be changed here: only with the mailbox on this
+    /// phone, which announces it.
+    pub name_editable: bool,
+    /// Our LXMF address, the one to give people, as lowercase hex.
+    pub address: String,
+    /// The avatar's letters, as the list's own avatar has them.
+    pub initials: String,
+    /// The contact code Columba and Sideband read,
+    /// `lxma://<address>:<public key>` (`loquax::lxma`).
+    pub lxma: String,
+    pub qr_size: u32,
+    /// The QR code of [`Profile::lxma`], byte mode, verbatim:
+    /// `qr_size` squared modules, one byte each, row by row.
+    pub qr: Blob,
+    /// Whether the mailbox is on this phone.
+    pub here: bool,
+    /// Where it is otherwise: the host of its server.
+    pub mailbox: String,
+    /// Since when this phone reads it, unix seconds; 0 when unknown.
+    pub since: i64,
+    /// Advanced: the identity hash behind the address.
+    pub identity: String,
+    /// Advanced: the home node's own destination, which the phone talks to.
+    pub home_node: String,
+    /// Advanced: the propagation node the mailbox is told to use; empty
+    /// when it chooses one itself.
+    pub propagation_node: String,
+    /// Advanced: the app's version and commit.
+    pub version: String,
+}
+
+/// What [`Query::Lxma`] answers for a contact code: whose it is, and the
+/// code as it parsed, for [`Request::AddContact`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lxma {
+    pub v: u32,
+    pub address: String,
+    pub lxma: String,
+    /// The name every screen gives that address today: a petname or an
+    /// announced name when one is known, else empty.
+    pub known: String,
 }
 
 /// One contact's name fields, for [`Query::Suggest`].
@@ -664,8 +795,9 @@ pub struct ConversationRow {
     pub ours: bool,
     /// When it was written or came, seconds since 1970 UTC; 0 for none.
     pub at: i64,
-    /// Unread rows: a run of reports counts once (1184), so a report that
-    /// joins one raises no count and no notification.
+    /// Unread rows: a position report counts nothing (1209), so it raises
+    /// no count and no notification; the raw count the read marks name is
+    /// not here.
     pub unread: u32,
     /// The avatar's letters (1129): from the name, or the address's first
     /// two hex digits for a peer without one.
@@ -704,10 +836,20 @@ pub struct ConversationRow {
     #[serde(default)]
     pub muted: bool,
     /// How many reports the last row folds when it is a run of them, else
-    /// 0 (1184): the list says `📍 Position · 14`, and `unread` counted the
-    /// run once.
+    /// 0 (1184). The list says whether the position is alive instead
+    /// (1209), `📍 live` or `📍 3 h ago`, from the fields below.
     #[serde(default)]
     pub updates: u32,
+    /// Whether the peer's position is alive (1209): `live`, `recent` or
+    /// `stale` (`loquax::ui::liveness`), the avatar's ring; the learned
+    /// report cadence in seconds, 0 before three reports taught one; when
+    /// the newest report's fix was taken, unix seconds, 0 for none.
+    #[serde(default)]
+    pub liveness: String,
+    #[serde(default)]
+    pub cadence_s: u32,
+    #[serde(default)]
+    pub last_fix_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -796,6 +938,15 @@ pub struct MessageRow {
     pub updates: u32,
     #[serde(default)]
     pub since: i64,
+    /// The newest report's row only (1209): the peer's liveness and the
+    /// learned cadence, as in [`ConversationRow`], which the row says
+    /// instead of a count, `live · every 10 min · 2 min ago` or `last
+    /// position 3 h ago` with [`MessageRow::fix_at`]'s age; empty and 0 on
+    /// every other row.
+    #[serde(default)]
+    pub liveness: String,
+    #[serde(default)]
+    pub cadence_s: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -841,6 +992,13 @@ pub struct Messages {
     /// header's mark.
     #[serde(default)]
     pub verified: bool,
+    /// The bar avatar's ring (1209), as in [`ConversationRow`].
+    #[serde(default)]
+    pub liveness: String,
+    #[serde(default)]
+    pub cadence_s: u32,
+    #[serde(default)]
+    pub last_fix_at: i64,
 }
 
 /// What happened, for the screen.
@@ -963,15 +1121,6 @@ pub struct MapRequest {
     /// auto`.
     #[serde(default)]
     pub follow_phone: bool,
-    /// Store the map's table as the settings page chose it (1199): `auto`
-    /// follows the phone, `light` and `dark` overrule it; the config's
-    /// `map_theme` as with `toggle_theme`. The answer draws nothing.
-    #[serde(default)]
-    pub set_theme: Option<String>,
-    /// Only say the choice in force, in the answer's `theme`: the
-    /// settings page opening. Draws nothing.
-    #[serde(default)]
-    pub ask_theme: bool,
     /// Draw a batch of the tiles around the last frame at rest instead of
     /// a frame (1135): the answer has no pixels. Java asks while the view
     /// is idle, the app in front and the battery saver off.
@@ -995,24 +1144,12 @@ pub struct MapRequest {
     pub own_lat_e6: Option<i32>,
     #[serde(default)]
     pub own_lon_e6: Option<i32>,
-    /// The Maps page (1201): only list the regions in `regions`, no frame.
-    #[serde(default)]
-    pub ask_regions: bool,
-    /// Delete the region file of this name ([`RegionRow::name`]) and list
-    /// the rest. A name that is no region file of the directory deletes
-    /// nothing and is refused.
-    #[serde(default)]
-    pub delete_region: Option<String>,
-    /// Store the config's `map_autoload`, on or off, and list the
-    /// regions.
-    #[serde(default)]
-    pub set_autoload: Option<bool>,
 }
 
-/// One region of the maps directory, for the Maps page (1201).
+/// One region of the maps directory, for the Maps page (1201, 1207).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionRow {
-    /// The file's name, which `delete_region` hands back.
+    /// The file's name, which [`Query::MapRegions`]' `delete` hands back.
     pub name: String,
     /// Its bytes on the phone.
     pub bytes: u64,
@@ -1133,12 +1270,7 @@ pub struct MapShown {
     pub own_x: Option<i32>,
     #[serde(default)]
     pub own_y: Option<i32>,
-    /// The Maps page's answer (1201): the regions, newest first, their
-    /// bytes together, and whether the autoload is on.
-    #[serde(default)]
-    pub regions: Vec<RegionRow>,
-    #[serde(default)]
-    pub region_bytes: u64,
+    /// Whether the automatic download is on.
     #[serde(default)]
     pub autoload: bool,
 }

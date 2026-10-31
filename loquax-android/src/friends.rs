@@ -151,6 +151,9 @@ pub fn friends<B>(
             distance_m: own.map(|own| distance_m(own, place)),
             recent: now.saturating_sub(at) <= WINDOW_SECS,
             stale: fix.stale(now),
+            liveness: list.liveness.state.word().to_string(),
+            cadence_s: crate::session::cadence(&list.liveness),
+            last_fix_at: list.liveness.last_fix_at.unwrap_or(0),
         }
     };
     let mut rows: Vec<FriendRow> = model

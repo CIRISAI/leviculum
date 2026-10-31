@@ -31,11 +31,13 @@ pub struct Home<'a> {
 /// One answer: the bytes for the client, the message a `/send` put in
 /// the outbox, when it was a new one, for the daemon to start delivering,
 /// and for a `/watch` it took, the newest sequence the client was told, so
-/// the daemon keeps the link for its wakes.
+/// the daemon keeps the link for its wakes, and for a `/key` it took, the
+/// peer and the public key for the daemon to remember.
 pub struct Answer {
     pub bytes: Vec<u8>,
     pub accepted: Option<Outgoing>,
     pub watching: Option<u64>,
+    pub learned: Option<([u8; 16], [u8; 64])>,
 }
 
 impl Answer {
@@ -44,6 +46,7 @@ impl Answer {
             bytes,
             accepted: None,
             watching: None,
+            learned: None,
         }
     }
 }
@@ -71,6 +74,7 @@ pub fn answer(
         super::PETNAME_PATH => Answer::only(petname(store, home, data, device, now_secs)),
         super::PEERSTATE_PATH => Answer::only(peer_state(store, home, data, device, now_secs)),
         super::WATCH_PATH => watch(store, data, device),
+        super::KEY_PATH => key(store, data, device),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
 }
@@ -160,6 +164,7 @@ fn send(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
                     propagated: false,
                 }),
                 watching: None,
+                learned: None,
             }
         }
         Ok(Accepted::Again { id }) => Answer::only(wire::send_answer(&id)),
@@ -376,12 +381,44 @@ fn watch(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
                 bytes: wire::watch_answer(newest),
                 accepted: None,
                 watching: Some(newest),
+                learned: None,
             }
         }
         Err(error) => {
             tracing::warn!("HOME watch: {error}");
             Answer::only(wire::status_answer(Status::Failed))
         }
+    }
+}
+
+/// A contact's key from its contact code (1187): taken when its address is
+/// the one the key makes, for the daemon to remember; a pair that does not
+/// belong together is malformed.
+fn key(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
+    let Ok((peer, public_key)) = wire::read_key_request(data) else {
+        return Answer::only(wire::status_answer(Status::Malformed));
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "key") {
+        return Answer::only(refused);
+    }
+    if super::lxmf_address(&public_key).ok() != Some(peer) {
+        tracing::info!(
+            "HOME key refused device={} peer={} reason=mismatch",
+            crate::address::to_hex(&device),
+            crate::address::to_hex(&peer)
+        );
+        return Answer::only(wire::status_answer(Status::Malformed));
+    }
+    tracing::info!(
+        "HOME key device={} peer={}",
+        crate::address::to_hex(&device),
+        crate::address::to_hex(&peer)
+    );
+    Answer {
+        bytes: wire::status_answer(Status::Ok),
+        accepted: None,
+        watching: None,
+        learned: Some((peer, public_key)),
     }
 }
 
@@ -672,6 +709,40 @@ mod tests {
             300.0,
         );
         read_status(&answer.bytes).expect("status")
+    }
+
+    /// A contact's key (1187) is taken from an admitted device when its
+    /// address is the one the key makes, archives nothing, and comes back
+    /// for the daemon to remember; a mismatched pair or a stranger's
+    /// request is refused with nothing learned.
+    #[test]
+    fn a_contact_key_is_learned_only_when_it_matches_and_the_device_is_admitted() {
+        let (_dir, mut store) = store();
+        let identity = Identity::generate(&mut rand_core::OsRng);
+        let key = identity.public_key_bytes();
+        let peer = crate::home::lxmf_address(&key).expect("address");
+        let ask = |store: &mut Store, peer: [u8; 16]| {
+            let answer = answer(
+                store,
+                &home(),
+                crate::home::KEY_PATH,
+                &wire::key_request(&peer, &key),
+                Some(LAPTOP),
+                300.0,
+            );
+            (read_status(&answer.bytes).expect("status"), answer.learned)
+        };
+        assert_eq!(ask(&mut store, peer), (Status::NotAdmitted, None));
+        admitted(&mut store);
+        assert_eq!(ask(&mut store, peer), (Status::Ok, Some((peer, key))));
+        let mut wrong = peer;
+        wrong[0] ^= 1;
+        assert_eq!(ask(&mut store, wrong), (Status::Malformed, None));
+        assert!(store
+            .archive_since(0, usize::MAX)
+            .expect("page")
+            .entries
+            .is_empty());
     }
 
     /// A petname is an archive entry for an admitted device, only the

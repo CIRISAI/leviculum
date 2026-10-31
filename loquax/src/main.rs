@@ -354,6 +354,14 @@ struct SendArgs {
     #[arg(long)]
     title: Option<String>,
 
+    /// Send a position with it: the Telemeter of this place in degrees,
+    /// timed now, as Sideband and Columba send one. Without a body the
+    /// message is a position report, no text, which a receiving Loquax
+    /// shows as a state and raises no notification for (1209); stdin is
+    /// then not read.
+    #[arg(long, value_name = "LAT,LON", allow_hyphen_values = true)]
+    position: Option<String>,
+
     /// The name recipients see as the sender. Defaults to the account name of
     /// the user running loquax; `LNMSG_DISPLAY_NAME` sets it where there is no
     /// command line to edit, and this flag wins over it.
@@ -1013,10 +1021,19 @@ async fn run(args: SendArgs) -> ExitCode {
         Err(error) => return usage(error),
     };
     events::sender(&display_name.name, display_name.source.as_str());
-    let body = match body::resolve(args.body.as_deref(), &mut std::io::stdin().lock()) {
-        Ok(body) => body,
+    let fields = match args.position.as_deref().map(position_fields).transpose() {
+        Ok(fields) => fields,
         Err(error) => return usage(error),
     };
+    // A report has no body, and reads none from stdin.
+    let body = match (&fields, args.body.as_deref()) {
+        (Some(_), None) => Vec::new(),
+        (_, body) => match body::resolve(body, &mut std::io::stdin().lock()) {
+            Ok(body) => body,
+            Err(error) => return usage(error),
+        },
+    };
+    let fields = fields.unwrap_or_default();
     let title = args.title.unwrap_or_default().into_bytes();
 
     let home = match identity::home_dir() {
@@ -1030,6 +1047,7 @@ async fn run(args: SendArgs) -> ExitCode {
                 destination,
                 title,
                 body,
+                fields,
             };
             let reach = (args.instance, args.config, args.timeout);
             return run_client_send(home, public_key, message, reach).await;
@@ -1087,7 +1105,7 @@ async fn run(args: SendArgs) -> ExitCode {
         destination,
         title: title.clone(),
         body: body.clone(),
-        fields: Vec::new(),
+        fields: fields.clone(),
         via,
     };
 
@@ -1273,6 +1291,36 @@ struct ClientMessage {
     destination: [u8; 16],
     title: Vec<u8>,
     body: Vec<u8>,
+    fields: Vec<leviculum_lxmf::Field>,
+}
+
+/// `--position`'s `LAT,LON` in degrees as the fields of a position report
+/// timed now ([`loquax::ui::position_fields`]).
+fn position_fields(text: &str) -> Result<Vec<leviculum_lxmf::Field>, String> {
+    let bad = || format!("--position {text}: expected LAT,LON in degrees, as 52.5163,13.3777");
+    let (lat, lon) = text.split_once(',').ok_or_else(bad)?;
+    let degrees = |part: &str, limit: f64| {
+        part.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|d| d.is_finite() && d.abs() <= limit)
+            .map(|d| (d * 1e6).round() as i32)
+            .ok_or_else(bad)
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    Ok(loquax::ui::position_fields(
+        leviculum_lxmf::telemetry::Location {
+            latitude_e6: degrees(lat, 90.0)?,
+            longitude_e6: degrees(lon, 180.0)?,
+            altitude_e2: 0,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: 0,
+            last_update: now,
+        },
+    ))
 }
 
 /// `loquax send` on a client of a home node: hand the message to the home
@@ -1332,7 +1380,7 @@ async fn run_client_send(
         destination: message.destination,
         title: message.title,
         content: message.body,
-        fields: Vec::new(),
+        fields: message.fields,
     };
     let accepted = loquax::home::client::send_retrying(
         &node,
@@ -1833,5 +1881,26 @@ async fn run_client_fetch(home: PathBuf, public_key: [u8; 64], args: FetchArgs) 
             ExitCode::SUCCESS
         }
         Err(error) => failure(error, "failed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--position` (1209): degrees to a report's Telemeter, which reads
+    /// back as a position report; anything else is refused before a send.
+    #[test]
+    fn a_position_argument_is_a_reports_telemeter() {
+        let fields = position_fields("52.516275,-13.3777").expect("a place");
+        let read = loquax::telemetry::read([0; 16], &fields, None);
+        let fix = loquax::telemetry::shown_fix(&read).expect("a fix");
+        assert_eq!(
+            (fix.location.latitude_e6, fix.location.longitude_e6),
+            (52_516_275, -13_377_700)
+        );
+        for bad in ["52.5", "91,0", "0,181", "a,b", "NaN,0"] {
+            assert!(position_fields(bad).is_err(), "{bad}");
+        }
     }
 }

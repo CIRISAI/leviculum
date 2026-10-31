@@ -122,6 +122,7 @@ Link requests on `loquax.home`, msgpack on the wire:
 /mark  [flag: uint, [id: bin32, ...]] -> [status]
 /petname [address: bin16, name: str] -> [status]
 /watch [cursor: uint]              -> [status, newest: uint]
+/key   [address: bin16, public_key: bin64] -> [status]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
@@ -391,6 +392,27 @@ and photo a phone shows stays on that phone
   the contacts file, takes it as the reader's word and writes the
   contacts file, and never hands it back. A home node from before 1139
   answers `/petname` as malformed, which the client says in its log.
+
+## Contact keys from a code
+
+1187. A contact code, `lxma://<address>:<public key>` as Columba and
+Sideband share it (`loquax::lxma`), carries the contact's key, so the
+first message can go out before any announce of the contact was heard.
+The key has to reach the home node, which signs and sends.
+
+- **`/key`** hands the home node the peer's address and its identity's
+  64 byte public key. The phone sends it when the user adds a contact
+  from a scanned or pasted code (`Request::AddContact`), on a task of its
+  own, asked again as a petname is.
+- **The home node** refuses a device it never admitted, and a pair whose
+  address is not the one the key makes (malformed). It archives nothing:
+  the daemon remembers the identity in its node's known destinations,
+  which the node keeps on disk as it keeps those it learned from
+  announces (`server::key`, `daemon::answer`).
+- **A home node from before 1187** answers `/key` as malformed. The phone
+  says so once ("Your mailbox did not take the contact's key yet") and the
+  first message waits for the contact's announce, as every message did
+  before.
 
 ## Imported history
 

@@ -25,7 +25,8 @@ import java.util.Map;
  * The settings (1199), after the modern messenger cut: one list, each
  * entry a page of its own, this screen again with PAGE. Profile, Mailbox,
  * Appearance, Notifications, Privacy, Maps, Backup, Advanced; a page that
- * has no controls yet says what exists today.
+ * has no controls yet says what exists today. Profile opens the screen
+ * behind the avatar (ProfileActivity, 1187).
  *
  * Appearance holds the map's theme, which the map screen's moon held
  * before: like the phone, light or dark, the config's `map_theme` (1133).
@@ -138,9 +139,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
 
     private void refresh() {
         body.removeAllViews();
-        if (page == R.string.settings_profile) {
-            profile();
-        } else if (page == R.string.mailbox) {
+        if (page == R.string.mailbox) {
             mailbox();
         } else if (page == R.string.settings_appearance) {
             appearance();
@@ -178,33 +177,16 @@ public class SettingsActivity extends Activity implements Events.Listener {
             entry.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    startActivity(new Intent(SettingsActivity.this, SettingsActivity.class)
-                            .putExtra(PAGE, target));
+                    // Profile is the screen behind the avatar (1187), not a page of its own.
+                    startActivity(target == R.string.settings_profile
+                            ? new Intent(SettingsActivity.this, ProfileActivity.class)
+                            : new Intent(SettingsActivity.this, SettingsActivity.class)
+                                    .putExtra(PAGE, target));
                 }
             });
             body.addView(entry, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
-    }
-
-    /** Our name, address and its code, until the profile of 1187. */
-    private void profile() {
-        Map<String, Object> me = Core.me();
-        if (me.containsKey("error")) {
-            body.addView(padded(text(Core.str(me, "error"), 15, R.color.text_secondary)));
-            return;
-        }
-        String name = Core.str(me, "name");
-        if (!name.isEmpty()) {
-            body.addView(padded(text(name, 18, R.color.text)));
-        }
-        body.addView(padded(text(getString(R.string.address_text), 15, R.color.text_secondary)));
-        body.addView(padded(text(Core.str(me, "fingerprint"), 16, R.color.text)));
-        LinearLayout.LayoutParams centred = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        centred.gravity = Gravity.CENTER_HORIZONTAL;
-        centred.topMargin = dp(16);
-        body.addView(QrCode.view(this, me, dp(240), Core.str(me, "fingerprint")), centred);
     }
 
     /** Where the mailbox is. */
@@ -223,7 +205,6 @@ public class SettingsActivity extends Activity implements Events.Listener {
         TextView header = text(getString(R.string.settings_map_theme), 14, R.color.accent);
         header.setPadding(dp(16), dp(16), dp(16), dp(4));
         body.addView(header);
-        final String dir = getFilesDir().getAbsolutePath();
         final String[] words = {"auto", "light", "dark"};
         int[] labels = {R.string.map_theme_auto, R.string.map_theme_light, R.string.map_theme_dark};
         final RadioButton[] choices = new RadioButton[words.length];
@@ -240,7 +221,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
             choice.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    theme(dir, word, choices, words);
+                    theme(word, choices, words);
                 }
             });
             choices[i] = choice;
@@ -248,19 +229,19 @@ public class SettingsActivity extends Activity implements Events.Listener {
         }
         body.addView(group);
         body.addView(padded(text(getString(R.string.settings_app_theme_text), 14, R.color.text_secondary)));
-        theme(dir, null, choices, words);
+        theme(null, choices, words);
     }
 
     /**
      * Store `set` as the map's theme, or with null only ask, off the UI
      * thread; the choice in force checked after, a failure said.
      */
-    private void theme(final String dir, final String set, final RadioButton[] choices,
+    private void theme(final String set, final RadioButton[] choices,
             final String[] words) {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final Map<String, Object> answer = Core.mapTheme(dir, set);
+                final Map<String, Object> answer = Core.mapTheme(set);
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -268,7 +249,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
                             android.widget.Toast.makeText(SettingsActivity.this,
                                     Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
                             if (set != null) {
-                                theme(dir, null, choices, words);
+                                theme(null, choices, words);
                             }
                             return;
                         }
@@ -303,20 +284,27 @@ public class SettingsActivity extends Activity implements Events.Listener {
     /**
      * The Maps page (1201): ask the renderer off the UI thread, with a
      * region to delete or the autoload to switch when given, and show
-     * what it answers.
+     * what it answers; a change refused is said and the page asked again,
+     * so the switch shows what is stored (1207).
      */
     private void maps(final String delete, final Boolean autoload) {
-        final String dir = getFilesDir().getAbsolutePath();
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final Map<String, Object> answer = Core.mapRegions(dir, delete, autoload);
+                final Map<String, Object> answer = Core.mapRegions(delete, autoload);
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (page == R.string.settings_maps && !isFinishing()) {
-                            showMaps(answer);
+                        if (page != R.string.settings_maps || isFinishing()) {
+                            return;
                         }
+                        if (!Core.bool(answer, "ok") && (delete != null || autoload != null)) {
+                            android.widget.Toast.makeText(SettingsActivity.this,
+                                    Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
+                            maps(null, null);
+                            return;
+                        }
+                        showMaps(answer);
                     }
                 });
             }
@@ -352,6 +340,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView used = text(getString(R.string.maps_used,
                 Formatter.formatShortFileSize(this, Core.num(answer, "region_bytes"))), 14, R.color.accent);
+        used.setId(R.id.maps_used);
         used.setPadding(dp(16), dp(16), dp(16), dp(4));
         body.addView(used);
         List<Map<String, Object>> regions = Core.list(answer, "regions");
@@ -372,15 +361,19 @@ public class SettingsActivity extends Activity implements Events.Listener {
         line.setPadding(dp(16), dp(8), dp(8), dp(8));
         LinearLayout words = new LinearLayout(this);
         words.setOrientation(LinearLayout.VERTICAL);
-        words.addView(text(getString(R.string.maps_region,
-                Ui.place(Core.num(region, "lat_e6"), Core.num(region, "lon_e6"))), 16, R.color.text));
+        TextView place = text(getString(R.string.maps_region,
+                Ui.place(Core.num(region, "lat_e6"), Core.num(region, "lon_e6"))), 16, R.color.text);
+        place.setId(R.id.maps_region_name);
+        words.addView(place);
         long modified = Core.num(region, "modified");
         String when = modified == 0 ? "" : DateUtils.formatDateTime(this, modified * 1000,
                 DateUtils.FORMAT_SHOW_DATE | DateUtils.FORMAT_ABBREV_MONTH);
-        words.addView(text(getString(R.string.maps_region_line,
+        TextView facts = text(getString(R.string.maps_region_line,
                 Formatter.formatShortFileSize(this, Core.num(region, "bytes")), when,
                 (int) Core.num(region, "min_zoom"), (int) Core.num(region, "max_zoom")), 14,
-                R.color.text_secondary));
+                R.color.text_secondary);
+        facts.setId(R.id.maps_region_line);
+        words.addView(facts);
         line.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button delete = new Button(this);
         delete.setText(R.string.maps_delete);

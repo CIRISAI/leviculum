@@ -747,6 +747,14 @@ async fn answer(
         request.remote,
         now,
     );
+    if let Some((peer, public_key)) = answer.learned {
+        match leviculum_core::Identity::from_public_key_bytes(&public_key) {
+            Ok(identity) => {
+                node.remember_identity(leviculum_core::DestinationHash::new(peer), identity)
+            }
+            Err(error) => tracing::warn!("HOME key: {error:?}"),
+        }
+    }
     let bytes = &answer.bytes;
     let sent = match node
         .send_response(&request.link_id, &request.request_id, bytes)

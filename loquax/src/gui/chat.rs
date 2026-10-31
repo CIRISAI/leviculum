@@ -30,6 +30,9 @@ use super::{App, Message};
 /// The list's width, in logical pixels.
 pub const LIST_WIDTH: f32 = 340.0;
 
+/// The liveness ring's width around an avatar (1209): thin.
+const RING: f32 = 2.0;
+
 /// A token, `0xaarrggbb`, as iced's colour.
 pub fn colour(argb: u32) -> Color {
     let [a, r, g, b] = argb.to_be_bytes();
@@ -49,15 +52,18 @@ pub fn tokens(dark: bool) -> Colours {
     }
 }
 
-/// A peer's avatar: a circle of `diameter` with its initials.
+/// A peer's avatar: a circle of `diameter` with its initials, ringed by
+/// the liveness of its position (1209, [`chat::ring`]).
 fn avatar<'a>(
     peer: &[u8; 16],
     initials: &str,
     icon: Option<&(String, String)>,
     diameter: f32,
+    ring: Option<u32>,
 ) -> Element<'a, Message> {
     let (fg, bg) = chat::avatar_colours(peer, icon);
     let (fg, bg) = (rgb(fg), rgb(bg));
+    let ring = ring.map(colour);
     container(text(initials.to_string()).size(diameter * 0.4).color(fg))
         .width(diameter)
         .height(diameter)
@@ -65,7 +71,10 @@ fn avatar<'a>(
         .center_y(diameter)
         .style(move |_: &Theme| container::Style {
             background: Some(Background::Color(bg)),
-            border: border::rounded(diameter / 2.0),
+            border: match ring {
+                Some(ink) => border::rounded(diameter / 2.0).width(RING).color(ink),
+                None => border::rounded(diameter / 2.0),
+            },
             ..container::Style::default()
         })
         .into()
@@ -286,7 +295,8 @@ impl App {
                     &open.peer,
                     &open.initials,
                     open.icon.as_ref(),
-                    size::BAR_AVATAR
+                    size::BAR_AVATAR,
+                    chat::ring(open.liveness.state, &t),
                 ),
                 text(open.name.clone())
                     .size(size::BAR_NAME)
@@ -401,10 +411,18 @@ impl App {
             if let Some(accuracy) = loquax::telemetry::accuracy(&fix.location) {
                 words = format!("{words}  {accuracy}");
             }
-            words.push_str(&loquax::telemetry::run_words(
-                bubble.updates,
-                bubble.since.as_ref(),
-            ));
+            // The newest report says whether the position is alive
+            // (1209); an older run its count.
+            match &bubble.liveness {
+                Some(liveness) => {
+                    words.push_str(" · ");
+                    words.push_str(&liveness.row_words(self.seen.now.map(|now| now.unix_secs)));
+                }
+                None => words.push_str(&loquax::telemetry::run_words(
+                    bubble.updates,
+                    bubble.since.as_ref(),
+                )),
+            }
             let stale = self.seen.now.is_some_and(|now| {
                 fix.fix_time()
                     .saturating_add(loquax::telemetry::STALE_AFTER_SECS)
@@ -685,7 +703,13 @@ fn list_row<'a>(
     .width(Length::Fill)
     .clip(true);
     let line = row![
-        avatar(&r.peer, &r.initials, r.icon.as_ref(), size::ROW_AVATAR),
+        avatar(
+            &r.peer,
+            &r.initials,
+            r.icon.as_ref(),
+            size::ROW_AVATAR,
+            chat::ring(r.liveness.state, &t)
+        ),
         words,
         side
     ]

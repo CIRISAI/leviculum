@@ -169,6 +169,20 @@ pub async fn petname(
     ask_retrying(node, public_key, device, super::PETNAME_PATH, &data, budget).await
 }
 
+/// Hand the home node `peer`'s public key from its contact code (1187),
+/// asked again as a petname is: remembering it twice changes nothing.
+pub async fn key(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    peer: &[u8; 16],
+    peer_key: &[u8; 64],
+    budget: Duration,
+) -> Result<(), HomeError> {
+    let data = wire::key_request(peer, peer_key);
+    ask_retrying(node, public_key, device, super::KEY_PATH, &data, budget).await
+}
+
 /// Hand the home node the reader's word on `peer` (1146), asked again as a
 /// petname is: the home node keeps the newest.
 pub async fn peer_state(

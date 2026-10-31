@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import signal
@@ -64,9 +65,11 @@ STEPS = [
     "info",
     "reply_send",
     "receive_wake",
+    "receive_report",
     "map",
     "friends",
     "settings",
+    "profile",
     "teardown",
 ]
 
@@ -102,14 +105,26 @@ SETTINGS_PAGES = [
 # Each page's mark that it is that page and not a copy of another (1201):
 # an id or a text only it shows. Pages with no mark of their own say none.
 SETTINGS_PAGE_MARKS = {
+    "Profile": ("rid", "profile_qr"),
     "Appearance": ("text", THEME_AUTO),
     "Privacy": ("text", "Positions you shared"),
     "Maps": ("rid", "maps_auto"),
 }
+# The region the walk puts on the phone for the Maps page (1207): the
+# repository's Florence fixture, and the middle the page names it by
+# (Ui.place, two decimals, either decimal mark).
+FIXTURE_REGION = REPO / "leviculum-map" / "fixtures" / "firenze.lmr"
+FIXTURE_REGION_PLACE = re.compile(r"43[.,]\d\d° N, 11[.,]\d\d° E")
+# A size as Formatter.formatShortFileSize writes it: "1.2 MB", "345 kB".
+FILE_SIZE = re.compile(r"\d+(?:[.,]\d+)?\s?(?:B|kB|KB|MB|GB)\b")
 # The buttons of the dialogs a first start may raise: Android's
 # notification question, its battery exemption, the app's own (Asks.java).
 # "Not now" before "Leave it out": the latter opens a second, system dialog.
 DIALOG_BUTTONS = ["Allow", "ALLOW", "Not now"]
+# The list's last line for a peer whose position is live (1209, Ui.preview).
+LIVE_LINE = "\U0001f4cd live"
+# The liveness ring's width as a share of the avatar (AvatarView.RING).
+RING = 0.06
 # A delivery mark of ours the walk counts as a tick (Ui.state's words).
 TICKS = {"sent", "delivered ✓"}
 
@@ -129,6 +144,7 @@ class Node:
     clickable: bool = False
     long_clickable: bool = False
     scrollable: bool = False
+    checked: bool = False
 
     @property
     def center(self) -> tuple[int, int]:
@@ -201,6 +217,7 @@ def parse_dump(xml_text: str) -> list[Node]:
                 clickable=el.get("clickable") == "true",
                 long_clickable=el.get("long-clickable") == "true",
                 scrollable=el.get("scrollable") == "true",
+                checked=el.get("checked") == "true",
             )
         )
     return nodes
@@ -328,9 +345,66 @@ def settings_list_problems(nodes: list[Node]) -> tuple[list[str], list[str]]:
     return titles, problems
 
 
+ADDRESS = re.compile(r"[0-9a-f]{32}")
+
+
+def profile_problems(nodes: list[Node], want: str | None) -> tuple[str, list[str]]:
+    """The profile behind the avatar (1187): the address it shows, and
+    what is wrong: no address row or one that is not 32 hex digits, not
+    the mailbox's address `want` (when known), no QR code, no Share, a
+    line that did not decode."""
+    rows = find(nodes, rid="profile_address")
+    shown = rows[0].text.strip() if rows else ""
+    problems = []
+    if not rows:
+        problems.append("no address row")
+    elif not ADDRESS.fullmatch(shown):
+        problems.append(f"the address row shows {shown!r}")
+    elif want is not None and shown != want:
+        problems.append(f"the address row shows {shown}, the mailbox is {want}")
+    if not find(nodes, rid="profile_qr"):
+        problems.append("no QR code")
+    if not find(nodes, rid="profile_share"):
+        problems.append("no Share")
+    problems += decode_problems(nodes)
+    return shown, problems
+
+
 def decode_problems(nodes: list[Node]) -> list[str]:
     """A line that says something did not decode, anywhere on screen."""
     return [f"on screen: {t!r}" for t in texts(nodes) if NOT_DECODED in t]
+
+
+def maps_page_problems(nodes: list[Node]) -> tuple[str, list[str]]:
+    """The Maps page (1201, 1207): what it shows, and what is wrong: no
+    automatic download switch or one that is off (on by default, 1089,
+    and the walk never stores off for good), no storage line or one
+    without a size or of 0 B, no region row of the walk's fixture, a
+    region without its size, a line that did not decode. Lew's phone
+    showed the switch off, "0 B" and no maps, the request having failed
+    to decode."""
+    switch = find(nodes, rid="maps_auto")
+    used = find(nodes, rid="maps_used")
+    names = [n.text for n in by_top(find(nodes, rid="maps_region_name"))]
+    lines = [n.text for n in by_top(find(nodes, rid="maps_region_line"))]
+    problems = []
+    if not switch:
+        problems.append("no automatic download switch")
+    elif not switch[0].checked:
+        problems.append("the automatic download shows off")
+    used_text = used[0].text if used else ""
+    size = FILE_SIZE.search(used_text)
+    if not used:
+        problems.append("no storage line")
+    elif size is None or re.fullmatch(r"0\s?B", size.group(0)):
+        problems.append(f"the storage line says {used_text!r}")
+    if not any(FIXTURE_REGION_PLACE.search(name) for name in names):
+        problems.append(f"no row of the fixture region among {names}")
+    if len(lines) != len(names) or any(not FILE_SIZE.search(line) for line in lines):
+        problems.append(f"a region without its size: {lines}")
+    problems += decode_problems(nodes)
+    state = "none" if not switch else "on" if switch[0].checked else "off"
+    return f"auto={state} used={size.group(0) if size else '?'} regions={len(names)}", problems
 
 
 def page_mark_missing(page: str, nodes: list[Node]) -> str | None:
@@ -458,6 +532,44 @@ def mean_luma(samples: list[tuple[int, int, int]]) -> float:
     if not samples:
         return 0.0
     return sum(0.299 * r + 0.587 * g + 0.114 * b for r, g, b in samples) / len(samples)
+
+
+def ring_points(
+    box: tuple[int, int, int, int], ring: float = RING, count: int = 16
+) -> list[tuple[int, int]]:
+    """`count` points on the middle of an avatar's liveness ring (1209):
+    the circle inside `box`, `ring` of its side wide at the edge."""
+    x1, y1, x2, y2 = box
+    side = min(x2 - x1, y2 - y1)
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    radius = side / 2 - side * ring / 2
+    return [
+        (
+            round(cx + radius * math.cos(2 * math.pi * i / count)),
+            round(cy + radius * math.sin(2 * math.pi * i / count)),
+        )
+        for i in range(count)
+    ]
+
+
+def conversation_notifications(dumpsys: str, package: str) -> dict[str, str]:
+    """The conversation notifications `dumpsys notification --noredact`
+    lists for `package`: each record's tag (LoquaxService tags one by the
+    peer) to the first time the record names (`mUpdateTimeMs`, `postTime`
+    or `when`), so a notification raised again shows as a new time. The
+    session's own, untagged, is left out."""
+    out: dict[str, str] = {}
+    blocks = re.split(r"(?=NotificationRecord\()", dumpsys)
+    for block in blocks:
+        head = re.match(r"NotificationRecord\([^\n]*", block)
+        if not head or f"pkg={package} " not in head.group(0) + " ":
+            continue
+        tag = re.search(r"\btag=(\S+)", head.group(0))
+        if not tag or tag.group(1) == "null":
+            continue
+        when = re.search(r"\b(?:mUpdateTimeMs|postTime|when)=(\d+)", block)
+        out[tag.group(1)] = when.group(1) if when else ""
+    return out
 
 
 def clean_detail(detail: str) -> str:
@@ -612,13 +724,25 @@ class Fixture:
                 proc.wait(timeout=5)
 
 
-def lnsd_config(instance: str, listen_ip: str, port: int) -> str:
+def lnsd_config(
+    instance: str,
+    listen_ip: str,
+    port: int,
+    mode: str | None = None,
+    link_keepalive: int | None = None,
+) -> str:
+    """The fixture's config. `mode` is the TCP server's interface mode
+    (`access_point` keeps announces off the device's connection) and
+    `link_keepalive` the `keepalive_interval` in seconds of every link
+    the host's side holds; both are the power proxy's levers (1177)."""
+    keepalive = f"  keepalive_interval = {link_keepalive}\n" if link_keepalive else ""
+    server_mode = f"    mode = {mode}\n" if mode else ""
     return f"""[reticulum]
   enable_transport = True
   share_instance = Yes
   instance_name = {instance}
   panic_on_interface_error = No
-
+{keepalive}
 [logging]
   loglevel = 4
 
@@ -628,7 +752,7 @@ def lnsd_config(instance: str, listen_ip: str, port: int) -> str:
     enabled = yes
     listen_ip = {listen_ip}
     listen_port = {port}
-"""
+{server_mode}"""
 
 
 def wait_for(predicate, timeout: float, every: float = 0.25):
@@ -838,7 +962,10 @@ class Walk:
             raise StepFailed(f"walk_mailbox: {filled.stderr.decode(errors='replace')[-400:]}")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         (cfg / "config").write_text(
-            lnsd_config(f"walk{os.getpid()}", args.listen, port), encoding="utf-8"
+            lnsd_config(
+                f"walk{os.getpid()}", args.listen, port, args.server_mode, args.link_keepalive
+            ),
+            encoding="utf-8",
         )
         fixture = Fixture(root, cfg, mailbox, sender, manifest, code="")
         self.fixture = fixture
@@ -1118,6 +1245,73 @@ class Walk:
             if begun > 3.0:
                 raise StepFailed(f"no bubble {body!r} within 3s of the send; {texts(nodes)[-6:]}")
 
+    def step_receive_report(self) -> str:
+        """A position report from the open conversation's peer, with the
+        conversation closed (1209): it raises no notification, the list's
+        line says `📍 live`, and the row's avatar gains its ring."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        peer = fixture.manifest["sender_peer"]
+        shown = fixture.manifest["open"]["shown"]
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+        nodes = dev.dump()
+        avatar = self.row_avatar(nodes, shown)
+        before = [dev.screen().pixel(x, y) for x, y in ring_points(avatar.bounds)]
+        told = conversation_notifications(
+            dev.shell("dumpsys notification --noredact"), PACKAGE
+        )
+        send = subprocess.run(
+            [
+                self.args.loquax,
+                "send",
+                "--config",
+                str(fixture.cfg),
+                "--via",
+                "direct",
+                "--position",
+                "43.7731,11.2560",
+                fixture.manifest["address"],
+            ],
+            env={**os.environ, "LNMSG_HOME": str(fixture.sender)},
+            capture_output=True,
+            timeout=60,
+        )
+        sent = time.monotonic()
+        if send.returncode != 0:
+            raise StepFailed(f"loquax send exit={send.returncode}: {send.stderr.decode()[-300:]}")
+        if not wait_for(lambda: find(dev.dump(), text=LIVE_LINE), 5, every=0.3):
+            raise StepFailed(f"no {LIVE_LINE!r} line within 5s; {texts(dev.dump())[:12]}")
+        seen_ms = int((time.monotonic() - sent) * 1000)
+        # The notification would come with the row; a moment more for it.
+        time.sleep(1.0)
+        after_told = conversation_notifications(
+            dev.shell("dumpsys notification --noredact"), PACKAGE
+        )
+        if after_told.get(peer) != told.get(peer):
+            raise StepFailed(
+                f"a notification for {peer[:8]}: before={told.get(peer)!r} after={after_told.get(peer)!r}"
+            )
+        avatar = self.row_avatar(dev.dump(), shown)
+        after = [dev.screen().pixel(x, y) for x, y in ring_points(avatar.bounds)]
+        ring = changed_fraction(before, after)
+        if ring < 0.5:
+            raise StepFailed(f"the avatar's ring did not change: {ring:.2f} of its points")
+        return f"live_line_ms={seen_ms} notified=no ring_changed={ring:.2f}"
+
+    def row_avatar(self, nodes: list[Node], shown: str) -> Node:
+        """The list row's avatar beside the name `shown`."""
+        names = find(nodes, rid="name", text=shown)
+        if not names:
+            raise StepFailed(f"no row {shown!r} in the list")
+        middle = (names[0].bounds[1] + names[0].bounds[3]) // 2
+        for node in find(nodes, rid="avatar"):
+            if node.bounds[1] <= middle <= node.bounds[3]:
+                return node
+        raise StepFailed(f"no avatar beside {shown!r}")
+
     def step_map(self) -> str:
         dev = self.need_device()
         # Back to the list, then the Map tab (1199).
@@ -1241,8 +1435,10 @@ class Walk:
         """The settings (1201): More, Settings; the eight entries in their
         order, each with a one line description and no raw hash; each page
         opened and left with back, none with a line that did not decode,
-        each with its own mark where it has one; back to the chats."""
+        each with its own mark where it has one; the Maps page as
+        `maps_page` walks it (1207); back to the chats."""
         dev = self.need_device()
+        self.put_fixture_region()
         for _ in range(3):
             if find(dev.dump(), rid="write"):
                 break
@@ -1268,8 +1464,7 @@ class Walk:
             if trouble:
                 raise StepFailed(f"{page}: " + "; ".join(trouble))
             if page == "Maps":
-                regions = len(find(nodes, rid="maps_region"))
-                walked.append(f"Maps(regions={regions})")
+                walked.append(f"Maps({self.maps_page()})")
             else:
                 walked.append(page)
             dev.key("KEYCODE_BACK")
@@ -1277,6 +1472,78 @@ class Walk:
         dev.key("KEYCODE_BACK")
         self.wait_id("write", 10)
         return f"entries={len(titles)} walked={','.join(walked)} back=chats"
+
+    def put_fixture_region(self) -> None:
+        """The walk's region into the app's maps directory, through
+        run-as (a debug APK), for the Maps page to list (1207)."""
+        dev = self.need_device()
+        if not FIXTURE_REGION.is_file():
+            raise StepFailed(f"{FIXTURE_REGION} missing")
+        dev.run("push", str(FIXTURE_REGION), "/data/local/tmp/walk-firenze.lmr", timeout=60)
+        dev.shell(
+            f"cat /data/local/tmp/walk-firenze.lmr | run-as {PACKAGE} sh -c "
+            "'mkdir -p files/maps && cat > files/maps/firenze.lmr'"
+        )
+        dev.shell("rm -f /data/local/tmp/walk-firenze.lmr", check=False)
+
+    def maps_switch(self, on: bool) -> list[Node]:
+        """The Maps page's switch once it shows `on`; a line that did not
+        decode on the way fails (1207)."""
+        dev = self.need_device()
+        seen: list[Node] = []
+
+        def shows():
+            nonlocal seen
+            seen = dev.dump()
+            if decode_problems(seen):
+                raise StepFailed("Maps: " + "; ".join(decode_problems(seen)))
+            switch = find(seen, rid="maps_auto")
+            return seen if switch and switch[0].checked == on else None
+
+        if not wait_for(shows, 10, every=0.3):
+            raise StepFailed(f"Maps: the switch did not show {'on' if on else 'off'}")
+        return seen
+
+    def maps_page(self) -> str:
+        """The Maps page (1207), open: the switch on, the storage used,
+        the fixture's region with its size; the switch off, the page left
+        and opened again still off (stored), then on again; never a line
+        that did not decode. The page's line for the detail."""
+        dev = self.need_device()
+        nodes = self.maps_switch(True)
+        detail, problems = maps_page_problems(nodes)
+        if problems:
+            raise StepFailed("Maps: " + "; ".join(problems))
+        dev.tap_node(find(nodes, rid="maps_auto")[0])
+        self.maps_switch(False)
+        dev.key("KEYCODE_BACK")
+        self.wait_id("settings_entry_title", 10)
+        self.tap_text("Maps")
+        self.wait_id("maps_auto", 10)
+        nodes = self.maps_switch(False)
+        dev.tap_node(find(nodes, rid="maps_auto")[0])
+        self.maps_switch(True)
+        return f"{detail} switch=off,stored,on"
+
+    def step_profile(self) -> str:
+        """The profile (1187): our avatar at the top left of the chats
+        opens it; the address row shows the mailbox's address, the QR code
+        and Share are there; back to the chats."""
+        dev = self.need_device()
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        dev.tap_node(self.wait_id("avatar", 10)[0])
+        self.wait_id("profile_address", 10)
+        want = self.fixture.manifest["address"] if self.fixture is not None else None
+        shown, problems = profile_problems(dev.dump(), want)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        return f"address={shown} qr=shown share=shown back=chats"
 
     def map_theme(self, choice: str) -> None:
         """From the Map tab: menu, Settings, Appearance, `choice`, and back
@@ -1333,6 +1600,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="host:port of the mailbox's TCP server as the device reaches it",
     )
     p.add_argument("--listen", default="0.0.0.0", help="the TCP server's listen address")
+    p.add_argument(
+        "--server-mode",
+        help="the TCP server's interface mode, e.g. access_point; default: full",
+    )
+    p.add_argument(
+        "--link-keepalive",
+        type=int,
+        help="keepalive_interval in seconds of the host's links; default: from the RTT",
+    )
     p.add_argument("--loquax", default=str(debug / "loquax"), help="host loquax (--features tui)")
     p.add_argument("--lnsd", default=str(debug / "lnsd"), help="host lnsd")
     p.add_argument(

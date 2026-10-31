@@ -205,7 +205,7 @@ After the modern messenger cut, one list, each entry a settings page:
 
 ```text
 Settings
-  Profile         name, avatar, address, QR (1187)
+  Profile         the profile behind the avatar (1187), below
   Mailbox         where it lives, connected since, join another
   Appearance      app theme; Map: like the phone / light / dark
   Notifications   on/off, sound, per chat muting
@@ -217,6 +217,56 @@ Settings
 
 "Load area" becomes the Maps entry: management, not an action on the
 map. Help is its own entry in the three dot menu, not a settings page.
+
+## The profile
+
+1187, after the modern messenger layout: the avatar at the top left of
+the chat list opens our own screen, and so does Settings, Profile. The
+design rule is the end user one: a user who knows nothing of Reticulum
+sees the name, the address, a way to hand it over and where the mailbox
+is; what needs Reticulum knowledge sits under Advanced, collapsed.
+Columba's "Your Identity" page was the reference; ours is cut to Loquax.
+
+```text
+Your profile
+  avatar, large
+  name             the name the announce carries; edited in place with
+                   the mailbox on this phone, else "set where your
+                   mailbox runs"
+  Your address     the LXMF address, monospaced, selectable    [Copy]
+  QR code          on a white card: the contact code
+                   lxma://<address>:<public key>
+                   "Scan this code to add me as a contact"
+  [Share]          the system share sheet with the contact code as text
+  [Share as picture]  the QR code as a PNG (QrProvider)
+  Copy address
+  Scan a contact's code   the scanner: lxma:// adds a contact, lqxh1 joins
+  Mailbox: on this phone | on <host>, since <date>
+  Use another mailbox     the join form
+  Advanced ▾       identity hash, home node, propagation node (or
+                   "Chosen by your mailbox"), backup, app version
+```
+
+The contact code is the one Columba and Sideband read (in Columba's
+checkout: `encodeToQrString` of `IdentityQrCodeUtils`, and
+`LXMF_IDENTITY_PREFIX` and `PUBLIC_KEY_LENGTH`, 64, of
+`ValidationConstants`): the address and the identity's public key as
+lowercase hex. `loquax::lxma` writes and
+parses it once for every frontend; its test pins the string byte for
+byte against Columba's encoder, and the QR code is byte mode, verbatim,
+because Columba compares the prefix case for case.
+
+A scanned or pasted code (the pencil's field takes one too) asks for the
+contact's name, keeps it as the reader's name for the address, hands the
+key to the mailbox (`/key`, docs/src/concepts/loquax-home-node.md) and
+opens the chat. The facade has `Query::Profile`, `Query::Lxma` (whose a
+code is, before the name is asked) and `Request::AddContact`. The parser
+refuses a code whose address is not the one its key makes, with words
+for the screen.
+
+No new colours: the card is white because a QR code is black on white,
+and every text on the screen uses the background's text and secondary
+text colours of the contrast table in `res/values/colors.xml`.
 
 ## Consistency rules
 

@@ -29,7 +29,8 @@ import java.util.Map;
 /**
  * The main views (1199): the chat list and the map side by side under a
  * bottom tab bar, one top bar over both: our avatar with the status dot
- * (green while the mailbox link is up), the tab's name, search and a menu
+ * (green while the mailbox link is up), which opens our profile (1187),
+ * the tab's name, search and a menu
  * of Settings and Help. The selected tab survives a rotation; system back
  * on the map goes to the chats first.
  *
@@ -90,8 +91,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         own.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                // The profile of 1187 once it exists; until then the settings.
-                startActivity(new Intent(ConversationsActivity.this, SettingsActivity.class));
+                startActivity(new Intent(ConversationsActivity.this, ProfileActivity.class));
             }
         });
         ListView list = (ListView) findViewById(R.id.list);

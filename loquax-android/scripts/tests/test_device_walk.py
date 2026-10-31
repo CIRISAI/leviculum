@@ -185,6 +185,85 @@ class Settings(unittest.TestCase):
         self.assertIsNone(walk.page_mark_missing("Backup", []))
 
 
+def maps_page(on=True, used="Storage used: 1.4 MB", rows=(("Around 43.77° N, 11.25° E",
+              "1.4 MB · Oct 31 · zoom 0 to 16"),)):
+    """The Maps page as SettingsActivity.showMaps builds it (1207)."""
+    switch = walk.Node(text="", desc="", rid="network.leviculum.loquax.debug:id/maps_auto",
+                       cls="android.widget.Switch", bounds=(900, 200, 1000, 260), checked=on)
+    nodes = [switch, at("maps_used", used, 300)]
+    for i, (name, line) in enumerate(rows):
+        nodes.append(at("maps_region_name", name, 400 + 100 * i))
+        nodes.append(at("maps_region_line", line, 440 + 100 * i))
+    return nodes
+
+
+class MapsPage(unittest.TestCase):
+    def test_the_page_as_built_has_no_problem(self):
+        detail, problems = walk.maps_page_problems(maps_page())
+        self.assertEqual(problems, [])
+        self.assertEqual(detail, "auto=on used=1.4 MB regions=1")
+        german = maps_page(used="Speicher belegt: 1,4 MB",
+                           rows=(("Rund um 43,77° N, 11,25° E", "1,4 MB · 31. Okt. · Zoom 0 bis 16"),))
+        self.assertEqual(walk.maps_page_problems(german)[1], [])
+
+    def test_lews_phone_on_2026_10_31(self):
+        """Switch off, 0 B, no maps, the toast's line in the dump."""
+        nodes = maps_page(on=False, used="Storage used: 0 B", rows=()) + [
+            node("", "No maps on this phone yet."),
+            node("", "the request did not decode: missing field `w`"),
+        ]
+        detail, problems = walk.maps_page_problems(nodes)
+        self.assertEqual(detail, "auto=off used=0 B regions=0")
+        self.assertEqual(problems, [
+            "the automatic download shows off",
+            "the storage line says 'Storage used: 0 B'",
+            "no row of the fixture region among []",
+            "on screen: 'the request did not decode: missing field `w`'",
+        ])
+
+    def test_a_region_without_its_size_and_no_switch(self):
+        rows = (("Around 43.77° N, 11.25° E", " · Oct 31 · zoom 0 to 16"),)
+        _, problems = walk.maps_page_problems(maps_page(rows=rows))
+        self.assertEqual(problems, [f"a region without its size: {[rows[0][1]]}"])
+        _, problems = walk.maps_page_problems(maps_page()[1:])
+        self.assertEqual(problems, ["no automatic download switch"])
+
+    def test_the_dump_reads_a_switchs_state(self):
+        xml = ('<hierarchy rotation="0"><node index="0" text="" resource-id="x:id/maps_auto" '
+               'class="android.widget.Switch" checked="true" bounds="[0,0][1,1]" /></hierarchy>')
+        self.assertTrue(walk.parse_dump(xml)[0].checked)
+        self.assertFalse(walk.parse_dump(xml.replace('checked="true"', 'checked="false"'))[0].checked)
+
+    def test_the_fixture_region_exists(self):
+        self.assertTrue(walk.FIXTURE_REGION.is_file(), walk.FIXTURE_REGION)
+
+
+ME = "3e35f10c9a7b4d2e8f1a0b6c5d4e3f21"
+
+
+class Profile(unittest.TestCase):
+    def test_the_profile_as_built_has_no_problem(self):
+        nodes = [node("profile_address", ME), node("profile_qr"), node("profile_share", "Share")]
+        self.assertEqual(walk.profile_problems(nodes, ME), (ME, []))
+        self.assertEqual(walk.profile_problems(nodes, None), (ME, []))
+
+    def test_a_missing_or_wrong_address_a_missing_code_and_share(self):
+        self.assertEqual(walk.profile_problems([], None),
+                         ("", ["no address row", "no QR code", "no Share"]))
+        other = "0" * 32
+        _, problems = walk.profile_problems(
+            [node("profile_address", other), node("profile_qr"), node("profile_share")], ME)
+        self.assertEqual(problems, [f"the address row shows {other}, the mailbox is {ME}"])
+        _, problems = walk.profile_problems(
+            [node("profile_address", "<3e35f10c…>"), node("profile_qr"), node("profile_share")], ME)
+        self.assertEqual(problems, ["the address row shows '<3e35f10c…>'"])
+
+    def test_the_settings_profile_entry_shows_the_code(self):
+        self.assertIsNone(walk.page_mark_missing("Profile", [node("profile_qr")]))
+        self.assertEqual(walk.page_mark_missing("Profile", []),
+                         "Profile without its rid 'profile_qr'")
+
+
 class Dump(unittest.TestCase):
     def setUp(self):
         self.nodes = walk.parse_dump(DUMP)
@@ -362,3 +441,60 @@ class InputText(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Two records as `dumpsys notification --noredact` lists them on Android
+# 13, cut: the session's own, untagged, and a conversation's, tagged by its
+# peer; a record of another app between them.
+NOTIFICATIONS = """\
+  Notification List:
+    NotificationRecord(0x0a1b2c3d: pkg=network.leviculum.loquax.debug user=UserHandle{0} id=1 tag=null importance=2 key=0|network.leviculum.loquax.debug|1|null|10123: Notification(channel=session))
+      uid=10123 userId=0
+      mUpdateTimeMs=1793480000000
+    NotificationRecord(0x0e0f: pkg=com.android.systemui user=UserHandle{0} id=7 tag=abcd importance=3 key=x: Notification(channel=x))
+      mUpdateTimeMs=1793480000001
+    NotificationRecord(0x0b2c3d4e: pkg=network.leviculum.loquax.debug user=UserHandle{0} id=0 tag=3b5c00112233445566778899aabbccdd importance=4 key=0|network.leviculum.loquax.debug|0|3b5c00112233445566778899aabbccdd|10123: Notification(channel=messages))
+      uid=10123 userId=0
+      mUpdateTimeMs=1793480123456
+"""
+
+
+class Notifications(unittest.TestCase):
+    """The receive_report step's notification check (1209)."""
+
+    def test_the_conversations_records_by_tag_with_their_time(self):
+        got = walk.conversation_notifications(NOTIFICATIONS, walk.PACKAGE)
+        self.assertEqual(got, {"3b5c00112233445566778899aabbccdd": "1793480123456"})
+
+    def test_none_listed_is_none(self):
+        self.assertEqual(walk.conversation_notifications("", walk.PACKAGE), {})
+
+    def test_another_package_with_our_prefix_is_not_ours(self):
+        other = NOTIFICATIONS.replace("loquax.debug user", "loquax.debugx user")
+        self.assertEqual(walk.conversation_notifications(other, walk.PACKAGE), {})
+
+
+class Ring(unittest.TestCase):
+    """Where the receive_report step looks for the avatar's ring (1209)."""
+
+    def test_the_points_lie_on_the_rings_middle_inside_the_box(self):
+        box = (100, 200, 200, 300)
+        points = walk.ring_points(box)
+        self.assertEqual(len(points), 16)
+        self.assertEqual(points[0], (197, 250))
+        for x, y in points:
+            self.assertTrue(100 <= x <= 200 and 200 <= y <= 300, (x, y))
+            self.assertAlmostEqual(((x - 150) ** 2 + (y - 250) ** 2) ** 0.5, 47, delta=1)
+
+    def test_a_ring_drawn_into_a_screen_is_seen_changed(self):
+        side = 100
+        plain = filled(side, side, (255, 255, 255))
+        ringed = list(plain)
+        for x, y in walk.ring_points((0, 0, side, side)):
+            ringed[y * side + x] = (0, 90, 200)
+        a = walk.parse_screencap(screencap(side, side, plain))
+        b = walk.parse_screencap(screencap(side, side, ringed))
+        points = walk.ring_points((0, 0, side, side))
+        before = [a.pixel(x, y) for x, y in points]
+        after = [b.pixel(x, y) for x, y in points]
+        self.assertEqual(walk.changed_fraction(before, after), 1.0)

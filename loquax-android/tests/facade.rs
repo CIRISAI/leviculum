@@ -19,6 +19,11 @@ mod nomadnet_tree;
 #[path = "../../loquax/tests/support/ugly_store.rs"]
 mod ugly_store;
 
+mod support {
+    pub mod java;
+}
+use support::java::{java_map, Java};
+
 /// The exported facade keeps one session per process, and the tests of a
 /// binary share the process: those that go through it take turns. Tokio's
 /// lock, which the async test holds across its awaits.
@@ -1453,60 +1458,14 @@ impl<'de> serde::Deserialize<'de> for JavaLong {
     }
 }
 
-/// A value of a request map as the app builds it.
-enum Java<'a> {
-    Str(&'a str),
-    Long(i64),
-    Longs(&'a [i64]),
-}
-
-/// A request map in the bytes `MsgPack.pack` writes: a long below -32 or
-/// above 127 as `d3` and eight bytes, whatever its size.
-fn java_map(entries: &[(&str, Java)]) -> Vec<u8> {
-    fn long(out: &mut Vec<u8>, n: i64) {
-        if (0..128).contains(&n) || (-32..0).contains(&n) {
-            out.push(n as u8);
-        } else {
-            out.push(0xd3);
-            out.extend_from_slice(&n.to_be_bytes());
-        }
-    }
-    fn string(out: &mut Vec<u8>, s: &str) {
-        let n = s.len();
-        if n < 32 {
-            out.push(0xa0 | n as u8);
-        } else if n < 0x100 {
-            out.extend_from_slice(&[0xd9, n as u8]);
-        } else {
-            out.push(0xda);
-            out.extend_from_slice(&(n as u16).to_be_bytes());
-        }
-        out.extend_from_slice(s.as_bytes());
-    }
-    let mut out = vec![0x80 | entries.len() as u8];
-    for (name, value) in entries {
-        string(&mut out, name);
-        match value {
-            Java::Str(s) => string(&mut out, s),
-            Java::Long(n) => long(&mut out, *n),
-            Java::Longs(ns) => {
-                out.push(0x90 | ns.len() as u8);
-                for n in *ns {
-                    long(&mut out, *n);
-                }
-            }
-        }
-    }
-    out
-}
-
 /// A request map of `t` with a peer and a boolean `on`, as `MsgPack.pack`
 /// writes a Java `boolean` (`c3` and `c2`).
 fn java_bool_map(t: &str, peer: &str, on: bool) -> Vec<u8> {
-    let mut out = java_map(&[("t", Java::Str(t)), ("peer", Java::Str(peer))]);
-    out[0] += 1;
-    out.extend_from_slice(&[0xa2, b'o', b'n', if on { 0xc3 } else { 0xc2 }]);
-    out
+    java_map(&[
+        ("t", Java::Str(t)),
+        ("peer", Java::Str(peer)),
+        ("on", Java::Bool(on)),
+    ])
 }
 
 /// 1164: an import on the running mailbox runs outside its daemon, on a
@@ -1615,6 +1574,8 @@ fn instance() -> String {
 struct HomeNode {
     transport: ReticulumNode,
     daemon: tokio::task::JoinHandle<Result<(), String>>,
+    /// The daemon's stop: dropping it stops the daemon too.
+    stop: tokio::sync::oneshot::Sender<()>,
 }
 
 impl HomeNode {
@@ -1638,6 +1599,7 @@ impl HomeNode {
         let identity = loquax::identity::load_or_create(&home.join("identity")).expect("identity");
         let daemon_storage = home.join("storage");
         std::fs::create_dir_all(&daemon_storage).expect("daemon storage");
+        let (stop, stopped) = tokio::sync::oneshot::channel();
         let daemon = tokio::spawn(loquax::home::daemon::run(
             loquax::home::daemon::DaemonOptions {
                 home: home.to_path_buf(),
@@ -1659,15 +1621,34 @@ impl HomeNode {
                 sync_bound_ms: None,
                 fetch_budget: Duration::from_secs(10),
                 wake: true,
-                stop: None,
+                stop: Some(stopped),
             },
         ));
-        Self { transport, daemon }
+        Self {
+            transport,
+            daemon,
+            stop,
+        }
+    }
+
+    /// Stop both as a shutdown does: the daemon closes its node, which
+    /// writes what it keeps to disk.
+    async fn stop(mut self) {
+        let _ = self.stop.send(());
+        self.daemon
+            .await
+            .expect("the daemon task")
+            .expect("the daemon stopped cleanly");
+        self.transport
+            .stop()
+            .await
+            .expect("stop the transport node");
     }
 
     /// Kill both, as a power cut does to the box they run on: the daemon
     /// gone with its lock, the TCP server closed.
     async fn kill(mut self) {
+        drop(self.stop);
         self.daemon.abort();
         let _ = self.daemon.await;
         self.transport
@@ -2122,7 +2103,8 @@ fn hex(bytes: &[u8]) -> String {
 /// Lew's phone, 2026-10-31 (1184): Columba's report a minute was a bubble,
 /// an unread count and a notification each. Over the ugly store with a run
 /// of 14 reports between two texts, the facade answers three rows, the
-/// run's with its count and when it began, and counts it unread once; the
+/// run's with its count and when it began, and counts it unread not at all
+/// (1209, it counted once at 1184); the
 /// expand lists all 14, newest first. A report after the text starts a new
 /// run, a row of its own counted once, which the next report updates in
 /// place. The store keeps every report.
@@ -2180,7 +2162,8 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
         ugly_store::BASE + 86_400 + 60,
         "the first report"
     );
-    assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 3);
+    // The texts count, the run not (1209).
+    assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 2);
 
     let expanded = session::run(&model, peer, loquax_android::schema::model_key(run.key));
     assert_eq!(expanded.positions.len(), RUN_REPORTS);
@@ -2196,7 +2179,7 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
     assert_eq!(alone.positions.len(), 1);
 
     // After the text a report starts a new run: a row of its own, unread
-    // once; the next report updates that row, and counts nothing more.
+    // never (1209); the next report updates that row.
     let report = |id: u8, lat: i32| {
         UiEvent::Engine(OutboxEvent::Received {
             message_id: [id; 32],
@@ -2211,16 +2194,165 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
     let rows = session::rows(&model, c);
     assert_eq!(rows.len(), 4);
     assert_eq!(rows[3].updates, 0, "one report is no run yet");
-    assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 4);
+    assert_eq!(loquax::ui::chat::list_row(&model, &peer).unread, 2);
     update(&mut model, report(0xe2, 52_600_001));
     let rows = session::rows(&model, c);
     assert_eq!(rows.len(), 4, "updated in place");
     assert_eq!((rows[3].updates, rows[3].lat_e6), (2, Some(52_600_001)));
     let row = loquax::ui::chat::list_row(&model, &peer);
-    assert_eq!((row.unread, row.updates), (4, 2));
+    assert_eq!((row.unread, row.updates), (2, 2));
     // Every report is still there, and every one unread for the read marks.
     assert_eq!(model.conversations[c].messages.len(), RUN_REPORTS + 4);
     assert_eq!(model.conversations[c].unread, RUN_REPORTS + 4);
+}
+
+/// Lew, 2026-10-31 (1209): a position report is a state, not a message.
+/// Over the ugly store, six reports from one peer ten minutes apart raise
+/// no unread count (the phone's notification grows with it), no toast (the
+/// facade's `notice`) and no move in the list; a text from the same peer
+/// still does all three.
+#[test]
+fn a_position_report_is_a_state_not_a_message() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::chat::list_row;
+    use loquax::ui::{update, UiEvent};
+    use loquax::when::WallTime;
+    use loquax_android::session;
+    let home = tempfile::tempdir().expect("app dir");
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    ugly_store::fill_store_of(home.path(), &identity);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let store = loquax::store::Store::open_in(home.path(), me).expect("the store");
+    let mut model = session::known(home.path(), &store).expect("a model");
+    model.home_client = true;
+    model.list_apart = true;
+    let clock = |at: i64| {
+        UiEvent::Clock(WallTime {
+            unix_secs: at,
+            offset_secs: 0,
+        })
+    };
+    let start = ugly_store::BASE + 3 * 86_400;
+    update(&mut model, clock(start));
+    model.restore(store.restore().expect("restore"));
+    update(&mut model, UiEvent::Close);
+    // A conversation in the middle of the list, read.
+    let order = model.order();
+    let c = order[order.len() / 2];
+    let peer = model.conversations[c].peer;
+    model.conversations[c].unread = 0;
+    model.conversations[c].new_rule = None;
+    assert_eq!(list_row(&model, &peer).unread, 0);
+    let toasts = model.toasts.len();
+    let received = |id: u8, body: &str, fields: Vec<_>| {
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [id; 32],
+            source: peer,
+            title: Vec::new(),
+            body: body.as_bytes().to_vec(),
+            fields,
+            verified: true,
+        })
+    };
+    let newest = start + 5 * 600;
+    for i in 0..6u8 {
+        let at = start + i64::from(i) * 600;
+        update(&mut model, clock(at));
+        update(
+            &mut model,
+            received(
+                0xa0 + i,
+                "",
+                ugly_store::position(at, 52_500_000 + i32::from(i)),
+            ),
+        );
+    }
+    assert_eq!(list_row(&model, &peer).unread, 0, "a report counts nothing");
+    assert_eq!(model.toasts.len(), toasts, "nor toasts: {:?}", model.toasts);
+    assert_eq!(model.order(), order, "nor moves the conversation up");
+    assert_eq!(
+        model.conversations[c].unread, 6,
+        "the read marks still name them"
+    );
+    assert!(
+        model.conversations[c].new_rule.is_none(),
+        "nor sets the new rule"
+    );
+    // Alive: six reports ten minutes apart are every 10 minutes, and the
+    // newest is the row that says so, on the list, the bubble and the map.
+    use loquax::ui::liveness::State;
+    let live = list_row(&model, &peer).liveness;
+    assert_eq!(
+        (live.state, live.cadence_s, live.last_fix_at),
+        (State::Live, Some(600), Some(newest))
+    );
+    assert_eq!(list_row(&model, &peer).last, "📍 live");
+    let rows = session::rows(&model, c);
+    let newest_row = rows.last().expect("the run's row");
+    assert_eq!(
+        (
+            newest_row.liveness.as_str(),
+            newest_row.cadence_s,
+            newest_row.updates
+        ),
+        ("live", 600, 6)
+    );
+    assert!(
+        rows[..rows.len() - 1].iter().all(|r| r.liveness.is_empty()),
+        "only the newest report's row says it"
+    );
+    let friend = |model: &loquax::ui::UiModel<session::Line>, at: i64| {
+        loquax_android::friends::friends(model, at, None, |_| None)
+            .friends
+            .into_iter()
+            .find(|f| f.peer == loquax::address::to_hex(&peer))
+            .map(|f| (f.liveness, f.cadence_s, f.last_fix_at))
+    };
+    assert_eq!(
+        friend(&model, newest),
+        Some(("live".to_string(), 600, newest))
+    );
+    // 25 minutes on, past twice the cadence: recent.
+    update(&mut model, clock(newest + 25 * 60));
+    assert_eq!(list_row(&model, &peer).liveness.state, State::Recent);
+    assert_eq!(list_row(&model, &peer).last, "📍 25 min ago");
+    assert_eq!(
+        session::rows(&model, c).last().map(|r| r.liveness.clone()),
+        Some("recent".into())
+    );
+    // 25 hours on: stale.
+    update(&mut model, clock(newest + 25 * 3600));
+    assert_eq!(list_row(&model, &peer).liveness.state, State::Stale);
+    assert_eq!(
+        friend(&model, newest + 25 * 3600).map(|f| f.0),
+        Some("stale".to_string())
+    );
+    assert_eq!(
+        model.toasts.len(),
+        toasts,
+        "time passing raises nothing either"
+    );
+
+    // A text from the same peer still notifies, counts and moves up.
+    update(&mut model, clock(newest + 25 * 3600 + 60));
+    update(&mut model, received(0xb0, "bin da", Vec::new()));
+    assert_eq!(list_row(&model, &peer).unread, 1);
+    let first_unpinned = model
+        .order()
+        .into_iter()
+        .find(|&i| !model.conversations[i].pinned);
+    assert_eq!(first_unpinned, Some(c), "on top, under the pinned");
+    assert_eq!(model.toasts.len(), toasts + 1);
+    // A text that carries a position stays a message.
+    update(
+        &mut model,
+        received(
+            0xb1,
+            "hier",
+            ugly_store::position(newest + 25 * 3600, 52_600_000),
+        ),
+    );
+    assert_eq!(list_row(&model, &peer).unread, 2);
 }
 
 /// The map's Friends sheet (1200), as the facade answers it from the
@@ -2416,4 +2548,338 @@ fn a_shared_position_reaches_the_privacy_list_and_a_bad_fix_is_refused() {
     }))
     .expect("decodes");
     assert!(matches!(request, Request::Share { at, .. } if at == now));
+}
+
+/// The texts of the QR code `size` squared modules draw, read back by the
+/// scanner's decoder: what a phone pointed at the profile reads.
+fn read_qr(size: u32, modules: &[u8]) -> Vec<String> {
+    let (size, scale) = (size as usize, 4);
+    let side = (size + 8) * scale;
+    let mut luma = vec![255u8; side * side];
+    for y in 0..size {
+        for x in 0..size {
+            if modules[y * size + x] != 0 {
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        luma[((y + 4) * scale + dy) * side + (x + 4) * scale + dx] = 0;
+                    }
+                }
+            }
+        }
+    }
+    loquax_android::scan::decode(side, side, side, &luma)
+}
+
+/// Every file under `dir` named `name`, however deep.
+fn files_named(dir: &Path, name: &str) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_named(&path, name));
+        } else if path.file_name().is_some_and(|n| n == name) {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// The profile behind the avatar (1187) and a contact from its code: the
+/// profile names our address, the contact code of the mailbox's identity
+/// and a QR code that reads back as exactly that code, where the mailbox
+/// is and the advanced facts. Our own code parses back to our address; a
+/// contact code adds the contact under the name given, its key reaches
+/// the home node, which keeps it on disk, and a malformed code is refused
+/// with words for the screen.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let home_identity =
+        loquax::identity::load_or_create(&home.path().join("identity")).expect("identity");
+    let home_key = home_identity.public_key_bytes();
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let bob = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let bob_key = bob.public_key_bytes();
+    let bob_code = loquax::lxma::encode(&bob_key).expect("bob's code");
+    let bob_address = loquax::address::to_hex(&loquax::home::lxmf_address(&bob_key).expect("a"));
+    let session = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let profile: schema::Profile =
+            rmp_serde::from_slice(&session.query(schema::Query::Profile).expect("profile"))
+                .expect("decode");
+        let address = loquax::address::to_hex(&session.address());
+        assert_eq!(profile.address, address);
+        assert_eq!(profile.lxma, loquax::lxma::encode(&home_key).expect("code"));
+        assert!(profile.lxma.starts_with(&format!("lxma://{address}:")));
+        assert_eq!(
+            profile.qr.0.len(),
+            (profile.qr_size * profile.qr_size) as usize
+        );
+        assert_eq!(
+            read_qr(profile.qr_size, &profile.qr.0),
+            vec![profile.lxma.clone()]
+        );
+        assert!(!profile.here && !profile.name_editable);
+        assert_eq!(profile.mailbox, "127.0.0.1");
+        assert!(profile.since > 0, "{profile:?}");
+        assert_eq!(profile.identity, hex(home_identity.hash()));
+        assert_eq!(
+            profile.home_node,
+            hex(&loquax::home::destination_hash(&home_key).expect("home"))
+        );
+        assert_eq!(profile.version, loquax::VERSION);
+
+        // Our own code, parsed back: our address.
+        let ours: schema::Lxma = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Lxma {
+                    text: profile.lxma.clone(),
+                })
+                .expect("our code parses"),
+        )
+        .expect("decode");
+        assert_eq!(ours.address, address);
+
+        // Bob's, pasted with a newline in capitals: whose it is, then added.
+        let scanned: schema::Lxma = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Lxma {
+                    text: format!("{}\n", bob_code.to_uppercase()),
+                })
+                .expect("bob's code parses"),
+        )
+        .expect("decode");
+        assert_eq!(scanned.address, bob_address);
+        assert_eq!(scanned.lxma, bob_code);
+        assert_eq!(scanned.known, "");
+        session
+            .request(Request::AddContact {
+                lxma: scanned.lxma.clone(),
+                name: Some("Bob".to_string()),
+            })
+            .expect("added");
+        wait_for(
+            &session,
+            schema::Query::Lxma {
+                text: bob_code.clone(),
+            },
+            20,
+            |l: &schema::Lxma| l.known == "Bob",
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while session.keys_told() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the home node never took the key"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+
+        // A code with a wrong digit, and no code at all: refused, in words.
+        let mut wrong = bob_code.clone();
+        let at = "lxma://".len();
+        let flipped = if wrong.as_bytes()[at] == b'0' {
+            "1"
+        } else {
+            "0"
+        };
+        wrong.replace_range(at..at + 1, flipped);
+        let refused = session
+            .request(Request::AddContact {
+                lxma: wrong.clone(),
+                name: None,
+            })
+            .expect_err("a wrong code");
+        assert!(refused.contains("does not match"), "{refused}");
+        let refused = session
+            .query(schema::Query::Lxma {
+                text: "hello".to_string(),
+            })
+            .expect_err("no code");
+        assert!(refused.contains("lxma://"), "{refused}");
+        session
+    })
+    .await
+    .expect("the profile");
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+    node.stop().await;
+    let kept = files_named(home.path(), "known_destinations");
+    assert!(
+        kept.iter().any(|file| std::fs::read(file)
+            .unwrap_or_default()
+            .windows(bob_key.len())
+            .any(|window| window == bob_key)),
+        "the home node kept no key for Bob in {kept:?}"
+    );
+}
+
+/// One query in the bytes Java sends, through the session as the facade's
+/// `query` hands it on, and its answer as `T`.
+fn java_query<T: serde::de::DeserializeOwned>(
+    session: &Session,
+    entries: &[(&str, Java)],
+) -> Result<T, String> {
+    let query: schema::Query = schema::decode(&java_map(entries))?;
+    let answer = session.query(query)?;
+    rmp_serde::from_slice(&answer).map_err(|error| error.to_string())
+}
+
+/// 1207, Lew's phone on 2026-10-31: the Maps page showed the switch off,
+/// "0 B" and no maps with Berlin installed, and the switch said "the
+/// request did not decode: missing field `w`". The page and Appearance
+/// now ask with queries of their own, here in Java's bytes with exactly
+/// the fields `Core.mapRegions` and `Core.mapTheme` put in, against a
+/// phone with one installed region and no `map_autoload` in its config:
+/// the region with its size and date, the automatic download on (1089),
+/// the switch off stored and kept across a session's restart, and a new
+/// renderer reads it from the config; Delete removes the file; the map's
+/// theme is asked and set.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_settings_pages_ask_the_renderer_in_javas_bytes() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let maps = phone.path().join("maps");
+    std::fs::create_dir_all(&maps).expect("maps dir");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/firenze.lmr");
+    std::fs::copy(&fixture, maps.join("firenze.lmr")).expect("the installed region");
+    let len = std::fs::metadata(maps.join("firenze.lmr"))
+        .expect("its size")
+        .len();
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let config = loquax::config::load(Path::new(&first.dir)).unwrap_or_default();
+        assert_eq!(config.map_autoload, None, "no choice stored yet");
+
+        let page: schema::MapRegions =
+            java_query(&session, &[("t", Java::Str("mapregions"))]).expect("the Maps page");
+        assert!(page.ok && page.autoload, "on by default (1089): {page:?}");
+        assert_eq!(page.regions.len(), 1, "{page:?}");
+        let region = &page.regions[0];
+        assert_eq!(region.name, "firenze.lmr");
+        assert_eq!((region.bytes, page.region_bytes), (len, len));
+        assert!(region.modified > 0, "a date: {region:?}");
+
+        let off: schema::MapRegions = java_query(
+            &session,
+            &[
+                ("t", Java::Str("mapregions")),
+                ("set_autoload", Java::Bool(false)),
+            ],
+        )
+        .expect("the switch off");
+        assert!(off.ok && !off.autoload && off.regions.len() == 1, "{off:?}");
+
+        let theme: schema::MapThemeChoice =
+            java_query(&session, &[("t", Java::Str("maptheme"))]).expect("Appearance");
+        assert!(
+            theme.ok && theme.theme == "auto" && !theme.theme_chosen,
+            "{theme:?}"
+        );
+        let dark: schema::MapThemeChoice = java_query(
+            &session,
+            &[("t", Java::Str("maptheme")), ("set", Java::Str("dark"))],
+        )
+        .expect("dark chosen");
+        assert!(
+            dark.ok && dark.theme == "dark" && dark.theme_chosen,
+            "{dark:?}"
+        );
+        let refused = java_query::<schema::MapThemeChoice>(
+            &session,
+            &[("t", Java::Str("maptheme")), ("set", Java::Str("sepia"))],
+        );
+        assert!(refused.is_err(), "{refused:?}");
+        session.stop();
+    })
+    .await
+    .expect("the first session");
+
+    // Restarted as the sticky service starts it: the switch is still off,
+    // and a renderer made afresh reads it from the config.
+    let again = Start {
+        dir: phone.path().display().to_string(),
+        ..Start::default()
+    };
+    let dir = phone.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        let page: schema::MapRegions =
+            java_query(&session, &[("t", Java::Str("mapregions"))]).expect("the Maps page");
+        assert!(page.ok && !page.autoload, "kept: {page:?}");
+        let fresh = loquax_android::map::Renderer::new(&dir)
+            .regions(None, None)
+            .expect("a fresh renderer");
+        assert!(!fresh.autoload, "stored in the config");
+        assert_eq!(
+            loquax::config::load(&dir).expect("config").map_autoload,
+            Some(false)
+        );
+
+        let on: schema::MapRegions = java_query(
+            &session,
+            &[
+                ("t", Java::Str("mapregions")),
+                ("set_autoload", Java::Bool(true)),
+            ],
+        )
+        .expect("the switch on");
+        assert!(on.ok && on.autoload, "{on:?}");
+
+        let refused = java_query::<schema::MapRegions>(
+            &session,
+            &[
+                ("t", Java::Str("mapregions")),
+                ("delete", Java::Str("../config.toml")),
+            ],
+        );
+        assert!(refused.is_err(), "{refused:?}");
+        let gone: schema::MapRegions = java_query(
+            &session,
+            &[
+                ("t", Java::Str("mapregions")),
+                ("delete", Java::Str("firenze.lmr")),
+            ],
+        )
+        .expect("deleted");
+        assert!(
+            gone.ok && gone.regions.is_empty() && gone.region_bytes == 0,
+            "{gone:?}"
+        );
+        assert!(!dir.join("maps/firenze.lmr").exists());
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+    node.stop().await;
 }

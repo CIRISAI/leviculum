@@ -138,10 +138,18 @@ final class Ui {
     static String preview(Context context, Map<String, Object> row) {
         String kind = Core.str(row, "kind");
         if ("position".equals(kind)) {
-            // A run of reports is one line with its count (1184).
-            long updates = Core.num(row, "updates");
-            String line = "\uD83D\uDCCD " + context.getString(R.string.position);
-            return updates > 1 ? context.getString(R.string.position_run, line, (int) updates) : line;
+            // Whether the position is alive, never how many came (1209):
+            // `📍 live` or `📍 3 h ago`.
+            long fixAt = Core.num(row, "last_fix_at");
+            String words;
+            if ("live".equals(Core.str(row, "liveness"))) {
+                words = context.getString(R.string.live);
+            } else if (fixAt > 0) {
+                words = livedAgo(context, fixAt, nowSecs());
+            } else {
+                words = context.getString(R.string.position);
+            }
+            return "\uD83D\uDCCD " + words;
         }
         String reaction = Core.str(row, "reaction");
         if ("reaction".equals(kind) && !reaction.isEmpty()) {
@@ -160,6 +168,35 @@ final class Ui {
             case "failed": return context.getString(R.string.state_failed);
             default: return state;
         }
+    }
+
+    /**
+     * The newest report's row (1209), as loquax's `Liveness::row_words`
+     * says it: `live · every 10 min · 2 min ago` while `liveness` is
+     * live, `last position 3 h ago` once the reports stopped; the cadence
+     * only once one was learned (`cadenceS` above 0).
+     */
+    static String liveRow(Context context, String liveness, long cadenceS, long fixAt, long nowSecs) {
+        String ago = livedAgo(context, fixAt, nowSecs);
+        if (!"live".equals(liveness)) {
+            return context.getString(R.string.last_position, ago);
+        }
+        StringBuilder line = new StringBuilder(context.getString(R.string.live));
+        if (cadenceS > 0) {
+            String every = cadenceS < 3600
+                    ? context.getString(R.string.minutes_ago, (int) ((cadenceS + 30) / 60))
+                    : context.getString(R.string.hours_ago, (int) ((cadenceS + 1800) / 3600));
+            line.append(" · ").append(context.getString(R.string.live_every, every));
+        }
+        return line.append(" · ").append(ago).toString();
+    }
+
+    /** How long ago a fix was, in words: `now`, `2 min ago`, `3 h ago`. */
+    static String livedAgo(Context context, long fixAt, long nowSecs) {
+        if (nowSecs - fixAt < 60) {
+            return context.getString(R.string.live_now);
+        }
+        return context.getString(R.string.live_ago, age(context, fixAt, nowSecs));
     }
 
     static long nowSecs() {

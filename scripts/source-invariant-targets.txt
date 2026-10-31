@@ -223,6 +223,7 @@ skip  loquax           tui_snapshot               # spawns loquax tui against an
 skip  loquax           wire_props                 # property tests of the home wire's codecs; subject is the code; loquax-tui
 skip  loquax-android   device_walk_script         # starts python3 on the device walk's parser tests; subject is the script's code
 skip  loquax-android   facade                     # the facade against an in-process home node and transport over a loopback TCP socket; subject is the code
+skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
 skip  loquax-android   schema_props               # property tests of the facade schema's codec; subject is the code
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link

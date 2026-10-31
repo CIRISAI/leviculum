@@ -27,7 +27,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: folded ---
 ┌● Loquax afbda7b3───────┐┌  them ·61dd  unknown──────────── pos 4 min · no pn ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · 2 updates ││                                                    │
+│▌◎ position · live      ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -43,8 +43,8 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                    ── Today ──                     │
 │                        ││ leaving the hut now  14:00                         │
 │                        ││                                                    │
-│                        ││ ◎ position 43.77310 N 11.25600 E · 2               │
-│                        ││ updates since 14:00  14:00                         │
+│                        ││ ◎ position 43.77310 N 11.25600 E ·                 │
+│                        ││ live · 4 min ago  14:00                            │
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -119,7 +119,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: folded ---
 ┌● Loquax afbda7b3─────────────────┐┌  them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                  no propagation node │
-│▌◎ position · 2 updates           ││ ──────────────────────────────────────────────────────────────────────────────── │
+│▌◎ position · live                ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -152,7 +152,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                  ││                                   ── Today ──                                    │
 │                                  ││ leaving the hut now  14:00                                                       │
 │                                  ││                                                                                  │
-│                                  ││ ◎ position 43.77310 N 11.25600 E · 2 updates since 14:00  14:00                  │
+│                                  ││ ◎ position 43.77310 N 11.25600 E · live · 4 min ago  14:00                       │
 │                                  │├  to them ·61dd─────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
@@ -160,7 +160,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: detail ---
 ┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                  no propagation node │
-│▌◎ position · 2 updates           ││ ──────────────────────────────────────────────────────────────────────────────── │
+│▌◎ position · live                ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -193,7 +193,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                  ││                                   ── Today ──                                    │
 │                                  ││ leaving the hut now  14:00                                                       │
 │                                  ││                                                                                  │
-│                                  ││▌◎ position 43.77310 N 11.25600 E · 2 updates since 14:00  14:00                  │
+│                                  ││▌◎ position 43.77310 N 11.25600 E · live · 4 min ago  14:00                       │
 │                                  │├  to them ·61dd─────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘

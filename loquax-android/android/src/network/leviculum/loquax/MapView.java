@@ -4,10 +4,13 @@ import android.content.Context;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.ColorMatrix;
+import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
@@ -101,6 +104,24 @@ final class MapView extends View {
     private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint label = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint labelGround = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** A pin's liveness ring (1209). */
+    private final Paint live = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** The layer a stale pin is drawn through: grey, its colours taken. */
+    private final Paint grey = new Paint();
+    /** The age label's ground, reused: a frame allocates nothing. */
+    private final RectF labelBox = new RectF();
+    /** One slow alpha cycle of a live pin's ring, in milliseconds (1209). */
+    private static final long PULSE_MS = 2000;
+    /** How often a pulsing ring is drawn anew: slow is enough for a soft pulse. */
+    private static final long PULSE_FRAME_MS = 66;
+
+    {
+        ColorMatrix none = new ColorMatrix();
+        none.setSaturation(0f);
+        grey.setColorFilter(new ColorMatrixColorFilter(none));
+        live.setStyle(Paint.Style.STROKE);
+    }
+
     /** The people the marks name, by peer: the Friends query's rows and ours (UI thread). */
     private Map<String, Map<String, Object>> people = new HashMap<>();
     /** The peer whose card is open: its pin gets the accent ring (UI thread). */
@@ -525,15 +546,20 @@ final class MapView extends View {
 
     /**
      * The people over the frame (1200): each pin the list's avatar circle
-     * in a ring of the background, its age under it, faded when stale, the
-     * open card's in the accent ring; a cluster a circle with its count.
-     * Held by the frame's place, but never scaled: a circle stays a circle
-     * of PIN_DP.
+     * in a ring of the background, its age under it, faded when its fix is
+     * old, the open card's in the accent ring; a cluster a circle with its
+     * count. Held by the frame's place, but never scaled: a circle stays a
+     * circle of PIN_DP. The liveness ring (1209) sits on the avatar: a
+     * live one pulses, one slow alpha cycle of PULSE_MS, drawn anew only
+     * while the map is on screen; a stale pin is drawn in grey.
      */
     private void drawMarks(Canvas canvas) {
         float side = PIN_DP * density;
         float edge = 2 * density;
         long now = Ui.nowSecs();
+        boolean pulsing = false;
+        double phase = (SystemClock.uptimeMillis() % PULSE_MS) * 2.0 * Math.PI / PULSE_MS;
+        int pulse = (int) (255 * (0.6 + 0.4 * Math.cos(phase)));
         for (Map<String, Object> mark : marks) {
             float cx = offX + scale * Core.num(mark, "x");
             float cy = offY + scale * Core.num(mark, "y");
@@ -561,20 +587,44 @@ final class MapView extends View {
                 row.put("initials", peer.length() >= 2 ? peer.substring(0, 2).toUpperCase(java.util.Locale.ROOT) : "?");
             }
             boolean stale = Core.bool(row, "stale");
-            int layer = canvas.saveLayerAlpha(cx - side, cy - side, cx + side, cy + side * 2, stale ? 128 : 255);
+            String liveness = Core.str(row, "liveness");
+            int layer;
+            if ("stale".equals(liveness)) {
+                grey.setAlpha(stale ? 128 : 255);
+                layer = canvas.saveLayer(cx - side, cy - side, cx + side, cy + side * 2, grey);
+            } else {
+                layer = canvas.saveLayerAlpha(cx - side, cy - side, cx + side, cy + side * 2, stale ? 128 : 255);
+            }
             ring.setColor(getContext().getColor(peer.equals(carded) ? R.color.accent : R.color.background));
             canvas.drawCircle(cx, cy, side / 2f + (peer.equals(carded) ? 2 * edge : edge), ring);
             AvatarView.drawAt(canvas, cx, cy, side, peer, row, circle, letters, picture);
+            int ringColour = AvatarView.ring(getContext(), row);
+            if (ringColour != 0) {
+                float width = side * AvatarView.RING;
+                live.setStrokeWidth(width);
+                live.setColor(ringColour);
+                if ("live".equals(liveness)) {
+                    live.setAlpha(pulse);
+                    pulsing = true;
+                }
+                canvas.drawCircle(cx, cy, side / 2f - width / 2f, live);
+            }
             if (row.containsKey("at")) {
                 String age = Ui.age(getContext(), Core.num(row, "at"), now);
                 Paint.FontMetrics m = label.getFontMetrics();
                 float w = label.measureText(age) + 8 * density;
                 float h = m.descent - m.ascent + 2 * density;
                 float top = cy + side / 2f + 3 * density;
-                canvas.drawRoundRect(new RectF(cx - w / 2, top, cx + w / 2, top + h), h / 2, h / 2, labelGround);
+                labelBox.set(cx - w / 2, top, cx + w / 2, top + h);
+                canvas.drawRoundRect(labelBox, h / 2, h / 2, labelGround);
                 canvas.drawText(age, cx, top + density - m.ascent, label);
             }
             canvas.restoreToCount(layer);
+        }
+        // Off when the map is not on screen: a hidden or detached view
+        // asks for no next frame, and the pulse stops with it.
+        if (pulsing && isShown()) {
+            postInvalidateDelayed(PULSE_FRAME_MS);
         }
     }
 
