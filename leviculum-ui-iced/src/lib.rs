@@ -10,7 +10,7 @@
 //! a count badge, the tabs' rail or bar, the list item and the search
 //! field ([`chrome`]). A program keeps its own nodes, words and layout;
 //! these take them as arguments, coloured by a [`Palette`] each program
-//! fills from its own tokens. And a view without a window ([`headless`]):
+//! fills from its own tokens. A key as the keymap's ([`key`]). And a view without a window ([`headless`]):
 //! drawn into pixels for the goldens, clicked for the tests.
 //!
 //! Generic over the program's message: a press is the `M` it was given.
@@ -20,6 +20,7 @@ pub mod chrome;
 pub mod control;
 pub mod headless;
 pub mod icon;
+pub mod key;
 pub mod paint;
 pub mod wave;
 

@@ -53,7 +53,7 @@ use tokio::sync::oneshot;
 use leviculum_map::mercator::World;
 use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::Style;
-use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+use leviculum_ui::input::KeyCode;
 use leviculum_ui::keymap::Ctx;
 use loquax::keys::{self, MapCmd};
 use loquax::mapframe::{hold, onto, Ask, Frames};
@@ -1073,7 +1073,7 @@ impl App {
     /// the map's, on a stacked chat the messages' (`Escape` is Back), on
     /// the chats the list's.
     fn key(&self, event: &keyboard::Event) -> Option<Intent> {
-        let key = chord(event)?;
+        let key = leviculum_ui_iced::key::chord(event)?;
         let pane = match (self.screen, self.scene.top.id) {
             (Screen::Map, _) => Pane::Map,
             (Screen::Chats, NodeId::ChatBar) => Pane::Messages,
@@ -1127,7 +1127,9 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         // The viewer is over everything: a key is its Esc or nothing.
         if let (Some(viewer), Message::Key(event)) = (&mut self.viewer, &message) {
-            if chord(event).is_some_and(|k| k.code == KeyCode::Esc) && viewer.back() {
+            if leviculum_ui_iced::key::chord(event).is_some_and(|k| k.code == KeyCode::Esc)
+                && viewer.back()
+            {
                 self.viewer = None;
             }
             return Task::none();
@@ -1744,74 +1746,6 @@ fn held_pointer(
 /// it.
 fn locale() -> Lang {
     loquax::engine::locale()
-}
-
-/// A key iced reports as the keymap's key (1218): the named keys the
-/// chords use, a character as itself, the modifiers held. None for a
-/// release or a key no chord names.
-fn chord(event: &keyboard::Event) -> Option<KeyEvent> {
-    use keyboard::key::Named;
-    let keyboard::Event::KeyPressed {
-        modified_key,
-        modifiers,
-        ..
-    } = event
-    else {
-        return None;
-    };
-    let shift = modifiers.shift();
-    let code = match modified_key.as_ref() {
-        keyboard::Key::Named(named) => match named {
-            Named::Escape => KeyCode::Esc,
-            Named::Enter => KeyCode::Enter,
-            Named::Tab if shift => KeyCode::BackTab,
-            Named::Tab => KeyCode::Tab,
-            Named::Backspace => KeyCode::Backspace,
-            Named::Delete => KeyCode::Delete,
-            Named::Insert => KeyCode::Insert,
-            Named::ArrowLeft => KeyCode::Left,
-            Named::ArrowRight => KeyCode::Right,
-            Named::ArrowUp => KeyCode::Up,
-            Named::ArrowDown => KeyCode::Down,
-            Named::Home => KeyCode::Home,
-            Named::End => KeyCode::End,
-            Named::PageUp => KeyCode::PageUp,
-            Named::PageDown => KeyCode::PageDown,
-            Named::Space => KeyCode::Char(' '),
-            Named::F1 => KeyCode::F(1),
-            Named::F2 => KeyCode::F(2),
-            Named::F3 => KeyCode::F(3),
-            Named::F4 => KeyCode::F(4),
-            Named::F5 => KeyCode::F(5),
-            Named::F6 => KeyCode::F(6),
-            Named::F7 => KeyCode::F(7),
-            Named::F8 => KeyCode::F(8),
-            Named::F9 => KeyCode::F(9),
-            Named::F10 => KeyCode::F(10),
-            Named::F11 => KeyCode::F(11),
-            Named::F12 => KeyCode::F(12),
-            _ => return None,
-        },
-        keyboard::Key::Character(c) => {
-            let mut chars = c.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) => KeyCode::Char(c),
-                _ => return None,
-            }
-        }
-        keyboard::Key::Unidentified => return None,
-    };
-    let mut held = KeyModifiers::NONE;
-    if shift {
-        held |= KeyModifiers::SHIFT;
-    }
-    if modifiers.control() {
-        held |= KeyModifiers::CONTROL;
-    }
-    if modifiers.alt() {
-        held |= KeyModifiers::ALT;
-    }
-    Some(KeyEvent::new(code, held))
 }
 
 #[cfg(test)]
