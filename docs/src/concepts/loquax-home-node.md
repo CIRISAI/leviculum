@@ -265,6 +265,20 @@ then and may sleep.
   recipient is there; the cadence covers an announce the home node missed,
   at one link attempt an hour. The router holds one entry per message id,
   so a message is never on two legs at once.
+- **A leg that never ends is given up** (1293). The outbox starts no leg
+  for a message already on one, so a leg whose end the router never
+  reports (a link that died mid-leg, a transfer that stalled, a message the
+  engine refused without naming it) would hold the message forever. After
+  `outgoing::STALL_SECS` without a sign of the leg (779 s: the 725 s the
+  core takes to close a link that went silent, the router's five attempts
+  10 s apart after it, and one 4 s processing interval as margin; every
+  state the router reports for the message is a sign and moves the bound)
+  the home node calls the leg off in the router, logs `HOME outbox <leg>
+  stalled`, and archives one `stalled` entry. A stalled direct leg counts
+  as a direct failure: the propagation node is offered the copy once, on
+  the next tick, and direct retries go on at the next announce and hour. A
+  restart needs nothing of this: the row keeps no leg, so every message
+  still retried is due direct at once.
 - **No propagation node selected.** With neither `--pn` nor a config entry
   and `--sync-interval off`, nothing selects one: a collection is what
   applies the mailbox rule of `loquax-mailbox.md`. The home node does not
@@ -286,8 +300,10 @@ then and may sleep.
   transaction as the outbox row changes: `sent` (kind 1, the packed message
   as signed), `propagated` (2), `delivered` (3), `failed` (4: the seven days
   ended with no propagation node ever taking it) and `retries ended` (5: the
-  direct retries ended while a copy waits on the propagation node). Kinds 2
-  to 5 carry the message id as their bytes.
+  direct retries ended while a copy waits on the propagation node), and
+  `stalled` (11: a leg was given up and the message is tried again; the
+  first per message). Kinds 2 to 5 and 11 carry the message id as their
+  bytes.
 
 On the client the compose line and `loquax send` go through `/send`. The
 screen names the bubble after the id the home node answered with
@@ -295,8 +311,10 @@ screen names the bubble after the id the home node answered with
 each pull turns the state entries into the bubble's state: the sent entry
 as sent (`Command::HomeSent`; the message left the device and the home node
 has it), and through `Command::HomeState` propagated as at a propagation node,
-delivered as delivered, failed as failed. `loquax fetch` prints a line
-`message <id> <state>` for each.
+delivered as delivered, failed as failed. A `stalled` entry changes no
+state; through `Command::HomeStalled` the detail view's ledger says
+"sending stopped without an answer, trying again". `loquax fetch` prints a
+line `message <id> <state>` for each.
 
 **A client pulls right after it sends**, so the bubble leaves queued
 without waiting for the schedule: the screen starts a pull (sync reason
@@ -550,7 +568,10 @@ beside a running `lnsd`. It takes the
 messenger's `--instance`, `--config`, `--pn`, `--sync-interval` and
 `--timeout`. It logs to stderr (`warn,loquax=info`, `RUST_LOG` replaces
 it), one `HOME` line for each archived message, admission and refusal, and
-never logs a message's text. Without the package, a systemd user unit:
+never logs a message's text. Each collection from the propagation node
+leaves one line, also when it found nothing (1293): `PN_PULL n=<messages>
+pn=<first 8 hex of the node> next_in_s=<seconds to the next>`, so the
+fifteen-minute cadence shows. Without the package, a systemd user unit:
 
 ```ini
 # ~/.config/systemd/user/loquax-home.service

@@ -168,6 +168,11 @@ pub const KIND_IMPORTED: u8 = 9;
 /// it ([`wire::peer_state_entry`]). Only a peer's newest is kept, and it
 /// wakes nobody, as a petname does.
 pub const KIND_PEERSTATE: u8 = 10;
+/// A leg of a sent message went [`outgoing::STALL_SECS`] without a sign
+/// and was given up (1293); the message is tried again. Its bytes are the
+/// message id, and a message keeps one such entry, the first. A client from
+/// before it skips it as a kind it cannot show.
+pub const KIND_STALLED: u8 = 11;
 
 /// What a client shows for a state entry of a message it sent through the
 /// home node: the router state its bubble takes, `None` for an entry that
@@ -194,6 +199,7 @@ pub fn sent_word(kind: u8) -> Option<&'static str> {
         KIND_DELIVERED => "delivered",
         KIND_FAILED => "failed",
         KIND_RETRIES_ENDED => "retries-ended",
+        KIND_STALLED => "stalled",
         _ => return None,
     })
 }
@@ -240,6 +246,7 @@ pub fn policy(config: &crate::config::Config) -> outgoing::Policy {
                 .unwrap_or(outgoing::DEFAULT_DAYS)
                 .saturating_mul(24 * 3600),
         ),
+        stall_secs: secs(outgoing::STALL_SECS),
     }
 }
 

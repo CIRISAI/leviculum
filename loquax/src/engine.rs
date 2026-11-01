@@ -680,6 +680,7 @@ impl Engine {
                 | Command::HomeState { .. }
                 | Command::HomeSent { .. }
                 | Command::HomeMark { .. }
+                | Command::HomeStalled { .. }
                 | Command::HomeName { .. }
                 | Command::HomePetname { .. }
                 | Command::HomePeerState { .. } => {}
@@ -861,6 +862,9 @@ impl Engine {
                     }
                 }
                 Command::HomeMark { mark } => self.emit(OutboxEvent::HomeMarked { mark }),
+                Command::HomeStalled { message_id } => {
+                    self.emit(OutboxEvent::HomeStalled { message_id });
+                }
                 Command::HomeName { destination, name } => self.emit(OutboxEvent::Announced {
                     destination,
                     name: Some(name),

@@ -933,6 +933,37 @@ mod tests {
         assert!(store.outbox_open().expect("open").is_empty());
     }
 
+    /// 1293: a leg given up leaves the row open, so a restart tries the
+    /// message again, and archives one stalled entry, the first.
+    #[test]
+    fn a_stalled_leg_keeps_the_message_open_and_is_archived_once() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = home();
+        let mut store = Store::open_in(dir.path(), HOME).expect("store");
+        admitted(&mut store);
+        let (id, _) = send(&mut store, &home, LAPTOP, &submission(1), 200.0);
+        let id = id.expect("id");
+        let first = store
+            .outbox_record(&id, Change::Stalled, 300, u64::MAX)
+            .expect("record");
+        assert!(first.is_some());
+        let again = store
+            .outbox_record(&id, Change::Stalled, 400, u64::MAX)
+            .expect("record");
+        assert_eq!(again, None);
+        let open = store.outbox_open().expect("open");
+        assert_eq!(open.len(), 1);
+        assert!(!open[0].propagated);
+        let kinds: Vec<u8> = store
+            .archive_since(0, usize::MAX)
+            .expect("page")
+            .entries
+            .iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(kinds, [crate::home::KIND_SENT, crate::home::KIND_STALLED]);
+    }
+
     fn mark(store: &mut Store, device: [u8; 16], mark: &wire::Mark) -> Status {
         let answer = answer(
             store,
