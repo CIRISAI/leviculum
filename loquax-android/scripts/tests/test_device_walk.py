@@ -674,6 +674,65 @@ class PanIntoEmpty(unittest.TestCase):
         self.assertLess(steps.index("pan_into_empty"), steps.index("first_start_name"))
 
 
+class RegionFillsIn(unittest.TestCase):
+    """The region_fills_in step's reading (1291)."""
+
+    def test_a_new_picture_is_one_that_differs_enough(self):
+        a = [(0, 0, 0)] * 100
+        b = [(255, 255, 255)] * 3 + [(0, 0, 0)] * 97
+        c = [(255, 255, 255)] * 1 + [(0, 0, 0)] * 99
+        # b differs from a in 3 % of its samples, c from b in 2 %: not new.
+        self.assertEqual(walk.fill_states([(1.0, a), (2.0, a), (3.0, b), (4.0, c)]), [1.0, 3.0])
+        self.assertEqual(walk.fill_states([]), [])
+
+    def test_the_verdict(self):
+        least = walk.FILL_STATES_LEAST
+        self.assertEqual(walk.region_fills_problems([1.0, 2.0, 3.0, 9.0], 10, 10, 5.0), [])
+        self.assertEqual(
+            walk.region_fills_problems([1.0, 2.0, 9.0], 10, 10, 5.0),
+            [f"2 distinct pictures before the region was whole, want at least {least}"],
+        )
+        self.assertEqual(
+            walk.region_fills_problems([1.0], 4, 10, None), ["the source sent 4 of 10 bytes"]
+        )
+
+    def test_the_source_answers_ranges_at_its_rate(self):
+        data = bytes(range(256)) * 80
+        source = walk.ThrottledSource("127.0.0.1", data, 100_000)
+        try:
+            began = walk.time.monotonic()
+            with walk.socket.create_connection(("127.0.0.1", source.port), timeout=5) as conn:
+                conn.sendall(b"GET /a.pmtiles HTTP/1.1\r\nRange: bytes=100-20579\r\n\r\n")
+                got = b""
+                while True:
+                    part = conn.recv(65536)
+                    if not part:
+                        break
+                    got += part
+            took = walk.time.monotonic() - began
+            head, body = got.split(b"\r\n\r\n", 1)
+            self.assertIn(b"206", head.split(b"\r\n")[0])
+            self.assertIn(b"Content-Range: bytes 100-20479/20480", head)
+            self.assertEqual(body, data[100:20480])
+            # 20,380 bytes at 100 kB/s: at least about a fifth of a second.
+            self.assertGreater(took, 0.15)
+            self.assertIsNone(source.last_byte, "the first 100 bytes never went")
+            with walk.socket.create_connection(("127.0.0.1", source.port), timeout=5) as conn:
+                conn.sendall(b"GET /a.pmtiles HTTP/1.1\r\nRange: bytes=0-99\r\n\r\n")
+                while conn.recv(65536):
+                    pass
+            self.assertIsNotNone(source.last_byte)
+            self.assertEqual(source.served, 20480)
+        finally:
+            source.close()
+
+    def test_the_archive_is_there_and_the_step_runs_after_the_pan(self):
+        self.assertTrue(walk.GRUNEWALD_ARCHIVE.is_file())
+        steps = walk.STEPS
+        self.assertGreater(steps.index("region_fills_in"), steps.index("pan_into_empty"))
+        self.assertLess(steps.index("region_fills_in"), steps.index("first_start_name"))
+
+
 class Lines(unittest.TestCase):
     def test_a_step_line_round_trips(self):
         line = walk.walk_line("list", True, 1234.7, "rows=18 of 18\n named=12")

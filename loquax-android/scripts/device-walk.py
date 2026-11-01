@@ -51,6 +51,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PACKAGE = "network.leviculum.loquax.debug"
@@ -97,6 +98,7 @@ STEPS = [
     "share_in_contact",
     "buildings",
     "pan_into_empty",
+    "region_fills_in",
     "first_start_name",
     "link_device",
     "move_phone",
@@ -584,6 +586,126 @@ class StallingSource:
         self.server.close()
         for conn in self.held:
             conn.close()
+
+
+# A region arriving over a slow link (1291): the Grunewald archive (z12
+# to z15, leviculum-mapcut/fixtures/README.md) served from this host at
+# FILL_RATE, about ten seconds of it, the map opened over it at z15. The
+# map must show at least FILL_STATES_LEAST distinct pictures before the
+# source sent its last byte: the outline and the coarser zooms standing in
+# for the finer ones as they arrive.
+GRUNEWALD_ARCHIVE = REPO / "leviculum-mapcut" / "fixtures" / "grunewald.pmtiles"
+GRUNEWALD_E6 = (52471500, 13228000)
+FILL_RATE = 8000
+FILL_STATES_LEAST = 3
+# The share of the samples that must differ for a grab to be a new picture.
+FILL_CHANGED = 0.02
+FILL_TIMEOUT_S = 90
+# How long the map must stay the same after the last byte to be at rest.
+FILL_REST_S = 3.0
+
+
+def fill_states(grabs: list[tuple[float, list[tuple[int, int, int]]]]) -> list[float]:
+    """The times of the grabs that start a new picture: the first, and each
+    that differs from the last new one in more than `FILL_CHANGED` of its
+    samples."""
+    times: list[float] = []
+    last = None
+    for at, samples in grabs:
+        if last is None or changed_fraction(samples, last) > FILL_CHANGED:
+            times.append(at)
+            last = samples
+    return times
+
+
+def region_fills_problems(states: list[float], served: int, size: int, last_byte: float | None) -> list[str]:
+    """What is wrong with a region arriving (1291): the source did not send
+    the whole archive, or the map showed fewer than `FILL_STATES_LEAST`
+    distinct pictures up to its last byte. `states` are the new pictures'
+    times, `last_byte` the time the source sent the last byte."""
+    problems = []
+    if served < size or last_byte is None:
+        problems.append(f"the source sent {served} of {size} bytes")
+        return problems
+    before = [t for t in states if t <= last_byte]
+    if len(before) < FILL_STATES_LEAST:
+        problems.append(
+            f"{len(before)} distinct pictures before the region was whole, "
+            f"want at least {FILL_STATES_LEAST}"
+        )
+    return problems
+
+
+class ThrottledSource:
+    """A map source on the walk's host that answers range requests for one
+    archive at `rate` bytes a second over all its connections together
+    (1291): a slow link the region arrives over. `served` counts the
+    bytes sent of the answers' bodies, `last_byte` when the whole archive
+    had gone out."""
+
+    def __init__(self, host: str, data: bytes, rate: int) -> None:
+        self.data = data
+        self.rate = max(1, rate)
+        self.lock = threading.Lock()
+        self.free = 0.0
+        self.sent: set[int] = set()
+        self.served = 0
+        self.last_byte: float | None = None
+        source = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                source.answer(self)
+
+        self.server = ThreadingHTTPServer((host, 0), Handler)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def answer(self, h: BaseHTTPRequestHandler) -> None:
+        size = len(self.data)
+        m = re.fullmatch(r"bytes=(\d+)-(\d*)", h.headers.get("Range", ""))
+        start, end = 0, size - 1
+        if m:
+            start = int(m.group(1))
+            end = min(int(m.group(2)) if m.group(2) else size - 1, size - 1)
+        if start >= size:
+            h.send_response(416)
+            h.send_header("Content-Range", f"bytes */{size}")
+            h.send_header("Content-Length", "0")
+            h.end_headers()
+            return
+        body = self.data[start : end + 1]
+        h.send_response(206 if m else 200)
+        if m:
+            h.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        h.send_header("Content-Length", str(len(body)))
+        h.send_header("Connection", "close")
+        h.end_headers()
+        for at in range(0, len(body), 4096):
+            chunk = body[at : at + 4096]
+            with self.lock:
+                now = time.monotonic()
+                begin = max(now, self.free)
+                self.free = begin + len(chunk) / self.rate
+                due = self.free
+            time.sleep(max(0.0, due - time.monotonic()))
+            h.wfile.write(chunk)
+            with self.lock:
+                self.served += len(chunk)
+                self.sent.update(range(start + at, start + at + len(chunk)))
+                if self.last_byte is None and len(self.sent) >= size:
+                    self.last_byte = time.monotonic()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
 
 
 def end_reports(store: Path, peer: str) -> int:
@@ -3936,6 +4058,66 @@ class Walk:
         problems = pan_into_empty_problems(
             before_chip, after_chip, connects_before, connect_ms, pan_end_ms
         )
+        if problems:
+            raise StepFailed("; ".join(problems) + "; " + detail)
+        return detail
+
+    def step_region_fills_in(self) -> str:
+        """A region shows itself while it downloads (1291): the autoload
+        on, its source the Grunewald archive on this host at `FILL_RATE`,
+        no region over Grunewald on the phone; the map opened there at
+        z15 and grabbed until it rests after the source's last byte. The
+        grabs before that byte must hold at least `FILL_STATES_LEAST`
+        distinct pictures. The config is put back and the region removed
+        after."""
+        dev = self.need_device()
+        host = self.args.server.rpartition(":")[0]
+        data = GRUNEWALD_ARCHIVE.read_bytes()
+        source = ThrottledSource(host, data, FILL_RATE)
+        url = f"http://{host}:{source.port}/grunewald.pmtiles"
+        keep = "grep -v -e '^map_source' -e '^map_autoload' files/config 2>/dev/null"
+        dev.shell(
+            f"run-as {PACKAGE} sh -c \"rm -f files/maps/auto-*.lmr; {keep} > files/config.walk; "
+            f"echo 'map_autoload = on' >> files/config.walk; "
+            f"echo 'map_source = \\\"{url}\\\"' >> files/config.walk; "
+            f"cp files/config files/config.before 2>/dev/null; "
+            f"mv files/config.walk files/config\""
+        )
+        grabs: list[tuple[float, list[tuple[int, int, int]]]] = []
+        try:
+            dev.shell(f"am force-stop {PACKAGE}", check=False)
+            lat, lon = GRUNEWALD_E6
+            began = time.monotonic()
+            dev.shell(
+                f"am start -W -n {PACKAGE}/{MAP_ACTIVITY} "
+                f"--el lat_e6 {lat} --el lon_e6 {lon} --el zoom_milli 15000"
+            )
+            while time.monotonic() - began < FILL_TIMEOUT_S:
+                screen = dev.screen()
+                box = middle_half(screen.width, screen.height)
+                grabs.append((time.monotonic(), sample_grid(screen, box, 16, 16)))
+                states = fill_states(grabs)
+                last = source.last_byte
+                now = time.monotonic()
+                if last is not None and now - max(last, states[-1]) > FILL_REST_S:
+                    break
+        finally:
+            source.close()
+            dev.shell(
+                f"run-as {PACKAGE} sh -c 'rm -f files/maps/auto-*.lmr; "
+                f"if [ -f files/config.before ]; then "
+                f"mv files/config.before files/config; else rm -f files/config; fi'",
+                check=False,
+            )
+            dev.shell(f"am force-stop {PACKAGE}", check=False)
+        states = fill_states(grabs)
+        last = source.last_byte
+        ms = [int((t - began) * 1000) for t in states]
+        detail = (
+            f"pictures_ms={ms} last_byte_ms={int((last - began) * 1000) if last else None} "
+            f"served={source.served}/{len(data)} grabs={len(grabs)} rate={FILL_RATE}"
+        )
+        problems = region_fills_problems(states, len(source.sent), len(data), last)
         if problems:
             raise StepFailed("; ".join(problems) + "; " + detail)
         return detail
