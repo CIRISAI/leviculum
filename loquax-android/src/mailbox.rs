@@ -206,6 +206,7 @@ impl Here {
             upstream: DaemonUpstream::Mesh {
                 servers: servers(&self.app),
                 screens: listener,
+                tcp: config.tcp,
             },
             storage_dir,
             identity: identity(&self.app)?,

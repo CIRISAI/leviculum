@@ -137,6 +137,28 @@ pub struct Config {
     /// remembered for it, in file order, a later line for a context
     /// replacing an earlier one.
     pub map_drawing: Vec<(String, String)>,
+    /// The `tcp_*` keys, when the file sets them: the TCP keepalive of
+    /// the device's connection to its mailbox (1176).
+    pub tcp: TcpLiveness,
+}
+
+/// A TCP connection's keepalive and user timeout, as the file sets them
+/// (1176): the same four keys, with the same names and meaning, as an
+/// lnsd TCP interface section (`docs/src/guide/configuration.md`, "TCP
+/// server"). Unset is the reference's value; the range is checked when the
+/// node is built, which refuses a value the kernel would not take.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TcpLiveness {
+    /// `tcp_keepalive_idle_secs`: idle seconds before the first probe.
+    pub idle_secs: Option<u64>,
+    /// `tcp_keepalive_interval_secs`: seconds between unanswered probes.
+    pub interval_secs: Option<u64>,
+    /// `tcp_keepalive_probes`: unanswered probes before the connection
+    /// is dropped.
+    pub probes: Option<u32>,
+    /// `tcp_user_timeout_secs`: seconds sent data may stay unacknowledged;
+    /// `0` is the kernel default.
+    pub user_timeout_secs: Option<u64>,
 }
 
 /// The prefix of a remembered map drawing's key; the context follows it.
@@ -312,6 +334,32 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                         });
                     }
                 }
+            }
+        }
+        for name in [
+            "tcp_keepalive_idle_secs",
+            "tcp_keepalive_interval_secs",
+            "tcp_keepalive_probes",
+            "tcp_user_timeout_secs",
+        ] {
+            if key.trim() != name {
+                continue;
+            }
+            let text = value.trim().trim_matches('"');
+            let Ok(n) = text.parse::<u64>() else {
+                return Err(ConfigError::BadValue {
+                    line: index + 1,
+                    key: name,
+                    detail: alloc::format!("{text:?} is not a whole number"),
+                });
+            };
+            match name {
+                "tcp_keepalive_idle_secs" => config.tcp.idle_secs = Some(n),
+                "tcp_keepalive_interval_secs" => config.tcp.interval_secs = Some(n),
+                "tcp_keepalive_probes" => {
+                    config.tcp.probes = Some(u32::try_from(n).unwrap_or(u32::MAX))
+                }
+                _ => config.tcp.user_timeout_secs = Some(n),
             }
         }
         if let Some(context) = key.trim().strip_prefix(MAP_DRAWING) {
@@ -643,6 +691,34 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).expect("read");
         assert_eq!(text, "map_drawing.local:foot = blocks\n");
         assert!(!dir.path().join(".config.new").exists());
+    }
+
+    /// The four TCP keys (1176) parse under the names an lnsd section
+    /// uses, and a word where a number belongs is an error naming the key.
+    #[test]
+    fn the_tcp_liveness_keys_parse_and_a_word_is_an_error() {
+        let config = parse_str(
+            "tcp_keepalive_idle_secs = 600\ntcp_keepalive_interval_secs = 30\n\
+             tcp_keepalive_probes = 4\ntcp_user_timeout_secs = 0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.tcp,
+            TcpLiveness {
+                idle_secs: Some(600),
+                interval_secs: Some(30),
+                probes: Some(4),
+                user_timeout_secs: Some(0),
+            }
+        );
+        assert_eq!(parse_str("").unwrap().tcp, TcpLiveness::default());
+        assert!(matches!(
+            parse_str("tcp_keepalive_idle_secs = long\n"),
+            Err(ConfigError::BadValue {
+                key: "tcp_keepalive_idle_secs",
+                ..
+            })
+        ));
     }
 
     #[test]

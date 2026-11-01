@@ -736,6 +736,7 @@ async fn a_leaf_with_its_own_tcp_interface_joins_pulls_and_marks() {
         identity: leviculum_core::Identity::generate(&mut rand_core::OsRng),
         display_name: Vec::new(),
         notices: loquax::effects::Terminal::new(std::env::temp_dir()),
+        tcp: Default::default(),
     };
     let phone = tempfile::tempdir().expect("phone home");
     let storage = phone.path().join("storage");
@@ -872,6 +873,7 @@ async fn watching_leaf(
         identity: leviculum_core::Identity::generate(&mut rand_core::OsRng),
         display_name: Vec::new(),
         notices: loquax::effects::Terminal::new(std::env::temp_dir()),
+        tcp: Default::default(),
     };
     let device = config.identity.clone();
     let attached = attach_leaf(config, Role::Client { address })

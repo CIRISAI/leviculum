@@ -113,6 +113,8 @@ pub enum DaemonUpstream {
     Mesh {
         servers: Vec<String>,
         screens: std::net::TcpListener,
+        /// The entry connections' keepalive, from the `tcp_*` keys (1176).
+        tcp: crate::config::TcpLiveness,
     },
 }
 
@@ -239,7 +241,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
             (instance, attached, mailbox)
         }
-        DaemonUpstream::Mesh { servers, screens } => {
+        DaemonUpstream::Mesh {
+            servers,
+            screens,
+            tcp,
+        } => {
             let attached = attach_mesh(
                 MeshConfig {
                     servers,
@@ -248,6 +254,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     identity,
                     display_name,
                     notices: Terminal::new(home.clone()),
+                    tcp,
                 },
                 role,
             )

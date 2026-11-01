@@ -226,6 +226,9 @@ pub struct LeafConfig<N = Terminal> {
     pub display_name: Vec<u8>,
     /// Where the stamp worker's progress lines go.
     pub notices: N,
+    /// The keepalive of the connection to the home node, from the config
+    /// file's `tcp_*` keys (1176); the default is the reference's.
+    pub tcp: crate::config::TcpLiveness,
 }
 
 /// What attaching a mailbox that runs its own node needs: a phone's
@@ -247,6 +250,9 @@ pub struct MeshConfig<N = Terminal> {
     pub display_name: Vec<u8>,
     /// Where the stamp worker's progress lines go.
     pub notices: N,
+    /// The keepalive of the connections to the entry servers, as
+    /// [`LeafConfig::tcp`].
+    pub tcp: crate::config::TcpLiveness,
 }
 
 /// `host:port` as the leaf dials it: the host as written (a name, an IPv4
@@ -286,12 +292,17 @@ enum Upstream {
         config_dir: Option<PathBuf>,
     },
     /// One TCP client interface to this host and port, the node's only one.
-    Tcp { host: String, port: u16 },
+    Tcp {
+        host: String,
+        port: u16,
+        tcp: crate::config::TcpLiveness,
+    },
     /// A TCP client interface to each entry server, and a TCP server on the
     /// screens' listener.
     Mesh {
         servers: Vec<(String, u16)>,
         screens: std::net::TcpListener,
+        tcp: crate::config::TcpLiveness,
     },
 }
 
@@ -409,6 +420,7 @@ pub async fn attach_leaf<N: Effects + Send + 'static>(
         identity,
         display_name,
         notices,
+        tcp,
     } = config;
     let (host, port) =
         parse_server(&server).map_err(|detail| AttachError::NoServer { server, detail })?;
@@ -418,7 +430,7 @@ pub async fn attach_leaf<N: Effects + Send + 'static>(
         display_name,
         notices,
     };
-    attach_through(joined, role, Upstream::Tcp { host, port }).await
+    attach_through(joined, role, Upstream::Tcp { host, port, tcp }).await
 }
 
 /// Attach a mailbox with a node of its own: transport off, a TCP client
@@ -437,6 +449,7 @@ pub async fn attach_mesh<N: Effects + Send + 'static>(
         identity,
         display_name,
         notices,
+        tcp,
     } = config;
     let servers = servers
         .iter()
@@ -453,7 +466,32 @@ pub async fn attach_mesh<N: Effects + Send + 'static>(
         display_name,
         notices,
     };
-    attach_through(joined, role, Upstream::Mesh { servers, screens }).await
+    attach_through(
+        joined,
+        role,
+        Upstream::Mesh {
+            servers,
+            screens,
+            tcp,
+        },
+    )
+    .await
+}
+
+/// `section` with the config file's `tcp_*` keys (1176) on it: the same
+/// keys an lnsd section takes, so the node checks their range exactly as
+/// lnsd does.
+fn tcp_section(
+    section: leviculum_std::config::InterfaceConfig,
+    tcp: crate::config::TcpLiveness,
+) -> leviculum_std::config::InterfaceConfig {
+    leviculum_std::config::InterfaceConfig {
+        tcp_keepalive_idle_secs: tcp.idle_secs,
+        tcp_keepalive_interval_secs: tcp.interval_secs,
+        tcp_keepalive_probes: tcp.probes,
+        tcp_user_timeout_secs: tcp.user_timeout_secs,
+        ..section
+    }
 }
 
 /// What both attaches hand the engine and the node.
@@ -476,7 +514,7 @@ async fn attach_through<N: Effects + Send + 'static>(
     };
     let dialled = match &upstream {
         Upstream::Shared { .. } => String::new(),
-        Upstream::Tcp { host, port } => format!("{host}:{port}"),
+        Upstream::Tcp { host, port, .. } => format!("{host}:{port}"),
         Upstream::Mesh { servers, .. } => servers
             .iter()
             .map(|(host, port)| format!("{host}:{port}"))
@@ -557,17 +595,20 @@ async fn attach_through<N: Effects + Send + 'static>(
         // client does for a name in `target_host`. Nothing else in the
         // config: no shared instance to serve, no discovery, no other
         // interface. A leaf is never a transport node.
-        Upstream::Tcp { host, port } => {
+        Upstream::Tcp { host, port, tcp } => {
             let mut config = leviculum_std::Config::default();
             config.interfaces.insert(
                 "Home Node".to_string(),
-                leviculum_std::config::InterfaceConfig {
-                    name: "Home Node".to_string(),
-                    interface_type: "TCPClientInterface".to_string(),
-                    target_host: Some(host),
-                    target_port: Some(port),
-                    ..Default::default()
-                },
+                tcp_section(
+                    leviculum_std::config::InterfaceConfig {
+                        name: "Home Node".to_string(),
+                        interface_type: "TCPClientInterface".to_string(),
+                        target_host: Some(host),
+                        target_port: Some(port),
+                        ..Default::default()
+                    },
+                    tcp,
+                ),
             );
             builder
                 .config(config)
@@ -578,19 +619,26 @@ async fn attach_through<N: Effects + Send + 'static>(
         // on each reconnect; the screens' server on the listener the caller
         // bound. Neither discovery nor a shared instance: the phone's
         // mailbox is a destination on the network, not a transport node.
-        Upstream::Mesh { servers, screens } => {
+        Upstream::Mesh {
+            servers,
+            screens,
+            tcp,
+        } => {
             let mut config = leviculum_std::Config::default();
             for (index, (host, port)) in servers.into_iter().enumerate() {
                 let name = format!("Entry {}", index + 1);
                 config.interfaces.insert(
                     name.clone(),
-                    leviculum_std::config::InterfaceConfig {
-                        name,
-                        interface_type: "TCPClientInterface".to_string(),
-                        target_host: Some(host),
-                        target_port: Some(port),
-                        ..Default::default()
-                    },
+                    tcp_section(
+                        leviculum_std::config::InterfaceConfig {
+                            name,
+                            interface_type: "TCPClientInterface".to_string(),
+                            target_host: Some(host),
+                            target_port: Some(port),
+                            ..Default::default()
+                        },
+                        tcp,
+                    ),
                 );
             }
             builder

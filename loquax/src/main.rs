@@ -1463,6 +1463,8 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
         Some(Ok(bound)) => bound,
         Some(Err(error)) => return usage(format!("--sync-interval {error}")),
     };
+    // A mailbox with no identity yet is a new install (1176).
+    let first_start = !home.join("identity").exists();
     let identity = match identity::load_or_create(&home.join("identity")) {
         Ok(identity) => identity,
         Err(error) => return failure(error, "no-identity"),
@@ -1472,6 +1474,12 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
         Err(error) => return usage(error),
     };
     let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
+    // The phones' port, in access point mode, on a new install only: a
+    // config that already runs is never rewritten (1176).
+    if first_start {
+        let added = loquax::home::phone_server::add(&config_dir);
+        println!("{}", loquax::home::phone_server::first_start_lines(&added));
+    }
     let instance = args.instance.unwrap_or_else(|| instance_name(&config_dir));
     let storage_dir = match storage_dir(&home) {
         Ok(dir) => dir,

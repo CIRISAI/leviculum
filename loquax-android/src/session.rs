@@ -226,6 +226,11 @@ impl Session {
         std::fs::create_dir_all(&storage)
             .map_err(|error| StartError::other(format!("{}: {error}", storage.display())))?;
 
+        // The keepalive of the connection to the mailbox: the same `tcp_*`
+        // keys as an lnsd section (1176), from this app's config file.
+        let tcp = loquax::config::load(&home)
+            .map_err(|error| StartError::other(error.to_string()))?
+            .tcp;
         let attached = runtime.block_on(attach_leaf(
             LeafConfig {
                 server: server.clone(),
@@ -233,6 +238,7 @@ impl Session {
                 identity: device.clone(),
                 display_name: Vec::new(),
                 notices: loquax::effects::Terminal::new(home.clone()),
+                tcp,
             },
             Role::Client { address },
         ));
