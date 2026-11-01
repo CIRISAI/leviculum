@@ -34,12 +34,26 @@ Usage:
   python3 -I scripts/bump-touched.py --selftest
       run the fixtures (a scripted git repository in a tempdir)
 
+Both `--check` and the bump print the base first, `base=<sha12> (<rev>,
+<date>)`, and every OWED line names the unit's version at the base and at
+HEAD. A gate tree whose `origin/master` had not been fetched compared
+against a landing days old and reported owed versions the coder tree did
+not see (1247); the base line is what lets a reader tell the two apart.
+
+A base that is not an ancestor of HEAD is no landing this tree builds on:
+the guard says `base is not an ancestor of HEAD; fetch origin` and exits 2,
+whatever the mode. A stale base that IS an ancestor cannot be told from a
+fresh one by git alone; its date on the base line is the witness.
+
 Exit 0 = nothing owed (or everything owed was bumped). Exit 1 = `--check`
 found owed units, or a fixture misbehaved. Exit 2 = the script could not
-work (no git, unresolvable base in bump mode, a version it cannot spell).
+work (no git, unresolvable base in bump mode, a base that is not an
+ancestor of HEAD, a version it cannot spell); a gate reads it as
+infrastructure, not as owed versions.
 """
 
 import argparse
+import io
 import json
 import os
 import re
@@ -327,6 +341,21 @@ def base_resolves(root, base):
     return git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}", check=False).returncode == 0
 
 
+NOT_ANCESTOR = "base is not an ancestor of HEAD; fetch origin"
+
+
+def base_line(root, base):
+    """`base=<sha12> (<rev>, <committer date>)`: what the guard compared
+    against, so a stale base shows on the first line of the log."""
+    proc = git(root, "log", "-1", "--format=%H %cI", f"{base}^{{commit}}")
+    sha, date = proc.stdout.split()
+    return sha[:12], f"base={sha[:12]} ({base}, {date})"
+
+
+def is_ancestor(root, base):
+    return git(root, "merge-base", "--is-ancestor", base, "HEAD", check=False).returncode == 0
+
+
 def run(root, base, mode, own_units=OWN_UNITS, code_unit=ANDROID_CODE_UNIT, out=sys.stdout):
     if not base_resolves(root, base):
         if mode == "check":
@@ -335,9 +364,15 @@ def run(root, base, mode, own_units=OWN_UNITS, code_unit=ANDROID_CODE_UNIT, out=
             print(f"version-guard: base {base} does not resolve here, nothing to compare", file=out)
             return 0
         raise Failure(f"base {base} does not resolve")
+    sha12, line = base_line(root, base)
+    if mode != "json":
+        print(line, file=out)
+    if not is_ancestor(root, base):
+        print(f"version-guard: {NOT_ANCESTOR} (base {sha12})", file=out if mode != "json" else sys.stderr)
+        return 2
     records = survey(root, base, own_units, code_unit)
     if mode == "json":
-        print(json.dumps({"base": base, "units": records}, indent=2), file=out)
+        print(json.dumps({"base": base, "base_sha": sha12, "units": records}, indent=2), file=out)
         return 1 if any(r["owed"] for r in records) else 0
     if mode == "check":
         owed = [r for r in records if r["owed"]]
@@ -345,7 +380,11 @@ def run(root, base, mode, own_units=OWN_UNITS, code_unit=ANDROID_CODE_UNIT, out=
             extra = ""
             if r["unit"] == code_unit:
                 extra = f" code={r['head_code']} base_code={r['base_code']}"
-            print(f"OWED unit={r['unit']} version={r['head']}{extra} (changed since {base})", file=out)
+            print(
+                f"OWED unit={r['unit']} base_version={r['base']} head_version={r['head']}{extra}"
+                f" (changed since {base})",
+                file=out,
+            )
         if owed:
             print(
                 f"version-guard: {len(owed)} unit(s) changed since {base} without a newer version;"
@@ -503,6 +542,43 @@ def selftest():
         expect("code not grown is owed", {r["unit"]: r["owed"] for r in survey(root, "base", units_fx, "c")}["c"], True)
 
         expect("unresolvable base in check mode", run(root, "no-such-rev", "check", units_fx, out=sink), 0)
+
+        # The base line comes first, and an OWED line names both versions.
+        _write(root / "b" / "src" / "lib.rs", "pub fn b2() {}\n")
+        _commit(root, env_git, "b work after its bump")
+        subprocess.run(["git", "tag", "-f", "bbase"], cwd=root, check=True, capture_output=True)
+        _write(root / "b" / "src" / "lib.rs", "pub fn b3() {}\n")
+        _commit(root, env_git, "b work past bbase")
+        buf = io.StringIO()
+        expect("owed b against bbase", run(root, "bbase", "check", units_fx, out=buf), 1)
+        lines = buf.getvalue().splitlines()
+        sha12 = git(root, "rev-parse", "bbase^{commit}").stdout.strip()[:12]
+        expect("base line first", bool(lines) and lines[0].startswith(f"base={sha12} (bbase, "), True)
+        expect(
+            "OWED line names both versions",
+            any(line.startswith("OWED unit=b base_version=0.1.5 head_version=0.1.5 ") for line in lines),
+            True,
+        )
+        buf = io.StringIO()
+        expect("clean case exit", run(root, "HEAD", "check", units_fx, out=buf), 0)
+        head12 = git(root, "rev-parse", "HEAD").stdout.strip()[:12]
+        head_date = git(root, "log", "-1", "--format=%cI", "HEAD").stdout.strip()
+        expect("clean case base line", buf.getvalue().splitlines()[:1], [f"base={head12} (HEAD, {head_date})"])
+
+        # A base off HEAD's history (a side branch, or a fetch from
+        # somewhere else) is no landing to compare against: exit 2, in
+        # check and bump mode alike, with nothing bumped.
+        subprocess.run(["git", "checkout", "-q", "-b", "side", "base"], cwd=root, check=True)
+        _write(root / "a" / "src" / "lib.rs", "pub fn side() {}\n")
+        _commit(root, env_git, "side")
+        subprocess.run(["git", "tag", "-f", "stale"], cwd=root, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-q", "master"], cwd=root, check=True)
+        before = (root / "Cargo.toml").read_text()
+        buf = io.StringIO()
+        expect("non-ancestor base in check mode", run(root, "stale", "check", units_fx, out=buf), 2)
+        expect("non-ancestor message", NOT_ANCESTOR in buf.getvalue(), True)
+        expect("non-ancestor base in bump mode", run(root, "stale", "bump", units_fx, out=sink), 2)
+        expect("non-ancestor bump changed nothing", (root / "Cargo.toml").read_text(), before)
         sink.close()
 
     broken.extend(makefile_selftest())

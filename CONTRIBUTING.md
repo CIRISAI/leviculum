@@ -85,6 +85,15 @@ version newer than the one there.
   and the lock files that name it; commit the result. `just
   version-guard`, part of `just guards`, refuses a tree that forgot.
   Several passes between two landings share one bump.
+* **The base.** Both print what they compared against first,
+  `base=<sha12> (origin/master, <date>)`, and every `OWED` line names
+  the unit's `base_version=` and `head_version=`. `--base <sha>`
+  compares against any other commit instead. A base that is not an
+  ancestor of HEAD stops the script with `base is not an ancestor of
+  HEAD; fetch origin` and exit 2, which a gate reads as its own
+  infrastructure, not as owed versions (exit 1). A base that is an
+  ancestor but stale looks fresh to git; run `git fetch origin` before
+  the guard and read the date on the base line.
 * **What only the maintainer moves.** Minor and major. At a release
   `0.10.0-dev.N` becomes `0.10.0` and the next window opens as
   `0.11.0-dev.1`; no script does that step.
