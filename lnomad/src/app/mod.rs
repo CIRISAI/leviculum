@@ -21,6 +21,7 @@ pub mod event;
 pub mod geometry;
 pub mod input;
 pub mod intent;
+pub mod keys;
 pub mod model;
 pub mod scene;
 pub mod strings;

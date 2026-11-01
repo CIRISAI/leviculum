@@ -30,52 +30,57 @@ shows are derived from those chords:
 
 Resolution takes the most specific matching chord, the first among equals,
 which for these rows is the first-match scan `lnomad` always had
-(`best`, `leviculum-ui/src/keymap.rs:569`; `key_to_scroll`,
-`lnomad/src/app/event.rs:2143`). The table is read by both the key handler
-and the help overlay (`lnomad/src/app/chrome.rs:541`).
+(`best`, `leviculum-ui/src/keymap.rs:569`; lnomad's `resolve`,
+`lnomad/src/app/keys.rs:384`). The table is read by both the key handler
+and the help overlay (`help_groups_in`, `lnomad/src/app/keys.rs:411`).
 
-**What is not.** Everything else is a hand-written `if`-chain in
-`update_browse_key` (`lnomad/src/app/event.rs:713-859`): roughly twenty
-sequential `if key.code == ... { return ...; }` statements. There is no
-binding map, no user-configurable keymap, no keybinding config file. The
-help overlay's non-scroll groups are a second, unlinked static list
-(`lnomad/src/app/chrome.rs:492-535`) that can silently drift from the handler.
+**What was not, when this was studied.** Everything else was a hand-written
+`if`-chain in `update_browse_key`: roughly twenty sequential `if key.code ==
+... { return ...; }` statements. There was no binding map, no
+user-configurable keymap, no keybinding config file. The help overlay's
+non-scroll groups were a second, unlinked static list that could silently
+drift from the handler. lnomad's slice 1b (order 1285) replaced both with
+its own rows over the shared mechanism (`ROWS`,
+`lnomad/src/app/keys.rs:148`); the layers below are how that table still
+settles the conflicts.
 
 **How the conflicts are actually resolved.** Three layers, in this order.
 
 1. *Global escapes*, before any mode dispatch
-   (`update_key`, `lnomad/src/app/event.rs:427-473`): any key dismisses the
+   (`update_key`, `lnomad/src/app/event.rs:432-468`; `pane`,
+   `lnomad/src/app/keys.rs:337`): any key dismisses the
    toast; `Ctrl-C` quits from anywhere; an open help overlay swallows
    everything; an open places panel takes over.
 2. *Mode gating*. `Mode::{Browse, Address, Hint, Search, Field}`
    (`lnomad/src/app/model.rs:96-115`), each with its own handler. Text modes
    forward unclaimed keys to a `tui_input::Input` editor. `Mode::Field`
    uses a whitelist rather than a catch-all so that "field editing never
-   leaks into browse hotkeys" (`lnomad/src/app/event.rs:480`, whitelist at
-   `:1643-1652`).
+   leaks into browse hotkeys" (`type_field`, `lnomad/src/app/event.rs:475`,
+   whitelist at `lnomad/src/app/event.rs:485-491`).
 3. *Modifier discrimination*. Nearly every single-letter binding is guarded
    `&& !ctrl && !alt`, which is what lets `f` (hint mode) and `Ctrl-f`
    (page down), `d` (places) and `Ctrl-d` (half page), `n` (next match) and
    `Ctrl-n` (line down), `g` (top) and `Ctrl-g` (cancel) all coexist.
 
-The ordering is load-bearing. In browse mode `key_to_scroll` is consulted
-*last* (`lnomad/src/app/event.rs:854-857`), so single-letter commands claim
-their keys first and `j`/`k`/`Space` reach the scroll table only because
-nothing above claims them. In the places panel the order is *inverted*
-(`lnomad/src/app/event.rs:1048`) with a comment explaining why: there `Ctrl-d`
-must be a half-page motion, not the `d` that closes the panel.
+The ordering was load-bearing. In browse mode the scroll lookup was
+consulted *last*, so single-letter commands claimed their keys first and
+`j`/`k`/`Space` reached the scroll table only because nothing above claimed
+them. In the places panel the order was *inverted*: there `Ctrl-d` must be a
+half-page motion, not the `d` that closes the panel. The table says both as
+chord specificity instead of order: the panel's `d` takes any modifier, the
+shared `Ctrl-d` asks for Ctrl and so wins (`lnomad/src/app/keys.rs:262-266`).
 
 There is one further principle worth carrying over verbatim. Bare `r` is
 deliberately left unbound, because "a mesh reload is expensive and single
 letters are reserved for cheap local actions"
-(`lnomad/src/app/event.rs:833-836`); reload requires `R`, `Ctrl-R` or `F5`.
+(`lnomad/src/app/keys.rs:187-189`); reload requires `R`, `Ctrl-R` or `F5`.
 That is a cost-aware keymap, and a messenger sends over the same radios.
 
 **Architecture.** Elm-style with an explicit effect list. The core sits in
 `lnomad/src/app/` since the #219 cut (2026-10-25): `Model` at
 `lnomad/src/app/model.rs:460-639` (`#[derive(Clone, Debug, Default)]` at
 `:565`), `Effect` at `:478-532`; `AppEvent` at
-`lnomad/src/app/event.rs:29-98` and `update(&mut Model, AppEvent) ->
+`lnomad/src/app/event.rs:30-99` and `update(&mut Model, AppEvent) ->
 Vec<Effect>` at `:98-208`. The terminal frontend is `lnomad/src/tui.rs`:
 `view(&Model, &ImageStore, &mut Frame)` at `:154-193`, and a single effect
 interpreter `run_effects` at `:1855-1960`. `update` mutates rather than
@@ -89,7 +94,7 @@ byte-identical golden files (`lnomad/tests/render_golden.rs:18-37`).
 
 **Unsolicited inbound events already exist.** This matters more than
 anything else for a messenger, and the answer is yes.
-`AppEvent::NodeDiscovered` (`lnomad/src/app/event.rs:98`) arrives from
+`AppEvent::NodeDiscovered` (`lnomad/src/app/event.rs:99`) arrives from
 announces with no user action. The chain is: an announce sink installed
 before the session is shared so nothing is missed at startup
 (`set_announce_sink`, `lnomad/src/fetch.rs:243-245`, wiring comment at
@@ -170,7 +175,7 @@ colours are hard-coded (`leviculum-ui/src/theme.rs:116-189`).
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
 clipboard and says so in a toast (`follow_link`,
-`lnomad/src/app/event.rs:1783-1792`). The messenger is the natural target of that
+`lnomad/src/app/event.rs:1485-1493`). The messenger is the natural target of that
 handoff, and wiring the two together is an explicit goal.
 
 ## 2. `leviculum-lxmf`: what it gives and what it does not

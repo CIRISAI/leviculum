@@ -4,9 +4,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use super::event::*;
 use super::geometry::Rect;
-use super::input::KeyCode;
 use super::intent::Intent;
 use super::model::*;
 use super::scene::{
@@ -273,28 +271,11 @@ pub(crate) fn short_hex(dest: &[u8; 16]) -> String {
     s
 }
 
-/// What a footer button activates when pressed or clicked. Mode-specific keys
-/// (`Esc`, `Tab`, `Space`, `Enter`, `n`, `N`) route back through the key handler
-/// so the click behaves exactly like the key press it mirrors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FooterAction {
-    Back,
-    Forward,
-    Reload,
-    /// Toggle identifying to the current page's node (same as the `i` key).
-    Identify,
-    Hint,
-    Search,
-    Places,
-    Mark,
-    Copy,
-    Help,
-    Quit,
-    /// Synthesize a plain key press (the mode-action buttons).
-    Key(KeyCode),
-    /// A non-interactive sentence (hint mode's instruction).
-    None,
-}
+/// What a footer button runs when pressed or clicked: the key table's
+/// action for the chord it shows ([`super::keys`]), so a click and the key
+/// cannot do two different things. [`Action::Sentence`](super::keys::Action::Sentence)
+/// is a sentence, not a button.
+pub type FooterAction = super::keys::Action;
 
 /// One footer button of lnomad's strip: [`leviculum_ui::footer::FooterItem`]
 /// over lnomad's [`FooterAction`].
@@ -313,109 +294,10 @@ impl leviculum_ui::footer::FooterRole for FooterAction {
     }
 }
 
-/// The footer's navigation trio, always first: back, forward, reload. They are
-/// ordinary `key + label` items like the rest of the strip, spelling their keys
-/// (`Alt-←`, `Alt-→`, `R`) rather than using glyphs. Their availability tracks
-/// the history so an impossible motion reads muted.
-pub(crate) fn footer_nav(model: &Model) -> [FooterItem; 3] {
-    let w = |id: StrId| id.text(model.lang);
-    [
-        FooterItem {
-            available: model.history.can_back(),
-            ..FooterItem::action("Alt-←", w(StrId::Back), FooterAction::Back)
-        },
-        FooterItem {
-            available: model.history.can_forward(),
-            ..FooterItem::action("Alt-→", w(StrId::Forward), FooterAction::Forward)
-        },
-        FooterItem {
-            available: model.history.current().is_some(),
-            ..FooterItem::action("R", w(StrId::Reload), FooterAction::Reload)
-        },
-    ]
-}
-
-/// The footer button list for the current mode: the nav trio, then the
-/// mode-dependent action set. The first non-nav item carries the stronger
-/// divider before it.
+/// The footer button list for the current mode, derived from the key table
+/// ([`super::keys::footer_items`]): the nav trio, then the mode's buttons.
 pub(crate) fn footer_items(model: &Model) -> Vec<FooterItem> {
-    let mut items: Vec<FooterItem> = footer_nav(model).to_vec();
-    let w = |id: StrId| id.text(model.lang);
-    match model.mode {
-        Mode::Browse => {
-            // The identify toggle, only when there is a page to identify to. A
-            // state action, so under truncation it outlives the hint/search/
-            // places/mark/copy conveniences (highest drop rank, right below the
-            // never-dropped reload).
-            if model.current_dest.is_some() {
-                let label = if model.identifying {
-                    w(StrId::Anonymous)
-                } else {
-                    w(StrId::Identify)
-                };
-                items.push(FooterItem::droppable("i", label, FooterAction::Identify, 6));
-            }
-            items.extend_from_slice(&[
-                FooterItem::droppable("f", w(StrId::HintMode), FooterAction::Hint, 5),
-                FooterItem::droppable("/", w(StrId::Search), FooterAction::Search, 4),
-                FooterItem::droppable("d", w(StrId::Places), FooterAction::Places, 3),
-                FooterItem::droppable("m", w(StrId::Mark), FooterAction::Mark, 2),
-                FooterItem::droppable("y", w(StrId::Copy), FooterAction::Copy, 1),
-                FooterItem::action("?", w(StrId::Help), FooterAction::Help),
-                FooterItem::action("q", w(StrId::Quit), FooterAction::Quit),
-            ]);
-        }
-        Mode::Field => items.extend_from_slice(&[
-            FooterItem::action("Esc", w(StrId::Done), FooterAction::Key(KeyCode::Esc)),
-            FooterItem::droppable(
-                "Tab",
-                w(StrId::NextField),
-                FooterAction::Key(KeyCode::Tab),
-                1,
-            ),
-            FooterItem::droppable(
-                "Space",
-                w(StrId::Toggle),
-                FooterAction::Key(KeyCode::Char(' ')),
-                2,
-            ),
-            FooterItem::action("?", w(StrId::Help), FooterAction::Help),
-        ]),
-        Mode::Search => items.extend_from_slice(&[
-            FooterItem::action("Enter", w(StrId::Go), FooterAction::Key(KeyCode::Enter)),
-            FooterItem::droppable(
-                "n",
-                w(StrId::Next),
-                FooterAction::Key(KeyCode::Char('n')),
-                2,
-            ),
-            FooterItem::droppable(
-                "N",
-                w(StrId::Prev),
-                FooterAction::Key(KeyCode::Char('N')),
-                3,
-            ),
-            FooterItem::action("Esc", w(StrId::Cancel), FooterAction::Key(KeyCode::Esc)),
-            FooterItem::droppable("?", w(StrId::Help), FooterAction::Help, 1),
-        ]),
-        Mode::Address => items.extend_from_slice(&[
-            FooterItem::action("Enter", w(StrId::Go), FooterAction::Key(KeyCode::Enter)),
-            FooterItem::action("Esc", w(StrId::Cancel), FooterAction::Key(KeyCode::Esc)),
-            FooterItem::droppable("?", w(StrId::Help), FooterAction::Help, 1),
-        ]),
-        Mode::Hint => items.extend_from_slice(&[
-            FooterItem {
-                key: "",
-                label: w(StrId::HintSentence),
-                key_first: true,
-                action: FooterAction::None,
-                drop_rank: None,
-                available: true,
-            },
-            FooterItem::action("Esc", w(StrId::Cancel), FooterAction::Key(KeyCode::Esc)),
-        ]),
-    }
-    items
+    super::keys::footer_items(model)
 }
 
 /// Lay lnomad's footer buttons out across `area`
@@ -447,7 +329,7 @@ pub fn focused_link_target(model: &Model) -> Option<String> {
     }
 }
 
-pub(crate) use leviculum_ui::help::{HelpEntry, HelpGroup};
+pub(crate) use leviculum_ui::help::HelpGroup;
 
 /// The catalogue's words for a shared scroll row's description: the rows live
 /// in `leviculum-ui` with English words, the browser says them in its own
@@ -464,76 +346,11 @@ pub(crate) fn scroll_desc(desc: &'static str, lang: Lang) -> &'static str {
     id.text(lang)
 }
 
-/// The keybinding groups shown in the help overlay, in `lang`. The Move
-/// group's scroll rows are pulled straight from [`SCROLL_ROWS`], so the overlay
-/// can never list a scroll binding that the key handler does not honour, nor
-/// omit one it does.
+/// The keybinding groups shown in the help overlay, in `lang`, derived from
+/// the key table ([`super::keys::help_groups_in`]): the overlay can never
+/// list a binding the key handler does not honour, nor omit one it does.
 pub(crate) fn help_groups_in(lang: Lang) -> Vec<HelpGroup> {
-    let w = |id: StrId| id.text(lang);
-    let e = |keys: &'static str, desc: StrId| HelpEntry {
-        keys,
-        desc: w(desc),
-    };
-    // The scroll rows come straight from the keymap table; the mouse wheel is the
-    // one Move affordance that is not a key chord, so it is appended here.
-    let mut move_entries: Vec<HelpEntry> = SCROLL_ROWS
-        .iter()
-        .map(|s| HelpEntry {
-            keys: s.keys(),
-            desc: scroll_desc(s.desc, lang),
-        })
-        .collect();
-    move_entries.push(e(w(StrId::HelpWheel), StrId::Scroll));
-    vec![
-        HelpGroup {
-            title: w(StrId::HelpMove),
-            entries: move_entries,
-        },
-        HelpGroup {
-            title: w(StrId::HelpFollow),
-            entries: vec![
-                e(w(StrId::HelpFocusKeys), StrId::HelpFocus),
-                e(w(StrId::HelpFollowKeys), StrId::HelpFollowLink),
-                e("f", StrId::HelpHint),
-                e(w(StrId::HelpHistoryKeys), StrId::HelpHistory),
-                e(w(StrId::HelpHoverKeys), StrId::HelpHover),
-            ],
-        },
-        HelpGroup {
-            title: w(StrId::HelpPage),
-            entries: vec![
-                e(w(StrId::HelpUrlKeys), StrId::HelpUrl),
-                e("R / Ctrl-R / F5", StrId::HelpReload),
-                e("Esc / Ctrl-g", StrId::HelpCancel),
-                e(w(StrId::HelpMarkKeys), StrId::HelpMark),
-                e("y", StrId::HelpCopy),
-                e(w(StrId::HelpPlacesKeys), StrId::HelpPlaces),
-                e("i", StrId::HelpIdentify),
-                e("", StrId::HelpIdentifyNote),
-                e("/ n N", StrId::HelpSearch),
-            ],
-        },
-        HelpGroup {
-            title: w(StrId::HelpImages),
-            entries: vec![
-                e("Enter", StrId::HelpSaveImage),
-                e("o", StrId::HelpOpenImage),
-                e("", StrId::HelpImagesOff),
-            ],
-        },
-        HelpGroup {
-            title: w(StrId::HelpFields),
-            entries: vec![e(w(StrId::HelpFieldKeys), StrId::HelpField)],
-        },
-        HelpGroup {
-            title: w(StrId::HelpApp),
-            entries: vec![
-                e("t", StrId::HelpTheme),
-                e(w(StrId::HelpCloseKeys), StrId::HelpClose),
-                e("q / Ctrl-c", StrId::Quit),
-            ],
-        },
-    ]
+    super::keys::help_groups_in(lang)
 }
 
 /// The help groups in English, as the tests of `tui.rs` read them.

@@ -91,15 +91,16 @@ Concretely:
   a better contact switcher than anything in either prior-art program.
 
 **What must not be copied**: `lnomad` quits on `Ctrl-C` from any mode,
-before the mode dispatch (`lnomad/src/app/event.rs:436-439`). In a messenger
+before the mode dispatch (the quit row's `Ctrl-c`, in every pane,
+`lnomad/src/app/keys.rs:328`). In a messenger
 that is a half-written message thrown away by a reflex. `Ctrl-C` in the
 compose pane clears the buffer to a recoverable draft; quitting needs
 `Ctrl-Q` or the palette.
 
 **The keymap must be one table.** `lnomad` applied single-source-of-truth
 discipline to scrolling and nowhere else, and its help overlay's other
-groups are hand-typed strings that can drift
-(`lnomad/src/app/chrome.rs:492-535`). Every binding here is one table read by
+groups were hand-typed strings that could drift, until its slice 1b made
+them rows of one table (`lnomad/src/app/keys.rs:148`). Every binding here is one table read by
 the key handler, the help overlay, the palette and the footer hints. That
 table is also the natural place to hang user configuration later, which
 `lnomad` has none of.
@@ -112,7 +113,7 @@ count how often focus is in the compose pane.
 
 **The quiet keyboard, with its one exception** (decided 2026-08-08). The
 `lnomad` rule that single letters are reserved for cheap local actions
-(`lnomad/src/app/event.rs:833-836`) generalises here to: **no single keystroke
+(`lnomad/src/app/keys.rs:187-189`) generalises here to: **no single keystroke
 may put bytes on the air — except `Enter` in the compose pane.** The
 exception is principled, not a leak: the deliberate act was typing the
 message into a deliberately focused pane, and `Enter` completes that act.

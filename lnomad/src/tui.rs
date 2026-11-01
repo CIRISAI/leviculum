@@ -3276,12 +3276,16 @@ mod tests {
         }
     }
 
+    /// A terminal tall enough for the whole help: since the help lists
+    /// every chord of the key table (slice 1b), it no longer fits 40 rows.
+    const HELP_ROWS: u16 = 50;
+
     #[test]
     fn help_overlay_renders_keybindings() {
-        let mut m = loaded_model((120, 40));
+        let mut m = loaded_model((120, HELP_ROWS));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
         assert!(m.show_help);
-        let buffer = render(&m, 120, 40);
+        let buffer = render(&m, 120, HELP_ROWS);
         let text = flat(&buffer);
         assert!(text.contains("help"), "help title missing:\n{text}");
         assert!(text.contains("quit"), "help body missing:\n{text}");
@@ -3343,9 +3347,9 @@ mod tests {
     fn help_descriptions_all_align() {
         // Every description starts at the same display column: the keys column is
         // computed, never hand-padded, so alignment is structural.
-        let mut m = loaded_model((120, 40));
+        let mut m = loaded_model((120, HELP_ROWS));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
-        let text = flat(&render(&m, 120, 40));
+        let text = flat(&render(&m, 120, HELP_ROWS));
         let rows: Vec<&str> = text.lines().collect();
         let mut cols = Vec::new();
         for group in help_groups() {
@@ -3371,9 +3375,9 @@ mod tests {
     fn help_lines_never_exceed_the_overlay_width() {
         // The overlay sizes itself to its widest line, so no content line wraps:
         // every built line renders intact on a single row.
-        let mut m = loaded_model((120, 40));
+        let mut m = loaded_model((120, HELP_ROWS));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
-        let text = flat(&render(&m, 120, 40));
+        let text = flat(&render(&m, 120, HELP_ROWS));
         for line in help_lines().iter().filter(|l| !l.is_empty()) {
             assert!(
                 text.lines().any(|row| row.contains(line.as_str())),
@@ -4757,12 +4761,12 @@ mod tests {
 
     #[test]
     fn help_overlay_lists_all_bindings_and_affordances() {
-        let mut m = loaded_model((120, 40));
+        let mut m = loaded_model((120, HELP_ROWS));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
-        let text = flat(&render(&m, 120, 40));
+        let text = flat(&render(&m, 120, HELP_ROWS));
         // The bindings the old hand-written list silently dropped.
         for s in [
-            "Ctrl-n", "Ctrl-p", "Ctrl-v", "PageDown", "PageUp", "wheel", "Ctrl-R", "F5", "Alt-←",
+            "Ctrl-n", "Ctrl-p", "Ctrl-v", "PageDown", "PageUp", "wheel", "Ctrl-r", "F5", "Alt-←",
             "Alt-→",
         ] {
             assert!(text.contains(s), "help missing binding {s:?}:\n{text}");
@@ -4921,7 +4925,7 @@ mod tests {
 
     #[test]
     fn help_that_fits_shows_no_scrollbar_and_ignores_scroll_keys() {
-        let mut m = loaded_model((120, 40));
+        let mut m = loaded_model((120, HELP_ROWS));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
         let (_, max) = help_scroll_geometry(&m);
         assert_eq!(max, 0, "the help fits, so there is nothing to scroll");
@@ -4931,7 +4935,7 @@ mod tests {
             "scroll keys are pinned when the help fits"
         );
         assert!(
-            !overlay_scrollbar_shown(&render(&m, 120, 40)),
+            !overlay_scrollbar_shown(&render(&m, 120, HELP_ROWS)),
             "no scrollbar when the help fits the terminal"
         );
     }
@@ -5130,10 +5134,28 @@ mod tests {
             labels.contains(&"next field"),
             "Tab next field missing: {labels:?}"
         );
+        // A text field takes Space as a letter, so the footer offers no toggle
+        // there: its keys are the key table's, live in this field (slice 1b).
         assert!(
-            labels.contains(&"toggle"),
-            "Space toggle missing: {labels:?}"
+            !labels.contains(&"toggle"),
+            "Space toggle offered on a text field: {labels:?}"
         );
+        // The help is F1 here: `?` is a letter while typing.
+        let keys: Vec<&str> = footer_layout(&m, Rect::new(0, 23, 100, 1))
+            .into_iter()
+            .map(|s| s.item.key)
+            .collect();
+        assert!(keys.contains(&"F1"), "help key missing: {keys:?}");
+        assert!(!keys.contains(&"?"), "? is typed, not help: {keys:?}");
+        // On a checkbox Space toggles, and the footer says so.
+        let mut m = field_model("Agree: `<?|agree`Agree>", (80, 24));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.mode, Mode::Field);
+        let toggle = footer_layout(&m, Rect::new(0, 23, 100, 1))
+            .into_iter()
+            .find(|s| s.item.label == "toggle")
+            .expect("Space toggle on a checkbox");
+        assert_eq!(toggle.item.key, "Space");
     }
 
     #[test]

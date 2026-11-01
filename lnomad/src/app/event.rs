@@ -7,7 +7,7 @@ use crate::bookmarks::Bookmark;
 use crate::browser::{self};
 use crate::discovery::DiscoveredNode;
 use crate::image::{ImageSlot, Probe, SlotState, MAX_INLINE_IMAGES};
-use crate::names::{direct_hit, search, PinMark, VisitOutcome};
+use crate::names::{direct_hit, search, VisitOutcome};
 use crate::page_cache::CacheEntry;
 use crate::render::{standalone_links, RenderedLink};
 use crate::url::{
@@ -16,11 +16,12 @@ use crate::url::{
 
 use super::chrome::*;
 use super::geometry::{rect_contains, regions, Rect};
-use super::input::{
-    input_request, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use super::input::{input_request, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use super::intent::{apply, Intent};
+use super::keys;
 use super::model::*;
 use super::strings::{with, with_args, Arg, Lang, StrId, Text};
+#[cfg(test)]
 pub(crate) use leviculum_ui::keymap::{self, Ctx, Panes, SCROLL_ROWS};
 
 /// A UI input event, decoupled from crossterm so [`update`] is trivially
@@ -423,79 +424,55 @@ pub fn split_path_anchor(mut target: Target) -> (Target, Option<String>) {
     }
 }
 
-/// Fold a key press, routed by mode. Returns any effects.
+/// Fold a key press. The key table ([`super::keys`]) names the action the
+/// key runs in the pane the model is in (the help, the places panel and the
+/// name list own the keys while open, else the mode); the action becomes an
+/// [`Intent`] and folds through [`apply`] as a tap does. A key the table
+/// does not hold goes to what the pane types into, or nowhere.
 pub(crate) fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
-    // Any key dismisses the current toast; a handler below may raise a fresh one
-    // for this very key (e.g. `m` -> "bookmarked"), which then wins.
+    // Any key dismisses the current toast; the intent below may raise a fresh
+    // one for this very key (e.g. `m` -> "bookmarked"), which then wins.
     model.dismiss_toast();
 
-    // Ctrl-C quits from any mode.
-    if ctrl && key.code == KeyCode::Char('c') {
-        model.quit = true;
-        return vec![Effect::Quit];
+    let pane = keys::pane(model);
+    if let Some(action) = keys::resolve(&key, pane, keys::ctx(model)) {
+        return match Intent::of_key(action, model) {
+            Some(intent) => apply(model, intent),
+            None => Vec::new(),
+        };
     }
-
-    // The help overlay swallows keys until dismissed. While it is open every
-    // scroll key from `SCROLL_ROWS` moves the OVERLAY's view (via the shared
-    // `scrolled` rule), not the page underneath.
-    if model.show_help {
-        if matches!(
-            key.code,
-            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
-        ) {
-            model.show_help = false;
-        } else if let Some(cmd) = key_to_scroll(&key) {
-            let (viewport, max) = help_scroll_geometry(model);
-            model.help_scroll = scrolled(model.help_scroll, cmd, viewport, max);
-        }
+    // While the name list asks, any key but `y` is the answer no.
+    if pane == keys::ASK {
+        return apply(model, Intent::Answer { yes: false });
+    }
+    if model.show_help || model.show_places || model.names.is_some() {
         return Vec::new();
     }
-
-    // The places panel is modal like the help overlay: it owns keys until closed.
-    if model.show_places {
-        return update_places_key(model, key);
-    }
-
-    // So is the name-search result list.
-    if model.names.is_some() {
-        return update_names_key(model, key);
-    }
-
     match model.mode {
-        Mode::Address => update_address_key(model, key),
-        Mode::Hint => update_hint_key(model, key),
-        Mode::Search => update_search_key(model, key),
-        Mode::Field => update_field_key(model, key),
-        Mode::Browse => update_browse_key(model, key, ctrl),
+        Mode::Address => {
+            if let Some(req) = input_request(&key) {
+                model.input.handle(req);
+            }
+            Vec::new()
+        }
+        Mode::Search => {
+            if let Some(req) = input_request(&key) {
+                model.search_input.handle(req);
+            }
+            Vec::new()
+        }
+        Mode::Hint => type_hint(model, key),
+        Mode::Field => type_field(model, key),
+        Mode::Browse => Vec::new(),
     }
 }
 
-/// Fold a key while a form field has focus. Tab/Shift-Tab move to the next/
-/// previous interactive element; Esc leaves editing back to browse. A text field
-/// takes the usual editing keys (typing, Backspace/Delete, Left/Right, Home/End)
-/// and re-lays the page out so its widget reflects the new value; a checkbox/
-/// radio toggles on Space (a radio deselects its group siblings). Any other key
-/// is ignored, so field editing never leaks into browse hotkeys.
-pub(crate) fn update_field_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    match key.code {
-        KeyCode::Tab => {
-            focus_next(model);
-            return Vec::new();
-        }
-        KeyCode::BackTab => {
-            focus_prev(model);
-            return Vec::new();
-        }
-        KeyCode::Esc => {
-            model.field_focus = None;
-            model.mode = Mode::Browse;
-            return Vec::new();
-        }
-        _ => {}
-    }
-
+/// Type a key into the focused form field, the keys the table left over. A
+/// text field takes the usual editing keys (typing, Backspace/Delete,
+/// Left/Right, Home/End) and re-lays the page out so its widget reflects the
+/// new value; a checkbox or radio takes nothing but its `Space`, which the
+/// table holds. With no field focused the mode falls back to browsing.
+pub(crate) fn type_field(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     let Some(fi) = model.field_focus else {
         model.mode = Mode::Browse;
         return Vec::new();
@@ -503,36 +480,27 @@ pub(crate) fn update_field_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> 
     let Some(fe) = model.field_state.get(fi - 1) else {
         return Vec::new();
     };
-
-    match fe.kind {
-        FieldKind::Text => {
-            if matches!(
-                key.code,
-                KeyCode::Char(_)
-                    | KeyCode::Backspace
-                    | KeyCode::Delete
-                    | KeyCode::Left
-                    | KeyCode::Right
-                    | KeyCode::Home
-                    | KeyCode::End
-            ) {
-                if let Some(fe) = model.field_state.get_mut(fi - 1) {
-                    if let Some(req) = input_request(&key) {
-                        fe.input.handle(req);
-                    }
-                }
-                // The widget text changed width: re-lay the page out so the box
-                // and every downstream position stay correct, keeping the scroll.
-                let (w, vp) = (model.width, model.viewport());
-                model.relayout(w);
-                model.clamp_scroll(vp);
+    let editing = matches!(
+        key.code,
+        KeyCode::Char(_)
+            | KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End
+    );
+    if fe.kind == FieldKind::Text && editing {
+        if let Some(fe) = model.field_state.get_mut(fi - 1) {
+            if let Some(req) = input_request(&key) {
+                fe.input.handle(req);
             }
         }
-        FieldKind::Checkbox | FieldKind::Radio => {
-            if key.code == KeyCode::Char(' ') {
-                toggle_field(model, fi);
-            }
-        }
+        // The widget text changed width: re-lay the page out so the box
+        // and every downstream position stay correct, keeping the scroll.
+        let (w, vp) = (model.width, model.viewport());
+        model.relayout(w);
+        model.clamp_scroll(vp);
     }
     Vec::new()
 }
@@ -575,40 +543,13 @@ pub(crate) fn select_radio(model: &mut Model, fi: usize) {
     }
 }
 
-/// Fold a key while the in-page search editor has focus. `Enter` commits the
-/// query (compute matches, jump to the first); `Esc` cancels and clears all
-/// highlights; any other key edits the query.
-pub(crate) fn update_search_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
+/// Type a key in hint mode, the keys the table left over. A character
+/// narrows the visible labels (by label prefix or link-text substring); a
+/// unique match follows the link, activates the form field, or drives the
+/// control; `Backspace` takes the last character back. A non-matching key
+/// is ignored.
+pub(crate) fn type_hint(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     match key.code {
-        KeyCode::Esc => {
-            exit_search(model);
-            Vec::new()
-        }
-        KeyCode::Enter => {
-            let query = model.search_input.value().to_string();
-            model.mode = Mode::Browse;
-            commit_search(model, &query);
-            Vec::new()
-        }
-        _ => {
-            if let Some(req) = input_request(&key) {
-                model.search_input.handle(req);
-            }
-            Vec::new()
-        }
-    }
-}
-
-/// Fold a key while hint mode is active. A character narrows the visible labels
-/// (by label prefix or link-text substring); a unique match follows the link,
-/// activates the form field, or drives the control. `Esc` exits; a non-matching
-/// key is ignored.
-pub(crate) fn update_hint_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    match key.code {
-        KeyCode::Esc => {
-            exit_hint(model);
-            Vec::new()
-        }
         KeyCode::Backspace => {
             model.hint_input.pop();
             Vec::new()
@@ -643,28 +584,6 @@ pub(crate) fn update_hint_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
             }
         }
         _ => Vec::new(),
-    }
-}
-
-/// Fold a key while the address editor has focus.
-pub(crate) fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    match key.code {
-        KeyCode::Esc => {
-            model.mode = Mode::Browse;
-            model.input.reset();
-            model.dismiss_toast();
-            Vec::new()
-        }
-        KeyCode::Enter => {
-            let raw = model.input.value().trim().to_string();
-            go_to(model, &raw)
-        }
-        _ => {
-            if let Some(req) = input_request(&key) {
-                model.input.handle(req);
-            }
-            Vec::new()
-        }
     }
 }
 
@@ -707,155 +626,6 @@ pub(crate) fn go_to(model: &mut Model, raw: &str) -> Vec<Effect> {
             Vec::new()
         }
     }
-}
-
-/// Fold a key while browsing (scrolling, navigation, mode switches).
-pub(crate) fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect> {
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-
-    if key.code == KeyCode::Char('q') {
-        model.quit = true;
-        return vec![Effect::Quit];
-    }
-
-    // Cancel an in-flight fetch or download (Esc or Ctrl-g), returning to the
-    // current page.
-    if model.is_loading() && (key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('g')))
-    {
-        model.pending = None;
-        model.download = None;
-        model.say(ToastKind::Info, Text::key(StrId::Cancelled));
-        return vec![Effect::Cancel];
-    }
-
-    // Ctrl-L: recompute the layout and redraw, keeping the (re-clamped) offset.
-    if ctrl && key.code == KeyCode::Char('l') {
-        let (w, vp) = (model.width, model.viewport());
-        model.relayout(w);
-        model.clamp_scroll(vp);
-        return Vec::new();
-    }
-
-    // Enter address mode.
-    if key.code == KeyCode::Char(':') {
-        enter_address(model);
-        return Vec::new();
-    }
-
-    // Enter hint mode (`f`).
-    if key.code == KeyCode::Char('f') && !ctrl && !alt {
-        enter_hint(model);
-        return Vec::new();
-    }
-
-    // Enter in-page search mode (`/`).
-    if key.code == KeyCode::Char('/') && !ctrl && !alt {
-        enter_search(model);
-        return Vec::new();
-    }
-
-    // Cycle the current search match: `n` next, `N` previous (both wrap), each
-    // scrolling the current match into view. A no-op with no active matches.
-    if key.code == KeyCode::Char('n') && !ctrl && !alt {
-        next_match(model);
-        return Vec::new();
-    }
-    if key.code == KeyCode::Char('N') && !ctrl && !alt {
-        prev_match(model);
-        return Vec::new();
-    }
-
-    // Toggle the light/dark theme (`t`), correcting a wrong auto-detection.
-    if key.code == KeyCode::Char('t') && !ctrl && !alt {
-        model.toggle_theme();
-        return Vec::new();
-    }
-
-    // Toggle the places panel (`d`): bookmarks + discovered nodes.
-    if key.code == KeyCode::Char('d') && !ctrl && !alt {
-        toggle_places(model);
-        return Vec::new();
-    }
-
-    // Bookmark (or un-bookmark) the current page (`m`).
-    if key.code == KeyCode::Char('m') && !ctrl && !alt {
-        return toggle_bookmark_current(model);
-    }
-
-    // Open the focused picture in the system image viewer (`o`): it is saved
-    // to the download directory first, because the platform handler needs a
-    // file and the picture has only ever existed in memory. A no-op unless an
-    // arrived picture is focused.
-    if key.code == KeyCode::Char('o') && !ctrl && !alt {
-        if let Some(effect) = model
-            .focus
-            .and_then(|index| saved_image_effect(model, index, true))
-        {
-            model.dismiss_toast();
-            return vec![effect];
-        }
-        return Vec::new();
-    }
-
-    // Yank the current page (or focused link) URL to the clipboard (`y`).
-    if key.code == KeyCode::Char('y') && !ctrl && !alt {
-        return yank_url(model);
-    }
-
-    // Toggle identifying to the current page's node (`i`), reloading it so the
-    // decision takes effect on a fresh link.
-    if key.code == KeyCode::Char('i') && !ctrl && !alt {
-        return toggle_identify(model);
-    }
-
-    // Tab / Shift-Tab move the focus cursor across links; Enter follows it.
-    if key.code == KeyCode::Tab {
-        focus_next(model);
-        return Vec::new();
-    }
-    if key.code == KeyCode::BackTab {
-        focus_prev(model);
-        return Vec::new();
-    }
-    if key.code == KeyCode::Enter {
-        return match model.focus {
-            Some(idx) => follow_link(model, idx),
-            None => Vec::new(),
-        };
-    }
-
-    // Toggle the help overlay.
-    if key.code == KeyCode::Char('?') {
-        model.show_help = true;
-        model.help_scroll = 0;
-        return Vec::new();
-    }
-
-    // Reload the current page (no history change). Bound to `R`, `Ctrl-R` and
-    // `F5` to match browser muscle memory; bare lowercase `r` stays free, as a
-    // mesh reload is expensive and single letters are reserved for cheap local
-    // actions.
-    if key.code == KeyCode::Char('R')
-        || (ctrl && key.code == KeyCode::Char('r'))
-        || key.code == KeyCode::F(5)
-    {
-        return reload_current(model);
-    }
-
-    // Back / forward (Alt-Left / Alt-Right): peek the target and re-fetch it,
-    // moving the cursor only once it loads.
-    if alt && key.code == KeyCode::Left {
-        return go_back(model);
-    }
-    if alt && key.code == KeyCode::Right {
-        return go_forward(model);
-    }
-
-    if let Some(cmd) = key_to_scroll(&key) {
-        let vp = model.viewport();
-        model.apply_scroll(cmd, vp);
-    }
-    Vec::new()
 }
 
 /// Enter address-entry mode with a cleared editor.
@@ -1033,36 +803,6 @@ pub(crate) fn toggle_places(model: &mut Model) {
 pub(crate) fn close_places(model: &mut Model) {
     model.show_places = false;
     model.places_hover = None;
-}
-
-/// Fold a key while the places panel is open. The up/down motions are the SAME
-/// as the content scroll: [`key_to_scroll`] maps `j`/`k`/`Ctrl-n`/`Ctrl-p`/arrows
-/// (line), `Ctrl-f`/`Ctrl-b`/`Ctrl-d`/`Ctrl-u` (page/half-page, clamped to the
-/// ends), and `g`/`G`/Home/End (first/last), applied to the panel SELECTION
-/// instead of the page. `Enter` opens the selected place, `x`/`Delete` delete
-/// the selected bookmark, `u` undoes the last deletion, `Esc`/`d` close the
-/// panel.
-pub(crate) fn update_places_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    // Movement shares the content keymap, so the panel and the page scroll the
-    // same way. This is checked first: `Ctrl-d` is a half-page motion here, not
-    // the `d` that closes the panel.
-    if let Some(cmd) = key_to_scroll(&key) {
-        apply_places_scroll(model, cmd);
-        return Vec::new();
-    }
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('d') => {
-            close_places(model);
-            Vec::new()
-        }
-        KeyCode::Enter => {
-            let idx = model.places_sel;
-            activate_place(model, idx)
-        }
-        KeyCode::Char('x') | KeyCode::Delete => delete_bookmark_at(model, model.places_sel),
-        KeyCode::Char('u') => undo_delete_bookmark(model),
-        _ => Vec::new(),
-    }
 }
 
 /// The places panel's line layout: the rendered LINE each entry sits on (indexed
@@ -1334,45 +1074,6 @@ pub(crate) fn move_name_sel(model: &mut Model, cmd: ScrollCmd) {
         }
         results.confirm = false;
         results.sel = scrolled(results.sel, cmd, vp, results.hits.len() - 1);
-    }
-}
-
-/// Fold a key while the name-search list is open. The motions are the content
-/// scroll keys; `Enter` opens the selected site, or asks first when its name
-/// is pinned to another hash; while asking, `y` opens and pins it and any other
-/// key returns to the list. `Esc` closes the list.
-pub(crate) fn update_names_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
-    let Some(results) = model.names.as_mut() else {
-        return Vec::new();
-    };
-    if results.confirm {
-        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-            return open_name_hit(model, true);
-        }
-        results.confirm = false;
-        return Vec::new();
-    }
-    if let Some(cmd) = key_to_scroll(&key) {
-        move_name_sel(model, cmd);
-        return Vec::new();
-    }
-    match key.code {
-        KeyCode::Esc => {
-            model.names = None;
-            Vec::new()
-        }
-        KeyCode::Enter => {
-            let conflict = results
-                .hits
-                .get(results.sel)
-                .is_some_and(|h| h.mark == PinMark::Conflict);
-            if conflict {
-                results.confirm = true;
-                return Vec::new();
-            }
-            open_name_hit(model, false)
-        }
-        _ => Vec::new(),
     }
 }
 
@@ -2097,7 +1798,7 @@ pub(crate) fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect>
     // A click on a footer button runs its action (same as pressing its key).
     if footer_shows_buttons(model) {
         for slot in footer_layout(model, footer) {
-            if slot.item.action != FooterAction::None && rect_contains(slot.rect, col, row) {
+            if slot.item.action != FooterAction::Sentence && rect_contains(slot.rect, col, row) {
                 return run_footer_action(model, slot.item.action);
             }
         }
@@ -2123,7 +1824,7 @@ pub(crate) fn update_hover(model: &mut Model, col: u16, row: u16) {
         let [_topbar, _content, footer] = regions(model.frame_area());
         if let Some(slot) = footer_layout(model, footer)
             .into_iter()
-            .find(|s| s.item.action != FooterAction::None && rect_contains(s.rect, col, row))
+            .find(|s| s.item.action != FooterAction::Sentence && rect_contains(s.rect, col, row))
         {
             model.footer_hover = Some(slot.index);
             model.hover = None;
@@ -2140,43 +1841,15 @@ pub(crate) fn update_hover(model: &mut Model, col: u16, row: u16) {
 /// Map a key press to a [`ScrollCmd`], honouring both vi and emacs idioms, from
 /// the shared scroll rows ([`SCROLL_ROWS`], in `leviculum-ui` so loquax reads the
 /// same ones). Returns `None` for keys that are not scroll motions.
+#[cfg(test)]
 pub(crate) fn key_to_scroll(key: &KeyEvent) -> Option<ScrollCmd> {
     keymap::best(SCROLL_ROWS, key, Panes::SCROLL, Ctx::NONE).map(|(_, cmd)| cmd)
 }
 
-/// Run a footer button's action, mirroring the key it stands for.
+/// Run a footer button's action: the intent the key it shows raises.
 pub(crate) fn run_footer_action(model: &mut Model, action: FooterAction) -> Vec<Effect> {
-    match action {
-        FooterAction::Back => go_back(model),
-        FooterAction::Forward => go_forward(model),
-        FooterAction::Reload => reload_current(model),
-        FooterAction::Identify => toggle_identify(model),
-        FooterAction::Hint => {
-            enter_hint(model);
-            Vec::new()
-        }
-        FooterAction::Search => {
-            enter_search(model);
-            Vec::new()
-        }
-        FooterAction::Places => {
-            toggle_places(model);
-            Vec::new()
-        }
-        FooterAction::Mark => toggle_bookmark_current(model),
-        FooterAction::Copy => yank_url(model),
-        FooterAction::Help => {
-            model.show_help = !model.show_help;
-            if model.show_help {
-                model.help_scroll = 0;
-            }
-            Vec::new()
-        }
-        FooterAction::Quit => {
-            model.quit = true;
-            vec![Effect::Quit]
-        }
-        FooterAction::Key(code) => update_key(model, KeyEvent::new(code, KeyModifiers::NONE)),
-        FooterAction::None => Vec::new(),
+    match Intent::of_key(action, model) {
+        Some(intent) => apply(model, intent),
+        None => Vec::new(),
     }
 }
