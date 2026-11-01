@@ -20,7 +20,9 @@ pub mod chrome;
 pub mod event;
 pub mod geometry;
 pub mod input;
+pub mod intent;
 pub mod model;
+pub mod scene;
 pub mod strings;
 
 pub use chrome::*;
@@ -30,4 +32,5 @@ pub use input::{
     input_request, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
+pub use intent::Intent;
 pub use model::*;

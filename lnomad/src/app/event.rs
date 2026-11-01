@@ -96,6 +96,8 @@ pub enum AppEvent {
     NodeDiscovered(DiscoveredNode),
     /// The spinner animation tick, delivered while a fetch is in flight.
     Tick,
+    /// What a tap on a scene node, or a host, asks ([`super::intent`]).
+    Intent(super::intent::Intent),
 }
 
 /// Fold an event into the model, returning any [`Effect`]s for the IO shell.
@@ -113,6 +115,7 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::PageLoaded { doc, title } => apply_loaded(model, doc, title),
+        AppEvent::Intent(intent) => super::intent::apply(model, intent),
         AppEvent::LoadFailed(msg) => {
             model.pending = None;
             model.set_toast(ToastKind::Error, msg);
@@ -656,7 +659,8 @@ pub(crate) fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect
 }
 
 /// Go where the address field's text `raw` says: a URL, a `nomadnetwork://`
-/// one, or a name to search (1227). What Enter in the address editor does.
+/// one, or a name to search (1227). What Enter in the address editor and
+/// [`Intent::Go`](super::intent::Intent::Go) do.
 pub(crate) fn go_to(model: &mut Model, raw: &str) -> Vec<Effect> {
     let raw = raw.to_string();
     if is_nururl(&raw) {

@@ -44,7 +44,7 @@ pub mod theme;
 pub mod tui;
 pub mod url;
 
-pub use app::{update, AppEvent, Effect, Model};
+pub use app::{update, AppEvent, Effect, Intent, Model};
 pub use bookmarks::{Bookmark, Bookmarks};
 pub use browser::{resolve_link, BrowserOptions};
 pub use cli::{resolve_args, Mode};

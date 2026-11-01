@@ -1,0 +1,571 @@
+{
+  "address": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "browser_address"
+      },
+      "resource": "address",
+      "role": "text_field",
+      "selected": false
+    },
+    "activate": {
+      "enabled": true,
+      "intent": "Activate(Address)",
+      "label_key": "browser_edit"
+    },
+    "cursor": null,
+    "editing": false,
+    "go": {
+      "enabled": true,
+      "intent": "Go { url: None }",
+      "label_key": "browser_go"
+    },
+    "hint": {
+      "args": [],
+      "key": "browser_address_hint"
+    },
+    "id": "address",
+    "value": "c0ffee00…:/page/readme.mu"
+  },
+  "help": false,
+  "names": null,
+  "page": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Reticulum · README"
+      },
+      "resource": "page",
+      "role": "page",
+      "selected": false
+    },
+    "first": 15,
+    "focus": {
+      "link": 2
+    },
+    "id": "page",
+    "lines": [
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  independent, inter-connectable and autonomous networks. Reticulum "
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": true,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "is not"
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": " "
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": true,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "one"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  network. It is "
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": true,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "a tool"
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": " for building "
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": true,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "thousands of networks"
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": ". Networks without"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  kill-switches, surveillance, censorship and control. Networks that can freely"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  interoperate, associate and disassociate with each other, and require no"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  central oversight. Networks for human beings. "
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": true,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "Networks for the people"
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "."
+        }
+      ],
+      [],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  Reticulum is a complete networking stack, and does not rely on IP or higher"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  layers, but it is possible to use IP as the underlying carrier for Reticulum."
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  It is therefore trivial to tunnel Reticulum over the Internet or private IP"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  networks."
+        }
+      ],
+      [],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  Having no dependencies on traditional networking stacks frees up overhead"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  that has been used to implement a networking stack built directly on"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  cryptographic principles, allowing resilience and stable functionality, even"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  in open and trustless networks."
+        }
+      ],
+      [],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  No kernel modules or drivers are required. Reticulum runs completely in"
+        }
+      ],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  userland, and can run on practically any system that runs Python."
+        }
+      ],
+      [],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": "#999999",
+            "bold": false,
+            "fg": "#111111",
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "   Read The Manual                                                             "
+        }
+      ],
+      [],
+      [
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "  The full documentation for Reticulum is available on "
+        },
+        {
+          "field": null,
+          "link": 2,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": true,
+            "fg": "#00afff",
+            "italic": false,
+            "reverse": false,
+            "underline": true
+          },
+          "text": "this node"
+        },
+        {
+          "field": null,
+          "link": null,
+          "matched": null,
+          "style": {
+            "bg": null,
+            "bold": false,
+            "fg": null,
+            "italic": false,
+            "reverse": false,
+            "underline": false
+          },
+          "text": "."
+        }
+      ]
+    ],
+    "total": 434
+  },
+  "places": null,
+  "state": [
+    {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [],
+          "key": "browser_hops_unknown"
+        },
+        "resource": "chip_hops",
+        "role": "chip",
+        "selected": false
+      },
+      "id": "chip_hops",
+      "text": {
+        "args": [],
+        "key": "browser_hops_unknown"
+      }
+    }
+  ],
+  "status": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [
+          "c0ffee00… · :/page/blob.mu"
+        ],
+        "key": "browser_link_target"
+      },
+      "resource": "chip_status",
+      "role": "chip",
+      "selected": false
+    },
+    "id": "chip_status",
+    "text": {
+      "args": [
+        "c0ffee00… · :/page/blob.mu"
+      ],
+      "key": "browser_link_target"
+    }
+  },
+  "toast": null,
+  "top_bar": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Reticulum · README"
+      },
+      "resource": "top_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": false,
+        "intent": "Forward",
+        "label_key": "browser_forward"
+      },
+      {
+        "enabled": true,
+        "intent": "Reload",
+        "label_key": "browser_reload"
+      },
+      {
+        "enabled": true,
+        "intent": "Bookmark { on: true }",
+        "label_key": "browser_bookmark"
+      },
+      {
+        "enabled": true,
+        "intent": "Identify { on: true }",
+        "label_key": "browser_identify"
+      }
+    ],
+    "id": "top_bar",
+    "lead": {
+      "me": {
+        "avatar": {
+          "me": ""
+        },
+        "link": null
+      }
+    },
+    "title": {
+      "raw": "Reticulum · README"
+    }
+  }
+}

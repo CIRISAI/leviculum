@@ -3248,6 +3248,7 @@ dependencies = [
  "ratatui",
  "rmpv",
  "serde",
+ "serde_json",
  "tempfile",
  "terminal_size",
  "thiserror 2.0.17",
