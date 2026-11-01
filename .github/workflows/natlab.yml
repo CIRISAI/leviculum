@@ -19,6 +19,7 @@ jobs:
       - run: sudo apt-get update -q && sudo apt-get install -yq conntrack iptables iproute2
       - name: lab
         run: |
+          set -o pipefail
           sudo python3 scripts/natlab/natlab.py matrix \
             --trials "${{ inputs.trials || '5' }}" --only "${{ inputs.only }}" \
             --out natlab-results.json | tee natlab.log

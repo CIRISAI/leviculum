@@ -69,15 +69,15 @@ def setup(kind_a, kind_b):
     for ns in NS:
         sh(f"ip netns add {ns}")
         nsx(ns, "ip link set lo up")
-    nsx("inet", "ip link add br type bridge")
-    nsx("inet", "ip link set br up")
-    nsx("inet", f"ip addr add {RELAY_IP}/24 dev br")
+    nsx("inet", "ip link add name br0 type bridge")
+    nsx("inet", "ip link set br0 up")
+    nsx("inet", f"ip addr add {RELAY_IP}/24 dev br0")
     for side, wan_ip, lan, kind in (("A", "203.0.113.1", "10.0.1", kind_a),
                                     ("B", "203.0.113.2", "10.0.2", kind_b)):
         r, h = f"r{side}", f"h{side}"
         # WAN: router <-> bridge
         sh(f"ip link add wan{side} netns {r} type veth peer name p{side} netns inet")
-        nsx("inet", f"ip link set p{side} master br up")
+        nsx("inet", f"ip link set p{side} master br0 up")
         nsx(r, f"ip addr add {wan_ip}/24 dev wan{side}")
         nsx(r, f"ip link set wan{side} up")
         # LAN: router <-> host
