@@ -173,6 +173,10 @@ struct Inner {
     fallback: Fallback,
     /// loquax's links to the phone's address book (1139).
     book: Book,
+    /// The peers added by a code while this session runs (walk finding
+    /// 15): their chat does not ask to save them to the phone's contacts,
+    /// the user just named them.
+    just_added: std::collections::BTreeSet<[u8; 16]>,
     /// The contact keys the home node took (1187), for the facade test.
     keys_told: Arc<std::sync::atomic::AtomicUsize>,
     /// What the recorder is to do (1276, `UiEffect::Recording`), by peer,
@@ -558,6 +562,7 @@ impl Session {
                 return Err(StrId::CodeIsMailbox.text(inner.lang).to_string())
             }
         };
+        inner.just_added.insert(peer);
         if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
             inner.apply(UiEvent::Rename {
                 peer,
@@ -1467,6 +1472,7 @@ impl Inner {
             front: false,
             fallback: Fallback::default(),
             book: links::load(home),
+            just_added: std::collections::BTreeSet::new(),
             keys_told: Arc::default(),
             recorder: Vec::new(),
         })
@@ -2140,7 +2146,10 @@ impl Inner {
             linked: link.is_some(),
             lookup: link.map(|link| link.lookup.clone()),
             contact_id: link.map(|link| link.contact_id),
-            ask_link: link.is_none() && heard && !self.book.not_now.contains(&peer),
+            ask_link: link.is_none()
+                && heard
+                && !self.book.not_now.contains(&peer)
+                && !self.just_added.contains(&peer),
             announced: names.announced(&peer).map(str::to_string),
             petname: names.petname(&peer).map(str::to_string),
             others: names

@@ -74,6 +74,15 @@
         <category a:name='android.intent.category.DEFAULT'/>
         <data a:mimeType='text/plain'/>
       </intent-filter>
+      <!-- A friend's code as a link (walk finding 12): lxma://<address>:<key>
+           tapped in another messenger opens "Add contact". A shared text
+           that carries one comes through SEND above. -->
+      <intent-filter>
+        <action a:name='android.intent.action.VIEW'/>
+        <category a:name='android.intent.category.DEFAULT'/>
+        <category a:name='android.intent.category.BROWSABLE'/>
+        <data a:scheme='lxma'/>
+      </intent-filter>
       <!-- A contact card's IM row of protocol LXMF: AOSP's contacts app
            sends SENDTO imto://lxmf/<address> (ContactsUtils.java:162-180);
            VIEW for a contacts app that views instead. -->

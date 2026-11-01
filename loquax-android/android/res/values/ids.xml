@@ -66,6 +66,7 @@
     <item name="profile_qr" type="id" />
     <item name="welcome_qr" type="id" />
     <item name="welcome_share" type="id" />
+    <item name="welcome_name" type="id" />
     <item name="join_retry" type="id" />
     <item name="join_details_toggle" type="id" />
     <item name="join_details" type="id" />

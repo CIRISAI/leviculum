@@ -13,6 +13,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.util.Log;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,7 +45,6 @@ public class LoquaxService extends Service implements Events.Listener {
     /** Each conversation's unread count as last seen; null before the first look. */
     private Map<String, Long> unread;
     private long total;
-    private String server = "";
     /** Whether the TCP interface to the home node is up, as the library last said. */
     private boolean linkUp;
     /** Whether the mailbox runs here, in this process (1152). */
@@ -126,7 +126,6 @@ public class LoquaxService extends Service implements Events.Listener {
         }
         if (Core.bool(answer, "ok")) {
             running = true;
-            server = Core.str(answer, "server");
             linkUp = Core.bool(answer, "link");
             here = Core.bool(answer, "here");
             Events.start();
@@ -139,7 +138,10 @@ public class LoquaxService extends Service implements Events.Listener {
             end();
             return;
         }
-        line = getString(R.string.not_connected, Core.str(answer, "error"));
+        // The words of the failure are the log's; the line says what the
+        // service does about it (walk finding 19).
+        Log.i(PhotoView.TAG, "start failed: " + Core.str(answer, "error"));
+        line = getString(R.string.not_connected);
         show();
         retryLater();
     }
@@ -204,9 +206,8 @@ public class LoquaxService extends Service implements Events.Listener {
             // library has dropped the dead session, so the next start
             // builds a fresh one.
             running = false;
-            String detail = Core.str(event, "detail");
-            line = getString(R.string.not_connected,
-                    detail.isEmpty() ? getString(R.string.stopped) : detail);
+            Log.i(PhotoView.TAG, "session ended: " + Core.str(event, "detail"));
+            line = getString(R.string.not_connected);
             show();
             if (!stopping) {
                 retryLater();
@@ -261,11 +262,13 @@ public class LoquaxService extends Service implements Events.Listener {
             line = total == 0 ? getString(R.string.here_running)
                     : getString(R.string.here_running_unread, total);
         } else if (!linkUp) {
-            line = getString(R.string.connecting, server);
+            // No address on the line (walk finding 19): the profile's
+            // Advanced lists the servers and which one is up.
+            line = getString(R.string.connecting);
         } else if (total == 0) {
-            line = getString(R.string.connected, server);
+            line = getString(R.string.connected);
         } else {
-            line = getString(R.string.connected_unread, server, total);
+            line = getString(R.string.connected_unread, total);
         }
         show();
     }

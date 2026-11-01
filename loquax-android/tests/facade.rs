@@ -297,6 +297,33 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     let (address, peer) = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
         ugly_in(&session);
+        // A peer that wrote to us and is in no address book contact: its
+        // chat asks to save it to the phone's contacts. Added by its code,
+        // the same chat no longer asks while this session runs (walk
+        // finding 15): the user just added it.
+        let wrote = ugly_store::peer_hex(3);
+        let asks = |session: &Session| -> bool {
+            let messages: schema::Messages = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Messages {
+                        peer: wrote.clone(),
+                    })
+                    .expect("messages"),
+            )
+            .expect("decode");
+            messages.ask_link
+        };
+        assert!(
+            asks(&session),
+            "a peer that wrote, not in the book: the banner"
+        );
+        session
+            .request(Request::AddContact {
+                lxma: wrote.clone(),
+                name: None,
+            })
+            .expect("added by address");
+        assert!(!asks(&session), "just added: no banner");
         let address = loquax::address::to_hex(&session.address());
         session
             .request(Request::Send {

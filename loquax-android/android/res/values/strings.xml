@@ -18,10 +18,10 @@
     <string name="stopped">Stopped.</string>
     <string name="channel_session">Connection to your mailbox</string>
     <string name="channel_messages">New messages</string>
-    <string name="connecting">Connecting to %1$s</string>
-    <string name="connected">Connected to %1$s</string>
-    <string name="connected_unread">Connected to %1$s, %2$d unread</string>
-    <string name="not_connected">Not connected: %1$s</string>
+    <string name="connecting">Not connected, trying again</string>
+    <string name="connected">Connected to your mailbox</string>
+    <string name="connected_unread">Connected to your mailbox, %1$d unread</string>
+    <string name="not_connected">Not connected, trying again</string>
     <string name="stop">Stop</string>
     <string name="battery_title">Stay connected in the background?</string>
     <string name="battery_text">Loquax keeps a connection to your mailbox so new messages arrive while the app is closed. Android\'s battery optimisation may cut that connection when the phone lies still. You can leave Loquax out of it; you can change this later in the system settings.</string>
@@ -85,7 +85,7 @@
     <string name="unlink">Unlink from contact</string>
     <string name="rename">Rename</string>
     <string name="rename_hint">Your name for them; empty clears it</string>
-    <string name="book_banner">Not in your contacts. Add?</string>
+    <string name="book_banner">Save to your phone\'s contacts?</string>
     <string name="book_add">Add</string>
     <string name="not_now">Not now</string>
     <string name="another_contact">Another contact…</string>
@@ -184,7 +184,6 @@
     <string name="address_text">Show this to people who should write to you.</string>
     <string name="write_message">Write a message</string>
     <string name="name_for_others">Your name for others</string>
-    <string name="optional">optional</string>
     <string name="backup_address">Save a backup of your address</string>
     <string name="done">Done</string>
     <string name="restore_title">Your address from a backup</string>
@@ -221,6 +220,7 @@
     <string name="scan_wrong_kind">That code is for something else. Scan the code this screen asks for.</string>
     <!-- The main views and the settings (1199). -->
     <string name="help">Help</string>
+    <string name="help_url">https://leviculum.network/help</string>
     <string name="settings_profile">Profile</string>
     <string name="settings_profile_summary">Name, address, QR code</string>
     <string name="settings_mailbox_summary">Where it lives</string>

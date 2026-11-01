@@ -95,9 +95,10 @@ public class WelcomeActivity extends Activity {
             page = savedInstanceState.getInt(PAGE, CHOICE);
             here = savedInstanceState.getBoolean(WHERE_HERE, true);
         } else if (ADDRESS_PAGE.equals(getIntent().getStringExtra(SHOW))) {
-            // The address page of a session that runs: the device walk's
-            // way to the first start's QR (1263), in the debug APK, where
-            // this screen is exported.
+            // The address page of a session that runs: after the first
+            // join of a mailbox elsewhere (walk finding 13), and the device
+            // walk's way to the first start's QR (1263), in the debug APK,
+            // where this screen is exported.
             page = ADDRESS;
         }
         // Recreated while starting or after: the session runs or ran in
@@ -482,9 +483,26 @@ public class WelcomeActivity extends Activity {
         body.addView(again, wrap());
     }
 
-    /** The address to give people, the name for others, the backup. */
+    /** The name for others, the address to give people, the backup. */
     private void address(LinearLayout body) {
-        body.addView(text(getString(R.string.address_title), 22, R.color.text, true), matchWrap());
+        final boolean phone = Core.bool(me, "here");
+        if (phone) {
+            // The page's one field, first (walk finding 9): friends see this
+            // name, not the address's digits. Prefilled from the phone
+            // owner's card where Android lets us read it; empty is allowed.
+            body.addView(text(getString(R.string.name_for_others), 15, R.color.text, false),
+                    matchWrap());
+            name = new EditText(this);
+            name.setId(R.id.welcome_name);
+            name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+            name.setSingleLine(true);
+            name.setHint(R.string.profile_name_hint);
+            String kept = Core.str(me, "name");
+            name.setText(kept.isEmpty() ? Book.ownerName(this) : kept);
+            body.addView(name, matchWrap());
+        }
+        body.addView(gap(text(getString(R.string.address_title), 22, R.color.text, true), 16, 0),
+                matchWrap());
         // The contact code's QR, the profile's (1263): a friend's scanner
         // takes it.
         ImageView qr = QrCode.view(this, me, dp(240), Core.str(me, "fingerprint"));
@@ -524,15 +542,7 @@ public class WelcomeActivity extends Activity {
         });
         row.addView(write, wrap());
         body.addView(row, matchWrap());
-        final boolean phone = Core.bool(me, "here");
         if (phone) {
-            body.addView(gap(text(getString(R.string.name_for_others), 15, R.color.text, false),
-                    20, 0), matchWrap());
-            name = new EditText(this);
-            name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-            name.setHint(R.string.optional);
-            name.setText(Core.str(me, "name"));
-            body.addView(name, matchWrap());
             Button backup = button(getString(R.string.backup_address));
             backup.setOnClickListener(new View.OnClickListener() {
                 @Override
