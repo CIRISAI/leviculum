@@ -222,7 +222,9 @@ the ref the night pushed a moment earlier. Then it runs the scripts the
 forge pipeline runs, in the same order: `deb-stamp.sh`, `build-deb.sh`
 for amd64 and arm64, `lnflash-bundle.sh` with the firmware built,
 `build-docs-tarball.sh`, `collect-nightly-debs.sh` into `dist/`, then
-`publish-site.sh`. It does **not** run `publish-nightly.sh` by default:
+`build-nightly-apk.sh`, which adds the Android APKs to `dist/` (1267; the
+forge has no step for it, its builders carry no Android SDK, so the APKs
+are on the site only), then `publish-site.sh`. It does **not** run `publish-nightly.sh` by default:
 the forge cron owns the forge release. `LEVICULUM_PUBLISH_FORGE=1` is
 the manual fallback for a morning the forge could not publish; it adds
 `publish-nightly.sh`, each of the two publishes then running whatever

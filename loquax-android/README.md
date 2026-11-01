@@ -193,6 +193,11 @@ emulator, under its own name so it never stands in for a phone's APK. The
 scripted device walk installs it (`scripts/device-walk.py`,
 [the walk's page](../docs/src/concepts/loquax-device-walk.md)).
 
+The nightly publishes both on the download page, as
+`loquax-nightly-android.apk` and `loquax-nightly-android-x86_64.apk`
+(`scripts/build-nightly-apk.sh`, 1267), signed with a key kept outside the
+tree so that each nightly installs over the last.
+
 `make debug` makes `android/debug.keystore` on first use. No keystore goes
 into git (`.gitignore`); the release key is made by hand:
 

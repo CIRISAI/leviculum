@@ -353,7 +353,7 @@ nrf-shellcheck:
         scripts/publish-nightly.sh scripts/test-publish-nightly.sh \
         scripts/publish-site.sh scripts/test-site-publish.sh scripts/nightly-publish.sh \
         packaging/site/lev-receive-nightly packaging/site/lev-unpack-docs scripts/test-site-unpack-docs.sh scripts/build-docs-tarball.sh \
-        scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
+        scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh scripts/build-nightly-apk.sh \
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh scripts/lnflash-bundle.sh \
         scripts/build-lnflash-deb.sh \
         scripts/t1000e-dfu-package.sh \
