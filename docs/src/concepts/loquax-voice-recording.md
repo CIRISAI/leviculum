@@ -1,8 +1,10 @@
 # Loquax: recording a voice message looks like recording
 
-Status: pass one built (1276, 2026-11-01): this page and the core's
-state machine with its tests. Pass two builds Android, the window and
-the terminal from it.
+Status: built (1276, 2026-11-01). Pass one wrote this page and the
+core's state machine with its tests; pass two built Android, the window
+and the terminal from it (section 7). Not yet run on a phone: the device
+walk's four steps and the floor's numbers (section 4) are the
+reviewer's.
 
 Lew, on the 11:08 build of 2026-11-01: pressing the microphone gave no
 visual feedback, so you could not tell whether it recorded at all. He
@@ -87,13 +89,23 @@ under the waveform then says "That is as long as a voice message can be".
 
 | | Android | Window, mouse | Terminal |
 |---|---|---|---|
-| Start | Press and hold the microphone | Press and hold the microphone | `v` in compose (starts locked: a terminal has no hold) |
-| Send | Release; or Send once locked | Release; or Send once locked | `v` again, or `Enter` |
-| Cancel | Slide left past 96 dp, then release; or the bin | Drag left past the hint, then release; or the bin | `Esc` |
-| Lock | Swipe up 72 dp, or tap the chip | Click the lock button while holding | (already locked) |
+| Start | Press and hold the microphone | Press and hold the microphone | `Alt-v` in compose (starts locked: a terminal has no hold) |
+| Send | Release; or Send once locked | Release; or Send once locked | `v` or `Alt-v` again, or the send chord (`Enter`) |
+| Cancel | Slide left past 96 dp, then release; or the bin | Drag left past the hint, then release; or the bin | `Esc` or `Ctrl-g` |
+| Lock | Swipe up 72 dp, or tap the chip | Drag up to the lock chip and release over it | (already locked) |
 | Pause, resume | The pause button; resume | The same buttons | `p` |
 | Listen | Play in the paused bar | Play | `Space` while paused |
-| Wheel | (none) | Does nothing while recording | (none) |
+| Wheel | (none) | No part in the recording: the chat scrolls as ever | (none) |
+
+Why `Alt-v` and not `v`: in the compose line `v` is a letter, and a
+message that begins with one ("vielleicht") must not start a recording.
+An empty-field rule would still fire on that first letter, and `Ctrl-v`
+is paste in many terminals. Once the bar is up the field takes no
+typing, so the plain keys `v`, `p` and `Space` are free there.
+
+Why the window locks on release over the chip: one mouse button cannot
+hold the microphone and click the chip at once. The phone's second
+finger on the chip works, and so does TalkBack's click on it.
 
 Every gesture becomes a `recording::Input`, and every button a
 `recording::Verb` (`Intent::Recording`). What the model answers is a
@@ -272,40 +284,67 @@ Tests:
   - the silent microphone's line and its way to the permission;
   - a tap's toast.
 
-## 7. What pass two builds per target
+## 7. What pass two built per target
 
-**Android:**
+**Android** (`loquax-android`):
 
-- The bar's three states from the scene: dot, timer, waveform, hint,
-  chip, buttons, notice.
-- The recorder of 1222 (`Voice.Recorder`) feeds an `Input::Level` every
-  50 ms, and pauses and resumes on the effects.
-- Haptics on `Effect::Haptic`.
-- The bubble draws `levels` as a waveform.
-- The slide distance and the lock distance come from the core
-  (`CANCEL_DP`, `LOCK_DP`), and the cap from `LONGEST_MS`. The Java
-  `Voice.LONGEST_MS` (still five minutes) goes.
-- After decoding a received message, `VoiceTrack` is handed in.
+- The facade: `Request::Record{peer, input, now, dx, dy, rms}` carries
+  an `Input` (press, slide in dp, release, cancel, level, tick, played),
+  `Request::Recording{peer, verb}` a button by its resource word
+  (`rec_lock` to `rec_allow`), and `Query::Recording{peer}` answers the
+  bar as the scene has it (phase, dot, timer, wave, hint, held, lock,
+  buttons, notice), the distances `cancel_dp`, `lock_dp`, the window and
+  the cap from the core, and the effects since the last ask, once each.
+  `Messages.recording` and `Bar.recording` carry the phase while the bar
+  is up. After `Query::Voice` has decoded a received message, its
+  `LevelTrack::from_pcm` goes in as `UiEvent::VoiceTrack`.
+- Java: `RecordFrame` keeps the finger that landed on the microphone for
+  the whole gesture; `RecordingBar` draws the dot, the timer, the
+  waveform (`Voice.Wave`, newest at the right, loud is tall and
+  brighter), the hint that follows the finger, the held microphone, the
+  rising lock chip, the buttons and the notice, and runs the effects:
+  the recorder, the preview's player, the haptics and the permission.
+  `Voice.Recorder` feeds a level every 50 ms (`Levels.java`, the core's
+  `rms` window for window, checked on the host by
+  `fling::the_recorders_windows_are_the_librarys`). `Voice.LONGEST_MS`
+  is gone: the recorder stops on the core's `Stop`.
+- The bubble draws `voice_levels` as bars, as 1222 did; they are now the
+  recording's track.
+- The colours `rec_red` and `rec_amber` are tokens of
+  `loquax::ui::chat::Colours`, in `colors.xml` for both themes.
 
-**Window:**
+**Window and terminal** (`loquax`):
 
-- The same bar with the mouse: press to hold, a lock button, drag left
-  to cancel, the wheel does nothing.
-
-**Terminal:**
-
-- `v` starts locked, `v` again sends, `Esc` discards, `p` pauses.
-- The waveform as block characters.
-- The silence line and the cap line as text.
+- The desktop's microphone (`loquax/src/mic.rs`) is the system's
+  recorder as a child process writing raw mono 16 kHz PCM to its output:
+  `LOQUAX_RECORDER`, else the first on `PATH` of `pw-record`, `parecord`
+  and `arecord`. The shell cuts it in 50 ms windows into `Input::Level`,
+  keeps the samples while it records, drops them while paused, and on
+  `Finish` codes the PCM and hands it over as `UiEvent::SendVoice`.
+  `Play` writes `voice/recording-<peer>.wav` for the system's player.
+  With no recorder, starting says what to install and discards.
+- The window: a press on the microphone is `Press`, the pointer's moves
+  while held are `Slide` (logical pixels as dp), the release is
+  `Release`, released over the chip `Verb::Lock`. The bar draws the
+  same parts as the phone's, and the bubble its bars.
+- The terminal: `Alt-v` starts locked; the compose line becomes
+  `● REC 00:07  ▁▂▃▅▇…  p pause · Esc cancel · Enter send`, red, the timer
+  amber in the last 30 s, the waveform in the eight block characters
+  (`_.-:=+*#` with `--ascii`), the notice in a second line. The words
+  take a click. A voice bubble draws its 32 bars under its line.
 
 **Proof:**
 
-- Device walk steps:
-  - `voice_hold_release`
-  - `voice_slide_cancel`
-  - `voice_lock_send`
-  - `voice_silence_hint` (a fake level feed at the floor)
-- A window golden of the recording bar.
-- A TUI snapshot.
-- The floor measured on the Pixel and the Fairphone, written into
-  section 4.
+- Device walk steps (`loquax-device-walk.md`): `voice_hold_release`,
+  `voice_slide_cancel`, `voice_lock_send`, `voice_silence_hint` (the
+  fixture is eight seconds of zeros). Not yet run on a device.
+- The facade test
+  `a_recording_is_held_slid_away_locked_paused_and_sent_from_its_bar`.
+- `loquax::mic` tests: three seconds of a fixture source send one voice
+  message whose bubble is the track's bars; pause and resume keep one
+  continuous recording; a discard sends nothing; a silent source shows
+  the line at 2 s and not at 1.95 s.
+- Window goldens `gui-recording-held.png`, `gui-recording-locked.png`,
+  `gui-recording-paused.png`; the TUI snapshot
+  `loquax/tests/fixtures/tui_recording.frames`.
+- Open: the floor on the Pixel and the Fairphone (section 4).

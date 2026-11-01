@@ -11,7 +11,7 @@ does it, and compatible with the other messengers.
 | Wire | The LXMF audio field, `0x07`, holding `[mode, bytes]`, the mode one of the reference's audio modes. No field of our own. |
 | What goes | Opus in Ogg, `AM_OPUS_OGG` (`0x10`): the one mode Columba and Sideband both play. Mono, 16 kHz, 12 kb/s on average, speech mode, 20 ms frames, ended exactly (the last page's granule says where the recording stops). |
 | What plays | Opus in Ogg from anyone, and the Codec2 modes Sideband sends on slow links (3200, 2400, 1600, 1400, 1300, 1200). 700C and the two 450 modes show as a voice message that does not play here. |
-| Length | 0.6 s to 10 min. A shorter hold is a tap and sends nothing, the chat says to hold. The cap was 5 min, Columba's limit, until 1276 derived it from what a receiver takes ([recording](loquax-voice-recording.md), section 5); the phone's recorder still stops at 5 min until pass two of 1276. |
+| Length | 0.6 s to 10 min. A shorter hold is a tap and sends nothing, the chat says to hold. The cap was 5 min, Columba's limit, until 1276 derived it from what a receiver takes ([recording](loquax-voice-recording.md), section 5). The recorders stop where the core says (`Effect::Stop`), on the phone and the desktop alike. |
 | Where the work is done | In Rust: the field, the codec (`loquax::voice`), the length rules and their words, the level bar, which message plays. Java keeps the microphone (`AudioRecord`), the player (`AudioTrack`), the button's gestures and the permission. |
 | Settings | None. Every message goes in the one mode every receiver plays. |
 
@@ -79,7 +79,7 @@ best of 3), the speech-like test signal of `loquax::voice::test_speech`:
 | encode a minute | 338 ms |
 | decode a minute | 28 ms |
 | Codec2 2400, a minute | 18 000 bytes, decoded in 55 ms |
-| five minutes, the longest | about 360 KB, under the 990 KB a message may carry |
+| ten minutes, the longest (1276) | about 720 KB, under the 990 KB a message may carry |
 
 No phone was measured. The encoder runs at complexity 9, opus-pure's
 default; a phone that is slow at it is the first thing to lower.
@@ -118,7 +118,13 @@ so a hostile stream of one byte packets does not ask for hours of PCM.
 In the terminal a voice message is a line `♪ voice message · 0:07`
 (`[v] voice message - 0:07` in ASCII); `Enter` writes it decoded as
 `$LNMSG_HOME/voice/<peer>-<key>.wav` and hands it to the system's player.
-The window draws the same line, and a press does the same.
+The window draws the same line, and a press does the same. Since 1276
+both draw the bubble's waveform under it (block characters in the
+terminal, bars in the window) and both record: the desktop's microphone
+is the system's recorder (`pw-record`, `parecord` or `arecord`, or
+`LOQUAX_RECORDER`) read as raw 16 kHz PCM (`loquax/src/mic.rs`), and the
+terminal starts a recording with `Alt-v`
+([recording](loquax-voice-recording.md)).
 
 ## 4. Android
 
@@ -175,8 +181,8 @@ The tools are `opus-tools` and `codec2` from apt
 1. No phone was measured: the encode time on a phone and the battery a
    minute costs are the reviewer's, on Waydroid and the Pixel.
 2. The walk step was not run.
-3. A received message is decoded whole before it plays: five minutes are
-   14 MB of PCM for the player. A streamed decode is the next step if a
+3. A received message is decoded whole before it plays: ten minutes are
+   29 MB of PCM for the player at 24 kHz. A streamed decode is the next step if a
    phone minds.
 4. No seek. Signal moves the playback with a drag on the bar.
 5. Codec2 700C and the 450 modes do not play: the Rust codec has none.

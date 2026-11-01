@@ -19,7 +19,7 @@ All numbers below were measured on branch `homenode` at `af8fa5c1`.
 `lnomad/src` has 24 files, **16,723 lines in total, 9,003 production
 lines**; the integration tests under `lnomad/tests` add 1,155. The
 "13 k" of the order was below the measurement: `tui.rs` alone holds
-5,600 lines of tests (its test module starts at `tui.rs:1768` of 7,309).
+5,600 lines of tests (its test module starts at `tui.rs:1777` of 7,309).
 
 | Role | Files (production lines) | Production | Platform free |
 |---|---|---:|---|
@@ -193,7 +193,7 @@ stores runs instead of cells; the M9 slice measures and picks (slice 4).
 
 | Control | Where it is | lnomad |
 |---|---|---|
-| List row | `ListItem` (`leviculum-ui/src/scene.rs:273`, since 1240); Loquax's `Row` (`loquax/src/ui/scene.rs:371`) is a `ListItem` with a conversation's `ListRow` beside it; iced `list_row` (`loquax/src/gui/chat.rs:1251`) | **parametrised**: the generic part moved to `leviculum-ui` as `ListItem` in slice 0 (id, `selected`, `activate`, `menu`, `A11y`); Loquax's `Row` keeps its `ListRow` beside it. Title, subtitle and trailing words join the item in slice 1, with the first list whose words are the item's own (Loquax's are its `ListRow`'s). Places, history and name results are list items |
+| List row | `ListItem` (`leviculum-ui/src/scene.rs:273`, since 1240); Loquax's `Row` (`loquax/src/ui/scene.rs:371`) is a `ListItem` with a conversation's `ListRow` beside it; iced `list_row` (`loquax/src/gui/chat.rs:1655`) | **parametrised**: the generic part moved to `leviculum-ui` as `ListItem` in slice 0 (id, `selected`, `activate`, `menu`, `A11y`); Loquax's `Row` keeps its `ListRow` beside it. Title, subtitle and trailing words join the item in slice 1, with the first list whose words are the item's own (Loquax's are its `ListRow`'s). Places, history and name results are list items |
 | Top bar | `TopBar`, `Lead` (`leviculum-ui/src/scene.rs:187`) | **reused**, moved to `leviculum-ui` in slice 0; `Lead::Back` for history; the address is a field node below or inside it per renderer |
 | Tab bar | `Tabs` (`leviculum-ui/src/scene.rs:244`), `TabId` (`loquax/src/ui/scene.rs:77`), Chats and Map | **parametrised** where the browser is hosted: `TabId::Browse` beside Chats and Map ("Calls later" in [Loquax on Android: navigation and views](loquax-android-navigation.md) already plans a third). The standalone lnomad has no tab bar |
 | Sheet | `Sheet` (`leviculum-ui/src/scene.rs:286`) | **reused** unchanged: places, history, a link's long press |
@@ -202,7 +202,7 @@ stores runs instead of cells; the M9 slice measures and picks (slice 4).
 | Chip | `Chip` (`leviculum-ui/src/scene.rs:296`) | **reused**: download running, cached view |
 | Accessibility | `A11y` (`leviculum-ui/src/scene.rs:119`) and `Role` (`leviculum-ui/src/scene.rs:69`) | **parametrised**: moved to `leviculum-ui` in slice 0, `Role` gains `Page`, `Link`, `Field`, `Image` in slice 1 |
 | Strings | `Text`, `Lang`, `format`, the `catalogue!` macro (`leviculum-ui/src/strings.rs:180`, `leviculum-ui/src/strings.rs:27`, `leviculum-ui/src/strings.rs:144`, `leviculum-ui/src/strings.rs:80`) | **parametrised**: the machinery moved to `leviculum-ui` in slice 0; each program declares its own `StrId` with the macro, keys prefixed `browser_` so the Android files do not collide |
-| Key bindings | the mechanism `leviculum_ui::keymap`; Loquax's rows `ROWS` (`loquax/src/keys.rs:187`); `Intent::from_action` (`loquax/src/ui/intent.rs:458`) | **adds** its own rows table (browse, address, hint, search, field, places) with the vi, Emacs and arrow spellings, replacing the per-mode `match`es; the help and footer derive from it as Loquax's do. Chords that mean the same keep the same key (`q`, `?`, `:`, `/`, [Loquax: keys, mouse and layout](loquax-keys-and-layout.md)) |
+| Key bindings | the mechanism `leviculum_ui::keymap`; Loquax's rows `ROWS` (`loquax/src/keys.rs:216`); `Intent::from_action` (`loquax/src/ui/intent.rs:458`) | **adds** its own rows table (browse, address, hint, search, field, places) with the vi, Emacs and arrow spellings, replacing the per-mode `match`es; the help and footer derive from it as Loquax's do. Chords that mean the same keep the same key (`q`, `?`, `:`, `/`, [Loquax: keys, mouse and layout](loquax-keys-and-layout.md)) |
 | Android host and renderers | Loquax's tab host (`ConversationsActivity`), node binders from slice 8 of the study | **reused** in the Loquax APK: one `PageBinder` added |
 | iced window | `loquax/src/gui.rs`, `loquax/src/gui/chat.rs` | **extracted**: the top bar, sheet, toast, list item and search field widgets move into a crate `leviculum-ui-iced`, the iced twin of `leviculum-ui-ratatui`; both programs draw through it. Not a second layer: the same extraction #475 did for ratatui |
 | Terminal widgets | `leviculum-ui-ratatui` | **reused**; the scene-node widgets (top bar, sheet, list item) are added there, so the M9's mousefood draws them too |

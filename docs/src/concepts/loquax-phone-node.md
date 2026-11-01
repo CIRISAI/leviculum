@@ -20,7 +20,7 @@ change to the interface seam keeps the way to the full node open.
 (`loquax/src/engine.rs:358`) says it "registers nothing, by
 construction", and a guard test, `a_client_engine_registers_no_delivery_destination`,
 holds that. The session attaches through `attach_leaf`
-(`loquax-android/src/session.rs:282`) with `Role::Client`. That node runs
+(`loquax-android/src/session.rs:286`) with `Role::Client`. That node runs
 with transport off and has no interface from the config: the rendezvous
 rotation dials one TCP client at a time (`Upstream::Tcp`,
 `loquax/src/engine/shell.rs:660`). The only destination it talks to is the
