@@ -255,6 +255,8 @@ pub(crate) struct SerialInterfaceConfig {
     /// TEST-ONLY range emulation: drop deframed hops=0 ingress frames
     /// (see [`super::test_drop_direct_ingress_frame`]).
     pub test_drop_direct_ingress: bool,
+    /// The board shares one UART under XON/XOFF ([`super::serial_mux`]).
+    pub serial_mux: bool,
 }
 
 /// Spawn a serial interface with automatic reconnection.
@@ -1093,7 +1095,11 @@ async fn serial_reconnect_task(
             .flow_control(tokio_serial::FlowControl::None);
 
         match tokio_serial::SerialStream::open(&builder) {
-            Ok(mut port) => {
+            Ok(port) => {
+                // Every byte this interface writes or reads goes through
+                // here, so a single-UART board's flow contract holds for
+                // the bring-up, the queries and the data alike.
+                let mut port = super::serial_mux::SerialMuxPort::new(port, config.serial_mux);
                 let is_reconnect = has_connected_before;
                 has_connected_before = true;
                 counters.set_online(true);
@@ -2605,6 +2611,7 @@ mod tests {
             reconnect_notify: None,
             radio_config: radio,
             test_drop_direct_ingress: false,
+            serial_mux: false,
         }
     }
 

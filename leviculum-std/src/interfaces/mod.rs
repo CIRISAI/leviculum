@@ -51,6 +51,8 @@ pub use rnode::{
 #[cfg(feature = "serial")]
 pub(crate) mod serial;
 #[cfg(feature = "serial")]
+pub mod serial_mux;
+#[cfg(feature = "serial")]
 pub use serial::{radio_bring_up, radio_pricing_phy, remembered_media_profile, RadioBringUp};
 pub(crate) mod tcp;
 pub(crate) mod tcp_admission;

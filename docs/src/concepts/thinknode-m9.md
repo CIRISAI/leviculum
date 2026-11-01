@@ -364,6 +364,11 @@ and `leviculum-esp/README.md` on that branch.
   and the HDLC transport, multiplexed on one line with XON/XOFF flow
   control. The multiplexing rules live in `serial-mux`, a member crate
   of ours since 943 (`leviculum-nrf/serial-mux`).
+- 2026-11-01 (1238, 1242, #483): the M9's UART obeys a received XOFF,
+  so a raw 0x13 from the host mutes it until a reset. lnsd drives it with
+  `serial_mux = yes` on its `SerialInterface` block, which escapes 0x11 and
+  0x13 in every frame and strips the board's flow bytes on read; periculum
+  escapes every frame it writes to an LNode.
 
 ### GPIO10
 

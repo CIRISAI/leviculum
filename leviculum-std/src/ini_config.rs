@@ -916,6 +916,9 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         // frames (see `InterfaceConfig::test_drop_direct_ingress`). No Python
         // equivalent; consumed by the 3-node relay hardware scenario.
         "test_drop_direct_ingress" => iface.test_drop_direct_ingress = parse_bool(key, value)?,
+        // A single-UART board (see `InterfaceConfig::serial_mux`). No Python
+        // equivalent.
+        "serial_mux" => iface.serial_mux = parse_bool(key, value)?,
         // Ingress control (Codeberg #8, Python `ingress_control`,
         // Reticulum.py:768-769). An explicit value overrides the medium-class
         // default; unset (None) resolves per medium at registration.
@@ -1988,6 +1991,27 @@ mod tests {
         assert_eq!(iface.tx_power, Some(17));
         assert_eq!(iface.preamble_symbols, Some(18));
         assert_eq!(iface.csma_enabled, Some(true));
+    }
+
+    /// `serial_mux` parses on the INI path (periculum and operators write
+    /// INI) and defaults off, so a plain `SerialInterface` keeps its bytes.
+    #[test]
+    fn test_parse_serial_mux_key() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[M9]]
+    type = SerialInterface
+    port = /dev/ttyUSB1
+    serial_mux = yes
+  [[Plain]]
+    type = SerialInterface
+    port = /dev/ttyUSB0
+"#,
+        )
+        .unwrap();
+        assert!(config.interfaces.get("M9").expect("m9").serial_mux);
+        assert!(!config.interfaces.get("Plain").expect("plain").serial_mux);
     }
 
     /// The TEST-ONLY `test_drop_direct_ingress` key parses on the INI path

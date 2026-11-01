@@ -18,6 +18,15 @@
 //!   HDLC-escape them inside frames ([`escape_flow`]), and the host removes the
 //!   board's flow bytes before anything else reads the stream ([`strip_flow`]).
 //!   The core `Deframer` undoes any `ESCAPE`d byte, so no receiver changes.
+//!   Only the board sends them raw, and its UART obeys a received XOFF in
+//!   hardware: one raw 0x13 from the host mutes it until an XON or a reset
+//!   (1238). The host senders that keep this: periculum, for every frame it
+//!   writes to an LNode (periculum 0c455f7 and 1b81660,
+//!   `periculum-wire/src/hdlc.rs`), and lnsd, for a `SerialInterface` block
+//!   with `serial_mux = yes`, which also strips the board's flow bytes on
+//!   read (`leviculum-std/src/interfaces/serial_mux.rs`, 1242, 8ed89b9b). A
+//!   plain `SerialInterface` keeps its bytes: Python's reader does not undo
+//!   an escaped flow byte.
 //! * The host separates the two with [`Splitter`]: out-of-frame bytes are
 //!   [`Event::Text`], `FLAG..FLAG` runs are [`Event::Frame`], forwarded
 //!   verbatim (still escaped, flags included) to whatever speaks HDLC.
