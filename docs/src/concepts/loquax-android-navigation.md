@@ -225,7 +225,7 @@ Settings
   Privacy         read receipts (1233, first), blocked contacts, positions shared
   Maps            regions with sizes, delete, automatic download on/off
   Backup          back up the mailbox, restore
-  Advanced        propagation node, the map's fling, stop the service, logs
+  Advanced        Relay (the propagation node), the map's fling, stop the service, logs
 ```
 
 "Load area" becomes the Maps entry: management, not an action on the
@@ -256,9 +256,13 @@ Your profile
   Scan a contact's code   the scanner: lxma:// adds a contact, lqxh1 joins
   Mailbox: on this phone | on <host>, since <date>
   Use another mailbox     the join form
-  Advanced ▾       identity hash, home node, propagation node (or
-                   "Chosen by your mailbox"), backup, app version
+  Advanced ▾       identity hash, home node, Relay: the propagation node
+                   (or "Chosen by your mailbox"), backup, app version
 ```
+
+The word on the screen is "Relay" wherever the phone names the
+propagation node (1283, walk finding 30), as the onboarding draft's
+section 1 asked; the rest of Advanced keeps its words.
 
 The contact code is the one Columba and Sideband read (in Columba's
 checkout: `encodeToQrString` of `IdentityQrCodeUtils`, and
