@@ -154,9 +154,13 @@ pub struct Palette {
     pub road_casing: Rgb565,
     /// The casing of every other line on a bridge.
     pub casing: Rgb565,
-    /// The ANSI indices: background, border, road casing, casing and the
-    /// muted ink of a tunnel, in this order.
-    pub ansi_fixed: [u8; 5],
+    /// The outline of a building footprint, a step darker than its fill
+    /// ([`Class::Building`]'s area colour), between the fill and the
+    /// ground in the dark table, the CoMaps rule (1191).
+    pub building_edge: Rgb565,
+    /// The ANSI indices: background, border, road casing, casing, the
+    /// muted ink of a tunnel and the building outline, in this order.
+    pub ansi_fixed: [u8; 6],
     /// The ANSI index of each area class.
     pub ansi_areas: [u8; AREAS],
     /// The ANSI index of each line class.
@@ -196,13 +200,16 @@ pub const LIGHT: Palette = Palette {
     ],
     road_casing: rgb(214, 160, 80),
     casing: rgb(200, 194, 186),
-    ansi_fixed: [7, 5, 3, 8, 8],
+    building_edge: rgb(194, 184, 175),
+    ansi_fixed: [7, 5, 3, 8, 8, 8],
     ansi_areas: [7, 7, 2, 10, 7, 11, 12, 8],
     ansi_lines: [4, 8, 15, 11, 3, 0],
 };
 
 /// The dark table (1099), the study's `DARK`: the same classes a step
-/// apart on a near-black ground, casings in the ground's own tone.
+/// apart on a near-black ground, casings in the ground's own tone. The
+/// building a step lighter than the study's (1192): at its first tone it
+/// was a step off the ground alone and footprints barely showed.
 pub const DARK: Palette = Palette {
     background: rgb(30, 32, 36),
     border: rgb(128, 100, 136),
@@ -214,7 +221,7 @@ pub const DARK: Palette = Palette {
         rgb(48, 48, 54),
         rgb(58, 54, 44),
         rgb(32, 52, 74),
-        rgb(56, 56, 62),
+        rgb(62, 62, 70),
     ],
     lines: [
         rgb(52, 84, 120),
@@ -226,7 +233,8 @@ pub const DARK: Palette = Palette {
     ],
     road_casing: rgb(24, 26, 30),
     casing: rgb(24, 26, 30),
-    ansi_fixed: [0, 5, 0, 0, 8],
+    building_edge: rgb(46, 46, 52),
+    ansi_fixed: [0, 5, 0, 0, 8, 8],
     ansi_areas: [0, 0, 2, 2, 8, 3, 4, 8],
     ansi_lines: [4, 3, 7, 3, 11, 8],
 };
@@ -273,12 +281,13 @@ impl Palette {
     /// The index among the sixteen ANSI colours this table's colour `c` is
     /// drawn in; `None` for a colour the table does not hold.
     pub fn ansi16(&self, c: Rgb565) -> Option<u8> {
-        let [bg, border, road, casing, tunnel] = self.ansi_fixed;
+        let [bg, border, road, casing, tunnel, edge] = self.ansi_fixed;
         let fixed = [
             (self.background, bg),
             (self.border, border),
             (self.road_casing, road),
             (self.casing, casing),
+            (self.building_edge, edge),
         ];
         let areas = self.areas.iter().copied().zip(self.ansi_areas);
         let lines = self.lines.iter().copied().zip(self.ansi_lines);
@@ -325,9 +334,9 @@ impl MapTheme {
     }
 }
 
-/// How a device draws: the colour table, and whether roads get casings
+/// How a device draws: the colour table, whether roads get casings
 /// and round joins (`docs/drafts/map-renderer-roadmap-2026-10.md`,
-/// section 2).
+/// section 2), and whether building footprints are drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Style {
     pub theme: MapTheme,
@@ -335,6 +344,11 @@ pub struct Style {
     /// round joins and caps, and dashed paths: the PC finish. Off on the M9, whose
     /// stroke cost is the open question of the draft's section 5.
     pub cased: bool,
+    /// Building footprints from a region's building sections, filled and
+    /// outlined at view zoom 16 and deeper (1191, 1192): on for the phone
+    /// and the window ([`Style::SCREEN`]), off on the M9 and in the
+    /// terminal, whose cells would only paint city blocks grey.
+    pub buildings: bool,
 }
 
 impl Style {
@@ -342,11 +356,19 @@ impl Style {
     pub const M9: Self = Self {
         theme: MapTheme::Light,
         cased: false,
+        buildings: false,
     };
-    /// The PC's finish in the light table: casings and round joins.
+    /// The PC's finish in the light table: casings and round joins, no
+    /// buildings; what the terminal's sixel and kitty pictures draw.
     pub const PC: Self = Self {
         theme: MapTheme::Light,
         cased: true,
+        buildings: false,
+    };
+    /// The finish of the phone and the window: the PC's with buildings.
+    pub const SCREEN: Self = Self {
+        buildings: true,
+        ..Self::PC
     };
 
     /// The same finish in `theme`.
@@ -444,8 +466,8 @@ mod tests {
     }
 
     /// Each table names an ANSI index for every colour it draws, and no
-    /// two of a table's area or line colours are one Rgb565 value, so a
-    /// colour in a frame says which class it is.
+    /// two of a table's area or line colours or the building outline are
+    /// one Rgb565 value, so a colour in a frame says which class it is.
     #[test]
     fn every_colour_has_its_sixteen_colour_index() {
         for p in [&LIGHT, &DARK] {
@@ -456,9 +478,11 @@ mod tests {
                     assert!(p.ansi16(p.tunnel(c)).is_some(), "{c:?}");
                 }
             }
-            let mut all: [Rgb565; AREAS - 1 + LINES] = [p.background; AREAS - 1 + LINES];
+            assert!(p.ansi16(p.building_edge).is_some());
+            let mut all: [Rgb565; AREAS + LINES] = [p.background; AREAS + LINES];
             all[..AREAS - 1].copy_from_slice(&p.areas[1..]);
-            all[AREAS - 1..].copy_from_slice(&p.lines);
+            all[AREAS - 1..AREAS - 1 + LINES].copy_from_slice(&p.lines);
+            all[AREAS - 1 + LINES] = p.building_edge;
             for (i, a) in all.iter().enumerate() {
                 assert!(!all[i + 1..].contains(a), "{a:?}");
             }
