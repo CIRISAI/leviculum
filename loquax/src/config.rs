@@ -59,6 +59,19 @@
 //! `home_wake`, `on` (the default) or `off`, whether clients that keep a
 //! link are woken when mail arrives.
 //!
+//! Three keys say how a phone and its mailbox reach each other
+//! (`docs/src/concepts/loquax-reachability.md`, 1196), all for power users:
+//! the defaults decide. `rendezvous`, the ordered list of public nodes both
+//! ends dial, one at a time with failover, `host:port` each, separated by
+//! commas and optionally in brackets (`rendezvous = ["a.example:4343",
+//! "b.example:4343"]`; unset is `leviculum.network:4343` with `:4242`
+//! behind it, `crate::home::rendezvous::DEFAULT`); the port is the phones'
+//! access point port, and a mailbox dials the ordinary one beside it.
+//! `rendezvous_dial`, `on` (the default) or `off`: off is "mesh only", no
+//! rendezvous dialled at all. And `home_address`, a fixed `host:port` the
+//! phone dials instead of any rendezvous (a mailbox with a public address
+//! or a router pinhole, "Advanced").
+//!
 //! A drawing's name is not checked here: the set is the frontend's, and a
 //! name an older loquax does not know falls back to its own choice, said
 //! once, rather than stop it from starting.
@@ -150,6 +163,15 @@ pub struct Config {
     /// The `tcp_*` keys, when the file sets them: the TCP keepalive of
     /// the device's connection to its mailbox (1176).
     pub tcp: TcpLiveness,
+    /// `rendezvous`, when the file sets it: the ordered list of public
+    /// nodes, `host:port` each (1196).
+    pub rendezvous: Option<Vec<String>>,
+    /// `rendezvous_dial`, when the file sets it; unset is on, off is
+    /// "mesh only".
+    pub rendezvous_dial: Option<bool>,
+    /// `home_address`, when the file sets it: the fixed `host:port` a phone
+    /// dials instead of a rendezvous.
+    pub home_address: Option<String>,
 }
 
 /// A TCP connection's keepalive and user timeout, as the file sets them
@@ -229,6 +251,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             ("home_wake", &mut config.home_wake),
             ("map_fling", &mut config.map_fling),
             ("read_receipts", &mut config.read_receipts),
+            ("rendezvous_dial", &mut config.rendezvous_dial),
         ] {
             if key.trim() == name {
                 *slot = Some(match value.trim().trim_matches('"') {
@@ -381,6 +404,40 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 None => config.map_drawing.push((context.to_string(), drawing)),
             }
         }
+        if key.trim() == "rendezvous" {
+            let inner = value.trim();
+            let inner = inner
+                .strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .unwrap_or(inner);
+            let mut list = Vec::new();
+            for entry in inner.split(',') {
+                let entry = entry.trim().trim_matches('"').trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                if !is_host_port(entry) {
+                    return Err(ConfigError::BadValue {
+                        line: index + 1,
+                        key: "rendezvous",
+                        detail: alloc::format!("{entry:?} is not host:port"),
+                    });
+                }
+                list.push(entry.to_string());
+            }
+            config.rendezvous = Some(list);
+        }
+        if key.trim() == "home_address" {
+            let entry = value.trim().trim_matches('"').trim();
+            if !is_host_port(entry) {
+                return Err(ConfigError::BadValue {
+                    line: index + 1,
+                    key: "home_address",
+                    detail: alloc::format!("{entry:?} is not host:port"),
+                });
+            }
+            config.home_address = Some(entry.to_string());
+        }
         if key.trim() == "propagation_node" {
             let value = value.trim().trim_matches('"');
             match address::parse(value) {
@@ -396,6 +453,14 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         }
     }
     Ok(config)
+}
+
+/// Whether `text` reads as `host:port`, a port from 1 to 65535 behind the
+/// last colon and a host before it; the dialler says what else is wrong.
+fn is_host_port(text: &str) -> bool {
+    text.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty() && port.parse::<u16>().is_ok_and(|port| port > 0)
+    })
 }
 
 /// Why `home/config` could not be used, with the file named.
@@ -730,6 +795,33 @@ mod tests {
 
     /// The four TCP keys (1176) parse under the names an lnsd section
     /// uses, and a word where a number belongs is an error naming the key.
+    #[test]
+    fn the_rendezvous_keys_parse_and_a_bad_entry_is_an_error() {
+        let config = parse_str(
+            "rendezvous = [\"a.example:4343\", b.example:4343 , [fd00::1]:4343]\n\
+             rendezvous_dial = off\nhome_address = 10.0.0.2:4242\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            config.rendezvous,
+            Some(vec![
+                "a.example:4343".to_string(),
+                "b.example:4343".to_string(),
+                "[fd00::1]:4343".to_string()
+            ])
+        );
+        assert_eq!(config.rendezvous_dial, Some(false));
+        assert_eq!(config.home_address.as_deref(), Some("10.0.0.2:4242"));
+        let none = parse_str("").expect("empty");
+        assert_eq!(
+            (none.rendezvous, none.rendezvous_dial, none.home_address),
+            (None, None, None)
+        );
+        assert!(parse_str("rendezvous = a.example\n").is_err());
+        assert!(parse_str("rendezvous = a.example:0\n").is_err());
+        assert!(parse_str("home_address = :4242\n").is_err());
+    }
+
     #[test]
     fn the_tcp_liveness_keys_parse_and_a_word_is_an_error() {
         let config = parse_str(

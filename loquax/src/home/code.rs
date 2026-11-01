@@ -16,12 +16,27 @@
 //! brackets), so one scan or one paste carries both. The base32 alphabet
 //! has no `@`, so the split is unambiguous, and a code without the address
 //! reads as before.
+//!
+//! Behind the `@` goes the mailbox's rendezvous list (1196,
+//! `docs/src/concepts/loquax-reachability.md`, rule 5): `host:port`
+//! entries separated by [`LIST_SEPARATOR`], the first to be tried first.
+//! A code with one entry is the form above, byte for byte, so every app
+//! reads it as it always did. An app from before the list takes a code
+//! with several entries as one address, whose host then holds a colon,
+//! and refuses it with "an IPv6 address goes in brackets" before anything
+//! goes on the wire: it never dials a wrong host. `loquax mailbox admit
+//! --server host:port` with a single entry writes the old form for it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 /// What separates the code from the home node's address in the combined form.
 pub const SERVER_SEPARATOR: char = '@';
+
+/// What separates the entries of the rendezvous list behind the code. Not
+/// in the base32 alphabet, not in a host name, an IPv4 or a bracketed IPv6
+/// address.
+pub const LIST_SEPARATOR: char = ',';
 
 /// What every code starts with, so a code is told from an address or a hash
 /// at a glance, and a later format can take `lqxh2`.
@@ -83,6 +98,41 @@ impl HomeCode {
         text
     }
 
+    /// The code with the rendezvous list behind it, `host:port` each, the
+    /// first tried first: what a phone takes in one go. An empty list is
+    /// the code alone, a list of one [`HomeCode::encode_with_server`].
+    pub fn encode_with_rendezvous(&self, list: &[String]) -> String {
+        let entries: Vec<&str> = list
+            .iter()
+            .map(|entry| entry.trim())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        match entries.is_empty() {
+            true => self.encode(),
+            false => {
+                let mut separator = String::new();
+                separator.push(LIST_SEPARATOR);
+                self.encode_with_server(&entries.join(separator.as_str()))
+            }
+        }
+    }
+
+    /// Read a code and the rendezvous list behind it, empty when there is
+    /// none. Whitespace and empty entries are ignored; the entries are not
+    /// checked, as in [`HomeCode::parse_with_server`].
+    pub fn parse_with_rendezvous(text: &str) -> Result<(Self, Vec<String>), CodeError> {
+        let (code, tail) = Self::parse_tail(text)?;
+        let list = tail
+            .map(|tail| {
+                tail.split(LIST_SEPARATOR)
+                    .filter(|entry| !entry.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((code, list))
+    }
+
     /// Read a code, in either form; an address behind it is dropped. A
     /// device that joins through its shared instance has no use for it.
     pub fn parse(text: &str) -> Result<Self, CodeError> {
@@ -93,7 +143,17 @@ impl HomeCode {
     /// is ignored, and the code's case is, so a code that a terminal
     /// wrapped or a person typed in capitals still reads. The address is
     /// not checked here: whoever dials it says what is wrong with it.
+    ///
+    /// A code with a rendezvous list yields its first entry: the address
+    /// to try first.
     pub fn parse_with_server(text: &str) -> Result<(Self, Option<String>), CodeError> {
+        let (code, list) = Self::parse_with_rendezvous(text)?;
+        Ok((code, list.into_iter().next()))
+    }
+
+    /// The code and the text behind its `@`, whitespace gone, `None` for
+    /// none or an empty one.
+    fn parse_tail(text: &str) -> Result<(Self, Option<String>), CodeError> {
         let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
         let (code, server) = match compact.split_once(SERVER_SEPARATOR) {
             Some((code, server)) => (code, Some(server).filter(|s| !s.is_empty())),
@@ -225,6 +285,48 @@ mod tests {
         assert_eq!(
             HomeCode::parse_with_server(&text).map(|(_, server)| server),
             Ok(Some("Home.Example:1".into()))
+        );
+    }
+
+    #[test]
+    fn the_rendezvous_list_rides_behind_the_code_and_one_entry_is_the_old_form() {
+        let list = alloc::vec![
+            String::from("home.example:4243"),
+            String::from("leviculum.network:4343"),
+            String::from("[fd00::1]:4343"),
+        ];
+        let text = code().encode_with_rendezvous(&list);
+        assert_eq!(
+            text,
+            alloc::format!(
+                "{}@home.example:4243,leviculum.network:4343,[fd00::1]:4343",
+                code().encode()
+            )
+        );
+        assert_eq!(HomeCode::parse_with_rendezvous(&text), Ok((code(), list)));
+        // The first entry is the address to try first.
+        assert_eq!(
+            HomeCode::parse_with_server(&text).map(|(_, first)| first),
+            Ok(Some("home.example:4243".into()))
+        );
+        // One entry is the old form, byte for byte, read by either call.
+        let one = code().encode_with_rendezvous(&[String::from("h.example:1")]);
+        assert_eq!(one, code().encode_with_server("h.example:1"));
+        assert_eq!(
+            HomeCode::parse_with_rendezvous(&one),
+            Ok((code(), alloc::vec![String::from("h.example:1")]))
+        );
+        // None is the code alone; a wrapped list still reads.
+        assert_eq!(code().encode_with_rendezvous(&[]), code().encode());
+        assert_eq!(
+            HomeCode::parse_with_rendezvous(&code().encode()),
+            Ok((code(), Vec::new()))
+        );
+        let (a, b) = text.split_at(150);
+        let wrapped = alloc::format!("{a}\n {b}");
+        assert_eq!(
+            HomeCode::parse_with_rendezvous(&wrapped).map(|(_, l)| l.len()),
+            Ok(3)
         );
     }
 
