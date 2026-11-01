@@ -226,6 +226,14 @@ impl Ring {
             liveness::State::Stale => None,
         }
     }
+
+    /// The ring's colour on a pixel screen, of `colours` ([`chat::ring`]).
+    pub fn colour(self, colours: &chat::Colours) -> u32 {
+        match self {
+            Ring::Accent => colours.accent,
+            Ring::Secondary => colours.text_secondary,
+        }
+    }
 }
 
 /// A round avatar: letters on a ground, `0xrrggbb` each.
@@ -444,24 +452,87 @@ impl<B> UiModel<B> {
             Some(chat) => ScreenId::Chat { peer: chat.peer },
             None => ScreenId::Chats,
         };
-        let stacked = class == LayoutClass::Compact && chat.is_some();
-        let list = (!stacked).then(|| list(self));
-        let tabs = (!stacked).then(|| tabs(self));
-        let top = match (stacked, &chat) {
-            (true, Some(chat)) => chat.bar.clone(),
-            _ => me_bar(self),
-        };
         Scene {
-            class,
+            class: LayoutClass::Wide,
             screen,
-            top,
-            tabs,
-            list,
+            top: me_bar(self),
+            tabs: Some(tabs(self)),
+            list: Some(list(self)),
             chat,
             sheet: None,
             card: None,
             chips: Vec::new(),
         }
+        .in_class(class)
+    }
+}
+
+impl Scene {
+    /// The scene in `class`, from the Wide one (1218): Compact with a
+    /// chat open is the chat alone, its bar on top, no tabs and no list;
+    /// without one it is the Wide scene. A window that is resized moves
+    /// between the classes with this and no model; a Compact scene with a
+    /// chat open has lost its list and stays as it is.
+    pub fn in_class(mut self, class: LayoutClass) -> Scene {
+        if class == LayoutClass::Compact {
+            if let Some(chat) = &self.chat {
+                self.top = chat.bar.clone();
+                self.tabs = None;
+                self.list = None;
+            }
+        }
+        self.class = class;
+        self
+    }
+
+    /// What a tap or a click on node `id` does: a row's opening, a tab's
+    /// switch, a bar's back, the compose bar's send. None for a node that
+    /// has no tap of its own (a bubble's is its menu) or is not in the
+    /// scene.
+    pub fn action(&self, id: NodeId) -> Option<&Action> {
+        fn back(bar: &TopBar) -> Option<&Action> {
+            match &bar.lead {
+                Lead::Back { back, .. } => Some(back),
+                Lead::Me { .. } => None,
+            }
+        }
+        match id {
+            NodeId::Row(_) => self
+                .list
+                .as_ref()
+                .and_then(|list| list.rows.iter().find(|row| row.id == id))
+                .map(|row| &row.activate),
+            NodeId::Tab(tab) => self
+                .tabs
+                .as_ref()
+                .and_then(|tabs| tabs.items.iter().find(|t| t.id == tab))
+                .map(|t| &t.action),
+            NodeId::ChatBar => self.chat.as_ref().and_then(|chat| back(&chat.bar)),
+            NodeId::TopBar => back(&self.top),
+            NodeId::Compose => self.chat.as_ref().map(|chat| &chat.compose.send),
+            _ => None,
+        }
+    }
+
+    /// The bubble node `id` names in the open chat.
+    pub fn bubble(&self, id: NodeId) -> Option<&BubbleNode> {
+        self.chat
+            .as_ref()?
+            .groups
+            .iter()
+            .flat_map(|group| &group.bubbles)
+            .find(|node| node.id == id)
+    }
+}
+
+impl List {
+    /// The rows the list's search `query` finds, in the list's order:
+    /// every word of it in the name or the last line
+    /// ([`chat::row_matches`]); the empty query finds all.
+    pub fn found<'a>(&'a self, query: &'a str) -> impl Iterator<Item = &'a Row> + 'a {
+        self.rows
+            .iter()
+            .filter(move |row| chat::row_matches(&row.row, query))
     }
 }
 
@@ -1227,5 +1298,73 @@ mod tests {
             .unwrap_or_default();
         assert!(rows[0].selected && rows[0].a11y.selected);
         assert_eq!(rows[0].a11y.resource, format!("row_{}", "42".repeat(16)));
+    }
+
+    /// A window resized moves its scene between the classes without the
+    /// model (1218): the Wide scene put in Compact is the Compact scene
+    /// the model builds, with a chat open and without; and what a click on
+    /// a node does is the node's action: a row opens its chat, a tab
+    /// switches, the stacked chat's bar goes back, the compose sends; a
+    /// bubble has no tap of its own.
+    #[test]
+    fn the_wide_scene_in_compact_is_the_models_and_a_node_says_what_a_click_does() {
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(false, t)]);
+        let peer = [0x42; 16];
+        for open in [0, crate::ui::NONE_OPEN] {
+            model.selected = open;
+            assert_eq!(
+                model
+                    .scene(LayoutClass::Wide)
+                    .in_class(LayoutClass::Compact),
+                model.scene(LayoutClass::Compact)
+            );
+        }
+        model.selected = 0;
+        let wide = model.scene(LayoutClass::Wide);
+        let intent = |scene: &Scene, id| scene.action(id).map(|a| a.intent.clone());
+        assert_eq!(
+            intent(&wide, NodeId::Row(peer)),
+            Some(Intent::OpenChat { peer })
+        );
+        assert_eq!(intent(&wide, NodeId::Row([7; 16])), None);
+        assert_eq!(
+            intent(&wide, NodeId::Tab(TabId::Map)),
+            Some(Intent::Tab(TabId::Map))
+        );
+        assert_eq!(
+            intent(&wide, NodeId::TopBar),
+            None,
+            "the list's bar has no back"
+        );
+        assert!(matches!(
+            intent(&wide, NodeId::Compose),
+            Some(Intent::Send { .. })
+        ));
+        let key = wide
+            .chat
+            .as_ref()
+            .map(|c| c.groups[0].bubbles[0].bubble.key);
+        let key = key.expect("one bubble");
+        assert_eq!(intent(&wide, NodeId::Bubble(key)), None);
+        assert!(wide.bubble(NodeId::Bubble(key)).is_some());
+        let compact = wide.in_class(LayoutClass::Compact);
+        assert_eq!(intent(&compact, NodeId::TopBar), Some(Intent::CloseChat));
+        assert_eq!(intent(&compact, NodeId::Row(peer)), None, "no list");
+    }
+
+    /// The list's search is one rule for every target (1218): every word
+    /// in the name or the last line, the list's order kept; the empty
+    /// query finds all.
+    #[test]
+    fn the_lists_search_finds_every_word() {
+        let t = 1_793_350_800;
+        let model = model_with(&[(false, t)]);
+        let list = list(&model);
+        let name = list.rows[0].row.name.clone();
+        let found = |q: &str| list.found(q).count();
+        assert_eq!(found(""), 1);
+        assert_eq!(found(&format!("m0 {}", name.to_uppercase())), 1);
+        assert_eq!(found(&format!("{name} nowhere")), 0);
     }
 }

@@ -26,7 +26,11 @@ density of one: two conversations, one open with a date line, two grouped
 bubbles of theirs, our reaction's pill and our queued bubble, the compose
 bar. Compared pixel for pixel as the map's picture is; the text is set in
 the window's default font, Fira Sans as iced embeds it, and the picture
-holds no emoji, which only a host's font would draw.
+holds no emoji, which only a host's font would draw. Redrawn in 1218,
+when the window began drawing the scene (`loquax::ui::scene`): 908
+pixels in each theme, the first date line alone, which reads
+"Yesterday" where the window's own date rule said "Thursday 29
+October"; the scene's day words are the phone's.
 
 
 `scene-compact-list.json`, `scene-compact-chat.json`, `scene-wide.json`:

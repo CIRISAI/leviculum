@@ -253,11 +253,7 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
 /// stale. Every screen rings the same: the list, the chat's bar, the
 /// Friends sheet and the map's pin.
 pub fn ring(state: super::liveness::State, colours: &Colours) -> Option<u32> {
-    match state {
-        super::liveness::State::Live => Some(colours.accent),
-        super::liveness::State::Recent => Some(colours.text_secondary),
-        super::liveness::State::Stale => None,
-    }
+    super::scene::Ring::of(state).map(|ring| ring.colour(colours))
 }
 
 /// The list's mark for a report's line: `📍 live`.
