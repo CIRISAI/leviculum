@@ -16,8 +16,8 @@ unsafe_code = "forbid"
 
 # The package ships the binary built with `--features tui` (scripts/build-deb.sh),
 # so plain `loquax` opens the messenger; the CLI alone is what a script needs, the package is
-# what a person installs. No service: loquax is a client of a running shared
-# instance, like lnomad.
+# what a person installs. The messenger is a client of a running shared
+# instance, like lnomad, and the package brings that instance along (1265).
 [package.metadata.deb]
 name = "loquax"
 maintainer = "Lew Palm <lp@lew-palm.de>"
@@ -27,7 +27,9 @@ extended-description = """\
 Terminal LXMF messenger for the Reticulum network. Plain `loquax` is the
 interactive messenger with conversations and a compose line, `loquax send`
 delivers one message from a script. It attaches to a local shared RNS
-instance: leviculum's lnsd or the Python rnsd.
+instance, which the leviculum package it depends on provides: lnsd, the
+zero-config Reticulum daemon, enabled and started as lnsd.service. The
+Python rnsd serves it as well.
 
 The package also carries Loquax Mailbox, the always-on part that keeps
 your mail while your devices are off, as the system service
@@ -36,11 +38,17 @@ switched off; `sudo loquax mailbox enable` switches it on.
 """
 section = "net"
 priority = "optional"
-# musl-static, and any RNS instance satisfies the runtime need, so leviculum
-# is a Recommends. adduser because postinst creates the mailbox's service
-# user (1153), as lnpnd's does.
-depends = "adduser"
-recommends = "leviculum"
+# musl-static. leviculum is a Depends, not a Recommends as for lnomad and
+# lnpnd (1265, walk finding 5 of the ninety percent walk): the package is
+# what a person installs who has never heard of Reticulum, and without a
+# daemon the messenger has nothing to attach to. leviculum's own
+# systemd-units (enable, start) bring lnsd up on install, so this postinst
+# does not touch lnsd.service, and an administrator's disable of it stays.
+# leviculum-heapacct provides leviculum and satisfies this too. adduser
+# because postinst creates the mailbox's service user (1153), as lnpnd's
+# does. Asserted by tests/package_metadata.rs and on the built .deb in
+# scripts/verify-deb-packaging.sh.
+depends = "adduser, leviculum"
 # The package was called lnmsg until #232; these two let an install of
 # loquax take the old package's place instead of failing on it.
 replaces = "lnmsg"

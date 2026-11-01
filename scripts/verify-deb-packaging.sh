@@ -391,6 +391,13 @@ contains "$LOQUAX_POSTINST" "deb-systemd-invoke try-restart loquax-mailbox.servi
     "postinst try-restarts on upgrade, so a running mailbox survives one"
 contains "$LOQUAX_POSTINST" "chmod 0700 \"\$STATE_DIR\"" \
     "postinst keeps the mailbox's state directory at 0700"
+# The messenger alone has nothing to attach to (1265, walk finding 5), so the
+# package pulls in leviculum, whose own postinst enables and starts lnsd.
+LOQUAX_DEPENDS="$(sed -n 's/^Depends: //p' "$CTRL_DIR/control")"
+case ", ${LOQUAX_DEPENDS}," in
+*", leviculum,"* | *", leviculum ("*) pass "loquax depends on leviculum, which brings lnsd" ;;
+*) fail "loquax does not depend on leviculum (Depends: ${LOQUAX_DEPENDS})" ;;
+esac
 # The marker is the `Tui` subcommand's doc comment in loquax/src/main.rs,
 # compiled in only with the feature; it has to follow that comment.
 check_loquax_tui() {
