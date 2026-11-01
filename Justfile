@@ -2503,6 +2503,8 @@ loquax-core-no-std:
 # `history` feature the tui build carries; files only, 0.05 s. So does the
 # wire's property test (`loquax/tests/wire_props.rs`, 1173): every home
 # wire shape and imported entry round trips, 256 cases each, 0.3 s.
+# The scene's goldens (`loquax/tests/scene_golden.rs`, 1217): the list and the
+# chat built from the ugly store for both layout classes, 0.4 s.
 # The forge runs this recipe and has no reference submodule, so the home node
 # tests that start the Python peer go out there by the names
 # scripts/integ-prerequisites.txt declares (scripts/with-prerequisites.sh,
@@ -2510,7 +2512,7 @@ loquax-core-no-std:
 [doc('Lint and test loquax with its tui feature (#232)')]
 loquax-tui:
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
-    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props
+    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden
 
 # 1084, #474: loquax's `gui` feature (the iced window) is off by default and
 # in no other feature, so neither the workspace runs nor `loquax-tui` compile
@@ -2528,6 +2530,16 @@ loquax-tui:
 loquax-gui:
     cargo clippy -p loquax --features gui --all-targets -- -D warnings
     {{manifest}} loquax-gui -- cargo test -p loquax --features gui --lib --bins --target "$(rustc -vV | sed -n 's/^host: //p')"
+
+# 1217, #232: the phone's strings of the list and the chat come from the core's
+# catalogue (`loquax/src/ui/strings.rs`, English and German), which this writes
+# to `loquax-android/android/res/values{,-de}/strings_scene.xml`. The library's
+# tests refuse a generated file that differs from the catalogue and an Android
+# `strings.xml` that still holds one of its keys, so a forgotten run is red in
+# every lib run. ~10 s warm, the library's tests filtered to the catalogue.
+[doc('Write the phone strings_scene.xml from the core catalogue (#232)')]
+loquax-strings:
+    LOQUAX_WRITE_STRINGS=1 cargo test -p loquax --lib ui::strings::tests::the_phone_reads_the_catalogue
 
 # 1147, #232: the messenger is Loquax in prose (Lew, 2026-10-30); `loquax` is
 # the command, the package, the crate and every path, so in the docs it is code,

@@ -178,6 +178,10 @@ Bottom right, stacked, in the one round button style:
   the phone's navigation app; Loquax builds no routing.
 - **From a chat**, a tap on a position bubble opens the map focused on
   that friend with the card open. Back returns to the chat.
+- **From the list** (1224), a row whose friend has a position younger
+  than a day carries a small map pin under the time; a tap on it switches
+  to the Map tab centred on that friend with the card open, and Back
+  returns to the chats. The newest report's line in a chat does the same.
 - **Empty map**: one line and one button, "No friends on the map yet" and
   "Share my position".
 
@@ -209,10 +213,10 @@ Settings
   Mailbox         where it lives, connected since, join another
   Appearance      app theme; Map: like the phone / light / dark
   Notifications   on/off, sound, per chat muting
-  Privacy         blocked contacts, read receipts, contact suggestions
+  Privacy         read receipts (1233, first), blocked contacts, positions shared
   Maps            regions with sizes, delete, automatic download on/off
   Backup          back up the mailbox, restore
-  Advanced        propagation node, stop the service, logs
+  Advanced        propagation node, the map's fling, stop the service, logs
 ```
 
 "Load area" becomes the Maps entry: management, not an action on the

@@ -52,22 +52,6 @@ final class Ui {
         return DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(unixSecs * 1000));
     }
 
-    /** The chat's day separator (1129): today, yesterday, the weekday within a week, then the date. */
-    static String day(Context context, long unixSecs, long nowSecs) {
-        int days = daysBetween(unixSecs, nowSecs);
-        if (days == 0) {
-            return context.getString(R.string.today);
-        }
-        if (days == 1) {
-            return context.getString(R.string.yesterday);
-        }
-        Date at = new Date(unixSecs * 1000);
-        if (days < 7) {
-            return new SimpleDateFormat("EEEE", Locale.getDefault()).format(at);
-        }
-        return DateFormat.getDateInstance(DateFormat.MEDIUM).format(at);
-    }
-
     /** Within the last hour, how long ago in words ("59 Min."); null otherwise. */
     static String ago(Context context, long unixSecs, long nowSecs) {
         long secs = nowSecs - unixSecs;
@@ -137,19 +121,11 @@ final class Ui {
      */
     static String preview(Context context, Map<String, Object> row) {
         String kind = Core.str(row, "kind");
-        if ("position".equals(kind)) {
-            // Whether the position is alive, never how many came (1209):
-            // `📍 live` or `📍 3 h ago`.
-            long fixAt = Core.num(row, "last_fix_at");
-            String words;
-            if ("live".equals(Core.str(row, "liveness"))) {
-                words = context.getString(R.string.live);
-            } else if (fixAt > 0) {
-                words = livedAgo(context, fixAt, nowSecs());
-            } else {
-                words = context.getString(R.string.position);
-            }
-            return "\uD83D\uDCCD " + words;
+        String live = Core.str(row, "live");
+        if ("position".equals(kind) && !live.isEmpty()) {
+            // Whether the position is alive, never how many came (1209),
+            // in the library's words (1217): `📍 live` or `📍 3 h ago`.
+            return "\uD83D\uDCCD " + live;
         }
         String reaction = Core.str(row, "reaction");
         if ("reaction".equals(kind) && !reaction.isEmpty()) {
@@ -158,45 +134,20 @@ final class Ui {
         return Core.str(row, "last");
     }
 
-    /** The delivery of one of ours, in words. */
-    static String state(Context context, String state) {
+    /**
+     * The delivery of one of ours as a screen reader says it (1232):
+     * `readAt` is the reader's time for "read", unix seconds.
+     */
+    static String state(Context context, String state, long readAt) {
         switch (state) {
-            case "queued": return context.getString(R.string.state_queued);
             case "sending": return context.getString(R.string.state_sending);
-            case "sent": return context.getString(R.string.state_sent);
+            case "unconfirmed": return context.getString(R.string.state_unconfirmed);
+            case "mailbox": return context.getString(R.string.state_mailbox);
             case "delivered": return context.getString(R.string.state_delivered);
+            case "read": return context.getString(R.string.state_read, clock(readAt));
             case "failed": return context.getString(R.string.state_failed);
             default: return state;
         }
-    }
-
-    /**
-     * The newest report's row (1209), as loquax's `Liveness::row_words`
-     * says it: `live · every 10 min · 2 min ago` while `liveness` is
-     * live, `last position 3 h ago` once the reports stopped; the cadence
-     * only once one was learned (`cadenceS` above 0).
-     */
-    static String liveRow(Context context, String liveness, long cadenceS, long fixAt, long nowSecs) {
-        String ago = livedAgo(context, fixAt, nowSecs);
-        if (!"live".equals(liveness)) {
-            return context.getString(R.string.last_position, ago);
-        }
-        StringBuilder line = new StringBuilder(context.getString(R.string.live));
-        if (cadenceS > 0) {
-            String every = cadenceS < 3600
-                    ? context.getString(R.string.minutes_ago, (int) ((cadenceS + 30) / 60))
-                    : context.getString(R.string.hours_ago, (int) ((cadenceS + 1800) / 3600));
-            line.append(" · ").append(context.getString(R.string.live_every, every));
-        }
-        return line.append(" · ").append(ago).toString();
-    }
-
-    /** How long ago a fix was, in words: `now`, `2 min ago`, `3 h ago`. */
-    static String livedAgo(Context context, long fixAt, long nowSecs) {
-        if (nowSecs - fixAt < 60) {
-            return context.getString(R.string.live_now);
-        }
-        return context.getString(R.string.live_ago, age(context, fixAt, nowSecs));
     }
 
     static long nowSecs() {

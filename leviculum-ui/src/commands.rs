@@ -85,6 +85,9 @@ pub enum Command {
     /// Bring over contacts and history from another messenger found in its
     /// default place.
     Import,
+    /// Turn sending read receipts off, and on again: off, none is sent and
+    /// none is shown.
+    ReadReceipts,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -97,7 +100,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 31] = [
+pub const COMMANDS: [PaletteEntry; 32] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -129,6 +132,7 @@ pub const COMMANDS: [PaletteEntry; 31] = [
     entry("archive", Command::Archive),
     entry("archived", Command::Archived),
     entry("import", Command::Import),
+    entry("read receipts", Command::ReadReceipts),
 ];
 
 /// The entry that runs `command`.

@@ -345,7 +345,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 if let Ok(newest) = store.archive_newest_waking() {
                     wakes.appended(newest);
                 }
-                if let Some(accepted) = accepted {
+                for accepted in accepted {
                     related(&mut store, &mut relations, accepted.destination, archive_cap_bytes);
                     outgoing.add(
                         accepted.id,
@@ -751,14 +751,14 @@ fn unix_now() -> i64 {
 }
 
 /// Answer one request, as a packet when it fits and as a resource when not.
-/// The message a `/send` put in the outbox comes back, when it is new, and
-/// what a `/watch` told its client, when it took it.
+/// The messages a `/send` or a seen `/mark` put in the outbox come back,
+/// the new ones, and what a `/watch` told its client, when it took it.
 async fn answer(
     node: &ReticulumNode,
     store: &mut Store,
     serving: &super::server::Home<'_>,
     request: HomeRequest,
-) -> (Option<crate::store::Outgoing>, Option<u64>) {
+) -> (Vec<crate::store::Outgoing>, Option<u64>) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |elapsed| elapsed.as_secs_f64());

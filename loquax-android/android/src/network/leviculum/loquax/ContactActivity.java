@@ -296,7 +296,7 @@ public class ContactActivity extends Activity implements Events.Listener {
             long at = Core.num(fix, "at");
             String place = String.format(Locale.ROOT, "%.5f, %.5f",
                     Core.num(fix, "lat_e6") / 1e6, Core.num(fix, "lon_e6") / 1e6);
-            setting("📍", Ui.day(this, at, now) + " " + Ui.clock(at),
+            setting("📍", Core.str(fix, "day") + " " + Ui.clock(at),
                     place + " · " + Ui.age(this, at, now), new Runnable() {
                         @Override
                         public void run() {

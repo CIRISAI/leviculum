@@ -27,7 +27,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: map ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
-│▌◎ position · live      ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
+│▌◎ position · live   ⌖  ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
 │                        ││ ⠈⠛⣷⣿⣀        ⠐⢅⢀⠞⠁⣰⠗⠉⠙⢷⣄⡀ ⠈⠙⢦⣄               ⠙⠻⣶⣏  │
 │                        ││  ⣴⠏⠈⠙⠳⢦⣄⡀    ⢀⡼⠛⢦⠞⠋    ⠈⠛⢶⣄  ⠈<33333333…> · 3 h ◉⢷⣦│
@@ -52,7 +52,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: next pin ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
-│▌◎ position · live      ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
+│▌◎ position · live   ⌖  ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
 │                        ││ ⠈⠛⣷⣿⣀        ⠐⢅⢀⠞⠁⣰⠗⠉⠙⢷⣄⡀ ⠈⠙⢦⣄               ⠙⠻⣶⣏  │
 │                        ││  ⣴⠏⠈⠙⠳⢦⣄⡀    ⢀⡼⠛⢦⠞⠋    ⠈⠛⢶⣄  ⠈<33333333…> · 3 h ●⢷⣦│
@@ -77,7 +77,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: dragged ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 2 in view ┐
 │▌them ·61dd       14:00 ││    ⠐⢅⢀⠞⠁⣰⠗⠉⠙⢷⣄⡀ ⠈⠙⢦⣄               ⠙⠻⣶⣏            │
-│▌◎ position · live      ││    ⢀⡼⠛⢦⠞⠋    ⠈⠛⢶⣄  ⠈<33333333…> · 3 h ●⢷⣦⣄        ⣰│
+│▌◎ position · live   ⌖  ││    ⢀⡼⠛⢦⠞⠋    ⠈⠛⢶⣄  ⠈<33333333…> · 3 h ●⢷⣦⣄        ⣰│
 │                        ││⠶⣤⣀⣴⠏ ⡴⠋         ⠉⠻⢦⣄  ⠈⠳⣦⣀        ⢠⡾⠁   ⠈⠙⠿⣦⣄   ⢀⣴⡟│
 │                        ││ ⣨⠟⠷⣤⡞⠁             ⠉⠻⣦⣀⣴⠏⠙⠳⣦⣀    ⣰⠟        ⠈⠙⠿⣦⣄⣾⠏ │
 │                        ││⡾⠋ ⣠⡾⠙⠳⣦⣀             ⢠⡿⠳⣦⣀ ⠈⠙⠷⣦⡀⣴⠏            ⣸⡿⡿⣦⣄│
@@ -102,7 +102,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 5: outline ---
 ┌  Loquax afbda7b3───────┐┌● map─────────────────────────────── z5 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                     ⡠⢄⠼⠁           │
-│▌◎ position · live      ││                                     ⡇              │
+│▌◎ position · live   ⌖  ││                                     ⡇              │
 │                        ││                                     ⢣              │
 │                        ││                                     ⢸              │
 │                        ││⠑⠒⠤⢤⡀                                 ⢇             │
@@ -127,7 +127,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 6: opened ---
 ┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · live      ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -152,7 +152,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 --- frame 7: back ---
 ┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · live      ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -177,7 +177,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 --- frame 8: from the report ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
 │▌them ·61dd       14:00 ││⠻⢷⣤⣀          ⢀⣼⠟⠁  ⢹⡟               ⠈⠛⢷⣦⣀       ⠈⠛⢶│
-│▌◎ position · live      ││  ⠈⠛⠿⣦⣄⡀    ⢀⣴⡿⠃   ⣴⠏                   ⠈⠻⢷⣤⡀       │
+│▌◎ position · live   ⌖  ││  ⠈⠛⠿⣦⣄⡀    ⢀⣴⡿⠃   ⣴⠏                   ⠈⠻⢷⣤⡀       │
 │                        ││     ⠈⠙⠻⢶⣤⡀⣠⣿⠋   ⢠⡾⠁                       ⠉⠻⢷⣤⡀    │
 │                        ││         ⢩⣿⢿⣥⡀  ⣴⠏                            ⠙⠻⣶⣄⡀ │
 │                        ││       ⢀⣴⡿⠁ ⠈⠛⢷⣾⣁                                ⠙⠻⣶│
@@ -202,7 +202,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 --- frame 9: report closed ---
 ┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · live      ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -253,7 +253,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: map ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 3 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
-│▌◎ position · live      ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀<33333333…> · 3 h ◉▀▀│
@@ -278,7 +278,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: next pin ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 3 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
-│▌◎ position · live      ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀<33333333…> · 3 h ●▀▀│
@@ -303,7 +303,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: dragged ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 2 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
-│▌◎ position · live      ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀<33333333…> · 3 h ●▀▀▀▀▀▀▀▀▀▀▀▀│
+│▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀<33333333…> · 3 h ●▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -328,7 +328,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 5: outline ---
 ┌  Loquax afbda7b3───────┐┌● map─────────────────────────────── z4 · 3 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
-│▌◎ position · live      ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -353,7 +353,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 6: opened ---
 ┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · live      ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -378,7 +378,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 --- frame 7: back ---
 ┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · live      ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -403,7 +403,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 --- frame 8: from the report ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
-│▌◎ position · live      ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -428,7 +428,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 --- frame 9: report closed ---
 ┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · live      ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │

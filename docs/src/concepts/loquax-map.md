@@ -32,9 +32,9 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:3242`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:2299`) and the positions in a table of
-their own (`SCHEMA_V2`, `loquax/src/store.rs:173`). The sender's timestamp
+`loquax/src/ui.rs:3444`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:2388`) and the positions in a table of
+their own (`SCHEMA_V2`, `loquax/src/store.rs:183`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
 change of its own and not the one line of plumbing the fields were.
@@ -118,11 +118,27 @@ ago` or `last position 3 h ago` (older runs keep their count), the
 list's line `📍 live` or `📍 3 h ago` (the terminal `◎ position ·
 live`), and every avatar of the peer carries a thin ring: the accent
 while live, the secondary text colour when recent, none when stale, in
-the list, the chat's bar, the Friends sheet and on the map's pin, where
+the chat's bar, the Friends sheet and on the map's pin, where
 a live ring pulses (one alpha cycle of 2 s, redrawn only while the map
 is on screen) and a stale pin is drawn grey. The phone's card says the
 row's words. The facade carries `liveness`, `cadence_s` and
 `last_fix_at` on the list's, the friends' and the chat's rows.
+
+**The list's map pin** (1224, Lew 2026-10-31). In the conversation list
+the ring gave way to a small map pin, one element with one meaning: a
+row whose peer has a fix younger than a day (the Friends sheet's rule,
+`scene::PositionBadge`) shows it under the time, left of the delivery
+mark or the unread count, tinted as the ring was (accent while live,
+the secondary text colour otherwise). A tap on it is the intent
+`OpenMapAt`: the map centred on the friend's newest fix with the card
+open, and Back returns to the list, not to the map's previous view; the
+rest of the row still opens the chat. The chat's bar and, on the phone,
+the newest report's line raise the same intent. The window draws the
+pin as a button, the terminal a `⌖` before the count with `m` on the
+highlighted entry, the phone a glyph of 18 dp in a 48 dp target
+labelled "Position of Anna, 2 min ago". Older fixes show no pin; the
+map still draws them grey. No distance is shown and there is no
+setting.
 
 **A text with a position** (1132). Sideband and a stock LXMF client can
 send a body and a telemetry field in one message. Such a message from a
@@ -294,9 +310,69 @@ The frontends:
   pins, in tiles of 256 pixels of the nearest whole step, kept by last
   use up to 96 MB, missing ones drawn on up to eight threads, scaled to
   the exact zoom (one to one at a whole step). The names are placed at
-  rest over the frame at the exact scale and kept; a frame while the
-  finger moves draws those names where the view moved them and places
-  none, so no name leaves the picture during a pan or a pinch. The pins
+  rest over the frame at the exact scale and kept; a pan at that zoom
+  draws them where the view moved them and places none. Since 1225 a
+  frame that zooms places its names anew, as a frame at rest at its
+  zoom would: the data's `min_zoom` ladder at the step nearest the
+  zoom, the anchors and the street lines of the frame's own geometry,
+  the text at its screen size (names never scale with the map), the
+  rule's collisions. Into the step's frame the Canvas scales up by
+  1/k it draws each name sampled at k, below k 0.75 from the name's
+  coverage averaged two by two, so on screen it has the size and the
+  place a frame at rest gives it. The names it looks up are kept while
+  the pinch stays at the step and inside a view 1.6 times the frame's
+  each way, so a pinch reads the region file about twice a step rather
+  than every frame. 1205's ladder filter and collision pass over the
+  names carried from rest, and its step limit past which a pinch showed
+  the ground alone, are gone: Lew saw names vanish when zooming out and
+  carried names detached from the streets that stretched under them. A
+  name that enters fades in over 150 ms and one that leaves fades out
+  where the map moves it, an alpha on the sprite's levels at blend
+  time by the frontend's clock, and a frame says it fades so the
+  frontend asks again; a frame at rest with its fades done is the same
+  bytes. A pinch out over the Berlin fixture from z14 to z10 in half
+  steps shows 20, 18, 13, 12, 9, 5, 3 and 1 names, each frame the set
+  a frame at rest at its zoom places, every anchor within a pixel of
+  it.
+
+  The cost, measured 2026-10-31 on the coder host (10 vCPUs, eight
+  workers) with `loquax/examples/names_cost.rs` over Berlin Mitte (cut
+  from the Protomaps build of that day, `--bbox
+  13.33,52.49,13.45,52.55`, and a z12 cut of the country around it),
+  the median of ten frames of a pinch out by 0.05 a frame, in ms (the
+  full placement: the names looked up, placed and sampled as a frame at
+  rest at a zoom between steps runs it, on the code before 1225):
+
+  | frame | zoom | names | ground | full placement before 1225 | zooming frame since 1225 | its names: kept / placed / sampled |
+  |---|---|---|---|---|---|---|
+  | phone 1080x2400 at 2.75 | 10 | 31 | 2.0 to 2.2 | 7.0 to 7.3 | 4.5 to 4.6 | 0.01 / 0.42 to 0.45 / 1.0 to 1.1 |
+  | phone | 13 | 120 | 0.7 to 1.2 | 42.9 to 43.7 | 10.1 to 10.7 | 0.01 / 2.8 to 3.2 / 3.5 to 4.0 |
+  | phone | 16 | 94 | 1.1 to 1.3 | 13.2 to 13.9 | 9.1 to 10.2 | 0.01 / 1.9 to 2.1 / 2.6 to 3.3 |
+  | window 1920x1080 at 1 | 10 | 67 | 0.8 to 1.1 | 5.0 to 5.2 | 2.0 to 2.6 | 0.02 / 0.30 to 0.35 / 0.6 to 0.8 |
+  | window | 13 | 210 | 0.6 to 0.8 | 8.3 to 8.7 | 5.1 to 7.4 | 0.02 / 1.3 / 1.8 to 3.3 |
+  | window | 16 | 199 | 0.7 to 0.9 | 8.1 | 5.5 to 6.7 | 0.02 / 1.8 to 1.9 / 1.4 to 2.2 |
+
+  Three runs each side, the coder host's load under 3.5. "Kept" is the
+  median over the frames, most of which took the names looked up
+  before; two of the eleven frames of each pinch looked them up, in the
+  view 1.6 times the frame's each way.
+
+  A full placement as a frame at rest runs it (the names looked up, 2.5
+  to 5 ms; placed, and their sprites sampled) did not fit beside the
+  ground in 16 ms at the phone's z13: the typesetter's store of masks
+  and halos was 4 MB, which the phone's density passes at z13, so every
+  frame shaped and rasterised its names again (32 ms of the 43). With
+  the store at 16 MB the same full placement there is 12.1 to 12.4 ms,
+  which a frame at rest gains too; with the names looked up kept as
+  well, and the sprites sampled over each name's own band, a zooming
+  frame is 2 to 11 ms on this host. The phone itself was not measured
+  in 1225 (no device on the coder host); a frame there that misses
+  16 ms is shown late, the Canvas scaling the last frame, names and
+  ground together, until it lands.
+
+  The gui feature's tests pin the same rule; `just loquax-gui` runs them.
+
+  The pins
   are drawn over the tiles every frame, so a pin costs no tile. A pinch
   keeps the step it is composed from while it stays within a step of it,
   and a frame shows other steps' cached tiles where the new step's are
@@ -374,7 +450,33 @@ The frontends:
   glyphs' blend (2159 of the 460800 bytes of each Florence golden, four
   of them by two). Through `map_fps` on the coder host the phone's
   sprites went from 9.19 MB to 0.89 MB and drawing them from 2.7 to
-  3.1 ms to 1.2 to 1.3 ms.
+  3.1 ms to 1.2 to 1.3 ms. Since 1188 a pan the finger lets go of while
+  it moves coasts on and slows down, with the platform's physics so it
+  feels like every other Android surface: VelocityTracker measures the
+  finger, an `OverScroller` flings with ListView's curve
+  (ViewConfiguration's scroll friction, the screen's density; AndroidX's
+  `FlingAnimation` is not used, the app has no AndroidX), and each
+  Choreographer frame moves the last bitmap by the scroller's step and
+  asks a moving frame, as a finger would, so the ground stays drawn and
+  the names are carried. The frame says how far its view may still go
+  north and south before the view is held to one world
+  (`room_north`, `room_south`), the scroller's y bounds, so a coast stops
+  at the Mercator edge without a bounce; x goes round. When the scroller
+  stops, the view is drawn at rest and the names are set, as after a
+  pan. Which gestures fling is `Fling.java`'s, plain Java the host's
+  tests compile and run (`loquax-android/tests/fling.rs`): a pan of one
+  finger, at ViewConfiguration's minimum fling velocity at least, still
+  moving 40 ms before it lifted (AOSP's VelocityTracker assumes a finger
+  stopped after that only since Android 13); a second finger at any time,
+  a pinch or a pan that ends under another finger, never flings, and a
+  finger down ends a coast where it is. The config's `map_fling`, on by
+  default, turns it off, the switch under Settings, Advanced. Through
+  `map_coast` on the coder host, the phone's 1620 x 3600 frame on a warm
+  cache, a coast of 10000 pixels a second asked one frame a vsync drew
+  60.4 frames a second in median 2.9 to 5.4 ms with no vsync missed on a
+  quiet host, the screen at most 217 to 266 pixels ahead of its frame
+  against a margin of 270; with the other lanes' builds on the host it
+  missed up to 15 of 103 vsyncs and ran up to 647 pixels ahead.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.

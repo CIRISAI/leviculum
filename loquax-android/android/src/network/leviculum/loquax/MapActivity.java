@@ -22,6 +22,8 @@ public class MapActivity extends Activity implements Events.Listener {
     static final String LON_E6 = "lon_e6";
     /** The pin to select where the map opens on a fix: its sender's address. */
     static final String SELECTED = "selected";
+    /** Open on this friend's newest fix with its card (1224, `OpenMapAt`). */
+    static final String FRIEND = "friend";
 
     private MapPane map;
     private final ServiceLink link = new ServiceLink(this);
@@ -64,7 +66,9 @@ public class MapActivity extends Activity implements Events.Listener {
                         .putExtra(ChatActivity.PEER, peer));
             }
         });
-        if (getIntent().hasExtra(LAT_E6) && getIntent().hasExtra(LON_E6)) {
+        if (getIntent().hasExtra(FRIEND)) {
+            map.openAt(getIntent().getStringExtra(FRIEND));
+        } else if (getIntent().hasExtra(LAT_E6) && getIntent().hasExtra(LON_E6)) {
             map.centreOn(getIntent().getLongExtra(LAT_E6, 0), getIntent().getLongExtra(LON_E6, 0),
                     getIntent().getStringExtra(SELECTED));
         }

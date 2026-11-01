@@ -151,6 +151,9 @@ struct KeysTerminal {
 impl TerminalOps for KeysTerminal {
     fn enter(&mut self) -> std::io::Result<()> {
         self.inner.enter()?;
+        // The focus reports read receipts wait for (1231); a terminal that
+        // sends none is in front once the reader typed in the chat.
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange)?;
         if self.enhanced {
             crossterm::execute!(
                 std::io::stdout(),
@@ -164,6 +167,7 @@ impl TerminalOps for KeysTerminal {
         if self.enhanced {
             let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
         }
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
         self.inner.restore()
     }
 }
@@ -338,6 +342,7 @@ async fn run_terminal(
                 });
             }
         }
+        say_viewport(shell);
         let view = ui::view(&shell.model);
         // A frame that panics is skipped, not the messenger: the panic hook
         // has left the alternate screen by then, so it is entered again and
@@ -389,6 +394,16 @@ async fn run_terminal(
     remember(shell, &mut memory);
     guard.restore_now().map_err(|e| e.to_string())?;
     result
+}
+
+/// Tell the model which bubbles are on screen when that changed (1231).
+fn say_viewport(shell: &mut Shell) {
+    let Some((peer, keys)) = ui::hit::viewport(&shell.model) else {
+        return;
+    };
+    if shell.model.reading.viewport() != Some(&(peer, keys.clone())) {
+        shell.apply(UiEvent::Viewport { peer, keys });
+    }
 }
 
 /// Write the way of drawing the map the reader chose to the config, when
@@ -550,6 +565,8 @@ fn map_event(event: Event) -> Option<UiEvent> {
         Event::Key(key) => Some(UiEvent::Key(key_event(key))),
         Event::Mouse(mouse) => Some(UiEvent::Mouse(mouse_event(mouse))),
         Event::Resize(width, height) => Some(UiEvent::Resize { width, height }),
+        Event::FocusGained => Some(UiEvent::Front(true)),
+        Event::FocusLost => Some(UiEvent::Front(false)),
         _ => None,
     }
 }
@@ -644,6 +661,8 @@ enum Step {
     Theme(Theme),
     /// The screen's style map, to the styles file.
     Styles(String),
+    /// The terminal's focus came or went.
+    Focus(bool),
 }
 
 /// The script's key names: `tab`, `backtab`, `enter`, `esc`, `up`, `down`,
@@ -842,6 +861,9 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// styles <name>                  the screen's style map, one letter a cell
 ///                                (see style_letter), to the frames file's
 ///                                path with `.styles` added
+/// focus <in|out>                 the terminal's focus report: in front or
+///                                behind (a script says none until then, and
+///                                is in front once a key or click came)
 /// ```
 ///
 /// Cells count from 1 at the top left, as the frames' rows and columns do.
@@ -898,6 +920,11 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 other => return Err(at(format!("unknown theme {other:?}, dark or light"))),
             },
             "styles" => Step::Styles(rest.trim().to_string()),
+            "focus" => match rest.trim() {
+                "in" => Step::Focus(true),
+                "out" => Step::Focus(false),
+                other => return Err(at(format!("unknown focus {other:?}, in or out"))),
+            },
             "sleep" => {
                 let ms = rest.trim();
                 match ms.parse::<u64>() {
@@ -1107,6 +1134,8 @@ async fn run_script(
             .map_err(|e| format!("{}: {e}", frames.display()))
     };
     for step in steps {
+        // What the last step put on screen, before the next acts.
+        say_viewport(shell);
         match step {
             Step::Mouse(events) => {
                 for event in events {
@@ -1114,6 +1143,10 @@ async fn run_script(
                 }
             }
             Step::Key(key) => shell.apply(UiEvent::Key(key)),
+            Step::Focus(front) => {
+                tracing::info!("FOCUS front={front} elapsed_ms={}", shell.elapsed_ms());
+                shell.apply(UiEvent::Front(front));
+            }
             Step::Keyboard(enhanced) => shell.model.enhanced = enhanced,
             Step::Tier(tier) => shell.model.tier = tier,
             Step::Theme(theme) => shell.model.theme = theme,
@@ -1157,6 +1190,7 @@ async fn run_script(
                 let deadline = tokio::time::Instant::now() + within;
                 loop {
                     shell.poll();
+                    say_viewport(shell);
                     if until.holds(&shell.model, &shell.legs_seen) {
                         break;
                     }
@@ -1185,6 +1219,7 @@ async fn run_script(
                     tokio::time::sleep(Duration::from_millis(step)).await;
                     slept += step;
                     shell.poll();
+                    say_viewport(shell);
                     while ticked + TICK_MS <= slept {
                         ticked += TICK_MS;
                         shell.apply(UiEvent::Tick);
@@ -1833,7 +1868,7 @@ mod tests {
             let inside = row.trim_matches(|c: char| c == '│' || c == ' ');
             assert!(inside.starts_with("word"), "{inside:?}");
             assert!(
-                inside.ends_with("word") || inside.ends_with('○'),
+                inside.ends_with("word") || inside.ends_with('◷'),
                 "{inside:?}"
             );
         }
@@ -2189,7 +2224,7 @@ mod tests {
             assert!(shot.contains("── Today ──"), "{shot}");
             assert!(shot.contains(" 2 new "), "{shot}");
             assert!(shot.contains("│ ok, bring the T114.  14:04 "), "{shot}");
-            assert!(shot.contains(" the tripod fits  14:06 ⠋ │"), "{shot}");
+            assert!(shot.contains(" the tripod fits  14:06 ⠋  │"), "{shot}");
             assert!(shot.contains("to <4f4f4f4f…>"), "{shot}");
         }
         let mut model = mockup(80, 24);
@@ -2308,7 +2343,9 @@ mod tests {
         frames.push_str(&format!("--- picker ---\n{picker}"));
         let effects = update(&mut model, UiEvent::Key(parse_key("1").expect("key")));
         assert!(
-            matches!(effects.as_slice(), [loquax::ui::UiEffect::Send { fields, .. }] if fields.len() == 1),
+            // The reaction and the read-receipt mark (1230).
+            matches!(effects.as_slice(), [loquax::ui::UiEffect::Send { fields, .. }]
+                if fields.len() == 3 && fields[0].0 == FIELD_REACTION),
             "{effects:?}"
         );
         model.toasts.clear();
@@ -2471,7 +2508,7 @@ mod tests {
             let glyphs = under(&shot, &marks);
             assert!(!glyphs.is_empty(), "{width}: {shot}");
             assert!(
-                glyphs.chars().all(|c| "○◇⌂✓✗⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)),
+                glyphs.chars().all(|c| "◷✓✔! .*vV⠋⠙⠹⠸⠼⠴".contains(c)),
                 "{width}: {glyphs:?}\n{shot}"
             );
         }

@@ -10,20 +10,12 @@
     <string name="join">Join</string>
     <string name="refresh">Refresh</string>
     <string name="open">Open</string>
-    <string name="send">Send</string>
     <string name="address_hint">Address of a new conversation</string>
-    <string name="no_conversations">No conversations yet. The pencil starts one.</string>
-    <string name="compose_hint">Message</string>
     <string name="pulling">Checking your mailbox…</string>
     <string name="pulled">%1$s new message(s).</string>
     <string name="pulled_nothing">No new messages.</string>
     <string name="pull_failed">Pull failed: %1$s</string>
     <string name="stopped">Stopped.</string>
-    <string name="state_queued">queued</string>
-    <string name="state_sending">sending</string>
-    <string name="state_sent">sent</string>
-    <string name="state_delivered">delivered ✓</string>
-    <string name="state_failed">failed ✗</string>
     <string name="channel_session">Connection to your mailbox</string>
     <string name="channel_messages">New messages</string>
     <string name="connecting">Connecting to %1$s</string>
@@ -35,7 +27,6 @@
     <string name="battery_text">Loquax keeps a connection to your mailbox so new messages arrive while the app is closed. Android\'s battery optimisation may cut that connection when the phone lies still. You can leave Loquax out of it; you can change this later in the system settings.</string>
     <string name="battery_yes">Leave it out</string>
     <string name="battery_no">Not now</string>
-    <string name="map">Map</string>
     <string name="map_loading">Loading the map of this area…</string>
     <!-- 1200: the map's state chips, its people, the card and the Friends sheet. -->
     <string name="map_offline">Offline</string>
@@ -51,29 +42,11 @@
     <string name="back">Back</string>
     <string name="menu">More</string>
     <string name="emoji">Emoji</string>
-    <string name="today">Today</string>
-    <string name="yesterday">Yesterday</string>
-    <string name="just_now">Now</string>
-    <string name="minutes_ago">%1$d min</string>
-    <string name="hours_ago">%1$d h</string>
-    <string name="days_ago">%1$d d</string>
-    <string name="list_hours">%1$dh</string>
-    <string name="position">Position</string>
     <!-- 1184: a run of position reports, folded into one row. -->
     <string name="position_run">%1$s · %2$d</string>
-    <string name="run_updates">%1$d updates since %2$s</string>
     <string name="action_run">Show all %1$d positions</string>
     <string name="run_title">%1$d positions</string>
     <!-- 1209: whether a position is alive. -->
-    <string name="live">live</string>
-    <string name="live_every">every %1$s</string>
-    <string name="live_ago">%1$s ago</string>
-    <string name="live_now">now</string>
-    <string name="last_position">last position %1$s</string>
-    <string name="reacted">reacted %1$s</string>
-    <string name="you_reacted">You reacted %1$s</string>
-    <string name="search">Search</string>
-    <string name="close_search">Close search</string>
     <string name="new_conversation">New conversation</string>
     <string name="address_label">The LXMF address to write to: 32 hex digits, as the other side\'s app shows it.</string>
     <string name="paste">Paste</string>
@@ -90,18 +63,11 @@
     <string name="emoji_objects">Objects</string>
     <string name="emoji_symbols">Symbols</string>
     <string name="emoji_flags">Flags</string>
-    <string name="action_reply">Reply</string>
-    <string name="action_forward">Forward</string>
-    <string name="action_copy">Copy</string>
-    <string name="action_select">Select</string>
-    <string name="action_info">Info</string>
     <string name="action_pin">Pin</string>
     <string name="action_unpin">Unpin</string>
-    <string name="action_delete">Delete</string>
     <string name="copied">Copied.</string>
     <string name="reply_to_ours">Replying to yourself</string>
     <string name="reply_to_theirs">Replying to %1$s</string>
-    <string name="quote_you">You</string>
     <string name="cancel_reply">Cancel the reply</string>
     <string name="forward_to">Forward to</string>
     <string name="forwarded">Forwarded to %1$s.</string>
@@ -112,10 +78,8 @@
     <string name="delete_one_home">Delete this message from every device of this mailbox?</string>
     <string name="delete_many_here">Delete %1$d messages from this device?</string>
     <string name="delete_many_home">Delete %1$d messages from every device of this mailbox?</string>
-    <string name="delete">Delete</string>
     <string name="keep">Keep</string>
     <string name="info">Message details</string>
-    <string name="pinned">Pinned</string>
     <string name="add_to_contacts">Add to contacts</string>
     <string name="open_contact">Open contact</string>
     <string name="contact_addresses">This contact\'s addresses</string>
@@ -145,8 +109,6 @@
     <string name="matched_prefix">start of the first name</string>
     <!-- The contact screen, the settings and the list's long press (1146). -->
     <string name="contact_info">Contact info</string>
-    <string name="mute">Mute</string>
-    <string name="unmute">Unmute</string>
     <string name="muted_mark">Muted</string>
     <string name="mute_for">Mute notifications</string>
     <string name="mute_hour">1 hour</string>
@@ -188,18 +150,10 @@
     <string name="delete_conversation_ask">Delete the conversation with %1$s?</string>
     <string name="delete_here">This device</string>
     <string name="delete_home">Every device of the mailbox</string>
-    <string name="settings">Settings</string>
     <string name="blocked_contacts">Blocked contacts</string>
     <string name="blocked_none">Nobody is blocked.</string>
-    <string name="archived">Archived</string>
     <string name="archived_count">Archived (%1$d)</string>
     <string name="archived_none">Nothing is archived.</string>
-    <string name="archive">Archive</string>
-    <string name="unarchive">Unarchive</string>
-    <string name="pin">Pin</string>
-    <string name="unpin">Unpin</string>
-    <string name="mark_unread">Mark as unread</string>
-    <string name="mark_read">Mark as read</string>
     <string name="pinned_mark">Pinned</string>
     <!-- The first start, the mailbox on the phone and its backup (1152;
          docs/drafts/loquax-onboarding-2026-10.md, section 2). -->
@@ -266,11 +220,7 @@
     <string name="scan_hint">Hold the code in front of the camera.</string>
     <string name="scan_no_camera">The camera cannot be used. Paste the code instead.</string>
     <!-- The main views and the settings (1199). -->
-    <string name="tab_chats">Chats</string>
-    <string name="tab_chats_unread">Chats, %1$d with unread messages</string>
     <string name="help">Help</string>
-    <string name="mailbox_connected">You. Your mailbox is connected.</string>
-    <string name="mailbox_not_connected">You. Your mailbox is not connected.</string>
     <string name="settings_profile">Profile</string>
     <string name="settings_profile_summary">Name, address, QR code</string>
     <string name="settings_mailbox_summary">Where it lives</string>
@@ -280,13 +230,13 @@
     <string name="settings_notifications_summary">New messages, muted chats</string>
     <string name="settings_notifications_text">Loquax tells you of every new message. To mute one chat, hold it in the list, then Mute. Sound and vibration are in Android\'s settings for Loquax.</string>
     <string name="settings_privacy">Privacy</string>
-    <string name="settings_privacy_summary">Blocked contacts, positions you shared</string>
+    <string name="settings_privacy_summary">Read receipts, blocked contacts, positions you shared</string>
     <string name="settings_maps">Maps</string>
     <string name="settings_maps_summary">Maps on this phone, automatic download</string>
     <string name="settings_backup">Backup</string>
     <string name="settings_backup_summary">Back up the mailbox</string>
     <string name="settings_backup_away">Your mailbox is on another device. Back it up there.</string>
-    <string name="settings_advanced_summary">Propagation Node, stop the service</string>
+    <string name="settings_advanced_summary">Propagation Node, map glide, stop the service</string>
     <string name="settings_map_theme">Map</string>
     <string name="map_theme_auto">Like the phone</string>
     <string name="map_theme_light">Light</string>
@@ -310,6 +260,8 @@
     <string name="share_failed">Not sent: %1$s</string>
     <string name="attach">Attach</string>
     <string name="attach_position">My position</string>
+    <string name="map_fling">Map keeps moving</string>
+    <string name="map_fling_text">A swipe on the map lets it glide on and slow down after your finger lifts.</string>
     <string name="maps_auto">Download maps automatically</string>
     <string name="maps_auto_text">The map of the area you look at loads by itself and stays on the phone.</string>
     <string name="maps_used">Storage used: %1$s</string>

@@ -4,6 +4,7 @@ import android.graphics.Bitmap;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TimeZone;
 
@@ -75,9 +76,14 @@ final class Core {
         return TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000;
     }
 
+    /** The phone's language as a locale tag (de-DE): the library says its words in it (1217). */
+    static String lang() {
+        return Locale.getDefault().toLanguageTag();
+    }
+
     /** Start; code and server null on a later start. Blocks: not on the UI thread. */
     static Map<String, Object> start(String dir, String server, String code, String name) {
-        Map<String, Object> request = map("dir", dir, "offset", (long) offset());
+        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang());
         if (server != null) request.put("server", server);
         if (code != null) request.put("code", code);
         if (name != null) request.put("name", name);
@@ -90,7 +96,7 @@ final class Core {
      * it restores the address first. Blocks: not on the UI thread.
      */
     static Map<String, Object> startHere(String dir, String restore, String passphrase) {
-        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "here", true);
+        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(), "here", true);
         if (restore != null) {
             request.put("restore", restore);
             request.put("passphrase", passphrase);
@@ -150,6 +156,15 @@ final class Core {
         return command(map("t", "react", "peer", peer, "target", target, "content", content));
     }
 
+    /**
+     * What the compose field of `peer`'s chat holds now (1219), and the id of
+     * the message a reply being written answers, "" for none: the library
+     * keeps it as the conversation's draft.
+     */
+    static String draft(String peer, String body, String reply) {
+        return command(map("t", "draft", "peer", peer, "body", body, "reply", reply));
+    }
+
     /** A reply to the message `target` (1137): sent with its id and a quote of it. */
     static String reply(String peer, String target, String body) {
         return command(map("t", "reply", "peer", peer, "target", target, "body", body));
@@ -158,6 +173,11 @@ final class Core {
     /** A copy of the message `key` of `peer`'s conversation to `to`. */
     static String forward(String peer, long key, String to) {
         return command(map("t", "forward", "peer", peer, "key", key, "to", to));
+    }
+
+    /** Send the message `key`, one of ours not sent, again: its red mark's tap (1232). */
+    static String sendAgain(String peer, long key) {
+        return command(map("t", "sendagain", "peer", peer, "key", key));
     }
 
     /** Delete the messages `keys`, asked already. */
@@ -330,8 +350,10 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "detail", "peer", peer))));
     }
 
-    static Map<String, Object> archived() {
-        return answer(Native.query(MsgPack.pack(map("t", "archived"))));
+    /** The archived conversations; with `search` only those the library's search finds (1217). */
+    static Map<String, Object> archived(String search) {
+        return answer(Native.query(MsgPack.pack(search == null
+                ? map("t", "archived") : map("t", "archived", "search", search))));
     }
 
     static Map<String, Object> blocked() {
@@ -347,8 +369,13 @@ final class Core {
         return command(map("t", "front", "front", front));
     }
 
-    static Map<String, Object> conversations() {
-        return answer(Native.query(MsgPack.pack(map("t", "conversations"))));
+    /**
+     * The conversation list; with `search` only the rows the library's
+     * search finds, every word in the name or the last line (1217).
+     */
+    static Map<String, Object> conversations(String search) {
+        return answer(Native.query(MsgPack.pack(search == null
+                ? map("t", "conversations") : map("t", "conversations", "search", search))));
     }
 
     static Map<String, Object> messages(String peer) {
@@ -380,6 +407,27 @@ final class Core {
      */
     static Map<String, Object> mapTheme(String set) {
         Map<String, Object> request = map("t", "maptheme");
+        if (set != null) request.put("set", set);
+        return answer(Native.query(MsgPack.pack(request)));
+    }
+
+    /**
+     * The map's fling (1188): `set` stored as the config's `map_fling`, or
+     * with null only asked; the choice in force as `fling`. Waits for the
+     * frame a map may be drawing: not on the UI thread.
+     */
+    static Map<String, Object> mapFling(Boolean set) {
+        Map<String, Object> request = map("t", "mapfling");
+        if (set != null) request.put("set", set);
+        return answer(Native.query(MsgPack.pack(request)));
+    }
+
+    /**
+     * The Privacy page's "Send read receipts" (1233): with `set` stored,
+     * the switch in force as "on" either way.
+     */
+    static Map<String, Object> receipts(Boolean set) {
+        Map<String, Object> request = map("t", "receipts");
         if (set != null) request.put("set", set);
         return answer(Native.query(MsgPack.pack(request)));
     }

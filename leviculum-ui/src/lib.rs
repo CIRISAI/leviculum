@@ -10,14 +10,17 @@
 //! overlay, toast), the loading spinner, the delivery glyph table of
 //! `docs/src/concepts/loquax-ui.md`, the OSC 52 clipboard sequence, and the
 //! rule for following a link, with the finder for links in a message's
-//! text. No terminal crate is named here, which is what lets a program's
-//! core take these types and stay terminal-free;
+//! text. The scene's shared vocabulary is here too: its nodes, their
+//! accessibility and actions, and the keyed catalogue of words they say
+//! (`scene`, `strings`, the `catalogue!` macro), generic over a program's
+//! intents and keys. No terminal crate is named here, which is what lets a
+//! program's core take these types and stay terminal-free;
 //! `just ui-no-terminal` checks it. The ratatui widgets over this model are
 //! `leviculum-ui-ratatui`.
 //!
-//! What is NOT here: a program's own labels and actions (lnomad's footer
-//! buttons and help text stay in lnomad), its layout of the screen, and its
-//! state.
+//! What is NOT here: a program's own catalogue, intents and node ids, its
+//! own labels and actions (lnomad's footer buttons and help text stay in
+//! lnomad), its layout of the screen, and its state.
 //!
 //! Without the default `std` feature the crate is `no_std` plus `alloc`: a
 //! messenger core built for a board takes these types too (loquax's `ui`
@@ -37,7 +40,9 @@ pub mod help;
 pub mod input;
 pub mod keymap;
 pub mod link;
+pub mod scene;
 pub mod spinner;
+pub mod strings;
 pub mod style;
 pub mod text;
 pub mod theme;

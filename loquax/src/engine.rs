@@ -848,6 +848,7 @@ impl Engine {
                         Ok(message) => self.emit(OutboxEvent::HomeSent {
                             message_id: message.message_id,
                             destination: message.destination_hash,
+                            sent_at: message.timestamp as i64,
                             body: message.content,
                             fields: message.fields,
                         }),

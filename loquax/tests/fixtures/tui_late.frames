@@ -27,7 +27,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                are you there  direct 2 s · 12:00 ○ │
+│                        ││               are you there  direct 2 s · 12:00 ◷  │
 │                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -44,7 +44,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                             are you there  12:00 ✓ │
+│                        ││                            are you there  12:00 ✓✓ │
 │                        │├● to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘

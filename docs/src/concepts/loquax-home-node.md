@@ -120,6 +120,7 @@ Link requests on `loquax.home`, msgpack on the wire:
 /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
         [[key: int, value: bin], ...]] -> [status, id: bin32]
 /mark  [flag: uint, [id: bin32, ...]] -> [status]
+/mark  [2, [id: bin32, ...], read_at: uint] -> [status]
 /petname [address: bin16, name: str] -> [status]
 /watch [cursor: uint]              -> [status, newest: uint]
 /key   [address: bin16, public_key: bin64] -> [status]
@@ -306,6 +307,11 @@ sent bubble on the others.
   entry of kind 6, under the SHA-256 of those bytes, so the same mark twice,
   from one client or two, is one entry. Every client applies the entry on
   its next pull (`Command::HomeMark`, `OutboxEvent::HomeMarked`).
+- **Seen** (flag 2, 1234) carries a third element, the reader's clock: the
+  messages were on a device's screen, and the home node signs their read
+  receipts (`loquax-read-receipts.md`, section 8). It keeps a seen mark of
+  only the ids no earlier seen mark names, so the first device sets the
+  read time and a second sends nothing new.
 - **Read** means every received message up to the marked one in its
   conversation is read, as opening the conversation there read them: the
   unread count becomes the number of received messages after it. A device

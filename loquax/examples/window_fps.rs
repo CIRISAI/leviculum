@@ -97,6 +97,7 @@ fn main() {
                 zooms: (3, 18),
                 draw_pins: false,
                 measure: None,
+                now_ms: None,
                 scaled_while_moving: true,
             });
             std::hint::black_box(shot.rgba.len());

@@ -13,15 +13,16 @@ import android.graphics.drawable.Drawable;
  * scaled to the bounds: no icon font, no AndroidX, no image assets (1129,
  * the list's search, close and pencil 1130, the tab bar's chat and pin
  * 1199, the map's people button 1200, the crosshair and the chat's
- * attachment menu 1201).
+ * attachment menu 1201). The delivery marks are the ladder of
+ * docs/src/concepts/loquax-read-receipts.md, section 3 (1232): CLOCK, TICK,
+ * TICKS, TICKS_READ, FAILED, with the numbers of
+ * loquax/src/ui/chat.rs's shapes, which a test of the facade reads here.
  */
 final class Glyph extends Drawable {
-    enum Kind { BACK, MENU, EMOJI, SEND, SENT, DELIVERED, QUEUED, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN, PEOPLE, LOCATE, ATTACH }
+    enum Kind { BACK, MENU, EMOJI, SEND, CLOCK, TICK, TICKS, TICKS_READ, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN, PEOPLE, LOCATE, ATTACH }
 
     private final Kind kind;
     private final int color;
-    /** The ground the delivered mark's ticks are cut into: the bubble's colour. */
-    private final int ground;
     /** The failed mark's circle and its exclamation mark. */
     private final int failedGround;
     private final int failedMark;
@@ -32,21 +33,32 @@ final class Glyph extends Drawable {
     /** The mark of one of ours, by the facade's delivery word. */
     static Kind mark(String state) {
         switch (state) {
-            case "sent": return Kind.SENT;
-            case "delivered": return Kind.DELIVERED;
+            case "mailbox": return Kind.TICK;
+            case "delivered": return Kind.TICKS;
+            case "read": return Kind.TICKS_READ;
             case "failed": return Kind.FAILED;
-            default: return Kind.QUEUED;
+            default: return Kind.CLOCK;
+        }
+    }
+
+    /** The view id a mark is found by in the device walk (chat::Mark::resource). */
+    static int resource(Kind kind) {
+        switch (kind) {
+            case TICK: return R.id.state_tick;
+            case TICKS: return R.id.state_ticks;
+            case TICKS_READ: return R.id.state_ticks_read;
+            case FAILED: return R.id.state_failed;
+            default: return R.id.state_clock;
         }
     }
 
     Glyph(Kind kind, int color) {
-        this(kind, color, 0, 0, 0);
+        this(kind, color, 0, 0);
     }
 
-    Glyph(Kind kind, int color, int ground, int failedGround, int failedMark) {
+    Glyph(Kind kind, int color, int failedGround, int failedMark) {
         this.kind = kind;
         this.color = color;
-        this.ground = ground;
         this.failedGround = failedGround;
         this.failedMark = failedMark;
         stroke.setStyle(Paint.Style.STROKE);
@@ -90,22 +102,22 @@ final class Glyph extends Drawable {
                 arrow.close();
                 canvas.drawPath(arrow, fill);
                 break;
-            case SENT:
-                stroke.setStrokeWidth(1.8f);
-                canvas.drawCircle(12, 12, 9, stroke);
-                canvas.drawPath(path(8, 12.5f, 11, 15.5f, 16.5f, 9), stroke);
-                break;
-            case DELIVERED:
-                canvas.drawCircle(12, 12, 10, fill);
-                stroke.setColor(ground);
-                stroke.setStrokeWidth(1.8f);
-                canvas.drawPath(path(5, 12.5f, 8, 15.5f, 13, 9), stroke);
-                canvas.drawPath(path(10.5f, 15.5f, 12, 15.5f, 17.5f, 9), stroke);
-                break;
-            case QUEUED:
+            case CLOCK:
                 stroke.setStrokeWidth(1.8f);
                 canvas.drawCircle(12, 12, 9, stroke);
                 canvas.drawPath(path(12, 7, 12, 12, 15.5f, 14), stroke);
+                break;
+            case TICK:
+                stroke.setStrokeWidth(2f);
+                canvas.drawPath(path(5, 12.5f, 9.5f, 17, 19, 7), stroke);
+                break;
+            case TICKS:
+            case TICKS_READ:
+                // Two bare ticks 6.5 units apart, the second's short leg
+                // cut clear of the first; read in a heavier stroke.
+                stroke.setStrokeWidth(kind == Kind.TICKS_READ ? 2.6f : 2f);
+                canvas.drawPath(path(1.5f, 12.5f, 6, 17, 15.5f, 7), stroke);
+                canvas.drawPath(path(11.6f, 16.1f, 12.5f, 17, 22, 7), stroke);
                 break;
             case FAILED:
                 fill.setColor(failedGround);

@@ -63,12 +63,17 @@ STEPS = [
     "list",
     "open_imported",
     "info",
+    "marks",
     "reply_send",
     "receive_wake",
     "receive_report",
+    "position_pin",
+    "draft",
     "map",
+    "fling",
     "friends",
     "settings",
+    "receipts",
     "profile",
     "teardown",
 ]
@@ -110,6 +115,12 @@ SETTINGS_PAGE_MARKS = {
     "Privacy": ("text", "Positions you shared"),
     "Maps": ("rid", "maps_auto"),
 }
+# The Privacy page's first row (1233): "Send read receipts", its line,
+# the switch's id.
+RECEIPTS_ROW = "Send read receipts"
+RECEIPTS_LINE = "Others see when you have read their messages."
+RECEIPTS_SWITCH = "privacy_receipts"
+BLOCKED_HEADER = "Blocked contacts"
 # The region the walk puts on the phone for the Maps page (1207): the
 # repository's Florence fixture, and the middle the page names it by
 # (Ui.place, two decimals, either decimal mark).
@@ -123,10 +134,29 @@ FILE_SIZE = re.compile(r"\d+(?:[.,]\d+)?\s?(?:B|kB|KB|MB|GB)\b")
 DIALOG_BUTTONS = ["Allow", "ALLOW", "Not now"]
 # The list's last line for a peer whose position is live (1209, Ui.preview).
 LIVE_LINE = "\U0001f4cd live"
+# A row's last line while a message is typed there and not sent (1219,
+# the catalogue's draft_row).
+DRAFT_PREFIX = "Draft: "
 # The liveness ring's width as a share of the avatar (AvatarView.RING).
 RING = 0.06
-# A delivery mark of ours the walk counts as a tick (Ui.state's words).
-TICKS = {"sent", "delivered ✓"}
+# The list row's map pin (1224): its content description begins so
+# (the catalogue's position_of), and its tap target is at least 48dp.
+PIN_LABEL = "Position of "
+PIN_DP = 48
+# The ladder's five marks (1232, loquax-read-receipts.md section 3): the
+# view id each rung gives its mark (chat::Mark::resource, Glyph.resource)
+# and the start of what a screen reader says for it (the catalogue's
+# state_* words in English); the clock has two, sending and sent with no
+# proof.
+MARK_WORDS = {
+    "state_clock": ("Sending", "Sent, not confirmed yet"),
+    "state_tick": ("Waiting in the mailbox",),
+    "state_ticks": ("Delivered",),
+    "state_ticks_read": ("Read at ",),
+    "state_failed": ("Not sent. Double tap to send again",),
+}
+# A mark of ours the walk counts as a tick: anyone confirmed it.
+TICKS = {"state_tick", "state_ticks", "state_ticks_read"}
 
 
 # --- Parsers: what the unit tests under scripts/tests/ pin. ---
@@ -157,6 +187,26 @@ class Node:
 
 
 BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+
+def marks_on(nodes: list[Node]) -> list[Node]:
+    """The delivery marks on screen: nodes whose id is a rung's."""
+    return [n for n in nodes if any(n.is_id(rid) for rid in MARK_WORDS)]
+
+
+def mark_rid(node: Node) -> str:
+    """The rung a mark node's id names, or ""."""
+    return next((rid for rid in MARK_WORDS if node.is_id(rid)), "")
+
+
+def marks_problems(seen: dict[str, str]) -> list[str]:
+    """What is wrong with the marks seen, rung to its spoken words: a rung
+    never seen, or one that says another rung's words."""
+    problems = [f"no {rid}" for rid in MARK_WORDS if rid not in seen]
+    for rid, desc in seen.items():
+        if not desc.startswith(MARK_WORDS[rid]):
+            problems.append(f"{rid} says {desc!r}, not {' or '.join(MARK_WORDS[rid])!r}")
+    return problems
 
 
 def parse_bounds(text: str) -> tuple[int, int, int, int] | None:
@@ -407,6 +457,41 @@ def maps_page_problems(nodes: list[Node]) -> tuple[str, list[str]]:
     return f"auto={state} used={size.group(0) if size else '?'} regions={len(names)}", problems
 
 
+def privacy_page_problems(nodes: list[Node]) -> tuple[bool | None, list[str]]:
+    """The Privacy page's read receipts row (1233): the switch's state,
+    None without one, and what is wrong: no switch, no row title or no
+    line under it, the row not above the blocked contacts, a line that
+    did not decode."""
+    switch = find(nodes, rid=RECEIPTS_SWITCH)
+    shown = texts(nodes)
+    problems = []
+    if not switch:
+        problems.append("no read receipts switch")
+    if RECEIPTS_ROW not in shown:
+        problems.append(f"no {RECEIPTS_ROW!r}")
+    if not any(t.startswith(RECEIPTS_LINE) for t in shown):
+        problems.append("no line under the read receipts row")
+    blocked = find(nodes, text=BLOCKED_HEADER)
+    if switch and blocked and switch[0].bounds[1] > blocked[0].bounds[1]:
+        problems.append("the read receipts row is not above the blocked contacts")
+    problems += decode_problems(nodes)
+    return (switch[0].checked if switch else None), problems
+
+
+def receipts_rungs_problems(seen: set[str], on: bool) -> list[str]:
+    """The imported chat's rungs as seen with read receipts `on` or off
+    (1233): on, the read rung is there; off, it is not, and its message
+    shows two grey ticks instead."""
+    if on:
+        return [] if "state_ticks_read" in seen else ["on: no read mark"]
+    problems = []
+    if "state_ticks_read" in seen:
+        problems.append("off: a read mark still shows")
+    if "state_ticks" not in seen:
+        problems.append("off: no delivered mark")
+    return problems
+
+
 def page_mark_missing(page: str, nodes: list[Node]) -> str | None:
     """What `page` lacks of its own mark (SETTINGS_PAGE_MARKS); None when
     it shows it or has none."""
@@ -527,6 +612,27 @@ def changed_fraction(
     return changed / len(a)
 
 
+def fling_problems(
+    early: list[tuple[int, int, int]],
+    later: list[tuple[int, int, int]],
+    final: list[tuple[int, int, int]],
+    least: float = 0.02,
+) -> list[str]:
+    """The fling step's verdict (1188): the map grabbed early in the coast,
+    later in it and at rest must differ pairwise by at least `least` of
+    the samples, or the map stood still between them."""
+    problems = []
+    for name, a, b in (
+        ("early=later", early, later),
+        ("early=final", early, final),
+        ("later=final", later, final),
+    ):
+        share = changed_fraction(a, b)
+        if share < least:
+            problems.append(f"{name} ({share:.3f} changed)")
+    return problems
+
+
 def mean_luma(samples: list[tuple[int, int, int]]) -> float:
     """The samples' mean brightness, 0 to 255 (Rec. 601 weights)."""
     if not samples:
@@ -550,6 +656,64 @@ def ring_points(
         )
         for i in range(count)
     ]
+
+
+def parse_density(text: str) -> int | None:
+    """The screen's density from `wm density`: the override when one is
+    set, else the physical one; None when neither is said."""
+    found = {}
+    for line in text.splitlines():
+        m = re.match(r"\s*(Physical|Override) density:\s*(\d+)", line)
+        if m:
+            found[m.group(1)] = int(m.group(2))
+    return found.get("Override", found.get("Physical"))
+
+
+def pin_in_row(nodes: list[Node], avatar: Node) -> Node | None:
+    """The map pin of the list row whose avatar is `avatar` (1224): the pin
+    whose middle lies within the avatar's height."""
+    top, bottom = avatar.bounds[1], avatar.bounds[3]
+    for node in find(nodes, rid="pin"):
+        if top <= node.center[1] <= bottom:
+            return node
+    return None
+
+
+def pin_problems(pin: Node | None, density: int | None) -> list[str]:
+    """What is wrong with a row's map pin: none there, no label of the
+    catalogue's, a tap target under 48dp."""
+    if pin is None:
+        return ["no map pin in the row"]
+    problems = []
+    if not pin.desc.startswith(PIN_LABEL):
+        problems.append(f"the pin says {pin.desc!r}, not {PIN_LABEL!r}...")
+    if density:
+        least = PIN_DP * density / 160 - 1
+        x1, y1, x2, y2 = pin.bounds
+        if x2 - x1 < least or y2 - y1 < least:
+            problems.append(f"the pin's target is {x2 - x1}x{y2 - y1} px, under {PIN_DP}dp at {density} dpi")
+    return problems
+
+
+def last_in_row(nodes: list[Node], avatar: Node) -> Node | None:
+    """The last line of the list row whose avatar is `avatar`: the `last`
+    whose middle lies within the avatar's height."""
+    top, bottom = avatar.bounds[1], avatar.bounds[3]
+    for node in find(nodes, rid="last"):
+        if top <= node.center[1] <= bottom:
+            return node
+    return None
+
+
+def draft_problems(last: Node | None, typed: str) -> list[str]:
+    """What is wrong with a row's draft line (1219): none there, or not
+    `Draft: ` and what was typed."""
+    if last is None:
+        return ["no last line in the row"]
+    want = DRAFT_PREFIX + typed
+    if last.text != want:
+        return [f"the row says {last.text!r}, not {want!r}"]
+    return []
 
 
 def conversation_notifications(dumpsys: str, package: str) -> dict[str, str]:
@@ -1169,6 +1333,30 @@ class Walk:
             dev.key("KEYCODE_BACK")
         return f"sheet={found[0].text!r} lines={len(shown)}"
 
+    def step_marks(self) -> str:
+        """The imported chat holds one sent message on each rung of the
+        ladder (ugly_store's delivery_of): down from the top until all five
+        marks were on screen, each with its own id and its own words."""
+        dev = self.need_device()
+        seen: dict[str, str] = {}
+        last: list[str] = []
+        for scrolls in range(60):
+            nodes = dev.dump()
+            for node in marks_on(nodes):
+                seen.setdefault(mark_rid(node), node.desc)
+            if len(seen) == len(MARK_WORDS):
+                break
+            bodies = [n.text for n in by_top(find(nodes, rid="body"))]
+            if bodies and bodies == last:
+                break
+            last = bodies
+            self.scroll_list(nodes, "list", up=False)
+        problems = marks_problems(seen)
+        self.note(f"marks seen: {seen}")
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"scrolls={scrolls} rungs={sorted(seen)}"
+
     def step_reply_send(self) -> str:
         dev = self.need_device()
         fixture = self.need_fixture()
@@ -1196,8 +1384,8 @@ class Walk:
             if not mine:
                 return False
             y = mine[-1].bounds[1]
-            marks = [n for n in find(nodes, rid="mark") if n.bounds[1] >= y]
-            mark = marks[0].desc if marks else ""
+            marks = [n for n in by_top(marks_on(nodes)) if n.bounds[1] >= y]
+            mark = mark_rid(marks[0]) if marks else ""
             return mark in TICKS
 
         shown = wait_for(ticked, 5, every=0.2)
@@ -1248,7 +1436,9 @@ class Walk:
     def step_receive_report(self) -> str:
         """A position report from the open conversation's peer, with the
         conversation closed (1209): it raises no notification, the list's
-        line says `📍 live`, and the row's avatar gains its ring."""
+        line says `📍 live`, and the row gains its map pin (1224), which
+        stands in the place of the avatar's ring: the avatar stays as it
+        was."""
         dev = self.need_device()
         fixture = self.need_fixture()
         peer = fixture.manifest["sender_peer"]
@@ -1294,12 +1484,100 @@ class Walk:
             raise StepFailed(
                 f"a notification for {peer[:8]}: before={told.get(peer)!r} after={after_told.get(peer)!r}"
             )
-        avatar = self.row_avatar(dev.dump(), shown)
+        nodes = dev.dump()
+        avatar = self.row_avatar(nodes, shown)
+        problems = pin_problems(pin_in_row(nodes, avatar), self.density())
+        if problems:
+            raise StepFailed("; ".join(problems))
         after = [dev.screen().pixel(x, y) for x, y in ring_points(avatar.bounds)]
         ring = changed_fraction(before, after)
-        if ring < 0.5:
-            raise StepFailed(f"the avatar's ring did not change: {ring:.2f} of its points")
-        return f"live_line_ms={seen_ms} notified=no ring_changed={ring:.2f}"
+        if ring >= 0.5:
+            raise StepFailed(f"the avatar gained a ring in the list: {ring:.2f} of its points changed")
+        return f"live_line_ms={seen_ms} notified=no pin=shown ring_changed={ring:.2f}"
+
+    def density(self) -> int | None:
+        return parse_density(self.need_device().shell("wm density"))
+
+    def step_position_pin(self) -> str:
+        """The list row's map pin (1224), after receive_report gave the
+        peer a fresh position: a tap lands on the Map tab with that
+        friend's card open; Back returns to the chats, the card closed."""
+        dev = self.need_device()
+        shown = self.need_fixture().manifest["open"]["shown"]
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        nodes = dev.dump()
+        pin = pin_in_row(nodes, self.row_avatar(nodes, shown))
+        problems = pin_problems(pin, self.density())
+        if problems or pin is None:
+            raise StepFailed("; ".join(problems))
+        start = time.monotonic()
+        dev.tap_node(pin)
+        card = self.wait_id("card_name", 10)
+        card_ms = int((time.monotonic() - start) * 1000)
+        if card[0].text != shown:
+            raise StepFailed(f"the card says {card[0].text!r}, the row {shown!r}")
+        nodes = dev.dump()
+        if find(nodes, rid="write") or find(nodes, rid="compose"):
+            raise StepFailed(f"not on the Map tab: {texts(nodes)[:12]}")
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        if find(dev.dump(), rid="card_name"):
+            raise StepFailed("back left the card open")
+        return f"pin={pin.desc!r} card_ms={card_ms} card={card[0].text!r} back=chats"
+
+    def step_draft(self) -> str:
+        """A message typed and not sent (1219): Back to the list shows it
+        as the row's `Draft: …`; the app stopped and started again shows it
+        there still, and the chat opens with it in the field. The field is
+        emptied again at the end, which takes the draft away."""
+        dev = self.need_device()
+        shown = self.need_fixture().manifest["open"]["shown"]
+        typed = f"walk draft {self.nonce}"
+
+        def to_list():
+            for _ in range(3):
+                if find(dev.dump(), rid="write"):
+                    return
+                dev.key("KEYCODE_BACK")
+                time.sleep(0.6)
+            self.wait_id("write", 10)
+
+        def row_says():
+            nodes = dev.dump()
+            return draft_problems(last_in_row(nodes, self.row_avatar(nodes, shown)), typed)
+
+        to_list()
+        self.open_conversation(shown)
+        dev.tap_node(self.wait_id("compose", 5)[0])
+        dev.type_text(typed)
+        to_list()
+        problems = row_says()
+        if problems:
+            raise StepFailed("in the list: " + "; ".join(problems))
+        # Typing paused long ago: the store has it. The app goes whole.
+        dev.shell(f"am force-stop {PACKAGE}")
+        start = time.monotonic()
+        dev.shell(f"am start -W -n {PACKAGE}/{ACTIVITY}", timeout=60)
+        self.wait_id("write", 30)
+        if not wait_for(lambda: not row_says(), 10, every=0.5):
+            raise StepFailed("after the restart: " + "; ".join(row_says()))
+        back_ms = int((time.monotonic() - start) * 1000)
+        self.open_conversation(shown)
+        field = self.wait_id("compose", 5)[0]
+        if field.text != typed:
+            raise StepFailed(f"the field holds {field.text!r}, not {typed!r}")
+        dev.tap_node(field)
+        dev.shell("input keyevent KEYCODE_MOVE_END " + " ".join(["KEYCODE_DEL"] * (len(typed) + 2)))
+        to_list()
+        nodes = dev.dump()
+        last = last_in_row(nodes, self.row_avatar(nodes, shown))
+        if last is not None and last.text.startswith(DRAFT_PREFIX):
+            raise StepFailed(f"emptied, the row still says {last.text!r}")
+        return f"row={DRAFT_PREFIX + typed!r} restart_ms={back_ms} field=restored cleared=yes"
 
     def row_avatar(self, nodes: list[Node], shown: str) -> Node:
         """The list row's avatar beside the name `shown`."""
@@ -1315,29 +1593,8 @@ class Walk:
     def step_map(self) -> str:
         dev = self.need_device()
         # Back to the list, then the Map tab (1199).
-        for _ in range(3):
-            if find(dev.dump(), rid="write"):
-                break
-            dev.key("KEYCODE_BACK")
-            time.sleep(0.6)
-        tabs = find(dev.dump(), rid="tab_map")
-        if not tabs:
-            raise StepFailed(f"no Map tab on the list: {texts(dev.dump())[:12]}")
-        dev.tap_node(tabs[0])
-        box = None
-
-        def framed():
-            nonlocal box
-            nodes = dev.dump()
-            if not find(nodes, rid="map"):
-                return None
-            box = self.map_box(nodes)
-            samples = sample_grid(dev.screen(), box)
-            return samples if not is_uniform(samples) else None
-
-        first = wait_for(framed, 20, every=0.5)
-        if not first or box is None:
-            raise StepFailed("no map frame within 20s: the map view is uniform or missing")
+        box = self.open_map()
+        first = sample_grid(dev.screen(), box)
         problems = map_screen_problems(dev.dump())
         if problems:
             raise StepFailed("; ".join(problems))
@@ -1379,6 +1636,73 @@ class Walk:
             raise StepFailed(f"Settings' map theme left the brightness at {lumas[0]:.0f} -> {lumas[1]:.0f}")
         dev.key("KEYCODE_BACK")
         return f"{' '.join(changes)} tabs=2 chrome=none theme_luma={lumas[0]:.0f}->{lumas[1]:.0f}"
+
+    def open_map(self) -> tuple[int, int, int, int]:
+        """The Map tab from wherever the walk is, once a frame shows: the
+        map view's box."""
+        dev = self.need_device()
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        tabs = find(dev.dump(), rid="tab_map")
+        if not tabs:
+            raise StepFailed(f"no Map tab on the list: {texts(dev.dump())[:12]}")
+        dev.tap_node(tabs[0])
+        box = None
+
+        def framed():
+            nonlocal box
+            nodes = dev.dump()
+            if not find(nodes, rid="map"):
+                return None
+            box = self.map_box(nodes)
+            return box if not is_uniform(sample_grid(dev.screen(), box)) else None
+
+        if not wait_for(framed, 20, every=0.5) or box is None:
+            raise StepFailed("no map frame within 20s: the map view is uniform or missing")
+        return box
+
+    def step_fling(self) -> str:
+        """A fast pan let go of coasts on (1188): the screen grabbed about
+        100 ms and 400 ms after the finger lifted and once at rest differ
+        pairwise. The grabs' times are measured from the swipe's return and
+        reported, a screencap takes its own while."""
+        dev = self.need_device()
+        box = self.open_map()
+        x1, y1, x2, y2 = box
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        time.sleep(1.5)
+        reach = (x2 - x1) * 3 // 8
+        # Half the width in 60 ms: thousands of pixels a second, far past
+        # ViewConfiguration's minimum fling velocity.
+        dev.swipe(cx + reach, cy, cx - reach, cy, 60)
+        lifted = time.monotonic()
+
+        def grab_at(ms: int) -> tuple[int, list[tuple[int, int, int]]]:
+            wait = lifted + ms / 1000 - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            took = int((time.monotonic() - lifted) * 1000)
+            return took, sample_grid(dev.screen(), box)
+
+        early_ms, early = grab_at(100)
+        later_ms, later = grab_at(400)
+        final_ms, final = grab_at(4000)
+        problems = fling_problems(early, later, final)
+        detail = (
+            f"grabs at +{early_ms}/+{later_ms}/+{final_ms} ms "
+            f"early-later={changed_fraction(early, later):.2f} "
+            f"later-final={changed_fraction(later, final):.2f}"
+        )
+        if problems:
+            raise StepFailed(f"the map stood still: {'; '.join(problems)}; {detail}")
+        black = black_cells(dev.screen(), box)
+        if black:
+            raise StepFailed(f"{black} black parts at rest after the fling; {detail}")
+        dev.key("KEYCODE_BACK")
+        return detail
 
     def step_friends(self) -> str:
         """The Map tab's Friends button (1200): the sheet lists the fixture's
@@ -1472,6 +1796,81 @@ class Walk:
         dev.key("KEYCODE_BACK")
         self.wait_id("write", 10)
         return f"entries={len(titles)} walked={','.join(walked)} back=chats"
+
+    def step_receipts(self) -> str:
+        """The read receipts switch (1233): More, Settings, Privacy; the
+        row first on the page, on; switched off, the imported chat shows
+        no read mark, its message two grey ticks; Privacy again shows it
+        off (stored), switched on, the read mark back."""
+        dev = self.need_device()
+        rungs = {}
+        for on in (False, True):
+            self.open_privacy()
+            state = self.privacy_switch(not on)
+            dev.tap_node(find(state, rid=RECEIPTS_SWITCH)[0])
+            self.privacy_switch(on)
+            for _ in range(3):
+                dev.key("KEYCODE_BACK")
+                time.sleep(0.6)
+                if find(dev.dump(), rid="write"):
+                    break
+            self.wait_id("write", 10)
+            seen = self.chat_rungs()
+            self.note(f"receipts {'on' if on else 'off'}: rungs {sorted(seen)}")
+            problems = receipts_rungs_problems(seen, on)
+            if problems:
+                raise StepFailed("; ".join(problems))
+            rungs["on" if on else "off"] = len(seen)
+        return f"switch=on,off,stored,on rungs_off={rungs['off']} rungs_on={rungs['on']}"
+
+    def open_privacy(self) -> None:
+        """From the open chat: More, Settings, Privacy."""
+        dev = self.need_device()
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        self.tap_text(MORE)
+        self.tap_text(SETTINGS)
+        self.wait_id("settings_entry_title", 10)
+        self.tap_text("Privacy")
+        self.wait_id(RECEIPTS_SWITCH, 10)
+
+    def privacy_switch(self, on: bool) -> list[Node]:
+        """The Privacy page once its read receipts switch shows `on`, the
+        row as `privacy_page_problems` wants it."""
+        dev = self.need_device()
+        seen: list[Node] = []
+
+        def shows():
+            nonlocal seen
+            seen = dev.dump()
+            state, problems = privacy_page_problems(seen)
+            if problems and state is not None:
+                raise StepFailed("Privacy: " + "; ".join(problems))
+            return seen if state == on else None
+
+        if not wait_for(shows, 10, every=0.3):
+            raise StepFailed(f"Privacy: the switch did not show {'on' if on else 'off'}")
+        return seen
+
+    def chat_rungs(self) -> set[str]:
+        """Every rung the open chat shows: up to its top, then down to its
+        end, collecting the marks on the way."""
+        dev = self.need_device()
+        seen: set[str] = set()
+        for up in (True, False):
+            last: list[str] = []
+            for _ in range(60):
+                nodes = dev.dump()
+                seen.update(mark_rid(n) for n in marks_on(nodes))
+                bodies = [n.text for n in by_top(find(nodes, rid="body"))]
+                if bodies and bodies == last:
+                    break
+                last = bodies
+                self.scroll_list(nodes, "list", up=up)
+        return seen
 
     def put_fixture_region(self) -> None:
         """The walk's region into the app's maps directory, through

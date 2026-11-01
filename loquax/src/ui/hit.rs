@@ -400,6 +400,34 @@ fn messages_target<B: InputBuffer>(
     }
 }
 
+/// The terminal's viewport (1231): the open chat's peer and the keys of its
+/// messages at least half on screen; one taller than the pane counts with
+/// a third of the pane. Nothing while the map, the help or a detail view
+/// covers the conversation. A frontend of its own layout says its own.
+pub fn viewport<B: InputBuffer>(model: &UiModel<B>) -> Option<([u8; 16], Vec<u64>)> {
+    let conversation = model.conversations.get(model.selected)?;
+    let peer = conversation.peer;
+    if model.map.is_some() || model.help || model.detail.is_some() {
+        return Some((peer, Vec::new()));
+    }
+    let laid = model.laid();
+    let at = rows(model, &laid);
+    let height = model.message_rows();
+    let (top, bottom) = (at.top, at.top + at.shown);
+    let keys = laid
+        .spans
+        .iter()
+        .zip(&conversation.messages)
+        .filter(|(span, _)| {
+            let len = span.end - span.start;
+            let shown = span.end.min(bottom).saturating_sub(span.start.max(top));
+            len > 0 && (shown * 2 >= len || (len > height && shown * 3 >= height))
+        })
+        .map(|(_, message)| message.activity)
+        .collect();
+    Some((peer, keys))
+}
+
 /// The laid-out row and column under the cell for a drag, held to the
 /// conversation's rows on screen: a drag past the pane's edge selects to
 /// the edge.

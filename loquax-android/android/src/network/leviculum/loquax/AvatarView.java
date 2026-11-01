@@ -64,15 +64,14 @@ public class AvatarView extends View {
     }
 
     /**
-     * The liveness ring of the peer `row` describes (1209, loquax's
-     * `chat::ring`): the accent while its position is live, the secondary
-     * text colour once the reports stopped, 0 (none) when stale or for a
-     * row without `liveness`.
+     * The liveness ring of the peer `row` describes (1209), the colour the
+     * library names in its `ring` (1217, loquax's `scene::Ring`): 0 (none)
+     * for a row without one.
      */
     static int ring(Context context, Map<String, Object> row) {
-        switch (Core.str(row, "liveness")) {
-            case "live": return context.getColor(R.color.accent);
-            case "recent": return context.getColor(R.color.text_secondary);
+        switch (Core.str(row, "ring")) {
+            case "accent": return context.getColor(R.color.accent);
+            case "secondary": return context.getColor(R.color.text_secondary);
             default: return 0;
         }
     }

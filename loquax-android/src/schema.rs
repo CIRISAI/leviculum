@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`], [`Shared`], [`Profile`], [`Lxma`], [`MapRegions`] or [`MapThemeChoice`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`], [`Shared`], [`Profile`], [`Lxma`], [`MapRegions`], [`MapThemeChoice`], [`MapFlingChoice`] or [`ReceiptsChoice`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
@@ -89,7 +89,36 @@
 //! `density_milli`, which that struct needs, so the request never decoded
 //! and both pages showed their empty defaults; those fields are gone. No
 //! new version: an app that sent them got nothing but the error, and the
-//! frame's own fields are unchanged.
+//! frame's own fields are unchanged. The Advanced page's switch of the
+//! map's fling (1188) is [`Query::MapFling`] with its [`MapFlingChoice`];
+//! the frame says the choice as `fling`, and how far its view may still
+//! move north and south before the world's edge as `room_north` and
+//! `room_south`, which a coast stops at. An older app reads none of them.
+//! The scene's words (1217) came within version 1 too: [`Start::lang`],
+//! the list's `search`, a row's `live` and `ring`, and a bubble's
+//! `joins_before`, `joins_after`, `day`, `meta`, `newest` and `live`. The
+//! app draws them and computes none of them again; an app that sends no
+//! `lang` gets English, one that sends no `search` the whole list.
+//! The list's map pin (1224) came within version 1 too:
+//! [`ConversationRow::pin`] and [`ConversationRow::pin_label`], and
+//! [`ConversationRow::ring`] empty in the list from then on. An older app
+//! draws no pin and, without the ring, no liveness in the list; the
+//! newest report's row still words it.
+//! The draft (1219) came within version 1 too: [`Request::Draft`], the
+//! list row's [`ConversationRow::draft`] and the chat's [`Messages::draft`]
+//! and [`Messages::draft_reply`]. An older app sends no draft, and keeps
+//! none.
+//! The viewport (1231) came within version 1 too: [`Request::Viewport`].
+//! An app that sends none sends no read receipts.
+//! Read receipts (1230) came within version 1 too: the delivery word
+//! `read` on [`MessageRow::state`] and [`ConversationRow::state`], with
+//! [`MessageRow::read_at`], and the peer's flag [`Messages::receipts`]. An
+//! app that does not know `read` draws its default mark; the app of this
+//! tree draws it as `delivered` until the glyph ladder of
+//! `docs/src/concepts/loquax-read-receipts.md` lands.
+//! The switch (1233) came within version 1 too: [`Query::Receipts`] with
+//! its [`ReceiptsChoice`]. An older app shows no switch, and the phone
+//! sends receipts unless its config says `read_receipts = off`.
 
 use serde::{Deserialize, Serialize};
 
@@ -118,6 +147,11 @@ pub struct Start {
     /// writes into a message's history.
     #[serde(default)]
     pub offset: i32,
+    /// The phone's language, a locale tag (`de-DE`): the words of the
+    /// scene (liveness, the day line) are said in it (1217). English when
+    /// absent or not one the catalogue speaks.
+    #[serde(default)]
+    pub lang: Option<String>,
     /// Make this phone the mailbox (the first start's choice, 1152): the
     /// session starts the home node in the app and joins it itself, with no
     /// code and no server. A phone that chose it once keeps it without
@@ -184,6 +218,9 @@ pub enum Request {
     /// Forwarded the message `key` ([`MessageRow::key`]) of `peer`'s
     /// conversation to `to`: its text and content fields again.
     Forward { peer: String, key: i64, to: String },
+    /// Tapped the red mark of the message `key` of `peer`'s conversation,
+    /// one of ours not sent: it goes again (1232), the failed one leaves.
+    SendAgain { peer: String, key: i64 },
     /// Deleted the messages `keys` of `peer`'s conversation, the user asked
     /// already; on a client of a home node from its every device.
     Delete { peer: String, keys: Vec<i64> },
@@ -196,6 +233,10 @@ pub enum Request {
     /// front and with the watching link down, the session pulls every
     /// minute.
     Front { front: bool },
+    /// These bubbles of `peer`'s chat are on screen, at least half of each,
+    /// by their [`MessageRow::key`], on every change (1231): the core
+    /// decides from it, and from the front, what was read.
+    Viewport { peer: String, keys: Vec<i64> },
     /// The name recipients see, for the mailbox on this phone (the first
     /// start's last screen, 1152).
     Name { name: String },
@@ -261,6 +302,16 @@ pub enum Request {
         lxma: String,
         #[serde(default)]
         name: Option<String>,
+    },
+    /// What the compose field of `peer`'s chat holds now (1219), on every
+    /// change: `body`, and the id of the message a reply being written
+    /// answers in `reply`, empty for none. Kept as the conversation's
+    /// draft; the empty one clears it.
+    Draft {
+        peer: String,
+        body: String,
+        #[serde(default)]
+        reply: String,
     },
 }
 
@@ -333,8 +384,13 @@ impl<'de> Deserialize<'de> for Blob {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Query {
-    /// The conversation list, in the list's order.
-    Conversations,
+    /// The conversation list, in the list's order; with `search` only the
+    /// rows it finds, every word of it in the name or the last line
+    /// (`loquax::ui::chat::row_matches`, 1217).
+    Conversations {
+        #[serde(default)]
+        search: Option<String>,
+    },
     /// One conversation's messages, oldest first.
     Messages { peer: String },
     /// The detail of the message `key` of `peer`'s conversation.
@@ -353,8 +409,12 @@ pub enum Query {
     Links,
     /// What the contact screen shows of `peer` (1146).
     Detail { peer: String },
-    /// The archived conversations, as the list's rows.
-    Archived,
+    /// The archived conversations, as the list's rows; `search` as in
+    /// [`Query::Conversations`].
+    Archived {
+        #[serde(default)]
+        search: Option<String>,
+    },
     /// The blocked peers, as the list's rows, conversation or not.
     Blocked,
     /// This phone's own address, for the first start's last screen (1152).
@@ -398,6 +458,18 @@ pub enum Query {
         #[serde(default)]
         set: Option<String>,
     },
+    /// The Advanced page's map fling (1188): `set` stored when given, the
+    /// choice in force answered.
+    MapFling {
+        #[serde(default)]
+        set: Option<bool>,
+    },
+    /// The Privacy page's "Send read receipts" (1233): `set` stored when
+    /// given, the switch in force answered as [`ReceiptsChoice`].
+    Receipts {
+        #[serde(default)]
+        set: Option<bool>,
+    },
 }
 
 /// What [`Query::MapRegions`] answers: the regions, newest first, their
@@ -420,6 +492,25 @@ pub struct MapThemeChoice {
     pub ok: bool,
     pub theme: String,
     pub theme_chosen: bool,
+}
+
+/// What [`Query::MapFling`] answers: whether the map coasts on after a
+/// pan (on unless the config's `map_fling` says off, 1188).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapFlingChoice {
+    pub v: u32,
+    pub ok: bool,
+    pub fling: bool,
+}
+
+/// What [`Query::Receipts`] answers: whether this phone sends read
+/// receipts and shows them (on unless the config's `read_receipts` says
+/// off, 1233).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptsChoice {
+    pub v: u32,
+    pub ok: bool,
+    pub on: bool,
 }
 
 /// What [`Query::Shared`] answers: the positions we sent, newest first, at
@@ -503,6 +594,13 @@ pub struct FriendRow {
     pub cadence_s: u32,
     #[serde(default)]
     pub last_fix_at: i64,
+    /// The card's words for a peer that reports, in the phone's language
+    /// (1217, `scene::row_live`), empty for one known from a text alone;
+    /// the ring's colour as [`ConversationRow::ring`].
+    #[serde(default)]
+    pub live: String,
+    #[serde(default)]
+    pub ring: String,
 }
 
 /// What [`Query::Run`] answers: the run's reports, newest first; one for a
@@ -729,6 +827,10 @@ pub struct PositionRow {
     pub at: i64,
     pub lat_e6: i32,
     pub lon_e6: i32,
+    /// Its day in the phone's language, as the chat's day line says it
+    /// (1217, `scene::day_words`): `Today`, `Saturday, 24 October`.
+    #[serde(default)]
+    pub day: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -822,6 +924,10 @@ pub struct ConversationRow {
     /// the list draws its mark where an unread count would be.
     #[serde(default)]
     pub state: String,
+    /// When `state` is `read`: the reader's time, unix seconds, else 0
+    /// (1232), as [`MessageRow::read_at`].
+    #[serde(default)]
+    pub read_at: i64,
     /// The linked contact's thumbnail as loquax copied it, a file the app
     /// decodes (1139); absent, the avatar is the initials.
     #[serde(default)]
@@ -850,6 +956,31 @@ pub struct ConversationRow {
     pub cadence_s: u32,
     #[serde(default)]
     pub last_fix_at: i64,
+    /// The last line in the phone's language when the last row is a
+    /// report (1217, `scene::list_live`): `live`, `3 h ago`; empty for
+    /// any other row.
+    #[serde(default)]
+    pub live: String,
+    /// The avatar's ring (1217, `scene::Ring`): `accent`, `secondary`, or
+    /// empty for none. Always empty in the list since 1224: the row's map
+    /// pin says the position there.
+    #[serde(default)]
+    pub ring: String,
+    /// The row's map pin (1224, `scene::PositionBadge`): its tint,
+    /// `accent` for a live position, `secondary` for a recent one, empty
+    /// for none (no position younger than a day); a tap on it opens the
+    /// map on the peer. Its content description in the phone's language,
+    /// `Position of Anna, 2 min ago`.
+    #[serde(default)]
+    pub pin: String,
+    #[serde(default)]
+    pub pin_label: String,
+    /// What was typed in the conversation and not sent (1219), in the
+    /// phone's language, `Draft: …`: shown in italics instead of
+    /// [`ConversationRow::last`]; empty for none, and always for the open
+    /// conversation.
+    #[serde(default)]
+    pub draft: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -890,8 +1021,14 @@ pub struct MessageRow {
     pub id: String,
     pub ours: bool,
     pub body: String,
-    /// Ours only: `queued`, `sending`, `sent`, `delivered` or `failed`.
+    /// Ours only: `queued`, `sending`, `sent`, `delivered`, `read` or
+    /// `failed`.
     pub state: String,
+    /// Ours only, when `state` is `read` (1230): when the peer read it, by
+    /// the reader's clock kept within when it was sent and when the receipt
+    /// came, unix seconds; 0 otherwise.
+    #[serde(default)]
+    pub read_at: i64,
     pub at: i64,
     pub chips: Vec<Chip>,
     /// The fix the message carries, a report's or a text's that came with
@@ -947,6 +1084,26 @@ pub struct MessageRow {
     pub liveness: String,
     #[serde(default)]
     pub cadence_s: u32,
+    /// Where the bubble sits (1217, `chat::Placement`): it continues the
+    /// group above, the next continues its group, it shows its time and
+    /// mark; `day` is the day line above it in the phone's language, empty
+    /// when no day begins with it; `newest` whether it is in the newest
+    /// group, which says its time as an age.
+    #[serde(default)]
+    pub joins_before: bool,
+    #[serde(default)]
+    pub joins_after: bool,
+    #[serde(default)]
+    pub meta: bool,
+    #[serde(default)]
+    pub newest: bool,
+    #[serde(default)]
+    pub day: String,
+    /// The newest report's words in the phone's language (1217,
+    /// `scene::row_live`): `live · every 10 min · 2 min ago`, `last
+    /// position 3 h ago`; empty on every other row.
+    #[serde(default)]
+    pub live: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -992,6 +1149,11 @@ pub struct Messages {
     /// header's mark.
     #[serde(default)]
     pub verified: bool,
+    /// The peer's latest message carried the read-receipt mark (1230): it
+    /// sends read receipts and is sent them. Without it, ours stay
+    /// `delivered`, and the detail view says the peer sends none.
+    #[serde(default)]
+    pub receipts: bool,
     /// The bar avatar's ring (1209), as in [`ConversationRow`].
     #[serde(default)]
     pub liveness: String,
@@ -999,6 +1161,18 @@ pub struct Messages {
     pub cadence_s: u32,
     #[serde(default)]
     pub last_fix_at: i64,
+    /// The ring's colour, as [`ConversationRow::ring`].
+    #[serde(default)]
+    pub ring: String,
+    /// What the compose field holds when the chat opens (1219, the scene's
+    /// compose node): the conversation's draft, which the field reports
+    /// back with [`Request::Draft`] on every change.
+    #[serde(default)]
+    pub draft: String,
+    /// The message the draft's reply answers, its id in hex; empty for
+    /// none.
+    #[serde(default)]
+    pub draft_reply: String,
 }
 
 /// What happened, for the screen.
@@ -1214,8 +1388,8 @@ pub struct MapShown {
     /// The zoom step whose tiles the frame is composed from.
     #[serde(default)]
     pub tile_zoom: u8,
-    /// The frame still owes tiles it showed another step's tiles for:
-    /// ask again.
+    /// The frame still owes tiles it showed another step's tiles for, or
+    /// a name in it fades in or out (1205): ask again.
     #[serde(default)]
     pub pending: bool,
     /// The shallowest and the deepest zoom the regions allow.
@@ -1273,6 +1447,17 @@ pub struct MapShown {
     /// Whether the automatic download is on.
     #[serde(default)]
     pub autoload: bool,
+    /// Whether a pan coasts on after the finger lifts (1188): the config's
+    /// `map_fling`, on when unset.
+    #[serde(default)]
+    pub fling: bool,
+    /// How many view pixels the view's centre may still move north, and
+    /// south, before the view is held at the world's edge (1131, 1188):
+    /// what a coast may travel. x has no edge, the world goes round.
+    #[serde(default)]
+    pub room_north: u32,
+    #[serde(default)]
+    pub room_south: u32,
 }
 
 /// A map frame as the host's tests and tools read it: the description's
@@ -1454,7 +1639,8 @@ mod tests {
     fn garbage_is_an_error_in_words() {
         let error = decode::<Request>(b"\xc1").expect_err("not msgpack");
         assert!(error.starts_with("the request did not decode"), "{error}");
-        let error = decode::<Request>(&encode(&Query::Conversations)).expect_err("a query");
+        let error = decode::<Request>(&encode(&Query::Conversations { search: None }))
+            .expect_err("a query");
         assert!(error.contains("conversations"), "{error}");
     }
 }

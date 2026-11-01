@@ -11,10 +11,14 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.view.Choreographer;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
+import android.view.VelocityTracker;
 import android.view.View;
+import android.view.ViewConfiguration;
+import android.widget.OverScroller;
 import android.view.animation.DecelerateInterpolator;
 import android.animation.ValueAnimator;
 import java.util.ArrayList;
@@ -63,6 +67,18 @@ import java.util.Map;
  * the background, where the frame says the fix lies; the crosshair centres
  * on it at a zoom of its choosing (centreAt), and a finger that moves the
  * map tells the listener, which ends follow mode.
+ *
+ * A pan the finger lets go of while it moves coasts on and slows down
+ * (1188), as every Android surface does: VelocityTracker measures the
+ * finger, an OverScroller flings with ListView's physics (the platform's
+ * scroll friction and the screen's density; FlingAnimation would need
+ * AndroidX, which the app does without), and each Choreographer frame
+ * moves the frame on screen by the scroller's step and asks a moving
+ * frame, as a finger would. The scroller's y stops at the world's edge the
+ * last frame names, no bounce; when it stops, the view is drawn at rest,
+ * names set, as after a pan. Which gestures fling is {@link Fling}'s; a
+ * finger down ends a coast where it is, and the config's `map_fling`
+ * turns it off.
  */
 final class MapView extends View {
     /** What a frame said, on the UI thread. */
@@ -91,6 +107,9 @@ final class MapView extends View {
      * of a pan to cover.
      */
     private static final float OVERSCAN = 0.25f;
+
+    /** x is free in a coast: the world goes round. */
+    private static final int FREE = Integer.MAX_VALUE / 2;
 
     private final String dir;
     private final Listener listener;
@@ -129,6 +148,33 @@ final class MapView extends View {
     /** A fly is on: frames are asked as while a finger moves. */
     private boolean flying;
     private ValueAnimator fly;
+    /** Which gestures fling, and the coast (1188), on the UI thread. */
+    private final Fling fling = new Fling();
+    private final Fling.Coast coast;
+    private VelocityTracker velocity;
+    private final float minFling;
+    private final float maxFling;
+    private final Choreographer.FrameCallback coastFrame = new Choreographer.FrameCallback() {
+        @Override
+        public void doFrame(long frameTimeNanos) {
+            int[] by = coast.frame();
+            if (by == null) {
+                return;
+            }
+            boolean on = coast.running();
+            synchronized (MapView.this) {
+                offX += by[0];
+                offY += by[1];
+                coasting = on;
+            }
+            invalidate();
+            if (on) {
+                Choreographer.getInstance().postFrameCallback(this);
+            }
+            // Moving while it runs, and at rest once it stopped.
+            ask();
+        }
+    };
 
     // Everything below is guarded by `this`: the UI thread writes the
     // gestures, the frame thread reads them and writes the frame.
@@ -162,6 +208,13 @@ final class MapView extends View {
     private float offY;
     /** A finger is on the map. */
     private boolean touching;
+    /** A fling coasts (1188): frames are asked as while a finger moves. */
+    private boolean coasting;
+    /** The config's `map_fling`, as the last frame said it. */
+    private boolean flingOn = true;
+    /** How far the last frame's view may still go north and south, in its pixels. */
+    private long roomNorth;
+    private long roomSouth;
     private Long atLat;
     private Long atLon;
     /** The zoom to centre on atLat, atLon at, in thousandths; null lets the library fit. */
@@ -189,6 +242,37 @@ final class MapView extends View {
         label.setTextSize(11 * context.getResources().getDisplayMetrics().scaledDensity);
         label.setTextAlign(Paint.Align.CENTER);
         labelGround.setColor(context.getColor(R.color.bar));
+        ViewConfiguration platform = ViewConfiguration.get(context);
+        minFling = platform.getScaledMinimumFlingVelocity();
+        maxFling = platform.getScaledMaximumFlingVelocity();
+        final OverScroller scroller = new OverScroller(context);
+        coast = new Fling.Coast(new Fling.Scroller() {
+            @Override
+            public void fling(int vx, int vy, int minY, int maxY) {
+                scroller.fling(0, 0, vx, vy, -FREE, FREE, minY, maxY);
+            }
+
+            @Override
+            public boolean step() {
+                // The step that ends a fling still moves it to its end.
+                return scroller.computeScrollOffset() && !scroller.isFinished();
+            }
+
+            @Override
+            public int x() {
+                return scroller.getCurrX();
+            }
+
+            @Override
+            public int y() {
+                return scroller.getCurrY();
+            }
+
+            @Override
+            public void stop() {
+                scroller.forceFinished(true);
+            }
+        });
         gestures = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
             @Override
             public boolean onDown(MotionEvent e) {
@@ -198,6 +282,7 @@ final class MapView extends View {
             @Override
             public boolean onScroll(MotionEvent a, MotionEvent b, float dx, float dy) {
                 listener.onFinger();
+                fling.panned(b.getEventTime());
                 synchronized (MapView.this) {
                     offX -= dx;
                     offY -= dy;
@@ -267,6 +352,7 @@ final class MapView extends View {
         if (fly != null && fly.isRunning()) {
             fly.cancel();
         }
+        stopCoast();
         synchronized (this) {
             flying = false;
             atLat = latE6;
@@ -395,6 +481,7 @@ final class MapView extends View {
         if (fly != null) {
             fly.cancel();
         }
+        stopCoast();
         synchronized (this) {
             flying = true;
             idle = false;
@@ -446,11 +533,34 @@ final class MapView extends View {
         }
     }
 
+    /** End a coast where it is (1188), on the UI thread. */
+    private void stopCoast() {
+        coast.stop();
+        Choreographer.getInstance().removeFrameCallback(coastFrame);
+        synchronized (this) {
+            coasting = false;
+        }
+    }
+
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            // A finger stops a coast where it is and takes over.
+            stopCoast();
+            fling.down(event.getEventTime());
+            if (velocity == null) {
+                velocity = VelocityTracker.obtain();
+            }
+            velocity.clear();
+        } else if (action == MotionEvent.ACTION_POINTER_DOWN) {
+            fling.pointerDown();
+        }
+        if (velocity != null) {
+            velocity.addMovement(event);
+        }
         pinch.onTouchEvent(event);
         gestures.onTouchEvent(event);
-        int action = event.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) {
             if (fly != null && fly.isRunning()) {
                 // A finger stops a fly where it is.
@@ -462,6 +572,9 @@ final class MapView extends View {
                 flying = false;
             }
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            if (action == MotionEvent.ACTION_UP && startCoast(event)) {
+                return true;
+            }
             boolean again;
             synchronized (this) {
                 touching = false;
@@ -472,6 +585,36 @@ final class MapView extends View {
                 ask();
             }
         }
+        return true;
+    }
+
+    /**
+     * The last finger lifted (`up`): start a coast when the gesture
+     * flings. The view is drawn at rest when the coast ends, not now.
+     */
+    private boolean startCoast(MotionEvent up) {
+        if (velocity == null) {
+            return false;
+        }
+        velocity.computeCurrentVelocity(1000, maxFling);
+        int id = up.getPointerId(up.getActionIndex());
+        float vx = velocity.getXVelocity(id);
+        float vy = velocity.getYVelocity(id);
+        boolean on;
+        synchronized (this) {
+            on = flingOn;
+        }
+        if (!fling.flings(up.getEventTime(), vx, vy, minFling, on)) {
+            return false;
+        }
+        int[] room;
+        synchronized (this) {
+            room = Fling.room(offY, scale, getHeight(), roomNorth, roomSouth);
+            touching = false;
+            coasting = true;
+        }
+        coast.start(vx, vy, room);
+        Choreographer.getInstance().postFrameCallback(coastFrame);
         return true;
     }
 
@@ -510,6 +653,11 @@ final class MapView extends View {
 
     @Override
     protected void onDetachedFromWindow() {
+        stopCoast();
+        if (velocity != null) {
+            velocity.recycle();
+            velocity = null;
+        }
         if (frames != null) {
             frames.interrupt();
             frames = null;
@@ -669,7 +817,7 @@ final class MapView extends View {
             boolean ahead;
             synchronized (this) {
                 while (!owed || getWidth() == 0 || getHeight() == 0) {
-                    if (idle && visible && !touching && getWidth() > 0 && getHeight() > 0) {
+                    if (idle && visible && !touching && !coasting && getWidth() > 0 && getHeight() > 0) {
                         break;
                     }
                     try {
@@ -691,7 +839,7 @@ final class MapView extends View {
             synchronized (this) {
                 owed = false;
                 idle = false;
-                moving = touching || flying;
+                moving = touching || flying || coasting;
                 w = getWidth();
                 h = getHeight();
                 mx = Math.round(w * OVERSCAN);
@@ -757,6 +905,9 @@ final class MapView extends View {
                     viewW = w;
                     viewH = h;
                     maxZoom = Core.num(shown, "max_zoom");
+                    flingOn = Core.bool(shown, "fling");
+                    roomNorth = Core.num(shown, "room_north");
+                    roomSouth = Core.num(shown, "room_south");
                     Object chosen = shown.get("selected");
                     selected = chosen == null ? null : String.valueOf(chosen);
                 }
@@ -778,7 +929,8 @@ final class MapView extends View {
                         && !Core.bool(shown, "loading");
             }
             if (Core.bool(shown, "pending")) {
-                // Tiles the frame showed from another step: draw them now.
+                // Tiles the frame showed from another step, or a name
+                // fading in or out: draw the next frame now.
                 ask();
             }
             if (Core.bool(shown, "loading")) {
@@ -824,7 +976,7 @@ final class MapView extends View {
     private void place(Map<String, Object> shown, int w, int h, boolean moving) {
         long z1 = Core.num(shown, "zoom_milli");
         boolean first = x == null || zoomMilli == null || y == null;
-        if (first || (!moving && !touching && !flying && !owed)) {
+        if (first || (!moving && !touching && !flying && !coasting && !owed)) {
             scale = 1f;
             offX = 0;
             offY = 0;

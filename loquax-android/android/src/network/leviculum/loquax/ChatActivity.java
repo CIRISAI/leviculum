@@ -81,8 +81,6 @@ public class ChatActivity extends Activity implements Events.Listener {
     };
     /** The pins, by peer: the key of the pinned message, this phone only. */
     private static final String PINS = "pins";
-    /** Messages of one sender this close together form a group. */
-    private static final long GROUP_SECS = 180;
     /** The bubble's corner, and a grouped bubble's inner one, in dp. */
     private static final float CORNER = 18;
     private static final float CORNER_GROUPED = 6;
@@ -101,6 +99,14 @@ public class ChatActivity extends Activity implements Events.Listener {
     private boolean homeClient;
     /** The message a reply being written answers, or null. */
     private Map<String, Object> replyTo;
+    /**
+     * The field is to take the library's draft with the next answer (1219):
+     * set whenever the screen comes back. Java keeps no draft of its own; the
+     * field mirrors the scene's compose and says every change.
+     */
+    private boolean draftOwed = true;
+    /** The field is being set from the draft, which is no change to say. */
+    private boolean mirroring;
     private View replyBar;
     /** The selection's keys while selecting, else null. */
     private Set<Long> selection;
@@ -121,12 +127,15 @@ public class ChatActivity extends Activity implements Events.Listener {
     private String searchQuery = "";
     private Long searchHit = null;
     private final ServiceLink link = new ServiceLink(this);
-    /** Redraws the relative times of the newest group while the screen is up. */
+    /**
+     * Asks again while the screen is up: the relative times of the newest
+     * group and the library's words (a position's age, the day line) ripen.
+     */
     private final Handler ticker = new Handler(Looper.getMainLooper());
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
-            adapter.notifyDataSetChanged();
+            refresh();
             ticker.postDelayed(this, 30_000);
         }
     };
@@ -256,6 +265,7 @@ public class ChatActivity extends Activity implements Events.Listener {
             @Override
             public void afterTextChanged(Editable s) {
                 sendable();
+                tellDraft();
             }
         });
         sendable();
@@ -320,6 +330,7 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         Core.front(true);
         say(error);
+        draftOwed = true;
         refresh();
         ticker.postDelayed(tick, 30_000);
     }
@@ -833,8 +844,14 @@ public class ChatActivity extends Activity implements Events.Listener {
             line(error);
             return;
         }
-        compose.setText("");
-        replyTo(null);
+        // The library dropped the draft with the send (1219).
+        mirroring = true;
+        try {
+            compose.setText("");
+            replyTo(null);
+        } finally {
+            mirroring = false;
+        }
         refresh();
     }
 
@@ -845,6 +862,13 @@ public class ChatActivity extends Activity implements Events.Listener {
      */
     private void showFix(Map<String, Object> row) {
         if (row.get("lat_e6") == null || row.get("lon_e6") == null) {
+            return;
+        }
+        if (!Core.str(row, "live").isEmpty()) {
+            // The newest report's line, which says whether the position is
+            // alive (1209), opens the map as the list's pin does (1224):
+            // the Map tab on the friend, Back to the chats.
+            ConversationsActivity.openMapAt(this, peer);
             return;
         }
         startActivity(new Intent(this, MapActivity.class)
@@ -869,17 +893,17 @@ public class ChatActivity extends Activity implements Events.Listener {
         if (!accuracy.isEmpty()) {
             line.append(" \u00B7 ").append(accuracy);
         }
-        String liveness = Core.str(row, "liveness");
-        if (!liveness.isEmpty() && row.get("fix_at") != null) {
-            // The newest report says whether the position is alive (1209).
-            line.append(" \u00B7 ").append(Ui.liveRow(this, liveness, Core.num(row, "cadence_s"),
-                    Core.num(row, "fix_at"), now));
+        String live = Core.str(row, "live");
+        if (!live.isEmpty()) {
+            // The newest report says whether the position is alive (1209),
+            // in the library's words (1217).
+            line.append(" \u00B7 ").append(live);
         } else if (row.get("fix_at") != null) {
             line.append(" \u00B7 ").append(Ui.age(this, Core.num(row, "fix_at"), now));
         }
         // An older run stands for all of it (1184): how many, since when.
         long updates = Core.num(row, "updates");
-        if (updates > 1 && liveness.isEmpty()) {
+        if (updates > 1 && live.isEmpty()) {
             String since = android.text.format.DateFormat.getTimeFormat(this)
                     .format(new java.util.Date(Core.num(row, "since") * 1000));
             line.append(" \u00B7 ").append(getString(R.string.run_updates, (int) updates, since));
@@ -1010,6 +1034,8 @@ public class ChatActivity extends Activity implements Events.Listener {
     private void replyTo(Map<String, Object> row) {
         replyTo = row;
         replyBar.setVisibility(row == null ? View.GONE : View.VISIBLE);
+        // The reply is part of the draft (1219), started or ended.
+        tellDraft();
         if (row == null) {
             return;
         }
@@ -1022,7 +1048,7 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     /** Pick a conversation and send it a copy of `row`. */
     private void forward(final Map<String, Object> row) {
-        final List<Map<String, Object>> all = Core.list(Core.conversations(), "conversations");
+        final List<Map<String, Object>> all = Core.list(Core.conversations(null), "conversations");
         String[] names = new String[all.size()];
         for (int i = 0; i < all.size(); i++) {
             names[i] = Core.str(all.get(i), "name");
@@ -1227,6 +1253,41 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         showPinned();
         adapter.notifyDataSetChanged();
+        if (draftOwed) {
+            draftOwed = false;
+            mirrorDraft(answer);
+        }
+    }
+
+    /** The field and the reply bar as the library's draft has them (1219). */
+    private void mirrorDraft(Map<String, Object> answer) {
+        mirroring = true;
+        try {
+            String draft = Core.str(answer, "draft");
+            if (!draft.equals(compose.getText().toString())) {
+                compose.setText(draft);
+                compose.setSelection(compose.getText().length());
+            }
+            String reply = Core.str(answer, "draft_reply");
+            Map<String, Object> target = null;
+            for (Map<String, Object> row : rows) {
+                if (!reply.isEmpty() && reply.equals(Core.str(row, "id"))) {
+                    target = row;
+                }
+            }
+            replyTo(target);
+        } finally {
+            mirroring = false;
+        }
+    }
+
+    /** What the field holds, and the reply, to the library as the draft. */
+    private void tellDraft() {
+        if (mirroring || peer == null) {
+            return;
+        }
+        Core.draft(peer, compose.getText().toString(),
+                replyTo == null ? "" : Core.str(replyTo, "id"));
     }
 
     @Override
@@ -1243,44 +1304,6 @@ public class ChatActivity extends Activity implements Events.Listener {
         if (words != null) {
             Ui.showLine(status, words, Ui.stays(event));
         }
-    }
-
-    /** Whether row `i` continues the group of row `i - 1`: one sender, one day, a few minutes. */
-    private boolean joinsPrevious(int i) {
-        if (i <= 0 || i >= rows.size()) {
-            return false;
-        }
-        Map<String, Object> a = rows.get(i - 1);
-        Map<String, Object> b = rows.get(i);
-        long at = Core.num(a, "at");
-        long bt = Core.num(b, "at");
-        return Core.bool(a, "ours") == Core.bool(b, "ours")
-                && at > 0 && bt > 0
-                && Math.abs(bt - at) <= GROUP_SECS
-                && Ui.daysBetween(at, bt) == 0;
-    }
-
-    /** Whether a new day begins at row `i`. */
-    private boolean dayBegins(int i) {
-        long at = Core.num(rows.get(i), "at");
-        if (at <= 0) {
-            return false;
-        }
-        if (i == 0) {
-            return true;
-        }
-        long before = Core.num(rows.get(i - 1), "at");
-        return before <= 0 || Ui.daysBetween(before, at) != 0;
-    }
-
-    /** Whether row `i` is in the conversation's newest group. */
-    private boolean newest(int i) {
-        for (int j = i + 1; j < rows.size(); j++) {
-            if (!joinsPrevious(j)) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private final class Adapter extends BaseAdapter {
@@ -1306,8 +1329,10 @@ public class ChatActivity extends Activity implements Events.Listener {
             }
             Map<String, Object> row = rows.get(position);
             boolean ours = Core.bool(row, "ours");
-            boolean joinsBefore = joinsPrevious(position);
-            boolean joinsAfter = joinsPrevious(position + 1);
+            // Where the bubble sits is the library's (1217): its group,
+            // its day line, whether it shows its time and mark.
+            boolean joinsBefore = Core.bool(row, "joins_before");
+            boolean joinsAfter = Core.bool(row, "joins_after");
             long at = Core.num(row, "at");
             long now = Ui.nowSecs();
             LinearLayout root = (LinearLayout) view;
@@ -1317,11 +1342,10 @@ public class ChatActivity extends Activity implements Events.Listener {
             root.setBackgroundColor(picked || found ? getColor(R.color.selected_row) : 0);
 
             TextView day = (TextView) view.findViewById(R.id.day);
-            boolean begins = dayBegins(position);
+            String dayWords = Core.str(row, "day");
+            boolean begins = !dayWords.isEmpty();
             day.setVisibility(begins ? View.VISIBLE : View.GONE);
-            if (begins) {
-                day.setText(Ui.day(ChatActivity.this, at, now));
-            }
+            day.setText(dayWords);
             root.setPadding(root.getPaddingStart(), joinsBefore ? dp(2) : dp(begins ? 0 : 10),
                     root.getPaddingEnd(), 0);
 
@@ -1350,22 +1374,40 @@ public class ChatActivity extends Activity implements Events.Listener {
             // Only a group's last shows its time, and one of ours whose
             // state differs from the next one's keeps its mark.
             String state = Core.str(row, "state");
-            boolean showMeta = !joinsAfter || ours
-                    && !state.equals(Core.str(rows.get(position + 1), "state"));
+            boolean showMeta = Core.bool(row, "meta");
             View meta = view.findViewById(R.id.meta);
             meta.setVisibility(showMeta && (at > 0 || ours) ? View.VISIBLE : View.GONE);
             int metaColor = getColor(ours ? R.color.bubble_ours_meta : R.color.bubble_theirs_meta);
             TextView time = (TextView) view.findViewById(R.id.time);
-            String ago = newest(position) ? Ui.ago(ChatActivity.this, at, now) : null;
+            String ago = Core.bool(row, "newest") ? Ui.ago(ChatActivity.this, at, now) : null;
             time.setText(at <= 0 ? "" : ago != null ? ago : Ui.clock(at));
             time.setVisibility(at > 0 ? View.VISIBLE : View.GONE);
             time.setTextColor(metaColor);
-            ImageView mark = (ImageView) view.findViewById(R.id.mark);
+            // Found by its tag: its id is the rung's (1232), which the
+            // device walk reads.
+            ImageView mark = (ImageView) view.findViewWithTag("mark");
             mark.setVisibility(ours ? View.VISIBLE : View.GONE);
+            mark.setOnClickListener(null);
+            mark.setClickable(false);
             if (ours) {
-                mark.setImageDrawable(new Glyph(Glyph.mark(state), metaColor, getColor(R.color.bubble_ours),
+                Glyph.Kind kind = Glyph.mark(state);
+                int ink = kind == Glyph.Kind.TICKS_READ ? getColor(R.color.read_mark) : metaColor;
+                mark.setImageDrawable(new Glyph(kind, ink,
                         getColor(R.color.failed_ground), getColor(R.color.failed_mark)));
-                mark.setContentDescription(Ui.state(ChatActivity.this, state));
+                mark.setId(Glyph.resource(kind));
+                mark.setContentDescription(Ui.state(ChatActivity.this, state, Core.num(row, "read_at")));
+                if (kind == Glyph.Kind.FAILED) {
+                    final long key = Core.num(row, "key");
+                    mark.setOnClickListener(new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            String error = Core.sendAgain(peer, key);
+                            if (error != null) {
+                                line(error);
+                            }
+                        }
+                    });
+                }
             }
 
             LinearLayout chips = (LinearLayout) view.findViewById(R.id.chips);

@@ -317,6 +317,97 @@ class Dump(unittest.TestCase):
             self.assertFalse(walk.is_hash_name(text), text)
 
 
+def mark_node(rid, desc, top):
+    """A delivery mark as the chat's dump has it (1232)."""
+    return (
+        f'<node index="0" text="" resource-id="network.leviculum.loquax.debug:id/{rid}" '
+        f'class="android.widget.ImageView" content-desc="{desc}" clickable="false" '
+        f'bounds="[900,{top}][948,{top + 48}]" />'
+    )
+
+
+class Marks(unittest.TestCase):
+    """The ladder's step: five rungs by id, each with its own words."""
+
+    ALL = [
+        ("state_clock", "Sending"),
+        ("state_tick", "Waiting in the mailbox"),
+        ("state_ticks", "Delivered"),
+        ("state_ticks_read", "Read at 10:32"),
+        ("state_failed", "Not sent. Double tap to send again"),
+    ]
+
+    def dump(self, marks):
+        body = "".join(mark_node(rid, desc, 200 + 100 * i) for i, (rid, desc) in enumerate(marks))
+        return walk.parse_dump(f'<hierarchy rotation="0">{body}</hierarchy>')
+
+    def test_five_rungs_with_their_words_pass(self):
+        nodes = self.dump(self.ALL)
+        seen = {walk.mark_rid(n): n.desc for n in walk.marks_on(nodes)}
+        self.assertEqual(walk.marks_problems(seen), [])
+
+    def test_a_missing_rung_and_wrong_words_are_named(self):
+        marks = [m for m in self.ALL if m[0] != "state_ticks_read"]
+        marks[1] = ("state_tick", "Delivered")
+        nodes = self.dump(marks)
+        seen = {walk.mark_rid(n): n.desc for n in walk.marks_on(nodes)}
+        problems = walk.marks_problems(seen)
+        self.assertIn("no state_ticks_read", problems)
+        self.assertTrue(any(p.startswith("state_tick says 'Delivered'") for p in problems), problems)
+
+    def test_the_old_mark_id_is_no_rung(self):
+        nodes = self.dump([("mark", "delivered ✓")])
+        self.assertEqual(walk.marks_on(nodes), [])
+
+    def test_a_tick_is_any_confirmed_rung(self):
+        self.assertEqual(walk.TICKS, {"state_tick", "state_ticks", "state_ticks_read"})
+
+
+def privacy_page(on=True, row_top=200, blocked_top=400):
+    """The Privacy page as SettingsActivity.privacy builds it (1233)."""
+    switch = walk.Node(text="", desc="Send read receipts",
+                       rid="network.leviculum.loquax.debug:id/privacy_receipts",
+                       cls="android.widget.Switch", bounds=(900, row_top, 1000, row_top + 60),
+                       checked=on)
+    return [
+        at("", "Send read receipts", row_top),
+        at("", "Others see when you have read their messages. Off, you do not see it "
+               "from others either.", row_top + 30),
+        switch,
+        at("", "Blocked contacts", blocked_top),
+        at("", "Positions you shared", blocked_top + 200),
+    ]
+
+
+class PrivacyPage(unittest.TestCase):
+    def test_the_page_as_built_has_no_problem(self):
+        self.assertEqual(walk.privacy_page_problems(privacy_page()), (True, []))
+        self.assertEqual(walk.privacy_page_problems(privacy_page(on=False)), (False, []))
+
+    def test_no_switch_no_line_and_the_row_below_the_blocked(self):
+        state, problems = walk.privacy_page_problems(privacy_page()[3:])
+        self.assertIsNone(state)
+        self.assertIn("no read receipts switch", problems)
+        self.assertIn("no 'Send read receipts'", problems)
+        self.assertIn("no line under the read receipts row", problems)
+        _, problems = walk.privacy_page_problems(privacy_page(row_top=600))
+        self.assertEqual(problems, ["the read receipts row is not above the blocked contacts"])
+
+    def test_the_rungs_with_the_switch_on_and_off(self):
+        everything = set(walk.MARK_WORDS)
+        self.assertEqual(walk.receipts_rungs_problems(everything, True), [])
+        self.assertEqual(walk.receipts_rungs_problems(everything - {"state_ticks_read"}, True),
+                         ["on: no read mark"])
+        self.assertEqual(walk.receipts_rungs_problems(everything - {"state_ticks_read"}, False), [])
+        self.assertEqual(walk.receipts_rungs_problems(everything, False),
+                         ["off: a read mark still shows"])
+        self.assertEqual(walk.receipts_rungs_problems({"state_clock"}, False),
+                         ["off: no delivered mark"])
+
+    def test_the_walk_runs_the_step_after_settings(self):
+        self.assertEqual(walk.STEPS.index("receipts"), walk.STEPS.index("settings") + 1)
+
+
 class Code(unittest.TestCase):
     ADMIT = (
         'Admission code for "walk", good for one device, once:\n\n'
@@ -396,6 +487,17 @@ class Sampling(unittest.TestCase):
         self.assertEqual(walk.changed_fraction(a, b), 0.5)
         self.assertEqual(walk.changed_fraction(a, b[:3]), 1.0)
 
+    def test_fling_problems_want_three_different_grabs(self):
+        a = [(0, 0, 0)] * 10
+        b = [(0, 0, 0)] * 5 + [(200, 200, 200)] * 5
+        c = [(200, 200, 200)] * 10
+        self.assertEqual(walk.fling_problems(a, b, c), [])
+        self.assertEqual(walk.fling_problems(a, b, b), ["later=final (0.000 changed)"])
+        self.assertEqual(
+            walk.fling_problems(a, a, a),
+            ["early=later (0.000 changed)", "early=final (0.000 changed)", "later=final (0.000 changed)"],
+        )
+
     def test_mean_luma(self):
         self.assertAlmostEqual(walk.mean_luma([(255, 255, 255)]), 255.0)
         self.assertAlmostEqual(walk.mean_luma([(0, 0, 0), (255, 255, 255)]), 127.5)
@@ -472,6 +574,55 @@ class Notifications(unittest.TestCase):
     def test_another_package_with_our_prefix_is_not_ours(self):
         other = NOTIFICATIONS.replace("loquax.debug user", "loquax.debugx user")
         self.assertEqual(walk.conversation_notifications(other, walk.PACKAGE), {})
+
+
+def boxed(rid, bounds, desc=""):
+    return walk.Node(text="", desc=desc, rid="network.leviculum.loquax.debug:id/" + rid, cls="", bounds=bounds)
+
+
+class Draft(unittest.TestCase):
+    """Where the draft step finds a row's last line (1219), and what it
+    refuses."""
+
+    def test_the_last_line_is_the_one_beside_the_rows_avatar(self):
+        avatar = boxed("avatar", (42, 300, 189, 447))
+        mine = boxed("last", (210, 390, 800, 430), "")
+        other = boxed("last", (210, 600, 800, 640), "")
+        self.assertEqual(walk.last_in_row([other, mine], avatar), mine)
+        self.assertIsNone(walk.last_in_row([other], avatar))
+
+    def test_a_row_without_the_draft_is_refused(self):
+        row = walk.Node(text="Draft: walk draft 7", desc="", rid="x:id/last", cls="", bounds=(0, 0, 1, 1))
+        self.assertEqual(walk.draft_problems(row, "walk draft 7"), [])
+        last = walk.Node(text="walk draft 7", desc="", rid="x:id/last", cls="", bounds=(0, 0, 1, 1))
+        self.assertEqual(len(walk.draft_problems(last, "walk draft 7")), 1)
+        self.assertEqual(walk.draft_problems(None, "x"), ["no last line in the row"])
+
+
+class Pin(unittest.TestCase):
+    """Where the receive_report and position_pin steps find a row's map pin
+    (1224), and what they refuse."""
+
+    def test_the_density_is_the_override_when_set(self):
+        self.assertEqual(walk.parse_density("Physical density: 420\n"), 420)
+        self.assertEqual(walk.parse_density("Physical density: 420\nOverride density: 480\n"), 480)
+        self.assertIsNone(walk.parse_density(""))
+
+    def test_the_pin_is_the_one_beside_the_rows_avatar(self):
+        avatar = boxed("avatar", (42, 300, 189, 447))
+        mine = boxed("pin", (900, 380, 1026, 506), "Position of Anna, now")
+        other = boxed("pin", (900, 590, 1026, 716), "Position of Bo, now")
+        self.assertEqual(walk.pin_in_row([other, mine], avatar), mine)
+        self.assertIsNone(walk.pin_in_row([other], avatar))
+
+    def test_a_pin_under_48dp_or_without_its_label_is_refused(self):
+        good = boxed("pin", (900, 380, 1026, 506), "Position of Anna, now")
+        self.assertEqual(walk.pin_problems(good, 420), [])
+        small = boxed("pin", (900, 380, 947, 427), "Position of Anna, now")
+        self.assertEqual(len(walk.pin_problems(small, 420)), 1)
+        bare = boxed("pin", (900, 380, 1026, 506))
+        self.assertEqual(len(walk.pin_problems(bare, 420)), 1)
+        self.assertEqual(walk.pin_problems(None, 420), ["no map pin in the row"])
 
 
 class Ring(unittest.TestCase):

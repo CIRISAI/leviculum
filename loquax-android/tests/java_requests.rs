@@ -145,6 +145,18 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             },
         ),
         (
+            "sendAgain",
+            java_map(&[
+                ("t", Java::Str("sendagain")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+            ]),
+            Request::SendAgain {
+                peer: s(PEER),
+                key: KEY,
+            },
+        ),
+        (
             "delete",
             java_map(&[
                 ("t", Java::Str("delete")),
@@ -475,15 +487,42 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
                 set: Some(s("dark")),
             },
         ),
+        ("mapFling", t("mapfling"), Query::MapFling { set: None }),
+        (
+            "mapFling (set)",
+            java_map(&[("t", Java::Str("mapfling")), ("set", Java::Bool(false))]),
+            Query::MapFling { set: Some(false) },
+        ),
         ("links", t("links"), Query::Links),
         (
             "detail",
             java_map(&[("t", Java::Str("detail")), ("peer", Java::Str(PEER))]),
             Query::Detail { peer: s(PEER) },
         ),
-        ("archived", t("archived"), Query::Archived),
+        ("archived", t("archived"), Query::Archived { search: None }),
         ("blocked", t("blocked"), Query::Blocked),
-        ("conversations", t("conversations"), Query::Conversations),
+        (
+            "conversations",
+            t("conversations"),
+            Query::Conversations { search: None },
+        ),
+        (
+            "conversations (search)",
+            java_map(&[
+                ("t", Java::Str("conversations")),
+                ("search", Java::Str("anna rome")),
+            ]),
+            Query::Conversations {
+                search: Some(s("anna rome")),
+            },
+        ),
+        (
+            "archived (search)",
+            java_map(&[("t", Java::Str("archived")), ("search", Java::Str("anna"))]),
+            Query::Archived {
+                search: Some(s("anna")),
+            },
+        ),
         (
             "messages",
             java_map(&[("t", Java::Str("messages")), ("peer", Java::Str(PEER))]),
@@ -512,6 +551,50 @@ fn every_request_java_builds_decodes_as_java_means_it() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// Every request Java builds decodes into an intent at the boundary
+/// (1217), its addresses and ids parsed, but the address book's four,
+/// which are the phone's own glue; the intent carries what Java said.
+#[test]
+fn every_request_java_builds_is_an_intent_or_the_phones_glue() {
+    use loquax::ui::intent::{Intent, Switch, Target};
+    use loquax_android::session::{decode, Decoded};
+    let glue = ["link", "unlink", "notNow", "relink"];
+    let mut wrong = Vec::new();
+    for (name, bytes, _) in commands() {
+        let request = schema::decode::<Request>(&bytes).expect("decodes");
+        match (decode(request), glue.contains(&name)) {
+            (Ok(Decoded::Intent(_)), false) | (Ok(Decoded::Platform(_)), true) => {}
+            (Ok(Decoded::Intent(intent)), true) => wrong.push(format!("{name}: {intent:?}")),
+            (Ok(Decoded::Platform(_)), false) => wrong.push(format!("{name}: platform")),
+            // The table's react and reply name the message `ab`, which no id
+            // is: refused at the boundary, as the session refused it before.
+            (Err(error), false)
+                if ["react", "reply"].contains(&name) && error.contains("is not a message id") => {}
+            (Err(error), _) => wrong.push(format!("{name}: {error}")),
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    let peer = [0x3f; 16];
+    let pin = Request::Pin {
+        peer: loquax::address::to_hex(&peer),
+        on: false,
+    };
+    match decode(pin) {
+        Ok(Decoded::Intent(intent)) => assert_eq!(
+            intent,
+            Intent::Pin {
+                peer: Target::Peer(peer),
+                on: Switch::Off
+            }
+        ),
+        _ => panic!("pin is an intent"),
+    }
+    let bad = Request::Open {
+        peer: "not hex".to_string(),
+    };
+    assert!(decode(bad).is_err());
+}
+
 /// `Core.start` (later start, and the first with server, code and name)
 /// and `Core.startHere` (with and without a restore), as Java sends them.
 #[test]
@@ -519,10 +602,15 @@ fn every_start_java_builds_decodes() {
     let s = |text: &str| Some(text.to_string());
     let cases = [
         (
-            java_map(&[("dir", Java::Str(DIR)), ("offset", Java::Long(3_600))]),
+            java_map(&[
+                ("dir", Java::Str(DIR)),
+                ("offset", Java::Long(3_600)),
+                ("lang", Java::Str("de-DE")),
+            ]),
             Start {
                 dir: DIR.to_string(),
                 offset: 3_600,
+                lang: s("de-DE"),
                 ..Start::default()
             },
         ),
@@ -547,11 +635,13 @@ fn every_start_java_builds_decodes() {
             java_map(&[
                 ("dir", Java::Str(DIR)),
                 ("offset", Java::Long(7_200)),
+                ("lang", Java::Str("en-US")),
                 ("here", Java::Bool(true)),
             ]),
             Start {
                 dir: DIR.to_string(),
                 offset: 7_200,
+                lang: s("en-US"),
                 here: true,
                 ..Start::default()
             },

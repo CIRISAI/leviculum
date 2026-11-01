@@ -27,37 +27,205 @@ use crate::when::WallTime;
 /// Messages of one sender this close together form a group.
 pub const GROUP_SECS: i64 = 180;
 
-/// The five marks a pixel screen draws, from the glyph table's nine.
+/// The marks a pixel screen draws, the ladder of
+/// `docs/src/concepts/loquax-read-receipts.md`, section 6 (1232), from the
+/// glyph table's nine states: a clock while nobody confirmed it, one tick
+/// from the mailbox, two from the recipient's device, two heavier in the
+/// accent once read, a red circle with `!` when it was not sent. Six
+/// marks, five glyphs: sending and sent-unconfirmed share the clock and
+/// differ in their words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
-    Queued,
+    /// Queued, stamping or in flight.
     Sending,
-    Sent,
+    /// Sent with no proof back: it left this device, nobody confirmed it.
+    Unconfirmed,
+    /// The mailbox took it (a propagated `Sent`).
+    Mailbox,
+    /// The recipient's device proved it.
     Delivered,
+    /// The peer's read receipt named it (1230).
+    Read,
+    /// Rejected or given up: its mark sends it again.
     Failed,
 }
+
+/// `state` as the screen shows it ([`super::shown_delivery`]).
+fn shown<B>(state: Option<DeliveryState>, model: &UiModel<B>) -> Option<DeliveryState> {
+    state.map(|state| super::shown_delivery(state, model.home_client, model.reading.on))
+}
+
+/// Every mark, in the ladder's order.
+pub const MARKS: [Mark; 6] = [
+    Mark::Sending,
+    Mark::Unconfirmed,
+    Mark::Mailbox,
+    Mark::Delivered,
+    Mark::Read,
+    Mark::Failed,
+];
 
 impl Mark {
     pub fn of(state: Option<DeliveryState>) -> Self {
         match state {
-            None | Some(DeliveryState::Queued) | Some(DeliveryState::Stamping) => Self::Queued,
-            Some(DeliveryState::InFlight) => Self::Sending,
-            Some(DeliveryState::Sent) | Some(DeliveryState::InMailbox) => Self::Sent,
+            None
+            | Some(DeliveryState::Queued)
+            | Some(DeliveryState::Stamping)
+            | Some(DeliveryState::InFlight) => Self::Sending,
+            Some(DeliveryState::Sent) => Self::Unconfirmed,
+            Some(DeliveryState::InMailbox) => Self::Mailbox,
             Some(DeliveryState::Delivered) => Self::Delivered,
+            Some(DeliveryState::Read { .. }) => Self::Read,
             Some(DeliveryState::Rejected) | Some(DeliveryState::Failed) => Self::Failed,
         }
     }
 
-    /// The facade's word: `queued`, `sending`, `sent`, `delivered`,
-    /// `failed`.
+    /// The facade's word: `sending`, `unconfirmed`, `mailbox`,
+    /// `delivered`, `read`, `failed`.
     pub fn word(self) -> &'static str {
         match self {
-            Self::Queued => "queued",
             Self::Sending => "sending",
-            Self::Sent => "sent",
+            Self::Unconfirmed => "unconfirmed",
+            Self::Mailbox => "mailbox",
             Self::Delivered => "delivered",
+            Self::Read => "read",
             Self::Failed => "failed",
         }
+    }
+
+    /// The name the phone gives the mark's view (its `R.id`), which the
+    /// device walk reads off the screen.
+    pub fn resource(self) -> &'static str {
+        match self {
+            Self::Sending | Self::Unconfirmed => "state_clock",
+            Self::Mailbox => "state_tick",
+            Self::Delivered => "state_ticks",
+            Self::Read => "state_ticks_read",
+            Self::Failed => "state_failed",
+        }
+    }
+
+    /// Its drawing on the [`GRID`].
+    pub fn shape(self) -> &'static Shape {
+        match self {
+            Self::Sending | Self::Unconfirmed => &CLOCK,
+            Self::Mailbox => &TICK,
+            Self::Delivered => &TICKS,
+            Self::Read => &TICKS_READ,
+            Self::Failed => &FAILED,
+        }
+    }
+}
+
+/// The square the marks are drawn on, in units; a screen scales it to the
+/// mark's size (16 dp in a bubble and in the list).
+pub const GRID: f32 = 24.0;
+
+/// A circle on the [`GRID`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Circle {
+    pub x: f32,
+    pub y: f32,
+    pub r: f32,
+}
+
+/// A mark as lines on the [`GRID`], drawn in this order: the disc filled in
+/// the failed ground, the ring and the lines stroked in `width` with round
+/// caps and joins, the dot filled. The ring, the lines and the dot are in
+/// the mark's colour, the failed mark's sign for [`Mark::Failed`]. The
+/// phone's `Glyph.java` draws the same numbers, which a test of the facade
+/// reads out of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shape {
+    pub disc: Option<Circle>,
+    pub ring: Option<Circle>,
+    pub lines: &'static [&'static [(f32, f32)]],
+    pub width: f32,
+    pub dot: Option<Circle>,
+}
+
+/// The clock: a ring and its hands.
+pub const CLOCK: Shape = Shape {
+    disc: None,
+    ring: Some(Circle {
+        x: 12.0,
+        y: 12.0,
+        r: 9.0,
+    }),
+    lines: &[&[(12.0, 7.0), (12.0, 12.0), (15.5, 14.0)]],
+    width: 1.8,
+    dot: None,
+};
+
+/// One tick.
+pub const TICK: Shape = Shape {
+    disc: None,
+    ring: None,
+    lines: &[&[(5.0, 12.5), (9.5, 17.0), (19.0, 7.0)]],
+    width: 2.0,
+    dot: None,
+};
+
+/// The first of two ticks, and the second set 6.5 units right of it, its
+/// short leg cut where it would run into the first's long one: the gap
+/// between the long legs is 4.7 units less the stroke, and the cut keeps
+/// the second clear of the first even at read's heavier stroke.
+const TWO_TICKS: &[&[(f32, f32)]] = &[
+    &[(1.5, 12.5), (6.0, 17.0), (15.5, 7.0)],
+    &[(11.6, 16.1), (12.5, 17.0), (22.0, 7.0)],
+];
+
+/// Two ticks: delivered.
+pub const TICKS: Shape = Shape {
+    disc: None,
+    ring: None,
+    lines: TWO_TICKS,
+    width: 2.0,
+    dot: None,
+};
+
+/// Two ticks, heavier: read.
+pub const TICKS_READ: Shape = Shape {
+    disc: None,
+    ring: None,
+    lines: TWO_TICKS,
+    width: 2.6,
+    dot: None,
+};
+
+/// A disc with an exclamation mark: not sent.
+pub const FAILED: Shape = Shape {
+    disc: Some(Circle {
+        x: 12.0,
+        y: 12.0,
+        r: 10.0,
+    }),
+    ring: None,
+    lines: &[&[(12.0, 6.5), (12.0, 13.0)]],
+    width: 2.4,
+    dot: Some(Circle {
+        x: 12.0,
+        y: 17.0,
+        r: 1.4,
+    }),
+};
+
+/// The colour mark `mark` is drawn in on our bubble, and its sign's ground
+/// for [`Mark::Failed`]: the meta colour, the read mark, the failed mark.
+pub fn bubble_ink(mark: Mark, colours: &Colours) -> u32 {
+    match mark {
+        Mark::Read => colours.read_mark,
+        Mark::Failed => colours.failed_mark,
+        _ => colours.bubble_ours_meta,
+    }
+}
+
+/// The colour mark `mark` is drawn in on the list's ground.
+pub fn list_ink(mark: Mark, colours: &Colours) -> u32 {
+    match mark {
+        Mark::Read => colours.accent,
+        Mark::Failed => colours.list_failed_mark,
+        _ => colours.text_secondary,
     }
 }
 
@@ -189,10 +357,17 @@ pub struct ListRow {
     /// Ours only: the last message's delivery, drawn where an unread count
     /// would be.
     pub mark: Option<Mark>,
+    /// Ours only, when [`Mark::Read`]: the reader's time, unix seconds,
+    /// for the words a screen reader says (1232).
+    pub read_at: Option<u32>,
     pub pinned: bool,
     pub muted: bool,
     /// Whether the peer's position is alive (1209): the avatar's ring.
     pub liveness: Liveness,
+    /// What was typed and not sent, on one line (1219): shown as the last
+    /// line, `Draft: …`, in italics, while the conversation is not the open
+    /// one. It counts as nothing unread and moves nothing in the list.
+    pub draft: Option<String>,
 }
 
 /// The conversation list as the model orders it.
@@ -241,10 +416,21 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
             .filter(|m| m.is_reaction())
             .and_then(|m| m.reaction())
             .map(|(_, content)| content),
-        mark: last.filter(|m| m.outbound).map(|m| Mark::of(m.delivery)),
+        mark: last
+            .filter(|m| m.outbound)
+            .map(|m| Mark::of(shown(m.delivery, model))),
+        read_at: last
+            .filter(|m| m.outbound)
+            .and_then(|m| match shown(m.delivery, model) {
+                Some(DeliveryState::Read { at }) => Some(at),
+                _ => None,
+            }),
         pinned: conversation.is_some_and(|c| c.pinned),
         muted: model.muted(peer),
         liveness,
+        draft: conversation
+            .filter(|c| model.conversations.get(model.selected).map(|o| o.peer) != Some(c.peer))
+            .and_then(|c| c.draft.line()),
     }
 }
 
@@ -253,11 +439,7 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
 /// stale. Every screen rings the same: the list, the chat's bar, the
 /// Friends sheet and the map's pin.
 pub fn ring(state: super::liveness::State, colours: &Colours) -> Option<u32> {
-    match state {
-        super::liveness::State::Live => Some(colours.accent),
-        super::liveness::State::Recent => Some(colours.text_secondary),
-        super::liveness::State::Stale => None,
-    }
+    super::scene::Ring::of(state).map(|ring| ring.colour(colours))
 }
 
 /// The list's mark for a report's line: `📍 live`.
@@ -295,6 +477,9 @@ pub struct Bubble {
     pub body: String,
     /// Ours only.
     pub mark: Option<Mark>,
+    /// Ours only, when [`Mark::Read`]: the reader's time, unix seconds
+    /// (1230).
+    pub read_at: Option<u32>,
     pub at: Option<WallTime>,
     pub chips: Vec<Chip>,
     /// The position the message carries, which the bubble's line opens the
@@ -344,7 +529,13 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                     (true, None) => "position report".to_string(),
                     (false, _) => message.body.clone(),
                 },
-                mark: message.outbound.then(|| Mark::of(message.delivery)),
+                mark: message
+                    .outbound
+                    .then(|| Mark::of(shown(message.delivery, model))),
+                read_at: match shown(message.delivery, model) {
+                    Some(DeliveryState::Read { at }) if message.outbound => Some(at),
+                    _ => None,
+                },
                 at: message.at,
                 chips: message
                     .id
@@ -471,6 +662,10 @@ pub struct Colours {
     pub bubble_theirs_meta: u32,
     pub failed_ground: u32,
     pub failed_mark: u32,
+    /// Read's two ticks on our bubble (1232): the accent's family, bright
+    /// enough for 3:1 on the bubble's green, where the accent itself is
+    /// not. In the list read is the accent.
+    pub read_mark: u32,
     pub send: u32,
     pub on_send: u32,
     pub badge: u32,
@@ -490,7 +685,7 @@ pub struct Colours {
 
 impl Colours {
     /// Each colour by its name, in the table's order.
-    pub fn named(&self) -> [(&'static str, u32); 26] {
+    pub fn named(&self) -> [(&'static str, u32); 27] {
         [
             ("background", self.background),
             ("text", self.text),
@@ -505,6 +700,7 @@ impl Colours {
             ("bubble_theirs_meta", self.bubble_theirs_meta),
             ("failed_ground", self.failed_ground),
             ("failed_mark", self.failed_mark),
+            ("read_mark", self.read_mark),
             ("send", self.send),
             ("on_send", self.on_send),
             ("badge", self.badge),
@@ -537,6 +733,7 @@ pub const LIGHT: Colours = Colours {
     bubble_theirs_meta: 0xff55585e,
     failed_ground: 0xffffdad6,
     failed_mark: 0xff93000a,
+    read_mark: 0xffb2ff59,
     send: 0xff2e6b38,
     on_send: 0xffffffff,
     badge: 0xff2e6b38,
@@ -567,6 +764,7 @@ pub const DARK: Colours = Colours {
     bubble_theirs_meta: 0xffa9abb0,
     failed_ground: 0xffffdad6,
     failed_mark: 0xff93000a,
+    read_mark: 0xffb2ff59,
     send: 0xff4f8f5b,
     on_send: 0xffffffff,
     badge: 0xff3b6b45,
@@ -742,6 +940,7 @@ mod tests {
             ours,
             body: String::new(),
             mark,
+            read_at: None,
             at: at.map(|unix_secs| WallTime {
                 unix_secs,
                 offset_secs: 3600,
@@ -803,14 +1002,180 @@ mod tests {
             kind: "text",
             reaction: None,
             mark: None,
+            read_at: None,
             pinned: false,
             muted: false,
             liveness: Liveness::default(),
+            draft: None,
         };
         assert!(row_matches(&row, ""));
         assert!(row_matches(&row, "anna"));
         assert!(row_matches(&row, "schulz tor"));
         assert!(!row_matches(&row, "anna bahnhof"));
+    }
+
+    #[cfg(feature = "std")]
+    fn contrast(a: u32, b: u32) -> f64 {
+        let lum = |c: u32| {
+            let f = |v: u32| {
+                let v = f64::from(v & 0xff) / 255.0;
+                match v <= 0.03928 {
+                    true => v / 12.92,
+                    false => ((v + 0.055) / 1.055).powf(2.4),
+                }
+            };
+            0.2126 * f(c >> 16) + 0.7152 * f(c >> 8) + 0.0722 * f(c)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// Every mark keeps 3:1 on what it sits on, in both themes: our
+    /// bubble in the chat, the background in the list, the failed sign on
+    /// its own disc; and read is told from the grey ticks by more than a
+    /// shade (1232).
+    #[test]
+    #[cfg(feature = "std")]
+    fn every_mark_holds_three_to_one_on_its_ground() {
+        let mut fails = Vec::new();
+        for (theme, c) in [("light", LIGHT), ("dark", DARK)] {
+            let mut check = |what: String, ink: u32, ground: u32| {
+                let ratio = contrast(ink, ground);
+                if ratio < 3.0 {
+                    fails.push(format!("{theme} {what}: {ratio:.2}"));
+                }
+            };
+            for mark in MARKS {
+                let (bubble, list) = match mark {
+                    Mark::Failed => (c.failed_ground, c.list_failed_ground),
+                    _ => (bubble_ink(mark, &c), list_ink(mark, &c)),
+                };
+                check(format!("{mark:?} on our bubble"), bubble, c.bubble_ours);
+                check(format!("{mark:?} in the list"), list, c.background);
+            }
+            check("the failed sign".into(), c.failed_mark, c.failed_ground);
+            check(
+                "the list's failed sign".into(),
+                c.list_failed_mark,
+                c.list_failed_ground,
+            );
+            // The read tick against both grounds it is drawn on.
+            check("read on our bubble".into(), c.read_mark, c.bubble_ours);
+            check("read in the list".into(), c.accent, c.background);
+            assert_ne!(c.read_mark, c.bubble_ours_meta, "{theme}");
+            assert_ne!(c.accent, c.text_secondary, "{theme}");
+        }
+        assert!(fails.is_empty(), "{fails:#?}");
+    }
+
+    /// The shortest distance from point `p` to the segment `a`-`b`.
+    #[cfg(feature = "std")]
+    fn to_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+        let (x, y) = (a.0 + t * dx - p.0, a.1 + t * dy - p.1);
+        (x * x + y * y).sqrt()
+    }
+
+    /// The two ticks read as two (loquax-read-receipts.md, 3.4): the second
+    /// is the first moved 6.5 units right, and no point of the second's
+    /// stroke comes nearer the first's than a clear gap, at read's heavier
+    /// stroke too; everything stays on the grid.
+    #[test]
+    #[cfg(feature = "std")]
+    fn the_two_ticks_never_touch() {
+        let [a, b] = TWO_TICKS else {
+            panic!("two ticks");
+        };
+        assert_eq!((b[2].0 - a[2].0, b[2].1 - a[2].1), (6.5, 0.0));
+        assert_eq!((b[1].0 - a[1].0, b[1].1 - a[1].1), (6.5, 0.0));
+        for shape in [TICKS, TICKS_READ] {
+            let mut nearest = f32::MAX;
+            for (from, to) in [(b, a), (a, b)] {
+                for pair in from.windows(2) {
+                    for step in 0..=100 {
+                        let t = step as f32 / 100.0;
+                        let p = (
+                            pair[0].0 + t * (pair[1].0 - pair[0].0),
+                            pair[0].1 + t * (pair[1].1 - pair[0].1),
+                        );
+                        for leg in to.windows(2) {
+                            nearest = nearest.min(to_segment(p, leg[0], leg[1]));
+                        }
+                    }
+                }
+            }
+            let gap = nearest - shape.width;
+            assert!(gap >= 0.7, "width {}: a gap of {gap:.2} units", shape.width);
+        }
+        for mark in MARKS {
+            let shape = mark.shape();
+            let half = shape.width / 2.0;
+            for &(x, y) in shape.lines.iter().flat_map(|l| l.iter()) {
+                assert!(x - half >= 0.0 && x + half <= GRID, "{mark:?} x {x}");
+                assert!(y - half >= 0.0 && y + half <= GRID, "{mark:?} y {y}");
+            }
+        }
+        const { assert!(TICKS_READ.width > TICKS.width) };
+        assert_eq!(TICKS_READ.lines, TICKS.lines);
+    }
+
+    /// Each state of the core's nine lands on its rung of five.
+    #[test]
+    fn each_delivery_state_has_its_rung() {
+        use DeliveryState as S;
+        let rungs: Vec<(Option<DeliveryState>, Mark)> = [
+            None,
+            Some(S::Queued),
+            Some(S::Stamping),
+            Some(S::InFlight),
+            Some(S::Sent),
+            Some(S::InMailbox),
+            Some(S::Delivered),
+            Some(S::Read { at: 7 }),
+            Some(S::Rejected),
+            Some(S::Failed),
+        ]
+        .into_iter()
+        .map(|state| (state, Mark::of(state)))
+        .collect();
+        let want = [
+            Mark::Sending,
+            Mark::Sending,
+            Mark::Sending,
+            Mark::Sending,
+            Mark::Unconfirmed,
+            Mark::Mailbox,
+            Mark::Delivered,
+            Mark::Read,
+            Mark::Failed,
+            Mark::Failed,
+        ];
+        assert_eq!(rungs.iter().map(|(_, m)| *m).collect::<Vec<_>>(), want);
+        let words: Vec<&str> = MARKS.iter().map(|m| m.word()).collect();
+        assert_eq!(
+            words,
+            [
+                "sending",
+                "unconfirmed",
+                "mailbox",
+                "delivered",
+                "read",
+                "failed"
+            ]
+        );
+        let resources: Vec<&str> = MARKS.iter().map(|m| m.resource()).collect();
+        assert_eq!(
+            resources,
+            [
+                "state_clock",
+                "state_clock",
+                "state_tick",
+                "state_ticks",
+                "state_ticks_read",
+                "state_failed"
+            ]
+        );
     }
 
     /// The phone's `colors.xml` holds the same table, name for name, so

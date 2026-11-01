@@ -12,10 +12,10 @@
 
 use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Blob, CandidateRow, Chip, ContactCopy, ConversationRow,
-    Conversations, Detail, Done, Event, FriendRow, Friends, ImRow, Info, LinkRow, Links, MapMark,
-    MapRegions, MapRequest, MapShown, MapThemeChoice, Me, MessageRow, Messages, PositionRow, Query,
-    Recents, RegionRow, Request, Run, RunRow, Shared, SharedRow, Start, Started, SuggestionRow,
-    Suggestions,
+    Conversations, Detail, Done, Event, FriendRow, Friends, ImRow, Info, LinkRow, Links,
+    MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, Me, MessageRow,
+    Messages, PositionRow, Query, Recents, RegionRow, Request, Run, RunRow, Shared, SharedRow,
+    Start, Started, SuggestionRow, Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -97,14 +97,16 @@ fn start() -> impl Strategy<Value = Start> {
     (
         (text(), opt_text(), opt_text(), opt_text()),
         (i32s(), any::<bool>(), opt_text(), opt_text()),
+        opt_text(),
     )
         .prop_map(
-            |((dir, server, code, name), (offset, here, restore, passphrase))| Start {
+            |((dir, server, code, name), (offset, here, restore, passphrase), lang)| Start {
                 dir,
                 server,
                 code,
                 name,
                 offset,
+                lang,
                 here,
                 restore,
                 passphrase,
@@ -166,10 +168,12 @@ fn request() -> impl Strategy<Value = Request> {
             body
         }),
         (text(), i64s(), text()).prop_map(|(peer, key, to)| Request::Forward { peer, key, to }),
+        (text(), i64s()).prop_map(|(peer, key)| Request::SendAgain { peer, key }),
         (text(), keys()).prop_map(|(peer, keys)| Request::Delete { peer, keys }),
         text().prop_map(|emoji| Request::Used { emoji }),
         Just(Request::Pull),
         any::<bool>().prop_map(|front| Request::Front { front }),
+        (text(), keys()).prop_map(|(peer, keys)| Request::Viewport { peer, keys }),
         text().prop_map(|name| Request::Name { name }),
         (text(), contact()).prop_map(|(peer, contact)| Request::Link { peer, contact }),
         text().prop_map(|peer| Request::Unlink { peer }),
@@ -197,6 +201,11 @@ fn request() -> impl Strategy<Value = Request> {
                 at,
             }
         ),
+        (text(), text(), text()).prop_map(|(peer, body, reply)| Request::Draft {
+            peer,
+            body,
+            reply
+        }),
     ]
 }
 
@@ -216,7 +225,7 @@ fn candidate() -> impl Strategy<Value = CandidateRow> {
 
 fn query() -> impl Strategy<Value = Query> {
     prop_oneof![
-        Just(Query::Conversations),
+        opt_text().prop_map(|search| Query::Conversations { search }),
         text().prop_map(|peer| Query::Messages { peer }),
         (text(), i64s()).prop_map(|(peer, key)| Query::Info { peer, key }),
         Just(Query::Recents),
@@ -225,7 +234,7 @@ fn query() -> impl Strategy<Value = Query> {
         text().prop_map(|lookup| Query::Contact { lookup }),
         Just(Query::Links),
         text().prop_map(|peer| Query::Detail { peer }),
-        Just(Query::Archived),
+        opt_text().prop_map(|search| Query::Archived { search }),
         Just(Query::Blocked),
         Just(Query::Me),
         text().prop_map(|passphrase| Query::Backup { passphrase }),
@@ -242,6 +251,7 @@ fn query() -> impl Strategy<Value = Query> {
             }
         }),
         opt_text().prop_map(|set| Query::MapTheme { set }),
+        prop::option::of(any::<bool>()).prop_map(|set| Query::MapFling { set }),
     ]
 }
 
@@ -263,7 +273,9 @@ fn chip() -> impl Strategy<Value = Chip> {
     })
 }
 
-fn message_row() -> impl Strategy<Value = MessageRow> {
+/// The rows are boxed: with the scene's fields (1217) their tuples together
+/// overflow the test thread's stack in [`the_lists_round_trip`].
+fn message_row() -> BoxedStrategy<MessageRow> {
     (
         (text(), any::<bool>(), text(), text(), i64s()),
         (
@@ -275,8 +287,9 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
         ),
         (prop::option::of(i64s()), prop::option::of(i64s()), i64s()),
         (opt_text(), prop::option::of(any::<bool>()), opt_text()),
-        (u32s(), i64s()),
+        (u32s(), i64s(), i64s()),
         (text(), u32s()),
+        (any::<(bool, bool, bool, bool)>(), text(), text()),
     )
         .prop_map(
             |(
@@ -284,13 +297,15 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
                 (chips, lat_e6, lon_e6, place, accuracy),
                 (fix_at, stale_at, key),
                 (quote, quote_ours, quote_to),
-                (updates, since),
+                (updates, since, read_at),
                 (liveness, cadence_s),
+                ((joins_before, joins_after, meta, newest), day, live),
             )| MessageRow {
                 id,
                 ours,
                 body,
                 state,
+                read_at,
                 at,
                 chips,
                 lat_e6,
@@ -307,11 +322,18 @@ fn message_row() -> impl Strategy<Value = MessageRow> {
                 since,
                 liveness,
                 cadence_s,
+                joins_before,
+                joins_after,
+                meta,
+                newest,
+                day,
+                live,
             },
         )
+        .boxed()
 }
 
-fn messages() -> impl Strategy<Value = Messages> {
+fn messages() -> BoxedStrategy<Messages> {
     (
         (
             u32s(),
@@ -326,16 +348,24 @@ fn messages() -> impl Strategy<Value = Messages> {
             prop::option::of(i64s()),
             any::<bool>(),
         ),
-        (opt_text(), opt_text(), texts(), any::<bool>()),
+        (
+            opt_text(),
+            opt_text(),
+            texts(),
+            any::<bool>(),
+            any::<bool>(),
+        ),
         live(),
+        (text(), text(), text()),
     )
         .prop_map(
             |(
                 (v, peer, name, messages),
                 (initials, icon_fg, icon_bg, home_client, photo),
                 (linked, lookup, contact_id, ask_link),
-                (announced, petname, others, verified),
+                (announced, petname, others, verified, receipts),
                 (liveness, cadence_s, last_fix_at),
+                (ring, draft, draft_reply),
             )| Messages {
                 v,
                 peer,
@@ -354,11 +384,16 @@ fn messages() -> impl Strategy<Value = Messages> {
                 petname,
                 others,
                 verified,
+                receipts,
                 liveness,
                 cadence_s,
                 last_fix_at,
+                ring,
+                draft,
+                draft_reply,
             },
         )
+        .boxed()
 }
 
 /// A liveness as the rows carry it (1209): the word, the cadence and the
@@ -367,19 +402,27 @@ fn live() -> impl Strategy<Value = (String, u32, i64)> {
     (text(), u32s(), i64s())
 }
 
-fn conversation_row() -> impl Strategy<Value = ConversationRow> {
+fn conversation_row() -> BoxedStrategy<ConversationRow> {
     (
         (text(), text(), text(), any::<bool>(), i64s(), u32s()),
         (text(), opt_text(), opt_text(), text(), opt_text()),
-        (text(), opt_text(), any::<(bool, bool, bool)>(), u32s()),
+        (
+            text(),
+            opt_text(),
+            any::<(bool, bool, bool)>(),
+            u32s(),
+            i64s(),
+        ),
         live(),
+        (text(), text(), text(), text(), text()),
     )
         .prop_map(
             |(
                 (peer, name, last, ours, at, unread),
                 (initials, icon_fg, icon_bg, kind, reaction),
-                (state, photo, (linked, pinned, muted), updates),
+                (state, photo, (linked, pinned, muted), updates, read_at),
                 (liveness, cadence_s, last_fix_at),
+                (live, ring, pin, pin_label, draft),
             )| ConversationRow {
                 peer,
                 name,
@@ -393,6 +436,7 @@ fn conversation_row() -> impl Strategy<Value = ConversationRow> {
                 kind,
                 reaction,
                 state,
+                read_at,
                 photo,
                 linked,
                 pinned,
@@ -401,8 +445,14 @@ fn conversation_row() -> impl Strategy<Value = ConversationRow> {
                 liveness,
                 cadence_s,
                 last_fix_at,
+                live,
+                ring,
+                pin,
+                pin_label,
+                draft,
             },
         )
+        .boxed()
 }
 
 fn conversations() -> impl Strategy<Value = Conversations> {
@@ -450,10 +500,13 @@ fn detail() -> impl Strategy<Value = Detail> {
             text(),
             any::<bool>(),
             prop::collection::vec(
-                (i64s(), i32s(), i32s()).prop_map(|(at, lat_e6, lon_e6)| PositionRow {
-                    at,
-                    lat_e6,
-                    lon_e6,
+                (i64s(), i32s(), i32s(), text()).prop_map(|(at, lat_e6, lon_e6, day)| {
+                    PositionRow {
+                        at,
+                        lat_e6,
+                        lon_e6,
+                        day,
+                    }
                 }),
                 0..3,
             ),
@@ -646,8 +699,8 @@ fn map_shown_1200() -> BoxedStrategy<MapShown> {
         .boxed()
 }
 
-/// The frame's fields of 1201 over [`map_shown_1200`]'s, boxed apart as
-/// for the request.
+/// The frame's fields of 1201 and 1188 over [`map_shown_1200`]'s, boxed
+/// apart as for the request.
 fn map_shown() -> impl Strategy<Value = MapShown> {
     (
         map_shown_1200(),
@@ -657,13 +710,19 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
             any::<bool>(),
         )
             .boxed(),
+        (any::<bool>(), u32s(), u32s()).boxed(),
     )
-        .prop_map(|(shown, (own_x, own_y, autoload))| MapShown {
-            own_x,
-            own_y,
-            autoload,
-            ..shown
-        })
+        .prop_map(
+            |(shown, (own_x, own_y, autoload), (fling, room_north, room_south))| MapShown {
+                own_x,
+                own_y,
+                autoload,
+                fling,
+                room_north,
+                room_south,
+                ..shown
+            },
+        )
 }
 
 fn regions() -> impl Strategy<Value = Vec<RegionRow>> {
@@ -702,12 +761,13 @@ fn marks() -> impl Strategy<Value = Vec<MapMark>> {
     )
 }
 
-fn friend_row() -> impl Strategy<Value = FriendRow> {
+fn friend_row() -> BoxedStrategy<FriendRow> {
     (
         (text(), text(), text(), opt_text(), opt_text(), opt_text()),
         (i64s(), i32s(), i32s(), prop::option::of(u32s())),
         (any::<(bool, bool)>(), text()),
         live(),
+        (text(), text()),
     )
         .prop_map(
             |(
@@ -715,6 +775,7 @@ fn friend_row() -> impl Strategy<Value = FriendRow> {
                 (at, lat_e6, lon_e6, distance_m),
                 ((recent, stale), geo),
                 (liveness, cadence_s, last_fix_at),
+                (live, ring),
             )| FriendRow {
                 peer,
                 name,
@@ -732,8 +793,11 @@ fn friend_row() -> impl Strategy<Value = FriendRow> {
                 liveness,
                 cadence_s,
                 last_fix_at,
+                live,
+                ring,
             },
         )
+        .boxed()
 }
 
 /// A request map as `MsgPack.pack` writes it: every `long` as `d3` and
@@ -918,6 +982,7 @@ proptest! {
     ) {
         round_trips(&MapRegions { v, ok, regions, region_bytes, autoload })?;
         round_trips(&MapThemeChoice { v, ok, theme, theme_chosen })?;
+        round_trips(&MapFlingChoice { v, ok, fling: autoload })?;
     }
 
     #[test]

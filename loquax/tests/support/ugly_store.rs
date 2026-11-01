@@ -43,6 +43,7 @@
 //! | 18             | a received empty body with a position only                 |
 //! | 29             | an empty body, an empty title, no fields                   |
 //! | sent, by `j`   | `j % 8`: 1 delivered, 3 failed, 5 in a mailbox, 7 queued   |
+//! | 15, 31 imported | read ten minutes later (1232): every rung in the chat |
 //! | others         | [`BODIES`] in turn                                         |
 //!
 //! The NomadNet rows carry provenance: received rows alternate verified,
@@ -239,7 +240,16 @@ fn reaction(to: [u8; 32], content: &str) -> Vec<Field> {
     )]
 }
 
-fn delivery_of(j: usize) -> DeliveryState {
+/// Row `j`'s state, sent at `at` in conversation `i`: an imported
+/// conversation (only the import carries read) holds every rung of the
+/// ladder, the device walk's chat among them.
+fn delivery_of(i: usize, j: usize, at: i64) -> DeliveryState {
+    let imported = i == RATSPEAK || i == NOMADNET;
+    if imported && j % 16 == 15 {
+        return DeliveryState::Read {
+            at: u32::try_from(at + 600).unwrap_or(0),
+        };
+    }
     match j % 8 {
         1 => DeliveryState::Delivered,
         3 => DeliveryState::Failed,
@@ -291,7 +301,7 @@ pub fn rows(own: &Identity, i: usize) -> Vec<Row> {
             29 => body = String::new(),
             _ => {}
         }
-        let delivery = outbound.then(|| delivery_of(j));
+        let delivery = outbound.then(|| delivery_of(i, j, at));
         let packed = (i != RATSPEAK).then(|| {
             let (to, from, signer) = match outbound {
                 true => (peer, me, own),
@@ -558,6 +568,7 @@ pub fn fill_store_of(home: &Path, own: &Identity) -> Filled {
                 muted_until: state.muted_until,
                 archived: state.archived,
                 verified: false,
+                receipts: false,
             },
         });
         store.write(&writes).expect("the live rows");

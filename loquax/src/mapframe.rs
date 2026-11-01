@@ -14,8 +14,20 @@
 //! shown from cached steps and owed ([`Shot::missing`]: ask again).
 //!
 //! The names are placed at rest, over the frame after the pins, and kept
-//! as sprites; a frame while the view moves draws them where the view
-//! moved them ([`moved`]), so they never leave the picture. The pins are
+//! as sprites; a pan at the zoom at rest draws them where the view moved
+//! them ([`moved`]), so they never leave the picture. A frame that zooms
+//! places them anew, as a frame at rest at its zoom would (1225): the
+//! ladder of its zoom, the anchors and the lines of its own geometry, the
+//! text at its screen size, the rule's collisions; into a frame the
+//! frontend scales ([`Ask::scaled_while_moving`]) each at the inverse of
+//! that scale ([`Sprite::scaled`]), so it shows at the size a frame at
+//! rest gives it. The names it looks up are kept for a while: those of a
+//! wider view at its step, until the zoom leaves the step or the view
+//! leaves them ([`PlaceCost::looked_up`]). A name that enters fades in
+//! over [`FADE_MS`] and one that leaves fades out where the map moves it,
+//! by the frontend's clock ([`Ask::now_ms`]); while one fades the frame
+//! says so ([`Shot::fading`]: ask again), and a frame at rest asked again
+//! keeps its placement. The pins are
 //! placed in every frame, and drawn in unless the frontend sets them
 //! itself ([`Ask::draw_pins`]).
 //!
@@ -29,11 +41,15 @@
 //! changes (the theme, the screen's density), so a frontend needs no
 //! invalidation of its own.
 
-use leviculum_map::labels::SUBPIXEL;
-use leviculum_map::viewport::{ExactView, MILLI};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+
+use leviculum_map::labels::{LabelKind, Rect, ViewLabel, SUBPIXEL};
+use leviculum_map::viewport::{ExactView, Viewport, MILLI};
 use leviculum_mapfill::style::{MapTheme, Style};
 
-use crate::mapnames::{self, Sprite, Typesetter};
+use crate::mapnames::{self, Mask, Mip, PlacedName, Sprite, Typesetter, MIP_BELOW};
 use crate::picture::{Maps, Painter};
 use crate::screenmap::{self, Placed};
 use crate::tiles::{self, Frame as TileFrame, Motion, Plan, Stats, TileCache, BUDGET_MB};
@@ -69,6 +85,10 @@ pub struct Ask<'a> {
     /// The width of a pin's label as the frontend sets it, when it sets
     /// them itself; the map's own typesetter's otherwise.
     pub measure: Option<fn(&str, f32) -> u32>,
+    /// The frontend's clock in milliseconds, which the names fade in and
+    /// out by ([`FADE_MS`], 1205); `None` for a still picture, a test or a
+    /// measuring tool, where a name shows or goes at once.
+    pub now_ms: Option<u64>,
     /// The frontend scales a frame on screen to the view it keeps, with a
     /// filter (the phone's Canvas, the window's image): a frame while a
     /// pinch or a wheel zooms (moving, at a zoom other than the last frame
@@ -97,6 +117,8 @@ pub struct Shot {
     pub rest_zoom: u8,
     /// Tiles it needed and did not draw: ask again.
     pub missing: usize,
+    /// A name is fading in or out ([`FADE_MS`]): ask again.
+    pub fading: bool,
     /// The credit of the regions drawn, the outline's when none.
     pub attribution: String,
     /// The maps directory's epoch it was drawn at.
@@ -113,6 +135,7 @@ impl Shot {
             tile_zoom: framed.tile_zoom,
             rest_zoom: framed.rest_zoom,
             missing: framed.missing,
+            fading: framed.fading,
             attribution: framed.attribution,
             epoch: framed.epoch,
         }
@@ -126,6 +149,7 @@ impl Shot {
             tile_zoom: self.tile_zoom,
             rest_zoom: self.rest_zoom,
             missing: self.missing,
+            fading: self.fading,
             attribution: self.attribution,
             epoch: self.epoch,
         };
@@ -142,6 +166,7 @@ pub struct Framed {
     pub tile_zoom: u8,
     pub rest_zoom: u8,
     pub missing: usize,
+    pub fading: bool,
     pub attribution: String,
     pub epoch: u64,
 }
@@ -187,10 +212,22 @@ pub struct Frames {
     tiles: TileCache,
     /// The zoom step the last frame was composed from.
     last_zoom: Option<u8>,
-    /// The names the last frame at rest placed.
+    /// The names the last placement set, as sprites.
     names: Vec<Sprite>,
-    /// The frame they were placed in.
+    /// The frame the sprites are drawn in.
     names_view: Option<ExactView>,
+    /// The same names as placed, at screen size.
+    set: Vec<PlacedName>,
+    /// The frame they were placed in: the screen's view and its margins.
+    set_view: Option<ExactView>,
+    /// The names a frame that zooms looked up last, kept for the next.
+    found: Option<Found>,
+    /// The screen's view and margins of the last frame.
+    last_view: Option<ExactView>,
+    /// The zoom of the last frame at rest, in thousandths: a frame that
+    /// moves at another is a zooming one, drawn at its step when the
+    /// frontend scales it ([`Ask::scaled_while_moving`]).
+    rested: Option<u32>,
     /// The pan's velocity and the last zoom's way (1135).
     motion: Motion,
     /// The last frame, when it was at rest and owed no tile, with the
@@ -200,6 +237,189 @@ pub struct Frames {
     plan: Option<Plan>,
     /// The pins the last frame placed, in its pixels.
     placed: Vec<Placed>,
+    /// How each name of `names` fades.
+    fades: Vec<Fade>,
+    /// Names an earlier placement set and the last one did not, fading
+    /// out.
+    leaving: Vec<Leaving>,
+    /// The frame at rest the names were placed for, kept while they fade.
+    rest_key: Option<RestKey>,
+    /// A name of the last frame was fading in or out.
+    fading: bool,
+    /// The names the last frame drew, by their index in `names`, each
+    /// moved by whole pixels from where it was placed, and the leaving
+    /// ones by their index in `leaving`.
+    drawn_names: Vec<Carried>,
+    drawn_leaving: Vec<Carried>,
+    /// The clock of a frontend that keeps none ([`Frames::clock_ms`]).
+    origin: Instant,
+    /// What the last frame that zoomed spent placing its names.
+    cost: PlaceCost,
+    /// No names placed nor drawn: a measuring tool's ground.
+    names_off: bool,
+    /// The [`Mip`] of each name shown, by its mask, which it holds.
+    mips: HashMap<usize, (Arc<Mask>, Arc<Mip>)>,
+}
+
+/// What a frame that zooms spends placing its names (1225): a measuring
+/// tool's row.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlaceCost {
+    /// The names looked up near the frame, and those it placed.
+    pub labels: usize,
+    pub names: usize,
+    /// The names were looked up in the map for this frame, not kept from
+    /// an earlier one.
+    pub looked_up: bool,
+    /// Looked up, or taken from those kept, in nanoseconds.
+    pub labels_ns: u64,
+    /// Placed by the rule, with their masks and halos, in nanoseconds.
+    pub place_ns: u64,
+    /// Their sprites sampled, in nanoseconds.
+    pub sprites_ns: u64,
+}
+
+/// The names of a view at a step, wider than a frame, kept while a pinch
+/// stays at the step (1225): looking them up reads the region file, and
+/// a frame of the phone at z13 asks a thousand.
+struct Found {
+    epoch: u64,
+    /// The view they were looked up in.
+    wide: Viewport,
+    labels: Vec<ViewLabel>,
+    /// Each one's box in `wide`'s sub-pixels: its anchor, or its line's.
+    reach: Vec<[i64; 4]>,
+}
+
+/// How much wider each way the view [`Found`] keeps is than the one a
+/// frame looks its names up in. A pinch through a step grows that one
+/// twofold, from 0.71 of the frame to 1.41, so this looks them up about
+/// twice a step.
+const FOUND_WIDER: f64 = 1.6;
+
+/// How long a name takes to fade in or out, in milliseconds (1205).
+pub const FADE_MS: u64 = 150;
+
+/// How a name fades (1205): the alpha out of 255 it had at `since_ms`,
+/// and whether it is fading in, towards 255, or out, towards nothing,
+/// over [`FADE_MS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fade {
+    from: u8,
+    since_ms: u64,
+    shown: bool,
+}
+
+impl Fade {
+    /// Shown, whole.
+    const SHOWN: Fade = Fade {
+        from: 255,
+        since_ms: 0,
+        shown: true,
+    };
+
+    /// Fading in from nothing at `at` milliseconds.
+    fn new_from_nothing(at: u64) -> Self {
+        Fade {
+            from: 0,
+            since_ms: at,
+            shown: true,
+        }
+    }
+
+    /// Its alpha at `now`; without a clock, where it is going.
+    fn alpha(&self, now: Option<u64>) -> u8 {
+        let Some(now) = now else {
+            return if self.shown { 255 } else { 0 };
+        };
+        let step = (now.saturating_sub(self.since_ms) * 255 / FADE_MS).min(255) as u8;
+        match self.shown {
+            true => self.from.saturating_add(step),
+            false => self.from.saturating_sub(step),
+        }
+    }
+
+    /// Fade in, or out, from the alpha it has at `now`.
+    fn turn(&mut self, shown: bool, now: Option<u64>) {
+        if self.shown == shown {
+            return;
+        }
+        let from = self.alpha(now);
+        *self = Fade {
+            from,
+            since_ms: now.unwrap_or(0),
+            shown,
+        };
+    }
+
+    /// Whether it is where it was going at `now`.
+    fn settled(&self, now: Option<u64>) -> bool {
+        self.alpha(now) == if self.shown { 255 } else { 0 }
+    }
+}
+
+/// A name the last placement no longer set, fading out where the map
+/// moves it, at its screen size.
+struct Leaving {
+    name: PlacedName,
+    /// The frame it was placed in.
+    set_view: ExactView,
+    sprite: Sprite,
+    /// The frame its sprite is drawn in, and the zoom of the screen's
+    /// view it was drawn for.
+    view: ExactView,
+    screen: u32,
+    fade: Fade,
+}
+
+/// A frame at rest's names were placed for: the frame, the density, the
+/// pins' boxes, the maps' epoch.
+#[derive(PartialEq)]
+struct RestKey {
+    view: ExactView,
+    scale: u32,
+    taken: Vec<Rect>,
+    epoch: u64,
+}
+
+/// A carried name in a frame: which, moved by how many whole pixels,
+/// whether the frame keeps it, and the alpha it is drawn at.
+#[derive(Clone, Copy, Debug)]
+struct Carried {
+    i: usize,
+    by: (i64, i64),
+    keep: bool,
+    alpha: u8,
+}
+
+/// `r` moved by `(dx, dy)` pixels.
+fn shifted(r: &Rect, (dx, dy): (i64, i64)) -> Rect {
+    let by = |v: i64| i32::try_from(v).unwrap_or(0);
+    Rect {
+        x0: r.x0 + by(dx),
+        y0: r.y0 + by(dy),
+        x1: r.x1 + by(dx),
+        y1: r.y1 + by(dy),
+    }
+}
+
+/// A name a frame drew ([`Frames::drawn_names`]): where, in the frame's
+/// pixels, and what it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawnName {
+    pub text: String,
+    pub kind: LabelKind,
+    pub min_zoom: u8,
+    /// Its middle in the screen's view with its margins, where a frame at
+    /// rest there places names, and its angle.
+    pub at: (f64, f64),
+    pub angle: f64,
+    /// The boxes it was placed by, moved with it, in the frame's pixels.
+    pub boxes: Vec<Rect>,
+    /// The alpha it was drawn at, out of 255.
+    pub alpha: u8,
+    /// The frame kept it: shown, or fading in; else fading out.
+    pub shown: bool,
 }
 
 impl Frames {
@@ -212,10 +432,25 @@ impl Frames {
             last_zoom: None,
             names: Vec::new(),
             names_view: None,
+            set: Vec::new(),
+            set_view: None,
+            found: None,
+            last_view: None,
+            rested: None,
             motion: Motion::default(),
             rest: None,
             plan: None,
             placed: Vec::new(),
+            fades: Vec::new(),
+            leaving: Vec::new(),
+            rest_key: None,
+            fading: false,
+            drawn_names: Vec::new(),
+            drawn_leaving: Vec::new(),
+            origin: Instant::now(),
+            cost: PlaceCost::default(),
+            names_off: false,
+            mips: HashMap::new(),
         }
     }
 
@@ -298,8 +533,7 @@ impl Frames {
         // Never a step above the view's zoom, so the frontend scales the
         // frame up, by two at most, and it covers at least the screen and
         // the margins asked.
-        let rest_at = self.names_view.map(|v| v.zoom_milli());
-        let zooming = ask.moving && rest_at != Some(view.zoom_milli());
+        let zooming = ask.moving && self.rested != Some(view.zoom_milli());
         let shows = match zooming && ask.scaled_while_moving {
             true => {
                 let below = u8::try_from(view.zoom_milli() / MILLI).unwrap_or(u8::MAX);
@@ -363,41 +597,109 @@ impl Frames {
                 type_.width(t, s)
             }),
         };
-        if !ask.moving {
+        let now = ask.now_ms;
+        // The screen's view and its margins: where a frame at rest at this
+        // zoom places its names, and the frame drawn unless the frontend
+        // scales it.
+        let mut exact = view.on_whole_pixel();
+        exact.resize(fw, fh);
+        if !self.names_off && !ask.moving {
             // At rest the names are placed anew over the frame, at the
-            // exact scale, after the pins, and kept in world terms.
-            let base = drawn.at_zoom(rest_zoom);
-            let labels = self.painter.labels(&base, true);
-            let (bw, bh) = base.size();
-            let s = drawn.scale_at(rest_zoom);
-            let sub = SUBPIXEL as f64;
-            let px = |v: (i64, i64)| {
-                (
-                    (v.0 as f64 / sub - f64::from(bw) / 2.0) * s + f64::from(w) / 2.0,
-                    (v.1 as f64 / sub - f64::from(bh) / 2.0) * s + f64::from(h) / 2.0,
-                )
-            };
+            // exact scale, after the pins, and kept in world terms; asked
+            // again while they fade, the same frame keeps them.
             let taken = screenmap::taken(&placed, scale);
-            let names = mapnames::place(w, h, &labels, px, &taken, scale, &mut self.type_);
-            #[cfg(test)]
-            if self.type_.unkept {
-                self.names = names.iter().map(Sprite::of_whole_reach).collect();
-            } else {
-                self.names = Sprite::of_all(&names, self.tiles.workers());
+            let key = RestKey {
+                view: drawn,
+                scale: scale.to_bits(),
+                taken,
+                epoch: self.painter.epoch(),
+            };
+            if !(self.fading && self.rest_key.as_ref() == Some(&key)) {
+                let base = drawn.at_zoom(rest_zoom);
+                let labels = self.painter.labels(&base, true);
+                let (bw, bh) = base.size();
+                let s = drawn.scale_at(rest_zoom);
+                let sub = SUBPIXEL as f64;
+                let px = |v: (i64, i64)| {
+                    (
+                        (v.0 as f64 / sub - f64::from(bw) / 2.0) * s + f64::from(w) / 2.0,
+                        (v.1 as f64 / sub - f64::from(bh) / 2.0) * s + f64::from(h) / 2.0,
+                    )
+                };
+                let names = mapnames::place(w, h, &labels, px, &key.taken, scale, &mut self.type_);
+                let sprites = self.sprites_of(&names);
+                self.carry_over(names, sprites, (drawn, drawn), now);
+                self.rest_key = Some(key);
             }
-            #[cfg(not(test))]
-            {
-                self.names = Sprite::of_all(&names, self.tiles.workers());
+            self.rested = Some(view.zoom_milli());
+        } else if !self.names_off {
+            // A frame that moves at another zoom than its names were
+            // placed at, or into a frame of another step, places them
+            // anew (1225); a pan at their zoom moves them.
+            let set_at = self.set_view.map(|v| v.zoom_milli());
+            let drawn_at = self.names_view.map(|v| v.zoom_milli());
+            if set_at != Some(exact.zoom_milli()) || drawn_at != Some(drawn.zoom_milli()) {
+                self.place_zooming(ask, (&exact, &drawn), rest_zoom, now);
+                self.rest_key = None;
             }
-            self.names_view = Some(drawn);
         }
-        if let Some(rest) = self.names_view {
-            for name in &self.names {
-                let (x, y) = moved(&rest, &drawn, name.centre);
-                let (dx, dy) = (x - name.centre.0, y - name.centre.1);
-                name.draw(rgba, w, h, theme, dx.round() as i64, dy.round() as i64);
+        self.last_view = Some(exact);
+        self.drawn_names.clear();
+        self.drawn_leaving.clear();
+        if let Some(from) = self.names_view {
+            for (i, name) in self.names.iter().enumerate() {
+                let alpha = self.fades[i].alpha(now);
+                if alpha == 0 {
+                    continue;
+                }
+                let (x, y) = moved(&from, &drawn, name.centre);
+                let by = ((x - name.centre.0).round(), (y - name.centre.1).round());
+                self.drawn_names.push(Carried {
+                    i,
+                    by: (by.0 as i64, by.1 as i64),
+                    keep: true,
+                    alpha,
+                });
             }
         }
+        // The names the last placement no longer set, fading out where
+        // the map moves them, under the others: a pan moves each sprite by
+        // whole pixels, a zoom samples it again at its screen size.
+        self.leaving.retain(|l| l.fade.alpha(now) > 0);
+        let k = drawn.scale_at(0) / exact.scale_at(0);
+        for (j, l) in self.leaving.iter_mut().enumerate() {
+            let by =
+                match l.view.zoom_milli() == drawn.zoom_milli() && l.screen == exact.zoom_milli() {
+                    true => {
+                        let (x, y) = moved(&l.view, &drawn, l.sprite.centre);
+                        let by = (
+                            (x - l.sprite.centre.0).round(),
+                            (y - l.sprite.centre.1).round(),
+                        );
+                        (by.0 as i64, by.1 as i64)
+                    }
+                    false => {
+                        let at = moved(&l.set_view, &exact, l.name.centre);
+                        l.sprite = Sprite::scaled(&l.name, moved(&exact, &drawn, at), k, None);
+                        l.view = drawn;
+                        l.screen = exact.zoom_milli();
+                        (0, 0)
+                    }
+                };
+            let alpha = l.fade.alpha(now);
+            l.sprite.draw_faded(rgba, w, h, theme, by, alpha);
+            self.drawn_leaving.push(Carried {
+                i: j,
+                by,
+                keep: false,
+                alpha,
+            });
+        }
+        for c in &self.drawn_names {
+            self.names[c.i].draw_faded(rgba, w, h, theme, c.by, c.alpha);
+        }
+        // A name fading in from nothing is not drawn yet, but fades.
+        self.fading = !self.leaving.is_empty() || self.fades.iter().any(|fade| !fade.settled(now));
         if ask.draw_pins {
             screenmap::draw_pins(rgba, w, h, &placed, scale, theme, &mut self.type_);
         }
@@ -408,9 +710,261 @@ impl Frames {
             tile_zoom,
             rest_zoom,
             missing,
+            fading: self.fading,
             attribution,
             epoch: self.painter.epoch(),
         }
+    }
+
+    /// The sprites of `names`, placed in the frame they are drawn in.
+    fn sprites_of(&self, names: &[PlacedName]) -> Vec<Sprite> {
+        #[cfg(test)]
+        if self.type_.unkept {
+            return names.iter().map(Sprite::of_whole_reach).collect();
+        }
+        Sprite::of_all(names, self.tiles.workers())
+    }
+
+    /// Place the names of a frame that moves at another zoom anew, as a
+    /// frame at rest at its zoom places them (1225): in `exact`, the
+    /// screen's view with its margins, after the pins, from the names
+    /// [`Found`] keeps near it at `step`; drawn into `drawn`, the frame
+    /// composed, each at the scale between the two.
+    fn place_zooming(
+        &mut self,
+        ask: &Ask<'_>,
+        (exact, drawn): (&ExactView, &ExactView),
+        step: u8,
+        now: Option<u64>,
+    ) {
+        let started = Instant::now();
+        let (fw, fh) = exact.size();
+        let scale = ask.scale;
+        let taken = match ask.pins.is_empty() {
+            true => Vec::new(),
+            false => {
+                let type_ = &mut self.type_;
+                let pins = match ask.measure {
+                    Some(measure) => {
+                        screenmap::place_exact(ask.pins, exact, ask.selected, scale, measure)
+                    }
+                    None => screenmap::place_exact(ask.pins, exact, ask.selected, scale, |t, s| {
+                        type_.width(t, s)
+                    }),
+                };
+                screenmap::taken(&pins, scale)
+            }
+        };
+        let base = exact.at_zoom(step);
+        let looked_up = self.find(&base);
+        let Some(found) = self.found.as_ref() else {
+            return;
+        };
+        // The frame's middle and the view a frame at rest looks its names
+        // up in, in the kept view's sub-pixels: the same offsets from the
+        // middle as a frame at rest's own lookup gives.
+        let c = found.wide.to_screen_sub(exact.centre);
+        let (bw, bh) = base.size();
+        let half = (i64::from(bw) * SUBPIXEL / 2, i64::from(bh) * SUBPIXEL / 2);
+        let area = [c.0 - half.0, c.1 - half.1, c.0 + half.0, c.1 + half.1];
+        let near: Vec<&ViewLabel> = found
+            .labels
+            .iter()
+            .zip(&found.reach)
+            .filter(|(_, r)| {
+                r[0] <= area[2] && r[2] >= area[0] && r[1] <= area[3] && r[3] >= area[1]
+            })
+            .map(|(l, _)| l)
+            .collect();
+        let s = exact.scale_at(step);
+        let sub = SUBPIXEL as f64;
+        let (mx, my) = (f64::from(fw) / 2.0, f64::from(fh) / 2.0);
+        let px = |v: (i64, i64)| {
+            (
+                (v.0 - c.0) as f64 / sub * s + mx,
+                (v.1 - c.1) as f64 / sub * s + my,
+            )
+        };
+        let labels = near.len();
+        let labels_ns = nanos(started);
+        let started = Instant::now();
+        let names = mapnames::place(fw, fh, near, px, &taken, scale, &mut self.type_);
+        let place_ns = nanos(started);
+        let started = Instant::now();
+        let sprites = match exact == drawn {
+            true => self.sprites_of(&names),
+            false => {
+                let k = drawn.scale_at(0) / exact.scale_at(0);
+                let mips = self.mips_of(&names, k);
+                let made: Vec<(&PlacedName, Option<&Mip>)> = names
+                    .iter()
+                    .zip(mips.iter().map(Option::as_deref))
+                    .collect();
+                Sprite::all_of(&made, self.tiles.workers(), |&(n, mip)| {
+                    Sprite::scaled(n, moved(exact, drawn, n.centre), k, mip)
+                })
+            }
+        };
+        self.cost = PlaceCost {
+            labels,
+            names: names.len(),
+            looked_up,
+            labels_ns,
+            place_ns,
+            sprites_ns: nanos(started),
+        };
+        self.carry_over(names, sprites, (*exact, *drawn), now);
+    }
+
+    /// The [`Mip`] of each of `names` when they are drawn at `k` below
+    /// [`MIP_BELOW`]: those kept by their mask, the others made; the
+    /// names before them no more kept.
+    fn mips_of(&mut self, names: &[PlacedName], k: f64) -> Vec<Option<Arc<Mip>>> {
+        if k >= MIP_BELOW {
+            return vec![None; names.len()];
+        }
+        let mut was = std::mem::take(&mut self.mips);
+        names
+            .iter()
+            .map(|n| {
+                let key = Arc::as_ptr(&n.mask) as usize;
+                let kept = match was.remove(&key).or_else(|| self.mips.remove(&key)) {
+                    Some(kept) => kept,
+                    None => (n.mask.clone(), Arc::new(Mip::of(n))),
+                };
+                let mip = kept.1.clone();
+                self.mips.insert(key, kept);
+                Some(mip)
+            })
+            .collect()
+    }
+
+    /// Keep the names of a view wider than `base` at its step ([`Found`]):
+    /// looked up anew when none are kept at that step, the maps changed,
+    /// or `base` reaches past them. Whether they were.
+    fn find(&mut self, base: &Viewport) -> bool {
+        let epoch = self.painter.epoch();
+        let (bw, bh) = base.size();
+        let (bw, bh) = (i64::from(bw) * SUBPIXEL, i64::from(bh) * SUBPIXEL);
+        let fits = self.found.as_ref().is_some_and(|f| {
+            let (ww, wh) = f.wide.size();
+            let (ww, wh) = (i64::from(ww) * SUBPIXEL, i64::from(wh) * SUBPIXEL);
+            let c = f.wide.to_screen_sub(base.centre);
+            f.epoch == epoch
+                && f.wide.zoom() == base.zoom()
+                && c.0 - bw / 2 >= 0
+                && c.1 - bh / 2 >= 0
+                && c.0 + bw / 2 <= ww
+                && c.1 + bh / 2 <= wh
+        });
+        if fits {
+            return false;
+        }
+        let side = |n: u32| (f64::from(n) * FOUND_WIDER).ceil() as u32;
+        let mut wide = *base;
+        let (w, h) = base.size();
+        wide.resize(side(w), side(h));
+        let labels = self.painter.labels(&wide, true);
+        let reach = labels.iter().map(reach_of).collect();
+        self.found = Some(Found {
+            epoch,
+            wide,
+            labels,
+            reach,
+        });
+        true
+    }
+
+    /// Take `set`, the names a placement set in the frame `set_view`, and
+    /// their `sprites` in the frame `view`, from the names before them
+    /// (1205): one shown before (by its text and kind), or fading out, keeps
+    /// its alpha and fades in from there, a new one fades in from nothing,
+    /// and one shown before and placed no more fades out where the map
+    /// moves it. Without a clock, or with no names before, they show at
+    /// once.
+    fn carry_over(
+        &mut self,
+        set: Vec<PlacedName>,
+        sprites: Vec<Sprite>,
+        (set_view, view): (ExactView, ExactView),
+        now: Option<u64>,
+    ) {
+        let was = self.set_view.zip(self.names_view);
+        self.set_view = Some(set_view);
+        self.names_view = Some(view);
+        let (Some(at), Some((was_set, was_view))) = (now, was) else {
+            self.fades = vec![Fade::SHOWN; sprites.len()];
+            self.names = sprites;
+            self.set = set;
+            self.leaving.clear();
+            return;
+        };
+        /// Where a name shown before is: shown, or fading out.
+        enum Before {
+            Shown(usize),
+            Leaving(usize),
+        }
+        let mut taken = vec![false; self.names.len()];
+        let mut back = vec![false; self.leaving.len()];
+        let fades: Vec<Fade> = {
+            let mut before: HashMap<(&str, LabelKind), Vec<Before>> = HashMap::new();
+            for (k, l) in self.leaving.iter().enumerate().rev() {
+                if l.fade.alpha(now) > 0 {
+                    let key = (l.name.text.as_str(), l.name.kind);
+                    before.entry(key).or_default().push(Before::Leaving(k));
+                }
+            }
+            // Pushed last, a name shown is taken before one leaving.
+            for (j, name) in self.names.iter().enumerate().rev() {
+                if self.fades[j].alpha(now) > 0 {
+                    let key = (name.text.as_str(), name.kind);
+                    before.entry(key).or_default().push(Before::Shown(j));
+                }
+            }
+            sprites
+                .iter()
+                .map(|s| {
+                    match before
+                        .get_mut(&(s.text.as_str(), s.kind))
+                        .and_then(Vec::pop)
+                    {
+                        Some(Before::Shown(j)) => {
+                            taken[j] = true;
+                            self.fades[j]
+                        }
+                        Some(Before::Leaving(k)) => {
+                            back[k] = true;
+                            let mut fade = self.leaving[k].fade;
+                            fade.turn(true, now);
+                            fade
+                        }
+                        None => Fade::new_from_nothing(at),
+                    }
+                })
+                .collect()
+        };
+        let mut k = 0;
+        self.leaving.retain(|_| {
+            k += 1;
+            !back[k - 1]
+        });
+        let old = std::mem::replace(&mut self.names, sprites);
+        let old_set = std::mem::replace(&mut self.set, set);
+        let gone = old.into_iter().zip(old_set).zip(self.fades.drain(..));
+        for (((sprite, name), mut fade), taken) in gone.zip(taken) {
+            if !taken && fade.alpha(now) > 0 {
+                fade.turn(false, now);
+                self.leaving.push(Leaving {
+                    name,
+                    set_view: was_set,
+                    sprite,
+                    view: was_view,
+                    screen: was_set.zoom_milli(),
+                    fade,
+                });
+            }
+        }
+        self.fades = fades;
     }
 
     /// Hand a shot's buffer back once it is shown (1154): the next frame
@@ -486,6 +1040,51 @@ impl Frames {
         self.names.iter().map(|n| n.text.clone()).collect()
     }
 
+    /// The names the last frame drew, in the order drawn, where it drew
+    /// them.
+    pub fn drawn_names(&self) -> Vec<DrawnName> {
+        let Some(screen) = self.last_view else {
+            return Vec::new();
+        };
+        let leaving = self.drawn_leaving.iter().map(|c| {
+            let l = &self.leaving[c.i];
+            (&l.sprite, &l.name, &l.set_view, c)
+        });
+        let names = self.drawn_names.iter().filter_map(|c| {
+            let set_view = self.set_view.as_ref()?;
+            Some((&self.names[c.i], &self.set[c.i], set_view, c))
+        });
+        leaving
+            .chain(names)
+            .map(|(sprite, name, set_view, c)| DrawnName {
+                text: sprite.text.clone(),
+                kind: sprite.kind,
+                min_zoom: sprite.min_zoom,
+                at: moved(set_view, &screen, name.centre),
+                angle: name.angle,
+                boxes: sprite.boxes.iter().map(|b| shifted(b, c.by)).collect(),
+                alpha: c.alpha,
+                shown: c.keep,
+            })
+            .collect()
+    }
+
+    /// Milliseconds since these frames were made: the clock of a frontend
+    /// that keeps none of its own ([`Ask::now_ms`]).
+    pub fn clock_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Place and draw no names, or again: a measuring tool's ground.
+    pub fn set_names_off(&mut self, off: bool) {
+        self.names_off = off;
+    }
+
+    /// What the last frame that placed its names while it moved spent.
+    pub fn place_cost(&self) -> PlaceCost {
+        self.cost
+    }
+
     /// What the tile cache did.
     pub fn tile_stats(&self) -> Stats {
         self.tiles.stats
@@ -511,6 +1110,21 @@ impl Frames {
     pub fn clear_tiles(&mut self) {
         self.tiles.clear();
     }
+}
+
+/// A name's reach in the sub-pixels of the view it was looked up in: its
+/// anchor's, or its line's.
+fn reach_of(l: &ViewLabel) -> [i64; 4] {
+    let mut r = [l.anchor.0, l.anchor.1, l.anchor.0, l.anchor.1];
+    for &(x, y) in l.line.iter().flatten() {
+        r = [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)];
+    }
+    r
+}
+
+/// The nanoseconds since `started`.
+fn nanos(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// `view` as every frontend shows it: one world at most, the zoom between
@@ -595,6 +1209,7 @@ mod tests {
             zooms: (10, 17),
             draw_pins: true,
             measure: None,
+            now_ms: None,
             scaled_while_moving: false,
         }
     }
@@ -685,10 +1300,33 @@ mod tests {
         assert_eq!(got.shows.centre, at(15_400).centre);
         assert_eq!(got.shows.size(), (900, 700));
         assert_eq!(got.view.size(), (900 + 2 * 225, 700 + 2 * 175));
+        // The ground, byte for byte; the names are placed for the
+        // pinch's zoom since 1225, so the pixels under them are left out.
+        let pinch_names = pinch.drawn_names();
         let mut pan = florence();
         pan.frame(&ask(at(15_000), false, 2.75, theme));
         let want = pan.frame(&ask(at(15_000), true, 2.75, theme));
-        assert!(got.rgba == want.rgba, "the step's frame, byte for byte");
+        let (w, _) = got.view.size();
+        let under: Vec<Rect> = pinch_names
+            .iter()
+            .chain(&pan.drawn_names())
+            .flat_map(|n| n.boxes.iter().map(|b| b.grown(16)))
+            .collect();
+        assert!(!under.is_empty(), "names drawn");
+        let differ = got
+            .rgba
+            .chunks_exact(4)
+            .zip(want.rgba.chunks_exact(4))
+            .enumerate()
+            .filter(|(i, (a, b))| {
+                let (x, y) = ((i % w as usize) as i32, (i / w as usize) as i32);
+                let named = under
+                    .iter()
+                    .any(|r| (r.x0..r.x1).contains(&x) && (r.y0..r.y1).contains(&y));
+                a != b && !named
+            })
+            .count();
+        assert_eq!(differ, 0, "the step's frame, byte for byte");
         let out = pinch.frame(&scaled(at(14_600)));
         assert_eq!((out.tile_zoom, out.shows.zoom_milli()), (14, 14_000));
         // At rest between steps, then a pan there: drawn at that zoom.
@@ -705,6 +1343,225 @@ mod tests {
             got.rgba == want.rgba,
             "a pan at the zoom at rest is as before"
         );
+    }
+
+    /// One frame of a pinch: its zoom, the names drawn, the pairs of
+    /// them whose boxes overlap, those the ladder of its zoom does not
+    /// show, and the names a frame at rest of its view places.
+    #[derive(Debug)]
+    struct PinchFrame {
+        zoom_milli: u32,
+        drawn: usize,
+        overlapping: usize,
+        below: usize,
+        budget: usize,
+    }
+
+    /// The overlapping pairs of `names`: two of them whose boxes cover
+    /// a pixel both.
+    fn overlapping(names: &[DrawnName]) -> usize {
+        let mut pairs = 0;
+        for (i, a) in names.iter().enumerate() {
+            for b in &names[i + 1..] {
+                let meet = a
+                    .boxes
+                    .iter()
+                    .any(|p| b.boxes.iter().any(|q| p.overlaps(q)));
+                pairs += usize::from(meet);
+            }
+        }
+        pairs
+    }
+
+    /// A pinch out from z15 to z12 over twenty frames on the Florence
+    /// fixture, the phone's way (the frame at the step, scaled by the
+    /// frontend), after a frame at rest at z15: each frame's names.
+    fn pinch_out() -> Vec<PinchFrame> {
+        const SCALE: f32 = 1.0;
+        let centre = project(LatLon::from_degrees(43.7757, 11.2603));
+        let theme = MapTheme::Light;
+        let rest = ExactView::new(centre, 15 * MILLI, 1280, 960);
+        let mut frames = florence();
+        frames.frame(&ask(rest, false, SCALE, theme));
+        assert!(frames.names().len() > 5, "{:?}", frames.names());
+        let mut out = Vec::new();
+        for i in 1..=20u32 {
+            let mut view = rest;
+            view.zoom_about(15_000 - 150 * i, 640.0, 480.0);
+            frames.frame(&Ask {
+                scaled_while_moving: true,
+                ..ask(view, true, SCALE, theme)
+            });
+            let drawn = frames.drawn_names();
+            let band = view.tile_zoom();
+            let budget = match drawn.is_empty() {
+                true => 0,
+                false => {
+                    let mut fresh = florence();
+                    fresh.frame(&ask(view, false, SCALE, theme));
+                    fresh.names().len()
+                }
+            };
+            out.push(PinchFrame {
+                zoom_milli: view.zoom_milli(),
+                drawn: drawn.len(),
+                overlapping: overlapping(&drawn),
+                below: drawn.iter().filter(|n| n.min_zoom > band).count(),
+                budget,
+            });
+        }
+        for f in &out {
+            eprintln!("{f:?}");
+        }
+        out
+    }
+
+    /// 1205: a pinch out draws no carpet: in every frame no name the
+    /// ladder of the frame's zoom does not show, no two names whose
+    /// boxes overlap, and no more names than a frame at rest of its view
+    /// places. Before, every frame drew all eight names of the frame at
+    /// rest, nine pairs of them overlapping from z14.85, twenty from
+    /// z13.95 and twenty-eight from z12.9, seven below the ladder from
+    /// z14.4 and all eight from z13.35, against six to none at rest.
+    #[test]
+    fn a_pinch_out_draws_no_carpet() {
+        let frames = pinch_out();
+        let below: Vec<_> = frames.iter().filter(|f| f.below > 0).collect();
+        assert!(below.is_empty(), "names below the ladder: {below:?}");
+        let overlapping: Vec<_> = frames.iter().filter(|f| f.overlapping > 0).collect();
+        assert!(overlapping.is_empty(), "names overlap: {overlapping:?}");
+        let over: Vec<_> = frames.iter().filter(|f| f.drawn > f.budget).collect();
+        assert!(over.is_empty(), "more names than at rest: {over:?}");
+        assert!(frames[0].drawn > 1, "the first frame keeps names");
+        assert_eq!(frames.last().map(|f| f.zoom_milli), Some(12_000));
+    }
+
+    /// The frames over the Berlin fixture, names from z10 to z14.
+    fn berlin() -> Frames {
+        let dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/berlin");
+        Frames::new(crate::picture::Maps::new(Some(dir)))
+    }
+
+    /// The names a frame at rest at `view` places, as drawn.
+    fn at_rest(frames: fn() -> Frames, view: ExactView, scale: f32) -> Vec<DrawnName> {
+        let mut fresh = frames();
+        fresh.frame(&ask(view, false, scale, MapTheme::Light));
+        fresh.drawn_names()
+    }
+
+    /// 1225: a pinch out from z14 to z10 in eight steps, the phone's way,
+    /// never clears the names: every frame shows the names a frame at
+    /// rest at its zoom places, each within a pixel of where that frame
+    /// puts it. Before, from z13 on none (1205's step limit), and the
+    /// frames that kept some carried them from z14.
+    #[test]
+    fn a_pinch_out_from_z14_to_z10_thins_the_names_and_never_clears_them() {
+        let centre = project(LatLon::from_degrees(52.5175, 13.3950));
+        let rest = ExactView::new(centre, 14 * MILLI, 1280, 960);
+        let mut frames = berlin();
+        frames.frame(&ask(rest, false, 1.0, MapTheme::Light));
+        let mut counts = Vec::new();
+        for i in 1..=8u32 {
+            let mut view = rest;
+            view.zoom_about(14_000 - 500 * i, 640.0, 480.0);
+            frames.frame(&Ask {
+                scaled_while_moving: true,
+                ..ask(view, true, 1.0, MapTheme::Light)
+            });
+            let shown: Vec<DrawnName> = frames
+                .drawn_names()
+                .into_iter()
+                .filter(|n| n.shown)
+                .collect();
+            let want = at_rest(berlin, view, 1.0);
+            let z = view.zoom_milli();
+            assert!(!want.is_empty(), "z{z}: the frame at rest places names");
+            assert!(!shown.is_empty(), "z{z}: no name, at rest {}", want.len());
+            for n in &shown {
+                let near = want.iter().find(|m| {
+                    m.text == n.text
+                        && m.kind == n.kind
+                        && (m.at.0 - n.at.0).abs() <= 1.0
+                        && (m.at.1 - n.at.1).abs() <= 1.0
+                });
+                assert!(
+                    near.is_some(),
+                    "z{z}: {} at {:?}, at rest {want:?}",
+                    n.text,
+                    n.at
+                );
+            }
+            let names = |v: &[DrawnName]| {
+                let mut t: Vec<String> = v.iter().map(|n| n.text.clone()).collect();
+                t.sort();
+                t
+            };
+            assert_eq!(
+                names(&shown),
+                names(&want),
+                "z{z}: the names of the frame at rest"
+            );
+            counts.push((z, shown.len()));
+        }
+        eprintln!("{counts:?}");
+        assert_eq!(counts.last().map(|c| c.0), Some(10_000));
+    }
+
+    /// 1225: a street's name in a pinch's frame is laid along the street
+    /// as the frame's own zoom draws it: its middle and its angle where a
+    /// frame at rest at that zoom lays it, and its glyphs drawn into the
+    /// step's frame at the inverse of the frontend's scale, so on screen
+    /// they are as long as at rest; carried, they were the step's.
+    #[test]
+    fn a_street_name_follows_its_street_through_a_pinch() {
+        let centre = project(LatLon::from_degrees(43.7731, 11.2560));
+        let theme = MapTheme::Light;
+        let rest = ExactView::new(centre, 15 * MILLI, 900, 700);
+        let mut frames = florence();
+        frames.frame(&ask(rest, false, 2.75, theme));
+        let mut streets = 0;
+        for z in [15_250, 15_600, 15_900] {
+            let mut view = rest;
+            view.zoom_about(z, 450.0, 350.0);
+            let got = frames.frame(&Ask {
+                scaled_while_moving: true,
+                ..ask(view, true, 2.75, theme)
+            });
+            let k = got.view.scale_at(0) / view.scale_at(0);
+            assert!(k < 0.96, "z{z}: drawn at the step ({k})");
+            let want = at_rest(florence, view, 2.75);
+            let span = |n: &DrawnName| {
+                let x0 = n.boxes.iter().map(|b| b.x0).min().unwrap_or(0);
+                let x1 = n.boxes.iter().map(|b| b.x1).max().unwrap_or(0);
+                let y0 = n.boxes.iter().map(|b| b.y0).min().unwrap_or(0);
+                let y1 = n.boxes.iter().map(|b| b.y1).max().unwrap_or(0);
+                f64::from(x1 - x0).hypot(f64::from(y1 - y0))
+            };
+            for n in frames.drawn_names().iter().filter(|n| n.kind.is_line()) {
+                let Some(m) = want.iter().find(|m| m.text == n.text && m.kind == n.kind) else {
+                    panic!("z{z}: {} is not at rest", n.text);
+                };
+                assert!(
+                    (m.at.0 - n.at.0).abs() <= 1.0 && (m.at.1 - n.at.1).abs() <= 1.0,
+                    "z{z}: {} at {:?}, at rest {:?}",
+                    n.text,
+                    n.at,
+                    m.at
+                );
+                assert!((m.angle - n.angle).abs() < 1e-9, "z{z}: {}", n.text);
+                // Its run on screen, the frame scaled by 1 / k, against
+                // the run at rest: within the boxes' rounding.
+                let (on_screen, at_rest) = (span(n) / k, span(m));
+                assert!(
+                    (on_screen - at_rest).abs() <= 4.0 / k,
+                    "z{z}: {} {on_screen} against {at_rest}",
+                    n.text
+                );
+                streets += 1;
+            }
+        }
+        assert!(streets > 2, "street names laid ({streets})");
     }
 
     /// 1163: a pinch's frame at the step below covers more than the

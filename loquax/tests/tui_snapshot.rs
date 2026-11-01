@@ -1,6 +1,6 @@
 //! The messenger (`loquax`, and its `loquax tui` alias) through the real
 //! binary, scripted, against a real daemon: open the conversation, type two lines (`Alt-Enter` between them), send,
-//! watch the delivery mark move from `○` to `✓`, read the two-line reply. The frames the script asks for are pinned in
+//! watch the delivery mark move from `◷` to `✓✓`, read the two-line reply. The frames the script asks for are pinned in
 //! `tests/fixtures/tui_session.frames`.
 //!
 //! The keymap's sessions (`docs/src/concepts/loquax-keys-and-layout.md`,
@@ -52,10 +52,16 @@
 //! one home: an exchange with Bob and a send to Carol, who never answers,
 //! cut off by quitting; a restart with no `--to`, which lists both from the
 //! store, Bob by the name he announced in the first run, our proven message
-//! `✓` and the cut-off send `○` with the restart in its ledger, then pins
+//! `✓✓` and the cut-off send `◷` with the restart in its ledger, then pins
 //! Bob and deletes his reply (`d`, `y`); and a third start that shows the
 //! pin above its rule and the reply gone. Pinned in
 //! `tests/fixtures/tui_history.frames`.
+//!
+//! The draft's session (1219) runs loquax twice over one home: a line typed
+//! to Bob and not sent stays when the reader goes on to Carol, Bob's row
+//! saying `Draft: …` where its last line would be; after the restart Bob's
+//! conversation is the store's only one, and its compose holds the line.
+//! Pinned in `tests/fixtures/tui_draft.frames`.
 //!
 //! The telemetry session (`docs/src/concepts/loquax-map.md`, slice (a)) runs
 //! at 80 x 24 and at 120 x 40: the peer writes a line, then sends two
@@ -101,7 +107,7 @@ use loquax::clock::Tokio;
 use loquax::effects::Terminal;
 use loquax::engine::{attach, delivery_address, AttachConfig};
 use loquax::fanout::Fanout;
-use loquax::outbox::{SendRequest, Via};
+use loquax::outbox::{OutboxEvent, SendRequest, Via};
 use loquax::send::{run_send, SendOptions};
 
 mod support;
@@ -124,6 +130,7 @@ const EXPECTED_STYLES: &str = include_str!("fixtures/tui_chat.styles");
 const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames");
 const EXPECTED_NAMES: &str = include_str!("fixtures/tui_names.frames");
 const EXPECTED_HISTORY: &str = include_str!("fixtures/tui_history.frames");
+const EXPECTED_DRAFT: &str = include_str!("fixtures/tui_draft.frames");
 const EXPECTED_TELEMETRY: &str = include_str!("fixtures/tui_telemetry.frames");
 const EXPECTED_LIVENESS: &str = include_str!("fixtures/tui_liveness.frames");
 const EXPECTED_MAP: &str = include_str!("fixtures/tui_map.frames");
@@ -1084,7 +1091,7 @@ type second line
 key enter
 key esc
 frame two sent
-drag 60 18 69 20
+drag 59 18 69 20
 frame dragged
 tick 12
 frame selected
@@ -1115,7 +1122,7 @@ async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
         "{click}"
     );
     assert!(
-        frame(&click, "sent by click").contains("hello by mouse  12:00 ○"),
+        frame(&click, "sent by click").contains("hello by mouse  12:00 ◷"),
         "{click}"
     );
     assert!(
@@ -1617,7 +1624,7 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
     let restarted = frame(&second, "restarted");
     assert!(restarted.contains("leaving in ten"), "{restarted}");
     assert!(
-        restarted.contains(" ○"),
+        restarted.contains(" ◷"),
         "the cut-off send is queued: {restarted}"
     );
     assert!(
@@ -1633,7 +1640,7 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
         bob_frame.contains("are you at the field site?"),
         "{bob_frame}"
     );
-    assert!(bob_frame.contains(" ✓"), "the proof survived: {bob_frame}");
+    assert!(bob_frame.contains(" ✓✓"), "the proof survived: {bob_frame}");
     assert!(bob_frame.contains("yes, from ten"), "{bob_frame}");
     assert!(frame(&second, "pinned").contains('┄'), "{second}");
     assert!(frame(&second, "asked").contains("y deletes"), "{second}");
@@ -1656,6 +1663,72 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              loquax/tests/fixtures/tui_history.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The draft's first run: a line typed to Bob, then on to Carol.
+const DRAFT_FIRST: &str = "\
+until ready 20
+frame attached
+key enter
+key i
+type half a thought
+frame typed
+key esc
+key alt-down
+frame left
+key alt-up
+frame back
+key alt-down
+key q
+";
+
+/// The restart, with no `--to`.
+const DRAFT_SECOND: &str = "\
+until ready 20
+frame restarted
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_stays_when_the_reader_goes_on_and_after_a_restart() {
+    let daemon = daemon("tui-draft", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+
+    let first = history_run(&daemon, home.path(), "first", DRAFT_FIRST, &[0x22, 0x33]).await;
+    let first = history_frames(first, home.path(), "first").await;
+    let typed = frame(&first, "typed");
+    assert!(!typed.contains("Draft:"), "the open one's row: {typed}");
+    let left = frame(&first, "left");
+    assert!(left.contains("Draft: half a thought"), "{left}");
+    let back = frame(&first, "back");
+    assert!(back.contains("half a thought"), "compose holds it: {back}");
+    assert!(!back.contains("Draft:"), "{back}");
+
+    // The restart: no `--to`, the store's conversations only.
+    let second = history_run(&daemon, home.path(), "second", DRAFT_SECOND, &[]).await;
+    let second = history_frames(second, home.path(), "second").await;
+    let restarted = frame(&second, "restarted");
+    assert!(restarted.contains("half a thought"), "{restarted}");
+    assert!(
+        !restarted.contains("Draft:"),
+        "open, in compose: {restarted}"
+    );
+
+    let all = format!("=== first ===\n{first}=== second ===\n{second}");
+    if all != EXPECTED_DRAFT {
+        let kept = std::env::temp_dir().join("loquax-tui-draft.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_draft.frames\n{all}",
             kept.display()
         );
     }
@@ -1730,6 +1803,22 @@ async fn peer_session(
     prepare: impl FnOnce(&Path),
     messages: impl FnOnce([u8; 16]) -> Vec<(&'static str, Vec<(i64, Vec<u8>)>)>,
 ) -> (String, String) {
+    let (frames, log, _) =
+        peer_session_of(name, size, script_text, extra, prepare, messages, false).await;
+    (frames, log)
+}
+
+/// [`peer_session`]; with `listen`, the peer also reads what loquax sends
+/// it until loquax quits, and returns each message's body and fields.
+async fn peer_session_of(
+    name: &str,
+    size: &str,
+    script_text: &str,
+    extra: &[&str],
+    prepare: impl FnOnce(&Path),
+    messages: impl FnOnce([u8; 16]) -> Vec<(&'static str, Vec<(i64, Vec<u8>)>)>,
+    listen: bool,
+) -> (String, String, Vec<(Vec<u8>, Vec<(i64, Vec<u8>)>)>) {
     let daemon = daemon(&format!("tui-{name}-{size}"), |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     prepare(home.path());
@@ -1826,7 +1915,24 @@ async fn peer_session(
         assert!(sent.is_ok(), "{body:?} did not go out: {sent:?}");
     }
 
-    let output = child.await.expect("the loquax child thread");
+    // The peer listens until loquax quits.
+    let mut heard = Vec::new();
+    let mut child = child;
+    let output = loop {
+        if !listen {
+            break (&mut child).await.expect("the loquax child thread");
+        }
+        tokio::select! {
+            output = &mut child => break output.expect("the loquax child thread"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                for event in fanout.pump(&mut them.outbox).unwrap_or_default() {
+                    if let OutboxEvent::Received { body, fields, .. } = event {
+                        heard.push((body, fields));
+                    }
+                }
+            }
+        }
+    };
     them.stop().await;
     let got = std::fs::read_to_string(&frames).expect("read the frames");
     assert_eq!(
@@ -1836,7 +1942,7 @@ async fn peer_session(
         String::from_utf8_lossy(&output.stderr)
     );
     let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
-    (without_ids(&got), log)
+    (without_ids(&got), log, heard)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1880,6 +1986,92 @@ async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line
     }
 }
 
+/// Read receipts, slice two (1231): the peer's three messages carry the
+/// `lev` mark; the terminal's focus comes in once they are on screen. A
+/// second later they are seen, five seconds after that one receipt goes,
+/// alone, with the three ids and the script's clock as the read time, and
+/// the peer hears it. No bubble is drawn for it.
+const RECEIPTS_SCRIPT: &str = "\
+until ready 20
+frame attached
+until received 3 60
+focus in
+sleep 1500
+frame seen
+sleep 9000
+frame after
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_terminal_sends_one_receipt_six_seconds_after_the_focus_came() {
+    let messages = |_: [u8; 16]| {
+        let mark = leviculum_lxmf::lev::Lev::mark().fields().to_vec();
+        vec![
+            ("first", mark.clone()),
+            ("second", mark.clone()),
+            ("third", mark),
+        ]
+    };
+    let (frames, log, heard) = peer_session_of(
+        "receipts",
+        "80x24",
+        RECEIPTS_SCRIPT,
+        &[],
+        |_| {},
+        messages,
+        true,
+    )
+    .await;
+    let elapsed = |prefix: &str| -> Vec<u64> {
+        log.lines()
+            .filter(|line| line.contains(prefix))
+            .filter_map(|line| line.split("elapsed_ms=").nth(1))
+            .filter_map(|ms| ms.trim().parse().ok())
+            .collect()
+    };
+    let focus = elapsed("FOCUS front=true");
+    let sent = elapsed("RECEIPT send");
+    assert_eq!(focus.len(), 1, "{log}");
+    assert_eq!(sent.len(), 1, "one receipt for the visit\n{log}");
+    let took = sent[0] - focus[0];
+    // Seen one second after the focus, sent five after that; the script
+    // pumps every 20 ms, a loaded host somewhat later.
+    assert!((6_000..7_000).contains(&took), "{took} ms\n{log}");
+    let line = log
+        .lines()
+        .find(|line| line.contains("RECEIPT send"))
+        .expect("the line");
+    assert!(
+        line.contains("ids=3") && line.contains("alone=true"),
+        "{line}"
+    );
+    let receipts: Vec<_> = heard
+        .iter()
+        .filter_map(|(body, fields)| {
+            leviculum_lxmf::lev::Lev::from_fields(fields)
+                .and_then(|lev| lev.receipt)
+                .map(|r| (body.clone(), r))
+        })
+        .collect();
+    assert_eq!(receipts.len(), 1, "the peer hears one: {heard:?}");
+    let (body, receipt) = &receipts[0];
+    assert!(body.is_empty(), "a receipt alone has no text");
+    assert_eq!(receipt.ids.len(), 3);
+    // The script's clock: 2026-10-26 12:00 UTC.
+    assert_eq!(receipt.read_at, 1_793_016_000);
+    // The list's row and the three bubbles carry the time; a bubble for
+    // the receipt would be a fifth.
+    let after = frame(&frames, "after");
+    assert_eq!(
+        after.matches("12:00").count(),
+        4,
+        "no bubble for it\n{after}"
+    );
+    assert!(after.contains("third  12:00"), "{after}");
+    eprintln!("RECEIPT left {took} ms after the focus came");
+}
+
 /// A position report is a state, not a message (1209): six reports ten
 /// minutes apart are one line that says the position is live, every 10
 /// min, with no badge in the list; 25 minutes later it is recent (`last
@@ -1919,6 +2111,7 @@ async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge() {
     let joined = |f: &str| f.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(joined(live).contains("live · every 10 min · now"), "{live}");
     assert!(live.contains("◎ position · live"), "{live}");
+    assert!(live.contains("⌖"), "the map pin\n{live}");
     assert!(
         !live.contains("[1]") && !live.contains("[6]"),
         "no badge\n{live}"
@@ -1928,9 +2121,11 @@ async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge() {
         joined(recent).contains("last position 25 min ago"),
         "{recent}"
     );
-    assert!(recent.contains("◎ position · 25 min a…"), "{recent}");
+    // The entry's map pin (1224) stands left of where a badge would.
+    assert!(recent.contains("◎ position · 25 mi… ⌖"), "{recent}");
     let stale = frame(&frames, "stale");
     assert!(joined(stale).contains("last position 25 h ago"), "{stale}");
+    assert!(!stale.contains("⌖"), "no pin past a day\n{stale}");
     if frames != EXPECTED_LIVENESS {
         let kept = std::env::temp_dir().join("loquax-tui-liveness.frames");
         let _ = std::fs::write(&kept, &frames);
@@ -3195,5 +3390,13 @@ async fn an_imported_conversation_opens_and_scrolls_to_its_oldest_row() {
         "stderr: {}\nframes:\n{got}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(got, EXPECTED_UGLY, "the frames differ:\n{got}");
+    if got != EXPECTED_UGLY {
+        let kept = std::env::temp_dir().join("loquax-tui-ugly.frames");
+        let _ = std::fs::write(&kept, &got);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_ugly.frames\n{got}",
+            kept.display()
+        );
+    }
 }

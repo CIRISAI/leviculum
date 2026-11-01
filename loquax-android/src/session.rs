@@ -27,9 +27,11 @@ use loquax::home::runner::{self, HomeClient};
 use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
+use loquax::ui::intent::{Intent, Messages, Switch, Target};
 use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
-use loquax::ui::{chat, update, UiEffect, UiEvent, UiModel};
+use loquax::ui::strings::Lang;
+use loquax::ui::{chat, scene, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
 use crate::links::{self, Book};
@@ -100,6 +102,9 @@ impl InputBuffer for Line {
         self.0.push('\n');
     }
     fn set_cursor(&mut self, _at: usize) {}
+    fn set_value(&mut self, text: &str) {
+        self.0 = text.to_string();
+    }
 }
 
 /// A runner's end, folded by the pump.
@@ -117,6 +122,8 @@ struct Inner {
     client: HomeClient,
     home: PathBuf,
     offset: i32,
+    /// The phone's language: the scene's words are said in it (1217).
+    lang: Lang,
     sends: VecDeque<([u8; 16], String, Vec<Field>)>,
     sending: bool,
     pull_owed: bool,
@@ -307,6 +314,7 @@ impl Session {
             attached,
             client,
             start.offset,
+            Lang::of_tag(start.lang.as_deref().unwrap_or_default()),
             events_tx,
             runtime.handle().clone(),
             watch_rx,
@@ -633,26 +641,29 @@ impl Session {
     }
 
     fn requested(&self, request: schema::Request) -> Result<(), String> {
-        let event = match request {
-            schema::Request::Open { peer } => {
-                let peer = parse_peer(&peer)?;
+        let intent = match decode(request)? {
+            Decoded::Intent(intent) => intent,
+            Decoded::Platform(platform) => return self.platform(platform),
+        };
+        let event = match intent {
+            Intent::OpenChat { peer } => {
                 let mut inner = self.lock();
                 inner.apply(UiEvent::Open { peer });
                 inner.apply(UiEvent::Run(PaletteCommand::Fetch));
                 return Ok(());
             }
-            schema::Request::Send { peer, body } => UiEvent::Write {
-                peer: parse_peer(&peer)?,
-                body,
-            },
-            schema::Request::React {
-                peer,
-                target,
-                content,
+            Intent::Send {
+                to: Target::Peer(peer),
+                body: Some(body),
+            } => UiEvent::Write { peer, body },
+            Intent::React {
+                to: Target::Peer(peer),
+                target: Some(target),
+                content: Some(content),
             } => {
                 let event = UiEvent::React {
-                    peer: parse_peer(&peer)?,
-                    target: parse_id(&target)?,
+                    peer,
+                    target,
                     content: content.clone(),
                 };
                 let mut inner = self.lock();
@@ -660,68 +671,65 @@ impl Session {
                 inner.apply(event);
                 return Ok(());
             }
-            schema::Request::Reply { peer, target, body } => UiEvent::Reply {
-                peer: parse_peer(&peer)?,
-                target: parse_id(&target)?,
-                body,
-            },
-            schema::Request::Forward { peer, key, to } => UiEvent::Forward {
-                from: parse_peer(&peer)?,
-                key: schema::model_key(key),
-                to: parse_peer(&to)?,
-            },
-            schema::Request::Delete { peer, keys } => UiEvent::Delete {
-                peer: parse_peer(&peer)?,
-                keys: keys.into_iter().map(schema::model_key).collect(),
-            },
-            schema::Request::Used { emoji } => {
+            Intent::Reply {
+                to: Target::Peer(peer),
+                target,
+                body: Some(body),
+            } => UiEvent::Reply { peer, target, body },
+            Intent::Forward { from, key, to } => UiEvent::Forward { from, key, to },
+            Intent::SendAgain { peer, key } => UiEvent::SendAgain { peer, key },
+            Intent::Delete {
+                messages: Messages::Keys { peer, keys },
+                confirmed: true,
+            } => UiEvent::Delete { peer, keys },
+            Intent::Insert(emoji) => {
                 self.lock().used(&emoji);
                 return Ok(());
             }
-            schema::Request::Close => UiEvent::Close,
-            schema::Request::Pull => {
+            Intent::CloseChat => UiEvent::Close,
+            Intent::Pull => {
                 let mut inner = self.lock();
                 inner.asked_to_pull();
                 inner.apply(UiEvent::Run(PaletteCommand::Fetch));
                 return Ok(());
             }
-            schema::Request::Front { front } => {
-                self.lock().front = front;
+            Intent::Front(front) => {
+                let mut inner = self.lock();
+                inner.front = front;
+                inner.apply(UiEvent::Front(front));
                 return Ok(());
             }
-            schema::Request::Name { name } => return self.rename(&name),
-            schema::Request::AddContact { lxma, name } => {
-                return self.add_contact(&lxma, name.as_deref())
+            Intent::Viewport { peer, keys } => UiEvent::Viewport { peer, keys },
+            Intent::Name(name) => return self.rename(&name),
+            Intent::AddContact { lxma, name } => return self.add_contact(&lxma, name.as_deref()),
+            Intent::Rename {
+                peer: Target::Peer(peer),
+                name: Some(name),
+            } => UiEvent::Rename { peer, name },
+            Intent::Pin {
+                peer: Target::Peer(peer),
+                on,
+            } => {
+                return self.change_state(&peer, |state, _| state.pinned = on.apply(state.pinned));
             }
-            schema::Request::Link { peer, contact } => {
-                let peer = parse_peer(&peer)?;
-                return self.lock().link(peer, &contact);
+            Intent::Archive {
+                peer: Target::Peer(peer),
+                on,
+            } => {
+                return self
+                    .change_state(&peer, |state, _| state.archived = on.apply(state.archived));
             }
-            schema::Request::Unlink { peer } => {
-                let peer = parse_peer(&peer)?;
-                return self.lock().unlink(peer);
+            Intent::Block {
+                peer: Target::Peer(peer),
+                on,
+            } => {
+                return self
+                    .change_state(&peer, |state, _| state.blocked = on.apply(state.blocked));
             }
-            schema::Request::NotNow { peer } => {
-                let peer = parse_peer(&peer)?;
-                let mut inner = self.lock();
-                inner.book.not_now.insert(peer);
-                inner.dirty = true;
-                return links::save(&inner.home, &inner.book);
-            }
-            schema::Request::Rename { peer, name } => UiEvent::Rename {
-                peer: parse_peer(&peer)?,
-                name,
-            },
-            schema::Request::Pin { peer, on } => {
-                return self.change_state(&peer, |state, _| state.pinned = on);
-            }
-            schema::Request::Archive { peer, on } => {
-                return self.change_state(&peer, |state, _| state.archived = on);
-            }
-            schema::Request::Block { peer, on } => {
-                return self.change_state(&peer, |state, _| state.blocked = on);
-            }
-            schema::Request::Mute { peer, secs } => {
+            Intent::Mute {
+                peer: Target::Peer(peer),
+                secs,
+            } => {
                 return self.change_state(&peer, |state, now| {
                     state.muted_until = match secs {
                         0 => None,
@@ -730,30 +738,53 @@ impl Session {
                     };
                 });
             }
-            schema::Request::Verify { peer, on } => UiEvent::Verify {
-                peer: parse_peer(&peer)?,
-                verified: on,
-            },
-            schema::Request::Unread { peer, on } => UiEvent::MarkUnread {
-                peer: parse_peer(&peer)?,
-                unread: on,
-            },
-            schema::Request::Forget { peer, everywhere } => UiEvent::DeleteConversation {
-                peer: parse_peer(&peer)?,
-                everywhere,
-            },
-            schema::Request::Share {
+            Intent::Verify {
+                peer: Target::Peer(peer),
+                on,
+            } => UiEvent::Verify {
                 peer,
-                lat_e6,
-                lon_e6,
-                alt_e2,
-                accuracy_e2,
-                at,
-            } => UiEvent::SharePosition {
-                peer: parse_peer(&peer)?,
-                location: share_location(lat_e6, lon_e6, alt_e2, accuracy_e2, at)?,
+                verified: on.apply(self.lock().model.verified(&peer)),
             },
-            schema::Request::Relink { rows } => {
+            Intent::MarkUnread {
+                peer: Target::Peer(peer),
+                on,
+            } => UiEvent::MarkUnread {
+                peer,
+                unread: on.apply(false),
+            },
+            Intent::Forget {
+                peer: Target::Peer(peer),
+                everywhere,
+                confirmed: true,
+            } => UiEvent::DeleteConversation { peer, everywhere },
+            Intent::Share { peer, location } => UiEvent::SharePosition { peer, location },
+            Intent::ReadReceipts { on } => {
+                UiEvent::ReadReceipts(on.apply(self.lock().model.reading.on))
+            }
+            Intent::Draft {
+                to: Target::Peer(peer),
+                text,
+                reply,
+            } => UiEvent::Draft { peer, text, reply },
+            other => return Err(format!("not a request of the facade: {other:?}")),
+        };
+        self.lock().apply(event);
+        Ok(())
+    }
+
+    /// A request that is the phone's own glue, not the user's intent: the
+    /// address book's links.
+    fn platform(&self, request: Platform) -> Result<(), String> {
+        match request {
+            Platform::Link { peer, contact } => self.lock().link(peer, &contact),
+            Platform::Unlink { peer } => self.lock().unlink(peer),
+            Platform::NotNow { peer } => {
+                let mut inner = self.lock();
+                inner.book.not_now.insert(peer);
+                inner.dirty = true;
+                links::save(&inner.home, &inner.book)
+            }
+            Platform::Relink { rows } => {
                 let mut inner = self.lock();
                 let linked = inner.relink(&rows)?;
                 if linked > 0 {
@@ -762,21 +793,19 @@ impl Session {
                         text: format!("linked {linked} from your contacts"),
                     });
                 }
-                return Ok(());
+                Ok(())
             }
-        };
-        self.lock().apply(event);
-        Ok(())
+        }
     }
 
     /// Change one field of the reader's word on `peer`, the others as the
     /// model holds them; `change` gets the time now in unix seconds.
     fn change_state(
         &self,
-        peer: &str,
+        peer: &[u8; 16],
         change: impl FnOnce(&mut loquax::home::wire::PeerState, i64),
     ) -> Result<(), String> {
-        let peer = parse_peer(peer)?;
+        let peer = *peer;
         let mut inner = self.lock();
         let mut state = inner.model.peer_state(&peer);
         change(&mut state, wall_now(inner.offset).unix_secs);
@@ -810,11 +839,30 @@ impl Session {
                 return crate::map::theme(&home, set.as_deref())
                     .map(|theme| schema::encode(&theme));
             }
+            schema::Query::MapFling { set } => {
+                let home = self.lock().home.clone();
+                return crate::map::fling(&home, set).map(|fling| schema::encode(&fling));
+            }
+            // The Privacy page's switch (1233): the model's, which the
+            // config keeps (`UiEffect::Remember`).
+            schema::Query::Receipts { set } => {
+                let mut inner = self.lock();
+                if let Some(on) = set {
+                    inner.apply(UiEvent::ReadReceipts(on));
+                }
+                return Ok(schema::encode(&schema::ReceiptsChoice {
+                    v: VERSION,
+                    ok: true,
+                    on: inner.model.reading.on,
+                }));
+            }
             _ => {}
         }
         let inner = self.lock();
         Ok(match query {
-            schema::Query::Conversations => schema::encode(&inner.conversations()),
+            schema::Query::Conversations { search } => {
+                schema::encode(&inner.conversations(search.as_deref()))
+            }
             schema::Query::Messages { peer } => schema::encode(&inner.messages(parse_peer(&peer)?)),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
@@ -852,15 +900,16 @@ impl Session {
                     .collect(),
             }),
             schema::Query::Detail { peer } => schema::encode(&inner.detail(parse_peer(&peer)?)?),
-            schema::Query::Archived => {
+            schema::Query::Archived { search } => {
                 let order = inner.model.archived_order();
-                schema::encode(&inner.listed(order))
+                schema::encode(&inner.listed(order, search.as_deref()))
             }
             schema::Query::Blocked => schema::encode(&inner.blocked()),
             schema::Query::Friends { lat_e6, lon_e6 } => schema::encode(&crate::friends::friends(
                 &inner.model,
                 wall_now(inner.offset).unix_secs,
                 lat_e6.zip(lon_e6),
+                inner.lang,
                 |peer| inner.photo(peer),
             )),
             schema::Query::Shared => schema::encode(&inner.shared()?),
@@ -882,7 +931,9 @@ impl Session {
             | schema::Query::Profile
             | schema::Query::Backup { .. }
             | schema::Query::MapRegions { .. }
-            | schema::Query::MapTheme { .. } => return Err("answered above".to_string()),
+            | schema::Query::MapTheme { .. }
+            | schema::Query::MapFling { .. }
+            | schema::Query::Receipts { .. } => return Err("answered above".to_string()),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -933,6 +984,10 @@ impl Session {
         };
         {
             let mut inner = self.lock();
+            // A draft typing has not paused on yet is kept all the same
+            // (1219).
+            inner.model.flush_drafts();
+            inner.persist();
             inner.gone = true;
             let _ = inner.events.send(Event::Stopped {
                 v: VERSION,
@@ -963,6 +1018,7 @@ impl Inner {
         attached: Attached,
         client: HomeClient,
         offset: i32,
+        lang: Lang,
         events: Sender<Event>,
         runtime: tokio::runtime::Handle,
         watch: tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
@@ -973,6 +1029,7 @@ impl Inner {
         let mut model = known(home, &store)?;
         model.home_client = true;
         model.list_apart = true;
+        model.reading.on = config.read_receipts.unwrap_or(true);
         for (message_id, source, packed) in store.unverified().map_err(|e| e.to_string())? {
             let verify = Command::Verify {
                 message_id,
@@ -1008,6 +1065,7 @@ impl Inner {
             client,
             home: home.to_path_buf(),
             offset,
+            lang,
             sends: VecDeque::new(),
             sending: false,
             pull_owed: false,
@@ -1280,6 +1338,18 @@ impl Inner {
                     }
                     self.dirty = true;
                 }
+                // A setting changed on a page (1233): the config in the
+                // app's directory, which the next start reads; the
+                // screens draw the marks again.
+                UiEffect::Remember { key, value } => {
+                    if let Err(error) = loquax::config::save(&self.home, key, value) {
+                        let _ = self.events.send(Event::Notice {
+                            v: VERSION,
+                            text: format!("{key} not saved: {error}"),
+                        });
+                    }
+                    self.dirty = true;
+                }
                 // What the terminal does with its screen and its maps has
                 // no place here yet.
                 _ => {}
@@ -1450,15 +1520,17 @@ impl Inner {
         self.apply(UiEvent::FetchDone(end.result));
     }
 
-    fn conversations(&self) -> schema::Conversations {
-        let mut listed = self.listed(self.model.order());
+    fn conversations(&self, search: Option<&str>) -> schema::Conversations {
+        let mut listed = self.listed(self.model.order(), search);
         listed.archived = u32::try_from(self.model.archived_order().len()).unwrap_or(u32::MAX);
         listed
     }
 
-    /// The list's rows for the conversations `order` names, in its order.
-    fn listed(&self, order: Vec<usize>) -> schema::Conversations {
-        let rows = chat::rows(&self.model, order)
+    /// The list's rows for the conversations `order` names, in its order;
+    /// with `search` only those it finds ([`chat::row_matches`]), so the
+    /// phone searches by the rule every loquax screen does (1217).
+    fn listed(&self, order: Vec<usize>, search: Option<&str>) -> schema::Conversations {
+        let rows = found(&self.model, order, search)
             .into_iter()
             .map(|row| self.schema_row(row))
             .collect();
@@ -1479,7 +1551,7 @@ impl Inner {
     /// Every blocked peer, with a conversation or without, as list rows
     /// (1146): the settings screen's "Blocked contacts".
     fn blocked(&self) -> schema::Conversations {
-        let mut listed = self.listed(Vec::new());
+        let mut listed = self.listed(Vec::new(), None);
         listed.conversations = self
             .model
             .names
@@ -1493,10 +1565,23 @@ impl Inner {
 
     /// One row of the list for `peer`, empty when it has no conversation.
     fn list_row(&self, peer: &[u8; 16]) -> schema::ConversationRow {
-        self.schema_row(chat::list_row(&self.model, peer))
+        self.schema_row(scene::row(&self.model, peer))
     }
 
-    fn schema_row(&self, row: chat::ListRow) -> schema::ConversationRow {
+    /// A scene's row in the facade's words (1217): what Java saw before
+    /// the scene, and the scene's words in the phone's language.
+    fn schema_row(&self, row: scene::Row) -> schema::ConversationRow {
+        let live = row
+            .live
+            .map(|live| live.resolve(self.lang))
+            .unwrap_or_default();
+        let ring = ring(row.avatar.ring);
+        let (pin, pin_label) = pin(row.position.as_ref(), self.lang);
+        let draft = row
+            .draft
+            .map(|draft| draft.resolve(self.lang))
+            .unwrap_or_default();
+        let row = row.row;
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
             name: row.name,
@@ -1510,6 +1595,7 @@ impl Inner {
             kind: row.kind.to_string(),
             reaction: row.reaction,
             state: row.mark.map_or("", chat::Mark::word).to_string(),
+            read_at: row.read_at.map_or(0, i64::from),
             photo: self.photo(&row.peer),
             linked: self.book.links.contains_key(&row.peer),
             pinned: row.pinned,
@@ -1518,6 +1604,11 @@ impl Inner {
             liveness: row.liveness.state.word().to_string(),
             cadence_s: cadence(&row.liveness),
             last_fix_at: row.liveness.last_fix_at.unwrap_or(0),
+            live,
+            ring,
+            pin,
+            pin_label,
+            draft,
         }
     }
 
@@ -1538,10 +1629,17 @@ impl Inner {
             .track(peer, POSITIONS_SHOWN)
             .map_err(|error| error.to_string())?
             .iter()
-            .map(|fix| schema::PositionRow {
-                at: fix.fix_time(),
-                lat_e6: fix.location.latitude_e6,
-                lon_e6: fix.location.longitude_e6,
+            .map(|fix| {
+                let at = WallTime {
+                    unix_secs: fix.fix_time(),
+                    offset_secs: self.offset,
+                };
+                schema::PositionRow {
+                    at: at.unix_secs,
+                    lat_e6: fix.location.latitude_e6,
+                    lon_e6: fix.location.longitude_e6,
+                    day: scene::day_words(&at, self.model.now.as_ref()).resolve(self.lang),
+                }
             })
             .collect();
         Ok(schema::Detail {
@@ -1588,7 +1686,7 @@ impl Inner {
         let index = self.model.conversations.iter().position(|c| c.peer == peer);
         let icon =
             index.and_then(|c| chat::latest_appearance(&self.model.conversations[c].messages));
-        let rows = index.map_or_else(Vec::new, |c| rows(&self.model, c));
+        let rows = index.map_or_else(Vec::new, |c| rows(&self.model, c, self.lang));
         let link = self.book.links.get(&peer);
         let heard = index.is_some_and(|c| {
             self.model.conversations[c]
@@ -1598,6 +1696,8 @@ impl Inner {
         });
         let names = &self.model.names;
         let liveness = self.model.liveness(&peer);
+        // The field opens with the scene's compose (1219).
+        let compose = index.map(|c| scene::compose(&self.model, c));
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
@@ -1620,9 +1720,16 @@ impl Inner {
                 .map(|other| names.label(other))
                 .collect(),
             verified: self.model.verified(&peer),
+            receipts: index.is_some_and(|c| self.model.conversations[c].flags.receipts),
             liveness: liveness.state.word().to_string(),
             cadence_s: cadence(&liveness),
             last_fix_at: liveness.last_fix_at.unwrap_or(0),
+            ring: ring(scene::Ring::of(liveness.state)),
+            draft: compose.as_ref().map(|c| c.text.clone()).unwrap_or_default(),
+            draft_reply: compose
+                .and_then(|c| c.reply)
+                .map(|id| loquax::address::to_hex(&id))
+                .unwrap_or_default(),
         }
     }
 
@@ -1731,14 +1838,57 @@ pub fn pins_in(home: &Path, now: WallTime) -> Result<Vec<MapPin>, String> {
     Ok(model.map_pins())
 }
 
-/// The bubbles of conversation `c`, as the app draws them
-/// ([`chat::bubbles`]): a reaction is a chip on the bubble it names, not a
-/// bubble, and a report with a position is the position line alone.
-pub fn rows<B>(model: &UiModel<B>, c: usize) -> Vec<schema::MessageRow> {
-    chat::bubbles(model, c).into_iter().map(row).collect()
+/// The scene's rows for the conversations `order` names, in its order,
+/// those `search` finds when given: every word of it in the name or the
+/// last line ([`chat::row_matches`], the desktop's rule too).
+pub fn found<B>(model: &UiModel<B>, order: Vec<usize>, search: Option<&str>) -> Vec<scene::Row> {
+    let mut rows = scene::rows(model, order);
+    if let Some(search) = search {
+        rows.retain(|row| chat::row_matches(&row.row, search));
+    }
+    rows
 }
 
-/// One bubble in the facade's words.
+/// The bubbles of conversation `c`, as the app draws them: the scene's
+/// chat ([`scene::chat`], from [`chat::bubbles`]) with its groups laid
+/// flat, each bubble with where it sits and its words in `lang`. A
+/// reaction is a chip on the bubble it names, not a bubble, and a report
+/// with a position is the position line alone.
+pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageRow> {
+    let groups = scene::chat(model, c).groups;
+    let last = groups.len().saturating_sub(1);
+    let mut rows = Vec::new();
+    for (g, group) in groups.into_iter().enumerate() {
+        let mut day = group.day.map(|day| day.words.resolve(lang));
+        for node in group.bubbles {
+            let mut row = row(node.bubble);
+            row.joins_before = node.place.joins_before;
+            row.joins_after = node.place.joins_after;
+            row.meta = node.place.meta;
+            row.newest = g == last;
+            row.day = day.take().unwrap_or_default();
+            row.live = node.live.map(|live| live.resolve(lang)).unwrap_or_default();
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// A ring as the facade carries it: its colour's name, empty for none.
+pub fn ring(ring: Option<scene::Ring>) -> String {
+    ring.map_or("", scene::Ring::word).to_string()
+}
+
+/// A row's map pin as [`schema::ConversationRow::pin`] and `pin_label`
+/// carry it (1224): its tint's word and its content description in
+/// `lang`, both empty for none.
+pub fn pin(position: Option<&scene::PositionBadge>, lang: Lang) -> (String, String) {
+    position.map_or_else(Default::default, |pin| {
+        (pin.tint.word().to_string(), pin.a11y.label.resolve(lang))
+    })
+}
+
+/// One bubble in the facade's words, placed by [`rows`].
 fn row(bubble: chat::Bubble) -> schema::MessageRow {
     let fix = bubble.fix.as_ref();
     schema::MessageRow {
@@ -1749,6 +1899,7 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         ours: bubble.ours,
         body: bubble.body,
         state: bubble.mark.map_or("", chat::Mark::word).to_string(),
+        read_at: bubble.read_at.map_or(0, i64::from),
         at: bubble.at.map_or(0, |at| at.unix_secs),
         chips: bubble
             .chips
@@ -1779,6 +1930,12 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         since: bubble.since.map_or(0, |at| at.unix_secs),
         liveness: bubble.liveness.map_or("", |l| l.state.word()).to_string(),
         cadence_s: bubble.liveness.map_or(0, |l| cadence(&l)),
+        joins_before: false,
+        joins_after: false,
+        meta: false,
+        newest: false,
+        day: String::new(),
+        live: String::new(),
     }
 }
 
@@ -1864,6 +2021,155 @@ pub fn shared<B>(
 /// The fix the app hands in for a share (1201), as the wire carries it;
 /// a place off the globe is refused, so a broken reading never leaves the
 /// phone.
+/// A facade request decoded at the boundary (1217): the user's intent, or
+/// the phone's address book glue, which is no intent.
+pub enum Decoded {
+    Intent(Intent),
+    Platform(Platform),
+}
+
+/// The requests that are the phone's own glue.
+pub enum Platform {
+    Link {
+        peer: [u8; 16],
+        contact: schema::ContactCopy,
+    },
+    Unlink {
+        peer: [u8; 16],
+    },
+    NotNow {
+        peer: [u8; 16],
+    },
+    Relink {
+        rows: Vec<schema::ImRow>,
+    },
+}
+
+/// `request` as an intent, with its addresses and ids parsed: every
+/// facade verb is one ([`loquax::ui::intent`]'s table names each).
+pub fn decode(request: schema::Request) -> Result<Decoded, String> {
+    use schema::Request as R;
+    let intent = match request {
+        R::Open { peer } => Intent::OpenChat {
+            peer: parse_peer(&peer)?,
+        },
+        R::Close => Intent::CloseChat,
+        R::Send { peer, body } => Intent::Send {
+            to: Target::Peer(parse_peer(&peer)?),
+            body: Some(body),
+        },
+        R::React {
+            peer,
+            target,
+            content,
+        } => Intent::React {
+            to: Target::Peer(parse_peer(&peer)?),
+            target: Some(parse_id(&target)?),
+            content: Some(content),
+        },
+        R::Reply { peer, target, body } => Intent::Reply {
+            to: Target::Peer(parse_peer(&peer)?),
+            target: parse_id(&target)?,
+            body: Some(body),
+        },
+        R::Forward { peer, key, to } => Intent::Forward {
+            from: parse_peer(&peer)?,
+            key: schema::model_key(key),
+            to: parse_peer(&to)?,
+        },
+        R::SendAgain { peer, key } => Intent::SendAgain {
+            peer: parse_peer(&peer)?,
+            key: schema::model_key(key),
+        },
+        R::Delete { peer, keys } => Intent::Delete {
+            messages: Messages::Keys {
+                peer: parse_peer(&peer)?,
+                keys: keys.into_iter().map(schema::model_key).collect(),
+            },
+            confirmed: true,
+        },
+        R::Used { emoji } => Intent::Insert(emoji),
+        R::Pull => Intent::Pull,
+        R::Front { front } => Intent::Front(front),
+        R::Viewport { peer, keys } => Intent::Viewport {
+            peer: parse_peer(&peer)?,
+            keys: keys.into_iter().map(schema::model_key).collect(),
+        },
+        R::Name { name } => Intent::Name(name),
+        R::Link { peer, contact } => {
+            return Ok(Decoded::Platform(Platform::Link {
+                peer: parse_peer(&peer)?,
+                contact,
+            }))
+        }
+        R::Unlink { peer } => {
+            return Ok(Decoded::Platform(Platform::Unlink {
+                peer: parse_peer(&peer)?,
+            }))
+        }
+        R::NotNow { peer } => {
+            return Ok(Decoded::Platform(Platform::NotNow {
+                peer: parse_peer(&peer)?,
+            }))
+        }
+        R::Relink { rows } => return Ok(Decoded::Platform(Platform::Relink { rows })),
+        R::Rename { peer, name } => Intent::Rename {
+            peer: Target::Peer(parse_peer(&peer)?),
+            name: Some(name),
+        },
+        R::Pin { peer, on } => Intent::Pin {
+            peer: Target::Peer(parse_peer(&peer)?),
+            on: Switch::of(on),
+        },
+        R::Mute { peer, secs } => Intent::Mute {
+            peer: Target::Peer(parse_peer(&peer)?),
+            secs,
+        },
+        R::Archive { peer, on } => Intent::Archive {
+            peer: Target::Peer(parse_peer(&peer)?),
+            on: Switch::of(on),
+        },
+        R::Block { peer, on } => Intent::Block {
+            peer: Target::Peer(parse_peer(&peer)?),
+            on: Switch::of(on),
+        },
+        R::Verify { peer, on } => Intent::Verify {
+            peer: Target::Peer(parse_peer(&peer)?),
+            on: Switch::of(on),
+        },
+        R::Unread { peer, on } => Intent::MarkUnread {
+            peer: Target::Peer(parse_peer(&peer)?),
+            on: Switch::of(on),
+        },
+        R::Forget { peer, everywhere } => Intent::Forget {
+            peer: Target::Peer(parse_peer(&peer)?),
+            everywhere,
+            confirmed: true,
+        },
+        R::Share {
+            peer,
+            lat_e6,
+            lon_e6,
+            alt_e2,
+            accuracy_e2,
+            at,
+        } => Intent::Share {
+            peer: parse_peer(&peer)?,
+            location: share_location(lat_e6, lon_e6, alt_e2, accuracy_e2, at)?,
+        },
+        R::AddContact { lxma, name } => Intent::AddContact { lxma, name },
+        R::Draft { peer, body, reply } => Intent::Draft {
+            to: Target::Peer(parse_peer(&peer)?),
+            text: body,
+            reply: match reply.is_empty() {
+                true => None,
+                false => Some(parse_id(&reply)?),
+            },
+        },
+    };
+    Ok(Decoded::Intent(intent))
+}
+
 pub fn share_location(
     lat_e6: i32,
     lon_e6: i32,

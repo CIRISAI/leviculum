@@ -86,7 +86,15 @@ fn main() {
     // As the app draws since 1155: straight into its Bitmap, the
     // description encoded for Java.
     let bitmap = RefCell::new(Bitmap::default());
+    // The renderer's clock held a second further each frame: every name's
+    // fade (1205) is done by the next, so a row measures what it did
+    // before the fades, a frame at rest asked again placing its names.
+    // The prefetch's rows run on the real clock, which orders the
+    // prefetch by the pan's velocity.
+    let clock = std::cell::Cell::new(Some(0u64));
     let draw = |ask: &MapRequest| -> MapShown {
+        clock.set(clock.get().map(|ms| ms + 1000));
+        loquax_android::map::tune_clock(&home, clock.get());
         let mut bitmap = bitmap.borrow_mut();
         let shown = loquax_android::map::render_into(ask, Some(Vec::new()), now, &mut *bitmap);
         std::hint::black_box(schema::encode(&shown));
@@ -255,14 +263,68 @@ fn main() {
             ms.push(t);
         }
         row("pinch again, tiles held (median)", median(ms), 0.0, owed);
+        carried(&home, &base, &draw, &timed, &median, threads);
     }
     facade(&home, &base, &draw, now, median, workers);
+    clock.set(None);
     prefetch(&home, &base, draw, timed, median, workers);
     if let Some((tiles, bytes)) = loquax_android::map::tile_memory(&home) {
         println!(
             "\ncache: {tiles} tiles, {:.1} MB of the budget's {} MB",
             bytes as f64 / f64::from(1u32 << 20),
             loquax::tiles::BUDGET_MB
+        );
+    }
+}
+
+/// The names a pinch out places (1205, 1225): a frame at rest at z15,
+/// then a pinch out to z14.0 in tenths, the finger down; the frames'
+/// median, and what a frame spent placing its names, the median of the
+/// frames of the pinch: looked up or kept, placed, sampled.
+fn carried(
+    home: &std::path::Path,
+    base: &MapRequest,
+    draw: &impl Fn(&MapRequest) -> MapShown,
+    timed: &impl Fn(&MapRequest) -> (f64, MapShown),
+    median: &impl Fn(Vec<f64>) -> f64,
+    threads: usize,
+) {
+    let (mut labels, mut place, mut sprites) = (Vec::new(), Vec::new(), Vec::new());
+    let mut ms = Vec::new();
+    let (mut names, mut looked_up) = (0, 0);
+    for _ in 0..5 {
+        let _ = draw(base);
+        let mut pinch = MapRequest {
+            moving: true,
+            ..base.clone()
+        };
+        for z in (14_000..15_000).rev().step_by(100) {
+            pinch.zoom_milli = Some(z);
+            ms.push(timed(&pinch).0);
+            if let Some(cost) = loquax_android::map::place_cost(home) {
+                names = cost.names;
+                looked_up += usize::from(cost.looked_up);
+                labels.push(cost.labels_ns as f64 / 1e6);
+                place.push(cost.place_ns as f64 / 1e6);
+                sprites.push(cost.sprites_ns as f64 / 1e6);
+            }
+        }
+    }
+    // Back at rest at z15, so the rows after start where they did
+    // before this one: a frame that moves keeps the step of the last.
+    let _ = draw(base);
+    let ms = median(ms);
+    println!(
+        "| pinch out z15 to z14, names placed (median) | {threads} | {ms:.1} | {:.0} | | |",
+        1e3 / ms
+    );
+    for (pass, ms) in [
+        ("looked up or kept", median(labels)),
+        ("placed", median(place)),
+        ("sampled", median(sprites)),
+    ] {
+        println!(
+            "| names placed: {names}, {pass} ms a frame ({looked_up} of 50 looked up) | {threads} | {ms:.2} | | | |"
         );
     }
 }

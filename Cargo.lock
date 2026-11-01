@@ -3049,6 +3049,7 @@ version = "0.1.0"
 name = "leviculum-ui"
 version = "0.10.0-dev.1"
 dependencies = [
+ "serde_json",
  "tui-input",
  "unicode-width",
 ]

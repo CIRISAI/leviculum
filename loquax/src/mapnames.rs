@@ -185,6 +185,29 @@ impl Mask {
         }
     }
 
+    /// Half the size, each pixel the mean of the two by two it covers,
+    /// those past the edge counting as nothing.
+    fn halved(&self) -> Mask {
+        let (w, h) = (self.w.div_ceil(2), self.h.div_ceil(2));
+        let mut alpha = vec![0u8; w * h];
+        for (y, row) in alpha.chunks_exact_mut(w).enumerate() {
+            for (x, a) in row.iter_mut().enumerate() {
+                let (sx, sy) = (2 * x as i64, 2 * y as i64);
+                let sum = u32::from(self.at(sx, sy))
+                    + u32::from(self.at(sx + 1, sy))
+                    + u32::from(self.at(sx, sy + 1))
+                    + u32::from(self.at(sx + 1, sy + 1));
+                *a = ((sum + 2) / 4) as u8;
+            }
+        }
+        Mask {
+            w,
+            h,
+            pad: self.pad / 2,
+            alpha,
+        }
+    }
+
     /// Bilinear coverage at a fractional pixel.
     fn sample(&self, x: f64, y: f64) -> f64 {
         let (x0, y0) = (x.floor(), y.floor());
@@ -202,8 +225,11 @@ type SetKey = (String, u32, usize, bool);
 
 /// The most masks, and the most halos, a [`Typesetter`] keeps.
 pub const MASKS_KEPT: usize = 8192;
-/// The most bytes of masks and halos together a [`Typesetter`] keeps.
-pub const MASK_BYTES_KEPT: usize = 4 << 20;
+/// The most bytes of masks and halos together a [`Typesetter`] keeps:
+/// at the phone's density a frame over a city at z13 asks about 7 MB of
+/// them, so a bound below that drops them all every frame and shapes and
+/// rasterises them again (1225: 32 ms of a placement at 4 MB).
+pub const MASK_BYTES_KEPT: usize = 16 << 20;
 /// The most text sizes a [`Typesetter`] keeps.
 pub const EXTENTS_KEPT: usize = 32768;
 
@@ -456,10 +482,16 @@ pub fn straight_runs(line: &[Vec<(f64, f64)>]) -> Vec<((f64, f64), f64, f64)> {
 pub struct PlacedName {
     pub text: String,
     pub kind: LabelKind,
+    /// The shallowest view zoom that shows it ([`ViewLabel::min_zoom`]).
+    pub min_zoom: u8,
+    /// The boxes the rule placed it by, in the picture's pixels.
+    pub boxes: Vec<Rect>,
     pub centre: (f64, f64),
     pub angle: f64,
-    pub mask: Mask,
-    pub halo: Mask,
+    /// Shared with the typesetter's store: a frame that places its names
+    /// again copies none (1225).
+    pub mask: Arc<Mask>,
+    pub halo: Arc<Mask>,
 }
 
 /// One name to set: where, at which angle, its text and size, and its
@@ -470,6 +502,7 @@ struct Setting {
     mask: Arc<Mask>,
     size: f32,
     kind: LabelKind,
+    min_zoom: u8,
 }
 
 /// Set the names of `names` that the rule places into `rgba`, `w` by `h`
@@ -499,10 +532,10 @@ pub fn set(
 /// the picture's pixels, which for a view between two zoom steps scales
 /// it (1134). In the order the rule placed them.
 #[allow(clippy::too_many_arguments)]
-pub fn place(
+pub fn place<'a>(
     w: u32,
     h: u32,
-    names: &[ViewLabel],
+    names: impl IntoIterator<Item = &'a ViewLabel>,
     px: impl Fn((i64, i64)) -> (f64, f64),
     taken: &[Rect],
     scale: f32,
@@ -569,6 +602,7 @@ pub fn place(
                 mask,
                 size,
                 kind: l.kind,
+                min_zoom: l.min_zoom,
             });
         }
     }
@@ -586,18 +620,20 @@ pub fn place(
             let river = s.kind == LabelKind::River;
             #[cfg(test)]
             let halo = match type_.unkept {
-                true => s.mask.widened_by_disc(HALO * scale),
-                false => (*type_.kept_halo(text, s.size, pad, river, HALO * scale)).clone(),
+                true => Arc::new(s.mask.widened_by_disc(HALO * scale)),
+                false => type_.kept_halo(text, s.size, pad, river, HALO * scale),
             };
             #[cfg(not(test))]
-            let halo = (*type_.kept_halo(text, s.size, pad, river, HALO * scale)).clone();
+            let halo = type_.kept_halo(text, s.size, pad, river, HALO * scale);
             PlacedName {
                 text: text.clone(),
                 kind: s.kind,
+                min_zoom: s.min_zoom,
+                boxes: candidates[i].boxes.clone(),
                 centre: s.centre,
                 angle: s.angle,
                 halo,
-                mask: (*s.mask).clone(),
+                mask: s.mask.clone(),
             }
         })
         .collect()
@@ -781,6 +817,11 @@ fn blend_at(rgba: &mut [u8], w: u32, x: i64, y: i64, colour: [u8; 3], a: f64) {
 pub struct Sprite {
     pub text: String,
     pub kind: LabelKind,
+    /// The shallowest view zoom that shows it.
+    pub min_zoom: u8,
+    /// The boxes the rule placed it by, where it was placed: what a frame
+    /// that moves holds it apart from the others by (1205).
+    pub boxes: Vec<Rect>,
     /// Where its middle was placed.
     pub centre: (f64, f64),
     /// The box's top left pixel where it was placed.
@@ -790,6 +831,83 @@ pub struct Sprite {
     /// How much the halo and the glyphs cover each pixel of the box, row
     /// by row, out of 255.
     cover: Vec<[u8; 2]>,
+}
+
+/// Below this scale a sprite drawn smaller samples its name's [`Mip`]
+/// ([`Sprite::scaled`]): a pixel then spans more than one and a third of
+/// the name's, and a single sample of the whole would miss strokes.
+pub const MIP_BELOW: f64 = 0.75;
+
+/// A name's halo and glyphs at half their size, each pixel the mean of
+/// two by two (1225): what a pinch's frame at the step below samples, so
+/// a pixel that spans two of the name's sees both. Made once a name and
+/// kept while it shows.
+#[derive(Clone, Debug)]
+pub struct Mip {
+    halo: Mask,
+    ink: Mask,
+}
+
+impl Mip {
+    pub fn of(name: &PlacedName) -> Self {
+        Mip {
+            halo: name.halo.halved(),
+            ink: name.mask.halved(),
+        }
+    }
+}
+
+/// Where a name's mask, turned about its middle and drawn at a scale, may
+/// cover a row of pixels: what a sprite samples, the rest of its box left
+/// empty, so a turned street's name samples its own band and not the
+/// square around it (1225).
+#[derive(Clone, Copy)]
+struct Reach {
+    centre: (f64, f64),
+    /// The turn's cosine and sine over the scale.
+    turn: (f64, f64),
+    mask: (f64, f64),
+}
+
+impl Reach {
+    fn of(name: &PlacedName, centre: (f64, f64), k: f64) -> Self {
+        let turn = (name.angle.cos() / k, name.angle.sin() / k);
+        let mask = (name.mask.w as f64, name.mask.h as f64);
+        Reach { centre, turn, mask }
+    }
+
+    /// The columns of row `y`, within `x0..x1`, a sample may cover: where
+    /// the inverse turn of a pixel's middle lands within a pixel of the
+    /// mask, and two pixels more each way for a sample off the middle.
+    fn row(&self, y: i64, (x0, x1): (i64, i64)) -> (i64, i64) {
+        let (c, s) = self.turn;
+        let dy = y as f64 + 0.5 - self.centre.1;
+        let x = 0.5 - self.centre.0;
+        // The mask's column and row at column x of the row: a x + b.
+        let (a_m, b_m) = (c, x * c + dy * s + self.mask.0 / 2.0 - 0.5);
+        let (a_n, b_n) = (-s, -x * s + dy * c + self.mask.1 / 2.0 - 0.5);
+        let within = |a: f64, b: f64, hi: f64| -> Option<(f64, f64)> {
+            match a.abs() < 1e-12 {
+                true => (b > -1.0 && b < hi).then_some((f64::NEG_INFINITY, f64::INFINITY)),
+                false => {
+                    let (p, q) = ((-1.0 - b) / a, (hi - b) / a);
+                    Some((p.min(q), p.max(q)))
+                }
+            }
+        };
+        match (within(a_m, b_m, self.mask.0), within(a_n, b_n, self.mask.1)) {
+            (Some(m), Some(n)) => {
+                let (lo, hi) = (m.0.max(n.0), m.1.min(n.1));
+                if lo > hi {
+                    return (x0, x0);
+                }
+                let lo = (lo.floor() as i64).saturating_sub(2).max(x0);
+                let hi = (hi.ceil() as i64).saturating_add(3).min(x1);
+                (lo, hi.max(lo))
+            }
+            _ => (x0, x0),
+        }
+    }
 }
 
 /// A coverage from 0 to 1 as a level out of 255.
@@ -819,7 +937,9 @@ impl Sprite {
         let x1 = x1.min((name.centre.0 + hx).ceil() as i64);
         let y0 = y0.max((name.centre.1 - hy).floor() as i64);
         let y1 = y1.min((name.centre.1 + hy).ceil() as i64);
-        Self::boxed(name, (x0, x1, y0, y1), |x, y| {
+        let at = (name, name.boxes.clone(), name.centre);
+        let reach = Reach::of(name, name.centre, 1.0);
+        Self::boxed(at, (x0, x1, y0, y1), Some(reach), |x, y| {
             let halo = cover_turned(&name.halo, name.centre, name.angle, turn, x, y);
             if same && halo <= 0.0 {
                 return [0, 0];
@@ -833,18 +953,92 @@ impl Sprite {
     /// sampled: the reference the boxed loop is held to.
     #[cfg(test)]
     pub(crate) fn of_whole_reach(name: &PlacedName) -> Self {
-        Self::boxed(name, reach(&name.mask, name.centre), |x, y| {
+        let at = (name, name.boxes.clone(), name.centre);
+        Self::boxed(at, reach(&name.mask, name.centre), None, |x, y| {
             let halo = cover(&name.halo, name.centre, name.angle, x, y);
             let ink = cover(&name.mask, name.centre, name.angle, x, y);
             [level(halo), level(ink)]
         })
     }
 
-    /// The sprite of `name` from the levels `cover` gives the pixels
-    /// `x0..x1` by `y0..y1`, cut to the box of those it covers.
+    /// `name` placed in a frame at screen size and drawn into another
+    /// whose pixels are `k` of its own, its middle at `centre` there
+    /// (1225): the frame of a pinch at its tile step, which the frontend
+    /// scales by `1 / k`, so the name shows at the size and the place a
+    /// frame at rest gives it. Each pixel samples the name's coverage
+    /// bilinearly, below [`MIP_BELOW`] from `mip`, its coverage averaged
+    /// two by two, so a pixel that spans two of the name's sees both. At
+    /// `k` 1 where it was placed, [`of`](Self::of).
+    pub fn scaled(name: &PlacedName, centre: (f64, f64), k: f64, mip: Option<&Mip>) -> Self {
+        if k == 1.0 && centre == name.centre {
+            return Self::of(name);
+        }
+        let k = k.max(1e-3);
+        let turn = (name.angle.cos(), name.angle.sin());
+        let (c, s) = (turn.0.abs(), turn.1.abs());
+        let (mw, mh) = (name.mask.w as f64, name.mask.h as f64);
+        let (hx, hy) = (
+            ((mw * c + mh * s) / 2.0 + 2.0) * k,
+            ((mw * s + mh * c) / 2.0 + 2.0) * k,
+        );
+        let x0 = (centre.0 - hx).floor() as i64;
+        let x1 = (centre.0 + hx).ceil() as i64;
+        let y0 = (centre.1 - hy).floor() as i64;
+        let y1 = (centre.1 + hy).ceil() as i64;
+        let same = (name.halo.w, name.halo.h) == (name.mask.w, name.mask.h);
+        // The masks sampled, and how a pixel of the name maps into them.
+        let (halo, ink, half) = match mip.filter(|_| k < MIP_BELOW) {
+            Some(mip) => (&mip.halo, &mip.ink, true),
+            None => (&*name.halo, &*name.mask, false),
+        };
+        let boxes = name
+            .boxes
+            .iter()
+            .map(|b| {
+                let at = |v: i32, from: f64, to: f64| (f64::from(v) - from) * k + to;
+                Rect {
+                    x0: at(b.x0, name.centre.0, centre.0).floor() as i32,
+                    y0: at(b.y0, name.centre.1, centre.1).floor() as i32,
+                    x1: at(b.x1, name.centre.0, centre.0).ceil() as i32,
+                    y1: at(b.y1, name.centre.1, centre.1).ceil() as i32,
+                }
+            })
+            .collect();
+        let at = |x: f64, y: f64| {
+            // The point in the frame the name was placed in.
+            let (dx, dy) = ((x - centre.0) / k, (y - centre.1) / k);
+            let (mx, my) = (
+                dx * turn.0 + dy * turn.1 + mw / 2.0 - 0.5,
+                -dx * turn.1 + dy * turn.0 + mh / 2.0 - 0.5,
+            );
+            let (mx, my) = match half {
+                true => ((mx - 0.5) / 2.0, (my - 0.5) / 2.0),
+                false => (mx, my),
+            };
+            let cover = halo.sample(mx, my);
+            match same && cover <= 0.0 {
+                true => (0.0, 0.0),
+                false => (cover, ink.sample(mx, my)),
+            }
+        };
+        Self::boxed(
+            (name, boxes, centre),
+            (x0, x1, y0, y1),
+            Some(Reach::of(name, centre, k)),
+            |x, y| {
+                let (halo, ink) = at(x as f64 + 0.5, y as f64 + 0.5);
+                [level(halo / 255.0), level(ink / 255.0)]
+            },
+        )
+    }
+
+    /// The sprite of `name`, its boxes and middle where it is drawn, from
+    /// the levels `cover` gives the pixels `x0..x1` by `y0..y1`, cut to
+    /// the box of those it covers.
     fn boxed(
-        name: &PlacedName,
+        (name, boxes, centre): (&PlacedName, Vec<Rect>, (f64, f64)),
         (x0, x1, y0, y1): (i64, i64, i64, i64),
+        reach: Option<Reach>,
         cover: impl Fn(i64, i64) -> [u8; 2],
     ) -> Self {
         let (sw, sh) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
@@ -852,7 +1046,12 @@ impl Sprite {
         // The covered box within the sampled one: columns, rows.
         let (mut c0, mut c1, mut r0, mut r1) = (sw, 0, sh, 0);
         for (r, y) in (y0..y1).enumerate() {
+            let (xa, xb) = reach.map_or((x0, x1), |reach| reach.row(y, (x0, x1)));
             for (c, x) in (x0..x1).enumerate() {
+                if x < xa || x >= xb {
+                    sampled.push([0, 0]);
+                    continue;
+                }
                 let both = cover(x, y);
                 if both != [0, 0] {
                     (c0, c1, r0, r1) = (c0.min(c), c1.max(c + 1), r0.min(r), r1.max(r + 1));
@@ -870,7 +1069,9 @@ impl Sprite {
         Self {
             text: name.text.clone(),
             kind: name.kind,
-            centre: name.centre,
+            min_zoom: name.min_zoom,
+            boxes,
+            centre,
             at: (x0 + c0 as i64, y0 + r0 as i64),
             w,
             cover,
@@ -881,21 +1082,25 @@ impl Sprite {
     /// `workers` threads: thread `t` takes every `workers`-th name from
     /// the `t`-th, so a run of long street names does not land on one.
     pub fn of_all(names: &[PlacedName], workers: usize) -> Vec<Self> {
+        Self::all_of(names, workers, Self::of)
+    }
+
+    /// The sprite `make` gives each of `names`, in their order, on up to
+    /// `workers` threads as [`of_all`](Self::of_all) deals them.
+    pub fn all_of<T: Sync>(
+        names: &[T],
+        workers: usize,
+        make: impl Fn(&T) -> Self + Sync,
+    ) -> Vec<Self> {
         let workers = workers.clamp(1, names.len().max(1));
         if workers == 1 {
-            return names.iter().map(Self::of).collect();
+            return names.iter().map(make).collect();
         }
+        let make = &make;
         let dealt: Vec<Vec<Self>> = std::thread::scope(|scope| {
             let hands: Vec<_> = (0..workers)
                 .map(|t| {
-                    scope.spawn(move || {
-                        names
-                            .iter()
-                            .skip(t)
-                            .step_by(workers)
-                            .map(Self::of)
-                            .collect()
-                    })
+                    scope.spawn(move || names.iter().skip(t).step_by(workers).map(make).collect())
                 })
                 .collect();
             hands
@@ -922,7 +1127,22 @@ impl Sprite {
     /// moved by `(dx, dy)` pixels from where it was placed: each pixel the
     /// halo blended, then the glyphs.
     pub fn draw(&self, rgba: &mut [u8], w: u32, h: u32, theme: MapTheme, dx: i64, dy: i64) {
-        if self.w == 0 {
+        self.draw_faded(rgba, w, h, theme, (dx, dy), 255);
+    }
+
+    /// [`draw`](Self::draw) at `alpha` out of 255, a name fading in or out
+    /// (1205): each level scaled by it as the blend reads it, so at 255
+    /// the bytes of [`draw`](Self::draw) and nothing drawn at 0.
+    pub fn draw_faded(
+        &self,
+        rgba: &mut [u8],
+        w: u32,
+        h: u32,
+        theme: MapTheme,
+        (dx, dy): (i64, i64),
+        alpha: u8,
+    ) {
+        if self.w == 0 || alpha == 0 {
             return;
         }
         let (ink, halo) = colours(self.kind, theme);
@@ -942,12 +1162,27 @@ impl Sprite {
             else {
                 return;
             };
-            for (px, &[ha, ia]) in row.chunks_exact_mut(4).zip(src) {
-                blend_level(px, halo, ha);
-                blend_level(px, ink, ia);
+            match alpha {
+                255 => {
+                    for (px, &[ha, ia]) in row.chunks_exact_mut(4).zip(src) {
+                        blend_level(px, halo, ha);
+                        blend_level(px, ink, ia);
+                    }
+                }
+                _ => {
+                    for (px, &[ha, ia]) in row.chunks_exact_mut(4).zip(src) {
+                        blend_level(px, halo, faded(ha, alpha));
+                        blend_level(px, ink, faded(ia, alpha));
+                    }
+                }
             }
         }
     }
+}
+
+/// The level `a` at `alpha`, both out of 255, rounded to the nearest.
+fn faded(a: u8, alpha: u8) -> u8 {
+    ((u32::from(a) * u32::from(alpha) + 127) / 255) as u8
 }
 
 /// Blend `colour` at level `a` out of 255 into the RGBA pixel `px`: the
@@ -1019,10 +1254,12 @@ mod tests {
                 let name = PlacedName {
                     text: "Via dei Calzaiuoli".to_string(),
                     kind: LabelKind::MinorRoad,
+                    min_zoom: 15,
+                    boxes: Vec::new(),
                     centre,
                     angle,
-                    mask: mask.clone(),
-                    halo: halo.clone(),
+                    mask: Arc::new(mask.clone()),
+                    halo: Arc::new(halo.clone()),
                 };
                 assert_eq!(
                     Sprite::of(&name),
@@ -1058,10 +1295,12 @@ mod tests {
                     let name = PlacedName {
                         text: text.to_string(),
                         kind,
+                        min_zoom: 0,
+                        boxes: Vec::new(),
                         centre,
                         angle,
-                        mask: mask.clone(),
-                        halo: halo.clone(),
+                        mask: Arc::new(mask.clone()),
+                        halo: Arc::new(halo.clone()),
                     };
                     let sprite = Sprite::of(&name);
                     for theme in [MapTheme::Light, MapTheme::Dark] {

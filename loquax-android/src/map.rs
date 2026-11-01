@@ -53,7 +53,7 @@ use leviculum_map::mercator::{project, LatLon, World};
 use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::{MapTheme, Style};
 use leviculum_ui::theme::{Theme, ThemeFlag};
-use loquax::mapframe::{frame_size, hold, Ask, Framed, Frames};
+use loquax::mapframe::{frame_size, hold, Ask, DrawnName, Framed, Frames, PlaceCost};
 use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
 use loquax::picture::{map_theme, Maps};
 use loquax::screenmap;
@@ -63,7 +63,7 @@ use loquax::when::WallTime;
 
 use crate::friends;
 use crate::schema::{
-    MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, RegionRow, VERSION,
+    MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, RegionRow, VERSION,
 };
 use crate::session::pins_in;
 
@@ -94,6 +94,8 @@ pub struct Renderer {
     frames: Frames,
     loader: Loader,
     autoload: bool,
+    /// The config's `map_fling` (1188).
+    fling: bool,
     theme: Option<ThemeFlag>,
     origin: Instant,
     /// The clock a test holds instead of [`origin`](Self::origin)'s
@@ -122,6 +124,7 @@ impl Renderer {
             notice_owed: None,
             loader: Loader::new(maps, source, cache),
             autoload: config.map_autoload.unwrap_or(true),
+            fling: config.map_fling.unwrap_or(true),
             theme: config.map_theme,
             origin: Instant::now(),
             held_ms: None,
@@ -233,6 +236,22 @@ impl Renderer {
             ok: true,
             theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
             theme: theme_word(self.theme).to_string(),
+        })
+    }
+
+    /// The Advanced page's map fling (1188): `set` stored as the config's
+    /// `map_fling` when given; the choice in force back, no frame drawn.
+    pub fn fling(&mut self, set: Option<bool>) -> Result<MapFlingChoice, String> {
+        if let Some(on) = set {
+            let word = if on { "on" } else { "off" };
+            loquax::config::save(&self.dir, "map_fling", word)
+                .map_err(|error| format!("map: the choice was not stored: {error}"))?;
+            self.fling = on;
+        }
+        Ok(MapFlingChoice {
+            v: VERSION,
+            ok: true,
+            fling: self.fling,
         })
     }
 
@@ -477,6 +496,7 @@ impl Renderer {
             zooms,
             draw_pins: !request.avatars,
             measure: None,
+            now_ms: Some(now),
             scaled_while_moving: true,
         };
         let shot = match draw(&mut self.frames, &ask) {
@@ -500,6 +520,7 @@ impl Renderer {
             }
             _ => None,
         };
+        let (room_north, room_south) = room(&shot.shows);
         let shown = MapShown {
             v: VERSION,
             ok: true,
@@ -515,7 +536,7 @@ impl Renderer {
             zoom: rest_zoom,
             zoom_milli: shot.shows.zoom_milli(),
             tile_zoom: shot.tile_zoom,
-            pending: shot.missing > 0,
+            pending: shot.missing > 0 || shot.fading,
             min_zoom: zoom_floor(area, &setup),
             max_zoom: setup.zooms.1,
             selected: selected.map(|p| loquax::address::to_hex(&p)),
@@ -537,6 +558,9 @@ impl Renderer {
             own_x: own.map(|o| o.0),
             own_y: own.map(|o| o.1),
             autoload: self.autoload,
+            fling: self.fling,
+            room_north,
+            room_south,
         };
         shown
     }
@@ -723,6 +747,34 @@ pub fn theme(dir: &Path, set: Option<&str>) -> Result<MapThemeChoice, String> {
     with_dir(dir, |renderer| renderer.theme(set))
 }
 
+/// The Advanced page's map fling (1188) of the app directory `dir`, on
+/// the renderer the map draws with, so the next frame says it.
+pub fn fling(dir: &Path, set: Option<bool>) -> Result<MapFlingChoice, String> {
+    with_dir(dir, |renderer| renderer.fling(set))
+}
+
+/// How many whole pixels the centre of `view`, held to one world, may
+/// still move north and south before [`hold`] stops it: the distance from
+/// each edge of the view to the projection's edge (1188). Rounded down,
+/// so a coast that travels it never passes the edge.
+pub fn room(view: &ExactView) -> (u32, u32) {
+    let (_, h) = view.size();
+    let north = view
+        .to_screen(World {
+            x: view.centre.x,
+            y: 0,
+        })
+        .1;
+    let south = view
+        .to_screen(World {
+            x: view.centre.x,
+            y: u32::MAX,
+        })
+        .1;
+    let whole = |v: f64| v.floor().clamp(0.0, f64::from(u32::MAX)) as u32;
+    (whole(-north), whole(south - f64::from(h)))
+}
+
 /// The Maps page (1207) of the app directory `dir`: [`Renderer::regions`]
 /// on the renderer the map draws with, so a deleted region leaves its
 /// frames and its loader too.
@@ -782,6 +834,30 @@ pub fn tile_stats(dir: &Path) -> Option<Stats> {
         .iter()
         .find(|r| r.dir == dir)
         .map(Renderer::tile_stats)
+}
+
+/// The names the last frame of the renderer over `dir` drew, where and
+/// at which alpha (1205): what a test reads a fade by.
+pub fn drawn_names(dir: &Path) -> Option<Vec<DrawnName>> {
+    let renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    renderers
+        .iter()
+        .find(|r| r.dir == dir)
+        .map(|r| r.frames.drawn_names())
+}
+
+/// What the last frame that zoomed of the renderer over `dir` spent
+/// placing its names (1225): the measuring tool's row.
+pub fn place_cost(dir: &Path) -> Option<PlaceCost> {
+    let renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    renderers
+        .iter()
+        .find(|r| r.dir == dir)
+        .map(|r| r.frames.place_cost())
 }
 
 /// The tiles and bytes the tile cache of the renderer over `dir` holds.

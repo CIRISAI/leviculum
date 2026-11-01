@@ -9,6 +9,7 @@
 //! /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
 //!         [[key: int, value: bin], ...]]      -> [status, id: bin32]
 //! /mark  [flag: uint, [id: bin32, ...]]       -> [status]
+//! /mark  [2, [id: bin32, ...], read_at: uint] -> [status]
 //! /watch [cursor: uint]                       -> [status, newest: uint]
 //! /key   [peer: bin16, public_key: bin64]     -> [status]
 //!
@@ -26,6 +27,15 @@
 //! A mark's flag is 0 for read and 1 for deleted ([`MarkFlag`]). The home
 //! node keeps the request's bytes as the archive entry, so every client
 //! reads the same mark the way the home node did.
+//!
+//! Flag 2 is seen (1234, `docs/src/concepts/loquax-read-receipts.md`): the
+//! bubbles were on a device's screen, and the third element is the
+//! reader's clock when the first of them was. The home node signs the read
+//! receipts for them, since the devices hold no identity, and keeps as the
+//! archive entry a seen mark of only the ids no device saw before, so the
+//! first device to see a message sets its read time and every other one
+//! learns it was seen. A home node from before refuses flag 2 as
+//! malformed, and no receipt goes.
 //!
 //! A field's value is its raw msgpack, carried as bytes, so the home node
 //! signs exactly what the client composed.
@@ -71,21 +81,24 @@ pub enum MarkFlag {
     Read,
     /// Deleted on one device: deleted on all.
     Deleted,
+    /// On a device's screen (1234): the home node owes their senders a
+    /// read receipt, at the reader's clock `at`, unix seconds.
+    Seen { at: u32 },
 }
+
+/// The code of [`MarkFlag::Seen`].
+const SEEN_CODE: u64 = 2;
+
+/// The bytes every seen mark begins with, request or archive entry: an
+/// array of three and the flag. The store finds the seen marks by them.
+pub const SEEN_MARK_PREFIX: [u8; 2] = [0x93, SEEN_CODE as u8];
 
 impl MarkFlag {
     fn code(self) -> u64 {
         match self {
             Self::Read => 0,
             Self::Deleted => 1,
-        }
-    }
-
-    fn from_code(code: u64) -> Option<Self> {
-        match code {
-            0 => Some(Self::Read),
-            1 => Some(Self::Deleted),
-            _ => None,
+            Self::Seen { .. } => SEEN_CODE,
         }
     }
 
@@ -94,6 +107,7 @@ impl MarkFlag {
         match self {
             Self::Read => "read",
             Self::Deleted => "deleted",
+            Self::Seen { .. } => "seen",
         }
     }
 }
@@ -356,24 +370,33 @@ pub fn send_answer(id: &[u8; 32]) -> Vec<u8> {
 
 pub fn mark_request(mark: &Mark) -> Vec<u8> {
     let mut out = Vec::new();
-    msgpack::array(&mut out, 2);
+    let seen_at = match mark.flag {
+        MarkFlag::Seen { at } => Some(at),
+        MarkFlag::Read | MarkFlag::Deleted => None,
+    };
+    msgpack::array(&mut out, if seen_at.is_some() { 3 } else { 2 });
     msgpack::uint(&mut out, mark.flag.code());
     msgpack::array(&mut out, mark.ids.len());
     for id in &mark.ids {
         msgpack::bin(&mut out, id);
     }
+    if let Some(at) = seen_at {
+        msgpack::uint(&mut out, u64::from(at));
+    }
     out
 }
 
 /// A mark, from a request or from the archive entry that keeps one. One
-/// without ids, with more than [`MARK_IDS_MAX`] or with a flag this loquax
-/// does not know is malformed.
+/// without ids, with more than [`MARK_IDS_MAX`], with a flag this loquax
+/// does not know, or a seen mark without its time, is malformed.
 pub fn read_mark(data: &[u8]) -> Result<Mark, Malformed> {
     let mut p = 0;
-    if msgpack::array_len(data, &mut p)? != 2 {
-        return Err(Malformed);
+    let len = msgpack::array_len(data, &mut p)?;
+    let code = msgpack::read_uint(data, &mut p)?;
+    match (code, len) {
+        (0 | 1, 2) | (SEEN_CODE, 3) => {}
+        _ => return Err(Malformed),
     }
-    let flag = MarkFlag::from_code(msgpack::read_uint(data, &mut p)?).ok_or(Malformed)?;
     let count = msgpack::array_len(data, &mut p)?;
     if count == 0 || count > MARK_IDS_MAX {
         return Err(Malformed);
@@ -382,6 +405,13 @@ pub fn read_mark(data: &[u8]) -> Result<Mark, Malformed> {
     for _ in 0..count {
         ids.push(<[u8; 32]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?);
     }
+    let flag = match code {
+        0 => MarkFlag::Read,
+        1 => MarkFlag::Deleted,
+        _ => MarkFlag::Seen {
+            at: u32::try_from(msgpack::read_uint(data, &mut p)?).map_err(|_| Malformed)?,
+        },
+    };
     Ok(Mark { flag, ids })
 }
 
@@ -673,6 +703,37 @@ mod tests {
         msgpack::array(&mut unknown, 1);
         msgpack::bin(&mut unknown, &[1; 32]);
         assert_eq!(read_mark(&unknown), Err(Malformed));
+    }
+
+    /// 1234: a seen mark carries the read time, begins with the prefix the
+    /// store looks for, and without its time it is malformed.
+    #[test]
+    fn a_seen_mark_round_trips_with_its_time() {
+        let seen = Mark {
+            flag: MarkFlag::Seen { at: 1_800_000_000 },
+            ids: alloc::vec![[1; 32], [2; 32]],
+        };
+        let data = mark_request(&seen);
+        assert!(data.starts_with(&SEEN_MARK_PREFIX));
+        assert_eq!(read_mark(&data), Ok(seen));
+        let read = mark_request(&Mark {
+            flag: MarkFlag::Read,
+            ids: alloc::vec![[1; 32]],
+        });
+        assert!(!read.starts_with(&SEEN_MARK_PREFIX));
+        let mut timeless = Vec::new();
+        msgpack::array(&mut timeless, 2);
+        msgpack::uint(&mut timeless, SEEN_CODE);
+        msgpack::array(&mut timeless, 1);
+        msgpack::bin(&mut timeless, &[1; 32]);
+        assert_eq!(read_mark(&timeless), Err(Malformed));
+        let mut read_with_time = Vec::new();
+        msgpack::array(&mut read_with_time, 3);
+        msgpack::uint(&mut read_with_time, 0);
+        msgpack::array(&mut read_with_time, 1);
+        msgpack::bin(&mut read_with_time, &[1; 32]);
+        msgpack::uint(&mut read_with_time, 5);
+        assert_eq!(read_mark(&read_with_time), Err(Malformed));
     }
 
     #[test]

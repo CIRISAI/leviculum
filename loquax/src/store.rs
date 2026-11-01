@@ -52,6 +52,15 @@
 //!   message a client handed in with `/send`, signed and packed once, with
 //!   its state, so a restart keeps retrying it. Each state change is an
 //!   archive entry as well, written in the same transaction.
+//! - **Drafts are a table** (`drafts`, schema 8, 1219): a conversation's
+//!   message typed and not sent, one row a conversation, beside it and not
+//!   in the config. The model writes it once typing paused
+//!   ([`crate::ui::history::DRAFT_DEBOUNCE_MS`]), each write one
+//!   transaction as every write is, and deletes it once sent.
+//! - **Read receipts are two columns** (schema 9, 1230): a message of ours
+//!   the peer read is state 8 with the reader's time in `messages.read_at`,
+//!   and `conversations.receipts` says whether the peer's latest message
+//!   carried the receipt mark (`docs/src/concepts/loquax-read-receipts.md`).
 //! - **Imported history sits below seq 0** (schema 6, `crate::import`): a
 //!   conversation's imported rows are older than what loquax wrote, so they
 //!   take negative keys below the store's lowest, in the source's time
@@ -65,8 +74,9 @@
 //!
 //! Schema 1 is the store of slice 6; schema 2 adds `positions`, schema 3
 //! `unverified`, schema 4 the home node's three tables, schema 5 its
-//! outbox and schema 6 the two provenance columns of imported messages,
-//! nothing else, so
+//! outbox, schema 6 the two provenance columns of imported messages, schema 7
+//! a conversation's mute, archive and verification, schema 8 the drafts, and
+//! schema 9 the two read-receipt columns, nothing else, so
 //! an older file is migrated in place at open, in one transaction. A file newer than this program is refused
 //! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
 //! schema 2 file, and leaves it as it is.
@@ -97,7 +107,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use crate::home::outgoing::Change;
 use crate::send::Leg;
 use crate::telemetry::{pack_fields, unpack_fields, Fix};
-use crate::ui::history::{Flags, Restored, StoreWrite, StoredHit, LOAD_WINDOW};
+use crate::ui::history::{Draft, Flags, Restored, StoreWrite, StoredHit, LOAD_WINDOW};
 use crate::ui::{LedgerEntry, Message, Signature};
 use crate::when::WallTime;
 use leviculum_lxmf::telemetry::Location;
@@ -106,7 +116,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 9;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -257,6 +267,28 @@ ALTER TABLE conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE conversations ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// What schema 8 adds to schema 7: a conversation's draft, the message
+/// typed and not sent (1219): its text, the LXMF id a reply answers, and
+/// what is to go with it as a JSON array (empty until attachments exist).
+const SCHEMA_V8: &str = "
+CREATE TABLE drafts(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    body TEXT NOT NULL,
+    reply BLOB,
+    attachments TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (identity, peer));
+";
+
+/// What schema 9 adds to schema 8: read receipts (1230). When the peer
+/// read one of ours, its reader's clock in unix seconds, beside `state` 8
+/// (read); and whether the peer's latest message carried the `lev`
+/// namespace's read-receipt mark.
+const SCHEMA_V9: &str = "
+ALTER TABLE messages ADD COLUMN read_at INTEGER;
+ALTER TABLE conversations ADD COLUMN receipts INTEGER NOT NULL DEFAULT 0;
+";
+
 /// The model's key of the row at seq 0. The model counts keys unsigned
 /// ([`Message::activity`]) and imported history sits below seq 0, so a key is
 /// the seq with its sign bit flipped: the same order, and every row of an
@@ -293,6 +325,9 @@ const TABLES_V4: [&str; 3] = ["archive", "home_devices", "home_tokens"];
 
 /// The tables schema 5 adds.
 const TABLES_V5: [&str; 1] = ["home_outbox"];
+
+/// The table schema 8 adds.
+const TABLES_V8: [&str; 1] = ["drafts"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -420,7 +455,9 @@ impl Store {
     fn create(&self) -> Result<(), StoreError> {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
-             {SCHEMA_V6} {SCHEMA_V7} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} \
+             PRAGMA user_version = {SCHEMA_VERSION}; \
+             COMMIT;"
         );
         self.conn
             .execute_batch(&batch)
@@ -491,6 +528,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 8 {
+            if let Some(missing) = missing(&TABLES_V8) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate();
         }
@@ -523,7 +565,13 @@ impl Store {
                 if version < 6 {
                     batch.push_str(SCHEMA_V6);
                 }
-                batch.push_str(SCHEMA_V7);
+                if version < 7 {
+                    batch.push_str(SCHEMA_V7);
+                }
+                if version < 8 {
+                    batch.push_str(SCHEMA_V8);
+                }
+                batch.push_str(SCHEMA_V9);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -562,7 +610,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT c.peer, c.pinned, c.unread, c.muted_until, c.archived, c.verified, \
-                 (SELECT MAX(seq) FROM messages m \
+                 c.receipts, (SELECT MAX(seq) FROM messages m \
                   WHERE m.identity = c.identity AND m.conversation = c.peer) AS last \
                  FROM conversations c WHERE c.identity = ?1 \
                  ORDER BY last DESC",
@@ -578,6 +626,7 @@ impl Store {
                         muted_until: row.get::<_, Option<i64>>(3)?,
                         archived: row.get::<_, bool>(4)?,
                         verified: row.get::<_, bool>(5)?,
+                        receipts: row.get::<_, bool>(6)?,
                     },
                 ))
             })
@@ -587,6 +636,7 @@ impl Store {
         for (peer, pinned, unread, flags) in rows {
             let peer = self.address(&peer)?;
             let (messages, earlier) = self.page(peer, u64::MAX, None)?;
+            let draft = self.draft(peer)?;
             out.push(Restored {
                 peer,
                 pinned,
@@ -594,6 +644,7 @@ impl Store {
                 unread: unread.max(0) as usize,
                 messages,
                 earlier,
+                draft,
             });
         }
         Ok(out)
@@ -645,7 +696,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT seq, id, direction, state, unproven, verification, last_leg, \
-                 received_at, utc_offset, size, content, fields FROM messages \
+                 received_at, utc_offset, size, content, fields, read_at FROM messages \
                  WHERE identity = ?1 AND conversation = ?2 AND seq < ?3 AND seq >= ?4 \
                  ORDER BY seq",
             )
@@ -1017,6 +1068,44 @@ impl Store {
         Ok(out)
     }
 
+    /// `peer`'s draft (1219), the empty one for none.
+    fn draft(&self, peer: [u8; 16]) -> Result<Draft, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT body, reply, attachments FROM drafts WHERE identity = ?1 AND peer = ?2",
+                params![&self.identity[..], &peer[..]],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| self.failed(e))?;
+        let Some((text, reply, attachments)) = row else {
+            return Ok(Draft::default());
+        };
+        let reply = match reply {
+            Some(id) => Some(id.as_slice().try_into().map_err(|_| StoreError::Corrupt {
+                path: self.path.clone(),
+                detail: format!("a draft's reply id of {} bytes", id.len()),
+            })?),
+            None => None,
+        };
+        let attachments = serde_json::from_str(&attachments).map_err(|e| StoreError::Corrupt {
+            path: self.path.clone(),
+            detail: format!("a draft's attachments: {e}"),
+        })?;
+        Ok(Draft {
+            text,
+            reply,
+            attachments,
+        })
+    }
+
     fn address(&self, bytes: &[u8]) -> Result<[u8; 16], StoreError> {
         bytes.try_into().map_err(|_| StoreError::Corrupt {
             path: self.path.clone(),
@@ -1235,6 +1324,42 @@ impl Store {
     /// said its word on that peer's block, pin, archive and mute (1162).
     pub fn archive_holds_peer_state(&self, peer: &[u8; 16]) -> Result<bool, StoreError> {
         self.archive_holds_of(crate::home::KIND_PEERSTATE, peer)
+    }
+
+    /// The bytes of the archive entry of `kind` kept under `id`, while the
+    /// archive still holds it.
+    pub fn archive_entry(&self, kind: u8, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 AND id = ?3",
+                params![&self.identity[..], i64::from(kind), &id[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Whether a seen mark in the archive names the message `id` (1234):
+    /// some device saw it already, and its read receipt went then.
+    pub fn archive_seen(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
+        let prefix = crate::home::wire::SEEN_MARK_PREFIX;
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 1, ?3) = ?4 AND instr(packed, ?5) > 0 LIMIT 1",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_MARK),
+                    prefix.len() as i64,
+                    &prefix[..],
+                    &id[..]
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))?;
+        Ok(found.is_some())
     }
 
     /// Whether the archive holds an entry of `kind` whose bytes begin with
@@ -2277,11 +2402,11 @@ fn apply(
             tx.execute(
                 "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
                  unproven, verification, last_leg, received_at, utc_offset, size, content, \
-                 fields) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 fields, read_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
                  ON CONFLICT(seq) DO UPDATE SET id = excluded.id, state = excluded.state, \
                  unproven = excluded.unproven, verification = excluded.verification, \
-                 last_leg = excluded.last_leg",
+                 last_leg = excluded.last_leg, read_at = excluded.read_at",
                 params![
                     key,
                     &identity[..],
@@ -2297,6 +2422,7 @@ fn apply(
                     message.size as i64,
                     message.body,
                     (!message.fields.is_empty()).then(|| pack_fields(&message.fields)),
+                    read_at(message.delivery),
                 ],
             )?;
             // The ledger only grows: the lines past what the store has.
@@ -2322,11 +2448,11 @@ fn apply(
         } => {
             tx.execute(
                 "INSERT INTO conversations(identity, peer, pinned, unread, muted_until, \
-                 archived, verified) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 archived, verified, receipts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
                  ON CONFLICT(identity, peer) DO UPDATE SET \
                  pinned = excluded.pinned, unread = excluded.unread, \
                  muted_until = excluded.muted_until, archived = excluded.archived, \
-                 verified = excluded.verified",
+                 verified = excluded.verified, receipts = excluded.receipts",
                 params![
                     &identity[..],
                     &peer[..],
@@ -2334,7 +2460,8 @@ fn apply(
                     *unread as i64,
                     flags.muted_until,
                     flags.archived,
-                    flags.verified
+                    flags.verified,
+                    flags.receipts
                 ],
             )?;
         }
@@ -2356,12 +2483,46 @@ fn apply(
                 params![&identity[..], &peer[..]],
             )?;
             tx.execute(
+                "DELETE FROM drafts WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+            tx.execute(
                 "DELETE FROM conversations WHERE identity = ?1 AND peer = ?2",
                 params![&identity[..], &peer[..]],
             )?;
             tx.execute(
                 "DELETE FROM positions WHERE identity = ?1 AND peer = ?2",
                 params![&identity[..], &peer[..]],
+            )?;
+        }
+        StoreWrite::Draft { peer, draft } if draft.is_empty() => {
+            tx.execute(
+                "DELETE FROM drafts WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+        }
+        // Beside its conversation, so a conversation with nothing in it but
+        // a draft comes back at start.
+        StoreWrite::Draft { peer, draft } => {
+            tx.execute(
+                "INSERT INTO conversations(identity, peer) VALUES (?1, ?2) \
+                 ON CONFLICT DO NOTHING",
+                params![&identity[..], &peer[..]],
+            )?;
+            let attachments = serde_json::to_string(&draft.attachments)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            tx.execute(
+                "INSERT INTO drafts(identity, peer, body, reply, attachments) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET body = excluded.body, \
+                 reply = excluded.reply, attachments = excluded.attachments",
+                params![
+                    &identity[..],
+                    &peer[..],
+                    draft.text,
+                    draft.reply.as_ref().map(|id| &id[..]),
+                    attachments,
+                ],
             )?;
         }
         StoreWrite::Position(fix) => {
@@ -2419,7 +2580,10 @@ fn row_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         outbound: direction == 1,
         body: row.get(10)?,
         id: id.and_then(|id| <[u8; 32]>::try_from(id.as_slice()).ok()),
-        delivery: state.and_then(state_of),
+        delivery: match state {
+            Some(code) => delivery_of(code, row.get(12)?),
+            None => None,
+        },
         signature: signature_of(row.get(5)?),
         leg: None,
         unproven: row.get(4)?,
@@ -2480,6 +2644,26 @@ pub(crate) fn state_code(state: DeliveryState) -> i64 {
         DeliveryState::Delivered => 5,
         DeliveryState::Rejected => 6,
         DeliveryState::Failed => 7,
+        DeliveryState::Read { .. } => 8,
+    }
+}
+
+/// `messages.read_at` for a state: the time of a read, NULL otherwise.
+fn read_at(state: Option<DeliveryState>) -> Option<i64> {
+    match state {
+        Some(DeliveryState::Read { at }) => Some(i64::from(at)),
+        _ => None,
+    }
+}
+
+/// A row's state with its `read_at`: a read without one (a row another
+/// writer left) is read at 0, the time unknown.
+fn delivery_of(code: i64, read_at: Option<i64>) -> Option<DeliveryState> {
+    match state_of(code)? {
+        DeliveryState::Read { .. } => Some(DeliveryState::Read {
+            at: read_at.and_then(|at| u32::try_from(at).ok()).unwrap_or(0),
+        }),
+        other => Some(other),
     }
 }
 
@@ -2493,6 +2677,7 @@ pub(crate) fn state_of(code: i64) -> Option<DeliveryState> {
         5 => DeliveryState::Delivered,
         6 => DeliveryState::Rejected,
         7 => DeliveryState::Failed,
+        8 => DeliveryState::Read { at: 0 },
         _ => return None,
     })
 }
@@ -2602,6 +2787,8 @@ mod tests {
             at: at(1_010),
             what: "delivered (direct)".to_string(),
         });
+        // 1230: a read with its time, in the row written over the first.
+        sent.delivery = Some(DeliveryState::Read { at: 1_020 });
         put(&mut store, ALICE, sent.clone());
         store
             .write(&[StoreWrite::Conversation {
@@ -2612,6 +2799,7 @@ mod tests {
                     muted_until: Some(i64::MAX),
                     archived: true,
                     verified: true,
+                    receipts: true,
                 },
             }])
             .expect("pin");
@@ -2628,6 +2816,12 @@ mod tests {
         // 1146: the mute, the archive and the verified mark survive.
         assert_eq!(alice.flags.muted_until, Some(i64::MAX));
         assert!(alice.flags.archived && alice.flags.verified);
+        // 1230: the peer's receipt mark, and the read's time.
+        assert!(alice.flags.receipts);
+        assert_eq!(
+            alice.messages[0].delivery,
+            Some(DeliveryState::Read { at: 1_020 })
+        );
         assert_eq!(
             alice.messages,
             vec![sent, message(2, false, "yes, from ten")]
@@ -3303,6 +3497,136 @@ mod tests {
             )
             .expect("origin columns exist");
         assert_eq!(origins, 0);
+    }
+
+    /// 1219: a draft is kept beside its conversation, comes back at start
+    /// with its reply, is replaced in place, and goes when empty or with
+    /// its conversation; a conversation holding nothing but a draft comes
+    /// back too.
+    #[test]
+    fn a_draft_is_kept_beside_its_conversation() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let draft = |text: &str, reply: Option<[u8; 32]>| Draft {
+            text: text.to_string(),
+            reply,
+            attachments: Vec::new(),
+        };
+        store
+            .write(&[StoreWrite::Draft {
+                peer: BOB,
+                draft: draft("on my", Some([7; 32])),
+            }])
+            .expect("write");
+        store
+            .write(&[StoreWrite::Draft {
+                peer: BOB,
+                draft: draft("on my way", Some([7; 32])),
+            }])
+            .expect("replace");
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored.len(), 1, "a draft alone lists its conversation");
+        assert_eq!(restored[0].peer, BOB);
+        assert_eq!(restored[0].draft, draft("on my way", Some([7; 32])));
+        let rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM drafts", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 1, "one row a conversation");
+        store
+            .write(&[StoreWrite::Draft {
+                peer: BOB,
+                draft: Draft::default(),
+            }])
+            .expect("clear");
+        assert_eq!(store.restore().expect("restore")[0].draft, Draft::default());
+        store
+            .write(&[StoreWrite::Draft {
+                peer: BOB,
+                draft: draft("again", None),
+            }])
+            .expect("write");
+        store
+            .write(&[StoreWrite::ForgetConversation { peer: BOB }])
+            .expect("forget");
+        let rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM drafts", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 0, "the draft goes with its conversation");
+        // Another identity's store does not see it.
+        store
+            .write(&[StoreWrite::Draft {
+                peer: BOB,
+                draft: draft("mine", None),
+            }])
+            .expect("write");
+        drop(store);
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("other");
+        assert!(other.restore().expect("restore").is_empty());
+    }
+
+    /// 1219: a schema 7 store migrates to 8 in place, its conversations as
+    /// they were and no draft in them.
+    #[test]
+    fn a_schema_7_store_migrates_with_no_drafts() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
+             {SCHEMA_V6} {SCHEMA_V7} PRAGMA user_version = 7; COMMIT;"
+        ))
+        .expect("schema 7");
+        conn.execute(
+            "INSERT INTO conversations(identity, peer, pinned) VALUES (?1, ?2, 1)",
+            params![&US[..], &BOB[..]],
+        )
+        .expect("a pinned conversation");
+        drop(conn);
+        let store = Store::open_in(home.path(), US).expect("schema 7 opens");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        let restored = store.restore().expect("restore");
+        assert!(restored[0].pinned);
+        assert_eq!(restored[0].draft, Draft::default());
+    }
+
+    /// A schema 8 store, the one before read receipts (1230), migrates in
+    /// place: its delivered message stays delivered, and no peer is known
+    /// to send receipts.
+    #[test]
+    fn a_schema_8_store_migrates_with_no_receipts() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
+             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} PRAGMA user_version = 8; COMMIT;"
+        ))
+        .expect("schema 8");
+        conn.execute(
+            "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
+             verification, size, content) VALUES (1, ?1, ?2, ?3, 1, 5, 1, 2, 'hi')",
+            params![&US[..], &BOB[..], &[7u8; 32][..]],
+        )
+        .expect("a delivered message");
+        conn.execute(
+            "INSERT INTO conversations(identity, peer) VALUES (?1, ?2)",
+            params![&US[..], &BOB[..]],
+        )
+        .expect("its conversation");
+        drop(conn);
+        let store = Store::open_in(home.path(), US).expect("schema 8 opens");
+        let restored = store.restore().expect("restore");
+        assert_eq!(
+            restored[0].messages[0].delivery,
+            Some(DeliveryState::Delivered)
+        );
+        assert!(!restored[0].flags.receipts);
     }
 
     /// A schema 3 store, as the loquax before the home node wrote it,

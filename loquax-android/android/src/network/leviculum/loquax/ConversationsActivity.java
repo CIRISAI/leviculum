@@ -23,7 +23,6 @@ import android.widget.PopupMenu;
 import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -43,10 +42,18 @@ import java.util.Map;
  * menu: read or unread, pin, mute, archive, delete. The archived
  * conversations are this screen again with ARCHIVED, a sub view with the
  * back arrow and no tabs, reached from the list's last row.
+ *
+ * A row whose peer has a position younger than a day carries the map pin
+ * (1224, the library's `pin`): a tap on it is the core's `OpenMapAt`, the
+ * Map tab centred on that friend with the friend's card open, and Back
+ * returns to the chats, not to the map's previous view. A chat's newest
+ * report raises the same through {@link #MAP_AT}.
  */
 public class ConversationsActivity extends Activity implements Events.Listener {
     /** The extra that makes this screen the archived view. */
     static final String ARCHIVED = "archived";
+    /** The extra that opens the Map tab on a friend (1224): its address. */
+    static final String MAP_AT = "map_at";
     /** The saved state's key of the selected tab. */
     private static final String TAB = "tab";
     /** Help (1199): the book, until the app has a page of its own. */
@@ -65,15 +72,20 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     /** The map tab is selected; its pane is made on first selection. */
     private boolean onMap;
     private MapPane mapPane;
+    /** The map was opened on a friend from a pin: Back goes to the chats. */
+    private boolean mapFromPin;
     /** The list's last row: the archived view, with how many. */
     private TextView archivedRow;
     private final ServiceLink link = new ServiceLink(this);
-    /** "Jetzt" turns into "1 Min." without a message: the rows redraw twice a minute. */
+    /**
+     * "Jetzt" turns into "1 Min." without a message: the rows are asked
+     * again twice a minute, the library's words (a position's age) with them.
+     */
     private final Handler ticker = new Handler(Looper.getMainLooper());
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
-            adapter.notifyDataSetChanged();
+            refresh();
             ticker.postDelayed(this, 30_000);
         }
     };
@@ -135,6 +147,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             subView(this);
         } else {
             tabs(savedInstanceState != null && savedInstanceState.getBoolean(TAB, false));
+        }
+        if (savedInstanceState == null) {
+            mapAt(getIntent());
         }
         search.setImageDrawable(new Glyph(Glyph.Kind.SEARCH, text));
         search.setOnClickListener(new View.OnClickListener() {
@@ -201,12 +216,14 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         findViewById(R.id.tab_chats).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                mapFromPin = false;
                 select(false);
             }
         });
         findViewById(R.id.tab_map).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                mapFromPin = false;
                 select(true);
             }
         });
@@ -243,6 +260,51 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             // The map's position is read only while it is shown (1201).
             mapPane.pause();
         }
+    }
+
+    /**
+     * The core's `OpenMapAt` (1224): the Map tab centred on `peer`'s
+     * newest fix with its card open; Back returns to the chats. The
+     * archived view has no tabs: the map opens as a sub view there.
+     */
+    private void openMapAt(String peer) {
+        if (archivedView) {
+            startActivity(new Intent(this, MapActivity.class).putExtra(MapActivity.FRIEND, peer));
+            return;
+        }
+        if (query.getVisibility() == View.VISIBLE) {
+            searching(false);
+        }
+        select(true);
+        mapPane.openAt(peer);
+        mapFromPin = true;
+    }
+
+    /** A screen asked for the map on a friend with {@link #MAP_AT}. */
+    private void mapAt(Intent intent) {
+        String peer = intent == null ? null : intent.getStringExtra(MAP_AT);
+        if (peer != null && !peer.isEmpty()) {
+            intent.removeExtra(MAP_AT);
+            openMapAt(peer);
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        mapAt(intent);
+    }
+
+    /**
+     * Raise the core's `OpenMapAt` from another screen (the chat's newest
+     * report, 1224): the main views come to the top with the Map tab on
+     * `peer`, the screens above them closed, so Back goes to the chats.
+     */
+    static void openMapAt(Activity from, String peer) {
+        from.startActivity(new Intent(from, ConversationsActivity.class)
+                .putExtra(MAP_AT, peer)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP));
     }
 
     @Override
@@ -376,6 +438,14 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             searching(false);
             return;
         }
+        if (onMap && mapFromPin) {
+            // Opened on a friend from a pin (1224): back to the chats, the
+            // card closed with it.
+            mapFromPin = false;
+            mapPane.back();
+            select(false);
+            return;
+        }
         if (onMap && mapPane.back()) {
             return;
         }
@@ -444,7 +514,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     }
 
     private void refresh() {
-        Map<String, Object> answer = archivedView ? Core.archived() : Core.conversations();
+        Map<String, Object> answer = archivedView ? Core.archived(null) : Core.conversations(null);
         if (answer.containsKey("error")) {
             line(Core.str(answer, "error"));
             return;
@@ -482,16 +552,19 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 ? getString(R.string.tab_chats_unread, chats) : getString(R.string.tab_chats));
     }
 
-    /** The rows whose name or last line hold what the search field holds, in the library's order. */
+    /**
+     * The rows the search field finds, by the library's rule (1217): every
+     * word in the name or the last line, as on the desktop. The whole list
+     * while the field is empty.
+     */
     private void filter() {
-        String needle = query.getText().toString().trim().toLowerCase(Locale.getDefault());
+        String needle = query.getText().toString().trim();
         rows.clear();
-        for (Map<String, Object> row : all) {
-            if (needle.isEmpty()
-                    || Core.str(row, "name").toLowerCase(Locale.getDefault()).contains(needle)
-                    || Ui.preview(this, row).toLowerCase(Locale.getDefault()).contains(needle)) {
-                rows.add(row);
-            }
+        if (needle.isEmpty()) {
+            rows.addAll(all);
+        } else {
+            Map<String, Object> found = archivedView ? Core.archived(needle) : Core.conversations(needle);
+            rows.addAll(Core.list(found, "conversations"));
         }
         adapter.notifyDataSetChanged();
     }
@@ -553,24 +626,51 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                     + (Core.bool(row, "muted") ? " \uD83D\uDD15" : "");
             name.setText(Core.str(row, "name") + marks);
             name.setTypeface(null, unread > 0 ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
-            ((TextView) view.findViewById(R.id.last)).setText(Ui.preview(ConversationsActivity.this, row));
+            // A message typed and not sent stands in for the last one, in
+            // italics, in the library's words (1219): `Draft: …`.
+            String draft = Core.str(row, "draft");
+            TextView last = (TextView) view.findViewById(R.id.last);
+            last.setText(draft.isEmpty() ? Ui.preview(ConversationsActivity.this, row) : draft);
+            last.setTypeface(null, draft.isEmpty()
+                    ? android.graphics.Typeface.NORMAL : android.graphics.Typeface.ITALIC);
             TextView at = (TextView) view.findViewById(R.id.at);
             at.setText(Ui.listTime(ConversationsActivity.this, Core.num(row, "at"), Ui.nowSecs()));
             at.setTextColor(getColor(unread > 0 ? R.color.accent : R.color.text_secondary));
-            ((AvatarView) view.findViewById(R.id.avatar)).show(Core.str(row, "peer"), row);
+            final String peer = Core.str(row, "peer");
+            ((AvatarView) view.findViewById(R.id.avatar)).show(peer, row);
+            // The map pin (1224) in the library's tint: the map on the peer.
+            String tint = Core.str(row, "pin");
+            ImageView pin = (ImageView) view.findViewById(R.id.pin);
+            pin.setVisibility(tint.isEmpty() ? View.GONE : View.VISIBLE);
+            if (!tint.isEmpty()) {
+                int colour = getColor("accent".equals(tint) ? R.color.accent : R.color.text_secondary);
+                pin.setImageDrawable(new Glyph(Glyph.Kind.PIN, colour));
+                pin.setContentDescription(Core.str(row, "pin_label"));
+                pin.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        openMapAt(peer);
+                    }
+                });
+            } else {
+                pin.setOnClickListener(null);
+                pin.setClickable(false);
+            }
             TextView badge = (TextView) view.findViewById(R.id.unread);
             badge.setVisibility(unread > 0 ? View.VISIBLE : View.GONE);
             badge.setText(String.valueOf(unread));
             // Under the time either the count or, ours being the last, its
             // mark: the ticks cut into the list's ground.
             String state = Core.bool(row, "ours") ? Core.str(row, "state") : "";
-            ImageView mark = (ImageView) view.findViewById(R.id.mark);
+            ImageView mark = (ImageView) view.findViewWithTag("mark");
             mark.setVisibility(unread == 0 && !state.isEmpty() ? View.VISIBLE : View.GONE);
             if (!state.isEmpty()) {
-                mark.setImageDrawable(new Glyph(Glyph.mark(state), getColor(R.color.text_secondary),
-                        getColor(R.color.background), getColor(R.color.list_failed_ground),
+                Glyph.Kind kind = Glyph.mark(state);
+                int ink = getColor(kind == Glyph.Kind.TICKS_READ ? R.color.accent : R.color.text_secondary);
+                mark.setImageDrawable(new Glyph(kind, ink, getColor(R.color.list_failed_ground),
                         getColor(R.color.list_failed_mark)));
-                mark.setContentDescription(Ui.state(ConversationsActivity.this, state));
+                mark.setId(Glyph.resource(kind));
+                mark.setContentDescription(Ui.state(ConversationsActivity.this, state, Core.num(row, "read_at")));
             }
             return view;
         }

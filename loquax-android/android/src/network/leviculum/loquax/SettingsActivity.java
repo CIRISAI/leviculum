@@ -36,6 +36,9 @@ import java.util.Map;
  * phone (1152). Advanced names the Propagation Node, the only place the
  * app does, and ends the service.
  *
+ * Privacy starts with "Send read receipts" (1233), the core's switch:
+ * off, no receipt goes out and none is shown.
+ *
  * Maps (1201) is the management "Load area" was an action for: the
  * switch for the automatic download, the storage the regions take, and
  * each region with its size and date and a delete. Privacy lists the
@@ -263,8 +266,9 @@ public class SettingsActivity extends Activity implements Events.Listener {
         }, "loquax-theme").start();
     }
 
-    /** The blocked contacts. */
+    /** The read receipts switch, the blocked contacts, the positions shared. */
     private void privacy() {
+        receipts();
         TextView header = text(getString(R.string.blocked_contacts), 14, R.color.accent);
         header.setPadding(dp(16), dp(16), dp(16), dp(4));
         body.addView(header);
@@ -396,6 +400,42 @@ public class SettingsActivity extends Activity implements Events.Listener {
         return line;
     }
 
+    /**
+     * "Send read receipts" (1233), first on the page: the switch as the
+     * core holds it; a change goes to the core, which keeps it in the
+     * config, and the switch shows what the core answered.
+     */
+    private void receipts() {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), dp(12), dp(16), dp(12));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        words.addView(text(getString(R.string.read_receipts), 16, R.color.text));
+        words.addView(text(getString(R.string.read_receipts_text), 14, R.color.text_secondary));
+        row.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        final Switch on = new Switch(this);
+        on.setId(R.id.privacy_receipts);
+        on.setContentDescription(getString(R.string.read_receipts));
+        on.setChecked(Core.bool(Core.receipts(null), "on"));
+        on.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Map<String, Object> answer = Core.receipts(on.isChecked());
+                if (answer.containsKey("error")) {
+                    android.widget.Toast.makeText(SettingsActivity.this,
+                            Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
+                    on.setChecked(!on.isChecked());
+                    return;
+                }
+                on.setChecked(Core.bool(answer, "on"));
+            }
+        });
+        row.addView(on);
+        body.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
     /** The positions the user shared (1201): to whom, and when. */
     private void sharedPositions() {
         TextView header = text(getString(R.string.privacy_shared), 14, R.color.accent);
@@ -452,13 +492,34 @@ public class SettingsActivity extends Activity implements Events.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
-    /** The Propagation Node, and the service's end. */
+    /** The Propagation Node, the map's fling, and the service's end. */
     private void advanced() {
+        mapFling(null);
         TextView node = text(getString(R.string.propagation_node), 16, R.color.text);
         node.setPadding(dp(16), dp(16), dp(16), 0);
         body.addView(node);
         body.addView(padded(text(getString(R.string.propagation_node_text), 14,
                 R.color.text_secondary)));
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), dp(16), dp(16), dp(4));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        words.addView(text(getString(R.string.map_fling), 16, R.color.text));
+        words.addView(text(getString(R.string.map_fling_text), 14, R.color.text_secondary));
+        row.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        final Switch flings = new Switch(this);
+        flings.setId(R.id.map_fling);
+        flings.setChecked(true);
+        flings.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                mapFling(flings.isChecked());
+            }
+        });
+        row.addView(flings);
+        body.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView stop = text(getString(R.string.stop_service), 16, R.color.text);
         stop.setPadding(dp(16), dp(24), dp(16), dp(16));
         stop.setBackgroundResource(android.R.drawable.list_selector_background);
@@ -473,6 +534,33 @@ public class SettingsActivity extends Activity implements Events.Listener {
         });
         body.addView(stop, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    /**
+     * The map's fling (1188): `set` stored when given, then the switch
+     * shows the choice in force; off the UI thread, as the renderer may
+     * be drawing.
+     */
+    private void mapFling(final Boolean set) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final Map<String, Object> answer = Core.mapFling(set);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!Core.bool(answer, "ok")) {
+                            android.widget.Toast.makeText(SettingsActivity.this,
+                                    Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
+                        }
+                        View shown = body.findViewById(R.id.map_fling);
+                        if (shown instanceof Switch) {
+                            ((Switch) shown).setChecked(Core.bool(answer, "fling"));
+                        }
+                    }
+                });
+            }
+        }, "loquax-fling").start();
     }
 
     /** One blocked peer: its avatar and name as every screen shows it, and "Unblock". */

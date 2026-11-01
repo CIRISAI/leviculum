@@ -29,6 +29,8 @@ use leviculum_ui::text::{fit_width, truncate_to_cols};
 use leviculum_ui::tokens::{Paint, Tokens};
 use leviculum_ui::{RLine, RStyle};
 
+use super::scene::PositionBadge;
+use super::strings::{Arg, Lang, StrId, Text};
 use super::{leg_label, plain, push, reactions, wrap, Conversation, Message, Signature, UiModel};
 use crate::names::Names;
 use crate::telemetry;
@@ -67,6 +69,12 @@ pub struct Draw<'a> {
     /// The open search's query: each block marks its first match in place,
     /// between `«` and `»` (section 5, the 120 x 40 mockup).
     pub mark: Option<&'a str>,
+    /// A client of a home node: the home's `Sent` is the mailbox's tick
+    /// ([`super::shown_delivery`]).
+    pub home_client: bool,
+    /// The reader's read receipts switch (1233): off, read is drawn
+    /// delivered ([`super::shown_delivery`]).
+    pub receipts: bool,
 }
 
 /// A style drawn in a token's colours.
@@ -354,14 +362,19 @@ fn suffix(message: &Message, narrow: bool, draw: &Draw<'_>, selected: bool) -> R
         push(&mut line, &text, time);
     }
     if let Some(state) = message.delivery {
-        let row = glyph(state);
+        let row = glyph(super::shown_delivery(
+            state,
+            draw.home_client,
+            draw.receipts,
+        ));
         push(
             &mut line,
             if text.is_empty() { "  " } else { " " },
             RStyle::default(),
         );
         let mark = RStyle {
-            fg: draw.tokens.tones.of(row.tone, row.dim),
+            fg: draw.tokens.tones.of(row.tone),
+            bold: row.bold,
             ..RStyle::default()
         };
         push(&mut line, row.symbol(draw.tick as usize, draw.ascii), mark);
@@ -483,10 +496,14 @@ fn block(
     };
     // The mark closes the last row: its cells are that row's last.
     let mark = message.delivery.and_then(|state| {
-        let len = glyph(state)
-            .symbol(draw.tick as usize, draw.ascii)
-            .chars()
-            .count();
+        let len = glyph(super::shown_delivery(
+            state,
+            draw.home_client,
+            draw.receipts,
+        ))
+        .symbol(draw.tick as usize, draw.ascii)
+        .chars()
+        .count();
         let row = rows.len().checked_sub(1)?;
         Some((row, x + rows[row].cells.len() - len, len))
     });
@@ -567,7 +584,7 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
     for &index in &order[first..] {
         let conversation = &model.conversations[index];
         let here = index == model.selected;
-        let [top, bottom] = entry(conversation, &model.names, width, model.now);
+        let [top, bottom] = entry(conversation, &model.names, width, model.now, here);
         for mut row in [top, bottom] {
             if here {
                 if let Some(cell) = row.cells.first_mut() {
@@ -628,11 +645,14 @@ pub fn badge_cells(conversation: &Conversation, width: usize) -> Option<(usize, 
 /// One conversation's two rows, `width` cells with the bar's margin first
 /// and one blank last: the name and the last message's time, the last line's
 /// preview (`you:` when ours) and the unread count in brackets, reversed.
+/// A conversation not `open` with a message typed and not sent shows that
+/// instead of the last line, `Draft: …` in italics (1219).
 fn entry(
     conversation: &Conversation,
     names: &Names,
     width: usize,
     now: Option<WallTime>,
+    open: bool,
 ) -> [RLine; 2] {
     let room = width.saturating_sub(2);
     let last = conversation.messages.last();
@@ -676,17 +696,42 @@ fn entry(
         }
         None => String::new(),
     };
-    let budget = match badge.is_empty() {
-        true => room,
-        false => room.saturating_sub(badge.chars().count() + 1),
+    // The map pin (1224, `scene::PositionBadge`'s rule): left of the
+    // count, `m` on the entry opens the map on the peer.
+    let now_secs = now.map(|now| now.unix_secs);
+    let pin = PositionBadge::of(
+        &conversation.peer,
+        "",
+        &conversation.liveness(now_secs),
+        now_secs,
+    )
+    .map(|_| format!("{} ", StrId::PositionMarker.text(Lang::En)))
+    .unwrap_or_default();
+    let marks = pin.chars().count() + badge.chars().count();
+    let budget = match marks {
+        0 => room,
+        n => room.saturating_sub(n + 1),
+    };
+    let draft = conversation.draft.line().filter(|_| !open);
+    let preview = match &draft {
+        Some(line) => Text::Key(StrId::DraftRow, vec![Arg::Str(line.clone())]).resolve(Lang::En),
+        None => preview,
     };
     let preview = leviculum_ui::text::truncate_to_cols(&preview, budget);
-    let gap = room.saturating_sub(fit_width(&preview) + badge.chars().count());
+    let gap = room.saturating_sub(fit_width(&preview) + marks);
     let mut bottom = RLine::default();
     push(&mut bottom, " ", RStyle::default());
     push(
         &mut bottom,
-        &format!("{preview}{}", " ".repeat(gap)),
+        &preview,
+        RStyle {
+            italic: draft.is_some(),
+            ..RStyle::default()
+        },
+    );
+    push(
+        &mut bottom,
+        &format!("{}{pin}", " ".repeat(gap)),
         RStyle::default(),
     );
     push(

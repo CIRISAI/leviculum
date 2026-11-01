@@ -26,5 +26,31 @@ density of one: two conversations, one open with a date line, two grouped
 bubbles of theirs, our reaction's pill and our queued bubble, the compose
 bar. Compared pixel for pixel as the map's picture is; the text is set in
 the window's default font, Fira Sans as iced embeds it, and the picture
-holds no emoji, which only a host's font would draw.
+holds no emoji, which only a host's font would draw. Redrawn in 1218,
+when the window began drawing the scene (`loquax::ui::scene`): 908
+pixels in each theme, the first date line alone, which reads
+"Yesterday" where the window's own date rule said "Thursday 29
+October"; the scene's day words are the phone's. Redrawn again in 1218
+when the window first showed the scene's shared structure: the tab rail
+at the left (Chats with the unread count, Map), the reader's top bar
+(the avatar with Mia's initials, "Chats", search, new conversation and
+the theme toggle as drawn icons) in place of the window's own "Loquax"
+bar with the words Map, Dark and New; the list and the chat moved right
+by the rail's 72 pixels.
 
+`gui-chat-compact-chat.png`, `gui-chat-compact-list.png`: the same
+window in the Compact class (1218), 420 x 640, light, drawn by
+`gui::tests::a_narrow_window_stacks_and_a_resize_switches`: the open
+chat alone with a back in its bar, and once the model closed it the
+list with the tabs at the bottom, as the phone stacks them.
+
+
+`scene-compact-list.json`, `scene-compact-chat.json`, `scene-wide.json`:
+the scene of the list and the chat (1217, `loquax::ui::scene`) built from
+the ugly store (1173) by `tests/scene_golden.rs`: Compact with no
+conversation open, Compact and Wide with conversation 2 open. JSON with
+sorted keys; texts are catalogue keys with their arguments, not resolved,
+so one file pins both languages. Compared line for line; a scene that
+moved is left in the temp dir as `loquax-golden/<name>`, and
+`LOQUAX_WRITE_GOLDEN=1` writes the goldens for a change that means to move
+them.

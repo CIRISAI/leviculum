@@ -1,8 +1,12 @@
 //! `loquax gui`: the window over the same shell and model as the terminal
 //! (`docs/src/concepts/gui-toolkit.md`, option B, iced on the desktop;
 //! `docs/src/concepts/loquax-map.md`, slice (d)). It opens on the chat
-//! ([`chat`], 1145, after the phone's design): the conversations on the
-//! left, the open one on the right. The map is its other screen: the peers
+//! ([`chat`], 1145, after the phone's design), drawn from the model's
+//! scene (1218, [`loquax::ui::scene`]): the tabs, the conversations and
+//! the open one beside them in a wide window, stacked as on the phone in
+//! a narrow one. A press on a node and a key of the keymap are intents
+//! ([`loquax::ui::intent::Intent`]), the model's sent to the shell, the
+//! window's kept. The map is its other screen: the peers
 //! with a position listed on the left, by the display rule with their fix's
 //! age and dimmed when stale, and the map on the right.
 //!
@@ -48,12 +52,17 @@ use tokio::sync::oneshot;
 use leviculum_map::mercator::World;
 use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::Style;
+use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+use leviculum_ui::keymap::Ctx;
+use loquax::keys::{self, MapCmd};
 use loquax::mapframe::{hold, onto, Ask, Frames};
 use loquax::picture::map_theme;
 use loquax::tiles::Motion;
-use loquax::ui::chat::{list_rows, ListRow, Open};
+use loquax::ui::intent::{Intent, Messages, Target};
 use loquax::ui::map::{fit, want_pins, want_view, zoom_floor, MapPin, MapSetup, MapWant};
-use loquax::ui::{UiEvent, MAP_LOADED_ALREADY};
+use loquax::ui::scene::{LayoutClass, NodeId, Scene, TabId};
+use loquax::ui::strings::Lang;
+use loquax::ui::{Pane, UiEvent, MAP_LOADED_ALREADY};
 use loquax::when::WallTime;
 
 use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
@@ -62,6 +71,9 @@ use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
 const LIST_WIDTH: f32 = 260.0;
 /// The window's size when it opens.
 const WINDOW: (f32, f32) = (1100.0, 720.0);
+/// From this width on the window is Wide (1218): the rail, the list and
+/// a chat of 300 pixels beside each other; below it stacks.
+const WIDE_FROM: f32 = chat::RAIL + chat::LIST_WIDTH + 300.0;
 
 /// What the window shows of the model, sent after every change.
 #[derive(Clone, Debug, PartialEq)]
@@ -80,12 +92,15 @@ pub struct Seen {
     /// How the map is drawn: the PC's finish in the table `map_theme`
     /// names, light for `auto`: the map keeps its own toggle (1133).
     pub style: Style,
-    /// The conversation list, as the model orders it.
-    pub chats: Vec<ListRow>,
-    /// The open conversation.
-    pub chat: Option<Open>,
+    /// The list and the open chat (1218): the scene at
+    /// [`LayoutClass::Wide`], which the window draws in the class its
+    /// width gives ([`Scene::in_class`]).
+    pub scene: Scene,
     /// The model's wall clock, for the list's times and the date lines.
     pub now: Option<WallTime>,
+    /// The reader's switch "Send read receipts" (1233), the settings'
+    /// row.
+    pub receipts: bool,
 }
 
 impl Seen {
@@ -97,9 +112,9 @@ impl Seen {
             maps: shell.maps.epoch(),
             autoload: shell.model.map_autoload,
             style: Style::PC.in_theme(map_theme(shell.model.map_theme, None)),
-            chats: list_rows(&shell.model),
-            chat: loquax::ui::chat::open(&shell.model),
+            scene: shell.model.scene(LayoutClass::Wide),
             now: shell.model.now,
+            receipts: shell.model.reading.on,
         }
     }
 }
@@ -228,34 +243,17 @@ pub enum Message {
     Prefetched(bool),
     /// The desktop's light or dark setting, at the start and on a change.
     SystemTheme(iced::theme::Mode),
-    /// The list's toggle: the other theme than the one shown.
-    ToggleTheme,
-    /// A conversation clicked in the list.
-    Open([u8; 16]),
+    /// What the list's search field holds.
     Search(String),
-    /// The list's new conversation: its field, what is typed, `Enter`.
-    NewConversation,
+    /// The new conversation's field: what is typed, `Enter`.
     NewAddress(String),
     NewGo,
     Compose(text_editor::Action),
-    /// `Enter` in the compose field, or the send button.
-    Send,
-    ToggleEmoji,
-    /// An emoji picked into the compose field.
-    Insert(String),
-    /// The map, with this peer's pin selected; or back to the chat.
-    ShowMap(Option<[u8; 16]>),
-    ShowChats,
-    /// A right click on the bubble with this key opens its reactions and
-    /// actions; none closes them.
-    Menu(Option<u64>),
-    React([u8; 32], String),
-    Reply([u8; 32]),
-    CancelReply,
-    Copy(String),
-    /// The first click on delete asks, the second deletes.
-    AskDelete(u64),
-    Delete([u8; 16], u64),
+    /// What the user asks (1218): a press on a scene node raises the
+    /// node's [`Intent`], a key the keymap's, as on every target.
+    Intent(Intent),
+    /// The top bar's gear: the settings page (1233).
+    Settings,
 }
 
 impl Message {
@@ -268,11 +266,13 @@ impl Message {
                 | Message::Scale(_)
                 | Message::Window(_)
                 | Message::Key(_)
+                | Message::Intent(_)
                 | Message::Pointer(_)
                 | Message::Select(_)
                 | Message::Painted(_)
                 | Message::WheelRest
                 | Message::Prefetched(_)
+                | Message::Settings
         )
     }
 }
@@ -282,6 +282,8 @@ impl Message {
 pub enum Screen {
     Chats,
     Map,
+    /// The settings (1233): one page, "Send read receipts" on it.
+    Settings,
 }
 
 /// Thousandths of a step a line of the wheel zooms: a notch is a step.
@@ -328,6 +330,8 @@ pub struct Shown {
     pub attribution: String,
     /// Tiles it owes: the window asks again.
     pub missing: usize,
+    /// A name fades in or out: the window asks again.
+    pub fading: bool,
 }
 
 /// What the worker does next.
@@ -345,6 +349,7 @@ enum Job {
 pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
     let mut frames = frames.lock().unwrap_or_else(PoisonError::into_inner);
     frames.set_motion(order.motion);
+    let now_ms = frames.clock_ms();
     let shot = frames.frame(&Ask {
         view: order.view,
         margin: order.margin,
@@ -356,6 +361,7 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         zooms: order.zooms,
         draw_pins: false,
         measure: Some(map::measure),
+        now_ms: Some(now_ms),
         scaled_while_moving: true,
     });
     let (w, h) = shot.view.size();
@@ -365,6 +371,7 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         placed: frames.placed().to_vec(),
         attribution: shot.attribution,
         missing: shot.missing,
+        fading: shot.fading,
         order,
     })
 }
@@ -446,11 +453,18 @@ struct App {
     compose: text_editor::Content,
     /// The message a reply being written answers, with its first line.
     reply: Option<([u8; 32], String)>,
+    /// The chat whose draft the compose field holds (1219): the model
+    /// keeps it, the field is put back from the scene when another opens.
+    compose_for: Option<[u8; 16]>,
     emoji: bool,
     /// The bubble whose reactions and actions are open, and one whose
     /// delete was asked once.
-    menu: Option<u64>,
-    deleting: Option<u64>,
+    menu: Option<NodeId>,
+    deleting: Option<NodeId>,
+    /// The language the scene's words are said in: the desktop's locale.
+    lang: Lang,
+    /// The scene of [`Seen`] in the window's class: what is drawn.
+    scene: Scene,
 }
 
 impl App {
@@ -459,7 +473,8 @@ impl App {
             Some((frames, seen, asks)) => (frames, Some(seen), Some(asks)),
             None => (Frames::new(loquax::picture::Maps::default()), None, None),
         };
-        let app = Self::new(frames, asks);
+        let mut app = Self::new(frames, asks);
+        app.lang = locale();
         let scale = window::oldest()
             .and_then(window::scale_factor)
             .map(Message::Scale);
@@ -474,6 +489,7 @@ impl App {
     fn new(frames: Frames, asks: Option<Asks>) -> Self {
         let setup = map::setup(frames.painter());
         let centre = fit(&[], map::area((1, 1)), &setup).0;
+        let empty = crate::shell::Model::new(&[]).scene(LayoutClass::Wide);
         Self {
             seen: Seen {
                 pins: Vec::new(),
@@ -482,9 +498,9 @@ impl App {
                 maps: 0,
                 autoload: false,
                 style: Style::PC,
-                chats: Vec::new(),
-                chat: None,
+                scene: empty.clone(),
                 now: None,
+                receipts: true,
             },
             asks,
             fitted_at: None,
@@ -512,9 +528,12 @@ impl App {
             new_address: None,
             compose: text_editor::Content::new(),
             reply: None,
+            compose_for: None,
             emoji: false,
             menu: None,
             deleting: None,
+            lang: Lang::En,
+            scene: empty,
         }
     }
 
@@ -540,39 +559,154 @@ impl App {
 
     /// What a chat message changes; a task for what iced does for it.
     fn chat(&mut self, message: Message) -> Task<Message> {
-        let open = self.seen.chat.as_ref().map(|c| c.peer);
         match message {
             Message::SystemTheme(mode) => self.system_dark = mode == iced::theme::Mode::Dark,
-            Message::ToggleTheme => self.flipped = !self.flipped,
-            Message::Open(peer) => {
-                self.menu = None;
-                self.reply = None;
-                self.tell(UiEvent::Open { peer });
-            }
             Message::Search(query) => self.search = query,
-            Message::NewConversation => {
-                self.new_address = match self.new_address {
-                    Some(_) => None,
-                    None => Some(String::new()),
-                }
-            }
             Message::NewAddress(typed) => self.new_address = Some(typed),
             Message::NewGo => {
                 let typed = self.new_address.clone().unwrap_or_default();
                 match loquax::address::parse(typed.trim()) {
                     Ok(peer) => {
                         self.new_address = None;
-                        self.tell(UiEvent::Open { peer });
+                        return self.intent(Intent::OpenChat { peer });
                     }
                     Err(error) => self.seen.notice = Some(format!("'{}': {error}", typed.trim())),
                 }
             }
-            Message::Compose(action) => self.compose.perform(action),
-            Message::Send => {
-                let body = self.compose.text();
-                let body = body.trim_end_matches('\n').to_string();
-                let Some(peer) = open else {
+            Message::Compose(action) => {
+                let edit = action.is_edit();
+                self.compose.perform(action);
+                if edit {
+                    self.tell_draft();
+                }
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+
+    /// The model is told what the compose field holds, as its draft
+    /// (1219), on every change of the text or the reply.
+    fn tell_draft(&self) {
+        let Some(peer) = self.compose_for else {
+            return;
+        };
+        let typed = self.compose.text();
+        self.tell(UiEvent::Draft {
+            peer,
+            text: typed.trim_end_matches('\n').to_string(),
+            reply: self.reply.as_ref().map(|(id, _)| *id),
+        });
+    }
+
+    /// The open chat's draft into the compose field, when another chat
+    /// opened than the one the field holds (1219).
+    fn restore_draft(&mut self) {
+        let open = self.seen.scene.chat.as_ref().map(|c| c.peer);
+        if open == self.compose_for {
+            return;
+        }
+        self.compose_for = open;
+        let Some(chat) = self.seen.scene.chat.as_ref() else {
+            self.compose = text_editor::Content::new();
+            self.reply = None;
+            return;
+        };
+        self.compose = text_editor::Content::with_text(&chat.compose.text);
+        self.reply = chat.compose.reply.map(|target| {
+            let quoted = chat
+                .groups
+                .iter()
+                .flat_map(|g| &g.bubbles)
+                .find(|node| node.bubble.id == Some(target))
+                .map(|node| {
+                    node.bubble
+                        .body
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            (target, quoted)
+        });
+    }
+
+    /// The peer an intent's target names: the open chat's for
+    /// [`Target::Open`].
+    fn target(&self, to: Target) -> Option<[u8; 16]> {
+        match to {
+            Target::Peer(peer) => Some(peer),
+            Target::Open => self.scene.chat.as_ref().map(|c| c.peer),
+        }
+    }
+
+    /// What `intent` does in the window (1218): a press on a scene node
+    /// or a key of the keymap. What is the model's goes to the model as
+    /// its event; what is the window's (the map's view, the menu, the
+    /// reply being written, the emoji row, the theme) stays here. An
+    /// intent the window has no part for does nothing.
+    fn intent(&mut self, intent: Intent) -> Task<Message> {
+        match intent {
+            Intent::Activate(id) => {
+                let action = self
+                    .scene
+                    .action(id)
+                    .filter(|a| a.enabled)
+                    .map(|a| a.intent.clone());
+                if let Some(intent) = action {
+                    return self.intent(intent);
+                }
+            }
+            // The reply being written stays with its chat's draft: the
+            // field takes the next chat's once the scene shows it (1219).
+            Intent::OpenChat { peer } => {
+                self.menu = None;
+                self.tell(UiEvent::Open { peer });
+            }
+            Intent::CloseChat => {
+                self.menu = None;
+                self.tell(UiEvent::Close);
+            }
+            Intent::Back | Intent::Dismiss => match (self.menu, self.screen) {
+                (Some(_), _) => {
+                    self.menu = None;
+                    self.deleting = None;
+                }
+                (None, Screen::Map | Screen::Settings) => self.screen = Screen::Chats,
+                // A stacked chat goes back to the list, as its bar's back
+                // does; beside the list Back has nothing to leave.
+                (None, Screen::Chats) => {
+                    if let Some(back) = self.scene.action(NodeId::TopBar) {
+                        let back = back.intent.clone();
+                        return self.intent(back);
+                    }
+                }
+            },
+            Intent::Theme => self.flipped = !self.flipped,
+            Intent::ReadReceipts { on } => {
+                self.tell(UiEvent::ReadReceipts(on.apply(self.seen.receipts)));
+            }
+            Intent::Search => {
+                self.screen = Screen::Chats;
+                return iced::widget::operation::focus(chat::SEARCH_FIELD);
+            }
+            Intent::NewConversation => {
+                self.new_address = match self.new_address {
+                    Some(_) => None,
+                    None => Some(String::new()),
+                }
+            }
+            Intent::Send { to, body } => {
+                let Some(peer) = self.target(to) else {
                     return Task::none();
+                };
+                let body = match body {
+                    Some(body) => body,
+                    None => {
+                        let typed = self.compose.text();
+                        typed.trim_end_matches('\n').to_string()
+                    }
                 };
                 if body.trim().is_empty() {
                     return Task::none();
@@ -584,28 +718,40 @@ impl App {
                     None => self.tell(UiEvent::Write { peer, body }),
                 }
             }
-            Message::ToggleEmoji => self.emoji = !self.emoji,
-            Message::Insert(emoji) => {
+            Intent::Emoji => self.emoji = !self.emoji,
+            Intent::Insert(emoji) => {
                 self.compose
                     .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
                         Arc::new(emoji),
-                    )))
+                    )));
+                self.tell_draft();
             }
-            Message::ShowMap(peer) => {
+            Intent::ShowMap { peer } => {
                 self.screen = Screen::Map;
                 if let Some(peer) = peer {
                     self.apply(Message::Select(peer));
                 }
                 return self.paint();
             }
-            Message::ShowChats => self.screen = Screen::Chats,
-            Message::Menu(key) => {
-                self.menu = key;
+            // A row's pin or the chat bar's map (1224): the map on the
+            // peer's pin, selected, its card open.
+            Intent::OpenMapAt { peer } => {
+                let peer = self.target(peer);
+                return self.intent(Intent::ShowMap { peer });
+            }
+            Intent::Tab(TabId::Map) => return self.intent(Intent::ShowMap { peer: None }),
+            Intent::Tab(TabId::Chats) => self.screen = Screen::Chats,
+            Intent::Menu(id) => {
+                self.menu = id;
                 self.deleting = None;
             }
-            Message::React(target, content) => {
+            Intent::React {
+                to,
+                target: Some(target),
+                content: Some(content),
+            } => {
                 self.menu = None;
-                if let Some(peer) = open {
+                if let Some(peer) = self.target(to) {
                     self.tell(UiEvent::React {
                         peer,
                         target,
@@ -613,34 +759,152 @@ impl App {
                     });
                 }
             }
-            Message::Reply(target) => {
+            Intent::Reply {
+                to,
+                target,
+                body: Some(body),
+            } => {
+                if let Some(peer) = self.target(to) {
+                    self.tell(UiEvent::Reply { peer, target, body });
+                }
+            }
+            Intent::Reply {
+                target, body: None, ..
+            } => {
                 self.menu = None;
                 let quoted = self
-                    .seen
+                    .scene
                     .chat
-                    .as_ref()
-                    .and_then(|c| c.bubbles.iter().find(|b| b.id == Some(target)))
-                    .map(|b| b.body.lines().next().unwrap_or_default().to_string())
+                    .iter()
+                    .flat_map(|c| &c.groups)
+                    .flat_map(|g| &g.bubbles)
+                    .find(|node| node.bubble.id == Some(target))
+                    .map(|node| {
+                        node.bubble
+                            .body
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                            .to_string()
+                    })
                     .unwrap_or_default();
                 self.reply = Some((target, quoted));
+                self.tell_draft();
             }
-            Message::CancelReply => self.reply = None,
-            Message::Copy(words) => {
-                self.menu = None;
-                return iced::clipboard::write(words);
+            Intent::CancelReply => {
+                self.reply = None;
+                self.tell_draft();
             }
-            Message::AskDelete(key) => self.deleting = Some(key),
-            Message::Delete(peer, key) => {
+            Intent::Copy => {
+                let words = self
+                    .menu
+                    .and_then(|id| self.scene.bubble(id))
+                    .map(|node| node.bubble.body.clone());
                 self.menu = None;
-                self.deleting = None;
-                self.tell(UiEvent::Delete {
-                    peer,
-                    keys: vec![key],
-                });
+                if let Some(words) = words {
+                    return iced::clipboard::write(words);
+                }
+            }
+            Intent::SendAgain { peer, key } => self.tell(UiEvent::SendAgain { peer, key }),
+            Intent::Delete {
+                messages: Messages::Keys { peer, keys },
+                confirmed,
+            } => match confirmed {
+                false => self.deleting = keys.first().map(|&key| NodeId::Bubble(key)),
+                true => {
+                    self.menu = None;
+                    self.deleting = None;
+                    self.tell(UiEvent::Delete { peer, keys });
+                }
+            },
+            Intent::Map(cmd) if self.screen == Screen::Map => {
+                self.map_cmd(cmd);
+                return self.paint();
+            }
+            Intent::LoadMapArea if self.screen == Screen::Map => {
+                let view = self.view.at_zoom(self.view.tile_zoom());
+                match want_view(&view, &self.setup.regions) {
+                    Some(want) => self.ask(want),
+                    None => self.seen.notice = Some(MAP_LOADED_ALREADY.to_string()),
+                }
             }
             _ => {}
         }
         Task::none()
+    }
+
+    /// The layout class the window's width gives (1218): the list beside
+    /// the chat from [`WIDE_FROM`] logical pixels, stacked below.
+    fn class(&self) -> LayoutClass {
+        match self.window.width >= WIDE_FROM {
+            true => LayoutClass::Wide,
+            false => LayoutClass::Compact,
+        }
+    }
+
+    /// The scene in the window's class, again after a change of either.
+    fn rescene(&mut self) {
+        self.scene = self.seen.scene.clone().in_class(self.class());
+    }
+
+    /// What a map key does on the map: zoom about the centre, pan by
+    /// eighths of the view, fit every pin, step through the pins, open the
+    /// pin's conversation, or close the map.
+    fn map_cmd(&mut self, cmd: MapCmd) {
+        let (w, h) = self.view.size();
+        let (cx, cy) = (f64::from(w) / 2.0, f64::from(h) / 2.0);
+        let z = i64::from(self.view.zoom_milli());
+        match cmd {
+            MapCmd::ZoomIn => self.zoom_to(z + 1000, cx, cy),
+            MapCmd::ZoomOut => self.zoom_to(z - 1000, cx, cy),
+            MapCmd::Pan(dx, dy) => {
+                let eighth =
+                    |side: u32, by: i8| i32::from(by) * i32::try_from(side / 8).unwrap_or(0);
+                self.view.pan(eighth(w, dx), eighth(h, dy));
+                self.hold();
+            }
+            MapCmd::Fit => {
+                let selected = self.selected;
+                self.fit();
+                self.selected = selected.or(self.selected);
+            }
+            MapCmd::Step(next) => {
+                let pins = &self.seen.pins;
+                let at = pins.iter().position(|p| Some(p.peer) == self.selected);
+                let n = pins.len();
+                let step = match (at, next) {
+                    (_, _) if n == 0 => None,
+                    (None, _) => Some(0),
+                    (Some(i), true) => Some((i + 1) % n),
+                    (Some(i), false) => Some((i + n - 1) % n),
+                };
+                if let Some(peer) = step.map(|i| pins[i].peer) {
+                    self.apply(Message::Select(peer));
+                }
+            }
+            MapCmd::Open => {
+                if let Some(peer) = self.selected {
+                    self.screen = Screen::Chats;
+                    self.tell(UiEvent::Open { peer });
+                }
+            }
+            MapCmd::Close => self.screen = Screen::Chats,
+            MapCmd::Drawing(_) | MapCmd::GlyphTest => {}
+        }
+    }
+
+    /// The intent the keymap gives a key the widgets left alone (1218):
+    /// the same chords as the terminal's ([`keys::resolve`]), on the map
+    /// the map's, on a stacked chat the messages' (`Escape` is Back), on
+    /// the chats the list's.
+    fn key(&self, event: &keyboard::Event) -> Option<Intent> {
+        let key = chord(event)?;
+        let pane = match (self.screen, self.scene.top.id) {
+            (Screen::Map, _) => Pane::Map,
+            (Screen::Chats, NodeId::ChatBar) => Pane::Messages,
+            (Screen::Chats | Screen::Settings, _) => Pane::Conversations,
+        };
+        keys::resolve(&key, keys::panes_of(pane), Ctx::ENHANCED).map(Intent::from_action)
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -679,6 +943,21 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::Intent(intent) => return self.intent(intent),
+            Message::Settings => {
+                self.screen = Screen::Settings;
+                self.menu = None;
+                return Task::none();
+            }
+            Message::Key(event) => {
+                return match self.key(&event) {
+                    Some(intent) => self.intent(intent),
+                    None => Task::none(),
+                }
+            }
+            _ => {}
+        }
         if message.is_chat() {
             return self.chat(message);
         }
@@ -694,6 +973,8 @@ impl App {
             Message::Seen(seen) => {
                 let landed = seen.maps != self.seen.maps;
                 self.seen = *seen;
+                self.rescene();
+                self.restore_draft();
                 if landed {
                     self.regions_changed();
                 }
@@ -714,12 +995,12 @@ impl App {
             }
             Message::Window(window::Event::Resized(size)) => {
                 self.window = size;
+                self.rescene();
                 return false;
             }
             Message::Window(window::Event::Focused) => self.focused = true,
             Message::Window(window::Event::Unfocused) => self.focused = false,
             Message::Window(_) => return false,
-            Message::Key(event) => self.key(event),
             Message::Pointer(pointer) => self.pointer(pointer),
             Message::Select(peer) => {
                 self.selected = Some(peer);
@@ -765,7 +1046,7 @@ impl App {
         let current = self
             .shown
             .as_ref()
-            .is_some_and(|s| s.order == order && s.missing == 0);
+            .is_some_and(|s| s.order == order && s.missing == 0 && !s.fading);
         let job = match current {
             false => Job::Draw(order),
             true if self.prefetching && self.focused && !order.moving => {
@@ -882,44 +1163,6 @@ impl App {
         self.hold();
     }
 
-    /// The map's keys, on the map alone: on the chat a key is typing.
-    fn key(&mut self, event: keyboard::Event) {
-        if self.screen != Screen::Map {
-            return;
-        }
-        let keyboard::Event::KeyPressed { modified_key, .. } = event else {
-            return;
-        };
-        if modified_key == keyboard::Key::Named(keyboard::key::Named::Escape) {
-            self.screen = Screen::Chats;
-            return;
-        }
-        let keyboard::Key::Character(c) = modified_key.as_ref() else {
-            return;
-        };
-        let (w, h) = self.view.size();
-        let (cx, cy) = (f64::from(w) / 2.0, f64::from(h) / 2.0);
-        let z = i64::from(self.view.zoom_milli());
-        match c {
-            "+" | "=" => self.zoom_to(z + 1000, cx, cy),
-            "-" => self.zoom_to(z - 1000, cx, cy),
-            "0" => {
-                let selected = self.selected;
-                self.fit();
-                self.selected = selected.or(self.selected);
-            }
-            // The visible area's region, as `d` on the terminal's map.
-            "d" => {
-                let view = self.view.at_zoom(self.view.tile_zoom());
-                match want_view(&view, &self.setup.regions) {
-                    Some(want) => self.ask(want),
-                    None => self.seen.notice = Some(MAP_LOADED_ALREADY.to_string()),
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// Where the frame on screen lands on the view now: its top left
     /// corner and its scale ([`loquax::mapframe::onto`]).
     fn onto(&self) -> Option<(&Shown, f64, f64, f64)> {
@@ -992,9 +1235,19 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        match self.screen {
-            Screen::Chats => row![self.list_pane(), self.chat_pane()].into(),
-            Screen::Map => self.map_view(),
+        let body = match (self.screen, self.class(), &self.scene.chat) {
+            (Screen::Map, _, _) => self.map_view(),
+            (Screen::Settings, _, _) => self.settings_pane(),
+            (Screen::Chats, LayoutClass::Wide, _) => {
+                row![self.list_pane(), self.chat_pane()].into()
+            }
+            (Screen::Chats, LayoutClass::Compact, Some(_)) => self.chat_pane(),
+            (Screen::Chats, LayoutClass::Compact, None) => self.list_pane(),
+        };
+        match (self.tabs(), self.class()) {
+            (Some(tabs), LayoutClass::Wide) => row![tabs, body].into(),
+            (Some(tabs), LayoutClass::Compact) => column![body, tabs].into(),
+            (None, _) => body,
         }
     }
 
@@ -1031,7 +1284,7 @@ impl App {
             .map_or(String::new(), |s| s.attribution.clone());
         let bar = row![
             button(text("Chats").size(13))
-                .on_press(Message::ShowChats)
+                .on_press(Message::Intent(Intent::Tab(TabId::Chats)))
                 .padding([0, 6])
                 .style(button::text),
             // Always on screen: the region's credit, or the outline's.
@@ -1251,6 +1504,84 @@ impl canvas::Program<Message> for MapCanvas<'_> {
     }
 }
 
+/// The language the desktop's locale names (`LC_ALL`, `LC_MESSAGES`,
+/// `LANG`, the first one set): the scene's words are said in it.
+fn locale() -> Lang {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.is_empty())
+        .map_or(Lang::En, |tag| Lang::of_tag(&tag))
+}
+
+/// A key iced reports as the keymap's key (1218): the named keys the
+/// chords use, a character as itself, the modifiers held. None for a
+/// release or a key no chord names.
+fn chord(event: &keyboard::Event) -> Option<KeyEvent> {
+    use keyboard::key::Named;
+    let keyboard::Event::KeyPressed {
+        modified_key,
+        modifiers,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    let shift = modifiers.shift();
+    let code = match modified_key.as_ref() {
+        keyboard::Key::Named(named) => match named {
+            Named::Escape => KeyCode::Esc,
+            Named::Enter => KeyCode::Enter,
+            Named::Tab if shift => KeyCode::BackTab,
+            Named::Tab => KeyCode::Tab,
+            Named::Backspace => KeyCode::Backspace,
+            Named::Delete => KeyCode::Delete,
+            Named::Insert => KeyCode::Insert,
+            Named::ArrowLeft => KeyCode::Left,
+            Named::ArrowRight => KeyCode::Right,
+            Named::ArrowUp => KeyCode::Up,
+            Named::ArrowDown => KeyCode::Down,
+            Named::Home => KeyCode::Home,
+            Named::End => KeyCode::End,
+            Named::PageUp => KeyCode::PageUp,
+            Named::PageDown => KeyCode::PageDown,
+            Named::Space => KeyCode::Char(' '),
+            Named::F1 => KeyCode::F(1),
+            Named::F2 => KeyCode::F(2),
+            Named::F3 => KeyCode::F(3),
+            Named::F4 => KeyCode::F(4),
+            Named::F5 => KeyCode::F(5),
+            Named::F6 => KeyCode::F(6),
+            Named::F7 => KeyCode::F(7),
+            Named::F8 => KeyCode::F(8),
+            Named::F9 => KeyCode::F(9),
+            Named::F10 => KeyCode::F(10),
+            Named::F11 => KeyCode::F(11),
+            Named::F12 => KeyCode::F(12),
+            _ => return None,
+        },
+        keyboard::Key::Character(c) => {
+            let mut chars = c.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => KeyCode::Char(c),
+                _ => return None,
+            }
+        }
+        keyboard::Key::Unidentified => return None,
+    };
+    let mut held = KeyModifiers::NONE;
+    if shift {
+        held |= KeyModifiers::SHIFT;
+    }
+    if modifiers.control() {
+        held |= KeyModifiers::CONTROL;
+    }
+    if modifiers.alt() {
+        held |= KeyModifiers::ALT;
+    }
+    Some(KeyEvent::new(code, held))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1272,9 +1603,9 @@ mod tests {
             maps,
             autoload: false,
             style: Style::PC,
-            chats: Vec::new(),
-            chat: None,
+            scene: crate::shell::Model::new(&[]).scene(LayoutClass::Wide),
             now: None,
+            receipts: true,
         })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
@@ -1322,8 +1653,9 @@ mod tests {
     /// the same names where the drag moved them, so where the two frames
     /// overlap they are the same pixels, 40 apart. The frame on screen
     /// moves with the pointer until the next lands, and the pins with it.
-    /// The control: the same moving frame from frames that never rested
-    /// has no names, and differs there.
+    /// The same moving frame from frames that never rested places the
+    /// same names itself (1225). The control: frames that set no names
+    /// draw it without them, and differ there.
     #[test]
     fn a_drag_keeps_the_names() {
         let pins = vec![pin(1, "alice", 43.7752, 11.2640)];
@@ -1365,9 +1697,15 @@ mod tests {
         assert_eq!(overlap(&b), 0, "the moved frame is the rest frame, moved");
         let (p0, p1) = (&rest.placed[0], &moved.placed[0]);
         assert!((p1.x - (p0.x - 40.0)).abs() < 1e-3, "{p0:?} {p1:?}");
-        let control = draw(&Mutex::new(florence()), moved.order.clone());
+        let fresh = Mutex::new(florence());
+        draw(&fresh, moved.order.clone());
+        let placed = fresh.lock().unwrap_or_else(PoisonError::into_inner).names();
+        assert_eq!(placed, named, "a moving frame places its own names");
+        let mut ground = florence();
+        ground.set_names_off(true);
+        let control = draw(&Mutex::new(ground), moved.order.clone());
         let differ = overlap(&rgba(&control));
-        assert!(differ > 1000, "without kept names: {differ} pixels differ");
+        assert!(differ > 1000, "without names: {differ} pixels differ");
     }
 
     /// A fractional wheel zoom stays where it ends (1144): a touchpad's
@@ -1427,6 +1765,8 @@ mod tests {
 
     const ANNA: [u8; 16] = [0x3a; 16];
     const BERT: [u8; 16] = [0xb7; 16];
+    /// The reader.
+    const OWN: [u8; 16] = [0x30; 16];
 
     fn at(day: u32, hour: u32, minute: u32) -> WallTime {
         WallTime::from_civil(2026, 10, day, hour, minute, 3600)
@@ -1446,11 +1786,13 @@ mod tests {
         );
     }
 
-    /// A model as the shell holds one: Anna wrote yesterday and twice this
+    /// A model as the shell holds one, the reader Mia: Anna wrote yesterday and twice this
     /// morning, we answered, she reacted; Bert wrote once, unread. Anna's
     /// conversation is open.
     fn chat_model() -> crate::shell::Model {
         let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        model.names.remember(OWN, "Mia Sander");
         model.names.remember(ANNA, "Anna Schulz");
         model.names.remember(BERT, "Bert");
         update(&mut model, UiEvent::Clock(at(29, 18, 40)));
@@ -1500,9 +1842,9 @@ mod tests {
             maps: 0,
             autoload: false,
             style: Style::PC,
-            chats: list_rows(model),
-            chat: loquax::ui::chat::open(model),
+            scene: model.scene(LayoutClass::Wide),
             now: model.now,
+            receipts: model.reading.on,
         }
     }
 
@@ -1524,6 +1866,17 @@ mod tests {
         events
     }
 
+    /// What the window told the model besides the drafts, and the last
+    /// draft it told (1219).
+    fn told_apart(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Want>,
+    ) -> (Vec<UiEvent>, Option<UiEvent>) {
+        let (drafts, others): (Vec<_>, Vec<_>) = told(rx)
+            .into_iter()
+            .partition(|e| matches!(e, UiEvent::Draft { .. }));
+        (others, drafts.into_iter().last())
+    }
+
     fn type_into(app: &mut App, words: &str) {
         for c in words.chars() {
             let _ = app.update(Message::Compose(text_editor::Action::Edit(
@@ -1532,29 +1885,68 @@ mod tests {
         }
     }
 
-    /// The list and the open chat are the model's, through the library's
-    /// rows ([`loquax::ui::chat`]): the newest conversation first with its
-    /// unread count, the open one's bubbles grouped as the phone groups
-    /// them, our reaction a chip on the bubble it names.
+    /// The list and the open chat are the model's scene (1218): the
+    /// newest conversation first with its unread count, the open one's
+    /// bubbles grouped as the phone groups them, our reaction a chip on
+    /// the bubble it names.
     #[test]
     fn the_window_shows_the_models_list_and_chat() {
         let (app, _rx) = chat_window();
-        let names: Vec<&str> = app.seen.chats.iter().map(|r| r.name.as_str()).collect();
+        let listed = app.listed();
+        let names: Vec<&str> = listed.iter().map(|r| r.row.name.as_str()).collect();
         assert_eq!(names.len(), 2, "{names:?}");
         assert!(names[0].starts_with("Bert"), "{names:?}");
-        assert_eq!(app.seen.chats[0].unread, 1);
-        let open = app.seen.chat.as_ref().expect("Anna's chat is open");
+        assert_eq!(listed[0].row.unread, 1);
+        let open = app.scene.chat.as_ref().expect("Anna's chat is open");
         assert_eq!(open.peer, ANNA);
-        assert_eq!(open.initials, "AS");
-        let bodies: Vec<&str> = open.bubbles.iter().map(|b| b.body.as_str()).collect();
-        assert_eq!(bodies.len(), 4, "the reaction is no bubble: {bodies:?}");
-        let days: Vec<bool> = open.placements.iter().map(|p| p.day).collect();
+        let nodes: Vec<_> = open.groups.iter().flat_map(|g| &g.bubbles).collect();
+        assert_eq!(nodes.len(), 4, "the reaction is no bubble");
+        let days: Vec<bool> = nodes.iter().map(|n| n.place.day).collect();
         assert_eq!(days, [true, true, false, false]);
-        assert!(open.placements[2].joins_before);
-        assert_eq!(open.bubbles[2].chips.len(), 1);
-        assert!(open.bubbles[2].chips[0].ours);
-        assert!(open.bubbles[3].ours);
-        assert_eq!(open.bubbles[3].mark, Some(loquax::ui::chat::Mark::Queued));
+        assert!(nodes[2].place.joins_before);
+        assert_eq!(nodes[2].bubble.chips.len(), 1);
+        assert!(nodes[2].bubble.chips[0].ours);
+        assert!(nodes[3].bubble.ours);
+        assert_eq!(nodes[3].bubble.mark, Some(loquax::ui::chat::Mark::Sending));
+    }
+
+    /// One scene, two targets (1218): the rows the window draws are the
+    /// rows the phone's facade lists ([`loquax::ui::scene::rows`] over the
+    /// model's order, what `session::found` hands `schema_row`), the same
+    /// names in the same order; the search narrows both by one rule. The
+    /// control: a model whose order turned round lists them turned round.
+    #[test]
+    fn the_window_and_the_facade_list_the_same_rows() {
+        let model = chat_model();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), None);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let drawn = |app: &App| -> Vec<String> {
+            app.listed().iter().map(|r| r.row.name.clone()).collect()
+        };
+        let facade = |search: Option<&str>| -> Vec<String> {
+            let mut rows = loquax::ui::scene::rows(&model, model.order());
+            if let Some(search) = search {
+                rows.retain(|r| loquax::ui::chat::row_matches(&r.row, search));
+            }
+            rows.into_iter().map(|r| r.row.name).collect()
+        };
+        assert_eq!(drawn(&app), facade(None));
+        assert_eq!(drawn(&app).len(), 2);
+        let _ = app.update(Message::Search("schulz anna".to_string()));
+        assert_eq!(drawn(&app), facade(Some("schulz anna")));
+        assert_eq!(drawn(&app).len(), 1);
+        let _ = app.update(Message::Search(String::new()));
+        let mut turned = model.scene(LayoutClass::Wide);
+        if let Some(list) = turned.list.as_mut() {
+            list.rows.reverse();
+        }
+        let mut seen = seen_of(&model);
+        seen.scene = turned;
+        app.apply(Message::Seen(Box::new(seen)));
+        let mut back = facade(None);
+        back.reverse();
+        assert_eq!(drawn(&app), back);
+        assert_ne!(drawn(&app), facade(None));
     }
 
     /// `Enter` sends what was typed to the open conversation and empties
@@ -1563,26 +1955,42 @@ mod tests {
     #[test]
     fn enter_sends_and_a_reply_goes_as_one() {
         let (mut app, mut rx) = chat_window();
-        let _ = app.update(Message::Send);
+        let send = Message::Intent(
+            app.scene
+                .action(NodeId::Compose)
+                .expect("the compose bar sends")
+                .intent
+                .clone(),
+        );
+        let _ = app.update(send.clone());
         assert!(told(&mut rx).is_empty(), "nothing typed, nothing sent");
         type_into(&mut app, "on my way");
-        let _ = app.update(Message::Send);
+        let _ = app.update(send.clone());
         assert_eq!(
-            told(&mut rx),
-            [UiEvent::Write {
-                peer: ANNA,
-                body: "on my way".to_string()
-            }]
+            told_apart(&mut rx),
+            (
+                vec![UiEvent::Write {
+                    peer: ANNA,
+                    body: "on my way".to_string()
+                }],
+                Some(UiEvent::Draft {
+                    peer: ANNA,
+                    text: "on my way".to_string(),
+                    reply: None
+                })
+            )
         );
         assert_eq!(app.compose.text().trim(), "");
-        let _ = app.update(Message::Menu(Some(2)));
-        let _ = app.update(Message::Reply([2; 32]));
+        let key = bubble_key(&app, [2; 32]);
+        let _ = app.update(Message::Intent(Intent::Menu(Some(NodeId::Bubble(key)))));
+        let reply = menu_intent(&app, key, |i| matches!(i, Intent::Reply { .. }));
+        let _ = app.update(Message::Intent(reply));
         assert_eq!(app.menu, None);
         assert_eq!(app.reply, Some(([2; 32], "Good morning!".to_string())));
         type_into(&mut app, "morning");
-        let _ = app.update(Message::Send);
+        let _ = app.update(send);
         assert_eq!(
-            told(&mut rx),
+            told_apart(&mut rx).0,
             [UiEvent::Reply {
                 peer: ANNA,
                 target: [2; 32],
@@ -1592,13 +2000,83 @@ mod tests {
         assert_eq!(app.reply, None);
     }
 
-    /// A click on a row opens its conversation in the model; a reaction
-    /// picked on a bubble reacts; a delete asks once, then deletes.
+    /// 1219: the window's field is the open chat's draft. What is typed and
+    /// the reply being written go to the model as the draft; another chat
+    /// opens with its own field, and coming back puts the text and the
+    /// reply back from the scene.
+    #[test]
+    fn the_field_tells_its_draft_and_takes_it_back_from_the_scene() {
+        let mut model = chat_model();
+        let (mut app, mut rx) = chat_window();
+        let key = bubble_key(&app, [2; 32]);
+        let reply = menu_intent(&app, key, |i| matches!(i, Intent::Reply { .. }));
+        let _ = app.update(Message::Intent(reply));
+        type_into(&mut app, "on my");
+        let told = told(&mut rx);
+        assert!(told
+            .iter()
+            .all(|e| matches!(e, UiEvent::Draft { peer: ANNA, .. })));
+        for event in told {
+            update(&mut model, event);
+        }
+        update(&mut model, UiEvent::Open { peer: BERT });
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert_eq!(app.compose.text().trim(), "", "Bert's field is his own");
+        assert_eq!(app.reply, None);
+        let anna = app
+            .listed()
+            .into_iter()
+            .find(|r| r.row.peer == ANNA)
+            .expect("Anna's row");
+        assert_eq!(
+            anna.draft.as_ref().map(|d| d.resolve(Lang::En)).as_deref(),
+            Some("Draft: on my")
+        );
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert_eq!(app.compose.text().trim_end_matches('\n'), "on my");
+        assert_eq!(app.reply, Some(([2; 32], "Good morning!".to_string())));
+    }
+
+    /// The key of the bubble whose message is `id`, in the window's scene.
+    fn bubble_key(app: &App, id: [u8; 32]) -> u64 {
+        app.scene
+            .chat
+            .iter()
+            .flat_map(|c| &c.groups)
+            .flat_map(|g| &g.bubbles)
+            .find(|n| n.bubble.id == Some(id))
+            .map(|n| n.bubble.key)
+            .expect("the bubble is in the chat")
+    }
+
+    /// The bubble's action the scene offers that `which` picks.
+    fn menu_intent(app: &App, key: u64, which: impl Fn(&Intent) -> bool) -> Intent {
+        app.scene
+            .bubble(NodeId::Bubble(key))
+            .and_then(|n| n.actions.iter().find(|a| which(&a.intent)))
+            .map(|a| a.intent.clone())
+            .expect("the scene offers it")
+    }
+
+    /// A click on a row is a hit on its node, which opens its conversation
+    /// in the model; a reaction picked on a bubble reacts; a delete asks
+    /// once, then deletes.
     #[test]
     fn the_list_opens_and_the_actions_tell_the_model() {
         let (mut app, mut rx) = chat_window();
-        let _ = app.update(Message::Open(BERT));
-        let _ = app.update(Message::React([1; 32], "👍".to_string()));
+        let _ = app.update(Message::Intent(Intent::Activate(NodeId::Row(BERT))));
+        let react = match menu_intent(&app, bubble_key(&app, [1; 32]), |i| {
+            matches!(i, Intent::React { .. })
+        }) {
+            Intent::React { to, target, .. } => Intent::React {
+                to,
+                target,
+                content: Some("👍".to_string()),
+            },
+            other => panic!("not a reaction: {other:?}"),
+        };
+        let _ = app.update(Message::Intent(react));
         assert_eq!(
             told(&mut rx),
             [
@@ -1610,15 +2088,23 @@ mod tests {
                 }
             ]
         );
-        let _ = app.update(Message::AskDelete(7));
-        assert_eq!(app.deleting, Some(7));
+        let key = bubble_key(&app, [1; 32]);
+        let ask = menu_intent(&app, key, |i| matches!(i, Intent::Delete { .. }));
+        let _ = app.update(Message::Intent(ask.clone()));
+        assert_eq!(app.deleting, Some(NodeId::Bubble(key)));
         assert!(told(&mut rx).is_empty(), "the first click only asks");
-        let _ = app.update(Message::Delete(ANNA, 7));
+        let Intent::Delete { messages, .. } = ask else {
+            panic!("not a delete");
+        };
+        let _ = app.update(Message::Intent(Intent::Delete {
+            messages,
+            confirmed: true,
+        }));
         assert_eq!(
             told(&mut rx),
             [UiEvent::Delete {
                 peer: ANNA,
-                keys: vec![7]
+                keys: vec![key]
             }]
         );
     }
@@ -1628,7 +2114,7 @@ mod tests {
     #[test]
     fn a_new_conversation_takes_an_address() {
         let (mut app, mut rx) = chat_window();
-        let _ = app.update(Message::NewConversation);
+        let _ = app.update(Message::Intent(Intent::NewConversation));
         let _ = app.update(Message::NewAddress("not hex".to_string()));
         let _ = app.update(Message::NewGo);
         assert!(told(&mut rx).is_empty());
@@ -1642,8 +2128,8 @@ mod tests {
     }
 
     /// On the chat a key is typing: `+` does not zoom the map behind it,
-    /// and the map draws nothing until it is shown. On the map it zooms,
-    /// and `Escape` goes back.
+    /// and the map draws nothing until it is shown. On the map it zooms
+    /// through the keymap's `MapCmd`, and `Escape` goes back.
     #[test]
     fn the_maps_keys_belong_to_the_map() {
         let (mut app, _rx) = chat_window();
@@ -1660,12 +2146,14 @@ mod tests {
             text: None,
             repeat: false,
         };
-        app.apply(Message::Key(plus.clone()));
+        let _ = app.update(Message::Key(plus.clone()));
         assert_eq!(app.view.zoom_milli(), zoom);
         assert!(app.next_job().is_none(), "no frame for a hidden map");
-        let _ = app.update(Message::ShowMap(None));
+        let _ = app.update(Message::Intent(Intent::ShowMap { peer: None }));
         app.busy = false;
-        app.apply(Message::Key(plus));
+        // The key goes through the keymap, as on the terminal (1218).
+        assert_eq!(app.key(&plus), Some(Intent::Map(MapCmd::ZoomIn)));
+        let _ = app.update(Message::Key(plus));
         assert!(app.view.zoom_milli() > zoom);
         let escape = keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(keyboard::key::Named::Escape),
@@ -1678,7 +2166,7 @@ mod tests {
             text: None,
             repeat: false,
         };
-        app.apply(Message::Key(escape));
+        let _ = app.update(Message::Key(escape));
         assert_eq!(app.screen, Screen::Chats);
     }
 
@@ -1736,15 +2224,118 @@ mod tests {
         app.window = Size::new(w as f32, h as f32);
         let light = shoot(&app, w, h);
         assert_eq!(shoot(&app, w, h), light, "a second picture is the same");
-        let _ = app.update(Message::ToggleTheme);
+        let _ = app.update(Message::Intent(Intent::Theme));
         assert!(app.dark());
         let dark = shoot(&app, w, h);
         assert_ne!(light, dark);
-        // The ground is the token's in each.
-        assert_eq!(&light[..3], &[0xff, 0xff, 0xff]);
-        assert_eq!(&dark[..3], &[0x17, 0x18, 0x1b]);
+        // The rail is the bar's token and the list's ground the
+        // background's, in each.
+        let px = |v: &[u8], x: u32, y: u32| {
+            let i = ((y * w + x) * 3) as usize;
+            [v[i], v[i + 1], v[i + 2]]
+        };
+        let rgb = |argb: u32| {
+            let [_, r, g, b] = argb.to_be_bytes();
+            [r, g, b]
+        };
+        let ground = (chat::RAIL as u32 + 4, h - 4);
+        for (shot, dark) in [(&light, false), (&dark, true)] {
+            let t = chat::tokens(dark);
+            assert_eq!(px(shot, 0, 0), rgb(t.bar));
+            assert_eq!(px(shot, ground.0, ground.1), rgb(t.background));
+        }
+        assert_eq!(px(&light, ground.0, ground.1), [0xff, 0xff, 0xff]);
+        assert_eq!(px(&dark, ground.0, ground.1), [0x17, 0x18, 0x1b]);
         map::tests::same_as("gui-chat-light.png", &light, w, h);
         map::tests::same_as("gui-chat-dark.png", &dark, w, h);
+    }
+
+    /// A narrow window stacks as the phone does, and a resize switches
+    /// (1218): below [`WIDE_FROM`] the open chat is alone, with a back in
+    /// its bar and no tabs; the back (and `Escape`, the keymap's Back)
+    /// closes it in the model; the list comes with the tabs at the
+    /// bottom; a wide window puts the rail, the list and the chat beside
+    /// each other again. Pixel for pixel the Compact goldens, light.
+    #[test]
+    fn a_narrow_window_stacks_and_a_resize_switches() {
+        let (w, h) = (420, 640);
+        let (mut app, mut rx) = chat_window();
+        assert_eq!(app.class(), LayoutClass::Wide);
+        let _ = app.update(Message::Window(window::Event::Resized(Size::new(
+            w as f32, h as f32,
+        ))));
+        assert_eq!(app.class(), LayoutClass::Compact);
+        assert!(app.scene.list.is_none() && app.scene.tabs.is_none());
+        assert_eq!(app.scene.top.id, NodeId::ChatBar);
+        map::tests::same_as("gui-chat-compact-chat.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Intent(Intent::Activate(NodeId::TopBar)));
+        assert_eq!(told(&mut rx), [UiEvent::Close]);
+        let escape = keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        };
+        assert_eq!(app.key(&escape), Some(Intent::Back));
+        let _ = app.update(Message::Key(escape));
+        assert_eq!(told(&mut rx), [UiEvent::Close]);
+        // The model closed it: the list, with the tabs.
+        let mut model = chat_model();
+        update(&mut model, UiEvent::Close);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(app.scene.chat.is_none());
+        assert!(app.scene.list.is_some() && app.scene.tabs.is_some());
+        map::tests::same_as("gui-chat-compact-list.png", &shoot(&app, w, h), w, h);
+        // Wide again: the open chat beside the list.
+        app.apply(Message::Seen(Box::new(seen_of(&chat_model()))));
+        assert!(app.scene.list.is_none());
+        let _ = app.update(Message::Window(window::Event::Resized(Size::new(
+            900.0, 560.0,
+        ))));
+        assert_eq!(app.class(), LayoutClass::Wide);
+        assert!(app.scene.list.is_some() && app.scene.chat.is_some());
+        assert_eq!(app.scene.top.id, NodeId::TopBar);
+    }
+
+    /// The settings page (1233): the gear opens it, its read receipts
+    /// row shows the model's switch, a toggle tells the model the other
+    /// value, the model's answer turns the row, and Back returns to the
+    /// chats. Pixel for pixel the golden, light.
+    #[test]
+    fn the_settings_page_switches_read_receipts_in_the_model() {
+        let (w, h) = (900, 560);
+        let (mut app, mut rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Settings);
+        assert_eq!(app.screen, Screen::Settings);
+        assert!(app.seen.receipts, "on by default");
+        map::tests::same_as("gui-settings-light.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Intent(Intent::ReadReceipts {
+            on: loquax::ui::intent::Switch::Off,
+        }));
+        assert_eq!(told(&mut rx), [UiEvent::ReadReceipts(false)]);
+        let mut model = chat_model();
+        let effects = update(&mut model, UiEvent::ReadReceipts(false));
+        assert!(matches!(
+            effects.as_slice(),
+            [loquax::ui::UiEffect::Remember {
+                key: "read_receipts",
+                value: "off"
+            }]
+        ));
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(!app.seen.receipts);
+        let _ = app.update(Message::Intent(Intent::ReadReceipts {
+            on: loquax::ui::intent::Switch::Toggle,
+        }));
+        assert_eq!(told(&mut rx), [UiEvent::ReadReceipts(true)]);
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert_eq!(app.screen, Screen::Chats);
     }
 
     /// The desktop's dark setting turns the window dark, and the toggle
@@ -1755,7 +2346,7 @@ mod tests {
         assert!(!app.dark());
         let _ = app.update(Message::SystemTheme(iced::theme::Mode::Dark));
         assert!(app.dark());
-        let _ = app.update(Message::ToggleTheme);
+        let _ = app.update(Message::Intent(Intent::Theme));
         assert!(!app.dark());
         let _ = app.update(Message::SystemTheme(iced::theme::Mode::Light));
         assert!(app.dark());

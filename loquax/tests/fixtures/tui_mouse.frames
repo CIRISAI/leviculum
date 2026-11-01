@@ -94,7 +94,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                            hello by mouse  12:00 ○ │
+│                        ││                           hello by mouse  12:00 ◷  │
 │                        │├● to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -119,7 +119,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                           ▌hello by mouse  12:00 ○ │
+│                        ││                          ▌hello by mouse  12:00 ◷  │
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -136,7 +136,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │ │peer   5ec0ea2ecbc35ac16053c86cc29663ec                                   │ │
 │ │id     none yet: the router has not queued it                             │ │
 │ │size   14 bytes                                                           │ │
-│ │state  queued                                                             │ │
+│ │state  waiting to be sent                                                 │ │
 │ │                                                                          │ │
 │ │on this device                                                            │ │
 │ │12:00:00  queued                                                          │ │
@@ -144,7 +144,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                           ▌hello by mouse  12:00 ○ │
+│                        ││                          ▌hello by mouse  12:00 ◷  │
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -169,7 +169,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                           ▌hello by mouse  12:00 ○ │
+│                        ││                          ▌hello by mouse  12:00 ◷  │
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -202,25 +202,25 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 === wheel ===
 --- frame 1: list focused ---
 ┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
-│▌<61ddb79a…>      12:00 ││                                 message 1  12:00 ○ │
+│▌<61ddb79a…>      12:00 ││                                message 1  12:00 ◷  │
 │▌you: message 10        ││                                                    │
-│                        ││                                 message 2  12:00 ○ │
+│                        ││                                message 2  12:00 ◷  │
 │ <5ec0ea2e…>            ││                                                    │
-│                        ││                                 message 3  12:00 ○ │
+│                        ││                                message 3  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 4  12:00 ○ │
+│                        ││                                message 4  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 5  12:00 ○ │
+│                        ││                                message 5  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 6  12:00 ○ │
+│                        ││                                message 6  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 7  12:00 ○ │
+│                        ││                                message 7  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 8  12:00 ○ │
+│                        ││                                message 8  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 9  12:00 ○ │
+│                        ││                                message 9  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                message 10  12:00 ○ │
+│                        ││                               message 10  12:00 ◷  │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -229,48 +229,48 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 ┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
 │▌<61ddb79a…>      12:00 ││           nothing earlier on this device           │
 │▌you: message 10        ││                    ── Today ──                     │
-│                        ││                                 message 1  12:00 ○ │
+│                        ││                                message 1  12:00 ◷  │
 │ <5ec0ea2e…>            ││                                                    │
-│                        ││                                 message 2  12:00 ○ │
+│                        ││                                message 2  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 3  12:00 ○ │
+│                        ││                                message 3  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 4  12:00 ○ │
+│                        ││                                message 4  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 5  12:00 ○ │
+│                        ││                                message 5  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 6  12:00 ○ │
+│                        ││                                message 6  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 7  12:00 ○ │
+│                        ││                                message 7  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 8  12:00 ○ │
+│                        ││                                message 8  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 9  12:00 ○ │
+│                        ││                                message 9  12:00 ◷  │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: wheeled down ---
 ┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
-│▌<61ddb79a…>      12:00 ││                                 message 1  12:00 ○ │
+│▌<61ddb79a…>      12:00 ││                                message 1  12:00 ◷  │
 │▌you: message 10        ││                                                    │
-│                        ││                                 message 2  12:00 ○ │
+│                        ││                                message 2  12:00 ◷  │
 │ <5ec0ea2e…>            ││                                                    │
-│                        ││                                 message 3  12:00 ○ │
+│                        ││                                message 3  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 4  12:00 ○ │
+│                        ││                                message 4  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 5  12:00 ○ │
+│                        ││                                message 5  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 6  12:00 ○ │
+│                        ││                                message 6  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 7  12:00 ○ │
+│                        ││                                message 7  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 8  12:00 ○ │
+│                        ││                                message 8  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                 message 9  12:00 ○ │
+│                        ││                                message 9  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                                message 10  12:00 ○ │
+│                        ││                               message 10  12:00 ◷  │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -294,9 +294,9 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                                first line  12:00 ○ │
+│                        ││                               first line  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                              ▌second line  12:00 ○ │
+│                        ││                             ▌second line  12:00 ◷  │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -320,9 +320,9 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                               ▌f┌─────────────────┐│
+│                        ││                              ▌fi┌─────────────────┐│
 │                        ││                                 │✓ copied 22 chars││
-│                        ││                               se└─────────────────┘│
+│                        ││                              sec└─────────────────┘│
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -345,9 +345,9 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                               ▌first line  12:00 ○ │
+│                        ││                              ▌first line  12:00 ◷  │
 │                        ││                                                    │
-│                        ││                               second line  12:00 ○ │
+│                        ││                              second line  12:00 ◷  │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘

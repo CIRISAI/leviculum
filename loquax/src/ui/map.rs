@@ -759,6 +759,7 @@ mod tests {
         ViewLabel {
             kind,
             rank,
+            min_zoom: 0,
             text: text.to_string(),
             local: text.to_string(),
             at: (col as u32, row as u32),
@@ -852,6 +853,7 @@ mod tests {
         ViewLabel {
             kind,
             rank: 0,
+            min_zoom: 0,
             text: text.to_string(),
             local: text.to_string(),
             at: (at, 0),
