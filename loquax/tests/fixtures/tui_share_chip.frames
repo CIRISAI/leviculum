@@ -1,0 +1,66 @@
+=== 80x24
+┌● Loquax (attaching)────┐┌  <abababab…>  unknown───────── no propagation node ┐
+│▌<abababab…>      03:44 ││ ⌖ Sharing your position, 42 min left               │
+│▌you:                   ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                                           03:26 ◷  │
+│                        ││                                                    │
+│                        ││                                           03:44 ◷  │
+│                        │├  to <abababab…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+=== 120x40
+┌● Loquax (attaching)──────────────┐┌  <abababab…>  unknown────────────────────────── abababababababababababababababab ┐
+│▌<abababab…>                03:44 ││                                                              no propagation node │
+│▌you:                             ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││ ⌖ Sharing your position, 42 min left · click to stop                             │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                                         03:26 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                                                         03:44 ◷  │
+│                                  │├  to <abababab…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

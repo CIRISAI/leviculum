@@ -59,6 +59,8 @@ pub enum Target {
     Mailbox,
     /// The peer's position in the header: the peer on the map.
     Position,
+    /// Our position share's chip row (1273): a click stops the share.
+    ShareChip,
     /// The compose box's text, at this character of it.
     Compose { at: usize },
     /// The word `send` on the compose box's border. Transmits: a send.
@@ -310,10 +312,7 @@ struct Rows {
 fn rows<B: InputBuffer>(model: &UiModel<B>, laid: &Laid) -> Rows {
     let screen = screen(model);
     let area = inner(screen.messages, false);
-    let header = match model.sizes().messages.0 >= WIDE_HEADER {
-        true => 2,
-        false => 0,
-    };
+    let header = model.header_rows();
     let height = model.message_rows();
     let top = model.top_of(laid.rows.len());
     let shown = laid.rows.len().saturating_sub(top).min(height);
@@ -351,6 +350,9 @@ fn messages_target<B: InputBuffer>(
     }
     let r = usize::from(row - at.area.y);
     let c = usize::from(col - at.area.x);
+    if model.chip_row() == Some(r) {
+        return Target::ShareChip;
+    }
     if r < at.header {
         // The mailbox row: the peer's position from its second cell, the
         // mailbox's words flush right after it.

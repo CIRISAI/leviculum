@@ -1206,15 +1206,33 @@ impl<B> UiModel<B> {
     }
 
     /// The header's rows inside the conversation pane: none, or the mailbox
-    /// row and a rule on a wide one.
-    fn header_rows(&self) -> usize
+    /// row and a rule on a wide one; then the share's chip row while our
+    /// position share runs in the open conversation (1273).
+    pub(crate) fn header_rows(&self) -> usize
     where
         B: InputBuffer,
     {
-        match self.sizes().messages.0 >= WIDE_HEADER {
+        let mailbox = match self.sizes().messages.0 >= WIDE_HEADER {
             true => 2,
             false => 0,
-        }
+        };
+        mailbox + self.chip_row().is_some() as usize
+    }
+
+    /// The share's chip row in the conversation pane (1273), counted from
+    /// the pane's first inner row: under the mailbox's rows, while our
+    /// share runs in the open conversation and the map is not up.
+    pub fn chip_row(&self) -> Option<usize>
+    where
+        B: InputBuffer,
+    {
+        let peer = self.conversations.get(self.selected)?.peer;
+        (self.map.is_none() && self.share(&peer).is_some()).then(|| {
+            match self.sizes().messages.0 >= WIDE_HEADER {
+                true => 2,
+                false => 0,
+            }
+        })
     }
 
     /// The rows of the conversation pane that carry messages.
@@ -2598,6 +2616,12 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
         }
         Target::Mailbox => return run(model, PaletteCommand::Fetch),
         Target::Position => peer_on_map(model),
+        // The chip's one click (1273): the share stops with its end report.
+        Target::ShareChip => {
+            if let Some(peer) = model.conversations.get(model.selected).map(|c| c.peer) {
+                return model.stop_share(peer);
+            }
+        }
         Target::Compose { at } => {
             model.focus = Pane::Compose;
             model.compose.set_cursor(at);
@@ -4111,6 +4135,9 @@ pub const MAP_LOADING: &str = "loading map";
 /// The toast for `load map area` over an area loaded already.
 pub const MAP_LOADED_ALREADY: &str = "the map here is loaded already";
 
+/// What the share's chip row says after its words in the terminal (1273).
+pub const SHARE_CLICK: &str = "click to stop";
+
 /// The empty conversations pane's line.
 pub const NO_CONVERSATIONS: &str =
     "No conversations yet: :new conversation starts one with a friend's code.";
@@ -4466,6 +4493,22 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         );
         push(&mut rule, " ", RStyle::default());
         messages.push(rule);
+    }
+    // Our share's chip (1273): its words, and that a click stops it.
+    if model.chip_row().is_some() {
+        if let Some(share) = peer.and_then(|peer| model.share(&peer)) {
+            let now = model.now.map_or(share.started_at, |now| now.unix_secs);
+            let words = scene::share_words(share, now).resolve(strings::Lang::En);
+            let chip = format!("⌖ {words}");
+            let hint = format!(" · {SHARE_CLICK}");
+            let mut row = plain(" ");
+            push(&mut row, &chip, RStyle::default());
+            // The hint where the pane has room for it after the words.
+            if 1 + chip.chars().count() + hint.chars().count() < sizes.messages.0 {
+                push(&mut row, &hint, layout::painted(model.tokens().muted));
+            }
+            messages.push(row);
+        }
     }
     let shown = laid.rows.len().saturating_sub(top).min(rows);
     messages.extend((shown..rows).map(|_| RLine::default()));

@@ -1921,6 +1921,109 @@ mod tests {
         }
     }
 
+    /// Our position share's chip row (1273) at 80x24 and at 120x40: under
+    /// the mailbox's row on the wide pane, at the top of the narrow one,
+    /// the time left and that a click stops it; the frames pinned in
+    /// `tests/fixtures/tui_share_chip.frames`. A click on the row stops
+    /// the share with its end report, and the row goes.
+    #[test]
+    fn the_share_chip_row_says_the_time_left_and_a_click_stops_it() {
+        use leviculum_lxmf::telemetry::Location;
+        use loquax::ui::share::Span;
+        let peer = [0xab; 16];
+        let mut model = Model::new(&[peer]);
+        let t = 1_793_500_000;
+        let clock = |model: &mut Model, at: i64| {
+            update(
+                model,
+                UiEvent::Clock(WallTime {
+                    unix_secs: at,
+                    offset_secs: 3600,
+                }),
+            )
+        };
+        clock(&mut model, t);
+        update(
+            &mut model,
+            UiEvent::OwnFix(Some(Location {
+                latitude_e6: 43_773_100,
+                longitude_e6: 11_256_000,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 500,
+                last_update: t,
+            })),
+        );
+        update(
+            &mut model,
+            UiEvent::StartShare {
+                peer,
+                span: Span::Hour1,
+            },
+        );
+        clock(&mut model, t + 18 * 60);
+        let mut frames = String::new();
+        for (w, h) in [(80u16, 24u16), (120, 40)] {
+            update(
+                &mut model,
+                UiEvent::Resize {
+                    width: w,
+                    height: h,
+                },
+            );
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+            let view = ui::view(&model);
+            terminal
+                .draw(|frame| draw(frame, &view, None))
+                .expect("draw");
+            let screen = frame_text(terminal.backend().buffer());
+            assert!(
+                screen.contains("⌖ Sharing your position, 42 min left"),
+                "{screen}"
+            );
+            assert_eq!(screen.contains("· click to stop"), w == 120, "{screen}");
+            frames.push_str(&format!("=== {w}x{h}\n{screen}"));
+        }
+        let expected = include_str!("../tests/fixtures/tui_share_chip.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-share-chip.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_share_chip.frames\n{frames}",
+                kept.display()
+            );
+        }
+        // The click: on the chip row's first inner cell of the wide pane.
+        let screen = ui::Screen::of(120, 40, 1);
+        let row = screen.messages.y + 1 + model.chip_row().expect("a chip row") as u16;
+        let col = screen.messages.x + 3;
+        let mut effects = Vec::new();
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            effects.extend(update(
+                &mut model,
+                UiEvent::Mouse(MouseEvent {
+                    kind,
+                    column: col,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+            ));
+        }
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, ui::UiEffect::Send { to, .. } if *to == peer)),
+            "the end report: {effects:?}"
+        );
+        assert!(model.share(&peer).is_none());
+        assert_eq!(model.chip_row(), None);
+    }
+
     /// The first user in the terminal (1263, finding 6): the empty list
     /// names the palette's command, the palette offers `new conversation`
     /// and `add contact`, and a friend's code typed into either opens the
