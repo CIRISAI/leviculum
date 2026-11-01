@@ -1,0 +1,151 @@
+--- a/RNode_Firmware.ino
++++ b/RNode_Firmware.ino
+@@ -535,6 +535,7 @@
+         // Flash an info pattern to indicate
+         // that the radio is now on
+         kiss_indicate_radiostate();
++        kiss_indicate_diag_pa();
+         led_indicate_info(3);
+         return true;
+       }
+@@ -1010,8 +1011,11 @@
+       if (sbyte == ROM_UNLOCK_BYTE) {
+         unlock_rom();
+       }
++    } else if (command == CMD_DIAG_PA) {
++      kiss_indicate_diag_pa();
+     } else if (command == CMD_RESET) {
+       if (sbyte == CMD_RESET_BYTE) {
++        kiss_indicate_diag_pa();
+         hard_reset();
+       }
+     } else if (command == CMD_ROM_READ) {
+--- a/sx126x.cpp
++++ b/sx126x.cpp
+@@ -104,8 +104,17 @@
+   int lora_lna_gain = LORA_LNA_GAIN;
+ #endif
+ 
++// Leviculum diag (order 1271): what the PA detection saw at boot.
++uint8_t diag_csd_first = 0xFF;
++uint8_t diag_csd_mask = 0;
++uint8_t diag_detect_count = 0;
++uint8_t diag_begin_count = 0;
++uint32_t diag_detect_ms = 0;
++
+ extern SPIClass SPI;
+ 
++#define OP_GET_DEVICE_ERRORS_DIAG 0x17
++
+ #define MAX_PKT_LENGTH 255
+ 
+ sx126x::sx126x() :
+@@ -333,6 +342,7 @@
+ }
+ 
+ int sx126x::begin(long frequency) {
++  diag_begin_count++;
+   reset();
+   
+   if (_busy != -1) { pinMode(_busy, INPUT); }
+@@ -372,12 +382,19 @@
+         pinMode(LORA_PA_PWR_EN, OUTPUT);
+         pinMode(LORA_PA_CSD, INPUT);
+         digitalWrite(LORA_PA_PWR_EN, HIGH); delay(5);
+-        if (digitalRead(LORA_PA_CSD) == HIGH) {
++        diag_csd_first = digitalRead(LORA_PA_CSD);
++        diag_detect_ms = millis();
++        diag_detect_count++;
++        if (diag_csd_first == HIGH) {
+           lora_pa_model = LORA_PA_KCT8103L;
+           lora_lna_gain = LORA_LNA_KCT8103L_GAIN;
+         } else {
+           lora_pa_model = LORA_PA_GC1109;
+         }
++        // Seven more reads 1 ms apart, after the decision, so the
++        // decision itself keeps upstream's timing.
++        diag_csd_mask = diag_csd_first ? 1 : 0;
++        for (int i = 1; i < 8; i++) { delay(1); if (digitalRead(LORA_PA_CSD)) { diag_csd_mask |= (1 << i); } }
+       #endif
+     }
+ 
+@@ -855,6 +872,29 @@
+   _rxen = rxen;
+ }
+ 
++void sx126x::diagPa(uint8_t *out) {
++  out[0] = lora_pa_model;
++  out[1] = diag_csd_first;
++  out[2] = diag_csd_mask;
++  out[3] = diag_detect_count;
++  out[4] = diag_begin_count;
++  out[5] = (diag_detect_ms >> 24) & 0xFF; out[6] = (diag_detect_ms >> 16) & 0xFF;
++  out[7] = (diag_detect_ms >> 8) & 0xFF;  out[8] = diag_detect_ms & 0xFF;
++  #if BOARD_MODEL == BOARD_HELTEC32_V4
++    out[9]  = digitalRead(LORA_PA_PWR_EN);
++    out[10] = digitalRead(LORA_PA_CSD);
++    out[11] = digitalRead(LORA_PA_CPS);
++    out[12] = digitalRead(LORA_PA_CTX);
++  #else
++    out[9] = out[10] = out[11] = out[12] = 0xFF;
++  #endif
++  out[13] = (uint8_t)lora_lna_gain;
++  uint8_t err[2] = {0};
++  executeOpcodeRead(OP_GET_DEVICE_ERRORS_DIAG, err, 2);
++  out[14] = err[0]; out[15] = err[1];
++  out[16] = readRegister(0x08AC); // RX gain: 0x94 power saving, 0x96 boosted
++}
++
+ void sx126x::dumpRegisters(Stream& out) {
+   for (int i = 0; i < 128; i++) {
+     out.print("0x");
+--- a/sx126x.h
++++ b/sx126x.h
+@@ -97,6 +97,9 @@
+ 
+   void dumpRegisters(Stream& out);
+ 
++  // Leviculum diag (order 1271): PA detection and live front-end state.
++  void diagPa(uint8_t *out);
++
+ private:
+   void explicitHeaderMode();
+   void implicitHeaderMode();
+--- a/Utilities.h
++++ b/Utilities.h
+@@ -848,6 +848,11 @@
+ 	serial_write(FEND);
+ }
+ 
++// Leviculum diag (order 1271), Heltec V4 only: one KISS frame CMD_DIAG_PA
++// with the PA detection result and the live front-end pins. Declared here,
++// defined after the PA table below.
++void kiss_indicate_diag_pa();
++
+ void kiss_indicate_stat_rx() {
+ 	serial_write(FEND);
+ 	serial_write(CMD_STAT_RX);
+@@ -1311,6 +1316,23 @@
+ 	#endif
+ }
+ 
++#define CMD_DIAG_PA 0x7D
++void kiss_indicate_diag_pa() {
++	#if BOARD_MODEL == BOARD_HELTEC32_V4
++		uint8_t d[24] = {0};
++		LoRa->diagPa(d);
++		d[17] = pa_values_determined;
++		d[18] = (uint8_t)tx_gain[0];
++		d[19] = (uint8_t)lora_txp;
++		uint32_t now = millis();
++		d[20] = (now >> 24) & 0xFF; d[21] = (now >> 16) & 0xFF; d[22] = (now >> 8) & 0xFF; d[23] = now & 0xFF;
++		serial_write(FEND);
++		serial_write(CMD_DIAG_PA);
++		for (int i = 0; i < 24; i++) { escaped_serial_write(d[i]); }
++		serial_write(FEND);
++	#endif
++}
++
+ int map_target_power_to_modem_output(int target_tx_power) {
+ 	#if HAS_LORA_PA
+ 		if (!pa_values_determined) { determine_pa_values(); }
