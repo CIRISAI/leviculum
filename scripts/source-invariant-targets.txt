@@ -226,7 +226,6 @@ skip  loquax           tui_snapshot               # spawns loquax tui against an
 skip  loquax           scene_golden               # a golden of the scene built from the ugly store; subject is the code; loquax-tui
 skip  loquax           mailbox_receipts           # read receipts through the mailbox, in process with signed LXMF; subject is the code; loquax-tui
 skip  loquax           wire_props                 # property tests of the home wire's codecs; subject is the code; loquax-tui
-skip  loquax           mailbox_receipts           # read receipts through the mailbox store and its answers; subject is the code; loquax-tui
 skip  loquax-android   device_walk_script         # starts python3 on the device walk's parser tests; subject is the script's code
 skip  loquax-android   facade                     # the facade against an in-process home node and transport over a loopback TCP socket; subject is the code
 skip  loquax-android   fling                      # starts javac and java on Fling.java and its host test; subject is the code
