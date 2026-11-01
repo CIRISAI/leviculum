@@ -11,67 +11,90 @@ git tag, not the version string. -->
 
 ## [0.32.0+ciris.1] — CIRIS fork
 
-Catch-up to upstream master (+246 since the v0.30.0 base), with v0.31.0+ciris.1
-(#82, #83) carried onto it.
-
-### Changed
-
-- Off-lock resource assembly (leviculum#71) is carried onto upstream's
-  multi-resource links (Codeberg #657, up to
-  `max_incoming_resources_per_link` incoming resources per link) and split
-  request/response segments. Everything is now keyed by (link, resource
-  hash): the assembly queue, the resources assembling outside the node,
-  `take_resource_assembly_jobs` and `complete_resource_assembly`. A resource
-  assembling outside the node counts against its link's bound, and a cancel
-  naming it fails that resource alone.
-- Known-destination pruning (leviculum#49) is carried onto upstream's sliced,
-  off-lock storage flush. The runtime use-state is collected with each
-  slice, and the file is held to the identity cap during the off-lock write.
-- Direct links (leviculum#70): buffered channel messages are now drained by
-  upstream's `drain_ready_channel_messages`, which hands direct-link signals
-  to the node and drains them past a spent host budget.
-- The scoped-transit announce gate (leviculum#51) now sits inside upstream's
-  split mode/duty-hold gate.
+The fork carried onto current upstream master (+572 since the Oct 13 base),
+with v0.31.0+ciris.1 (#82, #83) and v0.31.1+ciris.1 (#86) on it, plus the
+mobile and direct-link work CIRISEdge asked for (#90, #89, #88, #84, #85).
 
 ### Added
 
+- A node restartable through a shared handle (leviculum#90).
+  `ReticulumNode::start_shared(&self)` and `stop_shared(&self)` start and stop
+  a node held behind an `Arc`, which a phone app needs to suspend the node in
+  the background. `start`/`stop` keep their `&mut self` signatures and call
+  these. A stop closes every listener and connection, ends the
+  traffic-counter thread (it no longer outlives the run), and bounds the
+  runtime shutdown at 5 s. A later start rebuilds the interfaces, and events
+  arrive on the receiver taken before the first start. Calls that need a run
+  fail with not-running while stopped; a second stop is a no-op. Witness:
+  `leviculum-std/tests/node_restart.rs` (three cycles, no thread or fd
+  growth).
+- Direct links: a two-sided commit (leviculum#89). Neither side moves its
+  link onto the punched path until both have punched. A side that punches
+  sends COMPLETE and waits up to 12 s for the peer's; a side whose punch fails
+  sends REJECT, and the other side then closes its punched interface and stays
+  relayed. This prevents the one-sided move from the 10-31 incident, where one
+  end moved to a path the other never confirmed. On the wire, a new optional
+  `"c"` key on REQUEST and READY announces support. rns-rs skips it, so a
+  mixed pair keeps the old one-sided behaviour.
+- Direct links: an opaque host payload on the proposal (leviculum#88).
+  `propose_direct_link_with(link_id, Some(bytes))` sends up to 16 KiB (it
+  must also fit the link MDU) in a new optional `"h"` key. It reaches the
+  asking host as `NodeEvent::DirectLinkRequested { host_payload, .. }`.
+  A payload that cannot fit is refused up front with
+  `DirectLinkError::PayloadTooLarge`.
+- TCP: `reconnect_interface(id)` and `reconnect_all_clients()` on
+  `ReticulumNode` and `api::Node` (leviculum#84). A host that knows the
+  network changed can redial at once instead of waiting for TCP to notice. It
+  rides upstream's per-attempt re-resolution (Codeberg #461), so each attempt
+  resolves the host again.
+- Direct links: two peers behind one NAT also punch each other's host
+  candidate (optional `"l"` key), so devices on one home network come up
+  direct on routers that do not hairpin.
 - `ReticulumNode::wire_link_id(&LinkId)` and `LinkInfo::wire_link_id`
-  (CIRISVerify#309). After an establishment retry (Codeberg #66) an
-  initiator keeps reporting the id it was first given, so its handles stay
-  valid, while the responder only sees the new wire id. Anything both ends
-  must derive alike from the link id (a KDF salt, a nonce) takes the wire
-  id.
-
-### Fixed
-
-- Upstream code that broke the fork's macOS and Windows lanes: the
-  storage-flush CPU timer used `clock_gettime`, absent on Windows (now zero
-  off Unix); one test assumed Linux's abstract socket name, another the
-  /proc-derived RSS line. Four discovery-cache tests age the registry by
-  setting a directory's mtime, which Windows refuses; they run on Unix.
-
-### Consumer notes
-
-- v0.31.0+ciris.1 (#82, #83) was tagged on the pre-sync base; its changes
-  are carried here unchanged and the tag is left where it is.
-- No fork API changed signature. Upstream changes are listed in its own
-  sections below; notably, link timing accessors are now in milliseconds
-  (`established_at_ms`, `last_inbound_ms`) and `DropReason` gained
-  `LinkIfaceMismatch`.
+  (CIRISVerify#309, leviculum#86; first in v0.31.1+ciris.1).
 
 ### Changed
 
-- Apple TCP liveness matches Linux (+ciris, leviculum#85). On iOS and macOS a
-  TCP socket now gets keepalive idle 5 s / interval 2 s / 12 probes, and
-  `TCP_RXT_CONNDROPTIME` 24 s, the counterpart of Linux's `TCP_USER_TIMEOUT`.
-  A dead socket after a Wi-Fi/cellular switch is now detected in about 24 s
-  instead of the kernel default of many minutes. This goes past the
-  reference, whose macOS branch sets only the idle keepalive.
-- The TCP client reconnect backoff caps at 20 s instead of 60 s (+ciris). It
-  is still a jittered doubling: 5, 5, 5, 10, then 20 s. A returning peer is
-  redialed within about 20 s. Upstream Python's fixed 5 s wait is not
-  adopted, because a fleet redialing a downed canonical every 5 s would
-  reconnect in one synchronized burst when the canonical returns.
+- Apple TCP liveness matches Linux (leviculum#85): keepalive idle 5 s,
+  interval 2 s, 12 probes, and `TCP_RXT_CONNDROPTIME` 24 s. A dead socket
+  after a Wi-Fi/cellular switch is now detected in about 24 s instead of
+  many minutes.
+- The TCP client reconnect backoff caps at 20 s instead of 60 s. It stays a
+  jittered doubling (5, 5, 5, 10, 20 s); upstream's fixed 5 s is not adopted,
+  so a fleet does not redial a returning canonical in one synchronized burst.
+- Carried onto upstream's newer code, with behaviour unchanged:
+  - off-lock resource assembly (#71) on multi-resource links (Codeberg #657),
+    keyed by (link, resource hash);
+  - known-destination pruning (#49) on the sliced off-lock flush;
+  - the scoped-transit announce gate (#51) inside the mode/duty-hold gate;
+  - direct-link signals drained by `drain_ready_channel_messages`, now that a
+    full channel sink holds messages;
+  - punched direct-link interfaces exempt from upstream's link interface
+    pinning (Codeberg #658).
+
+### Security
+
+- Lockfile lifts past RUSTSEC-2026-0414 (pulldown-cmark 0.13.6),
+  RUSTSEC-2026-0346..0349 (rustls 0.23.46), RUSTSEC-2026-0382
+  (rustls-webpki 0.103.16), RUSTSEC-2026-0386 (tokio 1.54.1) and
+  RUSTSEC-2026-0381 (webpki-roots 1.0.11). RUSTSEC-2026-0192 (`ttf-parser`
+  unmaintained, reached only through upstream's iced GUI, no fix) is
+  ignored in `deny.toml` with that reason.
+
+### Consumer notes
+
+- `NodeEvent::DirectLinkRequested` gained a field (`host_payload`). A match
+  that names fields without `..` must add it.
+- A `CoreProcessor` set on the builder runs only for the first run; a
+  restarted node has none (the daemons that set one, lntd and lnpnd, never
+  restart).
+- Upstream changes are listed in its own sections below. Notably, link timing
+  accessors are now in milliseconds (`established_at_ms`, `last_inbound_ms`);
+  `LinkCloseReason` gained `InterfaceRemoved`; and `DropReason` gained
+  `LinkIfaceMismatch` plus seven more (LinkNotActive, LinkDecryptFail,
+  RttInvalid, RequestNoHandler, ChannelDecryptFail, ResourceFull,
+  ResourceCompressed).
+- The v0.31.0+ciris.1 and v0.31.1+ciris.1 tags stay where they are.
 
 ## [0.31.0+ciris.1] — CIRIS fork
 
