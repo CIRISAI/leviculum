@@ -45,7 +45,13 @@ cd "$(dirname "$0")/.."
 # against both daemons -- and 898723d4 added it without moving this pin, so
 # the gate has reported "expected 3 tests to run, 4 did" and failed
 # `just standard` (Justfile:1681) on every sha since.
-EXPECTED=5
+#
+# 5 -> 6 (2026-11-01): a_path_request_burst_is_answered_alike_on_both_stacks
+# (1169), the reference arm of the board's queued-copy drop: the same three
+# path requests against lnsd and rnsd, the same count of path responses back.
+# It drives both daemons from this module's harness, so the module filter
+# picks it up and it rides this gate.
+EXPECTED=6
 
 cargo build -p leviculum-cli --bin lnsd --bin lnstatus
 

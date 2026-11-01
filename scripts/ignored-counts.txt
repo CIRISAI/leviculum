@@ -102,7 +102,12 @@
 # the_sixteen_lose_nothing (1229), the per-source TCP cap against a release
 # lnsd. Observed group: scripts/run-soak.sh runs it by name in the smoke
 # variant (`just standard`), beside loadtest_tcp_hub_smoke.
-25   -p leviculum-std --test rnsd_interop
+#
+# 25 -> 26 (2026-11-01): a_path_request_burst_is_answered_alike_on_both_stacks
+# (1169), the reference measurement for the board's queued-copy drop. Observed
+# group: run-status-parity.sh runs the status_parity_tests:: module by name in
+# `just standard`, its EXPECTED moved to 6 in the same commit.
+26   -p leviculum-std --test rnsd_interop
 
 # ble_link_gap_floor (2026-10-10, #379): the measurement grid behind
 # docs/measurements/2026-10-10-ble-link-gap-floor.md. It needs the patched
