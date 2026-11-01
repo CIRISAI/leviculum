@@ -364,7 +364,8 @@ impl Engine {
     }
 
     /// Hand every received message out packed as well
-    /// ([`OutboxEvent::Packed`]), for a home node's archive.
+    /// ([`OutboxEvent::Packed`]), for a home node's archive, and prove it
+    /// only on the [`Command::Prove`] that says it is archived.
     pub fn handing_out_packed(mut self) -> Self {
         self.hands_out_packed = true;
         self
@@ -415,7 +416,16 @@ impl Engine {
                 return;
             }
         };
-        self.state = match register(core, identity) {
+        let registered = register(core, identity).and_then(|mut ready| {
+            if self.hands_out_packed {
+                ready
+                    .router
+                    .hold_proofs_until_kept(core)
+                    .map_err(|e| format!("hold proofs: {e:?}"))?;
+            }
+            Ok(ready)
+        });
+        self.state = match registered {
             Ok(ready) => {
                 self.emit(OutboxEvent::Ready {
                     address: ready.address,
@@ -591,14 +601,14 @@ impl Engine {
     }
 
     /// Notice messages the router has forgotten. A terminal state removes the
-    /// entry from the outbound map (`leviculum-lxmf/src/router.rs:771-773`),
+    /// entry from the outbound map (`leviculum-lxmf/src/router.rs:872-874`),
     /// and the frontend has to be told, because the state event and the
     /// removal can arrive in the same tick.
     ///
     /// The predicate is membership of `outbound()`, deliberately **not**
     /// `LxmfRouter::has_message`: that one asks the delivered-id dedup cache
     /// whether this id has already been *received*
-    /// (`leviculum-lxmf/src/router.rs:679-681`), which is false for every
+    /// (`leviculum-lxmf/src/router.rs:780-782`), which is false for every
     /// message we send. Reading it as "is still queued" reported every message
     /// as departed in the tick that queued it, with no state ever seen — see
     /// the regression test below.
@@ -651,6 +661,14 @@ impl Engine {
                 Command::Announce => self.announced = false,
                 Command::SendPacked { packed, via } => {
                     self.send_packed(ready, core, &packed, via, out);
+                }
+                Command::Prove { message_id } => {
+                    match ready.router.release_proofs(core, &message_id) {
+                        Ok(output) => self.absorb(ready, core, output, out),
+                        Err(e) => self.emit(OutboxEvent::Broken {
+                            detail: format!("router release_proofs: {e:?}"),
+                        }),
+                    }
                 }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
                 // A client's commands: a messenger learns its states from its
@@ -812,6 +830,8 @@ impl Engine {
                     });
                 }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
+                // A client receives nothing over the mesh, so it holds no proof.
+                Command::Prove { .. } => {}
                 Command::HomeAccepted { message_id } => {
                     self.emit(OutboxEvent::Queued { message_id });
                 }

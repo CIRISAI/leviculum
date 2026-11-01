@@ -125,7 +125,7 @@ fn firmware_app_data(identity: &Identity) -> Vec<u8> {
 }
 
 /// The firmware's `lxmf.delivery` destination
-/// (`leviculum-lxmf/src/node.rs:398`, no ratchets), announced through the
+/// (`leviculum-lxmf/src/node.rs:423`, no ratchets), announced through the
 /// same core path the firmware uses.
 fn delivery_announce_wire(identity: Identity, app_data: &[u8]) -> Vec<u8> {
     let mut dest =

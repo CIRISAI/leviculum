@@ -60,6 +60,12 @@ On every run `report_and_assert` enforces:
 Both are `#[ignore]`d because they spawn the `lnsd` binary, which the
 `leviculum-std` test build does not itself produce — the binary is built first.
 
+Every load client connects from 127.0.0.1, so the hub's config raises
+`max_connections_per_source` to 1024 (the default 16 refuses all but sixteen
+of them). The smoke run also runs
+`a_seventeenth_client_from_one_source_is_refused_and_the_sixteen_lose_nothing`,
+which holds the cap at 16 and checks the refusal itself.
+
 ### Running it
 
 Use the entrypoint, which builds `lnsd` (release) so the test's `locate_lnsd()`

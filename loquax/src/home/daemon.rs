@@ -8,7 +8,8 @@
 //!   identity, announced at start and every [`ANNOUNCE_EVERY`], so senders
 //!   deliver DIRECT and get their proof;
 //! - archives every received message, packed as it came, under a sequence
-//!   ([`crate::store::Store::archive_append`]), within the configured cap;
+//!   ([`crate::store::Store::archive_append`]), within the configured cap,
+//!   and proves it to its sender only once it is archived (1239);
 //! - answers its admitted clients on `loquax.home` ([`super::server`]);
 //! - collects from its propagation node on the messenger's own schedule
 //!   ([`crate::sync::Schedule`]), so mail that senders propagated arrives
@@ -372,9 +373,17 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             }
                         }
                         OutboxEvent::Packed { message_id, packed } => {
-                            if let Some(seq) =
-                                archive(&mut store, &message_id, &packed, archive_cap_bytes)
-                            {
+                            let Ok(new) = archive(&mut store, &message_id, &packed, archive_cap_bytes)
+                            else {
+                                // Not archived, so not proven: the sender
+                                // tries again, or propagates.
+                                continue;
+                            };
+                            // Archived, now or before: the sender may be
+                            // told so (1239).
+                            // An engine that went away is said by the next pump.
+                            let _ = attached.outbox.submit(Command::Prove { message_id });
+                            if let Some(seq) = new {
                                 wakes.appended(seq);
                                 if let Some(source) = source_of(&packed) {
                                     related(&mut store, &mut relations, source, archive_cap_bytes);
@@ -625,8 +634,15 @@ fn archive_name(store: &mut Store, peer: [u8; 16], name: &str, cap: u64) -> Opti
     }
 }
 
-/// Keep one received message in the archive: its sequence, when it is new.
-fn archive(store: &mut Store, message_id: &[u8; 32], packed: &[u8], cap: u64) -> Option<u64> {
+/// Keep one received message in the archive: its sequence when it is new,
+/// `None` when the archive held it already, an error when it could not be
+/// kept (said here).
+fn archive(
+    store: &mut Store,
+    message_id: &[u8; 32],
+    packed: &[u8],
+    cap: u64,
+) -> Result<Option<u64>, ()> {
     let now = leviculum_std::local_time::unix_now_secs();
     match store.archive_append(crate::home::KIND_RECEIVED, message_id, packed, now, cap) {
         Ok(Some(seq)) => {
@@ -635,18 +651,18 @@ fn archive(store: &mut Store, message_id: &[u8; 32], packed: &[u8], cap: u64) ->
                 crate::address::to_hex(message_id),
                 packed.len()
             );
-            Some(seq)
+            Ok(Some(seq))
         }
         Ok(None) => {
             tracing::info!(
                 "HOME archived already message={}",
                 crate::address::to_hex(message_id)
             );
-            None
+            Ok(None)
         }
         Err(error) => {
             tracing::warn!("HOME archive: {error}");
-            None
+            Err(())
         }
     }
 }

@@ -126,6 +126,7 @@ skip  leviculum-lxmf  inbound_link_promise       # link state machine; subject i
 skip  leviculum-lxmf  message_vectors            # vector corpus; subject is the codec
 skip  leviculum-lxmf  propagation_client         # propagation client logic; subject is the code
 skip  leviculum-lxmf  propagation_node           # propagation node logic; subject is the code
+skip  leviculum-lxmf  proof_after_keep           # proof held until kept; subject is the router
 skip  leviculum-lxmf  reaction_vectors           # vector corpus; subject is the codec
 skip  leviculum-lxmf  reply_vectors              # vector corpus; subject is the codec
 skip  leviculum-lxmf  peer_sync_batch            # outbound sync batch and its streamed envelope; subject is the code

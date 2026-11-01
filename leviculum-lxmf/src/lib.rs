@@ -98,7 +98,7 @@ pub use control::{
 };
 pub use message::{DeliveryMethod, Field, Message, MessageError, Verification};
 pub use node::{
-    DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundRejection,
+    DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundProof, InboundRejection,
     IncomingResourceTransfer, LxmfNode, LxmfNodeConfig, LxmfNodeError, LxmfNodeEvent,
     LxmfNodeOutput, LxmfResourceSendParams, PreparedLxmfSend, SubmissionId,
 };
