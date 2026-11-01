@@ -65,7 +65,7 @@ by content, not just extension (`config.rs:662-689`):
 In practice your `config` file uses the Python INI form shown
 throughout this page. Boolean values accept `Yes`, `yes`, `True`,
 `true`, `1`, `on` (and their false counterparts); anything else is an
-error naming the key, as in rnsd (`ini_config.rs:1137-1157`).
+error naming the key, as in rnsd (`ini_config.rs:1144-1164`).
 
 ## A file with a syntax error is refused
 
@@ -158,7 +158,7 @@ and are best set in a TOML config or left at their defaults.
 everywhere: `lnsd --storage`, then the config key, then
 `<config_dir>/storage` (Python's only choice, `Reticulum.py:246`). The
 client tools resolve it the same way (`resolve_storage_path`,
-`config.rs:1608`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
+`config.rs:1627`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
 same directory as the daemon and derive the same RPC authkey from its
 `transport_identity`. Point the key at an external disk and nothing else
 has to be told about it — but note that `--storage` moves the daemon
@@ -281,7 +281,7 @@ supported-type filter (`interface_type` (`ini_config.rs:328-353`)):
 `BackboneInterface` and `BackboneClientInterface` are accepted too:
 they are wire-identical to TCP and are mapped onto the TCP interface at
 parse time, as Python does (`normalize_backbone_interface`
-(`ini_config.rs:1056-1091`)). An interface of any other type is skipped
+(`ini_config.rs:1086-1123`)). An interface of any other type is skipped
 with a log line (`tracing::warn` (`ini_config.rs:344-349`)), not an
 error.
 
@@ -311,6 +311,10 @@ is `InterfaceConfig` (`config.rs:258-737`).
 | `silent_timeout_secs` | u64 (sec) | `120` | A connection that has not delivered one valid HDLC frame within this is closed (`TCP_SILENT_CLOSED`). A client that has spoken is never closed by it. `0` never closes a silent connection. (`silent_timeout_secs` (`ini_config.rs:1024`); `InterfaceConfig::silent_timeout_secs` (`config.rs:1175-1178`)) |
 | `silent_timeout_pressure_secs` | u64 (sec) | `10` | The silent timeout while the server holds more than `pressure_fraction` of `max_connections`. (`silent_timeout_pressure_secs` (`ini_config.rs:1025`); `InterfaceConfig::silent_timeout_pressure_secs` (`config.rs:1179-1181`)) |
 | `pressure_fraction` | float | `0.8` | Share of `max_connections` above which the server is under pressure. Outside `(0, 1]` is refused at startup. (`pressure_fraction` (`ini_config.rs:1026`); `InterfaceConfig::pressure_fraction` (`config.rs:1182-1184`)) |
+| `tcp_keepalive_idle_secs` | u64 (sec) | `5` | Idle time before the kernel sends the first TCP keepalive probe on a connection (`TCP_KEEPIDLE`), 1 to 32767. On a server every accepted connection takes it. (`tcp_keepalive_idle_secs` (`ini_config.rs:1030`); `InterfaceConfig::tcp_keepalive_idle_secs` (`config.rs:1185-1189`)) |
+| `tcp_keepalive_interval_secs` | u64 (sec) | `2` | Time between unanswered probes (`TCP_KEEPINTVL`), 1 to 32767. (`tcp_keepalive_interval_secs` (`ini_config.rs:1031`); `InterfaceConfig::tcp_keepalive_interval_secs` (`config.rs:1190-1192`)) |
+| `tcp_keepalive_probes` | u32 | `12` | Unanswered probes before the kernel drops the connection (`TCP_KEEPCNT`), 1 to 127. (`tcp_keepalive_probes` (`ini_config.rs:1032`); `InterfaceConfig::tcp_keepalive_probes` (`config.rs:1193-1195`)) |
+| `tcp_user_timeout_secs` | u64 (sec) | `24` | Longest time sent data may stay unacknowledged before the connection is dropped (`TCP_USER_TIMEOUT`, Linux and Android). `0` leaves the kernel default. (`tcp_user_timeout_secs` (`ini_config.rs:1033`); `InterfaceConfig::tcp_user_timeout_secs` (`config.rs:1196-1199`)) |
 
 Why these exist: on 2026-10-31 one address held 972 of the 1 135
 connections on a public lnsd's TCP server, and almost none of them ever
@@ -336,6 +340,35 @@ a connection. None of it changes a byte on the wire.
     listen_port = 45999
 ```
 
+The four `tcp_*` keys (on a server and on a client alike) default to the
+values Python Reticulum fixes in `TCPInterface.py:84-87`, so a section
+without them behaves as before. Python has no such keys and ignores them;
+they are local socket options and change nothing on the wire. A value the
+kernel would refuse stops lnsd at start with the section's name. The reason
+to move them is a phone on cellular: a probe pair every 5 s is shorter than
+the modem's high power tail of about 10 s, so an idle connection keeps the
+modem awake for good, and a server's probes reach the phone even while it
+sleeps. For a server that phones dial, a longer idle together with
+`mode = access_point` is the setting to measure:
+
+```ini
+  [[Loquax Mailbox TCP]]
+    type = TCPServerInterface
+    listen_port = 4243
+    mode = access_point
+    tcp_keepalive_idle_secs = 600
+    tcp_keepalive_interval_secs = 30
+    tcp_keepalive_probes = 4
+```
+
+`mode = access_point` sends the connected phones no announce that is
+broadcast through the mesh, while their path requests are still answered
+and, for a destination the node does not know, asked on (the reference's
+`Transport.py:1193-1197` and `Interface.py:54`; ours
+`announce_mode_allows` and `InterfaceMode::discovers_paths`). Every
+accepted connection inherits the listener's mode, as in the reference
+(`TCPInterface.py:625`).
+
 ### TCP client (`TCPClientInterface`)
 
 | Key | Type | Default | Meaning |
@@ -344,6 +377,10 @@ a connection. None of it changes a byte on the wire.
 | `target_port` | u16 | unset | Remote port. (`target_port` (`ini_config.rs:787`)) |
 | `reconnect_interval` | u64 (sec) | `5` | Delay between reconnect attempts. (`reconnect_interval` (`ini_config.rs:879`); `InterfaceConfig::reconnect_interval_secs` (`config.rs:941-942`)) |
 | `max_reconnect_tries` | u64 | unlimited | Give up after this many attempts; unset means never. (`max_reconnect_tries` (`ini_config.rs:880`); `InterfaceConfig::max_reconnect_tries` (`config.rs:943-944`)) |
+| `tcp_keepalive_idle_secs` | u64 (sec) | `5` | Idle time before the kernel sends the first TCP keepalive probe on a connection (`TCP_KEEPIDLE`), 1 to 32767. (`tcp_keepalive_idle_secs` (`ini_config.rs:1030`); `InterfaceConfig::tcp_keepalive_idle_secs` (`config.rs:1185-1189`)) |
+| `tcp_keepalive_interval_secs` | u64 (sec) | `2` | Time between unanswered probes (`TCP_KEEPINTVL`), 1 to 32767. (`tcp_keepalive_interval_secs` (`ini_config.rs:1031`); `InterfaceConfig::tcp_keepalive_interval_secs` (`config.rs:1190-1192`)) |
+| `tcp_keepalive_probes` | u32 | `12` | Unanswered probes before the kernel drops the connection (`TCP_KEEPCNT`), 1 to 127. (`tcp_keepalive_probes` (`ini_config.rs:1032`); `InterfaceConfig::tcp_keepalive_probes` (`config.rs:1193-1195`)) |
+| `tcp_user_timeout_secs` | u64 (sec) | `24` | Longest time sent data may stay unacknowledged before the connection is dropped (`TCP_USER_TIMEOUT`, Linux and Android). `0` leaves the kernel default. (`tcp_user_timeout_secs` (`ini_config.rs:1033`); `InterfaceConfig::tcp_user_timeout_secs` (`config.rs:1196-1199`)) |
 
 ```ini
 [interfaces]

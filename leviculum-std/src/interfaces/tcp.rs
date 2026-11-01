@@ -63,56 +63,152 @@ pub(crate) const TCP_HW_MTU: u32 = match super::hw_mtu_for_bitrate(TCP_BITRATE_G
 /// Must be large enough to absorb short bursts during reconnection.
 pub(crate) const TCP_DEFAULT_BUFFER_SIZE: usize = 256;
 
-/// TCP liveness parity with Python Reticulum (Codeberg #63).
+/// TCP liveness, per interface (Codeberg #63, 1176).
 ///
-/// Values mirror TCPInterface.py:84-87 / set_timeouts_linux():
+/// The defaults mirror TCPInterface.py:84-87 / set_timeouts_linux():
 /// TCP_USER_TIMEOUT 24 s, SO_KEEPALIVE with idle 5 s / interval 2 s /
 /// 12 probes. A silently-dead link (e.g. an iptables-dropped path with
 /// no FIN/RST) then surfaces as a read/write error within ~24 s, the
 /// driver marks the interface offline, `handle_interface_down` culls
-/// its path entries, and the reconnect loop takes over — without these
+/// its path entries, and the reconnect loop takes over; without these
 /// options the kernel defaults let such a connection linger for many
-/// minutes. No config surface yet, by design (reference parity).
-#[cfg(any(target_os = "linux", target_os = "android"))]
-const TCP_USER_TIMEOUT: Duration = Duration::from_secs(24);
-const TCP_PROBE_AFTER: Duration = Duration::from_secs(5);
-#[cfg(any(target_os = "linux", target_os = "android"))]
-const TCP_PROBE_INTERVAL: Duration = Duration::from_secs(2);
-#[cfg(any(target_os = "linux", target_os = "android"))]
-const TCP_PROBES: u32 = 12;
+/// minutes.
+///
+/// Each value is configurable on a TCP client or server section
+/// (`tcp_keepalive_idle_secs`, `tcp_keepalive_interval_secs`,
+/// `tcp_keepalive_probes`, `tcp_user_timeout_secs`; Python has no such
+/// keys and ignores them). The options are local socket state, never on
+/// the wire. The reason to move them is a phone on cellular: a probe every
+/// 5 s is shorter than the modem's high power tail (about 10 s), so an
+/// idle connection keeps the modem awake for good, and a server's probes
+/// reach a phone even while it sleeps (1176).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Off Linux and Android only `idle` reaches the socket (see
+// `apply_liveness_sockref`); the rest is still parsed and range-checked.
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+pub(crate) struct TcpLiveness {
+    /// Idle time before the first keepalive probe (`TCP_KEEPIDLE`).
+    pub idle: Duration,
+    /// Time between unanswered probes (`TCP_KEEPINTVL`).
+    pub interval: Duration,
+    /// Unanswered probes before the kernel drops the connection
+    /// (`TCP_KEEPCNT`).
+    pub probes: u32,
+    /// Longest time sent data may stay unacknowledged (`TCP_USER_TIMEOUT`);
+    /// `None` leaves the kernel default.
+    pub user_timeout: Option<Duration>,
+}
 
-/// Apply the liveness options above to a TCP socket (std or tokio).
+impl Default for TcpLiveness {
+    fn default() -> Self {
+        Self {
+            idle: Duration::from_secs(DEFAULT_TCP_KEEPALIVE_IDLE_SECS),
+            interval: Duration::from_secs(DEFAULT_TCP_KEEPALIVE_INTERVAL_SECS),
+            probes: DEFAULT_TCP_KEEPALIVE_PROBES,
+            user_timeout: Some(Duration::from_secs(DEFAULT_TCP_USER_TIMEOUT_SECS)),
+        }
+    }
+}
+
+/// `TCP_PROBE_AFTER` (TCPInterface.py:85).
+pub(crate) const DEFAULT_TCP_KEEPALIVE_IDLE_SECS: u64 = 5;
+/// `TCP_PROBE_INTERVAL` (TCPInterface.py:86).
+pub(crate) const DEFAULT_TCP_KEEPALIVE_INTERVAL_SECS: u64 = 2;
+/// `TCP_PROBES` (TCPInterface.py:87).
+pub(crate) const DEFAULT_TCP_KEEPALIVE_PROBES: u32 = 12;
+/// `TCP_USER_TIMEOUT` (TCPInterface.py:84).
+pub(crate) const DEFAULT_TCP_USER_TIMEOUT_SECS: u64 = 24;
+/// Linux's ceiling for `TCP_KEEPIDLE` and `TCP_KEEPINTVL`
+/// (`MAX_TCP_KEEPIDLE`, `MAX_TCP_KEEPINTVL`); a larger value makes the
+/// setsockopt fail and the socket keep the kernel default.
+pub(crate) const MAX_TCP_KEEPALIVE_SECS: u64 = 32_767;
+/// Linux's ceiling for `TCP_KEEPCNT` (`MAX_TCP_KEEPCNT`).
+pub(crate) const MAX_TCP_KEEPALIVE_PROBES: u32 = 127;
+
+impl TcpLiveness {
+    /// The liveness a section asks for, today's defaults for every key it
+    /// leaves out. `Err` names the key whose value the kernel would refuse:
+    /// a refused option fails silently at the socket (best-effort by
+    /// contract), so it has to be caught here, at start.
+    pub(crate) fn from_keys(
+        idle_secs: Option<u64>,
+        interval_secs: Option<u64>,
+        probes: Option<u32>,
+        user_timeout_secs: Option<u64>,
+    ) -> Result<Self, String> {
+        let defaults = Self::default();
+        let secs = |key: &str, value: Option<u64>, default: Duration| match value {
+            None => Ok(default),
+            Some(v) if (1..=MAX_TCP_KEEPALIVE_SECS).contains(&v) => Ok(Duration::from_secs(v)),
+            Some(v) => Err(format!(
+                "{key} must be 1 to {MAX_TCP_KEEPALIVE_SECS} seconds, got {v}"
+            )),
+        };
+        let probes = match probes {
+            None => defaults.probes,
+            Some(p) if (1..=MAX_TCP_KEEPALIVE_PROBES).contains(&p) => p,
+            Some(p) => {
+                return Err(format!(
+                    "tcp_keepalive_probes must be 1 to {MAX_TCP_KEEPALIVE_PROBES}, got {p}"
+                ))
+            }
+        };
+        Ok(Self {
+            idle: secs("tcp_keepalive_idle_secs", idle_secs, defaults.idle)?,
+            interval: secs(
+                "tcp_keepalive_interval_secs",
+                interval_secs,
+                defaults.interval,
+            )?,
+            probes,
+            // Zero is the kernel's own word for "no user timeout".
+            user_timeout: match user_timeout_secs {
+                None => defaults.user_timeout,
+                Some(0) => None,
+                Some(v) => Some(Duration::from_secs(v)),
+            },
+        })
+    }
+}
+
+/// Apply `liveness` to a TCP socket (std or tokio).
 /// Best-effort by contract at the call sites: a socket that cannot take
 /// the options still works, it just falls back to kernel default
 /// dead-peer detection.
 #[cfg(unix)]
-fn apply_liveness_options<S: std::os::fd::AsFd>(stream: &S) -> io::Result<()> {
-    apply_liveness_sockref(socket2::SockRef::from(stream))
+fn apply_liveness_options<S: std::os::fd::AsFd>(
+    stream: &S,
+    liveness: &TcpLiveness,
+) -> io::Result<()> {
+    apply_liveness_sockref(socket2::SockRef::from(stream), liveness)
 }
 
 #[cfg(windows)]
-fn apply_liveness_options<S: std::os::windows::io::AsSocket>(stream: &S) -> io::Result<()> {
-    apply_liveness_sockref(socket2::SockRef::from(stream))
+fn apply_liveness_options<S: std::os::windows::io::AsSocket>(
+    stream: &S,
+    liveness: &TcpLiveness,
+) -> io::Result<()> {
+    apply_liveness_sockref(socket2::SockRef::from(stream), liveness)
 }
 
 /// Shared body. The keepalive interval/retry tuning and `TCP_USER_TIMEOUT` are
 /// Linux/Android-only (socket2 gates the setters; `TCP_USER_TIMEOUT` is a Linux
 /// socket option). Other platforms get the universal idle-keepalive and fall
 /// back to kernel-default dead-peer detection (best-effort by contract).
-fn apply_liveness_sockref(sock: socket2::SockRef<'_>) -> io::Result<()> {
+fn apply_liveness_sockref(sock: socket2::SockRef<'_>, liveness: &TcpLiveness) -> io::Result<()> {
     use socket2::TcpKeepalive;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         let keepalive = TcpKeepalive::new()
-            .with_time(TCP_PROBE_AFTER)
-            .with_interval(TCP_PROBE_INTERVAL)
-            .with_retries(TCP_PROBES);
+            .with_time(liveness.idle)
+            .with_interval(liveness.interval)
+            .with_retries(liveness.probes);
         sock.set_tcp_keepalive(&keepalive)?;
-        sock.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT))?;
+        sock.set_tcp_user_timeout(liveness.user_timeout)?;
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
-        sock.set_tcp_keepalive(&TcpKeepalive::new().with_time(TCP_PROBE_AFTER))?;
+        sock.set_tcp_keepalive(&TcpKeepalive::new().with_time(liveness.idle))?;
     }
     Ok(())
 }
@@ -217,6 +313,9 @@ pub(crate) struct TcpClientConfig {
     /// Run against each freshly created connect socket before it dials. `None`
     /// skips the hook. See [`crate::socket_hook::OutboundSocketHook`].
     pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    /// Keepalive and user timeout of every connection this client makes
+    /// (1176).
+    pub liveness: TcpLiveness,
 }
 
 /// Default per-attempt connect timeout for reconnecting TCP clients.
@@ -363,7 +462,7 @@ pub(crate) fn spawn_tcp_interface<A: ToSocketAddrs>(
     let std_stream = std::net::TcpStream::connect_timeout(&addr, connect_timeout)?;
     std_stream.set_nonblocking(true)?;
     std_stream.set_nodelay(true)?;
-    apply_liveness_options(&std_stream).ok();
+    apply_liveness_options(&std_stream, &TcpLiveness::default()).ok();
     let stream = tokio::net::TcpStream::from_std(std_stream)?;
 
     Ok(spawn_tcp_interface_from_stream(
@@ -418,6 +517,8 @@ pub(crate) struct TcpServerConfig {
     pub announce_rate: (Option<u32>, Option<u32>, Option<u32>),
     /// Per-source and total caps and the silent timeouts (1190).
     pub admission: AdmissionConfig,
+    /// Keepalive and user timeout of every accepted connection (1176).
+    pub liveness: TcpLiveness,
 }
 
 /// A server connection's place in its listener's [`ConnTracker`] (1190).
@@ -453,6 +554,7 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
         inventory,
         announce_rate,
         admission,
+        liveness,
     } = config;
 
     // A server holds one descriptor per client: use the hard limit, and do
@@ -564,7 +666,7 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
                                 },
                             );
                             stream.set_nodelay(true).ok();
-                            apply_liveness_options(&stream).ok();
+                            apply_liveness_options(&stream, &liveness).ok();
                             let mut handle = spawn_tcp_interface_from_stream(
                                 id, name.clone(), stream, buffer_size, corrupt_every,
                                 Some(lease),
@@ -727,6 +829,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
             config.socks_target,
             config.shutdown,
             config.outbound_socket_hook,
+            config.liveness,
         )
         .await;
     });
@@ -892,6 +995,7 @@ async fn tcp_client_reconnect_task(
     socks_target: Option<(String, u16)>,
     shutdown: Option<oneshot::Receiver<()>>,
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    liveness: TcpLiveness,
 ) {
     // A runtime-added interface carries a detach signal; racing the reconnect
     // loop against it stops the loop at whatever await it is parked on (connect,
@@ -916,6 +1020,7 @@ async fn tcp_client_reconnect_task(
         ready,
         socks_target,
         outbound_socket_hook,
+        liveness,
     );
     match shutdown {
         Some(sd) => {
@@ -1028,6 +1133,7 @@ async fn tcp_client_reconnect_loop(
     ready: Arc<ReadySignal>,
     socks_target: Option<(String, u16)>,
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    liveness: TcpLiveness,
 ) {
     // Backoff DELIBERATELY DEVIATES from Python `RNS/Interfaces/TCPInterface.py`,
     // which uses `RECONNECT_WAIT = 5` and `RECONNECT_MAX_TRIES = None`: a fixed
@@ -1068,7 +1174,7 @@ async fn tcp_client_reconnect_loop(
         let connect_result = match connect_result {
             Ok((mut stream, addr)) => {
                 stream.set_nodelay(true).ok();
-                apply_liveness_options(&stream).ok();
+                apply_liveness_options(&stream, &liveness).ok();
                 match &socks_target {
                     Some((host, port)) => match tokio::time::timeout(
                         connect_timeout,
@@ -1425,6 +1531,131 @@ async fn tcp_interface_task(
 mod tests {
     use super::*;
 
+    /// Absent keys keep the reference's values (TCPInterface.py:84-87), so a
+    /// config without them behaves as before 1176.
+    #[test]
+    fn liveness_defaults_are_the_reference_values() {
+        let liveness = TcpLiveness::from_keys(None, None, None, None).expect("defaults");
+        assert_eq!(liveness, TcpLiveness::default());
+        assert_eq!(liveness.idle, Duration::from_secs(5));
+        assert_eq!(liveness.interval, Duration::from_secs(2));
+        assert_eq!(liveness.probes, 12);
+        assert_eq!(liveness.user_timeout, Some(Duration::from_secs(24)));
+    }
+
+    /// Every key moves its own value; zero turns the user timeout off; a
+    /// value the kernel would refuse is an error naming its key.
+    #[test]
+    fn liveness_keys_set_and_range_check_each_value() {
+        let liveness =
+            TcpLiveness::from_keys(Some(600), Some(30), Some(4), Some(0)).expect("in range");
+        assert_eq!(liveness.idle, Duration::from_secs(600));
+        assert_eq!(liveness.interval, Duration::from_secs(30));
+        assert_eq!(liveness.probes, 4);
+        assert_eq!(liveness.user_timeout, None);
+        for (keys, named) in [
+            ((Some(0), None, None, None), "tcp_keepalive_idle_secs"),
+            ((Some(32_768), None, None, None), "tcp_keepalive_idle_secs"),
+            ((None, Some(0), None, None), "tcp_keepalive_interval_secs"),
+            ((None, None, Some(0), None), "tcp_keepalive_probes"),
+            ((None, None, Some(128), None), "tcp_keepalive_probes"),
+        ] {
+            let error =
+                TcpLiveness::from_keys(keys.0, keys.1, keys.2, keys.3).expect_err("out of range");
+            assert!(error.contains(named), "{error}");
+        }
+    }
+
+    /// The values reach the socket: read back from the kernel.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn liveness_lands_on_the_socket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let liveness = TcpLiveness {
+            idle: Duration::from_secs(600),
+            interval: Duration::from_secs(30),
+            probes: 4,
+            user_timeout: Some(Duration::from_secs(90)),
+        };
+        apply_liveness_options(&stream, &liveness).expect("apply");
+        let sock = socket2::SockRef::from(&stream);
+        assert!(sock.keepalive().unwrap());
+        assert_eq!(sock.tcp_keepalive_time().unwrap(), Duration::from_secs(600));
+        assert_eq!(
+            sock.tcp_keepalive_interval().unwrap(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(sock.tcp_keepalive_retries().unwrap(), 4);
+        assert_eq!(
+            sock.tcp_user_timeout().unwrap(),
+            Some(Duration::from_secs(90))
+        );
+    }
+
+    /// A reconnecting client puts its configured liveness on the socket it
+    /// dials, not the defaults: the socket is read back through the fd the
+    /// outbound hook saw, which is the same socket once it connected.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[tokio::test]
+    async fn a_client_applies_its_configured_liveness() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(None::<std::os::fd::RawFd>));
+        let recorded = Arc::clone(&seen);
+        let hook: crate::socket_hook::OutboundSocketHook =
+            Arc::new(move |fd| *recorded.lock().unwrap() = Some(fd));
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
+            id: InterfaceId(0),
+            name: "liveness".to_string(),
+            target: addr.into(),
+            resolver: None,
+            buffer_size: 16,
+            corrupt_every: None,
+            reconnect_interval: Duration::from_millis(100),
+            max_reconnect_tries: None,
+            reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
+            connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
+            reconnect_notify: None,
+            tunnel_notify: None,
+            socks_target: None,
+            shutdown: Some(shutdown_rx),
+            outbound_socket_hook: Some(hook),
+            liveness: TcpLiveness {
+                idle: Duration::from_secs(900),
+                interval: Duration::from_secs(60),
+                probes: 3,
+                user_timeout: None,
+            },
+        });
+        let (_peer, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("dialled")
+            .unwrap();
+        // The options go on right after connect; wait for the interface to
+        // say it is online, which it does after that.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !handle.counters.is_online() {
+            assert!(Instant::now() < deadline, "client never came online");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let fd = seen.lock().unwrap().expect("hook saw the socket");
+        // SAFETY: the interface task owns this socket and holds it open
+        // while `handle` and the shutdown sender live, which is to the end
+        // of this test.
+        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        let sock = socket2::SockRef::from(&borrowed);
+        assert_eq!(sock.tcp_keepalive_time().unwrap(), Duration::from_secs(900));
+        assert_eq!(
+            sock.tcp_keepalive_interval().unwrap(),
+            Duration::from_secs(60)
+        );
+        assert_eq!(sock.tcp_keepalive_retries().unwrap(), 3);
+        assert_eq!(sock.tcp_user_timeout().unwrap(), None);
+        drop(handle);
+    }
+
     /// The hook fires once, with a real fd, before the connect socket dials.
     #[cfg(unix)]
     #[tokio::test]
@@ -1475,6 +1706,7 @@ mod tests {
             socks_target: None,
             shutdown: None,
             outbound_socket_hook: Some(hook),
+            liveness: TcpLiveness::default(),
         });
 
         let closed = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv()).await;
@@ -1745,6 +1977,7 @@ mod tests {
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
             announce_rate: (None, None, None),
             admission: AdmissionConfig::default(),
+            liveness: TcpLiveness::default(),
         })
         .unwrap();
 
@@ -1791,6 +2024,7 @@ mod tests {
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
             announce_rate: (None, None, None),
             admission: AdmissionConfig::default(),
+            liveness: TcpLiveness::default(),
         })
         .unwrap();
 
@@ -1844,6 +2078,7 @@ mod tests {
                 inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
                 announce_rate: (None, None, None),
                 admission: AdmissionConfig::default(),
+                liveness: TcpLiveness::default(),
             })
             .unwrap();
 
@@ -1888,6 +2123,7 @@ mod tests {
             socks_target: None,
             shutdown: None,
             outbound_socket_hook: None,
+            liveness: TcpLiveness::default(),
         });
 
         // 3. Accept first connection, send an HDLC-framed packet
@@ -1965,6 +2201,7 @@ mod tests {
             socks_target: None,
             shutdown: None,
             outbound_socket_hook: None,
+            liveness: TcpLiveness::default(),
         });
 
         // Wait for the reconnect task to give up (2 attempts * 100ms + overhead)
@@ -2029,6 +2266,7 @@ mod tests {
             socks_target: Some(("peer.example".to_string(), 4242)),
             shutdown: None,
             outbound_socket_hook: None,
+            liveness: TcpLiveness::default(),
         });
 
         let pkt = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv())
@@ -2062,6 +2300,7 @@ mod tests {
             socks_target: None,
             shutdown: Some(shutdown_rx),
             outbound_socket_hook: None,
+            liveness: TcpLiveness::default(),
         });
         let _ = tokio::time::timeout(Duration::from_millis(500), listener.accept()).await;
         drop(shutdown_tx); // resolves the receiver -> loop stops -> incoming closes

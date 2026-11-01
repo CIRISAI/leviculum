@@ -1024,6 +1024,13 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         "silent_timeout_secs" => iface.silent_timeout_secs = value.parse().ok(),
         "silent_timeout_pressure_secs" => iface.silent_timeout_pressure_secs = value.parse().ok(),
         "pressure_fraction" => iface.pressure_fraction = value.parse().ok(),
+        // TCP liveness (1176), on a client or a server. No Python equivalent:
+        // the reference fixes the values (TCPInterface.py:84-87) and ignores
+        // the keys. Range-checked when the interface is built.
+        "tcp_keepalive_idle_secs" => iface.tcp_keepalive_idle_secs = value.parse().ok(),
+        "tcp_keepalive_interval_secs" => iface.tcp_keepalive_interval_secs = value.parse().ok(),
+        "tcp_keepalive_probes" => iface.tcp_keepalive_probes = value.parse().ok(),
+        "tcp_user_timeout_secs" => iface.tcp_user_timeout_secs = value.parse().ok(),
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
         // bind, id_callsign, modulation, ...) must never make lnsd reject an
