@@ -296,6 +296,9 @@ leviculum_ui::catalogue! {
     October = "scene_october", "October", "Oktober";
     November = "scene_november", "November", "November";
     December = "scene_december", "December", "Dezember";
+    // A start with no daemon to attach to (1265, walk finding 5): one
+    // sentence and the one command, the stack's detail behind --verbose.
+    NeedsService = "needs_service", "Loquax needs its network service. Start it with: %1$s", "Loquax braucht seinen Netzwerkdienst. Starte ihn mit: %1$s";
 }
 
 /// [`leviculum_ui::strings::format`] over Loquax's catalogue.

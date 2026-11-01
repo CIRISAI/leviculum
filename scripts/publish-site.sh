@@ -208,7 +208,7 @@ trap 'rm -rf -- "$WORK"' EXIT
 # One flat tar: the dist/ files under their own names, plus BUILD_ID. Flat
 # because the receiver refuses any member name holding a `/` — a directory
 # member is a place for a name to hide. Uncompressed because every file in
-# dist/ is a .deb or a .tar.gz and is already compressed; gzip here would
+# dist/ is a .deb, a .tar.gz or an .apk and is already compressed; gzip here would
 # buy a fraction of a percent and cost the CPU of both ends.
 printf '%s\n' "$BUILD_ID" >"$WORK/BUILD_ID"
 tar -cf "$WORK/upload.tar" -C "$DIST" -- "${names[@]}"

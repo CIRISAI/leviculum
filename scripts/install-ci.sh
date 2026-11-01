@@ -385,6 +385,17 @@ command -v musl-gcc >/dev/null 2>&1 ||
     echo "[install-ci] Hint: sudo apt install musl-tools (needed for the musl .deb builds)"
 echo "[install-ci] nightly packaging: musl targets + cargo-deb + cargo-zigbuild + ziglang (just nightly-publish)"
 
+# 6b4. The nightly's Android APKs (1267, scripts/build-nightly-apk.sh): the
+#     JDK, the three Android rustup targets, and the SDK pieces and NDK
+#     loquax-android/install-toolchain.sh fetches (2.3 GB, checked against
+#     Google's SHA-1s). `just nightly-publish` refuses without them, one line
+#     per missing piece.
+command -v javac >/dev/null 2>&1 ||
+    echo "[install-ci] Hint: sudo apt install default-jdk-headless unzip (the nightly's APK build)"
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+bash "$REPO_DIR/loquax-android/install-toolchain.sh"
+echo "[install-ci] nightly APKs: Android rustup targets + SDK and NDK (scripts/build-nightly-apk.sh)"
+
 # 6c. ESP32-S3 (Xtensa) firmware toolchain.  ESP32-S3 is an Xtensa part,
 #     not RISC-V, so stock rustc cannot target it at all: there is no
 #     `rustup target add xtensa-esp32s3-none-elf`, and the esp-rs fork of

@@ -40,9 +40,17 @@
 #   installs the libraries unpinned; we pin because this writes to a
 #   board, the same reason scripts/install-esptool.sh gives.
 #
+# DIAG BUILDS (1271)
+#
+#   `build heltec-v4 --diag` also applies scripts/patches/diag-rnode-firmware-
+#   *.patch on top of the product patches and writes to heltec-v4-diag/, so
+#   the product image is never overwritten by an instrumented one. A diag
+#   patch is a measuring tool for one investigation, never flashed by
+#   default: `just flash-rnode-built` only ever takes heltec-v4/.
+#
 # Usage:
 #   scripts/build-rnode-firmware.sh setup        # install the toolchain
-#   scripts/build-rnode-firmware.sh build heltec-v4
+#   scripts/build-rnode-firmware.sh build heltec-v4 [--diag]
 #
 # The toolchain lives under LEVICULUM_RNODE_TOOLS (default ~/.rnode-tools,
 # beside the esptool venv); the core and libraries in arduino-cli's own data
@@ -123,8 +131,13 @@ board_row() {
 }
 
 cmd_build() {
-    local board="${1:-}" row fqbn model
+    local board="${1:-}" diag="${2:-}" row fqbn model suffix=""
     [[ -n "$board" ]] || die "build needs a board (heltec-v4)"
+    case "$diag" in
+        "") ;;
+        --diag) suffix="-diag" ;;
+        *) die "unknown build option '$diag' (--diag)" ;;
+    esac
     # Resolved into a variable first: a die() inside a here-string's command
     # substitution would leave the caller compiling with an empty fqbn.
     row="$(board_row "$board")" || exit 1
@@ -132,7 +145,7 @@ cmd_build() {
     [[ -x "$ARDUINO_CLI" && -f "$CONFIG" ]] || die "no toolchain (run: just rnode-firmware-setup)"
     [[ -f "$SRC/RNode_Firmware.ino" ]] || die "no sources at $SRC (git submodule update --init reference/RNode_Firmware)"
 
-    local sketch="$OUT/RNode_Firmware" build="$OUT/build-$board" dest="$OUT/$board"
+    local sketch="$OUT/RNode_Firmware" build="$OUT/build-$board$suffix" dest="$OUT/$board$suffix"
     rm -rf "$sketch" "$build" "$dest"
     mkdir -p "$sketch" "$dest"
     # The tracked sources only; .git and any local build products stay behind.
@@ -144,6 +157,13 @@ cmd_build() {
         say "applying $(basename "$p")"
         patch -p1 --forward --batch -d "$sketch" < "$p"
     done
+    if [[ -n "$suffix" ]]; then
+        for p in "$REPO_DIR"/scripts/patches/diag-rnode-firmware-*.patch; do
+            [[ -e "$p" ]] || continue
+            say "applying diag $(basename "$p")"
+            patch -p1 --forward --batch -d "$sketch" < "$p"
+        done
+    fi
 
     ac compile --fqbn "$fqbn" \
         --build-path "$build" --output-dir "$dest" \

@@ -145,7 +145,7 @@
     <string name="next">Weiter</string>
     <string name="have_address">Ich habe schon eine Loquax-Adresse</string>
     <string name="computer_title">Richte dein Postfach auf dem Computer ein</string>
-    <string name="computer_text">Installiere Loquax auf dem Computer und starte dort `loquax home admit --server`. Er zeigt einen Code. Scanne ihn hier oder füge ihn ein.</string>
+    <string name="computer_text">Starte auf deinem Computer: loquax mailbox setup\nEr zeigt einen Code. Scanne ihn hier oder füge ihn ein. So installierst du es: leviculum.network/mailbox</string>
     <string name="paste_code">Code einfügen</string>
     <string name="phone_until_then">Bis dahin dieses Telefon nehmen</string>
     <string name="background_title">Lass Loquax im Hintergrund laufen</string>

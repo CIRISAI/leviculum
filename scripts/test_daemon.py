@@ -598,6 +598,10 @@ class TestDaemon:
                     "ifac_identity": hasattr(iface, 'ifac_identity') and iface.ifac_identity is not None,
                     "held_announces": len(held) if held is not None else 0,
                     "burst_active": bool(getattr(iface, 'ic_burst_active', False)),
+                    # 1274: the announces this interface counted, the samples
+                    # its burst detection reads (Interface.py:259, :279): a
+                    # third in a burst of a new interface is what trips it.
+                    "announces_in": len(getattr(iface, 'ia_freq_deque', ())),
                     # Codeberg #93: the interface's effective bitrate. A
                     # configured bitrate overrides the medium default here
                     # (Reticulum.py:887).

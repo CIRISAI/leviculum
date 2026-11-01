@@ -80,8 +80,9 @@ mod shell;
 pub(crate) use shell::tcp_section;
 #[cfg(feature = "std")]
 pub use shell::{
-    attach, attach_as, attach_leaf, attach_mesh, parse_server, AttachConfig, AttachError, Attached,
-    HomeRequest, InProcessOutbox, LeafConfig, MeshConfig, Role,
+    attach, attach_as, attach_leaf, attach_mesh, locale, parse_server, start_command,
+    start_command_here, AttachConfig, AttachError, Attached, HomeRequest, InProcessOutbox,
+    LeafConfig, MeshConfig, Role, LNSD_UNITS,
 };
 
 /// How soon the engine asks the driver to come back.

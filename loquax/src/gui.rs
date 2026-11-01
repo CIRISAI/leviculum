@@ -1692,8 +1692,6 @@ impl canvas::Program<Message> for MapCanvas<'_> {
     }
 }
 
-/// The language the desktop's locale names (`LC_ALL`, `LC_MESSAGES`,
-/// `LANG`, the first one set): the scene's words are said in it.
 /// What the held microphone follows (1276): the pointer's moves and the
 /// left button's release, anywhere in the window.
 fn held_pointer(
@@ -1712,12 +1710,10 @@ fn held_pointer(
     }
 }
 
+/// The language the desktop's locale names: the scene's words are said in
+/// it.
 fn locale() -> Lang {
-    ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .find(|value| !value.is_empty())
-        .map_or(Lang::En, |tag| Lang::of_tag(&tag))
+    loquax::engine::locale()
 }
 
 /// A key iced reports as the keymap's key (1218): the named keys the

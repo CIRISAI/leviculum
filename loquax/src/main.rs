@@ -97,6 +97,13 @@ struct Args {
     #[command(flatten)]
     tui: TuiArgs,
 
+    /// When no daemon answers, print what the stack said (the instance, its
+    /// socket, the daemons that would serve it) instead of the one sentence
+    /// that names the command to start it. Taken before or after a
+    /// subcommand.
+    #[arg(long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Option<SubCommand>,
 }
@@ -144,6 +151,11 @@ enum SubCommand {
 #[cfg(feature = "tui")]
 #[derive(Subcommand, Debug)]
 enum MailboxCommand {
+    /// Set up this computer as your mailbox, in five steps: where it keeps
+    /// your mail, start on boot, how your phone reaches it, the code to
+    /// scan, and what to press on the phone. Asks what no flag answers;
+    /// running it again keeps what is set and shows a new code.
+    Setup(SetupArgs),
     /// Run Loquax Mailbox in the foreground until SIGINT or SIGTERM:
     /// receive for this identity, archive every message, answer the
     /// admitted devices, collect from the propagation node. `loquax
@@ -167,6 +179,9 @@ enum MailboxCommand {
         /// scan or one paste and tries this address first.
         #[arg(long)]
         server: Option<String>,
+        /// Print the code and its QR code only, for `mailbox setup`.
+        #[arg(long, hide = true)]
+        code_only: bool,
     },
     /// On the new device: redeem a code from `mailbox admit` and become a
     /// client of that Loquax Mailbox.
@@ -183,6 +198,44 @@ enum MailboxCommand {
     /// start of its hash as `mailbox tokens` lists it (four hex characters
     /// are enough when they are unique).
     RevokeToken { prefix: String },
+}
+
+/// `loquax mailbox setup`'s answers (`loquax::home::setup`).
+#[cfg(feature = "tui")]
+#[derive(clap::Args, Debug)]
+struct SetupArgs {
+    /// Where the mailbox keeps your mail: `system`, in
+    /// /var/lib/loquax-mailbox, run by the packaged service from every boot
+    /// on (the default where the loquax package is installed), or
+    /// `account`, in your own Loquax directory, started with `loquax
+    /// mailbox run`.
+    #[arg(long, value_name = "WHERE")]
+    store: Option<String>,
+
+    /// How a phone reaches the mailbox: `rendezvous` (the default), through
+    /// leviculum.network with nothing to set up on a router, or `fixed`,
+    /// at --address.
+    #[arg(long, value_name = "HOW")]
+    reach: Option<String>,
+
+    /// The fixed address, `host:port`, as a phone reaches this computer's
+    /// port for phones (4243); implies `--reach fixed`.
+    #[arg(long, value_name = "HOST:PORT")]
+    address: Option<String>,
+
+    /// The name the device is admitted under.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Ask nothing: every question no flag answers takes its default.
+    #[arg(long)]
+    yes: bool,
+
+    /// Reticulum config directory, where the port for phones goes for a
+    /// fixed address on a mailbox in your account (default: the platform
+    /// default; the system mailbox's is /etc/reticulum).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[cfg(feature = "tui")]
@@ -551,6 +604,24 @@ fn failure(message: impl std::fmt::Display, outcome: &str) -> ExitCode {
     ExitCode::from(EXIT_FAILURE)
 }
 
+/// `--verbose`, set once from the command line before any subcommand runs.
+static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Attaching failed: one sentence and the command that starts the daemon
+/// (1265, walk finding 5), or with `--verbose` what the stack said.
+fn no_daemon(error: &loquax::engine::AttachError) -> ExitCode {
+    match VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+        true => failure(error, "no-daemon"),
+        false => failure(
+            error.brief(
+                loquax::engine::locale(),
+                loquax::engine::start_command_here(),
+            ),
+            "no-daemon",
+        ),
+    }
+}
+
 /// The instance name decides the abstract socket (`\0rns/{name}`) the daemon
 /// listens on, so it comes from the daemon's own config file. Same derivation
 /// `lncp`, `lnstatus` and `leviculum-lxmf-node` use.
@@ -658,7 +729,7 @@ fn parse_args() -> Args {
         // the group id the flattened `TuiArgs` brings, which counts as given.
         let stray = command
             .get_arguments()
-            .filter(|arg| arg.get_id() != "config")
+            .filter(|arg| arg.get_id() != "config" && arg.get_id() != "verbose")
             .find(|arg| {
                 matches.value_source(arg.get_id().as_str()) == Some(ValueSource::CommandLine)
             })
@@ -678,6 +749,7 @@ fn parse_args() -> Args {
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = parse_args();
+    VERBOSE.store(args.verbose, std::sync::atomic::Ordering::Relaxed);
     // Once, before any subcommand resolves the state directory: a first
     // start after the rename must find the address it had as lnmsg.
     match identity::migrate_legacy_home() {
@@ -1152,7 +1224,7 @@ async fn run(args: SendArgs) -> ExitCode {
     .await
     {
         Ok(attached) => attached,
-        Err(error) => return failure(error, "no-daemon"),
+        Err(error) => return no_daemon(&error),
     };
 
     let mut options = SendOptions::new(instance.clone(), Duration::from_secs(args.timeout));
@@ -1303,7 +1375,7 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
     .await
     {
         Ok(attached) => attached,
-        Err(error) => return failure(error, "no-daemon"),
+        Err(error) => return no_daemon(&error),
     };
 
     let mut options = FetchOptions::new(instance.clone(), Duration::from_secs(args.timeout));
@@ -1478,7 +1550,7 @@ async fn run_client_send(
     .await
     {
         Ok(attached) => attached,
-        Err(error) => return failure(error, "no-daemon"),
+        Err(error) => return no_daemon(&error),
     };
     let node = attached.node();
     let bytes = message.body.len();
@@ -1648,6 +1720,7 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
 async fn run_mailbox(command: MailboxCommand) -> ExitCode {
     match command {
         MailboxCommand::Run(args) => return run_daemon(args).await,
+        MailboxCommand::Setup(args) => return Box::pin(run_setup(args)).await,
         // Through systemctl, before anything is made under this user's home.
         MailboxCommand::Enable => return systemctl(&["enable", "--now", MAILBOX_UNIT]),
         MailboxCommand::Disable => return systemctl(&["disable", "--now", MAILBOX_UNIT]),
@@ -1688,7 +1761,11 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
     };
     let now = leviculum_std::local_time::unix_now_secs();
     match command {
-        MailboxCommand::Admit { name, server } => on_home_node(&|store| {
+        MailboxCommand::Admit {
+            name,
+            server,
+            code_only,
+        } => on_home_node(&|store| {
             let name = match &name {
                 Some(name) => name.trim().to_string(),
                 None => match store.devices() {
@@ -1699,7 +1776,16 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
             if name.is_empty() {
                 return usage("--name may not be empty");
             }
-            let server = server.as_deref().map(str::trim);
+            let config = match loquax::config::load(&home) {
+                Ok(config) => config,
+                Err(error) => return usage(error.to_string()),
+            };
+            // Without --server, the fixed address `mailbox setup` kept
+            // (`home_address`, 1266) is the one the codes carry.
+            let server = server
+                .as_deref()
+                .or(config.home_address.as_deref())
+                .map(str::trim);
             if let Some(server) = server {
                 if let Err(error) = loquax::engine::parse_server(server) {
                     return usage(format!("--server: {error}"));
@@ -1712,10 +1798,6 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
             // The rendezvous list the phone tries in order (1196): this
             // mailbox's own phone port first when --server names it, then
             // the list the mailbox dials itself, on the phones' ports.
-            let config = match loquax::config::load(&home) {
-                Ok(config) => config,
-                Err(error) => return usage(error.to_string()),
-            };
             let list = loquax::home::admit::computer_list(&config, server);
             // The phone's "Link a device" opens its admissions the same way
             // (1264).
@@ -1725,15 +1807,24 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
             };
             let code = &admission.code;
             let text = admission.text();
+            let qr = loquax::home::qr::lines(&text);
+            if code_only {
+                println!("{text}\n");
+                match qr {
+                    Ok(lines) => println!("{}", lines.join("\n")),
+                    Err(error) => eprintln!("loquax: no QR code: {error}"),
+                }
+                return ExitCode::SUCCESS;
+            }
             println!("Admission code for {name:?}, good for one device, once:\n\n{text}\n");
-            match loquax::home::qr::lines(&text) {
+            match qr {
                 Ok(lines) => println!("{}\n", lines.join("\n")),
                 Err(error) => eprintln!("loquax: no QR code: {error}"),
             }
             match server.is_some() || !admission.list.is_empty() {
                 true => println!(
-                    "On a phone: scan it with a QR reader and share it to Loquax, or paste it \
-                     into Loquax's join screen."
+                    "On a phone, in Loquax: \"On a computer at home\", then \"Scan the code\"; \
+                     or paste it into the join screen."
                 ),
                 false => println!(
                     "On a phone: paste it, with this node's address; --server puts that in the \
@@ -1850,9 +1941,10 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
         }
         MailboxCommand::Join(args) => run_join(home, client, args).await,
         // Dispatched above, before the state directory is made.
-        MailboxCommand::Run(_) | MailboxCommand::Enable | MailboxCommand::Disable => {
-            ExitCode::SUCCESS
-        }
+        MailboxCommand::Run(_)
+        | MailboxCommand::Setup(_)
+        | MailboxCommand::Enable
+        | MailboxCommand::Disable => ExitCode::SUCCESS,
     }
 }
 
@@ -1878,6 +1970,368 @@ fn systemctl(args: &[&str]) -> ExitCode {
         ),
         Err(error) => failure(format!("systemctl: {error}"), "failed"),
     }
+}
+
+/// Ask one numbered question on stdin: the number typed, or `default` on
+/// an empty line or the end of input. `None` when the answer is no choice.
+#[cfg(feature = "tui")]
+fn choose(choices: usize, default: usize) -> Option<usize> {
+    let typed = prompt(&format!("     Choose 1 or {choices} [{default}]: "));
+    match typed.as_str() {
+        "" => Some(default),
+        text => text
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=choices).contains(n)),
+    }
+}
+
+/// Print `question` without a newline and read one line; empty at the end
+/// of input, so a pipe that runs dry takes the defaults.
+#[cfg(feature = "tui")]
+fn prompt(question: &str) -> String {
+    use std::io::Write as _;
+    print!("{question}");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => {
+            println!();
+            String::new()
+        }
+        Ok(_) => line.trim().to_string(),
+    }
+}
+
+/// Whether this process runs as root: `/proc/self` belongs to the
+/// effective user.
+#[cfg(feature = "tui")]
+fn is_root() -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata("/proc/self").is_ok_and(|meta| meta.uid() == 0)
+}
+
+/// `loquax mailbox setup` (1266): the questions first, so the run that
+/// needs root asks nothing; then the steps, printed in their order.
+#[cfg(feature = "tui")]
+async fn run_setup(args: SetupArgs) -> ExitCode {
+    use loquax::home::setup::{self, Answers, Reach, Store};
+
+    println!("{}", setup::TITLE);
+    let account_dir = match identity::home_path() {
+        Ok(dir) => dir,
+        Err(error) => return failure(error, "no-home"),
+    };
+    let unit = setup::unit_installed();
+    let store = match args.store.as_deref().map(Store::parse) {
+        Some(Ok(store)) => store,
+        Some(Err(error)) => return usage(format!("--store: {error}")),
+        None if args.yes => Store::default_here(),
+        None => {
+            println!("{}", setup::store_question(&account_dir, unit));
+            let default = match Store::default_here() {
+                Store::System => 1,
+                Store::Account => 2,
+            };
+            match choose(2, default) {
+                Some(1) => Store::System,
+                Some(_) => Store::Account,
+                None => return usage("choose 1 or 2"),
+            }
+        }
+    };
+    if store == Store::System && !unit {
+        return failure(
+            "the system mailbox comes with the loquax package, which is not installed \
+             here; install it, or keep the mailbox in your account with --store account",
+            "failed",
+        );
+    }
+    let dir = match store {
+        Store::System => setup::system_dir(),
+        Store::Account => account_dir,
+    };
+    // What is set already is the default; the system mailbox's directory
+    // is not readable before sudo, which keeps the shipped default.
+    let held = loquax::config::load(&dir)
+        .map(|config| Reach::of(&config))
+        .unwrap_or(Reach::Rendezvous);
+    let address = match args.address.as_deref().map(setup::check_address) {
+        Some(Ok(address)) => Some(address),
+        Some(Err(error)) => return usage(format!("--address: {error}")),
+        None => None,
+    };
+    let reach = match (args.reach.as_deref().map(str::trim), address) {
+        (Some("rendezvous"), Some(_)) => {
+            return usage("--address goes with --reach fixed, not rendezvous")
+        }
+        (Some("rendezvous"), None) => Reach::Rendezvous,
+        (Some("fixed") | None, Some(address)) => Reach::Fixed(address),
+        (Some("fixed"), None) => match (&held, args.yes) {
+            (Reach::Fixed(address), _) => Reach::Fixed(address.clone()),
+            (_, true) => return usage("--reach fixed needs --address host:port"),
+            (_, false) => match ask_address() {
+                Ok(reach) => reach,
+                Err(code) => return code,
+            },
+        },
+        (Some(other), _) => return usage(format!("--reach: {other:?} is not rendezvous or fixed")),
+        (None, None) if args.yes => held,
+        (None, None) => {
+            let offered = match &held {
+                Reach::Fixed(address) => Some(address.clone()),
+                Reach::Rendezvous => setup::default_fixed(),
+            };
+            println!("{}", setup::reach_question(offered.as_deref()));
+            let default = match held {
+                Reach::Rendezvous => 1,
+                Reach::Fixed(_) => 2,
+            };
+            match choose(2, default) {
+                Some(1) => Reach::Rendezvous,
+                Some(_) => match ask_address() {
+                    Ok(reach) => reach,
+                    Err(code) => return code,
+                },
+                None => return usage("choose 1 or 2"),
+            }
+        }
+    };
+    let answers = Answers {
+        store,
+        reach,
+        name: args.name.map(|name| name.trim().to_string()),
+    };
+    println!();
+    match store {
+        Store::System if !is_root() => {
+            println!("{}\n", setup::sudo_why());
+            let exe = match std::env::current_exe() {
+                Ok(exe) => exe,
+                Err(error) => return failure(format!("this program's path: {error}"), "failed"),
+            };
+            let argv = setup::sudo_argv(&exe, &answers);
+            match std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .status()
+            {
+                Ok(status) => match status.code() {
+                    Some(0) => ExitCode::SUCCESS,
+                    Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(EXIT_FAILURE)),
+                    None => ExitCode::from(EXIT_FAILURE),
+                },
+                Err(error) => failure(format!("sudo: {error}"), "failed"),
+            }
+        }
+        Store::System => setup_system(&answers, &dir),
+        Store::Account => {
+            let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
+            Box::pin(setup_account(&answers, &dir, &config_dir)).await
+        }
+    }
+}
+
+/// The fixed address, asked with the LAN address offered.
+#[cfg(feature = "tui")]
+fn ask_address() -> Result<loquax::home::setup::Reach, ExitCode> {
+    let offered = loquax::home::setup::default_fixed();
+    let typed = prompt(&match &offered {
+        Some(address) => format!("     The address, host:port [{address}]: "),
+        None => "     The address, host:port: ".to_string(),
+    });
+    let text = match (typed.is_empty(), offered) {
+        (true, Some(address)) => address,
+        (true, None) => return Err(usage("a fixed address needs host:port")),
+        (false, _) => typed,
+    };
+    loquax::home::setup::check_address(&text)
+        .map(loquax::home::setup::Reach::Fixed)
+        .map_err(|error| usage(format!("the address: {error}")))
+}
+
+/// How long a code stays good on the mailbox in `dir`, in hours.
+#[cfg(feature = "tui")]
+fn token_hours(dir: &Path) -> u64 {
+    loquax::config::load(dir)
+        .ok()
+        .and_then(|config| config.home_token_hours)
+        .unwrap_or(loquax::home::DEFAULT_TOKEN_HOURS)
+}
+
+/// The steps for a mailbox in this account: no service, the settings and
+/// the code written as this user.
+#[cfg(feature = "tui")]
+async fn setup_account(
+    answers: &loquax::home::setup::Answers,
+    dir: &Path,
+    config_dir: &Path,
+) -> ExitCode {
+    use loquax::home::setup::{self, Reach};
+
+    match loquax::home::client::load_client(dir) {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            return failure(
+                "this account is a client of a Loquax Mailbox, so it cannot be one; \
+                 set the mailbox up where the identity is",
+                "client",
+            )
+        }
+        Err(error) => return failure(error, "no-home"),
+    }
+    if dir.join("identity").exists() {
+        let state = identity::load_or_create(&dir.join("identity"))
+            .ok()
+            .and_then(|id| loquax::engine::delivery_address(&id).ok());
+        if let Some(address) = state {
+            let devices = loquax::store::Store::open_in(dir, address)
+                .ok()
+                .and_then(|store| store.devices().ok())
+                .map(|devices| devices.len());
+            println!("{}\n", setup::already(&address::to_hex(&address), devices));
+        }
+    }
+    println!("{}", setup::store_done(answers.store, dir));
+    let changed = match setup::save_reach(dir, &answers.reach) {
+        Ok(changed) => changed,
+        Err(error) => return failure(format!("{}: {error}", dir.display()), "no-home"),
+    };
+    println!("{}", setup::service_done(None, changed));
+    let port = match &answers.reach {
+        Reach::Fixed(_) => Some(loquax::home::phone_server::add(config_dir)),
+        Reach::Rendezvous => None,
+    };
+    println!(
+        "{}",
+        setup::reach_done(answers.store, &answers.reach, changed, port.as_ref())
+    );
+    println!("{}", setup::code_head(token_hours(dir)));
+    let code = run_mailbox(MailboxCommand::Admit {
+        name: answers.name.clone(),
+        server: None,
+        code_only: true,
+    })
+    .await;
+    if code != ExitCode::SUCCESS {
+        return code;
+    }
+    println!("{}", setup::PHONE_LINE);
+    ExitCode::SUCCESS
+}
+
+/// The steps for the system mailbox, as root: the settings written and
+/// handed to the service's account, the port for phones, the code issued
+/// as that account, then the service enabled and (re)started. The code
+/// comes before the service so the identity is minted once, by the code,
+/// and never by two processes at the same time.
+#[cfg(feature = "tui")]
+fn setup_system(answers: &loquax::home::setup::Answers, dir: &Path) -> ExitCode {
+    use loquax::home::setup::{self, Reach, Service};
+    use std::os::unix::fs::MetadataExt as _;
+
+    let owner = match std::fs::metadata(dir) {
+        Ok(meta) => (meta.uid(), meta.gid()),
+        Err(error) => {
+            return failure(
+                format!(
+                    "{}: {error}; the loquax package makes it, so reinstalling it does",
+                    dir.display()
+                ),
+                "failed",
+            )
+        }
+    };
+    let identity_file = dir.join("identity");
+    if identity_file.exists() {
+        let address = identity::load_or_create(&identity_file)
+            .ok()
+            .and_then(|id| loquax::engine::delivery_address(&id).ok());
+        if let Some(address) = address {
+            println!("{}\n", setup::already(&address::to_hex(&address), None));
+        }
+    }
+    let changed = match setup::save_reach(dir, &answers.reach) {
+        Ok(changed) => changed,
+        Err(error) => return failure(format!("{}: {error}", dir.display()), "failed"),
+    };
+    let config_file = dir.join(loquax::config::CONFIG_FILE);
+    if config_file.exists() {
+        if let Err(error) = std::os::unix::fs::chown(&config_file, Some(owner.0), Some(owner.1)) {
+            return failure(format!("{}: {error}", config_file.display()), "failed");
+        }
+    }
+    let port = match &answers.reach {
+        Reach::Fixed(_) => {
+            let added = loquax::home::phone_server::add(Path::new(setup::SYSTEM_RETICULUM));
+            if matches!(added, loquax::home::phone_server::Added::Written(_)) {
+                let _ = std::process::Command::new("systemctl")
+                    .args(["try-restart", "lnsd.service"])
+                    .status();
+            }
+            Some(added)
+        }
+        Reach::Rendezvous => None,
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => return failure(format!("this program's path: {error}"), "failed"),
+    };
+    let argv = setup::admit_argv(&exe, dir, answers.name.as_deref());
+    let admitted = match std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .output()
+    {
+        Ok(output) if output.status.success() => output.stdout,
+        Ok(output) => {
+            return failure(
+                format!(
+                    "the code, as {}: {}",
+                    setup::SYSTEM_USER,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                "failed",
+            )
+        }
+        Err(error) => return failure(format!("runuser: {error}"), "failed"),
+    };
+    let quiet = |args: &[&str]| {
+        std::process::Command::new("systemctl")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    let enabled = quiet(&["is-enabled", "--quiet", setup::UNIT]);
+    let active = quiet(&["is-active", "--quiet", setup::UNIT]);
+    if !enabled {
+        let code = systemctl(&["enable", setup::UNIT]);
+        if code != ExitCode::SUCCESS {
+            return code;
+        }
+    }
+    let service = match (active, changed, enabled) {
+        (false, _, _) => match systemctl(&["start", setup::UNIT]) {
+            ExitCode::SUCCESS => Service::Started,
+            code => return code,
+        },
+        (true, true, _) => match systemctl(&["restart", setup::UNIT]) {
+            ExitCode::SUCCESS => Service::Restarted,
+            code => return code,
+        },
+        (true, false, false) => Service::Started,
+        (true, false, true) => Service::AlreadyOn,
+    };
+    println!("{}", setup::store_done(answers.store, dir));
+    println!("{}", setup::service_done(Some(service), changed));
+    println!(
+        "{}",
+        setup::reach_done(answers.store, &answers.reach, changed, port.as_ref())
+    );
+    println!("{}", setup::code_head(token_hours(dir)));
+    print!("{}", String::from_utf8_lossy(&admitted));
+    println!("{}", setup::PHONE_LINE);
+    ExitCode::SUCCESS
 }
 
 /// `loquax mailbox join <code>`.
@@ -1926,7 +2380,7 @@ async fn run_join(home: PathBuf, client: Option<[u8; 64]>, args: JoinArgs) -> Ex
     .await
     {
         Ok(attached) => attached,
-        Err(error) => return failure(error, "no-daemon"),
+        Err(error) => return no_daemon(&error),
     };
     let node = attached.node();
     let joined = loquax::home::client::join(
@@ -1991,7 +2445,7 @@ async fn run_client_fetch(home: PathBuf, public_key: [u8; 64], args: FetchArgs) 
     .await
     {
         Ok(attached) => attached,
-        Err(error) => return failure(error, "no-daemon"),
+        Err(error) => return no_daemon(&error),
     };
     let node = attached.node();
     let mut effects = Terminal::new(home.clone());

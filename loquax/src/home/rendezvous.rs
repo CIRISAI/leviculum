@@ -310,11 +310,16 @@ mod driver {
         /// home destination's path on every up.
         Phone(DestinationHash),
         /// The mailbox, on the entries' ordinary ports, as a peer: it asks
-        /// for nothing, its destinations are its own. On every up it
-        /// announces the home destination it carries, so the entry it moved
-        /// to holds the path before the first phone asks; `None` for a node
-        /// with none.
-        Peer(Option<DestinationHash>),
+        /// for nothing and announces nothing of its own. The node announces
+        /// every destination it announced before on each interface that
+        /// registers or reconnects (`handle_interface_up`, Block D), so the
+        /// entry it moved to hears the delivery and the home destination
+        /// once each. A third announce here was one too many: a stock Python
+        /// entry holds the third announce of a new interface's burst, and a
+        /// sender beside it learnt a mailbox whose delivery announce came
+        /// third only half a minute later (1274,
+        /// `reference/Reticulum/RNS/Transport.py:1705`).
+        Peer,
     }
 
     /// What [`run`] needs: the node, the entries as `host:port`, already
@@ -493,11 +498,6 @@ mod driver {
                     rotation.up(now);
                     tell(index, true);
                     said(&host, port, "up", index);
-                    if let Side::Peer(Some(home)) = dial.side {
-                        if let Err(error) = dial.node.announce_destination(&home, None).await {
-                            tracing::warn!("HOME announce on the rendezvous: {error}");
-                        }
-                    }
                     if let Side::Phone(home) = dial.side {
                         // Rule 2: the path, asked for at once on every up,
                         // whether a path is held or not; one learned

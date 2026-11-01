@@ -612,12 +612,40 @@ pairs. The noise floor and CSMA readings were never affected, because
 `currentRssi()` was already right; nRF52 and AVR RNodes take the argument-free
 `packetRssi()` and were right too.
 
-**Not fixed by the patch, measured on the same board:** within minutes
-of a boot the V4 can be deaf and unreadable on the air while it still
-radiates (peers read its channel up to +3 dBm at a 2 dBm setting and decode
-nothing). Mark's unmodified 1.86 image behaves the same way, so it is not
-this patch. A `rig levels` round taken right after flashing the V4 shows it
-with no pairs at all; give it a few minutes, or read the round again.
+**A board in TNC mode ignores the host's radio settings until its radio
+restarts.** For a day the V4 looked deaf for minutes after every boot, and
+Mark's 1.86 image did the same. It was not the radio and not the patch: the
+V4's EEPROM held a TNC configuration (869.463 MHz, SF8, 22 dBm). With one,
+the firmware loads it at boot, sets `op_mode = MODE_TNC` and starts the
+radio on it (`reference/RNode_Firmware/RNode_Firmware.ino:1554-1557`).
+From then on every host setter only stores the value: the frequency
+handler applies it under `if (op_mode == MODE_HOST)`
+(`reference/RNode_Firmware/RNode_Firmware.ino:830`), and bandwidth, power,
+SF and CR are guarded the same way. `op_mode` never returns to host mode.
+The stored set reaches the radio only through `startRadio()`, which runs
+`begin()` and applies all of it, and only when the radio is off
+(`reference/RNode_Firmware/RNode_Firmware.ino:510`). A host that writes
+the parameters and then `RADIO_STATE_ON` onto a running TNC board, as
+Python's `initRadio` does
+(`reference/Reticulum/RNS/Interfaces/RNodeInterface.py:470-478`), gets
+every readback echoed as asked while the board stays on its EEPROM PHY:
+it decodes nothing from the cell and sends at 22 dBm where the cell asked
+for 2 (peers read it up to +3 dBm). Our lnsd is immune, because it sends
+`RADIO_STATE_OFF` first (`leviculum-std/src/interfaces/rnode.rs:1975`);
+raw KISS drivers that do not, and periculum's listener after a fresh
+boot, were hit. "Works again after minutes" was whichever run first
+turned the radio off and on.
+
+Measured 2026-11-01 (order 1271), against the Heltec V3: five boots in
+TNC mode, 0 of 9 probes either way at t+5 s and t+120 s; at the EEPROM
+PHY in the same minute, 9 of 9 both ways; after one `RADIO_STATE_OFF`,
+9 of 9 at the cell's PHY. Then `rnodeconf -N` (normal, host-controlled
+mode, as every other rig RNode already was): ten of ten boots, five hard
+and five soft, 9 of 9 both ways from t+5 s. The rig's V4 now runs in
+normal mode; a board put back into TNC mode (`rnodeconf -T`) brings the
+effect back. `scripts/build-rnode-firmware.sh build heltec-v4 --diag`
+builds the instrumented image that measured the PA detection on the way
+(KCT8103L on every boot, never flipping); it is never flashed by default.
 
 ---
 

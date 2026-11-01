@@ -37,8 +37,8 @@ case "$1" in
             echo "    sudo loquax mailbox enable"
             echo "Its state is in $STATE_DIR. Admit a device with:"
             echo "    sudo -u loquax LNMSG_HOME=$STATE_DIR loquax mailbox admit"
-            echo "It needs a running Reticulum daemon (lnsd from the 'leviculum'"
-            echo "package, or the Python rnsd), and a propagation node named in"
+            echo "It attaches to lnsd from the 'leviculum' package, which this"
+            echo "package depends on, and needs a propagation node named in"
             echo "$STATE_DIR/config (propagation_node = <hash>); see loquax(1)."
             echo ""
         fi

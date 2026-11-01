@@ -17,7 +17,7 @@ import java.util.Map;
  * yet asks for the home code and the home node's address. Once started it
  * hands over to the conversation list.
  *
- * A code from {@code loquax home admit --server} carries the address
+ * A code from {@code loquax mailbox admit --server} carries the address
  * ({@code lqxh1...@host:port}): pasted, it fills the address field too;
  * shared from another app (a QR reader's share button), it fills both and
  * joins at once.

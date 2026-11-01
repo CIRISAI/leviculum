@@ -13328,3 +13328,6 @@ mod tests {
         assert!(!has_timeout);
     }
 }
+
+#[cfg(test)]
+mod mvr_path_response_survives_reannounce;

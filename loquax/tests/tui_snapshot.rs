@@ -3400,3 +3400,66 @@ async fn an_imported_conversation_opens_and_scrolls_to_its_oldest_row() {
         );
     }
 }
+
+/// The messenger started with no daemon (1265, walk finding 5 of the ninety
+/// percent walk): before any frame is drawn it says one sentence and one
+/// command, in the locale's language, and exits 1, as plain `loquax` and as
+/// `loquax tui`. This binary is a checkout's build, so the command is the
+/// checkout's; the packaged `sudo systemctl start lnsd` is
+/// `start_command`'s unit test. The stack's words (the instance, the shared
+/// instance, rnsd) only with `--verbose`.
+#[test]
+fn without_a_daemon_the_messenger_says_one_sentence_and_one_command() {
+    let instance = format!("loquax-nodaemon-tui-{}", std::process::id());
+    let run = |args: &[&str], lang: &str| {
+        let home = tempfile::tempdir().expect("state dir");
+        let mut command = Command::new(LNMSG);
+        for name in ["LC_ALL", "LC_MESSAGES"] {
+            command.env_remove(name);
+        }
+        command
+            .args(args)
+            .env("LANG", lang)
+            .env("LNMSG_HOME", home.path())
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        let output = child.wait_with_output().expect("wait for loquax");
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let expected = [
+        (
+            "C.UTF-8",
+            "loquax: Loquax needs its network service. Start it with: \
+             cargo run --release --bin lnsd\n",
+        ),
+        (
+            "de_DE.UTF-8",
+            "loquax: Loquax braucht seinen Netzwerkdienst. Starte ihn mit: \
+             cargo run --release --bin lnsd\n",
+        ),
+    ];
+    for (lang, screen) in expected {
+        for args in [
+            &["--instance", &instance][..],
+            &["tui", "--instance", &instance][..],
+        ] {
+            let (code, stdout, stderr) = run(args, lang);
+            assert_eq!(code, Some(1), "{lang} {args:?} stderr: {stderr}");
+            assert!(stdout.is_empty(), "{lang} {args:?} stdout: {stdout}");
+            assert_eq!(stderr, screen, "{lang} {args:?}");
+        }
+    }
+
+    let (code, _, stderr) = run(&["--instance", &instance, "--verbose"], "C.UTF-8");
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    for words in [instance.as_str(), "shared instance", "rnsd"] {
+        assert!(stderr.contains(words), "--verbose lacks {words}: {stderr}");
+    }
+}

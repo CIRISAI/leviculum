@@ -6,6 +6,17 @@ Nightly builds of `master`, not releases. Nightly means nightly: what broke yest
 
 Each file has a `.sha256` beside it. The second link is the same file on Codeberg, until leviculum.network carries the builds.
 
+## Android: the Loquax app
+
+Loquax, our messenger, as an app for Android 8 and newer. It is a nightly test build, not a release: signed with our own nightly key rather than coming from an app store, and the test variant, which installs beside a later release instead of replacing it. A signed release and F-Droid come later.
+
+- [loquax-nightly-android.apk](https://leviculum.network/releases/nightly/latest/loquax-nightly-android.apk) ([sha256](https://leviculum.network/releases/nightly/latest/loquax-nightly-android.apk.sha256)), for phones and tablets
+- [loquax-nightly-android-x86_64.apk](https://leviculum.network/releases/nightly/latest/loquax-nightly-android-x86_64.apk) ([sha256](https://leviculum.network/releases/nightly/latest/loquax-nightly-android-x86_64.apk.sha256)), for Waydroid and the Android emulator on a PC
+
+To install, open the first link on the phone and open the download. Android asks once whether your browser may install apps: allow it, then tap Install. The next nightly installs over this one as an update.
+
+The app is only here, not on Codeberg. To check a download on a computer: `sha256sum -c loquax-nightly-android.apk.sha256` in the folder holding both files.
+
 ## The stack: `lnsd` and the tools
 
 - [leviculum-nightly-amd64.deb](https://leviculum.network/releases/nightly/latest/leviculum-nightly-amd64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/leviculum-nightly-amd64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-amd64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-amd64.deb.sha256))
@@ -23,7 +34,7 @@ Each file has a `.sha256` beside it. The second link is the same file on Codeber
 
 ## Messenger: `loquax`
 
-`loquax send` for scripts, `loquax tui` for people.
+`loquax send` for scripts, plain `loquax` for people. To make a computer your mailbox, see [the mailbox page](/mailbox).
 
 - [loquax-nightly-amd64.deb](https://leviculum.network/releases/nightly/latest/loquax-nightly-amd64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/loquax-nightly-amd64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-amd64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-amd64.deb.sha256))
 - [loquax-nightly-arm64.deb](https://leviculum.network/releases/nightly/latest/loquax-nightly-arm64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/loquax-nightly-arm64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-arm64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-arm64.deb.sha256))

@@ -166,7 +166,7 @@ pub struct Start {
     /// The home node's TCP server, `host:port`; the saved one when absent.
     #[serde(default)]
     pub server: Option<String>,
-    /// The admission code from `loquax home admit` (`lqxh1...`, or
+    /// The admission code from `loquax mailbox admit` (`lqxh1...`, or
     /// `lqxh1...@host:port` with the server behind it, which stands in for
     /// [`Start::server`] when that is absent); needed only while the phone
     /// is no client yet.

@@ -71,6 +71,7 @@ run   leviculum-std   nrf_boot_no_spin           # reads leviculum-nrf/src/bin/*
 run   leviculum-std   rak4631_gnss_pulse_pin     # reads the RAK firmware sources; the GNSS task claims no pulse pin and nothing claims P0.17
 run   leviculum-std   t114_boot_lines            # reads the T114 binary, the shared node loop and the board file; the boot lines are the pre-move ones plus D2 and D7
 run   lnflash         doc_board_catalogue        # reads catalogue.toml against the board facts the book repeats
+run   loquax          package_metadata           # reads loquax/Cargo.toml and leviculum-cli/Cargo.toml; the package depends on leviculum, which enables and starts lnsd
 
 # --------------------------------------------------------------- skip --------
 
@@ -219,6 +220,7 @@ skip  lnflash         vendored_softdevice        # close to the line: reads the 
 skip  loquax           home_node                  # spawns loquax --daemon and clients against Python over sockets; loquax-tui
 skip  loquax           import                     # its subject is the import code, and it spawns the loquax binary; loquax-tui
 skip  loquax           mailbox_cli                # spawns loquax against in-process daemons over sockets
+skip  loquax           mailbox_setup              # spawns the loquax binary over a temporary home; subject is the code; loquax-tui
 skip  loquax           python_interop             # drives Python over sockets; Tier 1
 skip  loquax           send_cli                   # spawns the loquax binary
 skip  loquax           stamp_timing               # tokio runtime around the stamp solver

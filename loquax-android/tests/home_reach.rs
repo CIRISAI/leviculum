@@ -19,6 +19,9 @@ use loquax::home::client;
 use loquax::home::rendezvous::Timing;
 use loquax::home::watch::{self, WatchEvent};
 
+#[path = "../../loquax/tests/support/python_peer.rs"]
+mod python_peer;
+
 /// loquax's own lines on stderr: the rotation's `HOME_RENDEZVOUS` and
 /// `HOME_PATH_REQUEST` beside the client's, which a red cell shows.
 fn logs() {
@@ -146,6 +149,11 @@ impl Mailbox {
 
     fn home(&self) -> DestinationHash {
         DestinationHash::new(loquax::home::destination_hash(&self.public_key).expect("home"))
+    }
+
+    /// The `lxmf.delivery` address a sender on the mesh writes to.
+    fn delivery(&self) -> DestinationHash {
+        DestinationHash::new(loquax::home::lxmf_address(&self.public_key).expect("address"))
     }
 
     async fn stop(self) {
@@ -428,6 +436,93 @@ async fn home_reach_beyond_the_first_relay() {
     c.stop().await;
 }
 
+/// A mailbox whose entry answers only after its start (1274): the delivery
+/// announce of the registration went out on no interface, and a sender
+/// beside the entry learns the mailbox's address only if the mailbox
+/// announces it again when the entry comes up. The facade's Python sender
+/// lost that race under the land gate's load and never learned the address.
+#[tokio::test(flavor = "multi_thread")]
+async fn home_reach_a_late_entry_hears_the_delivery_announce() {
+    logs();
+    let peer = TcpListener::bind("127.0.0.1:0").expect("a peer port");
+    let peer_addr = peer.local_addr().expect("peer");
+    drop(peer);
+    let mailbox = Mailbox::start(vec![entry(peer_addr)]).await;
+    // Long past the registration's announce, and inside the first grace.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let relay = Relay::on(
+        TcpListener::bind(peer_addr).expect("the peer port, now answering"),
+        TcpListener::bind("127.0.0.1:0").expect("an access point port"),
+        &[],
+    )
+    .await;
+    let (delivery, home) = (mailbox.delivery(), mailbox.home());
+    wait_until("the relay holds the mailbox's delivery path", 10, || {
+        relay.node.has_path(&delivery)
+    })
+    .await;
+    wait_until("the relay holds the mailbox's home path", 10, || {
+        relay.node.has_path(&home)
+    })
+    .await;
+    mailbox.stop().await;
+    relay.stop().await;
+}
+
+/// A stock Python RNS as the mailbox's entry (1274): the announces the
+/// mailbox sends when its entry comes up must not trip Python's ingress
+/// control. A new interface that brings three announces of unknown
+/// destinations in a burst has the third held
+/// (`reference/Reticulum/RNS/Interfaces/Interface.py:145`,
+/// `RNS/Transport.py:1705`), released after a 15 s penalty and held again
+/// until six announces were counted, so a sender beside the entry learns
+/// a held delivery address only after half a minute or more. Which
+/// announce comes third depends on how late the engine's first tick is, so
+/// the cell counts: one announce per destination, two in all, never three.
+#[tokio::test(flavor = "multi_thread")]
+async fn home_reach_a_python_entry_holds_none_of_the_mailboxs_announces() {
+    logs();
+    let peer = python_peer::PythonPeer::start();
+    let mailbox = Mailbox::start(vec![format!("127.0.0.1:{}", peer.rns_port)]).await;
+    let (delivery, home) = (mailbox.delivery(), mailbox.home());
+    let knows = |hash: &DestinationHash| {
+        peer.rpc(
+            "has_path",
+            serde_json::json!({ "hash": loquax::address::to_hex(hash.as_bytes()) }),
+        ) == serde_json::json!(true)
+    };
+    wait_until("Python holds the mailbox's delivery path", 10, || {
+        knows(&delivery)
+    })
+    .await;
+    wait_until("Python holds the mailbox's home path", 10, || knows(&home)).await;
+    // Whatever the connect brought has arrived by now.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let interfaces = peer.rpc("get_interfaces", serde_json::json!({}));
+    let held: Vec<&serde_json::Value> = interfaces
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter(|i| {
+            i.get("held_announces").and_then(|v| v.as_u64()) != Some(0)
+                || i.get("burst_active") == Some(&serde_json::json!(true))
+        })
+        .collect();
+    assert!(held.is_empty(), "Python held announces: {held:?}");
+    let most = interfaces
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|i| i.get("announces_in").and_then(|v| v.as_u64()))
+        .max();
+    assert_eq!(
+        most,
+        Some(2),
+        "the delivery and the home announce, once each: {interfaces}"
+    );
+    mailbox.stop().await;
+}
+
 /// Failover: rendezvous one down, both ends come up on rendezvous two within
 /// the grace and the backoff and the steps run there; rendezvous one back,
 /// both return to it on the return try and the steps run there again.
@@ -459,6 +554,13 @@ async fn home_reach_fails_over_and_returns() {
     .await;
     wait_until("the path through rendezvous two", 10, || {
         node.has_path(&home) && two.node.has_path(&home)
+    })
+    .await;
+    // A sender beside rendezvous two writes to the delivery address, which
+    // the mailbox announces on its new entry too (1274).
+    let delivery = mailbox.delivery();
+    wait_until("rendezvous two holds the delivery path", 10, || {
+        two.node.has_path(&delivery)
     })
     .await;
     // The cursor of the first pass is kept; the steps start over.

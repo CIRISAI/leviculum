@@ -45,6 +45,18 @@ The pin column is what the gitlink names at the time of writing;
 `git submodule status` is authoritative, and `just check-submodules`
 refuses a checkout that disagrees with it.
 
+`reference/LXST` is behind the release Sideband 2.2.0 requires
+(`lxst>=0.5.4`), and no git ref can bring it level. The upstream repository
+is a mirror whose code stops at `_version.py` 0.4.5: its tip and its `0.5.3`
+tag differ from the pin only in `README.md`, and no `0.5.4` tag exists.
+LXST 0.5.4 was published only as a PyPI wheel
+(`lxst-0.5.4-py3-none-any.whl`, sha256
+`feadeb244d12378c27c35dbe48a251ff4db03faf3c8f55b769f9d7656d0adeb7`, with prebuilt
+`filterlib` binaries and no sdist). The telephony study cites it as
+`lxst-0.5.4:` paths into that download rather than into this tree. Its
+licence is CC BY-NC-ND 4.0, the same as the pin's: we read LXST for the
+wire protocol and never port its code into Leviculum.
+
 ## Crates vendored under `vendor/`: linked into binaries
 
 Each is a published crate with a small local patch, substituted for the

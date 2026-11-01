@@ -3,7 +3,7 @@
     <string name="app_name">Loquax</string>
     <string name="starting">Starting…</string>
     <string name="joining">Connecting to your mailbox…</string>
-    <string name="code_label">The code your mailbox shows, from `loquax home admit` on the computer (with --server it brings the address along)</string>
+    <string name="code_label">The code your mailbox shows, from loquax mailbox setup on the computer</string>
     <string name="code_hint">lqxh1…</string>
     <string name="server_label">Your mailbox\'s address: host:port of its lnsd TCP server</string>
     <string name="server_hint">192.168.1.20:4242</string>
@@ -172,7 +172,7 @@
     <string name="next">Continue</string>
     <string name="have_address">I already have a Loquax address</string>
     <string name="computer_title">Set up your mailbox on the computer</string>
-    <string name="computer_text">Install Loquax on the computer and run `loquax home admit --server` there. It shows a code. Scan it here, or paste it.</string>
+    <string name="computer_text">On your computer, run: loquax mailbox setup\nIt shows a code. Scan it here, or paste it. How to install it: leviculum.network/mailbox</string>
     <string name="paste_code">Paste a code</string>
     <string name="phone_until_then">Use this phone until then</string>
     <string name="background_title">Let Loquax run in the background</string>
