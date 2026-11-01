@@ -2528,7 +2528,9 @@ loquax-core-no-std:
 # The scene's goldens (`loquax/tests/scene_golden.rs`, 1217): the list and the
 # chat built from the ugly store for both layout classes, 0.4 s. Read
 # receipts through the mailbox (`loquax/tests/mailbox_receipts.rs`, 1234)
-# need `history` too; in-process, no sockets.
+# need `history` too; in-process, no sockets. `loquax mailbox setup`
+# (`loquax/tests/mailbox_setup.rs`, 1266) is the terminal build's command;
+# it spawns the binary over a temporary home, no daemon.
 # The forge runs this recipe and has no reference submodule, so the home node
 # tests that start the Python peer go out there by the names
 # scripts/integ-prerequisites.txt declares (scripts/with-prerequisites.sh,
@@ -2536,7 +2538,7 @@ loquax-core-no-std:
 [doc('Lint and test loquax with its tui feature (#232)')]
 loquax-tui:
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
-    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts
+    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup
 
 # 1084, #474: loquax's `gui` feature (the iced window) is off by default and
 # in no other feature, so neither the workspace runs nor `loquax-tui` compile

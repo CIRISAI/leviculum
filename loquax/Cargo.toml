@@ -303,6 +303,11 @@ required-features = ["history"]
 name = "home_node"
 required-features = ["tui"]
 
+# 1266: `loquax mailbox setup`, the five steps, by flags and by typed answers.
+[[test]]
+name = "mailbox_setup"
+required-features = ["tui"]
+
 # A throwaway: the samples and cost table of
 # docs/drafts/terminal-map-rendering-2026-10.md (1090). Never in a package.
 [[example]]

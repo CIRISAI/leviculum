@@ -877,7 +877,7 @@ falls from 5.9:1 to 4.3:1.
 1. `--no-color`, or `NO_COLOR` set and not empty: monochrome.
 2. `--color truecolor|256|16`: that tier. `lnomad` had the flag with two
    values (`lnomad/src/main.rs:65`); `loquax` has it now
-   (`loquax/src/main.rs:316`), and both have `16`.
+   (`loquax/src/main.rs:362`), and both have `16`.
 3. `COLORTERM` is `truecolor` or `24bit`: truecolor (the rule
    `resolve_depth` had before 1042).
 4. `TERM` contains `256color`: 256. `xterm-256color`, `tmux-256color` and
@@ -917,7 +917,7 @@ first rung it is.
 `auto` there until 1042. Built as proposed:
 
 - a key `theme = auto|dark|light` in `loquax`'s config file
-  (`loquax/src/config.rs:271`, which holds `key = value` lines), `auto` the
+  (`loquax/src/config.rs:287`, which holds `key = value` lines), `auto` the
   default;
 - `--theme auto|dark|light` on the command line over the key, as `lnomad`
   has it (`lnomad/src/main.rs:57`);

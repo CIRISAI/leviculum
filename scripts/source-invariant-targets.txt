@@ -219,6 +219,7 @@ skip  lnflash         vendored_softdevice        # close to the line: reads the 
 skip  loquax           home_node                  # spawns loquax --daemon and clients against Python over sockets; loquax-tui
 skip  loquax           import                     # its subject is the import code, and it spawns the loquax binary; loquax-tui
 skip  loquax           mailbox_cli                # spawns loquax against in-process daemons over sockets
+skip  loquax           mailbox_setup              # spawns the loquax binary over a temporary home; subject is the code; loquax-tui
 skip  loquax           python_interop             # drives Python over sockets; Tier 1
 skip  loquax           send_cli                   # spawns the loquax binary
 skip  loquax           stamp_timing               # tokio runtime around the stamp solver

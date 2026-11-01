@@ -70,7 +70,9 @@
 //! `rendezvous_dial`, `on` (the default) or `off`: off is "mesh only", no
 //! rendezvous dialled at all. And `home_address`, a fixed `host:port` the
 //! phone dials instead of any rendezvous (a mailbox with a public address
-//! or a router pinhole, "Advanced").
+//! or a router pinhole, "Advanced"); on a mailbox, the address its codes
+//! carry, which `loquax mailbox setup` writes with `rendezvous_dial = off`
+//! (`crate::home::setup`, 1266).
 //!
 //! A drawing's name is not checked here: the set is the frontend's, and a
 //! name an older loquax does not know falls back to its own choice, said
@@ -229,6 +231,20 @@ pub fn set(text: &str, key: &str, value: &str) -> String {
     }
     if !done {
         out.push_str(&alloc::format!("{key} = {value}\n"));
+    }
+    out
+}
+
+/// `text` without any line that sets `key`; every other line kept as it was.
+pub fn unset(text: &str, key: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for raw in text.lines() {
+        let code = raw.split('#').next().unwrap_or("");
+        if code.split_once('=').is_some_and(|(k, _)| k.trim() == key) {
+            continue;
+        }
+        out.push_str(raw);
+        out.push('\n');
     }
     out
 }
@@ -491,16 +507,27 @@ impl core::error::Error for LoadError {}
 /// file or the new, never half of one. A missing file is created.
 #[cfg(feature = "std")]
 pub fn save(home: &std::path::Path, key: &str, value: &str) -> std::io::Result<()> {
-    let path = home.join(CONFIG_FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error),
-    };
+    let text = read_text(home)?;
+    save_text(home, &set(&text, key, value))
+}
+
+/// `home/config`'s text, empty when there is no file.
+#[cfg(feature = "std")]
+pub fn read_text(home: &std::path::Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(home.join(CONFIG_FILE)) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Write `text` as `home/config`, whole, as [`save`] does.
+#[cfg(feature = "std")]
+pub fn save_text(home: &std::path::Path, text: &str) -> std::io::Result<()> {
     leviculum_std::create_secret_dir_all(home)?;
     let next = home.join(alloc::format!(".{CONFIG_FILE}.new"));
-    std::fs::write(&next, set(&text, key, value))?;
-    std::fs::rename(&next, &path)
+    std::fs::write(&next, text)?;
+    std::fs::rename(&next, home.join(CONFIG_FILE))
 }
 
 /// Load `home/config`. A missing file is an empty config, not an error.
@@ -779,6 +806,18 @@ mod tests {
         assert_eq!(set("", "k", "v"), "k = v\n");
         // A comment that names the key sets nothing.
         assert_eq!(set("# k = old\n", "k", "v"), "# k = old\nk = v\n");
+    }
+
+    /// Unsetting drops every line that sets the key and nothing else; a
+    /// comment that names it stays.
+    #[test]
+    fn unsetting_a_key_keeps_the_rest_of_the_file() {
+        let text = "# home_address = a:1\nhome_address = b:2\ntheme = light\nhome_address = c:3\n";
+        assert_eq!(
+            unset(text, "home_address"),
+            "# home_address = a:1\ntheme = light\n"
+        );
+        assert_eq!(unset("", "k"), "");
     }
 
     #[test]

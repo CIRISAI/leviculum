@@ -6,7 +6,7 @@
 //! once with a single-use token, and pulls the archive by cursor over a link
 //! to the home node's own destination, `loquax.home`. Fetching never deletes.
 //!
-//! - [`code`]: the admission code `loquax home admit` prints.
+//! - [`code`]: the admission code `loquax mailbox admit` prints.
 //! - [`wire`]: the five requests, `/join`, `/sync`, `/send`, `/mark` and
 //!   `/watch`, their answers, and the wake.
 //! - [`wake`]: which watching link is owed a wake, on the home node.
@@ -20,6 +20,7 @@
 //! - `lock`: one registrar of the delivery destination per home.
 //! - `rendezvous`: the public node both ends dial, one at a time, with
 //!   failover (`docs/src/concepts/loquax-reachability.md`).
+//! - `setup`: `loquax mailbox setup`, the five steps of the wizard.
 
 use alloc::string::String;
 
@@ -48,6 +49,8 @@ pub mod rendezvous;
 pub mod runner;
 #[cfg(feature = "history")]
 pub mod server;
+#[cfg(feature = "std")]
+pub mod setup;
 #[cfg(feature = "std")]
 pub mod watch;
 

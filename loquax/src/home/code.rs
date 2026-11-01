@@ -1,4 +1,4 @@
-//! The admission code: what `loquax home admit` prints on the home node and
+//! The admission code: what `loquax mailbox admit` prints on the home node and
 //! `loquax home join` reads on the new device.
 //!
 //! It carries the home identity's public key (64 bytes), from which the
@@ -11,7 +11,7 @@
 //! slice 5's QR code can carry.
 //!
 //! A phone has no shared instance to reach the home node through, so it
-//! also needs the home node's TCP server. `loquax home admit --server`
+//! also needs the home node's TCP server. `loquax mailbox admit --server`
 //! writes it behind the code, `lqxh1...@host:port` (an IPv6 address in
 //! brackets), so one scan or one paste carries both. The base32 alphabet
 //! has no `@`, so the split is unambiguous, and a code without the address
