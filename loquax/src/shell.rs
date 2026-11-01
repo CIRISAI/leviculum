@@ -1112,7 +1112,7 @@ pub(crate) async fn start(
         role,
     )
     .await
-    .map_err(|error| crate::failure(error, "no-daemon"))?;
+    .map_err(|error| crate::no_daemon(&error))?;
     let client = client.map(|public_key| HomeClient {
         public_key,
         device,

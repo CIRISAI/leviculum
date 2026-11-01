@@ -1504,14 +1504,10 @@ impl canvas::Program<Message> for MapCanvas<'_> {
     }
 }
 
-/// The language the desktop's locale names (`LC_ALL`, `LC_MESSAGES`,
-/// `LANG`, the first one set): the scene's words are said in it.
+/// The language the desktop's locale names: the scene's words are said in
+/// it.
 fn locale() -> Lang {
-    ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .find(|value| !value.is_empty())
-        .map_or(Lang::En, |tag| Lang::of_tag(&tag))
+    loquax::engine::locale()
 }
 
 /// A key iced reports as the keymap's key (1218): the named keys the

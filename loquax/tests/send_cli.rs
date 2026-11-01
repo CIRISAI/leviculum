@@ -185,6 +185,7 @@ fn via_propagated_without_a_daemon_is_an_operational_failure() {
             "propagated",
             "--instance",
             &instance,
+            "--verbose",
         ],
         b"body\n",
     );
@@ -245,10 +246,14 @@ fn an_unknown_via_value_is_rejected_by_the_parser() {
 
 /// With no daemon there is nothing to queue into, and the message has to say
 /// what is missing and how to fix it — never fall back to a private stack.
+/// The instance and the daemons are the `--verbose` text since 1265.
 #[test]
 fn with_no_daemon_running_the_error_names_the_daemon() {
     let instance = format!("loquax-nothing-here-{}", std::process::id());
-    let run = run(&["send", NOWHERE, "--instance", &instance], b"body\n");
+    let run = run(
+        &["send", NOWHERE, "--instance", &instance, "--verbose"],
+        b"body\n",
+    );
     assert_eq!(run.code, Some(1), "stderr: {}", run.stderr);
     assert!(
         run.stdout.is_empty(),
@@ -604,6 +609,9 @@ fn a_first_send_or_fetch_makes_the_home_before_it_takes_the_lock() {
         let output = Command::new("sh")
             .args(["-c", "umask 0002 && exec \"$0\" \"$@\"", LNMSG])
             .args(&args)
+            // The instance is the verbose text's (1265), and it is what
+            // proves the run got as far as the daemon.
+            .arg("--verbose")
             .env("LNMSG_HOME", &home)
             .env_remove("LEVICULUM_EVENT_LOG")
             .stdin(Stdio::null())

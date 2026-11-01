@@ -27,6 +27,7 @@ use super::{Engine, StampAnswer, StampJob};
 use crate::clock;
 use crate::effects::{Effects, Terminal};
 use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone};
+use crate::ui::strings::{self, Lang, StrId};
 
 /// The engine as the driver sees it, with the frontend's and the miner's
 /// ends of its queues.
@@ -346,6 +347,69 @@ impl core::fmt::Display for AttachError {
 }
 
 impl core::error::Error for AttachError {}
+
+impl AttachError {
+    /// What a person reads when attaching failed (1265, walk finding 5):
+    /// for a missing daemon one sentence and the one command that starts
+    /// it, `start` from [`start_command`]; the [`Display`](core::fmt::Display)
+    /// text, which names the instance, the socket and rnsd, is the detail a
+    /// `--verbose` run prints instead. A leaf's failed node has no such
+    /// command and says what it said before.
+    pub fn brief(&self, lang: Lang, start: &str) -> String {
+        match self {
+            Self::NoDaemon { .. } => strings::format(
+                StrId::NeedsService.text(lang),
+                &[strings::Arg::Str(start.to_string())],
+                lang,
+            ),
+            Self::NoServer { .. } => self.to_string(),
+        }
+    }
+}
+
+/// The packaged unit that runs the daemon, where systemd looks for a
+/// package's units on Debian (`/lib` is `/usr/lib` merged, both named for
+/// an unmerged system).
+pub const LNSD_UNITS: [&str; 2] = [
+    "/usr/lib/systemd/system/lnsd.service",
+    "/lib/systemd/system/lnsd.service",
+];
+
+/// The command that starts the daemon for this loquax: inside a cargo
+/// `target` directory it is a checkout's build, which starts lnsd from the
+/// same checkout; otherwise the packaged unit when it is installed (the
+/// `loquax` package depends on `leviculum`, which ships it), else plain
+/// `lnsd` for an install from source.
+pub fn start_command(exe: Option<&std::path::Path>, unit_installed: bool) -> &'static str {
+    let in_checkout = exe.is_some_and(|exe| {
+        exe.components()
+            .any(|part| part.as_os_str() == std::ffi::OsStr::new("target"))
+    });
+    match (in_checkout, unit_installed) {
+        (true, _) => "cargo run --release --bin lnsd",
+        (false, true) => "sudo systemctl start lnsd",
+        (false, false) => "lnsd",
+    }
+}
+
+/// [`start_command`] for the running process.
+pub fn start_command_here() -> &'static str {
+    let exe = std::env::current_exe().ok();
+    let unit = LNSD_UNITS
+        .iter()
+        .any(|unit| std::path::Path::new(unit).exists());
+    start_command(exe.as_deref(), unit)
+}
+
+/// The language the locale names (`LC_ALL`, `LC_MESSAGES`, `LANG`, the
+/// first one set and not empty), English without one.
+pub fn locale() -> Lang {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.is_empty())
+        .map_or(Lang::En, |tag| Lang::of_tag(&tag))
+}
 
 /// A running client node and the outbox that talks to its engine.
 pub struct Attached {
@@ -746,5 +810,58 @@ mod tests {
         refused("home:0", "not a port");
         refused("home:65536", "not a port");
         refused("home:http", "not a port");
+    }
+
+    /// The no-daemon start says one sentence and one command in the
+    /// locale's language (1265); the instance and the stack's words are
+    /// the verbose text, and a leaf's error keeps its own.
+    #[test]
+    fn a_missing_daemon_is_one_sentence_and_one_command() {
+        let error = AttachError::NoDaemon {
+            instance: "walk".to_string(),
+            detail: "no local Leviculum daemon reachable".to_string(),
+        };
+        assert_eq!(
+            error.brief(Lang::En, "sudo systemctl start lnsd"),
+            "Loquax needs its network service. Start it with: sudo systemctl start lnsd"
+        );
+        assert_eq!(
+            error.brief(Lang::De, "sudo systemctl start lnsd"),
+            "Loquax braucht seinen Netzwerkdienst. Starte ihn mit: sudo systemctl start lnsd"
+        );
+        let verbose = error.to_string();
+        assert!(
+            verbose.contains("'walk'") && verbose.contains("rnsd"),
+            "{verbose}"
+        );
+        let leaf = AttachError::NoServer {
+            server: "home:4242".to_string(),
+            detail: "refused".to_string(),
+        };
+        assert_eq!(leaf.brief(Lang::En, "lnsd"), leaf.to_string());
+    }
+
+    #[test]
+    fn the_command_is_the_checkouts_the_packages_or_lnsd() {
+        use std::path::Path;
+        let checkout = Path::new("/home/u/src/leviculum/target/release/loquax");
+        let packaged = Path::new("/usr/bin/loquax");
+        assert_eq!(
+            start_command(Some(checkout), true),
+            "cargo run --release --bin lnsd"
+        );
+        assert_eq!(
+            start_command(Some(checkout), false),
+            "cargo run --release --bin lnsd"
+        );
+        assert_eq!(
+            start_command(Some(packaged), true),
+            "sudo systemctl start lnsd"
+        );
+        assert_eq!(start_command(Some(packaged), false), "lnsd");
+        assert_eq!(start_command(None, true), "sudo systemctl start lnsd");
+        // A directory that only starts with the word is no target directory.
+        let near = Path::new("/opt/targets/loquax");
+        assert_eq!(start_command(Some(near), false), "lnsd");
     }
 }

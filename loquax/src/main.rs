@@ -95,6 +95,13 @@ struct Args {
     #[command(flatten)]
     tui: TuiArgs,
 
+    /// When no daemon answers, print what the stack said (the instance, its
+    /// socket, the daemons that would serve it) instead of the one sentence
+    /// that names the command to start it. Taken before or after a
+    /// subcommand.
+    #[arg(long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Option<SubCommand>,
 }
@@ -527,6 +534,24 @@ fn failure(message: impl std::fmt::Display, outcome: &str) -> ExitCode {
     ExitCode::from(EXIT_FAILURE)
 }
 
+/// `--verbose`, set once from the command line before any subcommand runs.
+static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Attaching failed: one sentence and the command that starts the daemon
+/// (1265, walk finding 5), or with `--verbose` what the stack said.
+fn no_daemon(error: &loquax::engine::AttachError) -> ExitCode {
+    match VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+        true => failure(error, "no-daemon"),
+        false => failure(
+            error.brief(
+                loquax::engine::locale(),
+                loquax::engine::start_command_here(),
+            ),
+            "no-daemon",
+        ),
+    }
+}
+
 /// The instance name decides the abstract socket (`\0rns/{name}`) the daemon
 /// listens on, so it comes from the daemon's own config file. Same derivation
 /// `lncp`, `lnstatus` and `leviculum-lxmf-node` use.
@@ -634,7 +659,7 @@ fn parse_args() -> Args {
         // the group id the flattened `TuiArgs` brings, which counts as given.
         let stray = command
             .get_arguments()
-            .filter(|arg| arg.get_id() != "config")
+            .filter(|arg| arg.get_id() != "config" && arg.get_id() != "verbose")
             .find(|arg| {
                 matches.value_source(arg.get_id().as_str()) == Some(ValueSource::CommandLine)
             })
@@ -654,6 +679,7 @@ fn parse_args() -> Args {
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = parse_args();
+    VERBOSE.store(args.verbose, std::sync::atomic::Ordering::Relaxed);
     // Once, before any subcommand resolves the state directory: a first
     // start after the rename must find the address it had as lnmsg.
     match identity::migrate_legacy_home() {
@@ -1091,7 +1117,7 @@ async fn run(args: SendArgs) -> ExitCode {
     .await
     {
         Ok(attached) => attached,
-        Err(error) => return failure(error, "no-daemon"),
+        Err(error) => return no_daemon(&error),
     };
 
     let mut options = SendOptions::new(instance.clone(), Duration::from_secs(args.timeout));
@@ -1242,7 +1268,7 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
     .await
     {
         Ok(attached) => attached,
-        Err(error) => return failure(error, "no-daemon"),
+        Err(error) => return no_daemon(&error),
     };
 
     let mut options = FetchOptions::new(instance.clone(), Duration::from_secs(args.timeout));
@@ -1372,7 +1398,7 @@ async fn run_client_send(
     .await
     {
         Ok(attached) => attached,
-        Err(error) => return failure(error, "no-daemon"),
+        Err(error) => return no_daemon(&error),
     };
     let node = attached.node();
     let bytes = message.body.len();
@@ -1827,7 +1853,7 @@ async fn run_join(home: PathBuf, client: Option<[u8; 64]>, args: JoinArgs) -> Ex
     .await
     {
         Ok(attached) => attached,
-        Err(error) => return failure(error, "no-daemon"),
+        Err(error) => return no_daemon(&error),
     };
     let node = attached.node();
     let joined = loquax::home::client::join(
@@ -1892,7 +1918,7 @@ async fn run_client_fetch(home: PathBuf, public_key: [u8; 64], args: FetchArgs) 
     .await
     {
         Ok(attached) => attached,
-        Err(error) => return failure(error, "no-daemon"),
+        Err(error) => return no_daemon(&error),
     };
     let node = attached.node();
     let mut effects = Terminal::new(home.clone());

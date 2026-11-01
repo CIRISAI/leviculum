@@ -24,7 +24,7 @@ loquax -- terminal LXMF messenger for Reticulum
 
 ## DESCRIPTION
 
-**loquax** is the Leviculum messenger: with no subcommand it opens the conversation view, and **send**, **fetch** and **address** are the commands for scripts. It sends and receives LXMF messages over Reticulum, attaches to a shared instance that is already running -- **lnsd**(1), or Python's **rnsd** -- and runs its own LXMF router; it never starts a Reticulum stack of its own. Its address is a pure function of the identity in its state directory, minted on first use and never replaced silently.
+**loquax** is the Leviculum messenger: with no subcommand it opens the conversation view, and **send**, **fetch** and **address** are the commands for scripts. It sends and receives LXMF messages over Reticulum, attaches to a shared instance that is already running -- **lnsd**(1), or Python's **rnsd** -- and runs its own LXMF router; it never starts a Reticulum stack of its own. The package depends on the `leviculum` package, whose **lnsd** is enabled and started as `lnsd.service` when it is installed. When no daemon answers, Loquax says one sentence and the command that starts one, `sudo systemctl start lnsd` where the unit is installed, `cargo run --release --bin lnsd` from a source checkout, else `lnsd`, and exits 1; **--verbose** prints the instance and what the stack said instead. Its address is a pure function of the identity in its state directory, minted on first use and never replaced silently.
 
 **send** queues one message. The body is the argument, or standard input when the argument is missing or `-`, one trailing newline removed. A send that worked prints nothing and exits 0, which means the message was queued and handed to the network, not that it was delivered. **--via auto**, the default, tries a direct delivery link first and falls back to a propagation node when none comes up; exit 3 says a propagation node holds the message. A message that went onto the link and got no delivery proof in time is not sent again through a propagation node, which would deliver it twice; the run says so and exits 1.
 
@@ -43,6 +43,9 @@ loquax -- terminal LXMF messenger for Reticulum
 
 **--config** *dir*
 :   Reticulum config directory; only its instance name and RPC key are read. Default: the platform default.
+
+**--verbose**
+:   When no daemon answers, print the instance it looked for and what the stack said instead of the one sentence. Before or after a subcommand.
 
 **--pn** *hash*
 :   The propagation node to use, remembered as your choice. Without it the `propagation_node` key in Loquax's config decides; without either, the node an earlier run adopted, or a newly adopted one: the most recently heard node that does not run on this device. **send**, **fetch** and **tui**.

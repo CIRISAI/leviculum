@@ -138,4 +138,5 @@
     <string name="scene_october">Oktober</string>
     <string name="scene_november">November</string>
     <string name="scene_december">Dezember</string>
+    <string name="needs_service">Loquax braucht seinen Netzwerkdienst. Starte ihn mit: %1$s</string>
 </resources>
