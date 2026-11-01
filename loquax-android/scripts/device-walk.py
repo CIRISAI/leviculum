@@ -68,6 +68,7 @@ STEPS = [
     "marks",
     "reply_send",
     "image",
+    "picture_zoom",
     "file",
     "voice",
     "receive_wake",
@@ -367,6 +368,153 @@ def voice_problems(voices: list[Node], before: int, least_s: int) -> list[str]:
     if secs < least_s:
         return [f"the newest is {secs} s long, want at least {least_s}"]
     return []
+
+
+# --- The photo viewer's zoom (1269). ---
+
+# `PhotoView.logState`'s line, under the tag `loquax`, once a gesture
+# settled.
+PHOTO_ZOOM = re.compile(
+    r"PHOTO_ZOOM scale=(?P<scale>[\d.]+) left=(?P<left>-?[\d.]+) top=(?P<top>-?[\d.]+) "
+    r"width=(?P<width>[\d.]+) height=(?P<height>[\d.]+) view=(?P<vw>\d+)x(?P<vh>\d+)"
+)
+
+
+@dataclass
+class TouchDevice:
+    """A multi-touch screen of `getevent -pl`: its node and the range of
+    its two position axes, and whether it takes a pressure and a touch
+    size, which some drivers want above 0 for a contact."""
+
+    path: str
+    x_min: int
+    x_max: int
+    y_min: int
+    y_max: int
+    pressure: bool = False
+    touch_major: bool = False
+
+
+AXIS = re.compile(r"(ABS_MT_[A-Z_]+)\s*:\s*value -?\d+, min (-?\d+), max (-?\d+)")
+
+
+def parse_touch_device(getevent: str) -> TouchDevice | None:
+    """The first direct (screen, not pad) multi-touch device with slots
+    in `getevent -pl`'s listing; any with slots when none says direct."""
+    found: list[tuple[bool, TouchDevice]] = []
+    for block in re.split(r"(?m)^add device \d+: ", getevent)[1:]:
+        path = block.split("\n", 1)[0].strip()
+        axes = {name: (int(lo), int(hi)) for name, lo, hi in AXIS.findall(block)}
+        if not {"ABS_MT_SLOT", "ABS_MT_POSITION_X", "ABS_MT_POSITION_Y"} <= axes.keys():
+            continue
+        (x_min, x_max), (y_min, y_max) = axes["ABS_MT_POSITION_X"], axes["ABS_MT_POSITION_Y"]
+        device = TouchDevice(
+            path,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            pressure="ABS_MT_PRESSURE" in axes,
+            touch_major="ABS_MT_TOUCH_MAJOR" in axes,
+        )
+        found.append(("INPUT_PROP_DIRECT" in block, device))
+    direct = [d for is_direct, d in found if is_direct]
+    return (direct or [d for _, d in found] or [None])[0]
+
+
+def parse_wm_size(text: str) -> tuple[int, int] | None:
+    """The screen's size of `wm size`: the override when one is set."""
+    sizes = re.findall(r"(Physical|Override) size: (\d+)x(\d+)", text)
+    if not sizes:
+        return None
+    by = {kind: (int(w), int(h)) for kind, w, h in sizes}
+    return by.get("Override", by.get("Physical"))
+
+
+# The input event codes a pinch writes (linux/input-event-codes.h).
+EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+SYN_REPORT, BTN_TOUCH = 0, 0x14A
+ABS_MT_SLOT, ABS_MT_TOUCH_MAJOR, ABS_MT_POSITION_X = 0x2F, 0x30, 0x35
+ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID, ABS_MT_PRESSURE = 0x36, 0x39, 0x3A
+
+
+def pinch_events(
+    touch: TouchDevice,
+    screen: tuple[int, int],
+    centre: tuple[int, int],
+    radii: tuple[int, int],
+    steps: int = 12,
+) -> list[tuple[int, int, int]]:
+    """Two fingers on a horizontal line through `centre`, `radii[0]`
+    screen pixels either side of it at first and `radii[1]` at last, in
+    `steps` moves: the (type, code, value) events of multi-touch protocol
+    B, the screen's pixels mapped onto the device's axes."""
+    sw, sh = screen
+    cx, cy = centre
+
+    def to_device(x: float, y: float) -> tuple[int, int]:
+        dx = touch.x_min + round(max(0, min(sw - 1, x)) * (touch.x_max - touch.x_min) / max(1, sw - 1))
+        dy = touch.y_min + round(max(0, min(sh - 1, y)) * (touch.y_max - touch.y_min) / max(1, sh - 1))
+        return dx, dy
+
+    events: list[tuple[int, int, int]] = []
+
+    def fingers(r: float, first: bool) -> None:
+        for slot, side in ((0, -1), (1, 1)):
+            x, y = to_device(cx + side * r, cy)
+            events.append((EV_ABS, ABS_MT_SLOT, slot))
+            if first:
+                events.append((EV_ABS, ABS_MT_TRACKING_ID, 1269 + slot))
+                if touch.touch_major:
+                    events.append((EV_ABS, ABS_MT_TOUCH_MAJOR, 6))
+                if touch.pressure:
+                    events.append((EV_ABS, ABS_MT_PRESSURE, 60))
+            events.append((EV_ABS, ABS_MT_POSITION_X, x))
+            events.append((EV_ABS, ABS_MT_POSITION_Y, y))
+        if first:
+            events.append((EV_KEY, BTN_TOUCH, 1))
+        events.append((EV_SYN, SYN_REPORT, 0))
+
+    r0, r1 = radii
+    fingers(r0, True)
+    for i in range(1, steps + 1):
+        fingers(r0 + (r1 - r0) * i / steps, False)
+    for slot in (0, 1):
+        events.append((EV_ABS, ABS_MT_SLOT, slot))
+        events.append((EV_ABS, ABS_MT_TRACKING_ID, -1))
+    events.append((EV_KEY, BTN_TOUCH, 0))
+    events.append((EV_SYN, SYN_REPORT, 0))
+    return events
+
+
+def sendevent_script(path: str, events: list[tuple[int, int, int]]) -> str:
+    """One shell line writing `events` to the device at `path`."""
+    return "; ".join(f"sendevent {path} {t} {c} {v}" for t, c, v in events)
+
+
+def parse_photo_zoom(logcat: str) -> list[dict]:
+    """The viewer's settled states in a logcat, oldest first."""
+    out = []
+    for m in PHOTO_ZOOM.finditer(logcat):
+        out.append({k: float(v) for k, v in m.groupdict().items()})
+    return out
+
+
+def zoom_bounds_problems(state: dict) -> list[str]:
+    """What is wrong with where the viewer put the picture: an axis it is
+    wider than the screen on whose edge has come inside the screen, or one
+    it is narrower on where it is not centred."""
+    problems = []
+    for axis, start, size, screen in (
+        ("x", state["left"], state["width"], state["vw"]),
+        ("y", state["top"], state["height"], state["vh"]),
+    ):
+        if size >= screen - 1:
+            if start > 1 or start + size < screen - 1:
+                problems.append(f"{axis}: {size:.0f} px from {start:.0f} leaves a gap on a {screen:.0f} px screen")
+        elif abs(start - (screen - size) / 2) > 1:
+            problems.append(f"{axis}: {size:.0f} px at {start:.0f} is not centred on {screen:.0f} px")
+    return problems
 
 
 def inside(node: Node, box: Node) -> bool:
@@ -1742,6 +1890,70 @@ class Walk:
         return (
             f"picked_to_bubble_ms={ms} desc={photo.desc!r} bubbles=1 mark=in "
             "mailbox=accepted full=shown"
+        )
+
+    def step_picture_zoom(self) -> str:
+        """The big picture zooms under two fingers (1269): the image
+        step's photo opened whole, a pinch out about its centre written
+        to the screen's multi-touch device with `sendevent` (`input` has
+        one pointer only), then a pan, a double tap back to 1x and Back
+        to the chat. The zoom's numbers are the viewer's own `PHOTO_ZOOM`
+        line in the log; that the picture moved is read off the screen."""
+        dev = self.need_device()
+        photos = photos_on(dev.dump())
+        if not photos:
+            raise StepFailed("no photo in the open chat: the image step leaves one")
+        touch = parse_touch_device(dev.shell("getevent -pl", timeout=30, check=False))
+        if touch is None:
+            raise StepFailed("getevent -pl lists no multi-touch device to pinch on")
+        size = parse_wm_size(dev.shell("wm size"))
+        if size is None:
+            raise StepFailed("wm size says no screen size")
+        dev.shell("logcat -c", check=False)
+        dev.tap_node(photos[-1])
+        box = self.wait_id(PHOTO_FULL, 10)[0].bounds
+        x1, y1, x2, y2 = box
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        states: list[dict] = []
+
+        def settled(test) -> bool:
+            nonlocal states
+            states = parse_photo_zoom(dev.shell("logcat -d -s loquax:I", check=False))
+            return bool(states) and test(states[-1])
+
+        def expect(what: str, test, timeout: float = 8) -> dict:
+            if not wait_for(lambda: settled(test), timeout, every=0.3):
+                last = states[-1] if states else "no PHOTO_ZOOM line"
+                raise StepFailed(f"{what}: {last}")
+            problems = zoom_bounds_problems(states[-1])
+            if problems:
+                raise StepFailed(f"{what}: {'; '.join(problems)}")
+            return states[-1]
+
+        expect("the viewer shows the photo at 1x", lambda z: z["scale"] == 1.0, 10)
+        time.sleep(0.5)
+        before = sample_grid(dev.screen(), box)
+        width = x2 - x1
+        events = pinch_events(touch, size, (cx, cy), (width // 10, width * 4 // 10))
+        dev.shell(sendevent_script(touch.path, events), timeout=120)
+        pinched = expect("the pinch zoomed", lambda z: z["scale"] > 1.2)
+        time.sleep(0.5)
+        share = changed_fraction(before, sample_grid(dev.screen(), box))
+        if share < 0.05:
+            raise StepFailed(f"the screen did not change with the pinch ({share:.2f})")
+        dev.swipe(cx + width // 6, cy, cx - width // 6, cy, 500)
+        panned = expect(
+            "the pan moved the zoomed picture",
+            lambda z: abs(z["left"] - pinched["left"]) > 10 or abs(z["top"] - pinched["top"]) > 10,
+        )
+        dev.double_tap(cx, cy)
+        expect("the double tap went back to 1x", lambda z: z["scale"] == 1.0)
+        dev.key("KEYCODE_BACK")
+        self.wait_id("compose", 10)
+        return (
+            f"pinch=1.000->{pinched['scale']:.3f} changed={share:.2f} "
+            f"pan_dx={panned['left'] - pinched['left']:.0f} doubletap=1x back=chat "
+            f"touch={touch.path}"
         )
 
     def step_file(self) -> str:

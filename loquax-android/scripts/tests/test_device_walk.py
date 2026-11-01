@@ -685,6 +685,110 @@ class PhotoBubble(unittest.TestCase):
         )
 
 
+class PictureZoom(unittest.TestCase):
+    """The viewer's zoom step (1269): the touch device, the screen size,
+    the pinch's events, the viewer's log line and where it put the
+    picture."""
+
+    # `getevent -pl` of an emulator: a keyboard, then the touch screen.
+    GETEVENT = """add device 1: /dev/input/event1
+  name:     "qwerty2"
+  events:
+    KEY (0001): KEY_ESC KEY_1
+add device 2: /dev/input/event2
+  name:     "virtio_input_multi_touch_1"
+  events:
+    KEY (0001): BTN_TOUCH
+    ABS (0003): ABS_MT_SLOT           : value 0, min 0, max 9, fuzz 0, flat 0, resolution 0
+                ABS_MT_TOUCH_MAJOR    : value 0, min 0, max 2147483647, fuzz 0, flat 0, resolution 0
+                ABS_MT_POSITION_X     : value 0, min 0, max 32767, fuzz 0, flat 0, resolution 0
+                ABS_MT_POSITION_Y     : value 0, min 0, max 32767, fuzz 0, flat 0, resolution 0
+                ABS_MT_TRACKING_ID    : value 0, min 0, max 9, fuzz 0, flat 0, resolution 0
+  input props:
+    INPUT_PROP_DIRECT
+"""
+
+    def test_the_touch_screen_is_found_and_a_keyboard_is_not(self):
+        touch = walk.parse_touch_device(self.GETEVENT)
+        self.assertEqual(touch.path, "/dev/input/event2")
+        self.assertEqual((touch.x_min, touch.x_max, touch.y_max), (0, 32767, 32767))
+        self.assertTrue(touch.touch_major)
+        self.assertFalse(touch.pressure)
+        self.assertIsNone(walk.parse_touch_device(self.GETEVENT.split("add device 2")[0]))
+
+    def test_a_direct_device_wins_over_a_touchpad(self):
+        pad = self.GETEVENT.replace("INPUT_PROP_DIRECT", "INPUT_PROP_POINTER").replace(
+            "/dev/input/event2", "/dev/input/event7"
+        )
+        # The pad first, the screen after it.
+        both = pad + "add device 3: /dev/input/event2\n" + self.GETEVENT.split(
+            "add device 2: /dev/input/event2\n"
+        )[1]
+        self.assertEqual(walk.parse_touch_device(both).path, "/dev/input/event2")
+        self.assertEqual(walk.parse_touch_device(pad).path, "/dev/input/event7")
+
+    def test_the_screen_size_takes_the_override(self):
+        self.assertEqual(walk.parse_wm_size("Physical size: 1080x2340\n"), (1080, 2340))
+        self.assertEqual(
+            walk.parse_wm_size("Physical size: 1080x2340\nOverride size: 720x1560\n"),
+            (720, 1560),
+        )
+        self.assertIsNone(walk.parse_wm_size("no size"))
+
+    def test_the_pinch_spreads_two_fingers_and_lifts_both(self):
+        touch = walk.parse_touch_device(self.GETEVENT)
+        events = walk.pinch_events(touch, (1000, 2000), (500, 1000), (100, 400), steps=3)
+        xs = {0: [], 1: []}
+        slot = None
+        for t, c, v in events:
+            if (t, c) == (walk.EV_ABS, walk.ABS_MT_SLOT):
+                slot = v
+            elif (t, c) == (walk.EV_ABS, walk.ABS_MT_POSITION_X):
+                xs[slot].append(v)
+        # Screen x 400 and 600 at first, 100 and 900 at last, on 0..32767.
+        scale = 32767 / 999
+        self.assertEqual(xs[0][0], round(400 * scale))
+        self.assertEqual(xs[1][0], round(600 * scale))
+        self.assertEqual(xs[0][-1], round(100 * scale))
+        self.assertEqual(xs[1][-1], round(900 * scale))
+        self.assertEqual(len(xs[0]), 4)
+        self.assertTrue(all(a > b for a, b in zip(xs[0], xs[0][1:])), xs[0])
+        ids = [v for t, c, v in events if c == walk.ABS_MT_TRACKING_ID]
+        self.assertEqual(ids, [1269, 1270, -1, -1])
+        self.assertEqual(events[-1], (walk.EV_SYN, walk.SYN_REPORT, 0))
+        self.assertIn((walk.EV_KEY, walk.BTN_TOUCH, 0), events)
+        line = walk.sendevent_script(touch.path, events[:2])
+        self.assertEqual(line, "sendevent /dev/input/event2 3 47 0; sendevent /dev/input/event2 3 57 1269")
+
+    LOG = (
+        "11-01 14:00:01.000  4711  4711 I loquax  : PHOTO_ZOOM scale=1.000 left=0.0 "
+        "top=480.0 width=1080.0 height=1440.0 view=1080x2400\n"
+        "11-01 14:00:03.000  4711  4711 I loquax  : PHOTO_ZOOM scale=2.500 left=-810.0 "
+        "top=-600.0 width=2700.0 height=3600.0 view=1080x2400\n"
+    )
+
+    def test_the_viewers_lines_are_read_oldest_first(self):
+        states = walk.parse_photo_zoom(self.LOG)
+        self.assertEqual([z["scale"] for z in states], [1.0, 2.5])
+        self.assertEqual(states[1]["left"], -810.0)
+        self.assertEqual((states[1]["vw"], states[1]["vh"]), (1080.0, 2400.0))
+        self.assertEqual(walk.parse_photo_zoom("nothing"), [])
+
+    def test_a_picture_in_bounds_passes_and_one_off_them_fails(self):
+        rest, zoomed = walk.parse_photo_zoom(self.LOG)
+        self.assertEqual(walk.zoom_bounds_problems(rest), [])
+        self.assertEqual(walk.zoom_bounds_problems(zoomed), [])
+        # Panned past the left edge: a black gap on the right.
+        gap = dict(zoomed, left=-1700.0)
+        self.assertIn("x: 2700 px from -1700 leaves a gap", walk.zoom_bounds_problems(gap)[0])
+        # At 1x not centred.
+        off = dict(rest, top=100.0)
+        self.assertIn("y: 1440 px at 100 is not centred", walk.zoom_bounds_problems(off)[0])
+
+    def test_the_step_stands_after_the_image_it_zooms(self):
+        self.assertEqual(walk.STEPS.index("picture_zoom"), walk.STEPS.index("image") + 1)
+
+
 class File(unittest.TestCase):
     """The file step's reading of the screen (1221)."""
 

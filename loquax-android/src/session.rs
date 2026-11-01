@@ -989,6 +989,8 @@ impl Session {
                     width: pixels.width,
                     height: pixels.height,
                     rgba: schema::Blob(pixels.rgba),
+                    full_width: pixels.full.0,
+                    full_height: pixels.full.1,
                 }));
             }
             // A file to open or share (1221): its message's fields copied
@@ -1137,6 +1139,8 @@ impl Session {
             | schema::Query::Photo { .. }
             | schema::Query::SaveFile { .. }
             | schema::Query::Voice { .. } => return Err("answered above".to_string()),
+            // The viewer's zoom needs no session: `lib.rs` answers it.
+            schema::Query::Zoom(ask) => return Ok(crate::viewer::answer(&ask)),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner

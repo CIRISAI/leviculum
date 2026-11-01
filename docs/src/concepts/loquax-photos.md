@@ -124,9 +124,35 @@ same tree without and with the `photos` feature.
   where `text` is none. Before 1268 the phone drew the photo above an
   empty text bubble.
 - `UiEvent::ViewPhoto` answers `UiEffect::ShowPhoto` for a message that
-  carries one. The terminal and the window write the picture to
-  `$LNMSG_HOME/photos/<peer>-<key>.<format>` and hand it to the system's
-  viewer; the phone opens its viewer screen.
+  carries one. The terminal writes the picture to
+  `$LNMSG_HOME/photos/<peer>-<key>.<format>` and hands it to the system's
+  viewer; the window decodes that file and shows it over itself (1269);
+  the phone opens its viewer screen.
+- The picture whole zooms (1269, Lew 2026-11-01): one state machine,
+  `loquax::ui::zoom::Zoom`, for the phone and the window. At 1x the
+  picture fits the screen whole; it zooms up to 4x, or to its own size
+  when that is larger on screen (`Query::Photo` answers `full_width` and
+  `full_height`, the size before the decode scaled it). A pinch keeps the
+  picture point under its centre; one finger pans while zoomed; a double
+  tap toggles 1x and 2x at the tap; the picture never leaves the screen:
+  where it is wider than the screen its edges stay outside, where it is
+  narrower it stays centred. Back while zoomed goes to 1x, at 1x it
+  closes, as does a swipe down (an eighth of the screen, more down than
+  sideways). The platform only reports gestures:
+
+  | Gesture | Android (`PhotoView`) | Window (`gui/viewer.rs`) | `Zoom` |
+  |---|---|---|---|
+  | zoom about a point | pinch (`ScaleGestureDetector`, its focus) | wheel or touchpad scroll, 1.25x a notch, about the pointer | `pinch` |
+  | move | one finger while zoomed (`onScroll`) | drag with the left button | `pan_by` |
+  | coast | fling while zoomed (`Fling`'s decision, an `OverScroller` bounded by `room`) | none | `pan_by`, `room` |
+  | toggle 1x / 2x | double tap | double click | `double_tap` |
+  | back | Back | Esc, the bar's Close closes at once | `back` |
+  | close at 1x | tap, swipe down | Esc | `swipe_closes`, `back` |
+  | screen size | `onSizeChanged` | the canvas's size | `resize` |
+
+  The phone keeps the state between gestures and hands it back with each
+  (`Query::Zoom`, which needs no session); the terminal keeps its still
+  picture.
 - The terminal draws `▣ photo · 279 KB` above the text or alone
   (`[#] photo - 279 KB` in ASCII); `Enter` on it shows it. The window
   draws the photo's words as a pressable line; its thumbnail in the window
@@ -163,8 +189,9 @@ same tree without and with the `photos` feature.
   240 dp on the longer side (less where the bubble is narrower), its shape the picture's, from
   `Query::Photo { peer, key, edge }`, which answers RGBA rows that
   `Bitmap.copyPixelsFromBuffer` takes as they are; a cache of 16 MiB
-  keeps them. A tap opens `PhotoActivity`, which asks for the screen's
-  longer side and shows the Bitmap; a tap or Back closes it.
+  keeps them. A tap opens `PhotoActivity`, which asks for twice the
+  screen's longer side (at most 4096), so a zoom has pixels to show, and
+  shows the Bitmap in `PhotoView`, zoomed as above (1269).
 - Settings › Chats: the three sizes as a choice, phone checked by default,
   and the line "Photos are made smaller before they go. Their place and
   camera data never go." (`Query::PhotoSize`).
@@ -194,7 +221,16 @@ same tree without and with the `photos` feature.
   steps its quality down to fit.
 - The scene, the terminal and the config each have their test; the device
   walk's `image` step drives the paperclip, the picker, the thumbnail and
-  the viewer on a phone ([the device walk](loquax-device-walk.md)).
+  the viewer on a phone ([the device walk](loquax-device-walk.md)), its
+  `picture_zoom` step a pinch, a pan, a double tap and Back on it.
+- The zoom (1269): `loquax::ui::zoom` unit tests (the fit, the most of 4x
+  or the native size, a pinch's clamp and anchor, an anchor at the edge,
+  a pan held at the edge, the double tap, Back, the swipe down, a resize,
+  and 2000 held random gestures after each of which the picture covers
+  the screen or is centred); `loquax-android/tests/viewer.rs` the same in
+  Java's bytes through the JNI's `query` without a session;
+  `gui/viewer.rs` and `gui.rs`'s `a_photo_opens_in_the_windows_viewer_and_zooms`
+  the window's wheel, drag, double click, Esc and Close.
 
 ## 7. Open
 

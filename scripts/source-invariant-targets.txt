@@ -234,6 +234,7 @@ skip  loquax-android   home_reach                 # phone and mailbox through in
 skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
 skip  loquax-android   schema_props               # property tests of the facade schema's codec; subject is the code
+skip  loquax-android   viewer                     # the photo viewer's zoom through the JNI query in Java's bytes (1269); subject is the code
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer

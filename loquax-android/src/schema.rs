@@ -94,6 +94,11 @@
 //! the frame says the choice as `fling`, and how far its view may still
 //! move north and south before the world's edge as `room_north` and
 //! `room_south`, which a coast stops at. An older app reads none of them.
+//! The photo viewer's zoom (1269) came within version 1 too: the query
+//! [`Query::Zoom`] with its [`ZoomShown`], the first that carries reals
+//! (msgpack float 64, which `MsgPack.java` reads and since then writes),
+//! and [`PhotoPixels::full_width`] and [`PhotoPixels::full_height`]. An
+//! older app sends no `zoom` and reads neither size.
 //! The scene's words (1217) came within version 1 too: [`Start::lang`],
 //! the list's `search`, a row's `live` and `ring`, and a bubble's
 //! `joins_before`, `joins_after`, `day`, `meta`, `newest` and `live`. The
@@ -416,8 +421,9 @@ impl<'de> Deserialize<'de> for Blob {
     }
 }
 
-/// What the screen wants to show.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// What the screen wants to show. `PartialEq` alone: [`Query::Zoom`]
+/// carries reals.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Query {
     /// The conversation list, in the list's order; with `search` only the
@@ -534,6 +540,84 @@ pub enum Query {
     /// decoded for `AudioTrack` (1222): Opus at 24 kHz, Codec2 at 8 kHz.
     /// Answered as [`VoicePcm`].
     Voice { peer: String, key: i64 },
+    /// One gesture on the photo viewer (1269), folded into the zoom it
+    /// was at, needing no session: the viewer's state is the app's,
+    /// handed back as [`ZoomShown`] gave it, the logic
+    /// `loquax::ui::zoom`'s, which the window runs too. Answered as
+    /// [`ZoomShown`].
+    Zoom(ZoomAsk),
+}
+
+/// What [`Query::Zoom`] asks: the viewer's state, in screen pixels, and
+/// one gesture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZoomAsk {
+    pub view_w: f64,
+    pub view_h: f64,
+    /// The picture's native size, not the Bitmap's: it bounds the zoom.
+    pub picture_w: f64,
+    pub picture_h: f64,
+    /// The zoom, a multiple of the fit; 1 when absent.
+    #[serde(default = "one")]
+    pub scale: f64,
+    /// The picture's centre from the screen's centre.
+    #[serde(default)]
+    pub pan_x: f64,
+    #[serde(default)]
+    pub pan_y: f64,
+    /// `pinch` (`factor` about `x`, `y`), `pan` (by `dx`, `dy`),
+    /// `doubletap` (at `x`, `y`), `back`, `swipe` (a drag of `dx`, `dy`
+    /// from where it went down: whether it closes), `resize` (to
+    /// `view_w`, `view_h`, the state kept) or `none` (the state alone).
+    pub gesture: String,
+    #[serde(default)]
+    pub factor: f64,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default)]
+    pub dx: f64,
+    #[serde(default)]
+    pub dy: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// What [`Query::Zoom`] answers: the state after the gesture (the app
+/// hands it back with the next), where the picture lands (`left`, `top`, `width`, `height`, screen pixels), the
+/// room a coast has to each edge, and what the gesture moved.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ZoomShown {
+    pub v: u32,
+    pub ok: bool,
+    /// The state, as [`ZoomAsk`] takes it back.
+    pub view_w: f64,
+    pub view_h: f64,
+    pub picture_w: f64,
+    pub picture_h: f64,
+    pub scale: f64,
+    pub pan_x: f64,
+    pub pan_y: f64,
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+    pub room_left: f64,
+    pub room_right: f64,
+    pub room_up: f64,
+    pub room_down: f64,
+    pub max_scale: f64,
+    /// At 1x: the whole picture.
+    pub at_rest: bool,
+    /// The viewer closes: `back` at 1x, or a `swipe` that closes.
+    pub close: bool,
+    /// What a `pan` moved, less where an edge stopped it: a coast that
+    /// moves nothing has reached the edge.
+    pub moved_x: f64,
+    pub moved_y: f64,
 }
 
 /// What [`Query::Voice`] answers: mono 16-bit PCM, little endian, the
@@ -588,6 +672,12 @@ pub struct PhotoPixels {
     pub width: u32,
     pub height: u32,
     pub rgba: Blob,
+    /// The picture's own size before it was scaled (1269): the viewer
+    /// zooms to it at most, when that is past 4x.
+    #[serde(default)]
+    pub full_width: u32,
+    #[serde(default)]
+    pub full_height: u32,
 }
 
 /// What [`Query::MapRegions`] answers: the regions, newest first, their

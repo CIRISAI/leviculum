@@ -32,6 +32,7 @@ pub mod pull_line;
 pub mod scan;
 pub mod schema;
 pub mod session;
+pub mod viewer;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -132,6 +133,9 @@ pub fn query(request: &[u8]) -> Vec<u8> {
             |_| String::new(),
         )
         .map(|read| schema::encode(&read)),
+        // The photo viewer's zoom (1269): the state is the app's, no
+        // session is asked.
+        (_, Ok(schema::Query::Zoom(ask))) => Ok(viewer::answer(&ask)),
         (None, _) => Err("not started".to_string()),
         (_, Err(error)) => Err(error),
         (Some(session), Ok(query)) => session.query(query),

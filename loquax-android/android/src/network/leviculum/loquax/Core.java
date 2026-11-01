@@ -53,6 +53,12 @@ final class Core {
         return value instanceof Number ? ((Number) value).longValue() : 0;
     }
 
+    /** A real of an answer: a float, or an integer as one. */
+    static double real(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        return value instanceof Number ? ((Number) value).doubleValue() : 0;
+    }
+
     static boolean bool(Map<String, Object> map, String key) {
         return Boolean.TRUE.equals(map.get(key));
     }
@@ -193,7 +199,37 @@ final class Core {
      * square by the library (1220), as a Bitmap; null when it has none or
      * it does not decode. Not on the UI thread.
      */
+    /**
+     * One gesture on the photo viewer (1269), folded into the state
+     * `state` holds (its `view_w`, `view_h`, `picture_w`, `picture_h`,
+     * `scale`, `pan_x`, `pan_y`) by the library's zoom, which needs no
+     * session: the state after it, where the picture lands and what a
+     * coast has room for (schema.rs, ZoomShown), itself such a state. `gesture` is the
+     * gesture's word and its reals: `factor`, `x`, `y`, `dx`, `dy`.
+     */
+    static Map<String, Object> zoom(Map<String, Object> state, String gesture, Object... reals) {
+        Map<String, Object> request = map("t", "zoom",
+                "view_w", real(state, "view_w"), "view_h", real(state, "view_h"),
+                "picture_w", real(state, "picture_w"), "picture_h", real(state, "picture_h"),
+                "scale", real(state, "scale"),
+                "pan_x", real(state, "pan_x"), "pan_y", real(state, "pan_y"),
+                "gesture", gesture);
+        for (int i = 0; i + 1 < reals.length; i += 2) {
+            request.put((String) reals[i], ((Number) reals[i + 1]).doubleValue());
+        }
+        return answer(Native.query(MsgPack.pack(request)));
+    }
+
     static Bitmap photoBitmap(String peer, long key, int edge) {
+        return photoBitmap(peer, key, edge, null);
+    }
+
+    /**
+     * The photo's pixels, scaled into `edge` by `edge`; with `full` not
+     * null, its two ints set to the picture's own size before the scale
+     * (1269, what the viewer zooms to).
+     */
+    static Bitmap photoBitmap(String peer, long key, int edge, int[] full) {
         Map<String, Object> answer = answer(Native.query(MsgPack.pack(
                 map("t", "photo", "peer", peer, "key", key, "edge", (long) edge))));
         Object rgba = answer.get("rgba");
@@ -202,6 +238,13 @@ final class Core {
         if (!(rgba instanceof byte[]) || w <= 0 || h <= 0
                 || ((byte[]) rgba).length != w * h * 4) {
             return null;
+        }
+        if (full != null) {
+            // An older library sends no full size: the pixels' own.
+            long fw = num(answer, "full_width");
+            long fh = num(answer, "full_height");
+            full[0] = (int) (fw > 0 ? fw : w);
+            full[1] = (int) (fh > 0 ? fh : h);
         }
         Bitmap bitmap = Bitmap.createBitmap((int) w, (int) h, Bitmap.Config.ARGB_8888);
         bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap((byte[]) rgba));
