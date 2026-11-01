@@ -156,6 +156,15 @@ final class Core {
         return command(map("t", "react", "peer", peer, "target", target, "content", content));
     }
 
+    /**
+     * What the compose field of `peer`'s chat holds now (1219), and the id of
+     * the message a reply being written answers, "" for none: the library
+     * keeps it as the conversation's draft.
+     */
+    static String draft(String peer, String body, String reply) {
+        return command(map("t", "draft", "peer", peer, "body", body, "reply", reply));
+    }
+
     /** A reply to the message `target` (1137): sent with its id and a quote of it. */
     static String reply(String peer, String target, String body) {
         return command(map("t", "reply", "peer", peer, "target", target, "body", body));

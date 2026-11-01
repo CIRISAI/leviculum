@@ -489,6 +489,25 @@ def boxed(rid, bounds, desc=""):
     return walk.Node(text="", desc=desc, rid="network.leviculum.loquax.debug:id/" + rid, cls="", bounds=bounds)
 
 
+class Draft(unittest.TestCase):
+    """Where the draft step finds a row's last line (1219), and what it
+    refuses."""
+
+    def test_the_last_line_is_the_one_beside_the_rows_avatar(self):
+        avatar = boxed("avatar", (42, 300, 189, 447))
+        mine = boxed("last", (210, 390, 800, 430), "")
+        other = boxed("last", (210, 600, 800, 640), "")
+        self.assertEqual(walk.last_in_row([other, mine], avatar), mine)
+        self.assertIsNone(walk.last_in_row([other], avatar))
+
+    def test_a_row_without_the_draft_is_refused(self):
+        row = walk.Node(text="Draft: walk draft 7", desc="", rid="x:id/last", cls="", bounds=(0, 0, 1, 1))
+        self.assertEqual(walk.draft_problems(row, "walk draft 7"), [])
+        last = walk.Node(text="walk draft 7", desc="", rid="x:id/last", cls="", bounds=(0, 0, 1, 1))
+        self.assertEqual(len(walk.draft_problems(last, "walk draft 7")), 1)
+        self.assertEqual(walk.draft_problems(None, "x"), ["no last line in the row"])
+
+
 class Pin(unittest.TestCase):
     """Where the receive_report and position_pin steps find a row's map pin
     (1224), and what they refuse."""

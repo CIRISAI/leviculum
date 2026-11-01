@@ -67,6 +67,7 @@ STEPS = [
     "receive_wake",
     "receive_report",
     "position_pin",
+    "draft",
     "map",
     "fling",
     "friends",
@@ -125,6 +126,9 @@ FILE_SIZE = re.compile(r"\d+(?:[.,]\d+)?\s?(?:B|kB|KB|MB|GB)\b")
 DIALOG_BUTTONS = ["Allow", "ALLOW", "Not now"]
 # The list's last line for a peer whose position is live (1209, Ui.preview).
 LIVE_LINE = "\U0001f4cd live"
+# A row's last line while a message is typed there and not sent (1219,
+# the catalogue's draft_row).
+DRAFT_PREFIX = "Draft: "
 # The liveness ring's width as a share of the avatar (AvatarView.RING).
 RING = 0.06
 # The list row's map pin (1224): its content description begins so
@@ -614,6 +618,27 @@ def pin_problems(pin: Node | None, density: int | None) -> list[str]:
         if x2 - x1 < least or y2 - y1 < least:
             problems.append(f"the pin's target is {x2 - x1}x{y2 - y1} px, under {PIN_DP}dp at {density} dpi")
     return problems
+
+
+def last_in_row(nodes: list[Node], avatar: Node) -> Node | None:
+    """The last line of the list row whose avatar is `avatar`: the `last`
+    whose middle lies within the avatar's height."""
+    top, bottom = avatar.bounds[1], avatar.bounds[3]
+    for node in find(nodes, rid="last"):
+        if top <= node.center[1] <= bottom:
+            return node
+    return None
+
+
+def draft_problems(last: Node | None, typed: str) -> list[str]:
+    """What is wrong with a row's draft line (1219): none there, or not
+    `Draft: ` and what was typed."""
+    if last is None:
+        return ["no last line in the row"]
+    want = DRAFT_PREFIX + typed
+    if last.text != want:
+        return [f"the row says {last.text!r}, not {want!r}"]
+    return []
 
 
 def conversation_notifications(dumpsys: str, package: str) -> dict[str, str]:
@@ -1404,6 +1429,56 @@ class Walk:
         if find(dev.dump(), rid="card_name"):
             raise StepFailed("back left the card open")
         return f"pin={pin.desc!r} card_ms={card_ms} card={card[0].text!r} back=chats"
+
+    def step_draft(self) -> str:
+        """A message typed and not sent (1219): Back to the list shows it
+        as the row's `Draft: …`; the app stopped and started again shows it
+        there still, and the chat opens with it in the field. The field is
+        emptied again at the end, which takes the draft away."""
+        dev = self.need_device()
+        shown = self.need_fixture().manifest["open"]["shown"]
+        typed = f"walk draft {self.nonce}"
+
+        def to_list():
+            for _ in range(3):
+                if find(dev.dump(), rid="write"):
+                    return
+                dev.key("KEYCODE_BACK")
+                time.sleep(0.6)
+            self.wait_id("write", 10)
+
+        def row_says():
+            nodes = dev.dump()
+            return draft_problems(last_in_row(nodes, self.row_avatar(nodes, shown)), typed)
+
+        to_list()
+        self.open_conversation(shown)
+        dev.tap_node(self.wait_id("compose", 5)[0])
+        dev.type_text(typed)
+        to_list()
+        problems = row_says()
+        if problems:
+            raise StepFailed("in the list: " + "; ".join(problems))
+        # Typing paused long ago: the store has it. The app goes whole.
+        dev.shell(f"am force-stop {PACKAGE}")
+        start = time.monotonic()
+        dev.shell(f"am start -W -n {PACKAGE}/{ACTIVITY}", timeout=60)
+        self.wait_id("write", 30)
+        if not wait_for(lambda: not row_says(), 10, every=0.5):
+            raise StepFailed("after the restart: " + "; ".join(row_says()))
+        back_ms = int((time.monotonic() - start) * 1000)
+        self.open_conversation(shown)
+        field = self.wait_id("compose", 5)[0]
+        if field.text != typed:
+            raise StepFailed(f"the field holds {field.text!r}, not {typed!r}")
+        dev.tap_node(field)
+        dev.shell("input keyevent KEYCODE_MOVE_END " + " ".join(["KEYCODE_DEL"] * (len(typed) + 2)))
+        to_list()
+        nodes = dev.dump()
+        last = last_in_row(nodes, self.row_avatar(nodes, shown))
+        if last is not None and last.text.startswith(DRAFT_PREFIX):
+            raise StepFailed(f"emptied, the row still says {last.text!r}")
+        return f"row={DRAFT_PREFIX + typed!r} restart_ms={back_ms} field=restored cleared=yes"
 
     def row_avatar(self, nodes: list[Node], shown: str) -> Node:
         """The list row's avatar beside the name `shown`."""

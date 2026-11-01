@@ -626,7 +626,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                     + (Core.bool(row, "muted") ? " \uD83D\uDD15" : "");
             name.setText(Core.str(row, "name") + marks);
             name.setTypeface(null, unread > 0 ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
-            ((TextView) view.findViewById(R.id.last)).setText(Ui.preview(ConversationsActivity.this, row));
+            // A message typed and not sent stands in for the last one, in
+            // italics, in the library's words (1219): `Draft: …`.
+            String draft = Core.str(row, "draft");
+            TextView last = (TextView) view.findViewById(R.id.last);
+            last.setText(draft.isEmpty() ? Ui.preview(ConversationsActivity.this, row) : draft);
+            last.setTypeface(null, draft.isEmpty()
+                    ? android.graphics.Typeface.NORMAL : android.graphics.Typeface.ITALIC);
             TextView at = (TextView) view.findViewById(R.id.at);
             at.setText(Ui.listTime(ConversationsActivity.this, Core.num(row, "at"), Ui.nowSecs()));
             at.setTextColor(getColor(unread > 0 ? R.color.accent : R.color.text_secondary));

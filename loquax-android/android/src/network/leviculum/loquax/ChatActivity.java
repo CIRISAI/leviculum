@@ -99,6 +99,14 @@ public class ChatActivity extends Activity implements Events.Listener {
     private boolean homeClient;
     /** The message a reply being written answers, or null. */
     private Map<String, Object> replyTo;
+    /**
+     * The field is to take the library's draft with the next answer (1219):
+     * set whenever the screen comes back. Java keeps no draft of its own; the
+     * field mirrors the scene's compose and says every change.
+     */
+    private boolean draftOwed = true;
+    /** The field is being set from the draft, which is no change to say. */
+    private boolean mirroring;
     private View replyBar;
     /** The selection's keys while selecting, else null. */
     private Set<Long> selection;
@@ -257,6 +265,7 @@ public class ChatActivity extends Activity implements Events.Listener {
             @Override
             public void afterTextChanged(Editable s) {
                 sendable();
+                tellDraft();
             }
         });
         sendable();
@@ -321,6 +330,7 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         Core.front(true);
         say(error);
+        draftOwed = true;
         refresh();
         ticker.postDelayed(tick, 30_000);
     }
@@ -834,8 +844,14 @@ public class ChatActivity extends Activity implements Events.Listener {
             line(error);
             return;
         }
-        compose.setText("");
-        replyTo(null);
+        // The library dropped the draft with the send (1219).
+        mirroring = true;
+        try {
+            compose.setText("");
+            replyTo(null);
+        } finally {
+            mirroring = false;
+        }
         refresh();
     }
 
@@ -1018,6 +1034,8 @@ public class ChatActivity extends Activity implements Events.Listener {
     private void replyTo(Map<String, Object> row) {
         replyTo = row;
         replyBar.setVisibility(row == null ? View.GONE : View.VISIBLE);
+        // The reply is part of the draft (1219), started or ended.
+        tellDraft();
         if (row == null) {
             return;
         }
@@ -1235,6 +1253,41 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         showPinned();
         adapter.notifyDataSetChanged();
+        if (draftOwed) {
+            draftOwed = false;
+            mirrorDraft(answer);
+        }
+    }
+
+    /** The field and the reply bar as the library's draft has them (1219). */
+    private void mirrorDraft(Map<String, Object> answer) {
+        mirroring = true;
+        try {
+            String draft = Core.str(answer, "draft");
+            if (!draft.equals(compose.getText().toString())) {
+                compose.setText(draft);
+                compose.setSelection(compose.getText().length());
+            }
+            String reply = Core.str(answer, "draft_reply");
+            Map<String, Object> target = null;
+            for (Map<String, Object> row : rows) {
+                if (!reply.isEmpty() && reply.equals(Core.str(row, "id"))) {
+                    target = row;
+                }
+            }
+            replyTo(target);
+        } finally {
+            mirroring = false;
+        }
+    }
+
+    /** What the field holds, and the reply, to the library as the draft. */
+    private void tellDraft() {
+        if (mirroring || peer == null) {
+            return;
+        }
+        Core.draft(peer, compose.getText().toString(),
+                replyTo == null ? "" : Core.str(replyTo, "id"));
     }
 
     @Override
