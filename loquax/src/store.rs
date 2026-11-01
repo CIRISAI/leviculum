@@ -1775,6 +1775,22 @@ impl Store {
         at: i64,
         ttl_secs: i64,
     ) -> Result<Redeemed, StoreError> {
+        self.redeem_token_as(token, device, "", at, ttl_secs)
+    }
+
+    /// [`Store::redeem_token`], with the name the device brought in its
+    /// join: a token issued without a name (a phone's "Link a device",
+    /// 1264, which cannot know the other device's name) admits it under
+    /// that one. A token with a name keeps it, as the person who issued it
+    /// chose it.
+    pub fn redeem_token_as(
+        &mut self,
+        token: &[u8; 16],
+        device: &[u8; 16],
+        brought: &str,
+        at: i64,
+        ttl_secs: i64,
+    ) -> Result<Redeemed, StoreError> {
         let identity = self.identity;
         let path = self.path.clone();
         let tx = self
@@ -1789,9 +1805,15 @@ impl Store {
             )
             .optional()
             .map_err(|e| failed(&path, e))?;
-        let Some((name, created_at)) = open else {
+        let Some((mut name, created_at)) = open else {
             return Ok(Redeemed::Unknown);
         };
+        if name.trim().is_empty() {
+            name = match brought.trim() {
+                "" => "device".to_string(),
+                brought => brought.to_string(),
+            };
+        }
         tx.execute(
             "DELETE FROM home_tokens WHERE identity = ?1 AND token = ?2",
             params![&identity[..], &token[..]],

@@ -1696,16 +1696,10 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
                     return usage(format!("--server: {error}"));
                 }
             }
-            let mut token = [0u8; 16];
-            rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut token);
-            if let Err(error) = store.issue_token(&token, &name, now) {
-                return failure(error, "no-store");
-            }
             let public_key = match identity::load_or_create(&home.join("identity")) {
                 Ok(identity) => identity.public_key_bytes(),
                 Err(error) => return failure(error, "no-identity"),
             };
-            let code = loquax::home::code::HomeCode { public_key, token };
             // The rendezvous list the phone tries in order (1196): this
             // mailbox's own phone port first when --server names it, then
             // the list the mailbox dials itself, on the phones' ports.
@@ -1713,22 +1707,21 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
                 Ok(config) => config,
                 Err(error) => return usage(error.to_string()),
             };
-            let shared: Vec<String> = match loquax::home::rendezvous::mailbox_list(&config) {
-                (_, "config") => config.rendezvous.clone().unwrap_or_default(),
-                (_, "default") => loquax::home::rendezvous::default_list(),
-                _ => Vec::new(),
+            let list = loquax::home::admit::computer_list(&config, server);
+            // The phone's "Link a device" opens its admissions the same way
+            // (1264).
+            let admission = match loquax::home::admit::open(store, public_key, &name, list, now) {
+                Ok(admission) => admission,
+                Err(error) => return failure(error, "no-store"),
             };
-            let list = match server {
-                Some(server) => loquax::home::rendezvous::with_first(server, &shared),
-                None => shared,
-            };
-            let text = code.encode_with_rendezvous(&list);
+            let code = &admission.code;
+            let text = admission.text();
             println!("Admission code for {name:?}, good for one device, once:\n\n{text}\n");
             match loquax::home::qr::lines(&text) {
                 Ok(lines) => println!("{}\n", lines.join("\n")),
                 Err(error) => eprintln!("loquax: no QR code: {error}"),
             }
-            match server.is_some() || !list.is_empty() {
+            match server.is_some() || !admission.list.is_empty() {
                 true => println!(
                     "On a phone: scan it with a QR reader and share it to Loquax, or paste it \
                      into Loquax's join screen."

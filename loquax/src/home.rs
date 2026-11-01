@@ -7,6 +7,7 @@
 //! to the home node's own destination, `loquax.home`. Fetching never deletes.
 //!
 //! - [`code`]: the admission code `loquax home admit` prints.
+//! - `admit`: opening one, on a computer's mailbox and a phone's alike.
 //! - [`wire`]: the five requests, `/join`, `/sync`, `/send`, `/mark` and
 //!   `/watch`, their answers, and the wake.
 //! - [`wake`]: which watching link is owed a wake, on the home node.
@@ -25,6 +26,8 @@ use alloc::string::String;
 
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 
+#[cfg(feature = "history")]
+pub mod admit;
 pub mod backup;
 pub mod code;
 pub mod outgoing;
