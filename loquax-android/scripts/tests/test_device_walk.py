@@ -685,6 +685,88 @@ class PhotoBubble(unittest.TestCase):
         )
 
 
+class ComposeBar(unittest.TestCase):
+    """The compose bar as Signal has it (1270): its buttons, in order and
+    named, the round one outside the field; a caption in the photo's
+    bubble; the mailbox's sends to a peer."""
+
+    field = boxed("compose", (120, 2200, 700, 2300))
+
+    def bar(self, ids, desc="words"):
+        x = {"emoji": 20, "locate": 720, "camera": 800, "record": 880, "plus": 980, "send": 980}
+        return [boxed(rid, (x[rid], 2210, x[rid] + 80, 2290), desc) for rid in ids]
+
+    def test_the_empty_field_has_five_buttons_and_the_typed_four(self):
+        empty = [self.field] + self.bar(walk.BAR_EMPTY)
+        self.assertEqual(walk.bar_problems(empty, typed=False), [])
+        typed = [self.field] + self.bar(walk.BAR_TYPED)
+        self.assertEqual(walk.bar_problems(typed, typed=True), [])
+        self.assertEqual(len(walk.BAR_EMPTY), 5)
+
+    def test_the_old_bar_and_a_missed_swap_are_named(self):
+        # Today's bar before 1270: the paperclip is no button of the
+        # scene's, the round one was the microphone named send.
+        old = [self.field] + self.bar(["emoji", "send"])
+        self.assertEqual(
+            walk.bar_problems(old, typed=False),
+            [f"the bar has ['emoji', 'send'], want {walk.BAR_EMPTY}"],
+        )
+        stuck = [self.field] + self.bar(walk.BAR_EMPTY)
+        self.assertEqual(
+            walk.bar_problems(stuck, typed=True),
+            [f"the bar has {walk.BAR_EMPTY}, want {walk.BAR_TYPED}"],
+        )
+
+    def test_a_button_without_words_or_on_the_wrong_side_is_named(self):
+        nodes = [self.field] + self.bar(walk.BAR_EMPTY)
+        nodes[2] = boxed("locate", (720, 2210, 800, 2290), "")
+        self.assertEqual(
+            walk.bar_problems(nodes, typed=False),
+            ["locate has no words for a screen reader"],
+        )
+        left = [self.field] + self.bar(walk.BAR_EMPTY)
+        left[3] = boxed("camera", (300, 2210, 380, 2290), "words")
+        problems = walk.bar_problems(left, typed=False)
+        self.assertIn("the bar has ['emoji', 'camera', 'locate', 'record', 'plus']", problems[0])
+        self.assertTrue(any(p.startswith("camera is not right of the field") for p in problems))
+
+    def test_the_round_button_must_be_outside(self):
+        nodes = [self.field] + self.bar(["emoji", "locate", "camera", "record"])
+        nodes.append(boxed("plus", (850, 2210, 930, 2290), "words"))
+        problems = walk.bar_problems(nodes, typed=False)
+        self.assertIn("the round button is not outside the field", problems)
+
+    def test_a_caption_sits_in_the_photos_bubble_with_its_mark(self):
+        bubble = boxed("bubble", (480, 380, 1060, 1180))
+        photo = walk.Node("", "Photo, 104 KB", "network.leviculum.loquax:id/photo", "", (500, 400, 1040, 1000))
+        body = walk.Node("the view", "", "network.leviculum.loquax:id/body", "", (500, 1010, 900, 1060))
+        mark = boxed("state_ticks", (990, 1110, 1030, 1140), "Delivered")
+        self.assertEqual(walk.caption_bubble_problems([bubble, photo, body, mark], photo, "the view"), [])
+        # The caption in a bubble of its own: the old two-bubble shape.
+        other = boxed("bubble", (480, 1200, 1060, 1300))
+        apart = walk.Node("the view", "", "network.leviculum.loquax:id/body", "", (500, 1210, 900, 1260))
+        self.assertEqual(
+            walk.caption_bubble_problems([bubble, photo, other, apart, mark], photo, "the view"),
+            ["its bubble says [], want ['the view']"],
+        )
+        self.assertEqual(
+            walk.caption_bubble_problems([photo], photo, "the view"),
+            ["the photo is in 0 bubbles, want one"],
+        )
+
+    def test_the_mailbox_sends_to_a_peer_are_counted(self):
+        log = "\n".join(
+            [
+                "INFO HOME send accepted device=aa message=01 to=0c0c",
+                "INFO HOME send accepted device=aa message=02 to=0d0d",
+                "INFO HOME send accepted device=aa message=03 to=0c0c",
+                "INFO something else to=0c0c",
+            ]
+        )
+        self.assertEqual(walk.accepted_to(log, "0c0c"), 2)
+        self.assertEqual(walk.accepted_to(log, "0e0e"), 0)
+
+
 class PictureZoom(unittest.TestCase):
     """The viewer's zoom step (1269): the touch device, the screen size,
     the pinch's events, the viewer's log line and where it put the

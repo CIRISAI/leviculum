@@ -238,6 +238,42 @@
             android:padding="10dp" />
     </LinearLayout>
 
+    <!-- The photo the camera took (1270), waiting for Send and its caption:
+         its thumbnail, its words and its cross. -->
+    <LinearLayout
+        android:id="@+id/staged_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/staged"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:scaleType="centerCrop" />
+
+        <TextView
+            android:id="@+id/staged_words"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:paddingStart="10dp"
+            android:textColor="@color/text_secondary"
+            android:textSize="14sp" />
+
+        <ImageButton
+            android:id="@+id/staged_remove"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/scene_unstage"
+            android:padding="10dp" />
+    </LinearLayout>
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -286,17 +322,51 @@
                 android:textColorHint="@color/text_secondary"
                 android:textSize="17sp" />
 
-            <!-- The attachment menu (1201): the own position, for now. -->
+            <!-- Inside the field at its right edge (1270, after Signal): the
+                 position button, the camera, the microphone. Which of them
+                 show is the scene's (the compose node's buttons). -->
             <ImageButton
-                android:id="@+id/attach"
+                android:id="@+id/locate"
                 android:layout_width="40dp"
                 android:layout_height="40dp"
                 android:layout_gravity="bottom"
                 android:layout_marginBottom="4dp"
                 android:background="?android:attr/selectableItemBackgroundBorderless"
-                android:contentDescription="@string/attach"
+                android:contentDescription="@string/scene_locate"
+                android:padding="8dp" />
+
+            <ImageButton
+                android:id="@+id/camera"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_gravity="bottom"
+                android:layout_marginBottom="4dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/scene_camera"
+                android:padding="8dp" />
+
+            <ImageButton
+                android:id="@+id/record"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_gravity="bottom"
+                android:layout_marginBottom="4dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/record_voice"
                 android:padding="8dp" />
         </LinearLayout>
+
+        <!-- Outside the field: the round button, the plus while there is
+             nothing to send, Send once there is (1270). Two views, so each
+             has the scene's resource id. -->
+        <ImageButton
+            android:id="@+id/plus"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/send_circle"
+            android:contentDescription="@string/scene_attach"
+            android:padding="13dp" />
 
         <ImageButton
             android:id="@+id/send"
@@ -305,6 +375,7 @@
             android:layout_marginStart="8dp"
             android:background="@drawable/send_circle"
             android:contentDescription="@string/send"
-            android:padding="13dp" />
+            android:padding="13dp"
+            android:visibility="gone" />
     </LinearLayout>
 </LinearLayout>

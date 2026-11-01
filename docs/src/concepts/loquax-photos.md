@@ -179,8 +179,12 @@ same tree without and with the `photos` feature.
 
 ## 5. Android
 
-- The paperclip's menu has "Photo" above "My position": the system
-  picker (`ACTION_GET_CONTENT`, `image/*`), no camera yet. The picked
+- The compose bar's plus opens the sheet whose first row is "Gallery"
+  (1270, [the UI](loquax-ui.md), "The compose bar"): the system picker
+  (`ACTION_GET_CONTENT`, `image/*`). The camera in the field takes a
+  photo through the platform's capture intent and stages it for a caption;
+  its bytes take the same `loquax::photo::prepare` as a picked one
+  (`Request::Stage`). The picked
   bytes, read off the UI thread up to 64 MB, go to the library
   (`Request::Photo`); the library's refusal is said on the status line.
 - `MessageRow` carries `photo`, `photo_bytes`, `photo_w`, `photo_h` (the
@@ -220,7 +224,7 @@ same tree without and with the `photos` feature.
   text and EXIF chunks; no picture and too large are refused, and noise
   steps its quality down to fit.
 - The scene, the terminal and the config each have their test; the device
-  walk's `image` step drives the paperclip, the picker, the thumbnail and
+  walk's `image` step drives the plus, the picker, the thumbnail and
   the viewer on a phone ([the device walk](loquax-device-walk.md)), its
   `picture_zoom` step a pinch, a pan, a double tap and Back on it.
 - The zoom (1269): `loquax::ui::zoom` unit tests (the fit, the most of 4x

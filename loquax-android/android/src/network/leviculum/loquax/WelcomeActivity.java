@@ -410,6 +410,7 @@ public class WelcomeActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
+                Core.sense(getApplicationContext());
                 final Map<String, Object> started = Core.startHere(dir, restore, passphrase);
                 final Map<String, Object> mine = Core.bool(started, "ok") ? Core.me() : null;
                 runOnUiThread(new Runnable() {

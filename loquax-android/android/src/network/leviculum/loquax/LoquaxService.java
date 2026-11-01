@@ -108,6 +108,7 @@ public class LoquaxService extends Service implements Events.Listener {
         new Thread(new Runnable() {
             @Override
             public void run() {
+                Core.sense(getApplicationContext());
                 final Map<String, Object> answer = Core.start(home, null, null, null);
                 main.post(new Runnable() {
                     @Override

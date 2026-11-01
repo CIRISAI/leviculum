@@ -11,6 +11,16 @@
     <item name="state_ticks_read" type="id" />
     <item name="state_failed" type="id" />
     <item name="friends_sheet" type="id" />
+    <!-- The compose bar's sheet (1270) and its rows, by the scene's ids
+         (NodeId::SheetRow::resource). -->
+    <item name="sheet" type="id" />
+    <item name="sheet_map" type="id" />
+    <item name="sheet_fix_words" type="id" />
+    <item name="sheet_gallery" type="id" />
+    <item name="sheet_file" type="id" />
+    <item name="sheet_position" type="id" />
+    <item name="sheet_share_now" type="id" />
+    <item name="sheet_location_on" type="id" />
     <item name="friend_row" type="id" />
     <item name="friend_name" type="id" />
     <item name="friend_age" type="id" />

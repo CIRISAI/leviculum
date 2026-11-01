@@ -30,8 +30,8 @@ use loquax::store::Store;
 use loquax::ui::intent::{Intent, Messages, Switch, Target};
 use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
-use loquax::ui::strings::{Lang, StrId};
-use loquax::ui::{chat, scene, update, UiEffect, UiEvent, UiModel};
+use loquax::ui::strings::{Lang, StrId, Text};
+use loquax::ui::{chat, compose, scene, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
 use crate::links::{self, Book};
@@ -344,6 +344,7 @@ impl Session {
             client,
             start.offset,
             Lang::of_tag(start.lang.as_deref().unwrap_or_default()),
+            start.camera,
             events_tx,
             runtime.handle().clone(),
             watch_rx,
@@ -879,6 +880,23 @@ impl Session {
                 text,
                 reply,
             } => UiEvent::Draft { peer, text, reply },
+            // The camera's photo goes through the same scaling and
+            // stripping as one from the gallery (1270), off the lock.
+            Intent::StagePhoto { peer, data } => {
+                let size = self.lock().model.photo_size;
+                let prepared = loquax::photo::prepare(&data, size).map_err(|e| e.to_string())?;
+                UiEvent::StagePhoto {
+                    peer,
+                    format: prepared.format.to_string(),
+                    data: prepared.data,
+                }
+            }
+            Intent::Unstage { peer } => UiEvent::Unstage { peer },
+            Intent::Attach { peer } => UiEvent::OpenSheet(compose::Sheet::Attach { peer }),
+            Intent::Locate { peer } => UiEvent::OpenSheet(compose::Sheet::Position { peer }),
+            Intent::CloseSheet => UiEvent::CloseSheet,
+            Intent::OwnFix { location } => UiEvent::OwnFix(location),
+            Intent::ShareFix { peer } => UiEvent::ShareFix { peer },
             other => return Err(format!("not a request of the facade: {other:?}")),
         };
         self.lock().apply(event);
@@ -993,6 +1011,30 @@ impl Session {
                     full_height: pixels.full.1,
                 }));
             }
+            // The staged photo's pixels (1270): its bytes copied under the
+            // lock, decoded and scaled off it.
+            schema::Query::Staged { peer, edge } => {
+                let peer = parse_peer(&peer)?;
+                let bytes = self
+                    .lock()
+                    .model
+                    .bar
+                    .staged
+                    .get(&peer)
+                    .map(|staged| staged.data.clone())
+                    .ok_or_else(|| "no staged photo".to_string())?;
+                let pixels =
+                    loquax::photo::fit(&bytes, edge.clamp(1, 4096)).map_err(|e| e.to_string())?;
+                return Ok(schema::encode(&schema::PhotoPixels {
+                    v: VERSION,
+                    ok: true,
+                    width: pixels.width,
+                    height: pixels.height,
+                    rgba: schema::Blob(pixels.rgba),
+                    full_width: pixels.full.0,
+                    full_height: pixels.full.1,
+                }));
+            }
             // A file to open or share (1221): its message's fields copied
             // under the lock, written under the app's files off it.
             // A voice message's sound (1222): its bytes copied under the
@@ -1067,6 +1109,7 @@ impl Session {
                 schema::encode(&inner.conversations(search.as_deref()))
             }
             schema::Query::Messages { peer } => schema::encode(&inner.messages(parse_peer(&peer)?)),
+            schema::Query::Bar { peer } => schema::encode(&inner.bar(parse_peer(&peer)?)),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
                 let detail = loquax::ui::message_detail(&inner.model, peer, schema::model_key(key))
@@ -1137,6 +1180,7 @@ impl Session {
             | schema::Query::Receipts { .. }
             | schema::Query::PhotoSize { .. }
             | schema::Query::Photo { .. }
+            | schema::Query::Staged { .. }
             | schema::Query::SaveFile { .. }
             | schema::Query::Voice { .. } => return Err("answered above".to_string()),
             // The viewer's zoom needs no session: `lib.rs` answers it.
@@ -1226,6 +1270,7 @@ impl Inner {
         client: HomeClient,
         offset: i32,
         lang: Lang,
+        camera: bool,
         events: Sender<Event>,
         runtime: tokio::runtime::Handle,
         watch: tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
@@ -1238,6 +1283,7 @@ impl Inner {
         model.list_apart = true;
         model.reading.on = config.read_receipts.unwrap_or(true);
         model.photo_size = config.photo_size.unwrap_or_default();
+        model.bar.abilities = compose::Abilities::phone(camera);
         for (message_id, source, packed) in store.unverified().map_err(|e| e.to_string())? {
             let verify = Command::Verify {
                 message_id,
@@ -1920,6 +1966,7 @@ impl Inner {
         let liveness = self.model.liveness(&peer);
         // The field opens with the scene's compose (1219).
         let compose = index.map(|c| scene::compose(&self.model, c));
+        let bar = self.bar(peer);
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
@@ -1949,10 +1996,83 @@ impl Inner {
             ring: ring(scene::Ring::of(liveness.state)),
             draft: compose.as_ref().map(|c| c.text.clone()).unwrap_or_default(),
             draft_reply: compose
+                .as_ref()
                 .and_then(|c| c.reply)
                 .map(|id| loquax::address::to_hex(&id))
                 .unwrap_or_default(),
+            round: bar.round,
+            buttons: bar.buttons,
+            hint: bar.hint,
+            staged: bar.staged,
+            sheet: bar.sheet,
+            sheet_title: bar.sheet_title,
+            sheet_rows: bar.sheet_rows,
+            has_fix: bar.has_fix,
+            fix_lat_e6: bar.fix_lat_e6,
+            fix_lon_e6: bar.fix_lon_e6,
+            fix_words: bar.fix_words,
         }
+    }
+
+    /// `peer`'s compose bar (1270, the scene's compose node and the sheet
+    /// it opened), for [`schema::Messages`] and [`schema::Query::Bar`].
+    fn bar(&self, peer: [u8; 16]) -> schema::Bar {
+        let compose = self
+            .model
+            .conversations
+            .iter()
+            .position(|c| c.peer == peer)
+            .map(|c| scene::compose(&self.model, c));
+        let mut bar = schema::Bar {
+            v: VERSION,
+            ..schema::Bar::default()
+        };
+        if let Some(compose) = compose {
+            bar.round = compose.round.word().to_string();
+            bar.buttons = compose
+                .buttons
+                .iter()
+                .map(|b| schema::BarButton {
+                    id: b.id.resource(),
+                    label: b.a11y.label.resolve(self.lang),
+                })
+                .collect();
+            bar.hint = compose.a11y.label.resolve(self.lang);
+            bar.staged = compose
+                .staged
+                .as_ref()
+                .map(|st| st.words.resolve(self.lang))
+                .unwrap_or_default();
+        }
+        let (sheet, whereabouts) = scene::bar_sheet(&self.model, peer);
+        let Some(sheet) = sheet else {
+            return bar;
+        };
+        let fix = whereabouts.as_ref().and_then(|w| w.fix);
+        bar.sheet = self
+            .model
+            .bar
+            .sheet
+            .map(|s| s.word().to_string())
+            .unwrap_or_default();
+        bar.sheet_title = sheet.title.resolve(self.lang);
+        bar.sheet_rows = sheet
+            .actions
+            .iter()
+            .filter_map(|a| {
+                Some(schema::BarButton {
+                    id: scene::NodeId::SheetRow(scene::sheet_row(&a.intent)?).resource(),
+                    label: Text::key(a.label_key).resolve(self.lang),
+                })
+            })
+            .collect();
+        bar.has_fix = fix.is_some();
+        bar.fix_lat_e6 = fix.map_or(0, |f| f.0);
+        bar.fix_lon_e6 = fix.map_or(0, |f| f.1);
+        bar.fix_words = whereabouts
+            .map(|w| w.words.resolve(self.lang))
+            .unwrap_or_default();
+        bar
     }
 
     /// A linked peer's copied thumbnail.
@@ -2476,6 +2596,36 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
                 true => None,
                 false => Some(parse_id(&reply)?),
             },
+        },
+        R::Stage { peer, data } => Intent::StagePhoto {
+            peer: parse_peer(&peer)?,
+            data: data.0,
+        },
+        R::Unstage { peer } => Intent::Unstage {
+            peer: parse_peer(&peer)?,
+        },
+        R::Sheet { peer, kind } => match kind.as_str() {
+            "" => Intent::CloseSheet,
+            "attach" => Intent::Attach {
+                peer: parse_peer(&peer)?,
+            },
+            "position" => Intent::Locate {
+                peer: parse_peer(&peer)?,
+            },
+            other => return Err(format!("{other:?} is not attach, position or empty")),
+        },
+        R::Fix {
+            lat_e6,
+            lon_e6,
+            alt_e2,
+            accuracy_e2,
+            at,
+        } => Intent::OwnFix {
+            location: Some(share_location(lat_e6, lon_e6, alt_e2, accuracy_e2, at)?),
+        },
+        R::NoFix => Intent::OwnFix { location: None },
+        R::ShareFix { peer } => Intent::ShareFix {
+            peer: parse_peer(&peer)?,
         },
     };
     Ok(Decoded::Intent(intent))

@@ -3555,6 +3555,207 @@ async fn a_draft_survives_another_chat_and_a_new_session() {
     node.kill().await;
 }
 
+/// 1270, against a real home node: the compose bar through the facade.
+/// A phone with a camera has the five buttons and the plus; a typed
+/// letter makes it Send and hides the microphone. The camera's capture
+/// (the photo fixture as a camera writes it, EXIF turn, place and model
+/// in it) reaches the same scaling and stripping as a picked one: the
+/// staged photo is upright at the phone size, and the message Send makes
+/// of it and its caption is one row carrying exactly the bytes
+/// `loquax::photo::prepare` makes of a gallery pick. The position
+/// button's sheet says there is no fix, then shows the one the phone gave,
+/// and its row sends it as a report.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_compose_bar_stages_a_camera_photo_through_the_gallery_path() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        camera: true,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let peer = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c".to_string();
+        session
+            .request(Request::Open { peer: peer.clone() })
+            .expect("open");
+        let bar = |session: &Session| -> schema::Bar {
+            asked(session, schema::Query::Bar { peer: peer.clone() })
+        };
+        let ids = |bar: &schema::Bar| bar.buttons.iter().map(|b| b.id.clone()).collect::<Vec<_>>();
+        let empty = bar(&session);
+        assert_eq!(empty.round, "plus");
+        assert_eq!(ids(&empty), ["emoji", "locate", "camera", "record", "plus"]);
+        assert_eq!(empty.buttons[2].label, "Take a photo");
+        assert_eq!(empty.hint, "Message");
+        session
+            .request(Request::Draft {
+                peer: peer.clone(),
+                body: "h".to_string(),
+                reply: String::new(),
+            })
+            .expect("draft");
+        let typed = bar(&session);
+        assert_eq!(typed.round, "send");
+        assert_eq!(ids(&typed), ["emoji", "locate", "camera", "send"]);
+        session
+            .request(Request::Draft {
+                peer: peer.clone(),
+                body: String::new(),
+                reply: String::new(),
+            })
+            .expect("draft");
+
+        // The camera's capture, staged.
+        session
+            .request(Request::Stage {
+                peer: peer.clone(),
+                data: schema::Blob(PHOTO.to_vec()),
+            })
+            .expect("stage");
+        let staged = bar(&session);
+        let gallery = loquax::photo::prepare(PHOTO, loquax::ui::photos::PhotoSize::Phone)
+            .expect("the gallery path");
+        assert_eq!(
+            staged.staged,
+            format!(
+                "Photo to send, {}",
+                loquax::ui::photos::size_words(gallery.data.len())
+            )
+        );
+        assert_eq!(staged.round, "send", "a staged photo is something to send");
+        assert_eq!(staged.hint, "Add a caption");
+        let pixels: schema::PhotoPixels = asked(
+            &session,
+            schema::Query::Staged {
+                peer: peer.clone(),
+                edge: 4096,
+            },
+        );
+        assert_eq!(
+            (pixels.full_width, pixels.full_height),
+            (gallery.width, gallery.height)
+        );
+        assert_eq!(
+            (gallery.width, gallery.height),
+            (1200, 1600),
+            "upright, phone size"
+        );
+        assert!(red_corner(&pixels.rgba.0, pixels.width), "drawn upright");
+        let before: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        session
+            .request(Request::Send {
+                peer: peer.clone(),
+                body: "the view".to_string(),
+            })
+            .expect("send");
+        let after: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        assert_eq!(
+            after.messages.len(),
+            before.messages.len() + 1,
+            "one message"
+        );
+        let sent = after.messages.last().expect("the photo's row");
+        assert_eq!(sent.body, "the view");
+        assert_eq!(sent.photo, gallery.format);
+        assert_eq!(
+            sent.photo_bytes as usize,
+            gallery.data.len(),
+            "the gallery's bytes"
+        );
+        assert_eq!(after.staged, "");
+        assert_eq!(after.round, "plus");
+
+        // The position button's sheet: no fix, then the phone's.
+        session
+            .request(Request::Sheet {
+                peer: peer.clone(),
+                kind: "position".to_string(),
+            })
+            .expect("sheet");
+        session.request(Request::NoFix).expect("no fix");
+        let none = bar(&session);
+        assert_eq!(none.sheet, "position");
+        assert_eq!(none.sheet_title, "My position");
+        assert!(!none.has_fix);
+        assert_eq!(none.fix_words, "Loquax does not know where you are yet.");
+        assert_eq!(none.sheet_rows[0].id, "sheet_location_on");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs() as i64;
+        session
+            .request(Request::Fix {
+                lat_e6: 43_773_100,
+                lon_e6: 11_256_000,
+                alt_e2: 0,
+                accuracy_e2: 500,
+                at: now,
+            })
+            .expect("fix");
+        let fixed = bar(&session);
+        assert!(fixed.has_fix);
+        assert_eq!(
+            (fixed.fix_lat_e6, fixed.fix_lon_e6),
+            (43_773_100, 11_256_000)
+        );
+        assert_eq!(fixed.sheet_rows[0].id, "sheet_share_now");
+        assert_eq!(fixed.sheet_rows[0].label, "Send my position now");
+        session
+            .request(Request::ShareFix { peer: peer.clone() })
+            .expect("share");
+        let shared: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        assert_eq!(shared.sheet, "", "the share closes the sheet");
+        let report = shared.messages.last().expect("the report's row");
+        assert!(report.ours);
+        assert_eq!(
+            (report.lat_e6, report.lon_e6),
+            (Some(43_773_100), Some(11_256_000))
+        );
+
+        // The plus's sheet: its three rows.
+        session
+            .request(Request::Sheet {
+                peer: peer.clone(),
+                kind: "attach".to_string(),
+            })
+            .expect("sheet");
+        let attach = bar(&session);
+        assert_eq!(
+            attach
+                .sheet_rows
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["sheet_gallery", "sheet_file", "sheet_position"]
+        );
+        session
+            .request(Request::Sheet {
+                peer: peer.clone(),
+                kind: String::new(),
+            })
+            .expect("close");
+        assert_eq!(bar(&session).sheet, "");
+        session.stop();
+    })
+    .await
+    .expect("the session");
+    node.kill().await;
+}
+
 /// 1230, against the ugly store: a read receipt from a peer turns the
 /// message of ours it names into `read` on the phone's rows, with the
 /// reader's time, adds no row, and the read and the peer's flag survive the

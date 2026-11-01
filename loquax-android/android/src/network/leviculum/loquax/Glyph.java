@@ -19,7 +19,7 @@ import android.graphics.drawable.Drawable;
  * loquax/src/ui/chat.rs's shapes, which a test of the facade reads here.
  */
 final class Glyph extends Drawable {
-    enum Kind { BACK, MENU, EMOJI, SEND, CLOCK, TICK, TICKS, TICKS_READ, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN, PEOPLE, LOCATE, ATTACH, MIC, PLAY, PAUSE }
+    enum Kind { BACK, MENU, EMOJI, SEND, CLOCK, TICK, TICKS, TICKS_READ, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN, PEOPLE, LOCATE, ATTACH, MIC, PLAY, PAUSE, CAMERA, PLUS }
 
     private final Kind kind;
     private final int color;
@@ -208,6 +208,18 @@ final class Glyph extends Drawable {
                 cup.cubicTo(15.3f, 18, 18, 15, 18, 11);
                 canvas.drawPath(cup, stroke);
                 canvas.drawLine(12, 18, 12, 21, stroke);
+                break;
+            case CAMERA:
+                // A body with a hump on top and a lens (1270).
+                Path body = path(3, 8, 7.5f, 8, 9, 5.5f, 15, 5.5f, 16.5f, 8, 21, 8, 21, 19, 3, 19);
+                body.close();
+                canvas.drawPath(body, stroke);
+                canvas.drawCircle(12, 13, 3.5f, stroke);
+                break;
+            case PLUS:
+                // The compose bar's round button with nothing to send (1270).
+                canvas.drawLine(12, 5, 12, 19, stroke);
+                canvas.drawLine(5, 12, 19, 12, stroke);
                 break;
             case PLAY:
                 Path play = path(8, 5, 19, 12, 8, 19);

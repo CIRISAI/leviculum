@@ -67,10 +67,13 @@ STEPS = [
     "info",
     "marks",
     "reply_send",
+    "compose_bar",
     "image",
     "picture_zoom",
     "file",
     "voice",
+    "camera_photo",
+    "share_position_from_bar",
     "receive_wake",
     "receive_report",
     "position_pin",
@@ -136,9 +139,27 @@ BLOCKED_HEADER = "Blocked contacts"
 # says, what a bubble's photo is called by a screen reader (the
 # catalogue's scene_photo), and the whole photo's view id.
 FIXTURE_PHOTO = REPO / "loquax" / "tests" / "fixtures" / "photo-portrait.jpg"
-ATTACH_PHOTO = "Photo"
+ATTACH_PHOTO = "Gallery"
 PHOTO_WORDS = re.compile(r"^Photo, \d+(?:\.\d)? (?:B|KB|MB)$")
 PHOTO_FULL = "photo_full"
+# The compose bar (1270, after Signal): the buttons inside the field
+# left to right, and the round one outside it, by the scene's ids
+# (scene::NodeId::resource); five with an empty field, four once a letter
+# is typed (the plus is Send, the microphone hides). The plus sheet's and
+# the position sheet's rows, the staged photo's words, the fixtures the
+# debug build takes for the camera (ChatActivity.CAMERA_FIXTURE) and the
+# phone's fix (Locator.FIXTURE), and the walk's seeded fix.
+BAR_EMPTY = ["emoji", "locate", "camera", "record", "plus"]
+BAR_TYPED = ["emoji", "locate", "camera", "send"]
+BAR_IDS = ["emoji", "locate", "camera", "record", "plus", "send"]
+SHEET_GALLERY = "sheet_gallery"
+SHEET_FILE = "sheet_file"
+SHEET_SHARE_NOW = "sheet_share_now"
+SHEET_FIX_WORDS = "sheet_fix_words"
+STAGED_WORDS = re.compile(r"^Photo to send, \d+(?:\.\d)? (?:B|KB|MB)$")
+CAMERA_FIXTURE = "camera-fixture.jpg"
+FIX_FIXTURE = "fix-fixture.txt"
+SEEDED_FIX = "43.7731,11.2560"
 # A file (1221): what the paperclip's entry says, what a bubble's file is
 # called by a screen reader (the catalogue's scene_file), and the line the
 # chat shows where no app on the phone opens the kind.
@@ -285,6 +306,77 @@ def marks_problems(seen: dict[str, str]) -> list[str]:
         if not desc.startswith(MARK_WORDS[rid]):
             problems.append(f"{rid} says {desc!r}, not {' or '.join(MARK_WORDS[rid])!r}")
     return problems
+
+
+def bar_on(nodes: list[Node]) -> list[Node]:
+    """The compose bar's buttons on screen (1270), left to right."""
+    found = [n for n in nodes if any(n.is_id(rid) for rid in BAR_IDS)]
+    return sorted(found, key=lambda n: (n.bounds[0], n.bounds[1]))
+
+
+def bar_id(node: Node) -> str:
+    """The scene's id of a compose bar button node, or ""."""
+    return next((rid for rid in BAR_IDS if node.is_id(rid)), "")
+
+
+def bar_problems(nodes: list[Node], typed: bool) -> list[str]:
+    """What is wrong with the compose bar (1270): not the buttons the
+    scene lists for an empty or a typed field, in their order; a button
+    a screen reader cannot name; the emoji not left of the field, the
+    others not right of it; the round button inside the field's pill."""
+    want = BAR_TYPED if typed else BAR_EMPTY
+    buttons = bar_on(nodes)
+    have = [bar_id(n) for n in buttons]
+    problems = []
+    if have != want:
+        problems.append(f"the bar has {have}, want {want}")
+    for node in buttons:
+        if not node.desc:
+            problems.append(f"{bar_id(node)} has no words for a screen reader")
+    field = find(nodes, rid="compose")
+    if not field:
+        return problems + ["no compose field"]
+    fx1, _, fx2, _ = field[0].bounds
+    for node in buttons:
+        x1, _, x2, _ = node.bounds
+        rid = bar_id(node)
+        if rid == "emoji" and x2 > fx1:
+            problems.append(f"the emoji is not left of the field: {node.bounds} vs {field[0].bounds}")
+        if rid != "emoji" and x1 < fx2:
+            problems.append(f"{rid} is not right of the field: {node.bounds} vs {field[0].bounds}")
+    inside = [n for n in buttons if bar_id(n) in ("locate", "camera", "record")]
+    rounds = [n for n in buttons if bar_id(n) in ("plus", "send")]
+    if rounds and inside and rounds[0].bounds[0] < max(n.bounds[2] for n in inside):
+        problems.append("the round button is not outside the field")
+    return problems
+
+
+def caption_bubble_problems(nodes: list[Node], photo: Node, caption: str) -> list[str]:
+    """What is wrong with the bubble of a photo sent with a caption
+    (1270, 1268's one bubble): the photo in no bubble or more than one,
+    its bubble without the caption as its text row, or without a
+    delivery mark."""
+    around = [b for b in find(nodes, rid="bubble") if inside(photo, b)]
+    if len(around) != 1:
+        return [f"the photo is in {len(around)} bubbles, want one"]
+    bubble = around[0]
+    problems = []
+    words = [n.text for n in find(nodes, rid="body") if inside(n, bubble)]
+    if words != [caption]:
+        problems.append(f"its bubble says {words}, want [{caption!r}]")
+    if not [n for n in marks_on(nodes) if inside(n, bubble)]:
+        problems.append("its bubble has no delivery mark")
+    return problems
+
+
+def accepted_to(log: str, peer: str) -> int:
+    """How many sends the mailbox accepted for `peer` (`HOME send accepted
+    ... to=<peer>`)."""
+    return sum(
+        1
+        for line in log.splitlines()
+        if "HOME send accepted" in line and f"to={peer}" in line
+    )
 
 
 def photos_on(nodes: list[Node]) -> list[Node]:
@@ -1835,6 +1927,135 @@ class Walk:
             raise StepFailed("the mailbox log has no 'HOME send accepted'")
         return f"bubble_ms={ms} mark={mark!r} mailbox=accepted"
 
+    def clear_compose(self) -> None:
+        """Empty the compose field, as the voice step does."""
+        dev = self.need_device()
+        compose = self.wait_id("compose", 5)[0]
+        if compose.text.strip():
+            dev.tap_node(compose)
+            dev.shell("input keyevent KEYCODE_MOVE_END")
+            for _ in range(len(compose.text) + 2):
+                dev.key("KEYCODE_DEL")
+
+    def step_compose_bar(self) -> str:
+        """The compose bar as Signal has it (1270): with an empty field
+        the emoji left of it, the position button, the camera and the
+        microphone right of it and the round plus outside it, five, each
+        named for a screen reader; a typed letter turns the plus into Send
+        and hides the microphone; the letter deleted turns it back."""
+        dev = self.need_device()
+        self.clear_compose()
+        problems: list[str] = []
+
+        def bar_is(typed: bool) -> bool:
+            nonlocal problems
+            problems = bar_problems(dev.dump(), typed)
+            return not problems
+
+        if not wait_for(lambda: bar_is(False), 5, every=0.3):
+            raise StepFailed("empty field: " + "; ".join(problems))
+        empty = [bar_id(n) for n in bar_on(dev.dump())]
+        dev.tap_node(self.wait_id("compose", 5)[0])
+        start = time.monotonic()
+        dev.type_text("x")
+        if not wait_for(lambda: bar_is(True), 5, every=0.2):
+            raise StepFailed("typed: " + "; ".join(problems))
+        swap_ms = int((time.monotonic() - start) * 1000)
+        dev.key("KEYCODE_DEL")
+        if not wait_for(lambda: bar_is(False), 5, every=0.3):
+            raise StepFailed("deleted again: " + "; ".join(problems))
+        return f"empty={','.join(empty)} typed=send swap_ms={swap_ms} back=plus"
+
+    def step_camera_photo(self) -> str:
+        """A photo through the compose bar's camera (1270): the fixture put
+        where the debug build takes its capture from (an emulator has no
+        camera app), the camera tapped; the staged photo shows with its
+        words and the round button is Send; a caption typed and Send make
+        one bubble with the picture, the caption and a mark, the mailbox's
+        send; the bar is the plus again."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        if not FIXTURE_PHOTO.is_file():
+            raise StepFailed(f"{FIXTURE_PHOTO} missing")
+        dev.run("push", str(FIXTURE_PHOTO), f"/data/local/tmp/{CAMERA_FIXTURE}", timeout=60)
+        dev.shell(
+            f"run-as {PACKAGE} sh -c 'cat /data/local/tmp/{CAMERA_FIXTURE} > files/{CAMERA_FIXTURE}'"
+        )
+        caption = f"walk caption {self.nonce}"
+        try:
+            self.clear_compose()
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            before = len(photos_on(dev.dump()))
+            dev.tap_node(self.wait_id("camera", 5)[0])
+            staged = self.wait_id("staged_words", 15)[0]
+            if not STAGED_WORDS.match(staged.text):
+                raise StepFailed(f"the staged photo says {staged.text!r}")
+            nodes = dev.dump()
+            if not find(nodes, rid="send") or find(nodes, rid="plus"):
+                raise StepFailed(f"with a staged photo the round button is {[bar_id(n) for n in bar_on(nodes)]}")
+            dev.tap_node(self.wait_id("compose", 5)[0])
+            dev.type_text(caption)
+            start = time.monotonic()
+            dev.tap_node(self.wait_id("send", 5)[0])
+            problems: list[str] = []
+
+            def shown():
+                nonlocal problems
+                nodes = dev.dump()
+                problems = photo_problems(photos_on(nodes), before)
+                if not problems:
+                    problems = caption_bubble_problems(nodes, photos_on(nodes)[-1], caption)
+                return not problems
+
+            if not wait_for(shown, 15, every=0.3):
+                raise StepFailed("; ".join(problems))
+            ms = int((time.monotonic() - start) * 1000)
+            accepted = wait_for(
+                lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30
+            )
+            if not accepted:
+                raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+            nodes = dev.dump()
+            if find(nodes, rid="staged_words"):
+                raise StepFailed("the staged photo stayed after the send")
+            problems = bar_problems(nodes, typed=False)
+            if problems:
+                raise StepFailed("after the send: " + "; ".join(problems))
+            return f"staged={staged.text!r} sent_ms={ms} bubbles=1 caption=in mark=in mailbox=accepted"
+        finally:
+            dev.shell(f"run-as {PACKAGE} rm -f files/{CAMERA_FIXTURE}", check=False)
+            dev.shell(f"rm -f /data/local/tmp/{CAMERA_FIXTURE}", check=False)
+
+    def step_share_position_from_bar(self) -> str:
+        """The position one tap away (1270, Lew 2026-11-01 13:30): a fix
+        seeded where the debug build reads the phone's from, the bar's
+        position button opens the sheet with the fix's age and "Send my
+        position now"; its tap sends the position report to this chat:
+        the mailbox accepts a send for the open conversation's peer and
+        the sheet closes. The peer's own session is not run by the walk,
+        so the mailbox's acceptance for it is where the walk can see the
+        report go."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        peer = fixture.manifest["sender_peer"]
+        dev.shell(f"run-as {PACKAGE} sh -c 'echo {SEEDED_FIX} > files/{FIX_FIXTURE}'")
+        try:
+            before = accepted_to(fixture.mailbox_log(), peer)
+            dev.tap_node(self.wait_id("locate", 5)[0])
+            words = self.wait_id(SHEET_FIX_WORDS, 10)[0]
+            if not words.text.startswith("Found"):
+                raise StepFailed(f"the sheet says {words.text!r}, not the fix's age")
+            start = time.monotonic()
+            dev.tap_node(self.wait_id(SHEET_SHARE_NOW, 5)[0])
+            if not wait_for(lambda: accepted_to(fixture.mailbox_log(), peer) > before, 30):
+                raise StepFailed(f"the mailbox accepted no send to {peer[:8]}")
+            ms = int((time.monotonic() - start) * 1000)
+            if not wait_for(lambda: not find(dev.dump(), rid="sheet"), 5, every=0.3):
+                raise StepFailed("the sheet stayed open after the share")
+            return f"sheet={words.text!r} accepted_ms={ms} to={peer[:8]} sheet=closed"
+        finally:
+            dev.shell(f"run-as {PACKAGE} rm -f files/{FIX_FIXTURE}", check=False)
+
     def step_image(self) -> str:
         """A photo through the paperclip (1220): the fixture onto the
         phone's pictures, the system's picker, the bubble's thumbnail
@@ -1854,8 +2075,8 @@ class Walk:
         )
         sent_before = fixture.mailbox_log().count("HOME send accepted")
         before = len(photos_on(dev.dump()))
-        dev.tap_node(self.wait_id("attach", 5)[0])
-        self.tap_text(ATTACH_PHOTO)
+        dev.tap_node(self.wait_id("plus", 5)[0])
+        dev.tap_node(self.wait_id(SHEET_GALLERY, 5)[0])
         # The system's picker: the file by its name, in its recent or its
         # pictures list.
         start = time.monotonic()
@@ -1978,8 +2199,8 @@ class Walk:
         )
         sent_before = fixture.mailbox_log().count("HOME send accepted")
         before = len(files_on(dev.dump()))
-        dev.tap_node(self.wait_id("attach", 5)[0])
-        self.tap_text(ATTACH_FILE)
+        dev.tap_node(self.wait_id("plus", 5)[0])
+        dev.tap_node(self.wait_id(SHEET_FILE, 5)[0])
         start = time.monotonic()
         dev.tap_node(self.wait_text(name, 20, contains=True)[0])
         problems: list[str] = []
@@ -2049,7 +2270,7 @@ class Walk:
                     dev.key("KEYCODE_DEL")
             sent_before = fixture.mailbox_log().count("HOME send accepted")
             before = len(voices_on(dev.dump()))
-            mic = self.wait_id("send", 5)[0]
+            mic = self.wait_id("record", 5)[0]
             dev.long_press(mic, 3_000)
             start = time.monotonic()
             problems: list[str] = []

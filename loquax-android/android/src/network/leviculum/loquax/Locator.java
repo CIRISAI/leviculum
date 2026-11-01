@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.location.Location;
 import android.location.LocationListener;
@@ -12,6 +13,10 @@ import android.location.LocationManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -34,6 +39,12 @@ import java.util.List;
 final class Locator {
     /** The request code of the permission question. */
     static final int ASK = 0x10c1;
+    /**
+     * In a debuggable build, a file of this name in the app's files holding
+     * `lat,lon` in degrees is the phone's fix, taken now (1270): the device
+     * walk's seeded fix, since an emulator has no position to give.
+     */
+    static final String FIXTURE = "fix-fixture.txt";
     /** A fix younger than this is fresh enough to share or centre on. */
     private static final long FRESH_MS = 2 * 60_000;
     /** How long a share waits for a fix before it says there is none. */
@@ -171,6 +182,37 @@ final class Locator {
         return best;
     }
 
+    /** The debug build's seeded fix ({@link #FIXTURE}), or null. */
+    Location fixture() {
+        boolean debuggable =
+                (activity.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        File file = new File(activity.getFilesDir(), FIXTURE);
+        if (!debuggable || !file.isFile()) {
+            return null;
+        }
+        byte[] bytes = new byte[64];
+        int n;
+        try (FileInputStream in = new FileInputStream(file)) {
+            n = in.read(bytes);
+        } catch (IOException e) {
+            return null;
+        }
+        String[] parts = new String(bytes, 0, Math.max(n, 0), StandardCharsets.US_ASCII).trim().split(",");
+        if (parts.length != 2) {
+            return null;
+        }
+        try {
+            Location fix = new Location("fixture");
+            fix.setLatitude(Double.parseDouble(parts[0].trim()));
+            fix.setLongitude(Double.parseDouble(parts[1].trim()));
+            fix.setAccuracy(5f);
+            fix.setTime(System.currentTimeMillis());
+            return fix;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     /** Whether `fix` is recent enough to centre on or share. */
     static boolean fresh(Location fix) {
         return fix != null && System.currentTimeMillis() - fix.getTime() < FRESH_MS;
@@ -264,6 +306,24 @@ final class Locator {
      * Send `fix` to `peer`, the user asked for it: the library's share,
      * a report of ours with the fix alone. The error in words, or null.
      */
+    /**
+     * The phone's newest fix to the library, for the compose bar's position
+     * sheet (1270); null says there is none. The error in words, or null.
+     */
+    static String tell(Location fix) {
+        if (fix == null) {
+            return Core.noFix();
+        }
+        Long alt = fix.hasAltitude() ? Math.round(fix.getAltitude() * 100) : 0L;
+        Long accuracy = fix.hasAccuracy() ? Math.round(fix.getAccuracy() * 100.0) : 0L;
+        return Core.command(Core.map("t", "fix",
+                "lat_e6", Math.round(fix.getLatitude() * 1e6),
+                "lon_e6", Math.round(fix.getLongitude() * 1e6),
+                "alt_e2", alt,
+                "accuracy_e2", accuracy,
+                "at", fix.getTime() / 1000));
+    }
+
     static String share(String peer, Location fix) {
         Long alt = fix.hasAltitude() ? Math.round(fix.getAltitude() * 100) : 0L;
         Long accuracy = fix.hasAccuracy() ? Math.round(fix.getAccuracy() * 100.0) : 0L;

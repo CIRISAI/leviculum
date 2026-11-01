@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft`, `stage`, `unstage`, `sheet`, `fix`, `nofix`, `sharefix` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -113,6 +113,11 @@
 //! list row's [`ConversationRow::draft`] and the chat's [`Messages::draft`]
 //! and [`Messages::draft_reply`]. An older app sends no draft, and keeps
 //! none.
+//! The compose bar of 1270 came within version 1 too: [`Start::camera`],
+//! the requests [`Request::Stage`], [`Request::Unstage`],
+//! [`Request::Sheet`], [`Request::Fix`], [`Request::NoFix`] and
+//! [`Request::ShareFix`], [`Query::Staged`], [`Query::Bar`] with its [`Bar`], and the chat's bar fields from
+//! [`Messages::round`] on. An older app sends none of them and reads none.
 //! The viewport (1231) came within version 1 too: [`Request::Viewport`].
 //! An app that sends none sends no read receipts.
 //! Read receipts (1230) came within version 1 too: the delivery word
@@ -170,6 +175,10 @@ pub struct Start {
     pub restore: Option<String>,
     #[serde(default)]
     pub passphrase: Option<String>,
+    /// The phone has a camera (1270, `FEATURE_CAMERA_ANY`): the compose
+    /// bar gets its camera button. An older app sends none, and gets none.
+    #[serde(default)]
+    pub camera: bool,
 }
 
 /// What became of [`Start`].
@@ -205,12 +214,17 @@ pub struct Started {
 pub enum Request {
     /// Opened a conversation, a new one by typing the address: its unread
     /// are read and marked so, and a pull starts.
-    Open { peer: String },
+    Open {
+        peer: String,
+    },
     /// Went back to the list: no conversation is open, so what arrives
     /// stays unread.
     Close,
     /// Sent text in a conversation, through the home node's `/send`.
-    Send { peer: String, body: String },
+    Send {
+        peer: String,
+        body: String,
+    },
     /// Reacted to a message.
     React {
         peer: String,
@@ -226,16 +240,26 @@ pub enum Request {
     },
     /// Forwarded the message `key` ([`MessageRow::key`]) of `peer`'s
     /// conversation to `to`: its text and content fields again.
-    Forward { peer: String, key: i64, to: String },
+    Forward {
+        peer: String,
+        key: i64,
+        to: String,
+    },
     /// Tapped the red mark of the message `key` of `peer`'s conversation,
     /// one of ours not sent: it goes again (1232), the failed one leaves.
-    SendAgain { peer: String, key: i64 },
+    SendAgain {
+        peer: String,
+        key: i64,
+    },
     /// Picked a picture with the paperclip's "Photo" (1220): the system
     /// picker's bytes as they came. The session scales and strips them
     /// by the reader's photo size (`loquax::photo::prepare`) and sends
     /// them to `peer` as the image field; a picture it cannot send
     /// answers the request with the reason.
-    Photo { peer: String, data: Blob },
+    Photo {
+        peer: String,
+        data: Blob,
+    },
     /// Picked a file with the paperclip's "File" (1221): its display name
     /// and bytes as the picker gave them. The session sends them to `peer`
     /// as the file attachments field; one past the 990 KB a receiver
@@ -255,31 +279,51 @@ pub enum Request {
     /// (`loquax::voice::encode`) and sends it to `peer` as the audio
     /// field; one shorter than 0.6 s or longer than 5 min answers the
     /// request with the reason.
-    Voice { peer: String, pcm: Blob, rate: u32 },
+    Voice {
+        peer: String,
+        pcm: Blob,
+        rate: u32,
+    },
     /// Tapped a voice message's play button (`on`) or its pause button,
     /// or the player came to its end (1222): the bubble's button follows.
     /// [`Query::Voice`] has the sound.
     #[serde(rename = "playvoice")]
-    PlayVoice { peer: String, key: i64, on: bool },
+    PlayVoice {
+        peer: String,
+        key: i64,
+        on: bool,
+    },
     /// Deleted the messages `keys` of `peer`'s conversation, the user asked
     /// already; on a client of a home node from its every device.
-    Delete { peer: String, keys: Vec<i64> },
+    Delete {
+        peer: String,
+        keys: Vec<i64>,
+    },
     /// Picked `emoji` into a message: it joins the recents, as a reaction
     /// sent does.
-    Used { emoji: String },
+    Used {
+        emoji: String,
+    },
     /// Asked for a pull now: the refresh button.
     Pull,
     /// A screen of the app came to the front (`true`) or left it: while in
     /// front and with the watching link down, the session pulls every
     /// minute.
-    Front { front: bool },
+    Front {
+        front: bool,
+    },
     /// These bubbles of `peer`'s chat are on screen, at least half of each,
     /// by their [`MessageRow::key`], on every change (1231): the core
     /// decides from it, and from the front, what was read.
-    Viewport { peer: String, keys: Vec<i64> },
+    Viewport {
+        peer: String,
+        keys: Vec<i64>,
+    },
     /// The name recipients see, for the mailbox on this phone (the first
     /// start's last screen, 1152).
-    Name { name: String },
+    Name {
+        name: String,
+    },
     /// Linked `peer` to a contact of the address book the user picked or
     /// confirmed (1139), or the link's copy refreshed: what the contact
     /// said right then, its thumbnail's bytes among it.
@@ -289,36 +333,66 @@ pub enum Request {
         contact: ContactCopy,
     },
     /// Took `peer`'s link away; its copied name and photo go with it.
-    Unlink { peer: String },
+    Unlink {
+        peer: String,
+    },
     /// "Not now" on `peer`'s banner: it does not ask again.
     #[serde(rename = "notnow")]
-    NotNow { peer: String },
+    NotNow {
+        peer: String,
+    },
     /// The user's own name for `peer`, the empty one clearing it: kept
     /// here and handed to the home node for the home's other devices.
-    Rename { peer: String, name: String },
+    Rename {
+        peer: String,
+        name: String,
+    },
     /// The address book's IM rows with protocol LXMF (with
     /// `READ_CONTACTS`): each address loquax knows and has not linked
     /// becomes a link, unless two contacts carry it.
-    Relink { rows: Vec<ImRow> },
+    Relink {
+        rows: Vec<ImRow>,
+    },
     /// Pinned the conversation to the top of the list, or loosened it
     /// (1146). Pin, mute, archive and block reach the home's other devices.
-    Pin { peer: String, on: bool },
+    Pin {
+        peer: String,
+        on: bool,
+    },
     /// Muted the conversation for `secs` from now, for always when
     /// negative, or unmuted it with 0.
-    Mute { peer: String, secs: i64 },
+    Mute {
+        peer: String,
+        secs: i64,
+    },
     /// Moved the conversation into the archive, or back.
-    Archive { peer: String, on: bool },
+    Archive {
+        peer: String,
+        on: bool,
+    },
     /// Blocked the peer, or lifted the block.
-    Block { peer: String, on: bool },
+    Block {
+        peer: String,
+        on: bool,
+    },
     /// Marked the peer's identity verified after comparing it in person,
     /// or took it back; on this device only.
-    Verify { peer: String, on: bool },
+    Verify {
+        peer: String,
+        on: bool,
+    },
     /// Marked the conversation unread on this device, or read as opening
     /// it would.
-    Unread { peer: String, on: bool },
+    Unread {
+        peer: String,
+        on: bool,
+    },
     /// Deleted the conversation from this device, or from every device of
     /// the home.
-    Forget { peer: String, everywhere: bool },
+    Forget {
+        peer: String,
+        everywhere: bool,
+    },
     /// Shared the phone's own position with `peer`, the user asked for it
     /// (1201): from the empty map, a friend's card or the chat. The fix in
     /// the wire's integers; `at` is when the phone took it, unix seconds.
@@ -353,6 +427,44 @@ pub enum Request {
         body: String,
         #[serde(default)]
         reply: String,
+    },
+    /// The camera took a photo for `peer` (1270): the bytes as the
+    /// capture wrote them. The session scales and strips them as a
+    /// [`Request::Photo`]'s and stages them in the compose bar, where the
+    /// next [`Request::Send`] takes them with its body as the caption.
+    Stage {
+        peer: String,
+        data: Blob,
+    },
+    /// The staged photo's cross.
+    Unstage {
+        peer: String,
+    },
+    /// The compose bar's plus (`attach`) or position button (`position`)
+    /// opened its sheet over `peer`'s chat; an empty `kind` closed it
+    /// (1270). The chat's [`Messages::sheet`] says what it holds.
+    Sheet {
+        #[serde(default)]
+        peer: String,
+        #[serde(default)]
+        kind: String,
+    },
+    /// The phone's newest own fix for the position sheet (1270), as
+    /// [`Request::Share`]'s; [`Request::NoFix`] when it has none.
+    Fix {
+        lat_e6: i32,
+        lon_e6: i32,
+        #[serde(default)]
+        alt_e2: i32,
+        #[serde(default)]
+        accuracy_e2: u32,
+        at: i64,
+    },
+    NoFix,
+    /// The position sheet's "Send my position now": the fix of the last
+    /// [`Request::Fix`] goes to `peer` as a report.
+    ShareFix {
+        peer: String,
     },
 }
 
@@ -531,6 +643,13 @@ pub enum Query {
     /// upright and scaled into an `edge` by `edge` box, never up (1220):
     /// a bubble's thumbnail, the full view. Answered as [`PhotoPixels`].
     Photo { peer: String, key: i64, edge: u32 },
+    /// The photo staged in `peer`'s compose bar (1270), scaled into an
+    /// `edge` box as [`Query::Photo`]'s; answered as [`PhotoPixels`].
+    Staged { peer: String, edge: u32 },
+    /// `peer`'s compose bar alone (1270), asked on every change of the
+    /// field so the plus turns into Send as the first letter is typed;
+    /// answered as [`Bar`], the same fields [`Messages`] carries.
+    Bar { peer: String },
     /// The `index`th file of the message `key` of `peer`'s conversation,
     /// saved under the app's files (`files/<peer>-<key>-<index>/<name>`,
     /// the name made safe) for the open or share intent (1221). Answered
@@ -1369,7 +1488,7 @@ pub struct MessageRow {
     pub voice_words: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Messages {
     pub v: u32,
     pub peer: String,
@@ -1436,6 +1555,64 @@ pub struct Messages {
     /// none.
     #[serde(default)]
     pub draft_reply: String,
+    /// The compose bar (1270, the scene's compose node): the round
+    /// button, `plus` or `send`, and every button in the order drawn by
+    /// its id (`emoji`, `locate`, `camera`, `record`, then `plus` or
+    /// `send`), each with its words.
+    #[serde(default)]
+    pub round: String,
+    #[serde(default)]
+    pub buttons: Vec<BarButton>,
+    /// The field's hint: `Message`, or `Add a caption` with a photo staged.
+    #[serde(default)]
+    pub hint: String,
+    /// The staged photo's words (`Photo to send, 312 KB`); empty for none.
+    /// [`Query::Staged`] has its pixels.
+    #[serde(default)]
+    pub staged: String,
+    /// The open sheet: `attach`, `position`, or empty for none; its title
+    /// and rows in the order shown.
+    #[serde(default)]
+    pub sheet: String,
+    #[serde(default)]
+    pub sheet_title: String,
+    #[serde(default)]
+    pub sheet_rows: Vec<BarButton>,
+    /// The position sheet's fix for its map (degrees times a million),
+    /// whether there is one, and its age or that there is none, in words.
+    #[serde(default)]
+    pub has_fix: bool,
+    #[serde(default)]
+    pub fix_lat_e6: i32,
+    #[serde(default)]
+    pub fix_lon_e6: i32,
+    #[serde(default)]
+    pub fix_words: String,
+}
+
+/// What [`Query::Bar`] answers: the compose bar's fields of [`Messages`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bar {
+    pub v: u32,
+    pub round: String,
+    pub buttons: Vec<BarButton>,
+    pub hint: String,
+    pub staged: String,
+    pub sheet: String,
+    pub sheet_title: String,
+    pub sheet_rows: Vec<BarButton>,
+    pub has_fix: bool,
+    pub fix_lat_e6: i32,
+    pub fix_lon_e6: i32,
+    pub fix_words: String,
+}
+
+/// A button of the compose bar or a row of its sheet (1270): its resource
+/// id, which is also what Java switches on, and its words.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BarButton {
+    pub id: String,
+    pub label: String,
 }
 
 /// What happened, for the screen.

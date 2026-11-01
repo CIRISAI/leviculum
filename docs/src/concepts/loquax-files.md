@@ -9,7 +9,7 @@ kept on the phone and opens in the app the phone has for it.
 | Question | Decision |
 |---|---|
 | Wire | The LXMF file attachments field, `0x05`, holding `[[name, bytes], ...]`, the name a str, as the reference names it and Columba and Sideband write and read it. No field of our own. |
-| A file and text | A file is one message with an empty text, as the paperclip sends it. A received message with several files shows a row for each. |
+| A file and text | A file is one message with an empty text, as the plus sheet's File row sends it. A received message with several files shows a row for each. |
 | Cap | 990 000 bytes a file: a receiver refuses a message past 1000 KB, and the message around the file needs room. Refused with both sizes said, before anything goes. |
 | Names | What the sender wrote is shown and saved only after [`safe_name`](#3-the-core): no path, no control character, no leading dot. |
 | Where it is kept | Under the home: `files/<peer>-<key>-<n>/<name>`, written once when the file is first opened. On the phone that is the app's own files; a provider of the app's lends that one file read only to the app that opens it. |
@@ -97,7 +97,7 @@ pressable. `loquax send --file FILE` sends one from a script.
 
 ## 4. Android
 
-- The paperclip's menu: Photo, File, My position. File opens the system
+- The compose bar's plus sheet (1270): Gallery, File, My position. File opens the system
   picker with `ACTION_GET_CONTENT` and `*/*`; Java reads the display name
   and the bytes off the UI thread and sends `Request::File { peer, name,
   data, size }`. A refusal shows on the chat's status line.
@@ -149,7 +149,7 @@ both.
 1. Progress in the bubble (section 5).
 2. The propagation node's 256 KB per message (section 2), shared with
    photos; lnpnd's fallback of 4 KB without a config is lower still.
-3. One file per message from the paperclip; several picked at once are a
+3. One file per message from the plus sheet; several picked at once are a
    later slice. Received messages with several show all.
 4. No preview of a received picture sent as a file: it is a file row.
 5. A saved file stays under the app's files until the app is removed;

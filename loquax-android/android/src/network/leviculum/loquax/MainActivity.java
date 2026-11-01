@@ -186,6 +186,7 @@ public class MainActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
+                Core.sense(getApplicationContext());
                 final Map<String, Object> answer = Core.start(
                         home,
                         typedServer == null || typedServer.isEmpty() ? null : typedServer,

@@ -1,5 +1,7 @@
 package network.leviculum.loquax;
 
+import android.content.Context;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -15,8 +17,15 @@ import java.util.TimeZone;
  */
 final class Core {
     static final long VERSION = 1;
+    /** The phone has a camera (1270): set by {@link #sense} before a start. */
+    private static volatile boolean camera;
 
     private Core() {}
+
+    /** What the phone can do that the library's compose bar asks: a camera. */
+    static void sense(Context context) {
+        camera = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY);
+    }
 
     static Map<String, Object> map(Object... pairs) {
         Map<String, Object> map = new LinkedHashMap<>();
@@ -89,7 +98,8 @@ final class Core {
 
     /** Start; code and server null on a later start. Blocks: not on the UI thread. */
     static Map<String, Object> start(String dir, String server, String code, String name) {
-        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang());
+        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(),
+                "camera", camera);
         if (server != null) request.put("server", server);
         if (code != null) request.put("code", code);
         if (name != null) request.put("name", name);
@@ -102,7 +112,8 @@ final class Core {
      * it restores the address first. Blocks: not on the UI thread.
      */
     static Map<String, Object> startHere(String dir, String restore, String passphrase) {
-        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(), "here", true);
+        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(), "here", true,
+                "camera", camera);
         if (restore != null) {
             request.put("restore", restore);
             request.put("passphrase", passphrase);
@@ -220,6 +231,46 @@ final class Core {
         return answer(Native.query(MsgPack.pack(request)));
     }
 
+    /**
+     * The photo the camera took for `peer` (1270), as the capture wrote
+     * it: the library scales and strips it as a picked one and stages it
+     * in the compose bar. Not on the UI thread.
+     */
+    static String stage(String peer, byte[] data) {
+        return command(map("t", "stage", "peer", peer, "data", data));
+    }
+
+    /** The staged photo's cross. */
+    static String unstage(String peer) {
+        return command(map("t", "unstage", "peer", peer));
+    }
+
+    /** The compose bar's sheet: `attach`, `position`, or "" to close it. */
+    static String sheet(String peer, String kind) {
+        return command(map("t", "sheet", "peer", peer, "kind", kind));
+    }
+
+    /** The phone knows no own fix: the position sheet says so. */
+    static String noFix() {
+        return command(map("t", "nofix"));
+    }
+
+    /** The position sheet's "Send my position now": the last fix to `peer`. */
+    static String shareFix(String peer) {
+        return command(map("t", "sharefix", "peer", peer));
+    }
+
+    /** `peer`'s compose bar alone: its buttons, its staged photo, its sheet (1270). */
+    static Map<String, Object> bar(String peer) {
+        return answer(Native.query(MsgPack.pack(map("t", "bar", "peer", peer))));
+    }
+
+    /** The staged photo's pixels in an `edge` box, or null. Not on the UI thread. */
+    static Bitmap stagedBitmap(String peer, int edge) {
+        return pixels(answer(Native.query(MsgPack.pack(
+                map("t", "staged", "peer", peer, "edge", (long) edge)))), null);
+    }
+
     static Bitmap photoBitmap(String peer, long key, int edge) {
         return photoBitmap(peer, key, edge, null);
     }
@@ -230,8 +281,12 @@ final class Core {
      * (1269, what the viewer zooms to).
      */
     static Bitmap photoBitmap(String peer, long key, int edge, int[] full) {
-        Map<String, Object> answer = answer(Native.query(MsgPack.pack(
-                map("t", "photo", "peer", peer, "key", key, "edge", (long) edge))));
+        return pixels(answer(Native.query(MsgPack.pack(
+                map("t", "photo", "peer", peer, "key", key, "edge", (long) edge)))), full);
+    }
+
+    /** A PhotoPixels answer as a Bitmap, `full` as in photoBitmap; null for none. */
+    private static Bitmap pixels(Map<String, Object> answer, int[] full) {
         Object rgba = answer.get("rgba");
         long w = num(answer, "width");
         long h = num(answer, "height");

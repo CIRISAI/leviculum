@@ -397,6 +397,75 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
                 at: 1_793_475_600,
             },
         ),
+        (
+            "stage",
+            java_map(&[
+                ("t", Java::Str("stage")),
+                ("peer", Java::Str(PEER)),
+                ("data", Java::Bin(&[0xff, 0xd8, 0xff, 0xe1])),
+            ]),
+            Request::Stage {
+                peer: s(PEER),
+                data: schema::Blob(vec![0xff, 0xd8, 0xff, 0xe1]),
+            },
+        ),
+        (
+            "unstage",
+            java_map(&[("t", Java::Str("unstage")), ("peer", Java::Str(PEER))]),
+            Request::Unstage { peer: s(PEER) },
+        ),
+        (
+            "sheet",
+            java_map(&[
+                ("t", Java::Str("sheet")),
+                ("peer", Java::Str(PEER)),
+                ("kind", Java::Str("position")),
+            ]),
+            Request::Sheet {
+                peer: s(PEER),
+                kind: s("position"),
+            },
+        ),
+        (
+            "sheet (closed)",
+            java_map(&[
+                ("t", Java::Str("sheet")),
+                ("peer", Java::Str(PEER)),
+                ("kind", Java::Str("")),
+            ]),
+            Request::Sheet {
+                peer: s(PEER),
+                kind: String::new(),
+            },
+        ),
+        (
+            "noFix",
+            java_map(&[("t", Java::Str("nofix"))]),
+            Request::NoFix,
+        ),
+        (
+            "shareFix",
+            java_map(&[("t", Java::Str("sharefix")), ("peer", Java::Str(PEER))]),
+            Request::ShareFix { peer: s(PEER) },
+        ),
+        (
+            "Locator.tell",
+            java_map(&[
+                ("t", Java::Str("fix")),
+                ("lat_e6", Java::Long(43_773_100)),
+                ("lon_e6", Java::Long(11_256_000)),
+                ("alt_e2", Java::Long(0)),
+                ("accuracy_e2", Java::Long(500)),
+                ("at", Java::Long(1_793_475_600)),
+            ]),
+            Request::Fix {
+                lat_e6: 43_773_100,
+                lon_e6: 11_256_000,
+                alt_e2: 0,
+                accuracy_e2: 500,
+                at: 1_793_475_600,
+            },
+        ),
     ]
 }
 
@@ -599,6 +668,23 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
             },
         ),
         (
+            "bar",
+            java_map(&[("t", Java::Str("bar")), ("peer", Java::Str(PEER))]),
+            Query::Bar { peer: s(PEER) },
+        ),
+        (
+            "stagedBitmap",
+            java_map(&[
+                ("t", Java::Str("staged")),
+                ("peer", Java::Str(PEER)),
+                ("edge", Java::Long(256)),
+            ]),
+            Query::Staged {
+                peer: s(PEER),
+                edge: 256,
+            },
+        ),
+        (
             "zoom",
             java_map(&[
                 ("t", Java::Str("zoom")),
@@ -749,11 +835,13 @@ fn every_start_java_builds_decodes() {
                 ("dir", Java::Str(DIR)),
                 ("offset", Java::Long(3_600)),
                 ("lang", Java::Str("de-DE")),
+                ("camera", Java::Bool(true)),
             ]),
             Start {
                 dir: DIR.to_string(),
                 offset: 3_600,
                 lang: s("de-DE"),
+                camera: true,
                 ..Start::default()
             },
         ),
@@ -780,6 +868,7 @@ fn every_start_java_builds_decodes() {
                 ("offset", Java::Long(7_200)),
                 ("lang", Java::Str("en-US")),
                 ("here", Java::Bool(true)),
+                ("camera", Java::Bool(false)),
             ]),
             Start {
                 dir: DIR.to_string(),

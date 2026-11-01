@@ -11,11 +11,11 @@
 //! carry one, and the model key behind it must come back whole.
 
 use loquax_android::schema::{
-    self, AddressRow, Addresses, Backup, Blob, CandidateRow, Chip, ContactCopy, ConversationRow,
-    Conversations, Detail, Done, Event, FileRow, FriendRow, Friends, ImRow, Info, LinkRow, Links,
-    MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, Me, MessageRow,
-    Messages, PositionRow, Query, Recents, RegionRow, Request, Run, RunRow, Shared, SharedRow,
-    Start, Started, SuggestionRow, Suggestions,
+    self, AddressRow, Addresses, Backup, Bar, BarButton, Blob, CandidateRow, Chip, ContactCopy,
+    ConversationRow, Conversations, Detail, Done, Event, FileRow, FriendRow, Friends, ImRow, Info,
+    LinkRow, Links, MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, Me,
+    MessageRow, Messages, PositionRow, Query, Recents, RegionRow, Request, Run, RunRow, Shared,
+    SharedRow, Start, Started, SuggestionRow, Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -97,19 +97,22 @@ fn start() -> impl Strategy<Value = Start> {
     (
         (text(), opt_text(), opt_text(), opt_text()),
         (i32s(), any::<bool>(), opt_text(), opt_text()),
-        opt_text(),
+        (opt_text(), any::<bool>()),
     )
         .prop_map(
-            |((dir, server, code, name), (offset, here, restore, passphrase), lang)| Start {
-                dir,
-                server,
-                code,
-                name,
-                offset,
-                lang,
-                here,
-                restore,
-                passphrase,
+            |((dir, server, code, name), (offset, here, restore, passphrase), (lang, camera))| {
+                Start {
+                    dir,
+                    server,
+                    code,
+                    name,
+                    offset,
+                    lang,
+                    here,
+                    restore,
+                    passphrase,
+                    camera,
+                }
             },
         )
 }
@@ -220,6 +223,20 @@ fn request() -> impl Strategy<Value = Request> {
             body,
             reply
         }),
+        (text(), blob()).prop_map(|(peer, data)| Request::Stage { peer, data }),
+        text().prop_map(|peer| Request::Unstage { peer }),
+        (text(), text()).prop_map(|(peer, kind)| Request::Sheet { peer, kind }),
+        (i32s(), i32s(), i32s(), u32s(), i64s()).prop_map(
+            |(lat_e6, lon_e6, alt_e2, accuracy_e2, at)| Request::Fix {
+                lat_e6,
+                lon_e6,
+                alt_e2,
+                accuracy_e2,
+                at,
+            }
+        ),
+        Just(Request::NoFix),
+        text().prop_map(|peer| Request::ShareFix { peer }),
     ]
 }
 
@@ -268,6 +285,8 @@ fn query() -> impl Strategy<Value = Query> {
         prop::option::of(any::<bool>()).prop_map(|set| Query::MapFling { set }),
         opt_text().prop_map(|set| Query::PhotoSize { set }),
         (text(), i64s(), u32s()).prop_map(|(peer, key, edge)| Query::Photo { peer, key, edge }),
+        (text(), u32s()).prop_map(|(peer, edge)| Query::Staged { peer, edge }),
+        text().prop_map(|peer| Query::Bar { peer }),
         (text(), i64s(), u32s()).prop_map(|(peer, key, index)| Query::SaveFile {
             peer,
             key,
@@ -430,6 +449,7 @@ fn messages() -> BoxedStrategy<Messages> {
         ),
         live(),
         (text(), text(), text()),
+        bar(),
     )
         .prop_map(
             |(
@@ -439,6 +459,7 @@ fn messages() -> BoxedStrategy<Messages> {
                 (announced, petname, others, verified, receipts),
                 (liveness, cadence_s, last_fix_at),
                 (ring, draft, draft_reply),
+                bar,
             )| Messages {
                 v,
                 peer,
@@ -464,9 +485,62 @@ fn messages() -> BoxedStrategy<Messages> {
                 ring,
                 draft,
                 draft_reply,
+                round: bar.round,
+                buttons: bar.buttons,
+                hint: bar.hint,
+                staged: bar.staged,
+                sheet: bar.sheet,
+                sheet_title: bar.sheet_title,
+                sheet_rows: bar.sheet_rows,
+                has_fix: bar.has_fix,
+                fix_lat_e6: bar.fix_lat_e6,
+                fix_lon_e6: bar.fix_lon_e6,
+                fix_words: bar.fix_words,
             },
         )
         .boxed()
+}
+
+/// The compose bar's fields (1270), boxed: inlined into [`messages`] the
+/// strategy's type nests deep enough to overflow a test thread's stack.
+fn bar() -> BoxedStrategy<Bar> {
+    (
+        (
+            u32s(),
+            text(),
+            prop::collection::vec(bar_button(), 0..6),
+            text(),
+            text(),
+        ),
+        (text(), text(), prop::collection::vec(bar_button(), 0..4)),
+        (any::<bool>(), i32s(), i32s(), text()),
+    )
+        .prop_map(
+            |(
+                (v, round, buttons, hint, staged),
+                (sheet, sheet_title, sheet_rows),
+                (has_fix, fix_lat_e6, fix_lon_e6, fix_words),
+            )| Bar {
+                v,
+                round,
+                buttons,
+                hint,
+                staged,
+                sheet,
+                sheet_title,
+                sheet_rows,
+                has_fix,
+                fix_lat_e6,
+                fix_lon_e6,
+                fix_words,
+            },
+        )
+        .boxed()
+}
+
+/// A compose bar's button or a sheet's row (1270).
+fn bar_button() -> impl Strategy<Value = BarButton> {
+    (text(), text()).prop_map(|(id, label)| BarButton { id, label })
 }
 
 /// A liveness as the rows carry it (1209): the word, the cadence and the
@@ -937,6 +1011,11 @@ proptest! {
     fn the_lists_round_trip(conversations in conversations(), messages in messages()) {
         round_trips(&conversations)?;
         round_trips(&messages)?;
+    }
+
+    #[test]
+    fn the_compose_bar_round_trips(bar in bar()) {
+        round_trips(&bar)?;
     }
 
     #[test]
