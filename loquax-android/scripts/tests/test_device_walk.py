@@ -642,6 +642,76 @@ class Notifications(unittest.TestCase):
         self.assertEqual(walk.conversation_notifications(other, walk.PACKAGE), {})
 
 
+# The session's record with its extras, as `--noredact` prints them; the
+# conversation record below it carries a text of its own.
+SESSION_NOTIFICATIONS = """\
+    NotificationRecord(0x0a1b2c3d: pkg=network.leviculum.loquax.debug user=UserHandle{0} id=1 tag=null importance=2 key=0|network.leviculum.loquax.debug|1|null|10123: Notification(channel=session))
+      uid=10123 userId=0
+      extras={
+        android.title=String (Loquax)
+        android.text=String (Connected to your mailbox, 3 unread)
+      }
+    NotificationRecord(0x0b2c3d4e: pkg=network.leviculum.loquax.debug user=UserHandle{0} id=0 tag=3b5c00112233445566778899aabbccdd importance=4 key=x: Notification(channel=messages))
+      extras={
+        android.text=String (hallo)
+      }
+"""
+
+
+class SessionLine(unittest.TestCase):
+    """The always-on notification's line (1278, walk finding 19)."""
+
+    SERVER = "192.168.240.1:4242"
+
+    def test_the_untagged_records_text_is_the_line(self):
+        line = walk.session_line(SESSION_NOTIFICATIONS, walk.PACKAGE)
+        self.assertEqual(line, "Connected to your mailbox, 3 unread")
+        self.assertEqual(walk.session_line_problems(line, self.SERVER), [])
+        self.assertEqual(walk.session_line_problems("Connected to your mailbox", self.SERVER), [])
+
+    def test_none_the_old_words_or_the_server_are_named(self):
+        self.assertIsNone(walk.session_line(NOTIFICATIONS, walk.PACKAGE))
+        self.assertEqual(walk.session_line_problems(None, self.SERVER), ["no session notification"])
+        problems = walk.session_line_problems(f"Connected to {self.SERVER}", self.SERVER)
+        self.assertIn("the line says", problems[0])
+        self.assertIn("names the server", problems[1])
+        problems = walk.session_line_problems(walk.NOT_CONNECTED, self.SERVER)
+        self.assertEqual(len(problems), 1)
+
+
+def edit(rid, top):
+    return walk.Node(text="", desc="", rid="network.leviculum.loquax.debug:id/" + rid,
+                     cls="android.widget.EditText", bounds=(0, top, 100, top + 40))
+
+
+class FirstStartName(unittest.TestCase):
+    """The address page's one field (1278, walk finding 9)."""
+
+    def test_the_name_alone_above_the_qr_passes(self):
+        nodes = [edit("welcome_name", 100), boxed("welcome_qr", (0, 200, 240, 440))]
+        self.assertEqual(walk.first_start_name_problems(nodes), [])
+
+    def test_no_field_one_below_or_a_second_is_named(self):
+        qr = boxed("welcome_qr", (0, 200, 240, 440))
+        self.assertIn("no name field", walk.first_start_name_problems([qr]))
+        self.assertIn(
+            "the name field is below the QR",
+            walk.first_start_name_problems([qr, edit("welcome_name", 500)]),
+        )
+        self.assertIn(
+            "2 fields on the page, not the name alone",
+            walk.first_start_name_problems([edit("welcome_name", 100), edit("other", 150), qr]),
+        )
+
+    def test_the_new_steps_stand_where_they_need_their_state(self):
+        steps = walk.STEPS
+        self.assertLess(steps.index("first_start"), steps.index("notification_text"))
+        self.assertLess(steps.index("pencil_scan"), steps.index("share_in_contact"))
+        self.assertEqual(steps[-3:], ["first_start_name", "link_device", "teardown"])
+        for step in ("notification_text", "share_in_contact", "first_start_name"):
+            self.assertTrue(callable(getattr(walk.Walk, "step_" + step)), step)
+
+
 def boxed(rid, bounds, desc=""):
     return walk.Node(text="", desc=desc, rid="network.leviculum.loquax.debug:id/" + rid, cls="", bounds=bounds)
 

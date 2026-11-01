@@ -63,6 +63,7 @@ STEPS = [
     "join_error_words",
     "first_start",
     "list",
+    "notification_text",
     "open_imported",
     "info",
     "marks",
@@ -92,7 +93,9 @@ STEPS = [
     "profile",
     "first_start_qr",
     "pencil_scan",
+    "share_in_contact",
     "buildings",
+    "first_start_name",
     "link_device",
     "teardown",
 ]
@@ -114,6 +117,22 @@ LINK_STATUS = "link_status"
 LINKED = "Device linked: {}"
 LINKED_NAME = "walk laptop"
 JOIN_CODE_PREFIX = "lqxh1"
+# The first start's name (walk finding 9): the address page's one field,
+# and the name the walk types into it on a phone mailbox.
+WELCOME_NAME = "welcome_name"
+WELCOME_QR = "welcome_qr"
+PHONE_NAME = "Walk Phone"
+# The always-on notification (walk finding 19): its line names the
+# mailbox, never the server it dials.
+SESSION_LINE = re.compile(r"^Connected to your mailbox(?:, \d+ unread)?$")
+NOT_CONNECTED = "Not connected, trying again"
+# A friend's code from another app (walk finding 12): the name dialog, the
+# name the walk gives, and the chat's banner that must not show right
+# after the add (walk finding 15).
+ADD_CONTACT = "Add contact"
+ADD_CONTACT_ASK = "What do you call this contact?"
+FRIEND_NAME = "Walk Friend"
+BOOK_BANNER = "book_banner"
 CONTINUE = "Continue"
 PASTE_CODE = "Paste a code"
 JOIN = "Join"
@@ -1083,6 +1102,53 @@ def link_code_problems(shown: str, scanned: list[str], server: str) -> list[str]
     return problems
 
 
+def first_start_name_problems(nodes: list[Node]) -> list[str]:
+    """The address page of a phone mailbox's first start (walk finding 9):
+    the name is its one field, above the QR."""
+    problems = []
+    field = find(nodes, rid=WELCOME_NAME)
+    qr = find(nodes, rid=WELCOME_QR)
+    if not field:
+        problems.append("no name field")
+    elif qr and field[0].bounds[1] >= qr[0].bounds[1]:
+        problems.append("the name field is below the QR")
+    edits = [n for n in nodes if n.cls.endswith("EditText")]
+    if len(edits) != 1:
+        problems.append(f"{len(edits)} fields on the page, not the name alone")
+    return problems
+
+
+def session_line(dumpsys: str, package: str) -> str | None:
+    """The text of `package`'s session notification, the untagged one, in
+    `dumpsys notification --noredact`; None when there is none."""
+    for block in re.split(r"(?=NotificationRecord\()", dumpsys):
+        head = re.match(r"NotificationRecord\([^\n]*", block)
+        if not head or f"pkg={package} " not in head.group(0) + " ":
+            continue
+        tag = re.search(r"\btag=(\S+)", head.group(0))
+        if tag and tag.group(1) != "null":
+            continue
+        text = re.search(r"android\.text=\S+ \((.*)\)\s*$", block, re.M)
+        if text:
+            return text.group(1)
+    return None
+
+
+def session_line_problems(line: str | None, server: str) -> list[str]:
+    """What is wrong with the session notification's line (walk finding
+    19): none, not "Connected to your mailbox" with the unread count, or
+    the server's address on it."""
+    if line is None:
+        return ["no session notification"]
+    problems = []
+    if not SESSION_LINE.fullmatch(line):
+        problems.append(f"the line says {line!r}")
+    host = server.rpartition(":")[0]
+    if server in line or (host and host in line):
+        problems.append(f"the line names the server: {line!r}")
+    return problems
+
+
 def daemon_word_problems(nodes: list[Node]) -> list[str]:
     """A word of Reticulum or the daemon anywhere on screen."""
     return [
@@ -1707,6 +1773,8 @@ class Walk:
         self.fixture: Fixture | None = None
         self.installed = False
         self.joined = False
+        # The phone holds the mailbox since first_start_name (1278).
+        self.on_phone = False
         self.ok = 0
         self.failed = 0
         self.nonce = str(int(time.time()))[-6:]
@@ -1964,15 +2032,51 @@ class Walk:
         self.tap_text(JOIN)
         self.joined = True
         tapped = []
-        # The list's title is the app's name; the join leads there.
+        # The join leads to the address page once (walk finding 13), its
+        # Done to the list, whose title is the app's name.
+        address_page = False
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             tapped += self.dismiss_dialogs(1)
             nodes = dev.dump()
-            if find(nodes, rid="list") and find(nodes, rid="write"):
-                return f"joined dialogs={tapped or 'none'}"
+            if find(nodes, rid=WELCOME_QR):
+                address_page = True
+                self.tap_done(nodes)
+            elif find(nodes, rid="list") and find(nodes, rid="write"):
+                if not address_page:
+                    raise StepFailed("the list came without the address page after the join")
+                return f"joined address_page=shown dialogs={tapped or 'none'}"
             time.sleep(0.5)
         raise StepFailed(f"no conversation list 30s after Join; screen: {texts(nodes)[:12]}")
+
+    def tap_done(self, nodes: list[Node]) -> None:
+        """Done on the address page, scrolled to when below the fold."""
+        dev = self.need_device()
+        done = find(nodes, text=DONE)
+        if done:
+            dev.tap_node(done[0])
+            return
+        x1, y1, x2, y2 = find(nodes, rid=WELCOME_QR)[0].bounds
+        x = (x1 + x2) // 2
+        dev.swipe(x, y2, x, y1, 300)
+        time.sleep(0.5)
+
+    def step_notification_text(self) -> str:
+        """The always-on notification (walk finding 19): joined to the
+        host's mailbox, its line says "Connected to your mailbox" (with
+        the unread count) and never the server's address."""
+        dev = self.need_device()
+        seen: list[str | None] = []
+
+        def look():
+            line = session_line(dev.shell("dumpsys notification --noredact"), PACKAGE)
+            seen.append(line)
+            return not session_line_problems(line, self.args.server)
+
+        if not wait_for(look, 30, every=1.0):
+            problems = session_line_problems(seen[-1] if seen else None, self.args.server)
+            raise StepFailed("; ".join(problems) + f"; lines seen: {sorted(set(map(str, seen)))}")
+        return f"line={seen[-1]!r}"
 
     def expected_rows(self) -> list[dict]:
         """The conversations the list shows: neither archived nor blocked."""
@@ -3471,6 +3575,54 @@ class Walk:
             raise StepFailed("; ".join(problems))
         return f"camera={camera} scan={scanned} refusal={CODE_FOREIGN!r}"
 
+    def step_share_in_contact(self) -> str:
+        """A friend's code from another app (walk finding 12): a text with
+        an lxma:// code shared to Loquax opens "Add contact"; named, the
+        friend's chat opens without the banner that asks to save them to
+        the phone's contacts (walk finding 15). The same code as a tapped
+        lxma:// link opens the dialog again, the name known."""
+        dev = self.need_device()
+        friend = self.need_fixture().manifest["friend"]
+        code = friend["code"]
+        self.back_to_chats()
+        dev.shell(
+            f"am start -W -a android.intent.action.SEND -t text/plain "
+            f"--es android.intent.extra.TEXT 'Add me on Loquax: {code}' "
+            f"-n {PACKAGE}/{ACTIVITY}",
+            timeout=60,
+        )
+        self.wait_text(ADD_CONTACT_ASK, 20)
+        nodes = dev.dump()
+        edits = [n for n in nodes if n.cls.endswith("EditText")]
+        if len(edits) != 1:
+            raise StepFailed(f"the dialog holds {len(edits)} fields: {texts(nodes)[:12]}")
+        dev.tap_node(edits[0])
+        dev.type_text(FRIEND_NAME)
+        add = [n for n in find(dev.dump(), text=ADD_CONTACT) if n.clickable or "Button" in n.cls]
+        if not add:
+            dev.key("KEYCODE_BACK")
+            add = [
+                n for n in find(dev.dump(), text=ADD_CONTACT) if n.clickable or "Button" in n.cls
+            ]
+        if not add:
+            raise StepFailed(f"no {ADD_CONTACT!r} button: {texts(dev.dump())[:12]}")
+        dev.tap_node(add[0])
+        self.wait_text(FRIEND_NAME, 15)
+        problems = []
+        if find(dev.dump(), rid=BOOK_BANNER):
+            problems.append("the chat asks to save the friend right after the add")
+        self.back_to_chats()
+        dev.shell(f"am start -W -a android.intent.action.VIEW -d '{code}'", timeout=60)
+        self.wait_text(ADD_CONTACT_ASK, 20)
+        known = [n.text for n in dev.dump() if n.cls.endswith("EditText")]
+        if known != [FRIEND_NAME]:
+            problems.append(f"the link's dialog holds {known}, not {FRIEND_NAME!r}")
+        dev.key("KEYCODE_BACK")
+        self.back_to_chats()
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"shared=added {FRIEND_NAME!r} banner=none link=dialog address={friend['address']}"
+
     def step_buildings(self) -> str:
         """The buildings (1193): the walk's Frankfurt region on the phone
         and the autoload off, so nothing else lands; the map opened on the
@@ -3563,17 +3715,13 @@ class Walk:
         if not find(dev.dump(), rid="map"):
             raise StepFailed(f"not back on the map after the theme {choice!r}")
 
-    def step_link_device(self) -> str:
-        """Link a device (1264, finding 7), last before the teardown since
-        it starts the app afresh: the phone becomes the mailbox ("On this
-        phone"), its node dialling the walk's lnsd (the servers file, put
-        in before the first start, stands in for the public rendezvous);
-        the profile's "Link a device" shows a join code whose QR zbarimg
-        reads as the code's text, the server behind it; the host's loquax
-        joins with that code over lnsd as a second device, under its own
-        name; the sheet then says "Device linked: <that name>"."""
+    def start_on_phone(self, name: str | None) -> list[str]:
+        """A first start with the mailbox on this phone, its node dialling
+        the walk's lnsd (the servers file, put in before the first start,
+        stands in for the public rendezvous), to the chats. On the address
+        page `name` is typed into the name field when given; what is wrong
+        with that page (walk finding 9) comes back."""
         dev = self.need_device()
-        fixture = self.need_fixture()
         dev.shell(f"am force-stop {PACKAGE}", check=False)
         dev.shell(f"pm clear {PACKAGE}")
         dev.shell(
@@ -3584,6 +3732,7 @@ class Walk:
         self.wait_text(WHERE_TITLE, 20)
         self.tap_text(WHERE_PHONE)
         self.tap_text(USE_THIS_PHONE)
+        problems: list[str] | None = None
         deadline = time.monotonic() + 90
         while True:
             nodes = dev.dump()
@@ -3591,13 +3740,62 @@ class Walk:
                 break
             if time.monotonic() > deadline:
                 raise StepFailed(f"no chats 90s after Use this phone; screen: {texts(nodes)[:12]}")
-            if find(nodes, rid="welcome_qr") and find(nodes, text=DONE):
-                dev.tap_node(find(nodes, text=DONE)[0])
+            if find(nodes, rid=WELCOME_QR):
+                if problems is None:
+                    problems = first_start_name_problems(nodes)
+                    field = find(nodes, rid=WELCOME_NAME)
+                    if name is not None and field:
+                        dev.tap_node(field[0])
+                        # Whatever the owner's card put there goes first.
+                        dev.shell("input keyevent KEYCODE_MOVE_END " + "KEYCODE_DEL " * 40)
+                        dev.type_text(name)
+                        # The keyboard closed, so Done is no key under it.
+                        dev.key("KEYCODE_BACK")
+                        nodes = dev.dump()
+                self.tap_done(nodes)
             elif find(nodes, text=CONTINUE):
                 dev.tap_node(find(nodes, text=CONTINUE)[0])
             else:
                 self.dismiss_dialogs(1)
             time.sleep(0.5)
+        self.on_phone = True
+        return ["no address page"] if problems is None else problems
+
+    def step_first_start_name(self) -> str:
+        """The first start's name (walk finding 9): with the mailbox on
+        this phone the address page asks the name as its one field, above
+        the QR; the name typed there is the profile's afterwards."""
+        dev = self.need_device()
+        problems = self.start_on_phone(PHONE_NAME)
+        dev.tap_node(self.wait_id("avatar", 10)[0])
+        shown = ""
+
+        def named():
+            nonlocal shown
+            field = find(dev.dump(), rid="profile_name")
+            shown = field[0].text.strip() if field else ""
+            return shown == PHONE_NAME
+
+        if not wait_for(named, 15, every=0.5):
+            problems.append(f"the profile's name is {shown!r}, not {PHONE_NAME!r}")
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"name field=first, alone profile={PHONE_NAME!r}"
+
+    def step_link_device(self) -> str:
+        """Link a device (1264, finding 7), last before the teardown since
+        the app starts afresh before it: the phone holds the mailbox ("On
+        this phone", from first_start_name, or started here when that step
+        did not run), its node dialling the walk's lnsd; the profile's "Link a device" shows a join code whose QR zbarimg
+        reads as the code's text, the server behind it; the host's loquax
+        joins with that code over lnsd as a second device, under its own
+        name; the sheet then says "Device linked: <that name>"."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        if not self.on_phone:
+            self.start_on_phone(None)
         dev.tap_node(self.wait_id("avatar", 10)[0])
         dev.tap_node(self.wait_id(LINK_ROW, 10)[0])
         self.wait_id(LINK_QR, 15)
