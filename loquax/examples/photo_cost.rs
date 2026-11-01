@@ -5,6 +5,9 @@
 //! best of three runs.
 //!
 //! `cargo run --release -p loquax --features photos --example photo_cost -- a.jpg b.jpg`
+//!
+//! With `--out DIR` first, each prepared photo is also written there as
+//! `<name>.<size>.<format>`, to hand to other decoders (1288).
 
 use std::time::{Duration, Instant};
 
@@ -26,7 +29,16 @@ fn best<T>(mut run: impl FnMut() -> T) -> (T, Duration) {
 }
 
 fn main() {
-    for path in std::env::args().skip(1) {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let out = match args.first().map(String::as_str) {
+        Some("--out") if args.len() > 1 => {
+            let dir = std::path::PathBuf::from(args.remove(1));
+            args.remove(0);
+            Some(dir)
+        }
+        _ => None,
+    };
+    for path in args {
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -46,6 +58,16 @@ fn main() {
             let (prepared, took) = best(|| prepare(&bytes, size));
             match prepared {
                 Ok(p) => {
+                    if let Some(dir) = &out {
+                        let name = std::path::Path::new(&path)
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let file = dir.join(format!("{name}.{}.{}", size.word(), p.format));
+                        if let Err(error) = std::fs::write(&file, &p.data) {
+                            eprintln!("{}: {error}", file.display());
+                        }
+                    }
                     let (_, thumb) = best(|| fit(&p.data, 480).map(|t| t.width));
                     println!(
                         "  {:8} {}x{} {} bytes, prepare {} ms, thumbnail of it {} ms",
