@@ -190,6 +190,11 @@
     <string name="join_failed">Joining the mailbox did not work.</string>
     <string name="join_other_mailbox">This phone already reads another mailbox.</string>
     <string name="link_on_computer">Your mailbox is on a computer. Link the other device there.</string>
+    <string name="move_on_computer">Your mailbox is on a computer. Your new phone joins it there.</string>
+    <string name="move_failed">The move did not work. Your old phone still has everything.</string>
+    <string name="move_has_address">This phone already has an address. Only a new phone can take one over.</string>
+    <string name="moved_away">This phone has moved. Your mailbox is on your new phone now, and this phone sends nothing.</string>
+    <string name="restore_live">This address is in use on another device right now. Restored here too, both lose messages. Move from the old phone instead, or stop Loquax there first.</string>
     <string name="details">Details</string>
     <string name="scene_zoom_in">Zoom in</string>
     <string name="scene_zoom_out">Zoom out</string>

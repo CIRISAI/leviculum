@@ -299,6 +299,110 @@ async fn pages(
     }
 }
 
+/// What a move's pages brought (1281): the identity's private key, its
+/// ratchets, the old node's known identities, the mailbox's name, and the
+/// archive entries after the cursor asked, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Taken {
+    pub private_key: Vec<u8>,
+    pub ratchets: Vec<u8>,
+    pub known: Vec<u8>,
+    pub name: String,
+    pub entries: Vec<wire::Moving>,
+}
+
+/// Take a move's pages after `cursor` over one link (1281): `/move` with
+/// the move's token until no more follow.
+pub async fn take_move(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    token: &[u8; 16],
+    mut cursor: u64,
+    budget: Duration,
+) -> Result<Taken, HomeError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let link = open(node, public_key, device, deadline).await?;
+    let mut taken = Taken::default();
+    let result = loop {
+        let answer = match request(
+            node,
+            &link,
+            super::MOVE_PATH,
+            &wire::move_request(token, cursor),
+            deadline,
+        )
+        .await
+        {
+            Ok(answer) => answer,
+            Err(error) => break Err(error),
+        };
+        let page = match wire::read_move_answer(&answer) {
+            Ok(Ok(page)) => page,
+            Ok(Err(status)) => break Err(HomeError::Refused(status)),
+            Err(_) => break Err(HomeError::Malformed),
+        };
+        taken.private_key = page.private_key;
+        taken.ratchets = page.ratchets;
+        taken.known = page.known;
+        taken.name = page.name;
+        let last = page.entries.last().map(|entry| entry.seq);
+        taken.entries.extend(page.entries);
+        match (page.more, last) {
+            (true, Some(last)) if last > cursor => cursor = last,
+            _ => break Ok(taken),
+        }
+    };
+    let _ = node.close_link(&link).await;
+    result
+}
+
+/// Tell the old mailbox the move took (1281): `/moved` with the token and
+/// the newest sequence taken. `Refused(Behind)` when it holds more.
+pub async fn confirm_move(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    token: &[u8; 16],
+    cursor: u64,
+    budget: Duration,
+) -> Result<(), HomeError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let link = open(node, public_key, device, deadline).await?;
+    let answer = request(
+        node,
+        &link,
+        super::MOVED_PATH,
+        &wire::move_request(token, cursor),
+        deadline,
+    )
+    .await;
+    let _ = node.close_link(&link).await;
+    match wire::read_status(&answer?).map_err(|_| HomeError::Malformed)? {
+        Status::Ok => Ok(()),
+        status => Err(HomeError::Refused(status)),
+    }
+}
+
+/// Whether a mailbox answers under `public_key` right now (1281, the
+/// restore's guard): a link to its home destination comes up within
+/// `budget`. Any answer counts, a refusal too; only silence is "no".
+pub async fn answers(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    budget: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + budget;
+    match open(node, public_key, device, deadline).await {
+        Ok(link) => {
+            let _ = node.close_link(&link).await;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// A link to the home destination of `public_key`, identified as `device`.
 pub(crate) async fn open(
     node: &ReticulumNode,

@@ -1739,6 +1739,89 @@ impl Store {
         Ok(added)
     }
 
+    /// The archive after `cursor` as a move carries it (1281): each entry
+    /// with its id, oldest first, a page of about `max_bytes` but at least
+    /// one entry, and whether more follow, beside the oldest sequence held.
+    pub fn archive_moving(
+        &self,
+        cursor: u64,
+        max_bytes: usize,
+    ) -> Result<(Vec<crate::home::wire::Moving>, bool, u64), StoreError> {
+        let cursor = i64::try_from(cursor).unwrap_or(i64::MAX);
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT seq, kind, id, at, packed FROM archive WHERE identity = ?1 AND seq > ?2 \
+                 ORDER BY seq",
+            )
+            .map_err(|e| self.failed(e))?;
+        let mut rows = statement
+            .query(params![&self.identity[..], cursor])
+            .map_err(|e| self.failed(e))?;
+        let mut entries = Vec::new();
+        let mut bytes = 0usize;
+        let mut more = false;
+        while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            let packed: Vec<u8> = row.get(4).map_err(|e| self.failed(e))?;
+            if !entries.is_empty() && bytes.saturating_add(packed.len()) > max_bytes {
+                more = true;
+                break;
+            }
+            bytes = bytes.saturating_add(packed.len());
+            let seq: i64 = row.get(0).map_err(|e| self.failed(e))?;
+            let kind: i64 = row.get(1).map_err(|e| self.failed(e))?;
+            let id: Vec<u8> = row.get(2).map_err(|e| self.failed(e))?;
+            entries.push(crate::home::wire::Moving {
+                seq: seq as u64,
+                kind: u8::try_from(kind).unwrap_or(u8::MAX),
+                id: <[u8; 32]>::try_from(id.as_slice()).unwrap_or([0; 32]),
+                at: row.get(3).map_err(|e| self.failed(e))?,
+                packed,
+            });
+        }
+        let first: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MIN(seq) FROM archive WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok((entries, more, first.map_or(0, |seq| seq as u64)))
+    }
+
+    /// Append the entries a move brought (1281), in their order, each of
+    /// its own kind, id and time, all or none, under the cap: how many were
+    /// new to this archive.
+    pub fn archive_moved_in(
+        &mut self,
+        entries: &[crate::home::wire::Moving],
+        cap_bytes: u64,
+    ) -> Result<usize, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let mut added = 0;
+        for entry in entries {
+            let seq = append_in(
+                &tx,
+                &identity,
+                entry.kind,
+                &entry.id,
+                &entry.packed,
+                entry.at,
+                cap_bytes,
+            )
+            .map_err(|e| failed(&path, e))?;
+            added += usize::from(seq.is_some());
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(added)
+    }
+
     /// How many bytes of packed messages the archive holds.
     pub fn archive_bytes(&self) -> Result<u64, StoreError> {
         let total: i64 = self

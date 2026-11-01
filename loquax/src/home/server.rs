@@ -26,6 +26,20 @@ pub struct Home<'a> {
     pub token_ttl_secs: i64,
     /// The archive's cap in bytes.
     pub cap_bytes: u64,
+    /// The move its owner opened (1281), when one is open: what `/move`
+    /// and `/moved` are checked against and carry.
+    pub handover: Option<Handover>,
+}
+
+/// An open move (1281, [`super::handover`]): the token the new device
+/// joined with, and what goes along besides the identity and the archive:
+/// the delivery destination's ratchets and the node's known identities as
+/// the node keeps them, and the name the mailbox announces.
+pub struct Handover {
+    pub token: [u8; 16],
+    pub ratchets: Vec<u8>,
+    pub known: Vec<u8>,
+    pub name: alloc::string::String,
 }
 
 /// One answer: the bytes for the client, the messages a `/send` or a seen
@@ -38,6 +52,9 @@ pub struct Answer {
     pub accepted: Vec<Outgoing>,
     pub watching: Option<u64>,
     pub learned: Option<([u8; 16], [u8; 64])>,
+    /// A `/moved` took: the identity is on the new device now, and this
+    /// mailbox ends once the answer is out (1281).
+    pub gone: bool,
 }
 
 impl Answer {
@@ -47,6 +64,7 @@ impl Answer {
             accepted: Vec::new(),
             watching: None,
             learned: None,
+            gone: false,
         }
     }
 }
@@ -75,6 +93,8 @@ pub fn answer(
         super::PEERSTATE_PATH => Answer::only(peer_state(store, home, data, device, now_secs)),
         super::WATCH_PATH => watch(store, data, device),
         super::KEY_PATH => key(store, data, device),
+        super::MOVE_PATH => Answer::only(move_page(store, home, data, device)),
+        super::MOVED_PATH => moved(store, home, data, device),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
 }
@@ -165,6 +185,7 @@ fn send(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
                 }],
                 watching: None,
                 learned: None,
+                gone: false,
             }
         }
         Ok(Accepted::Again { id }) => Answer::only(wire::send_answer(&id)),
@@ -314,6 +335,7 @@ fn seen(
         accepted,
         watching: None,
         learned: None,
+        gone: false,
     }
 }
 
@@ -543,6 +565,7 @@ fn watch(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
                 accepted: Vec::new(),
                 watching: Some(newest),
                 learned: None,
+                gone: false,
             }
         }
         Err(error) => {
@@ -580,6 +603,103 @@ fn key(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
         accepted: Vec::new(),
         watching: None,
         learned: Some((peer, public_key)),
+        gone: false,
+    }
+}
+
+/// Whether `device` may move the mailbox with `token` (1281): admitted, and
+/// the token is the open move's. The handover back when it may, an answer
+/// to refuse it with when not.
+fn may_move<'h>(
+    store: &Store,
+    home: &'h Home<'_>,
+    token: &[u8; 16],
+    device: &[u8; 16],
+    what: &str,
+) -> Result<&'h Handover, Vec<u8>> {
+    if let Some(refused) = refuse_unless_admitted(store, device, what) {
+        return Err(refused);
+    }
+    match &home.handover {
+        Some(handover) if handover.token == *token => Ok(handover),
+        _ => {
+            tracing::info!(
+                "HOME {what} refused device={} reason=no-move",
+                crate::address::to_hex(device)
+            );
+            Err(wire::status_answer(Status::BadToken))
+        }
+    }
+}
+
+/// A page of the move (1281): the identity, its ratchets and the archive
+/// after the cursor with each entry's id.
+fn move_page(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> Vec<u8> {
+    let Ok((token, cursor)) = wire::read_move_request(data) else {
+        return wire::status_answer(Status::Malformed);
+    };
+    let handover = match may_move(store, home, &token, &device, "move") {
+        Ok(handover) => handover,
+        Err(refused) => return refused,
+    };
+    let Ok(private_key) = home.identity.private_key_bytes() else {
+        return wire::status_answer(Status::Failed);
+    };
+    match store.archive_moving(cursor, super::SYNC_PAGE_BYTES) {
+        Ok((entries, more, first)) => {
+            tracing::info!(
+                "HOME move device={} cursor={cursor} entries={} more={more}",
+                crate::address::to_hex(&device),
+                entries.len()
+            );
+            wire::move_answer(&wire::MovePage {
+                private_key: private_key.to_vec(),
+                ratchets: handover.ratchets.clone(),
+                known: handover.known.clone(),
+                name: handover.name.clone(),
+                first,
+                more,
+                entries,
+            })
+        }
+        Err(error) => {
+            tracing::warn!("HOME move: {error}");
+            wire::status_answer(Status::Failed)
+        }
+    }
+}
+
+/// The new device holds everything up to its cursor (1281): the mailbox
+/// here is gone once this is answered, unless the archive grew past it.
+fn moved(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> Answer {
+    let Ok((token, cursor)) = wire::read_move_request(data) else {
+        return Answer::only(wire::status_answer(Status::Malformed));
+    };
+    if let Err(refused) = may_move(store, home, &token, &device, "moved") {
+        return Answer::only(refused);
+    }
+    match store.archive_newest() {
+        Ok(newest) if newest > cursor => {
+            tracing::info!(
+                "HOME moved refused device={} cursor={cursor} newest={newest} reason=behind",
+                crate::address::to_hex(&device)
+            );
+            Answer::only(wire::status_answer(Status::Behind))
+        }
+        Ok(_) => {
+            tracing::warn!(
+                "HOME moved device={} cursor={cursor}: the mailbox is on that device now",
+                crate::address::to_hex(&device)
+            );
+            Answer {
+                gone: true,
+                ..Answer::only(wire::status_answer(Status::Ok))
+            }
+        }
+        Err(error) => {
+            tracing::warn!("HOME moved: {error}");
+            Answer::only(wire::status_answer(Status::Failed))
+        }
     }
 }
 
@@ -636,6 +756,7 @@ mod tests {
             address: HOME,
             token_ttl_secs: DAY,
             cap_bytes: u64::MAX,
+            handover: None,
         }
     }
 
@@ -1284,5 +1405,121 @@ mod tests {
             crate::store::Revoked::None
         );
         assert_eq!(store.devices().expect("devices").len(), 1);
+    }
+
+    /// A move (1281) is answered only to an admitted device with the open
+    /// move's token: the identity and the archive with each id; `/moved`
+    /// says Behind while the archive holds entries after the cursor, and
+    /// ends the mailbox once it does not.
+    #[test]
+    fn a_move_goes_only_to_the_admitted_device_with_the_open_moves_token() {
+        let (_dir, mut store) = store();
+        admitted(&mut store);
+        archive(&mut store, 1);
+        archive(&mut store, 2);
+        let mut serving = home();
+        let ask = |store: &mut Store, home: &Home<'_>, path, device, token| {
+            answer(
+                store,
+                home,
+                path,
+                &wire::move_request(&token, 0),
+                Some(device),
+                0.0,
+            )
+        };
+        // No move open: the token is no key.
+        let none = ask(
+            &mut store,
+            &serving,
+            crate::home::MOVE_PATH,
+            LAPTOP,
+            [8; 16],
+        );
+        assert_eq!(read_status(&none.bytes), Ok(Status::BadToken));
+        serving.handover = Some(Handover {
+            token: [8; 16],
+            ratchets: vec![1, 2, 3],
+            known: vec![4],
+            name: "Anna".into(),
+        });
+        let stranger = ask(
+            &mut store,
+            &serving,
+            crate::home::MOVE_PATH,
+            [2; 16],
+            [8; 16],
+        );
+        assert_eq!(read_status(&stranger.bytes), Ok(Status::NotAdmitted));
+        let other = ask(
+            &mut store,
+            &serving,
+            crate::home::MOVE_PATH,
+            LAPTOP,
+            [9; 16],
+        );
+        assert_eq!(read_status(&other.bytes), Ok(Status::BadToken));
+        let page = ask(
+            &mut store,
+            &serving,
+            crate::home::MOVE_PATH,
+            LAPTOP,
+            [8; 16],
+        );
+        let page = wire::read_move_answer(&page.bytes)
+            .expect("decodes")
+            .expect("a page");
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.ratchets, [1, 2, 3]);
+        assert_eq!(page.known, [4]);
+        assert_eq!(page.name, "Anna");
+        assert_eq!(
+            page.private_key,
+            serving.identity.private_key_bytes().expect("key").to_vec()
+        );
+        let newest = page.entries.last().map_or(0, |entry| entry.seq);
+        let behind = answer(
+            &mut store,
+            &serving,
+            crate::home::MOVED_PATH,
+            &wire::move_request(&[8; 16], newest - 1),
+            Some(LAPTOP),
+            0.0,
+        );
+        assert_eq!(read_status(&behind.bytes), Ok(Status::Behind));
+        assert!(!behind.gone);
+        let moved = answer(
+            &mut store,
+            &serving,
+            crate::home::MOVED_PATH,
+            &wire::move_request(&[8; 16], newest),
+            Some(LAPTOP),
+            0.0,
+        );
+        assert_eq!(read_status(&moved.bytes), Ok(Status::Ok));
+        assert!(moved.gone);
+
+        // The entries land in another archive as they were, ids and all:
+        // the same message again is no second entry.
+        let other_dir = tempfile::tempdir().expect("dir");
+        let mut new = Store::open_in(other_dir.path(), HOME).expect("store");
+        assert_eq!(
+            new.archive_moved_in(&page.entries, u64::MAX).expect("in"),
+            2
+        );
+        assert_eq!(
+            new.archive_moved_in(&page.entries, u64::MAX)
+                .expect("again"),
+            0
+        );
+        let (again, more, _) = new.archive_moving(0, usize::MAX).expect("read");
+        assert!(!more);
+        let strip = |entries: &[wire::Moving]| -> Vec<(u8, [u8; 32], i64, Vec<u8>)> {
+            entries
+                .iter()
+                .map(|e| (e.kind, e.id, e.at, e.packed.clone()))
+                .collect()
+        };
+        assert_eq!(strip(&again), strip(&page.entries));
     }
 }

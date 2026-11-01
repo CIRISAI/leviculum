@@ -190,6 +190,11 @@
     <string name="join_failed">Das Postfach ließ sich nicht verbinden.</string>
     <string name="join_other_mailbox">Dieses Handy liest schon ein anderes Postfach.</string>
     <string name="link_on_computer">Dein Postfach ist auf einem Computer. Verbinde das andere Gerät dort.</string>
+    <string name="move_on_computer">Dein Postfach ist auf einem Computer. Dein neues Handy verbindest du dort.</string>
+    <string name="move_failed">Der Umzug hat nicht geklappt. Dein altes Handy hat noch alles.</string>
+    <string name="move_has_address">Dieses Handy hat schon eine Adresse. Nur ein neues Handy kann eine übernehmen.</string>
+    <string name="moved_away">Dieses Handy ist umgezogen. Dein Postfach ist jetzt auf deinem neuen Handy, und dieses Handy sendet nichts mehr.</string>
+    <string name="restore_live">Diese Adresse ist gerade auf einem anderen Gerät in Betrieb. Hier auch wiederhergestellt, verlieren beide Nachrichten. Zieh lieber vom alten Handy um, oder beende Loquax dort zuerst.</string>
     <string name="details">Details</string>
     <string name="scene_zoom_in">Vergrößern</string>
     <string name="scene_zoom_out">Verkleinern</string>

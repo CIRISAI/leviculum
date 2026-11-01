@@ -89,6 +89,45 @@ pub fn announce_period(moved_at: Option<i64>, now: i64) -> Duration {
     }
 }
 
+/// How long a mailbox whose identity moved away (1281) waits after its
+/// `/moved` answer before it closes its node, so the answer leaves first.
+const GONE_GRACE: Duration = Duration::from_secs(2);
+
+/// The file under the node's storage with the identities it knows,
+/// written when the node shuts down (`leviculum_std::storage`).
+const KNOWN_FILE: &str = "known_destinations";
+
+/// The open move for a `/move` or `/moved` (1281): the token the owner
+/// opened, the delivery destination's ratchets and the node's known
+/// identities as the node keeps them (empty when it has none), and the
+/// mailbox's name. Read per request, since the owner opens a move while the
+/// mailbox runs and the node rotates its ratchets.
+fn handover(
+    home: &std::path::Path,
+    [ratchet_file, known_file]: [&std::path::Path; 2],
+    name: &str,
+    path: &str,
+) -> Option<super::server::Handover> {
+    if path != super::MOVE_PATH && path != super::MOVED_PATH {
+        return None;
+    }
+    let token = super::handover::token(home, unix_now())?;
+    let read = |file: &std::path::Path| match std::fs::read(file) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(error) => {
+            tracing::warn!("HOME move: {}: {error}", file.display());
+            None
+        }
+    };
+    Some(super::server::Handover {
+        token,
+        ratchets: read(ratchet_file)?,
+        known: read(known_file)?,
+        name: name.to_string(),
+    })
+}
+
 /// How often the engine's events are read.
 const PUMP: Duration = Duration::from_millis(20);
 /// How often the outbox looks for a due retry or a passed horizon. Both are
@@ -228,8 +267,20 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         wake,
         stop,
     } = options;
+    if let Some(at) = super::handover::gone_at(&home) {
+        return Err(format!(
+            "this mailbox moved to another device at {at} (unix time): it does not start \
+             here again until its owner takes it back"
+        ));
+    }
     let _lock = super::lock::DeliveryLock::acquire(&home, super::lock::HOME_NODE)?;
     let address = crate::engine::delivery_address(&identity)?;
+    let ratchet_file = leviculum_std::dest_ratchet_keys_path(&storage_dir, &address);
+    let known_file = storage_dir.join(KNOWN_FILE);
+    let own_name = match String::from_utf8_lossy(&display_name).into_owned() {
+        name if name == crate::display_name::FALLBACK => String::new(),
+        name => name,
+    };
     let home_destination = crate::home::destination_hash(&identity.public_key_bytes())?;
     let mut store = Store::open_in(&home, address).map_err(|e| e.to_string())?;
     backfill_contacts(&mut store, &home, archive_cap_bytes)?;
@@ -324,11 +375,12 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         archive_cap_bytes,
         outgoing.len()
     );
-    let serving = super::server::Home {
+    let mut serving = super::server::Home {
         identity: &signer,
         address,
         token_ttl_secs,
         cap_bytes: archive_cap_bytes,
+        handover: None,
     };
     let mut sender = Sender {
         cap_bytes: archive_cap_bytes,
@@ -382,7 +434,18 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         tokio::select! {
             Some(request) = requests.recv() => {
                 let (link, remote) = (request.link_id, request.remote);
-                let (accepted, watching) = answer(&node, &mut store, &serving, request).await;
+                serving.handover =
+                    handover(&home, [&ratchet_file, &known_file], &own_name, &request.path);
+                let (accepted, watching, gone) = answer(&node, &mut store, &serving, request).await;
+                if gone {
+                    // The new device holds everything (1281): this mailbox
+                    // ends here, once its answer had a moment to leave.
+                    if let Err(error) = super::handover::mark_gone(&home, unix_now()) {
+                        tracing::warn!("HOME moved: {error}");
+                    }
+                    tokio::time::sleep(GONE_GRACE).await;
+                    break Ok(());
+                }
                 if let (Some(told), Some(device), true) = (watching, remote, wake) {
                     wakes.watch(link, device, told);
                 }
@@ -805,7 +868,7 @@ async fn answer(
     store: &mut Store,
     serving: &super::server::Home<'_>,
     request: HomeRequest,
-) -> (Vec<crate::store::Outgoing>, Option<u64>) {
+) -> (Vec<crate::store::Outgoing>, Option<u64>, bool) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |elapsed| elapsed.as_secs_f64());
@@ -840,9 +903,9 @@ async fn answer(
         // The outbox has the message whether the answer arrived or not: a
         // client that retries with the same id is answered from it.
         tracing::warn!("HOME answer to {}: {error}", request.path);
-        return (answer.accepted, None);
+        return (answer.accepted, None, false);
     }
-    (answer.accepted, answer.watching)
+    (answer.accepted, answer.watching, answer.gone)
 }
 
 /// What carrying out the outbox's acts needs besides the engine and the

@@ -40,6 +40,8 @@ pub mod client;
 #[cfg(feature = "history")]
 pub mod daemon;
 #[cfg(feature = "std")]
+pub mod handover;
+#[cfg(feature = "std")]
 pub mod lock;
 #[cfg(feature = "std")]
 pub mod phone_server;
@@ -110,6 +112,19 @@ pub const WATCH_PATH: &str = "/watch";
 /// it. A home node from before it refuses the path, and the message waits
 /// for the peer's announce as it always did.
 pub const KEY_PATH: &str = "/key";
+
+/// A move to another device (1281, [`handover`]): the move token and the
+/// cursor in, a page of the archive with each entry's id out, beside the
+/// identity's private key and its delivery ratchets. Answered only to an
+/// admitted device that joined with the token of the move the owner
+/// opened on the mailbox itself.
+pub const MOVE_PATH: &str = "/move";
+
+/// The new device holds everything up to the cursor (1281): the token and
+/// the cursor in, a status out. `Ok` ends the mailbox here, for good until
+/// its owner takes it back; [`wire::Status::Behind`] when the archive grew
+/// past the cursor, which the new device takes with `/move` first.
+pub const MOVED_PATH: &str = "/moved";
 
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;

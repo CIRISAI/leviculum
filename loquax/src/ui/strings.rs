@@ -257,6 +257,12 @@ leviculum_ui::catalogue! {
     JoinOtherMailbox = "join_other_mailbox", "This phone already reads another mailbox.", "Dieses Handy liest schon ein anderes Postfach.";
     // Linking a device (1264): the phone holds no mailbox to link to.
     LinkOnComputer = "link_on_computer", "Your mailbox is on a computer. Link the other device there.", "Dein Postfach ist auf einem Computer. Verbinde das andere Gerät dort.";
+    // Moving to a new phone (1281, walk finding 24).
+    MoveOnComputer = "move_on_computer", "Your mailbox is on a computer. Your new phone joins it there.", "Dein Postfach ist auf einem Computer. Dein neues Handy verbindest du dort.";
+    MoveFailed = "move_failed", "The move did not work. Your old phone still has everything.", "Der Umzug hat nicht geklappt. Dein altes Handy hat noch alles.";
+    MoveHasAddress = "move_has_address", "This phone already has an address. Only a new phone can take one over.", "Dieses Handy hat schon eine Adresse. Nur ein neues Handy kann eine übernehmen.";
+    MovedAway = "moved_away", "This phone has moved. Your mailbox is on your new phone now, and this phone sends nothing.", "Dieses Handy ist umgezogen. Dein Postfach ist jetzt auf deinem neuen Handy, und dieses Handy sendet nichts mehr.";
+    RestoreLive = "restore_live", "This address is in use on another device right now. Restored here too, both lose messages. Move from the old phone instead, or stop Loquax there first.", "Diese Adresse ist gerade auf einem anderen Gerät in Betrieb. Hier auch wiederhergestellt, verlieren beide Nachrichten. Zieh lieber vom alten Handy um, oder beende Loquax dort zuerst.";
     Details = "details", "Details", "Details";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";
