@@ -34,6 +34,7 @@
 
 pub mod chat;
 pub mod map;
+pub mod viewer;
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -101,6 +102,9 @@ pub struct Seen {
     /// The reader's switch "Send read receipts" (1233), the settings'
     /// row.
     pub receipts: bool,
+    /// The photo a press on a bubble's photo last asked to see whole
+    /// (1269), decoded by the shell: a new one opens the viewer.
+    pub photo: Option<viewer::Picture>,
 }
 
 impl Seen {
@@ -115,6 +119,7 @@ impl Seen {
             scene: shell.model.scene(LayoutClass::Wide),
             now: shell.model.now,
             receipts: shell.model.reading.on,
+            photo: None,
         }
     }
 }
@@ -167,18 +172,34 @@ async fn drive(
     shell.apply(UiEvent::Clock(local_now()));
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
     let mut last: Option<Seen> = None;
+    let mut photo: Option<viewer::Picture> = None;
     loop {
         // The map view asks for no copy, link or mouse capture; what the
         // model asks of a terminal has no meaning in the window yet, but a
-        // photo's file, which the system's viewer shows (1220).
+        // photo, which the window's viewer shows (1269), and a file, which
+        // the system's handler opens (1221).
         for output in shell.outputs.drain(..) {
-            if let shell::Output::Photo(path) | shell::Output::File(path) = output {
-                if let Err(error) = open::that(&path) {
-                    tracing::warn!("could not open {}: {error}", path.display());
-                }
+            let path = match output {
+                shell::Output::Photo(path) => match picture(&path, photo.as_ref()) {
+                    Ok(decoded) => {
+                        photo = Some(decoded);
+                        continue;
+                    }
+                    // What the window cannot decode the system may show.
+                    Err(error) => {
+                        tracing::warn!("{}: {error}", path.display());
+                        path
+                    }
+                },
+                shell::Output::File(path) => path,
+                _ => continue,
+            };
+            if let Err(error) = open::that(&path) {
+                tracing::warn!("could not open {}: {error}", path.display());
             }
         }
-        let now = Seen::of(&shell);
+        let mut now = Seen::of(&shell);
+        now.photo = photo.clone();
         if last.as_ref() != Some(&now) {
             if seen.unbounded_send(now.clone()).is_err() {
                 break;
@@ -199,6 +220,23 @@ async fn drive(
         }
     }
     shell
+}
+
+/// The photo file at `path` decoded for the viewer, its serial past
+/// `last`'s.
+fn picture(
+    path: &std::path::Path,
+    last: Option<&viewer::Picture>,
+) -> Result<viewer::Picture, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let pixels = loquax::photo::fit(&bytes, 4096).map_err(|e| e.to_string())?;
+    Ok(viewer::Picture {
+        serial: last.map_or(1, |p| p.serial + 1),
+        width: pixels.width,
+        height: pixels.height,
+        full: pixels.full,
+        rgba: Arc::new(pixels.rgba),
+    })
 }
 
 /// Open the window and run it until it is closed.
@@ -261,6 +299,10 @@ pub enum Message {
     Intent(Intent),
     /// The top bar's gear: the settings page (1233).
     Settings,
+    /// The mouse on the photo viewer (1269).
+    Viewer(viewer::Input),
+    /// The viewer's Close.
+    ViewerClose,
 }
 
 impl Message {
@@ -280,6 +322,8 @@ impl Message {
                 | Message::WheelRest
                 | Message::Prefetched(_)
                 | Message::Settings
+                | Message::Viewer(_)
+                | Message::ViewerClose
         )
     }
 }
@@ -472,6 +516,8 @@ struct App {
     lang: Lang,
     /// The scene of [`Seen`] in the window's class: what is drawn.
     scene: Scene,
+    /// The photo whole while it is open (1269), over everything.
+    viewer: Option<viewer::Viewer>,
 }
 
 impl App {
@@ -508,6 +554,7 @@ impl App {
                 scene: empty.clone(),
                 now: None,
                 receipts: true,
+                photo: None,
             },
             asks,
             fitted_at: None,
@@ -541,6 +588,7 @@ impl App {
             deleting: None,
             lang: Lang::En,
             scene: empty,
+            viewer: None,
         }
     }
 
@@ -965,7 +1013,24 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // The viewer is over everything: a key is its Esc or nothing.
+        if let (Some(viewer), Message::Key(event)) = (&mut self.viewer, &message) {
+            if chord(event).is_some_and(|k| k.code == KeyCode::Esc) && viewer.back() {
+                self.viewer = None;
+            }
+            return Task::none();
+        }
         match message {
+            Message::Viewer(input) => {
+                if let Some(viewer) = &mut self.viewer {
+                    viewer.input(input, Instant::now());
+                }
+                return Task::none();
+            }
+            Message::ViewerClose => {
+                self.viewer = None;
+                return Task::none();
+            }
             Message::Intent(intent) => return self.intent(intent),
             Message::Settings => {
                 self.screen = Screen::Settings;
@@ -994,6 +1059,13 @@ impl App {
         match message {
             Message::Seen(seen) => {
                 let landed = seen.maps != self.seen.maps;
+                if let Some(photo) = seen
+                    .photo
+                    .as_ref()
+                    .filter(|p| self.seen.photo.as_ref() != Some(p))
+                {
+                    self.viewer = Some(viewer::Viewer::new(photo, self.window));
+                }
                 self.seen = *seen;
                 self.rescene();
                 self.restore_draft();
@@ -1257,6 +1329,9 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if let Some(viewer) = &self.viewer {
+            return viewer.view();
+        }
         let body = match (self.screen, self.class(), &self.scene.chat) {
             (Screen::Map, _, _) => self.map_view(),
             (Screen::Settings, _, _) => self.settings_pane(),
@@ -1628,6 +1703,7 @@ mod tests {
             scene: crate::shell::Model::new(&[]).scene(LayoutClass::Wide),
             now: None,
             receipts: true,
+            photo: None,
         })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
@@ -1867,7 +1943,73 @@ mod tests {
             scene: model.scene(LayoutClass::Wide),
             now: model.now,
             receipts: model.reading.on,
+            photo: None,
         }
+    }
+
+    /// A press on a bubble's photo (1269): the shell's file decoded for
+    /// the window, its own size kept; the window opens the viewer over
+    /// everything, the wheel zooms it, Esc goes to 1x and then closes, and
+    /// the same photo seen again does not open it again, a new press does.
+    #[test]
+    fn a_photo_opens_in_the_windows_viewer_and_zooms() {
+        let dir = std::env::temp_dir().join(format!("loquax-1269-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("photo.png");
+        image::RgbaImage::from_pixel(5000, 100, image::Rgba([200, 30, 30, 255]))
+            .save(&path)
+            .expect("a png");
+        let first = picture(&path, None).expect("decodes");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((first.width, first.height), (4096, 82));
+        assert_eq!(first.full, (5000, 100));
+        assert_eq!(first.serial, 1);
+
+        let model = chat_model();
+        let mut app = App::new(florence(), None);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(app.viewer.is_none());
+        let mut seen = seen_of(&model);
+        seen.photo = Some(first.clone());
+        app.apply(Message::Seen(Box::new(seen.clone())));
+        let viewer = app.viewer.as_ref().expect("the viewer opens");
+        // 5000 px on a 1100 px wide window: its own size is past 4x.
+        assert!((viewer.zoom.max_scale() - 5000.0 / 1100.0).abs() < 1e-9);
+        let _ = app.update(Message::Viewer(viewer::Input::Wheel(
+            Point::new(550.0, 360.0),
+            3.0,
+        )));
+        let scale = app.viewer.as_ref().map(|v| v.zoom.scale());
+        assert!(scale.is_some_and(|s| s > 1.9), "{scale:?}");
+        let esc = Message::Key(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        });
+        let _ = app.update(esc.clone());
+        assert!(app.viewer.as_ref().is_some_and(|v| v.zoom.at_rest()));
+        let _ = app.update(esc);
+        assert!(app.viewer.is_none());
+        // The same photo in the next Seen: still closed.
+        app.apply(Message::Seen(Box::new(seen.clone())));
+        assert!(app.viewer.is_none());
+        // A new press, the same photo: open again.
+        seen.photo = picture_again(&first);
+        app.apply(Message::Seen(Box::new(seen)));
+        assert!(app.viewer.is_some());
+        let _ = app.update(Message::ViewerClose);
+        assert!(app.viewer.is_none());
+    }
+
+    fn picture_again(last: &viewer::Picture) -> Option<viewer::Picture> {
+        Some(viewer::Picture {
+            serial: last.serial + 1,
+            ..last.clone()
+        })
     }
 
     /// The window over `chat_model`, with the channel to the shell.
