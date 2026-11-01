@@ -191,7 +191,7 @@ stores runs instead of cells; the M9 slice measures and picks (slice 4).
 
 | Control | Where it is | lnomad |
 |---|---|---|
-| List row | `Row` (`loquax/src/ui/scene.rs:308`) wraps a conversation's `ListRow`; iced `list_row` (`loquax/src/gui/chat.rs:714`) | **parametrised**: the generic part (title, subtitle, trailing, `activate`, `menu`, `A11y`) moves to `leviculum-ui` as a list item; Loquax's `Row` keeps its `ListRow` beside it. Places, history and name results are list items |
+| List row | `Row` (`loquax/src/ui/scene.rs:308`) wraps a conversation's `ListRow`; iced `list_row` (`loquax/src/gui/chat.rs:1018`) | **parametrised**: the generic part (title, subtitle, trailing, `activate`, `menu`, `A11y`) moves to `leviculum-ui` as a list item; Loquax's `Row` keeps its `ListRow` beside it. Places, history and name results are list items |
 | Top bar | `TopBar`, `Lead` (`loquax/src/ui/scene.rs:267`) | **reused**, moved to `leviculum-ui`; `Lead::Back` for history; the address is a field node below or inside it per renderer |
 | Tab bar | `Tabs`, `TabId` (`loquax/src/ui/scene.rs:72`), Chats and Map | **parametrised** where the browser is hosted: `TabId::Browse` beside Chats and Map ("Calls later" in [Loquax on Android: navigation and views](loquax-android-navigation.md) already plans a third). The standalone lnomad has no tab bar |
 | Sheet | `Sheet` (`loquax/src/ui/scene.rs:398`) | **reused** unchanged: places, history, a link's long press |

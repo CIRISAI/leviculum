@@ -305,6 +305,34 @@ a bubble, the full emoji picker over the emoji table with the recents
 (the button offers the six quick ones), the address book's names and
 photos, and the toolbar menu beyond the map.
 
+### Built 2026-11-01, the window draws the scene
+
+1218 (#232, slice two of the one UI contract) makes the window a renderer
+of `loquax::ui::scene`, the value the phone's facade is derived from: one
+function per node in `loquax/src/gui/chat.rs` (the top bar, the tabs, the
+rows, the chat bar, the groups, the bubbles, the bubble's menu, the
+compose bar). The window keeps no rule of its own for the grouping, the
+day lines, the liveness words and rings or the list's search
+(`List::found`). A press on a node is its `Intent`; a click on a row is
+a hit on its `NodeId`, which `Scene::action` turns into its opening. The
+window's keys go through `keys::resolve`, so the map takes the
+terminal's chords (arrows and `hjkl` pan, `Tab` steps through the pins,
+`Enter` opens one), and `Escape` in a stacked chat is Back.
+
+The window shows the shared structure: the reader's top bar with the
+avatar, the bar's search and new conversation and the window's theme
+toggle as drawn icons, and the tabs with the unread count. From 712
+logical pixels (rail, list and a chat of 300) it is Wide, the tabs a rail
+at the left; below it is Compact and stacks as the phone does: the list
+with the tabs at the bottom, or the open chat alone with a back in its
+bar. A resize switches (`Scene::in_class`, no model needed). The words
+are the catalogue's in the desktop's locale (`LC_ALL`, `LC_MESSAGES`,
+`LANG`); a few of the window's own words stay English (the empty chat,
+the address field, the reply line). The mailbox link's dot on the
+reader's avatar is drawn once the scene knows the link (slice three).
+Pinned by `gui-chat-{light,dark}.png` and
+`gui-chat-compact-{chat,list}.png`.
+
 ### Pixel screens: the tokens
 
 The phone and the window draw with one table of colours and sizes,

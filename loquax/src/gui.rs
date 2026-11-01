@@ -1,8 +1,12 @@
 //! `loquax gui`: the window over the same shell and model as the terminal
 //! (`docs/src/concepts/gui-toolkit.md`, option B, iced on the desktop;
 //! `docs/src/concepts/loquax-map.md`, slice (d)). It opens on the chat
-//! ([`chat`], 1145, after the phone's design): the conversations on the
-//! left, the open one on the right. The map is its other screen: the peers
+//! ([`chat`], 1145, after the phone's design), drawn from the model's
+//! scene (1218, [`loquax::ui::scene`]): the tabs, the conversations and
+//! the open one beside them in a wide window, stacked as on the phone in
+//! a narrow one. A press on a node and a key of the keymap are intents
+//! ([`loquax::ui::intent::Intent`]), the model's sent to the shell, the
+//! window's kept. The map is its other screen: the peers
 //! with a position listed on the left, by the display rule with their fix's
 //! age and dimmed when stale, and the map on the right.
 //!
@@ -67,6 +71,9 @@ use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
 const LIST_WIDTH: f32 = 260.0;
 /// The window's size when it opens.
 const WINDOW: (f32, f32) = (1100.0, 720.0);
+/// From this width on the window is Wide (1218): the rail, the list and
+/// a chat of 300 pixels beside each other; below it stacks.
+const WIDE_FROM: f32 = chat::RAIL + chat::LIST_WIDTH + 300.0;
 
 /// What the window shows of the model, sent after every change.
 #[derive(Clone, Debug, PartialEq)]
@@ -454,7 +461,8 @@ impl App {
             Some((frames, seen, asks)) => (frames, Some(seen), Some(asks)),
             None => (Frames::new(loquax::picture::Maps::default()), None, None),
         };
-        let app = Self::new(frames, asks);
+        let mut app = Self::new(frames, asks);
+        app.lang = locale();
         let scale = window::oldest()
             .and_then(window::scale_factor)
             .map(Message::Scale);
@@ -609,6 +617,10 @@ impl App {
                 }
             },
             Intent::Theme => self.flipped = !self.flipped,
+            Intent::Search => {
+                self.screen = Screen::Chats;
+                return iced::widget::operation::focus(chat::SEARCH_FIELD);
+            }
             Intent::NewConversation => {
                 self.new_address = match self.new_address {
                     Some(_) => None,
@@ -739,9 +751,13 @@ impl App {
         Task::none()
     }
 
-    /// The layout class the window draws in.
+    /// The layout class the window's width gives (1218): the list beside
+    /// the chat from [`WIDE_FROM`] logical pixels, stacked below.
     fn class(&self) -> LayoutClass {
-        LayoutClass::Wide
+        match self.window.width >= WIDE_FROM {
+            true => LayoutClass::Wide,
+            false => LayoutClass::Compact,
+        }
     }
 
     /// The scene in the window's class, again after a change of either.
@@ -797,12 +813,14 @@ impl App {
 
     /// The intent the keymap gives a key the widgets left alone (1218):
     /// the same chords as the terminal's ([`keys::resolve`]), on the map
-    /// the map's, on the chats the list's.
+    /// the map's, on a stacked chat the messages' (`Escape` is Back), on
+    /// the chats the list's.
     fn key(&self, event: &keyboard::Event) -> Option<Intent> {
         let key = chord(event)?;
-        let pane = match self.screen {
-            Screen::Map => Pane::Map,
-            Screen::Chats => Pane::Conversations,
+        let pane = match (self.screen, self.scene.top.id) {
+            (Screen::Map, _) => Pane::Map,
+            (Screen::Chats, NodeId::ChatBar) => Pane::Messages,
+            (Screen::Chats, _) => Pane::Conversations,
         };
         keys::resolve(&key, keys::panes_of(pane), Ctx::ENHANCED).map(Intent::from_action)
     }
@@ -1129,9 +1147,18 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        match self.screen {
-            Screen::Chats => row![self.list_pane(), self.chat_pane()].into(),
-            Screen::Map => self.map_view(),
+        let body = match (self.screen, self.class(), &self.scene.chat) {
+            (Screen::Map, _, _) => self.map_view(),
+            (Screen::Chats, LayoutClass::Wide, _) => {
+                row![self.list_pane(), self.chat_pane()].into()
+            }
+            (Screen::Chats, LayoutClass::Compact, Some(_)) => self.chat_pane(),
+            (Screen::Chats, LayoutClass::Compact, None) => self.list_pane(),
+        };
+        match (self.tabs(), self.class()) {
+            (Some(tabs), LayoutClass::Wide) => row![tabs, body].into(),
+            (Some(tabs), LayoutClass::Compact) => column![body, tabs].into(),
+            (None, _) => body,
         }
     }
 
@@ -1388,6 +1415,16 @@ impl canvas::Program<Message> for MapCanvas<'_> {
     }
 }
 
+/// The language the desktop's locale names (`LC_ALL`, `LC_MESSAGES`,
+/// `LANG`, the first one set): the scene's words are said in it.
+fn locale() -> Lang {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.is_empty())
+        .map_or(Lang::En, |tag| Lang::of_tag(&tag))
+}
+
 /// A key iced reports as the keymap's key (1218): the named keys the
 /// chords use, a character as itself, the modifiers held. None for a
 /// release or a key no chord names.
@@ -1631,6 +1668,8 @@ mod tests {
 
     const ANNA: [u8; 16] = [0x3a; 16];
     const BERT: [u8; 16] = [0xb7; 16];
+    /// The reader.
+    const OWN: [u8; 16] = [0x30; 16];
 
     fn at(day: u32, hour: u32, minute: u32) -> WallTime {
         WallTime::from_civil(2026, 10, day, hour, minute, 3600)
@@ -1650,11 +1689,13 @@ mod tests {
         );
     }
 
-    /// A model as the shell holds one: Anna wrote yesterday and twice this
+    /// A model as the shell holds one, the reader Mia: Anna wrote yesterday and twice this
     /// morning, we answered, she reacted; Bert wrote once, unread. Anna's
     /// conversation is open.
     fn chat_model() -> crate::shell::Model {
         let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        model.names.remember(OWN, "Mia Sander");
         model.names.remember(ANNA, "Anna Schulz");
         model.names.remember(BERT, "Bert");
         update(&mut model, UiEvent::Clock(at(29, 18, 40)));
@@ -1933,8 +1974,8 @@ mod tests {
     }
 
     /// On the chat a key is typing: `+` does not zoom the map behind it,
-    /// and the map draws nothing until it is shown. On the map it zooms,
-    /// and `Escape` goes back.
+    /// and the map draws nothing until it is shown. On the map it zooms
+    /// through the keymap's `MapCmd`, and `Escape` goes back.
     #[test]
     fn the_maps_keys_belong_to_the_map() {
         let (mut app, _rx) = chat_window();
@@ -1956,6 +1997,8 @@ mod tests {
         assert!(app.next_job().is_none(), "no frame for a hidden map");
         let _ = app.update(Message::Intent(Intent::ShowMap { peer: None }));
         app.busy = false;
+        // The key goes through the keymap, as on the terminal (1218).
+        assert_eq!(app.key(&plus), Some(Intent::Map(MapCmd::ZoomIn)));
         let _ = app.update(Message::Key(plus));
         assert!(app.view.zoom_milli() > zoom);
         let escape = keyboard::Event::KeyPressed {
@@ -2031,11 +2074,78 @@ mod tests {
         assert!(app.dark());
         let dark = shoot(&app, w, h);
         assert_ne!(light, dark);
-        // The ground is the token's in each.
-        assert_eq!(&light[..3], &[0xff, 0xff, 0xff]);
-        assert_eq!(&dark[..3], &[0x17, 0x18, 0x1b]);
+        // The rail is the bar's token and the list's ground the
+        // background's, in each.
+        let px = |v: &[u8], x: u32, y: u32| {
+            let i = ((y * w + x) * 3) as usize;
+            [v[i], v[i + 1], v[i + 2]]
+        };
+        let rgb = |argb: u32| {
+            let [_, r, g, b] = argb.to_be_bytes();
+            [r, g, b]
+        };
+        let ground = (chat::RAIL as u32 + 4, h - 4);
+        for (shot, dark) in [(&light, false), (&dark, true)] {
+            let t = chat::tokens(dark);
+            assert_eq!(px(shot, 0, 0), rgb(t.bar));
+            assert_eq!(px(shot, ground.0, ground.1), rgb(t.background));
+        }
+        assert_eq!(px(&light, ground.0, ground.1), [0xff, 0xff, 0xff]);
+        assert_eq!(px(&dark, ground.0, ground.1), [0x17, 0x18, 0x1b]);
         map::tests::same_as("gui-chat-light.png", &light, w, h);
         map::tests::same_as("gui-chat-dark.png", &dark, w, h);
+    }
+
+    /// A narrow window stacks as the phone does, and a resize switches
+    /// (1218): below [`WIDE_FROM`] the open chat is alone, with a back in
+    /// its bar and no tabs; the back (and `Escape`, the keymap's Back)
+    /// closes it in the model; the list comes with the tabs at the
+    /// bottom; a wide window puts the rail, the list and the chat beside
+    /// each other again. Pixel for pixel the Compact goldens, light.
+    #[test]
+    fn a_narrow_window_stacks_and_a_resize_switches() {
+        let (w, h) = (420, 640);
+        let (mut app, mut rx) = chat_window();
+        assert_eq!(app.class(), LayoutClass::Wide);
+        let _ = app.update(Message::Window(window::Event::Resized(Size::new(
+            w as f32, h as f32,
+        ))));
+        assert_eq!(app.class(), LayoutClass::Compact);
+        assert!(app.scene.list.is_none() && app.scene.tabs.is_none());
+        assert_eq!(app.scene.top.id, NodeId::ChatBar);
+        map::tests::same_as("gui-chat-compact-chat.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Intent(Intent::Activate(NodeId::TopBar)));
+        assert_eq!(told(&mut rx), [UiEvent::Close]);
+        let escape = keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        };
+        assert_eq!(app.key(&escape), Some(Intent::Back));
+        let _ = app.update(Message::Key(escape));
+        assert_eq!(told(&mut rx), [UiEvent::Close]);
+        // The model closed it: the list, with the tabs.
+        let mut model = chat_model();
+        update(&mut model, UiEvent::Close);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(app.scene.chat.is_none());
+        assert!(app.scene.list.is_some() && app.scene.tabs.is_some());
+        map::tests::same_as("gui-chat-compact-list.png", &shoot(&app, w, h), w, h);
+        // Wide again: the open chat beside the list.
+        app.apply(Message::Seen(Box::new(seen_of(&chat_model()))));
+        assert!(app.scene.list.is_none());
+        let _ = app.update(Message::Window(window::Event::Resized(Size::new(
+            900.0, 560.0,
+        ))));
+        assert_eq!(app.class(), LayoutClass::Wide);
+        assert!(app.scene.list.is_some() && app.scene.chat.is_some());
+        assert_eq!(app.scene.top.id, NodeId::TopBar);
     }
 
     /// The desktop's dark setting turns the window dark, and the toggle

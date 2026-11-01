@@ -15,10 +15,18 @@
 //! colours and sizes are [`loquax::ui::chat`]'s tokens. This file only
 //! decides how iced draws the nodes, one function per node type, and every
 //! press it makes is the node's [`Intent`].
+//!
+//! The window shows the shared structure (1218): the reader's top bar with
+//! the avatar, the bar's actions as drawn icons, the tabs with the unread
+//! count. In the Wide class the tabs are a rail at the left, the list and
+//! the chat beside each other; in the Compact class (a narrow window) the
+//! list with the tabs at the bottom, or the open chat alone with a back in
+//! its bar, as the phone stacks them.
 
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, text, text_editor, text_input, Space,
+    button, column, container, mouse_area, row, scrollable, stack, text, text_editor, text_input,
+    tooltip, Space,
 };
 use iced::{
     border, mouse, Alignment, Background, Border, Color, Element, Length, Point, Rectangle,
@@ -28,7 +36,9 @@ use iced::{
 use loquax::ui::chat::{self, size, Colours, Mark};
 use loquax::ui::intent::Intent;
 use loquax::ui::reactions::SIGNAL_QUICK;
-use loquax::ui::scene::{self, BubbleNode, Chat, Group, Lead, Row};
+use loquax::ui::scene::{
+    self, Action, BubbleNode, Chat, Group, LayoutClass, Lead, Row, Tab, TabId,
+};
 use loquax::ui::strings::{Lang, StrId};
 use loquax::when::{list_time, WallTime};
 
@@ -36,6 +46,12 @@ use super::{App, Message};
 
 /// The list's width, in logical pixels.
 pub const LIST_WIDTH: f32 = 340.0;
+
+/// The tab rail's width in the Wide class, in logical pixels.
+pub const RAIL: f32 = 72.0;
+
+/// The search field's id: the top bar's search focuses it.
+pub const SEARCH_FIELD: &str = "search";
 
 /// The liveness ring's width around an avatar (1209): thin.
 const RING: f32 = 2.0;
@@ -57,6 +73,39 @@ pub fn tokens(dark: bool) -> Colours {
         true => chat::DARK,
         false => chat::LIGHT,
     }
+}
+
+/// The reader's avatar with the mailbox link's dot at its foot, green
+/// while linked, grey while not; no dot while the link is not known.
+fn avatar_with_dot<'a>(
+    a: &scene::Avatar,
+    diameter: f32,
+    link: Option<bool>,
+    t: Colours,
+) -> Element<'a, Message> {
+    let Some(up) = link else {
+        return avatar(a, diameter, t);
+    };
+    let dot = diameter * 0.3;
+    let ink = colour(match up {
+        true => t.status_up,
+        false => t.status_down,
+    });
+    let dot =
+        container(Space::new().width(dot).height(dot)).style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(ink)),
+            border: border::rounded(dot / 2.0).width(2.0).color(colour(t.bar)),
+            ..container::Style::default()
+        });
+    stack![
+        avatar(a, diameter, t),
+        container(dot)
+            .width(diameter)
+            .height(diameter)
+            .align_right(diameter)
+            .align_bottom(diameter),
+    ]
+    .into()
 }
 
 /// A scene's avatar: a circle of `diameter` with its initials in its
@@ -87,6 +136,18 @@ pub enum Icon {
     Mark(Mark),
     Send,
     Face,
+    /// A bar's back: a chevron to the left.
+    Back,
+    /// The search: a lens.
+    Search,
+    /// A new conversation: a pencil.
+    Pencil,
+    /// The theme's toggle: a disc half filled.
+    Theme,
+    /// The chats' tab: a speech bubble.
+    Chats,
+    /// The map's tab: a pin.
+    Map,
 }
 
 struct Drawing {
@@ -155,6 +216,65 @@ impl canvas::Program<Message> for Drawing {
                 });
                 frame.fill(&arrow, self.ink);
             }
+            Icon::Back => {
+                let chevron = Path::new(|b| {
+                    b.move_to(p(0.62, 0.2));
+                    b.line_to(p(0.32, 0.5));
+                    b.line_to(p(0.62, 0.8));
+                });
+                frame.stroke(&chevron, line);
+            }
+            Icon::Search => {
+                frame.stroke(&Path::circle(p(0.43, 0.43), s * 0.25), line);
+                frame.stroke(&Path::line(p(0.61, 0.61), p(0.85, 0.85)), line);
+            }
+            Icon::Pencil => {
+                let body = Path::new(|b| {
+                    b.move_to(p(0.2, 0.8));
+                    b.line_to(p(0.25, 0.6));
+                    b.line_to(p(0.68, 0.17));
+                    b.line_to(p(0.83, 0.32));
+                    b.line_to(p(0.4, 0.75));
+                    b.close();
+                });
+                frame.stroke(&body, line);
+            }
+            Icon::Theme => {
+                frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.33), line);
+                let half = Path::new(|b| {
+                    b.arc(canvas::path::Arc {
+                        center: p(0.5, 0.5),
+                        radius: s * 0.33,
+                        start_angle: iced::Radians(-std::f32::consts::FRAC_PI_2),
+                        end_angle: iced::Radians(std::f32::consts::FRAC_PI_2),
+                    });
+                    b.close();
+                });
+                frame.fill(&half, self.ink);
+            }
+            Icon::Chats => {
+                let bubble = Path::new(|b| {
+                    b.move_to(p(0.2, 0.25));
+                    b.line_to(p(0.8, 0.25));
+                    b.line_to(p(0.8, 0.65));
+                    b.line_to(p(0.45, 0.65));
+                    b.line_to(p(0.28, 0.8));
+                    b.line_to(p(0.3, 0.65));
+                    b.line_to(p(0.2, 0.65));
+                    b.close();
+                });
+                frame.stroke(&bubble, line);
+            }
+            Icon::Map => {
+                let pin = Path::new(|b| {
+                    b.move_to(p(0.3, 0.5));
+                    b.line_to(p(0.5, 0.86));
+                    b.line_to(p(0.7, 0.5));
+                });
+                frame.stroke(&pin, line);
+                frame.stroke(&Path::circle(p(0.5, 0.38), s * 0.22), line);
+                frame.fill(&Path::circle(p(0.5, 0.38), s * 0.07), self.ink);
+            }
             Icon::Face => {
                 frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.38), line);
                 frame.fill(&Path::circle(p(0.38, 0.42), s * 0.05), self.ink);
@@ -218,26 +338,178 @@ impl App {
             .map_or_else(Vec::new, |list| list.found(&self.search).collect())
     }
 
-    /// The list pane: its bar, the search, the new conversation's field
-    /// when asked for, and the rows.
+    /// The width the list takes: beside the chat a fixed one, alone the
+    /// window's.
+    fn list_width(&self) -> Length {
+        match self.class() {
+            LayoutClass::Wide => Length::Fixed(LIST_WIDTH),
+            LayoutClass::Compact => Length::Fill,
+        }
+    }
+
+    /// An action of a bar as a drawn icon with its label on hover; a
+    /// disabled one is not drawn.
+    fn icon_action<'a>(
+        &self,
+        icon: Icon,
+        label: &str,
+        on: Message,
+        t: Colours,
+    ) -> Element<'a, Message> {
+        let face = drawing(
+            icon,
+            colour(t.accent),
+            (Color::TRANSPARENT, Color::TRANSPARENT),
+            24.0,
+        );
+        tooltip(
+            flat(face, on).padding(8),
+            container(text(label.to_string()).size(13).color(colour(t.text)))
+                .padding([2, 6])
+                .style(move |_: &Theme| container::Style {
+                    background: Some(Background::Color(colour(t.panel))),
+                    border: border::rounded(4),
+                    ..container::Style::default()
+                }),
+            tooltip::Position::Bottom,
+        )
+        .into()
+    }
+
+    /// The scene's top bar over the list: the reader's avatar with the
+    /// link's dot, the title, the bar's actions; then the window's own
+    /// theme toggle.
+    fn top_bar<'a>(&'a self, t: Colours) -> Element<'a, Message> {
+        let top = &self.scene.top;
+        let mut line = row![].spacing(12).align_y(Alignment::Center);
+        if let Lead::Me { avatar, link } = &top.lead {
+            line = line.push(avatar_with_dot(avatar, size::BAR_AVATAR, *link, t));
+        }
+        line = line.push(
+            text(top.title.resolve(self.lang))
+                .size(22)
+                .color(colour(t.text))
+                .width(Length::Fill),
+        );
+        let mut actions = row![].align_y(Alignment::Center);
+        for action in top.actions.iter().filter(|a| a.enabled) {
+            let icon = match action.intent {
+                Intent::Search => Icon::Search,
+                Intent::NewConversation => Icon::Pencil,
+                _ => continue,
+            };
+            actions = actions.push(self.icon_action(
+                icon,
+                self.word(action.label_key),
+                Message::Intent(action.intent.clone()),
+                t,
+            ));
+        }
+        actions = actions.push(self.icon_action(
+            Icon::Theme,
+            self.word(Intent::Theme.label()),
+            Message::Intent(Intent::Theme),
+            t,
+        ));
+        container(line.push(actions))
+            .height(size::BAR)
+            .padding([0, 12])
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into()
+    }
+
+    /// One tab: its icon over its label, the unread count beside the
+    /// icon, the active one in the accent on the selected row's ground.
+    fn tab<'a>(&self, tab: &'a Tab, active: bool, t: Colours) -> Element<'a, Message> {
+        let ink = match active {
+            true => colour(t.accent),
+            false => colour(t.text_secondary),
+        };
+        let icon = match tab.id {
+            TabId::Chats => Icon::Chats,
+            TabId::Map => Icon::Map,
+        };
+        let mut top = row![drawing(
+            icon,
+            ink,
+            (Color::TRANSPARENT, Color::TRANSPARENT),
+            26.0
+        )]
+        .spacing(2)
+        .align_y(Alignment::Center);
+        if let Some(count) = tab.badge {
+            top = top.push(
+                container(
+                    text(count.to_string())
+                        .size(size::BADGE_TEXT - 2.0)
+                        .color(colour(t.badge_text)),
+                )
+                .padding([0, 5])
+                .style(move |_: &Theme| container::Style {
+                    background: Some(Background::Color(colour(t.badge))),
+                    border: border::rounded(size::BADGE_CORNER),
+                    ..container::Style::default()
+                }),
+            );
+        }
+        let item = column![top, text(tab.label.resolve(self.lang)).size(12).color(ink)]
+            .spacing(2)
+            .align_x(Alignment::Center);
+        let ground = match active {
+            true => colour(t.selected_row),
+            false => Color::TRANSPARENT,
+        };
+        button(container(item).center_x(Length::Fill).padding([8, 0]))
+            .on_press(Message::Intent(Intent::Activate(scene::NodeId::Tab(
+                tab.id,
+            ))))
+            .padding(0)
+            .width(Length::Fill)
+            .style(move |_: &Theme, _| button::Style {
+                background: Some(Background::Color(ground)),
+                border: border::rounded(12),
+                ..button::Style::default()
+            })
+            .into()
+    }
+
+    /// The tabs, the active one the window's screen: a rail at the left
+    /// in the Wide class, a bar at the bottom in the Compact one; none
+    /// when the scene has none (a stacked chat).
+    pub(super) fn tabs(&self) -> Option<Element<'_, Message>> {
+        let tabs = self.scene.tabs.as_ref()?;
+        let t = self.tokens();
+        let active = match self.screen {
+            super::Screen::Chats => TabId::Chats,
+            super::Screen::Map => TabId::Map,
+        };
+        let items = tabs
+            .items
+            .iter()
+            .map(|tab| self.tab(tab, tab.id == active, t));
+        let ground = move |_: &Theme| container::Style {
+            background: Some(Background::Color(colour(t.bar))),
+            ..container::Style::default()
+        };
+        Some(match self.class() {
+            LayoutClass::Wide => container(column(items).spacing(8).padding([12, 6]))
+                .width(RAIL)
+                .height(Length::Fill)
+                .style(ground)
+                .into(),
+            LayoutClass::Compact => container(row(items).spacing(8).padding([6, 12]))
+                .width(Length::Fill)
+                .style(ground)
+                .into(),
+        })
+    }
+
+    /// The list pane: the scene's top bar, the search, the new
+    /// conversation's field when asked for, and the rows.
     pub(super) fn list_pane(&self) -> Element<'_, Message> {
         let t = self.tokens();
-        let bar = row![
-            text("Loquax").size(22).color(colour(t.text)),
-            Space::new().width(Length::Fill),
-            link("Map", Message::Intent(Intent::ShowMap { peer: None }), t),
-            link(
-                match self.dark() {
-                    true => "Light",
-                    false => "Dark",
-                },
-                Message::Intent(Intent::Theme),
-                t
-            ),
-            link("New", Message::Intent(Intent::NewConversation), t),
-        ]
-        .align_y(Alignment::Center)
-        .padding([12, 12]);
+        let bar = self.top_bar(t);
         let field = |value: &str, hint: &str| {
             text_input(hint, value)
                 .size(15)
@@ -251,7 +523,9 @@ impl App {
                     selection: colour(t.selected_row),
                 })
         };
-        let search = field(&self.search, "Search").on_input(Message::Search);
+        let search = field(&self.search, self.word(StrId::Search))
+            .id(SEARCH_FIELD)
+            .on_input(Message::Search);
         let mut pane = column![bar, container(search).padding([0, 12])].spacing(8);
         if let Some(address) = &self.new_address {
             let new = field(address, "Address, 32 hex digits")
@@ -263,9 +537,10 @@ impl App {
         let rows = self.listed().into_iter().fold(column![], |rows, r| {
             rows.push(list_row(r, self.seen.now, self.lang, t))
         });
+        let words = (self.scene.list.as_ref()).map(|list| list.empty.resolve(self.lang));
         let body: Element<'_, Message> = match empty {
             true => container(
-                text("No conversations yet")
+                text(words.unwrap_or_default())
                     .size(15)
                     .color(colour(t.text_secondary)),
             )
@@ -274,7 +549,7 @@ impl App {
             false => scrollable(rows).height(Length::Fill).into(),
         };
         container(pane.push(body))
-            .width(LIST_WIDTH)
+            .width(self.list_width())
             .height(Length::Fill)
             .style(move |_: &Theme| container::Style {
                 background: Some(Background::Color(colour(t.background))),
@@ -310,18 +585,29 @@ impl App {
 
     /// The chat's top bar: the peer's avatar, the name, the bar's actions.
     fn chat_bar<'a>(&'a self, open: &'a Chat, t: Colours) -> Element<'a, Message> {
+        let mut line = row![].spacing(12).align_y(Alignment::Center);
         let avatar_of = match &open.bar.lead {
-            Lead::Back { avatar, .. } | Lead::Me { avatar, .. } => avatar,
+            Lead::Back { back, avatar } => {
+                // Stacked, the chat's back leads to the list; beside the
+                // list there is nothing to go back to.
+                if self.class() == LayoutClass::Compact {
+                    line = line.push(self.back(back, t));
+                }
+                avatar
+            }
+            Lead::Me { avatar, .. } => avatar,
         };
-        let mut line = row![
-            avatar(avatar_of, size::BAR_AVATAR, t),
-            text(open.bar.title.resolve(self.lang))
-                .size(size::BAR_NAME)
-                .color(colour(t.text))
-                .width(Length::Fill),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center);
+        line = line.push(
+            row![
+                avatar(avatar_of, size::BAR_AVATAR, t),
+                text(open.bar.title.resolve(self.lang))
+                    .size(size::BAR_NAME)
+                    .color(colour(t.text))
+                    .width(Length::Fill),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        );
         for action in open.bar.actions.iter().filter(|a| a.enabled) {
             line = line.push(link(
                 self.word(action.label_key),
@@ -339,6 +625,16 @@ impl App {
                 ..container::Style::default()
             })
             .into()
+    }
+
+    /// A bar's back as a chevron.
+    fn back<'a>(&self, back: &Action, t: Colours) -> Element<'a, Message> {
+        self.icon_action(
+            Icon::Back,
+            self.word(back.label_key),
+            Message::Intent(back.intent.clone()),
+            t,
+        )
     }
 
     /// The chat's groups: each one's day line when a day begins with it,
@@ -400,7 +696,11 @@ impl App {
 
     /// The chat's width in logical pixels, for the bubbles' widest.
     fn chat_width(&self) -> f32 {
-        (self.window.width - LIST_WIDTH).max(200.0)
+        let beside = match self.class() {
+            LayoutClass::Wide => LIST_WIDTH + RAIL,
+            LayoutClass::Compact => 0.0,
+        };
+        (self.window.width - beside).max(200.0)
     }
 
     fn bubble<'a>(
@@ -617,7 +917,11 @@ impl App {
                         .size(14)
                         .color(colour(t.text_secondary))
                         .width(Length::Fill),
-                    link("Cancel", Message::Intent(Intent::CancelReply), t),
+                    link(
+                        self.word(Intent::CancelReply.label()),
+                        Message::Intent(Intent::CancelReply),
+                        t
+                    ),
                 ]
                 .align_y(Alignment::Center),
             );

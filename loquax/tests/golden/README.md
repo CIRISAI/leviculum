@@ -30,7 +30,19 @@ holds no emoji, which only a host's font would draw. Redrawn in 1218,
 when the window began drawing the scene (`loquax::ui::scene`): 908
 pixels in each theme, the first date line alone, which reads
 "Yesterday" where the window's own date rule said "Thursday 29
-October"; the scene's day words are the phone's.
+October"; the scene's day words are the phone's. Redrawn again in 1218
+when the window first showed the scene's shared structure: the tab rail
+at the left (Chats with the unread count, Map), the reader's top bar
+(the avatar with Mia's initials, "Chats", search, new conversation and
+the theme toggle as drawn icons) in place of the window's own "Loquax"
+bar with the words Map, Dark and New; the list and the chat moved right
+by the rail's 72 pixels.
+
+`gui-chat-compact-chat.png`, `gui-chat-compact-list.png`: the same
+window in the Compact class (1218), 420 x 640, light, drawn by
+`gui::tests::a_narrow_window_stacks_and_a_resize_switches`: the open
+chat alone with a back in its bar, and once the model closed it the
+list with the tabs at the bottom, as the phone stacks them.
 
 
 `scene-compact-list.json`, `scene-compact-chat.json`, `scene-wide.json`:
